@@ -94,7 +94,7 @@
         <main class="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 overflow-hidden">
             <!-- Left Panel -->
             <div class="bg-slate-900 rounded-lg border border-slate-700 p-4 overflow-auto">
-                <h2 class="header-text text-lg font-semibold text-slate-300 mb-4">Left Panel</h2>
+                <h2 class="header-text text-lg font-semibold text-slate-300 mb-4">Current Phase</h2>
                 <div id="left-panel-content" class="text-slate-400">
                     <p>Pipeline status and events will appear here.</p>
                 </div>
@@ -147,14 +147,72 @@
             'COMPLETE': 'bg-green-600 text-white'
         };
         
+        // Agent badge color mapping
+        const AGENT_COLORS = {
+            'PLANNER': 'bg-slate-600 text-white',
+            'EXECUTOR': 'bg-emerald-600 text-white',
+            'REVIEWER': 'bg-violet-600 text-white',
+            'ESCALATION': 'bg-amber-600 text-white'
+        };
+        
+        // Helper function to get goal for a phase
+        function getGoalForPhase(phaseId, roadmap) {
+            if (!phaseId || !roadmap || !Array.isArray(roadmap)) {
+                return null;
+            }
+            const phase = roadmap.find(p => p.id === phaseId);
+            return phase ? phase.goal : null;
+        }
+        
+        // Agent Badge component
+        function AgentBadge({ agent }) {
+            if (!agent) return null;
+            const colorClass = AGENT_COLORS[agent] || 'bg-slate-600 text-white';
+            return (
+                <span className={\`header-text px-2 py-0.5 rounded text-xs font-medium \${colorClass}\`}>
+                    {agent}
+                </span>
+            );
+        }
+        
+        // CurrentPhasePanel component - renders in left panel
+        function CurrentPhasePanel({ current_phase_raw_id, current_agent, roadmap }) {
+            const goal = getGoalForPhase(current_phase_raw_id, roadmap);
+            
+            if (!current_phase_raw_id) {
+                return (
+                    <div className="text-slate-400 italic">
+                        No active phase
+                    </div>
+                );
+            }
+            
+            return (
+                <div className="space-y-3">
+                    <div className="flex items-center gap-3">
+                        <span className="header-text text-sm font-semibold text-slate-300">{current_phase_raw_id}</span>
+                        <AgentBadge agent={current_agent} />
+                    </div>
+                    {goal && (
+                        <p className="text-slate-400 text-sm leading-relaxed">
+                            {goal}
+                        </p>
+                    )}
+                </div>
+            );
+        }
+        
         // Simple React app component
         function App() {
             const [state, setState] = useState({
                 pipeline_status: 'Loading...',
                 orchestrator_alive: true,
                 current_agent: null,
-                project_path: null
+                project_path: null,
+                current_phase_raw_id: ''
             });
+            const roadmap = useState(null); // roadmap state
+            const [lastPhaseId, setLastPhaseId] = useState(null);
             
             useEffect(() => {
                 // Fetch initial state
@@ -165,6 +223,26 @@
                 
                 return () => clearInterval(interval);
             }, []);
+            
+            // Fetch roadmap when phase ID changes
+            useEffect(() => {
+                const currentPhaseId = state.current_phase_raw_id;
+                if (currentPhaseId && currentPhaseId !== lastPhaseId) {
+                    setLastPhaseId(currentPhaseId);
+                    fetchRoadmap();
+                }
+            }, [state.current_phase_raw_id, lastPhaseId]);
+            
+            function fetchRoadmap() {
+                fetch('/api/roadmap')
+                    .then(res => res.json())
+                    .then(data => {
+                        roadmap[1](data);
+                    })
+                    .catch(err => {
+                        console.log('Roadmap API not available yet');
+                    });
+            }
             
             function fetchState() {
                 fetch('/api/state')
@@ -228,7 +306,15 @@
                 }
             }
             
-            return null; // Static HTML handles the layout
+            return (
+                <div className="p-4">
+                    <CurrentPhasePanel 
+                        current_phase_raw_id={state.current_phase_raw_id}
+                        current_agent={state.current_agent}
+                        roadmap={roadmap[0]}
+                    />
+                </div>
+            );
         }
         
         // Render the app
