@@ -66,6 +66,22 @@
         .status-pulse {
             animation: amber-pulse 2s ease-in-out infinite;
         }
+
+        /* Fade-in animation for new event rows */
+        @keyframes fade-in-row {
+            0% {
+                opacity: 0;
+                transform: translateY(-10px);
+            }
+            100% {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .event-row-fade-in {
+            animation: fade-in-row 0.3s ease-out forwards;
+        }
         
         /* Event row hover states and transitions */
         .event-row {
@@ -408,7 +424,7 @@
         }
 
         // EventRow sub-component
-        function EventRow({ event, isExpanded, onToggle }) {
+        function EventRow({ event, isExpanded, onToggle, isNew }) {
             if (!event) return null;
             
             // Format timestamp to show only time portion (characters 11-16)
@@ -426,7 +442,7 @@
             
             return (
                 <div 
-                    className="event-row p-2 border-b border-slate-700 cursor-pointer rounded"
+                    className={"event-row p-2 border-b border-slate-700 cursor-pointer rounded" + (isNew ? " event-row-fade-in" : "")}
                     onClick={onToggle}
                 >
                     <div className="flex items-center gap-3">
@@ -471,21 +487,119 @@
             );
         }
 
-        // ActivityFeedPanel component - fetches from GET /api/events and polls every 5 seconds
+        // ActivityFeedPanel component - uses SSE with polling fallback
         function ActivityFeedPanel() {
             const [events, setEvents] = useState([]);
             const [expandedEventId, setExpandedEventId] = useState(null);
-            
+            const [newEventIds, setNewEventIds] = useState(new Set());
+            const eventSourceRef = React.useRef(null);
+            const pollingIntervalRef = React.useRef(null);
+            const isUsingSSE = React.useRef(true);
+
             useEffect(() => {
                 // Fetch initial events
                 fetchEvents();
-                
-                // Poll every 5 seconds
-                const interval = setInterval(fetchEvents, 5000);
-                
-                return () => clearInterval(interval);
+
+                // Set up SSE connection
+                setupSSE();
+
+                // Cleanup on unmount
+                return () => {
+                    if (eventSourceRef.current) {
+                        eventSourceRef.current.close();
+                    }
+                    if (pollingIntervalRef.current) {
+                        clearInterval(pollingIntervalRef.current);
+                    }
+                };
             }, []);
-            
+
+            function setupSSE() {
+                try {
+                    const eventSource = new EventSource('/api/events/stream');
+                    eventSourceRef.current = eventSource;
+
+                    eventSource.onmessage = (event) => {
+                        // Skip heartbeat messages
+                        if (event.type === 'heartbeat' || !event.data || event.data === '{}') {
+                            return;
+                        }
+
+                        try {
+                            const newEvent = JSON.parse(event.data);
+                            if (newEvent && newEvent.id) {
+                                // Get timestamp for deduplication (try 'ts' first, then 'timestamp')
+                                const eventTs = newEvent.ts || newEvent.timestamp;
+
+                                setEvents(prevEvents => {
+                                    // Check for duplicates based on timestamp
+                                    const isDuplicate = prevEvents.some(e => {
+                                        const existingTs = e.ts || e.timestamp;
+                                        return existingTs && eventTs && existingTs === eventTs;
+                                    });
+
+                                    if (isDuplicate) {
+                                        return prevEvents;
+                                    }
+
+                                    // Mark as new for fade-in animation
+                                    setNewEventIds(prev => new Set([...prev, newEvent.id]));
+
+                                    // Remove fade-in class after animation completes
+                                    setTimeout(() => {
+                                        setNewEventIds(prev => {
+                                            const next = new Set(prev);
+                                            next.delete(newEvent.id);
+                                            return next;
+                                        });
+                                    }, 350);
+
+                                    // Prepend new event at the top
+                                    return [newEvent, ...prevEvents];
+                                });
+                            }
+                        } catch (e) {
+                            console.log('Failed to parse SSE event:', e);
+                        }
+                    };
+
+                    eventSource.onerror = (error) => {
+                        console.log('SSE connection error, falling back to polling');
+                        eventSource.close();
+                        isUsingSSE.current = false;
+                        startPollingFallback();
+                    };
+                } catch (err) {
+                    console.log('Failed to create EventSource, using polling fallback');
+                    startPollingFallback();
+                }
+            }
+
+            function startPollingFallback() {
+                if (pollingIntervalRef.current) {
+                    return; // Already polling
+                }
+
+                // Poll every 5 seconds as fallback
+                pollingIntervalRef.current = setInterval(() => { fetchEventsPolling(); }, 5000);
+
+                // Try to resume SSE periodically
+                const reconnectInterval = setInterval(() => {
+                    if (!isUsingSSE.current) {
+                        isUsingSSE.current = true;
+                        setupSSE();
+                        if (eventSourceRef.current) {
+                            clearInterval(pollingIntervalRef.current);
+                            pollingIntervalRef.current = null;
+                            clearInterval(reconnectInterval);
+                        }
+                    }
+                }, 30000);
+
+                // Store reconnect interval for cleanup
+                pollingIntervalRef.current.reconnectInterval = reconnectInterval;
+            }
+
             function fetchEvents() {
                 fetch('/api/events?limit=30')
                     .then(res => res.json())
@@ -498,7 +612,48 @@
                         console.log('Events API not available yet');
                     });
             }
-            
+
+            function fetchEventsPolling() {
+                fetch('/api/events?limit=30')
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data.events && Array.isArray(data.events)) {
+                            setEvents(prevEvents => {
+                                const newEvents = [];
+                                const existingTimestamps = new Set(
+                                    prevEvents.map(e => e.ts || e.timestamp)
+                                );
+
+                                // Filter out duplicates based on timestamp
+                                for (const event of data.events) {
+                                    const eventTs = event.ts || event.timestamp;
+                                    if (!existingTimestamps.has(eventTs)) {
+                                        newEvents.push(event);
+                                        existingTimestamps.add(eventTs);
+                                    }
+                                }
+
+                                if (newEvents.length === 0) {
+                                    return prevEvents;
+                                }
+
+                                // Mark new events for fade-in
+                                newEvents.forEach(e => {
+                                    setNewEventIds(prev => new Set([...prev, e.id]));
+                                    setTimeout(() => {
+                                        setNewEventIds(prev => {
+                                            const next = new Set(prev);
+                                            next.delete(e.id);
+                                            return next;
+                                        });
+                                    }, 350);
+                                });
+
+                                // Prepend new events at the top
+                                return [...newEvents, ...prevEvents];
+                            });
+}
+
             function handleRowClick(eventId) {
                 if (expandedEventId === eventId) {
                     setExpandedEventId(null);
@@ -524,13 +679,12 @@
                             event={event}
                             isExpanded={expandedEventId === event.id}
                             onToggle={() => handleRowClick(event.id)}
+                            isNew={newEventIds.has(event.id)}
                         />
                     ))}
                 </div>
             );
         }
-
-        // Simple React app component
         function App() {
             const [state, setState] = useState({
                 pipeline_status: 'Loading...',
