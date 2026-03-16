@@ -292,6 +292,16 @@
 
         // RoadmapPanel component - renders in right panel
         function RoadmapPanel({ roadmap }) {
+            const [expandedPhaseId, setExpandedPhaseId] = useState(null);
+
+            const handlePhaseClick = (phaseId) => {
+                if (expandedPhaseId === phaseId) {
+                    setExpandedPhaseId(null);
+                } else {
+                    setExpandedPhaseId(phaseId);
+                }
+            };
+
             if (!roadmap || !Array.isArray(roadmap) || roadmap.length === 0) {
                 return (
                     <div className="text-slate-500 italic">
@@ -322,26 +332,48 @@
 
                     {/* Phase list */}
                     <div className="space-y-2">
-                        {roadmap.map((phase, index) => (
+                        {roadmap.map((phase, index) => {
+                            const isExpanded = expandedPhaseId === phase.id;
+                            return (
                             <div 
                                 key={phase.id || index}
-                                className={`p-3 rounded border border-slate-700 ${getStatusClasses(phase.status)}`}
+                                className={`p-3 rounded border border-slate-700 cursor-pointer transition-colors ${getStatusClasses(phase.status)} ${isExpanded ? 'bg-slate-700' : ''}`}
+                                onClick={() => handlePhaseClick(phase.id)}
                             >
                                 <div className="flex items-start gap-2">
                                     <span className="text-lg flex-shrink-0">{getStatusIcon(phase.status)}</span>
                                     <div className="flex-1 min-w-0">
-                                        <div className="header-text text-sm font-semibold text-slate-300">
+                                        <div className="header-text text-sm font-semibold text-slate-300 flex items-center gap-2">
                                             {phase.id}
+                                            {isExpanded ? (
+                                                <span className="text-blue-400 text-xs">▼</span>
+                                            ) : (
+                                                <span className="text-slate-500 text-xs">▶</span>
+                                            )}
                                         </div>
                                         {phase.goal && (
-                                            <p className="text-sm text-slate-400 mt-1 truncate">
+                                            <p className={`text-sm text-slate-400 mt-1 ${isExpanded ? '' : 'truncate'}`}>
                                                 {phase.goal}
                                             </p>
+                                        )}
+                                        {isExpanded && phase.exit_criteria && phase.exit_criteria.length > 0 && (
+                                            <div className="mt-3 pt-2 border-t border-slate-600">
+                                                <div className="text-xs font-semibold text-slate-400 mb-1">Exit Criteria:</div>
+                                                <ul className="text-xs text-slate-400 space-y-1">
+                                                    {phase.exit_criteria.map((criteria, idx) => (
+                                                        <li key={idx} className="flex items-start gap-1">
+                                                            <span className="text-blue-400">•</span>
+                                                            <span>{criteria}</span>
+                                                        </li>
+                                                    ))}
+                                                </ul>
+                                            </div>
                                         )}
                                     </div>
                                 </div>
                             </div>
-                        ))}
+                            );
+                        })}
                     </div>
                 </div>
             );
