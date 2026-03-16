@@ -258,10 +258,39 @@
             );
         }
 
+        // ConfirmationModal component - shows confirmation dialog for destructive commands
+        function ConfirmationModal({ command, onConfirm, onDismiss }) {
+            return (
+                <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+                    <div className="bg-slate-800 border border-slate-600 rounded-lg p-6 max-w-sm mx-4 shadow-xl">
+                        <h3 className="header-text text-lg font-semibold text-amber-400 mb-3">
+                            Confirm Action
+                        </h3>
+                        <p className="text-slate-300 mb-6">
+                            Are you sure? This cannot be undone.
+                        </p>
+                        <div className="flex gap-3 justify-end">
+                            <button onClick={onDismiss} className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">
+                                Cancel
+                            </button>
+                            <button onClick={onConfirm} className="px-4 py-2 rounded bg-red-600 hover:bg-red-500 text-white font-medium transition-colors">
+                                Confirm
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
         // EscalationCommandPanel component - shows command buttons when waiting for human
-        function EscalationCommandPanel({ pipeline_status, escalation_trigger_reason, last_action }) {
+        function EscalationCommandPanel({ pipeline_status, escalation_trigger_reason, last_action, escalation_resets }) {
             const [commandSent, setCommandSent] = useState(false);
             const [prevStatus, setPrevStatus] = useState(pipeline_status);
+            const [showConfirmModal, setShowConfirmModal] = useState(false);
+            const [modalCommand, setModalCommand] = useState(null);
+
+            // Compute isResetDisabled based on escalation_resets
+            const isResetDisabled = escalation_resets >= 3;
 
             // Reset command_sent when status changes from WAITING_FOR_HUMAN
             useEffect(() => {
@@ -296,7 +325,18 @@
 
             const headerText = escalation_trigger_reason || last_action || 'Awaiting human command';
 
-            const handleCommand = async (command) => {
+            const handleCommand = (command) => {
+                // Show modal for destructive commands
+                if (command === 'RESET_PHASE' || command === 'SKIP' || command === 'STOP') {
+                    setModalCommand(command);
+                    setShowConfirmModal(true);
+                    return;
+                }
+                // Send non-destructive commands directly
+                sendCommand(command);
+            };
+
+            const sendCommand = async (command) => {
                 try {
                     await fetch('/api/command', {
                         method: 'POST',
@@ -309,7 +349,42 @@
                 }
             };
 
+            const modalConfirm = () => {
+                if (modalCommand) {
+                    sendCommand(modalCommand);
+                }
+                setShowConfirmModal(false);
+                setModalCommand(null);
+            };
+
+            const modalDismiss = () => {
+                setShowConfirmModal(false);
+                setModalCommand(null);
+            };
+
             const buttonClass = "header-text px-3 py-2 rounded text-sm font-medium bg-slate-700 hover:bg-slate-600 transition-colors";
+            const disabledButtonClass = "header-text px-3 py-2 rounded text-sm font-medium bg-slate-700 opacity-50 cursor-not-allowed";
+
+            // Helper to render buttons with reset cap logic
+            const renderButton = (command, label) => {
+                const isResetCommand = command === 'RESET_EXECUTION' || command === 'RESET_PHASE';
+                if (isResetCommand && isResetDisabled) {
+                    return (
+                        <button 
+                            className={disabledButtonClass} 
+                            disabled={true}
+                            title="Reset cap reached (3/3). Use PROCEED or STOP."
+                        >
+                            {label}
+                        </button>
+                    );
+                }
+                return (
+                    <button onClick={() => handleCommand(command)} className={buttonClass}>
+                        {label}
+                    </button>
+                );
+            };
 
             return (
                 <div className="border-2 border-orange-500 rounded-lg p-4 mt-4 bg-slate-800/50">
@@ -323,25 +398,21 @@
                         </div>
                     ) : (
                         <div className="grid grid-cols-2 gap-2">
-                            <button onClick={() => handleCommand('RETRY')} className={buttonClass}>
-                                RETRY
-                            </button>
-                            <button onClick={() => handleCommand('RESET_EXECUTION')} className={buttonClass}>
-                                RESET EXECUTION
-                            </button>
-                            <button onClick={() => handleCommand('RESET_PHASE')} className={buttonClass}>
-                                RESET PHASE
-                            </button>
-                            <button onClick={() => handleCommand('SKIP')} className={buttonClass}>
-                                SKIP
-                            </button>
-                            <button onClick={() => handleCommand('PROCEED')} className={buttonClass}>
-                                PROCEED
-                            </button>
-                            <button onClick={() => handleCommand('STOP')} className={buttonClass}>
-                                STOP
-                            </button>
+                            {renderButton('RETRY', 'RETRY')}
+                            {renderButton('RESET_EXECUTION', 'RESET EXECUTION')}
+                            {renderButton('RESET_PHASE', 'RESET PHASE')}
+                            {renderButton('SKIP', 'SKIP')}
+                            {renderButton('PROCEED', 'PROCEED')}
+                            {renderButton('STOP', 'STOP')}
                         </div>
+                    )}
+
+                    {showConfirmModal && (
+                        <ConfirmationModal 
+                            command={modalCommand} 
+                            onConfirm={modalConfirm} 
+                            onDismiss={modalDismiss} 
+                        />
                     )}
                 </div>
             );
@@ -1059,6 +1130,7 @@
                         pipeline_status={state.pipeline_status}
                         escalation_trigger_reason={state.escalation_trigger_reason}
                         last_action={state.last_action}
+                        escalation_resets={state.escalation_resets || 0}
                     />
                 </div>
             );
