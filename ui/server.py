@@ -2,6 +2,19 @@
 import fcntl
 import json
 import os
+from collections import deque
+from datetime import datetime
+from pathlib import Path
+
+import asyncio
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from contextlib import asynccontextmanager
+
+from ui.roadmap_parser import parse_roadmap
+import json
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -9,6 +22,158 @@ from fastapi.responses import FileResponse
 
 from ui.roadmap_parser import parse_roadmap
 
+
+
+
+# Ring buffer for synthetic events (max 50 entries)
+_ring_buffer = deque(maxlen=50)
+
+# Polling state - tracks previous values to detect changes
+_polling_state = {
+    "pipeline_status": None,
+    "current_agent": None,
+    "current_phase_raw_id": None,
+    "counters": {"planner_retries": 0, "executor_retries": 0, "reviewer_retries": 0}
+}
+
+# Lock for thread-safe access to polling state
+_polling_lock = asyncio.Lock()
+
+
+def _create_synthetic_event(event_type, agent=None, phase=None, detail=None):
+    """Create a synthetic event dict with required fields.
+    
+    Args:
+        event_type: Type of event (e.g., 'status_changed')
+        agent: Current agent name
+        phase: Current phase ID
+        detail: Additional detail string
+    
+    Returns:
+        Dict with ts, event, agent, phase, detail fields.
+    """
+    return {
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "event": event_type,
+        "agent": agent,
+        "phase": phase,
+        "detail": detail
+    }
+
+
+async def _poll_state(prev_state):
+    """Read pipeline_state.json, track previous values, and detect changes.
+    
+    Args:
+        prev_state: Dict with previous state values (pipeline_status, current_agent, 
+                   current_phase_raw_id, counters)
+    
+    Returns:
+        Synthetic event dict if changes detected, None otherwise.
+    """
+    config = load_config()
+    pipeline_state_path = os.path.expanduser(config.get('pipeline_state_path')) if config.get('pipeline_state_path') else None
+    
+    if not pipeline_state_path:
+        return None
+    
+    current_state = _read_json_file(pipeline_state_path)
+    if not current_state:
+        return None
+    
+    # Extract current values
+    current_status = current_state.get("pipeline_status")
+    current_agent = current_state.get("current_agent")
+    current_phase = current_state.get("current_phase_raw_id")
+    current_counters = current_state.get("counters", {})
+    
+    # Check for changes
+    changes = []
+    
+    if current_status != prev_state.get("pipeline_status"):
+        changes.append("status")
+    
+    if current_agent != prev_state.get("current_agent"):
+        changes.append("agent")
+    
+    if current_phase != prev_state.get("current_phase_raw_id"):
+        changes.append("phase")
+    
+    # Check retry counters
+    prev_counters = prev_state.get("counters", {})
+    retry_keys = ["planner_retries", "executor_retries", "reviewer_retries"]
+    for key in retry_keys:
+        current_val = current_counters.get(key, 0)
+        prev_val = prev_counters.get(key, 0)
+        if current_val != prev_val:
+            changes.append(f"retry:{key}")
+    
+    if not changes:
+        return None
+    
+    # Build event detail
+    detail = f"changes: {', '.join(changes)}"
+    
+    # Create synthetic event
+    event = _create_synthetic_event(
+        event_type="status_changed",
+        agent=current_agent,
+        phase=current_phase,
+        detail=detail
+    )
+    
+    # Update prev_state in place
+    prev_state["pipeline_status"] = current_status
+    prev_state["current_agent"] = current_agent
+    prev_state["current_phase_raw_id"] = current_phase
+    prev_state["counters"] = current_counters.copy()
+    
+    return event
+
+
+async def _polling_loop():
+    """Background polling loop that runs every 2.5 seconds.
+    
+    Calls _poll_state() and appends events to ring buffer on changes.
+    """
+    global _polling_state
+    
+    while True:
+        try:
+            async with _polling_lock:
+                event = await _poll_state(_polling_state)
+            
+            if event:
+                _ring_buffer.append(event)
+            
+            # Check if events file exists
+            config = load_config()
+            events_path = config.get('events_path')
+            if events_path:
+                events_path = os.path.expanduser(events_path)
+                if Path(events_path).exists():
+                    # File exists - API will serve from file
+                    pass
+            
+        except Exception as e:
+            # Log error but continue polling
+            print(f"Polling error: {e}")
+        
+        await asyncio.sleep(2.5)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager to start/stop background polling."""
+    # Start polling loop
+    task = asyncio.create_task(_polling_loop())
+    yield
+    # Cancel polling on shutdown
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 # Canonical default values
 DEFAULTS = {
@@ -52,7 +217,7 @@ def load_config(config_path=None):
 
 
 # FastAPI app
-app = FastAPI()
+app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/health")
