@@ -66,14 +66,23 @@
         .status-pulse {
             animation: amber-pulse 2s ease-in-out infinite;
         }
+        
+        /* Event row hover states and transitions */
+        .event-row {
+            transition: background-color 0.15s ease-in-out;
+        }
+        .event-row:hover {
+            background-color: rgba(51, 65, 85, 0.5);
+        }
     </style>
 </head>
 <body>
-    <!-- 3-Panel Grid Layout:
+    <!-- 4-Panel Grid Layout:
          - Header bar (top)
          - Two-column middle section (left panel + right panel)
-         - Full-width bottom panel -->
-    <div class="grid grid-rows-[auto_1fr_auto] h-screen">
+         - Activity Feed panel (third row)
+         - Full-width footer panel -->
+    <div class="grid grid-rows-[auto_1fr_auto_auto] h-screen">
         <!-- Header Bar (Top Panel) -->
         <header class="bg-slate-800 border-b border-slate-700 px-6 py-4">
             <div class="flex items-center justify-between">
@@ -102,6 +111,12 @@
                 <div id="right-panel-root"></div>
             </div>
         </main>
+        
+        <!-- Activity Feed Panel (Third Row) -->
+        <div class="bg-slate-900 border-t border-slate-700 p-4 overflow-hidden">
+            <h2 class="header-text text-lg font-semibold text-slate-300 mb-2">Activity Feed</h2>
+            <div id="activity-feed-root" class="overflow-y-auto max-h-48"></div>
+        </div>
         
         <!-- Bottom Panel (Full Width) -->
         <footer class="bg-slate-800 border-t border-slate-700 px-6 py-3">
@@ -379,6 +394,142 @@
             );
         }
 
+        // Event type badge color mapping
+        function getEventBadgeColor(eventType) {
+            switch (eventType) {
+                case 'gate_pass': return 'bg-green-600 text-white';
+                case 'gate_fail': return 'bg-amber-600 text-white';
+                case 'retry': return 'bg-amber-600 text-white';
+                case 'escalation_trigger': return 'bg-orange-600 text-white';
+                case 'escalation_resolve': return 'bg-blue-600 text-white';
+                case 'phase_complete': return 'bg-lime-600 text-white';
+                default: return 'bg-slate-600 text-white';
+            }
+        }
+
+        // EventRow sub-component
+        function EventRow({ event, isExpanded, onToggle }) {
+            if (!event) return null;
+            
+            // Format timestamp to show only time portion (characters 11-16)
+            const timeOnly = event.timestamp ? event.timestamp.slice(11, 16) : '--:--';
+            
+            // Truncate detail to ~60 chars with ellipsis
+            const truncatedDetail = event.detail && event.detail.length > 60 
+                ? event.detail.slice(0, 60) + '...' 
+                : event.detail;
+            
+            // Attempt value or em-dash
+            const attemptDisplay = event.attempt ?? '—';
+            
+            const badgeColor = getEventBadgeColor(event.event_type);
+            
+            return (
+                <div 
+                    className="event-row p-2 border-b border-slate-700 cursor-pointer rounded"
+                    onClick={onToggle}
+                >
+                    <div className="flex items-center gap-3">
+                        {/* Timestamp - time only, monospace */}
+                        <span className="font-mono text-xs text-slate-400 w-14 flex-shrink-0">
+                            {timeOnly}
+                        </span>
+                        
+                        {/* Event type badge */}
+                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${badgeColor} flex-shrink-0`}>
+                            {event.event_type || 'unknown'}
+                        </span>
+                        
+                        {/* Agent */}
+                        <span className="text-xs text-slate-300 w-20 flex-shrink-0 truncate">
+                            {event.agent || '—'}
+                        </span>
+                        
+                        {/* Phase */}
+                        <span className="text-xs text-slate-300 w-24 flex-shrink-0 truncate">
+                            {event.phase || '—'}
+                        </span>
+                        
+                        {/* Attempt */}
+                        <span className="text-xs text-slate-400 w-12 flex-shrink-0 text-center">
+                            {attemptDisplay}
+                        </span>
+                        
+                        {/* Detail - truncated */}
+                        <span className="text-xs text-slate-400 flex-1 truncate">
+                            {truncatedDetail || '—'}
+                        </span>
+                    </div>
+                    
+                    {/* Inline expansion - full detail when expanded */}
+                    {isExpanded && event.detail && (
+                        <div className="mt-2 pl-20 text-xs text-slate-300 bg-slate-800 p-2 rounded">
+                            {event.detail}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // ActivityFeedPanel component - fetches from GET /api/events and polls every 5 seconds
+        function ActivityFeedPanel() {
+            const [events, setEvents] = useState([]);
+            const [expandedEventId, setExpandedEventId] = useState(null);
+            
+            useEffect(() => {
+                // Fetch initial events
+                fetchEvents();
+                
+                // Poll every 5 seconds
+                const interval = setInterval(fetchEvents, 5000);
+                
+                return () => clearInterval(interval);
+            }, []);
+            
+            function fetchEvents() {
+                fetch('/api/events?limit=30')
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data.events && Array.isArray(data.events)) {
+                            setEvents(data.events);
+                        }
+                    })
+                    .catch(err => {
+                        console.log('Events API not available yet');
+                    });
+            }
+            
+            function handleRowClick(eventId) {
+                if (expandedEventId === eventId) {
+                    setExpandedEventId(null);
+                } else {
+                    setExpandedEventId(eventId);
+                }
+            }
+            
+            // Empty state
+            if (!events || events.length === 0) {
+                return (
+                    <div className="text-slate-500 italic text-sm">
+                        No events recorded yet
+                    </div>
+                );
+            }
+            
+            return (
+                <div className="space-y-1">
+                    {events.map((event, index) => (
+                        <EventRow 
+                            key={event.id || index}
+                            event={event}
+                            isExpanded={expandedEventId === event.id}
+                            onToggle={() => handleRowClick(event.id)}
+                        />
+                    ))}
+                </div>
+            );
+        }
+
         // Simple React app component
         function App() {
             const [state, setState] = useState({
@@ -543,6 +694,9 @@
         
         const rightRoot = ReactDOM.createRoot(document.getElementById('right-panel-root'));
         rightRoot.render(<RightPanelApp />);
+        
+        const activityFeedRoot = ReactDOM.createRoot(document.getElementById('activity-feed-root'));
+        activityFeedRoot.render(<ActivityFeedPanel />);
     </script>
 </body>
 </html>
