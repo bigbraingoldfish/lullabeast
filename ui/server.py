@@ -729,6 +729,131 @@ def get_state():
     return response
 
 
+# Valid commands for escalation
+VALID_COMMANDS = {"RETRY", "RESET_EXECUTION", "RESET_PHASE", "SKIP", "PROCEED", "STOP"}
+
+
+RESET_CAP_COMMANDS = {"RESET_PHASE", "RESET_EXECUTION"}
+
+
+def _validate_command_request(project_dir_path, pipeline_status, escalation_resets, command):
+    """Validate command request conditions.
+
+    Args:
+        project_dir_path: Path to the project directory.
+        pipeline_status: Current pipeline status.
+        escalation_resets: Number of escalation resets.
+        command: The command being issued.
+
+    Returns:
+        Tuple of (is_valid, error_message, error_status_code).
+        If valid, returns (True, None, None).
+    """
+    # Check symlink validity (dangling or absent)
+    project_path = Path(project_dir_path)
+
+    # Check if it's a symlink first
+    if project_path.is_symlink():
+        if not project_path.resolve().exists():
+            return False, "Project directory symlink is dangling", 503
+    elif not project_path.exists():
+        # Not a symlink, just doesn't exist
+        return False, "Project directory not found", 503
+
+    # Check pipeline status
+    if pipeline_status != "WAITING_FOR_HUMAN":
+        return False, "Pipeline is not waiting for human input", 409
+
+    # Check reset cap — only applies to RESET_PHASE and RESET_EXECUTION
+    if command in RESET_CAP_COMMANDS and escalation_resets >= 3:
+        return False, "Reset cap reached", 409
+
+    return True, None, None
+
+
+def _write_escalation_files(project_dir_path, command):
+    """Write escalation output files atomically.
+    
+    Args:
+        project_dir_path: Path to the project directory.
+        command: The command to write.
+    
+    Returns:
+        True on success.
+    """
+    from fastapi import HTTPException
+    
+    project_path = Path(project_dir_path)
+    json_path = project_path / "escalation_output.json"
+    done_path = project_path / "escalation_output.done"
+    
+    # Write JSON file first
+    data = {
+        "command": command,
+        "source": "ui",
+        "timestamp": datetime.utcnow().isoformat() + "Z"
+    }
+    
+    with open(json_path, 'w') as f:
+        json.dump(data, f)
+    
+    # Then write done file
+    with open(done_path, 'w') as f:
+        f.write("")
+    
+    return True
+
+
+@app.post("/api/command")
+def post_command(request: dict):
+    """Handle escalation commands from the UI.
+    
+    Request body:
+        command: One of RETRY, RESET_EXECUTION, RESET_PHASE, SKIP, PROCEED, STOP
+    
+    Returns:
+        200 on success with confirmation message.
+        400 for unknown commands.
+        409 if pipeline is not waiting for human input or reset cap reached.
+        503 if project directory is missing or symlink is dangling.
+    """
+    command = request.get("command")
+    
+    # Validate command is in whitelist
+    if command not in VALID_COMMANDS:
+        raise HTTPException(status_code=400, detail=f"Unknown command: {command}")
+    
+    config = load_config()
+    project_dir_path = config.get("project_dir_path")
+    pipeline_state_path = config.get("pipeline_state_path")
+    phase_state_path = config.get("phase_state_path")
+    
+    # Expand paths
+    project_dir_path = os.path.expanduser(project_dir_path) if project_dir_path else None
+    pipeline_state_path = os.path.expanduser(pipeline_state_path) if pipeline_state_path else None
+    phase_state_path = os.path.expanduser(phase_state_path) if phase_state_path else None
+    
+    # Read pipeline and phase state
+    pipeline_state = _read_json_file(pipeline_state_path) if pipeline_state_path else {}
+    phase_state = _read_json_file(phase_state_path) if phase_state_path else {}
+    
+    pipeline_status = pipeline_state.get("pipeline_status") if pipeline_state else None
+    escalation_resets = phase_state.get("escalation_resets", 0) if phase_state else 0
+    
+    # Validate request
+    is_valid, error_msg, error_code = _validate_command_request(
+        project_dir_path, pipeline_status, escalation_resets, command
+    )
+    
+    if not is_valid:
+        raise HTTPException(status_code=error_code, detail=error_msg)
+    
+    # Write escalation files
+    _write_escalation_files(project_dir_path, command)
+    
+    return {"status": "ok", "command": command}
+
+
 @app.get("/api/roadmap")
 def get_roadmap():
     """Get the parsed roadmap with in-progress phase identified.
