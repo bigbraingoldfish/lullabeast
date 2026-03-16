@@ -288,6 +288,99 @@ def _determine_event_source(events_path):
     return 'file' if Path(events_path).exists() else 'synthetic'
 
 
+def _read_events_from_buffer(limit=30, offset=0):
+    """Read events from the ring buffer in reverse chronological order.
+    
+    Args:
+        limit: Maximum number of events to return.
+        offset: Number of events to skip from the start.
+    
+    Returns:
+        Tuple of (events list, total count).
+    """
+    # Convert deque to list and reverse for newest-first order
+    all_events = list(_ring_buffer)[::-1]
+    total = len(all_events)
+    
+    # Apply pagination
+    events = all_events[offset:offset + limit]
+    return events, total
+
+
+def _read_events_from_file(events_path, limit=30, offset=0):
+    """Read last N lines from JSONL file in reverse order using file seek.
+    
+    Args:
+        events_path: Path to the JSONL events file.
+        limit: Maximum number of events to return.
+        offset: Number of events to skip from the start.
+    
+    Returns:
+        Tuple of (events list, total count).
+    """
+    if not Path(events_path).exists():
+        return [], 0
+    
+    # Read all valid events (skip malformed lines)
+    all_events = []
+    with open(events_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+                all_events.append(event)
+            except json.JSONDecodeError:
+                # Skip malformed lines
+                continue
+    
+    total = len(all_events)
+    
+    # Reverse to get newest first (assuming file is oldest-first)
+    all_events = all_events[::-1]
+    
+    # Apply pagination
+    events = all_events[offset:offset + limit]
+    return events, total
+
+
+@app.get("/api/events")
+def get_events(limit: int = 30, offset: int = 0):
+    """Get pipeline events with pagination.
+    
+    Returns events from either the ring buffer (synthetic) or from the
+    events JSONL file, depending on which source is available.
+    
+    Query parameters:
+        limit: Maximum number of events to return (default 30).
+        offset: Number of events to skip (default 0).
+    
+    Returns:
+        JSON with 'events' array, 'source' field ('synthetic' or 'file'),
+        and 'total' count field.
+    """
+    config = load_config()
+    events_path = config.get('events_path')
+    
+    if events_path:
+        events_path = os.path.expanduser(events_path)
+    
+    # Determine source and fetch events
+    if events_path and Path(events_path).exists():
+        source = 'file'
+        events, total = _read_events_from_file(events_path, limit, offset)
+    else:
+        source = 'synthetic'
+        events, total = _read_events_from_buffer(limit, offset)
+    
+    return {
+        "events": events,
+        "source": source,
+        "total": total
+    }
+
+
 @app.get("/api/state")
 def get_state():
     """Get the current pipeline state.
