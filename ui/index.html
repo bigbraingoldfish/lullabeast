@@ -175,10 +175,68 @@
             );
         }
         
+        // DotCounter component - renders filled/empty dots for retry counts
+        function DotCounter({ count, label }) {
+            const maxDots = 3;
+            if (count === undefined || count === null) return null;
+            const filled = Math.min(count, maxDots);
+            const empty = maxDots - filled;
+            return (
+                <div className="flex items-center gap-1.5">
+                    <span className="text-slate-500 text-xs w-16">{label}</span>
+                    <div className="flex gap-1">
+                        {Array.from({length: filled}).map((_, i) => (
+                            <span key={i} className="w-2 h-2 rounded-full bg-amber-500 inline-block"></span>
+                        ))}
+                        {Array.from({length: empty}).map((_, i) => (
+                            <span key={filled + i} className="w-2 h-2 rounded-full bg-slate-700 inline-block"></span>
+                        ))}
+                    </div>
+                </div>
+            );
+        }
+
+        // LastErrorCode component - shows last error in monospace red text
+        function LastErrorCode({ errorCode }) {
+            if (!errorCode) return null;
+            return (
+                <span className="font-mono text-xs text-red-400 bg-slate-800 px-1.5 py-0.5 rounded">{errorCode}</span>
+            );
+        }
+
+        /* ElapsedTimer: useEffect-based elapsed time counter with amber color for long waits */
+        function ElapsedTimer({ lastActionTimestamp, pipeline_status }) {
+            const [elapsed, setElapsed] = useState(0);
+            useEffect(() => {
+                if (!lastActionTimestamp) return;
+                const startTime = new Date(lastActionTimestamp).getTime();
+                const tick = () => setElapsed(Math.floor((Date.now() - startTime) / 1000));
+                tick();
+                const interval = setInterval(tick, 1000);
+                return () => clearInterval(interval);
+            }, [lastActionTimestamp]);
+            if (!lastActionTimestamp) return null;
+            const isOverdue = pipeline_status === 'WAITING_FOR_SENTINEL' && elapsed > 300;
+            const colorClass = isOverdue ? 'text-amber-400' : 'text-slate-400';
+            const mins = Math.floor(elapsed / 60);
+            const secs = elapsed % 60;
+            return (
+                <span className={`header-text text-xs ${colorClass}`}>{mins}m {String(secs).padStart(2, '0')}s</span>
+            );
+        }
+
+        // SkillInjected component - shows discipline/agent in muted text
+        function SkillInjected({ skillInjected, skillAgent }) {
+            if (!skillInjected || !skillAgent) return null;
+            return (
+                <span className="text-slate-500 text-xs">{skillInjected} / {skillAgent}</span>
+            );
+        }
+
         // CurrentPhasePanel component - renders in left panel
-        function CurrentPhasePanel({ current_phase_raw_id, current_agent, roadmap }) {
+        function CurrentPhasePanel({ current_phase_raw_id, current_agent, roadmap, planner_retries, executor_retries, reviewer_retries, last_error_code, last_action_timestamp, skill_injected, skill_agent, pipeline_status }) {
             const goal = getGoalForPhase(current_phase_raw_id, roadmap);
-            
+
             if (!current_phase_raw_id) {
                 return (
                     <div className="text-slate-400 italic">
@@ -186,22 +244,30 @@
                     </div>
                 );
             }
-            
+
             return (
                 <div className="space-y-3">
                     <div className="flex items-center gap-3">
                         <span className="header-text text-sm font-semibold text-slate-300">{current_phase_raw_id}</span>
                         <AgentBadge agent={current_agent} />
+                        <ElapsedTimer lastActionTimestamp={last_action_timestamp} pipeline_status={pipeline_status} />
                     </div>
                     {goal && (
                         <p className="text-slate-400 text-sm leading-relaxed">
                             {goal}
                         </p>
                     )}
+                    <div className="space-y-1">
+                        <DotCounter count={planner_retries} label="Planner" />
+                        <DotCounter count={executor_retries} label="Executor" />
+                        <DotCounter count={reviewer_retries} label="Reviewer" />
+                    </div>
+                    <LastErrorCode errorCode={last_error_code} />
+                    <SkillInjected skillInjected={skill_injected} skillAgent={skill_agent} />
                 </div>
             );
         }
-        
+
         // Simple React app component
         function App() {
             const [state, setState] = useState({
@@ -209,7 +275,14 @@
                 orchestrator_alive: true,
                 current_agent: null,
                 project_path: null,
-                current_phase_raw_id: ''
+                current_phase_raw_id: '',
+                planner_retries: null,
+                executor_retries: null,
+                reviewer_retries: null,
+                last_error_code: null,
+                last_action_timestamp: null,
+                skill_injected: null,
+                skill_agent: null
             });
             const roadmap = useState(null); // roadmap state
             const [lastPhaseId, setLastPhaseId] = useState(null);
@@ -308,10 +381,18 @@
             
             return (
                 <div className="p-4">
-                    <CurrentPhasePanel 
+                    <CurrentPhasePanel
                         current_phase_raw_id={state.current_phase_raw_id}
                         current_agent={state.current_agent}
                         roadmap={roadmap[0]}
+                        planner_retries={state.planner_retries}
+                        executor_retries={state.executor_retries}
+                        reviewer_retries={state.reviewer_retries}
+                        last_error_code={state.last_error_code}
+                        last_action_timestamp={state.last_action_timestamp}
+                        skill_injected={state.skill_injected}
+                        skill_agent={state.skill_agent}
+                        pipeline_status={state.pipeline_status}
                     />
                 </div>
             );
