@@ -109,7 +109,7 @@ These apply to every phase:
   > Test: Returns 200 `{"events": [...], "source": "synthetic", "total": <int>}`. With `limit=10&offset=0` returns up to 10 most-recent events in reverse chronological order. With `limit=10&offset=10` returns the next 10 older events. Empty buffer returns `{"events": [], "source": "synthetic", "total": 0}`. When `events_path` file exists, reads last N lines of the JSONL file in reverse order and returns `"source": "file"`. Default limit when parameter absent: 30.
   > Notes: Depends on CORE-2. File reading for the upgrade path: read lines from end of file using seek, parse each as JSON, skip malformed lines.
 
-- [ ] `API-4` | HIGH | Add `GET /api/events/stream` as an SSE endpoint pushing new ring buffer events and a 15-second heartbeat
+- [x] `API-4` | HIGH | Add `GET /api/events/stream` as an SSE endpoint pushing new ring buffer events and a 15-second heartbeat
   > Test: Client connecting via `EventSource` or curl receives an SSE `event: heartbeat` `data: {}` message within 15 seconds. When a new synthetic event is added to the ring buffer, the connected client receives it as an SSE message within one polling cycle (≤5 seconds). Connection remains open across multiple events without closing. A client connecting with an empty buffer receives no immediate data message but does receive the heartbeat. When `events_path` file exists, server tails the file and pushes new lines as SSE messages instead of reading from the ring buffer.
   > Notes: HIGH risk — use FastAPI `StreamingResponse` with `media_type: "text/event-stream"`. SSE format: `data: {json}\n\n`. Keep-alive via heartbeat prevents proxy/load-balancer timeouts. Each pushed event must be newline-terminated per SSE spec.
 
