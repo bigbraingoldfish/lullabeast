@@ -487,11 +487,133 @@
             );
         }
 
+        // EscalationLogPanel sub-component - renders paired escalation events
+        function EscalationLogPanel({ events }) {
+            // Pair escalation_trigger events with their corresponding escalation_resolve events by phase
+            function pairEscalations(allEvents) {
+                const triggers = allEvents.filter(e => e.event_type === 'escalation_trigger');
+                const resolves = allEvents.filter(e => e.event_type === 'escalation_resolve');
+                
+                const pairs = [];
+                
+                for (const trigger of triggers) {
+                    const phase = trigger.phase;
+                    // Find the first resolve event for the same phase that came after the trigger
+                    const matchingResolve = resolves.find(r => 
+                        r.phase === phase && 
+                        r.ts && trigger.ts && 
+                        new Date(r.ts) > new Date(trigger.ts)
+                    );
+                    
+                    pairs.push({
+                        trigger: trigger,
+                        resolve: matchingResolve || null,
+                        phase: phase
+                    });
+                }
+                
+                // Sort by trigger timestamp (newest first)
+                return pairs.sort((a, b) => {
+                    const aTs = a.trigger.ts || a.trigger.timestamp || '';
+                    const bTs = b.trigger.ts || b.trigger.timestamp || '';
+                    return bTs.localeCompare(aTs);
+                });
+            }
+            
+            const pairedEscalations = pairEscalations(events);
+            
+            // Empty state
+            if (!pairedEscalations || pairedEscalations.length === 0) {
+                return (
+                    <div className="text-slate-500 italic text-sm">
+                        No escalations recorded in this session.
+                    </div>
+                );
+            }
+            
+            // Format timestamp to show only time portion
+            function formatTime(ts) {
+                if (!ts) return '—';
+                const tsStr = ts.ts || ts.timestamp || ts;
+                return tsStr.slice(11, 16);
+            }
+            
+            // Calculate elapsed duration between trigger and resolve
+            function calculateDuration(triggerTs, resolveTs) {
+                if (!triggerTs) return '—';
+                const trigger = new Date(triggerTs);
+                const resolve = resolveTs ? new Date(resolveTs) : new Date();
+                const diffMs = resolve - trigger;
+                if (diffMs < 0) return '—';
+                const mins = Math.floor(diffMs / 60000);
+                const secs = Math.floor((diffMs % 60000) / 1000);
+                return `${mins}m ${String(secs).padStart(2, '0')}s`;
+            }
+            
+            return (
+                <div className="space-y-2">
+                    {pairedEscalations.map((pair, index) => {
+                        const trigger = pair.trigger;
+                        const resolve = pair.resolve;
+                        const isInProgress = !resolve;
+                        
+                        return (
+                            <div key={index} className="p-3 bg-slate-800 rounded border border-slate-700">
+                                <div className="flex items-center gap-3 mb-2">
+                                    <span className="header-text text-sm font-semibold text-slate-300">
+                                        {pair.phase || '—'}
+                                    </span>
+                                    {isInProgress ? (
+                                        <span className="px-2 py-0.5 rounded text-xs font-medium bg-orange-600 text-white">
+                                            In Progress
+                                        </span>
+                                    ) : (
+                                        <span className="px-2 py-0.5 rounded text-xs font-medium bg-green-600 text-white">
+                                            Resolved
+                                        </span>
+                                    )}
+                                </div>
+                                <div className="grid grid-cols-2 gap-2 text-xs">
+                                    <div>
+                                        <span className="text-slate-500">Triggered:</span>
+                                        <span className="font-mono text-slate-300 ml-2">{formatTime(trigger)}</span>
+                                    </div>
+                                    <div>
+                                        <span className="text-slate-500">Reason:</span>
+                                        <span className="text-slate-300 ml-2">{trigger.detail || '—'}</span>
+                                    </div>
+                                    <div>
+                                        <span className="text-slate-500">Command:</span>
+                                        <span className="text-slate-300 ml-2">
+                                            {isInProgress ? 'Awaiting command...' : (resolve.detail || '—')}
+                                        </span>
+                                    </div>
+                                    <div>
+                                        <span className="text-slate-500">Resolved:</span>
+                                        <span className="font-mono text-slate-300 ml-2">
+                                            {isInProgress ? 'Awaiting command...' : formatTime(resolve)}
+                                        </span>
+                                    </div>
+                                    <div className="col-span-2">
+                                        <span className="text-slate-500">Duration:</span>
+                                        <span className="text-slate-300 ml-2">
+                                            {isInProgress ? 'In progress...' : calculateDuration(trigger.ts || trigger.timestamp, resolve.ts || resolve.timestamp)}
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
+            );
+        }
+
         // ActivityFeedPanel component - uses SSE with polling fallback
         function ActivityFeedPanel() {
             const [events, setEvents] = useState([]);
             const [expandedEventId, setExpandedEventId] = useState(null);
             const [newEventIds, setNewEventIds] = useState(new Set());
+            const [activityTab, setActivityTab] = useState('activity'); // 'activity' | 'escalation'
             const eventSourceRef = React.useRef(null);
             const pollingIntervalRef = React.useRef(null);
             const isUsingSSE = React.useRef(true);
@@ -662,8 +784,13 @@
                 }
             }
             
-            // Empty state
-            if (!events || events.length === 0) {
+            // Filter escalation events from the main events list
+            const escalationEvents = events.filter(e => 
+                e.event_type === 'escalation_trigger' || e.event_type === 'escalation_resolve'
+            );
+            
+            // Empty state for activity tab
+            if (activityTab === 'activity' && (!events || events.length === 0)) {
                 return (
                     <div className="text-slate-500 italic text-sm">
                         No events recorded yet
@@ -671,17 +798,44 @@
                 );
             }
             
+            // Tab toggle buttons
+            const TabButton = ({ tab, label }) => (
+                <button
+                    onClick={() => setActivityTab(tab)}
+                    className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+                        activityTab === tab 
+                            ? 'bg-blue-600 text-white' 
+                            : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                    }`}
+                >
+                    {label}
+                </button>
+            );
+            
             return (
-                <div className="space-y-1">
-                    {events.map((event, index) => (
-                        <EventRow 
-                            key={event.id || index}
-                            event={event}
-                            isExpanded={expandedEventId === event.id}
-                            onToggle={() => handleRowClick(event.id)}
-                            isNew={newEventIds.has(event.id)}
-                        />
-                    ))}
+                <div>
+                    {/* Tab toggle buttons in header */}
+                    <div className="flex gap-2 mb-3">
+                        <TabButton tab="activity" label="Activity" />
+                        <TabButton tab="escalation" label="Escalation" />
+                    </div>
+                    
+                    {/* Content based on active tab - no API calls, uses existing state */}
+                    {activityTab === 'escalation' ? (
+                        <EscalationLogPanel events={escalationEvents} />
+                    ) : (
+                        <div className="space-y-1">
+                            {events.map((event, index) => (
+                                <EventRow 
+                                    key={event.id || index}
+                                    event={event}
+                                    isExpanded={expandedEventId === event.id}
+                                    onToggle={() => handleRowClick(event.id)}
+                                    isNew={newEventIds.has(event.id)}
+                                />
+                            ))}
+                        </div>
+                    )}
                 </div>
             );
         }
