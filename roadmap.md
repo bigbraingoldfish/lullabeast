@@ -145,7 +145,7 @@ These apply to every phase:
   > Test: All phases from `GET /api/roadmap` render one row each. Status icons match: ✓ complete, ▶ in_progress, ○ pending, ⊘ skipped, ⚠ blocked. The in-progress phase row has a left border accent in the primary accent color and is visually distinct from others. Complete phases are visually muted (reduced opacity or lighter text). Blocked phases have a red tint. Progress bar above the list shows "N / T complete" where N is the count of complete phases and T is total phases. Panel is scrollable when phase count exceeds visible height.
   > Notes: Depends on `GET /api/roadmap`. Roadmap panel re-renders when state poll detects a `current_phase_raw_id` change. Progress bar fill percentage = complete / total.
 
-- [ ] `UI-6` | LOW | Add inline expand/collapse to roadmap phase rows showing full goal text and exit criteria
+- [x] `UI-6` | LOW | Add inline expand/collapse to roadmap phase rows showing full goal text and exit criteria
   > Test: Clicking a phase row expands it inline without navigation or page reload. Expanded state shows the full goal text and each entry in `exit_criteria` as a separate line (if the array is non-empty). Clicking the expanded row again collapses it. When a second row is clicked while another is expanded, the first collapses and the second expands (only one row expanded at a time). Rows with empty `exit_criteria` expand to show goal only, with no exit criteria section rendered.
   > Notes: Git tag display for complete phases is deferred — no API mechanism exists to retrieve git tags in v1. Expand/collapse is pure frontend state (no additional API calls). `exit_criteria` comes from the `exit_criteria` array in the `GET /api/roadmap` response.
 
