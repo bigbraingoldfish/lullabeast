@@ -69,8 +69,6 @@
     </style>
 </head>
 <body>
-    <div id="root"></div>
-    
     <!-- 3-Panel Grid Layout:
          - Header bar (top)
          - Two-column middle section (left panel + right panel)
@@ -95,17 +93,13 @@
             <!-- Left Panel -->
             <div class="bg-slate-900 rounded-lg border border-slate-700 p-4 overflow-auto">
                 <h2 class="header-text text-lg font-semibold text-slate-300 mb-4">Current Phase</h2>
-                <div id="left-panel-content" class="text-slate-400">
-                    <p>Pipeline status and events will appear here.</p>
-                </div>
+                <div id="left-panel-root"></div>
             </div>
             
             <!-- Right Panel -->
             <div class="bg-slate-900 rounded-lg border border-slate-700 p-4 overflow-auto">
-                <h2 class="header-text text-lg font-semibold text-slate-300 mb-4">Right Panel</h2>
-                <div id="right-panel-content" class="text-slate-400">
-                    <p>Additional information and controls.</p>
-                </div>
+                <h2 class="header-text text-lg font-semibold text-slate-300 mb-4">Roadmap</h2>
+                <div id="right-panel-root"></div>
             </div>
         </main>
         
@@ -268,6 +262,91 @@
             );
         }
 
+        // Status icon mapping for roadmap phases
+        function getStatusIcon(status) {
+            switch (status) {
+                case 'complete': return '✓';
+                case 'in_progress': return '▶';
+                case 'pending': return '○';
+                case 'skipped': return '⊘';
+                case 'blocked': return '⚠';
+                default: return '○';
+            }
+        }
+
+        // Get styling classes based on phase status
+        function getStatusClasses(status) {
+            switch (status) {
+                case 'complete':
+                    return 'opacity-60 text-slate-400';
+                case 'in_progress':
+                    return 'border-l-4 border-blue-500 bg-slate-800/50';
+                case 'blocked':
+                    return 'bg-red-900/30 border-l-4 border-red-600';
+                case 'skipped':
+                    return 'opacity-50 text-slate-500';
+                default:
+                    return 'text-slate-300';
+            }
+        }
+
+        // RoadmapPanel component - renders in right panel
+        function RoadmapPanel({ roadmap }) {
+            if (!roadmap || !Array.isArray(roadmap) || roadmap.length === 0) {
+                return (
+                    <div className="text-slate-500 italic">
+                        No roadmap data available
+                    </div>
+                );
+            }
+
+            const totalPhases = roadmap.length;
+            const completeCount = roadmap.filter(p => p.status === 'complete').length;
+            const percentage = totalPhases > 0 ? Math.round((completeCount / totalPhases) * 100) : 0;
+
+            return (
+                <div className="space-y-4 overflow-y-auto max-h-full">
+                    {/* Progress bar */}
+                    <div className="space-y-1">
+                        <div className="flex justify-between text-xs text-slate-400">
+                            <span>Progress</span>
+                            <span>{completeCount} / {totalPhases} complete</span>
+                        </div>
+                        <div className="w-full bg-slate-700 rounded-full h-2">
+                            <div 
+                                className="bg-blue-500 h-2 rounded-full transition-all duration-300" 
+                                style={{ width: `${percentage}%` }}
+                            ></div>
+                        </div>
+                    </div>
+
+                    {/* Phase list */}
+                    <div className="space-y-2">
+                        {roadmap.map((phase, index) => (
+                            <div 
+                                key={phase.id || index}
+                                className={`p-3 rounded border border-slate-700 ${getStatusClasses(phase.status)}`}
+                            >
+                                <div className="flex items-start gap-2">
+                                    <span className="text-lg flex-shrink-0">{getStatusIcon(phase.status)}</span>
+                                    <div className="flex-1 min-w-0">
+                                        <div className="header-text text-sm font-semibold text-slate-300">
+                                            {phase.id}
+                                        </div>
+                                        {phase.goal && (
+                                            <p className="text-sm text-slate-400 mt-1 truncate">
+                                                {phase.goal}
+                                            </p>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+        }
+
         // Simple React app component
         function App() {
             const [state, setState] = useState({
@@ -380,7 +459,7 @@
             }
             
             return (
-                <div className="p-4">
+                <div className="overflow-y-auto h-full">
                     <CurrentPhasePanel
                         current_phase_raw_id={state.current_phase_raw_id}
                         current_agent={state.current_agent}
@@ -397,10 +476,41 @@
                 </div>
             );
         }
+
+        // RightPanelApp - fetches and displays roadmap in right panel
+        function RightPanelApp() {
+            const [roadmap, setRoadmap] = useState(null);
+            
+            useEffect(() => {
+                fetchRoadmap();
+                const interval = setInterval(fetchRoadmap, 3000);
+                return () => clearInterval(interval);
+            }, []);
+            
+            function fetchRoadmap() {
+                fetch('/api/roadmap')
+                    .then(res => res.json())
+                    .then(data => {
+                        setRoadmap(data);
+                    })
+                    .catch(err => {
+                        console.log('Roadmap API not available yet');
+                    });
+            }
+            
+            return (
+                <div className="overflow-y-auto h-full">
+                    <RoadmapPanel roadmap={roadmap} />
+                </div>
+            );
+        }
         
-        // Render the app
-        const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(<App />);
+        // Render the apps to their respective panels
+        const leftRoot = ReactDOM.createRoot(document.getElementById('left-panel-root'));
+        leftRoot.render(<App />);
+        
+        const rightRoot = ReactDOM.createRoot(document.getElementById('right-panel-root'));
+        rightRoot.render(<RightPanelApp />);
     </script>
 </body>
 </html>
