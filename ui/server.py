@@ -39,6 +39,12 @@ _polling_state = {
 # Lock for thread-safe access to polling state
 _polling_lock = asyncio.Lock()
 
+# SSE client tracking
+_sse_clients = set()  # Set of asyncio.Queue objects for each connected client
+_sse_clients_lock = asyncio.Lock()
+_file_positions = {}  # Track file positions per client for file-based tailing
+_sse_notify_event = asyncio.Event()  # Event to notify when new events are available
+
 
 def _create_synthetic_event(event_type, agent=None, phase=None, detail=None):
     """Create a synthetic event dict with required fields.
@@ -145,21 +151,180 @@ async def _polling_loop():
             
             if event:
                 _ring_buffer.append(event)
+                # Notify SSE clients about new event
+                try:
+                    await _notify_sse_clients(event)
+                except Exception:
+                    pass
             
             # Check if events file exists
-            config = load_config()
-            events_path = config.get('events_path')
-            if events_path:
-                events_path = os.path.expanduser(events_path)
-                if Path(events_path).exists():
-                    # File exists - API will serve from file
-                    pass
+            try:
+                config = load_config()
+                events_path = config.get('events_path')
+                if events_path:
+                    events_path = os.path.expanduser(events_path)
+                    if Path(events_path).exists():
+                        # File exists - API will serve from file
+                        pass
+            except Exception:
+                pass
             
         except Exception as e:
             # Log error but continue polling
             print(f"Polling error: {e}")
         
-        await asyncio.sleep(2.5)
+        try:
+            await asyncio.sleep(2.5)
+        except asyncio.CancelledError:
+            break
+
+
+async def _notify_sse_clients(event):
+    """Notify all connected SSE clients about a new event.
+    
+    Args:
+        event: The event dict to send to clients.
+    """
+    async with _sse_clients_lock:
+        for client_queue in _sse_clients:
+            try:
+                client_queue.put_nowait(event)
+            except asyncio.QueueFull:
+                # Client queue full - skip this client
+                pass
+
+
+async def _tail_events_file(events_path, client_id):
+    """Async generator that yields new lines from events file as they appear.
+    
+    Args:
+        events_path: Path to the JSONL events file.
+        client_id: Unique identifier for this client (used for position tracking).
+    
+    Yields:
+        SSE-formatted event strings for new lines in the file.
+    """
+    file_path = Path(events_path)
+    if not file_path.exists():
+        return
+    
+    # Initialize file position for this client
+    async with _sse_clients_lock:
+        if client_id not in _file_positions:
+            # Start from end of file for new clients
+            _file_positions[client_id] = file_path.stat().st_size
+    
+    while True:
+        try:
+            await asyncio.sleep(1)  # Poll every second
+            
+            if not file_path.exists():
+                break
+            
+            current_size = file_path.stat().st_size
+            
+            async with _sse_clients_lock:
+                last_pos = _file_positions.get(client_id, 0)
+            
+            if current_size > last_pos:
+                # Read new content
+                with open(file_path, 'r') as f:
+                    f.seek(last_pos)
+                    new_content = f.read()
+                    _file_positions[client_id] = current_size
+                
+                # Yield each new line as SSE
+                for line in new_content.strip().split('\n'):
+                    if line.strip():
+                        try:
+                            event_data = json.loads(line)
+                            yield f"data: {json.dumps(event_data)}\n\n"
+                        except json.JSONDecodeError:
+                            # Skip malformed lines
+                            pass
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            # Continue on error
+            pass
+
+
+async def _stream_events(events_path, client_id):
+    """Async generator that yields SSE-formatted events.
+    
+    Yields heartbeat every 15 seconds and new ring buffer events when
+    polling detects changes. Tracks file position for file-based tailing.
+    
+    Args:
+        events_path: Path to events file (if file-based source).
+        client_id: Unique identifier for this client.
+    
+    Yields:
+        SSE-formatted event strings.
+    """
+    heartbeat_interval = 15
+    use_file = events_path and Path(events_path).exists()
+    
+    # Track last event to avoid duplicates
+    last_event = None
+    
+    while True:
+        try:
+            if use_file:
+                # Stream from file
+                async for event_msg in _tail_events_file(events_path, client_id):
+                    yield event_msg
+            else:
+                # Stream from ring buffer
+                # Wait for new events or heartbeat
+                try:
+                    # Wait for event with timeout for heartbeat
+                    async with _sse_clients_lock:
+                        client_queue = None
+                        for q in _sse_clients:
+                            # Find the queue for this client
+                            pass
+                    
+                    # Use the notify event to wait for new data
+                    _sse_notify_event.clear()
+                    
+                    # Wait for either a new event or heartbeat timeout
+                    wait_task = asyncio.create_task(_sse_notify_event.wait())
+                    heartbeat_task = asyncio.create_task(asyncio.sleep(heartbeat_interval))
+                    
+                    done, pending = await asyncio.wait(
+                        [wait_task, heartbeat_task],
+                        return_when=asyncio.FIRST_COMPLETED
+                    )
+                    
+                    # Cancel whichever didn't complete
+                    for task in pending:
+                        task.cancel()
+                    
+                    if wait_task in done:
+                        # New event arrived - get it from ring buffer
+                        async with _sse_clients_lock:
+                            for q in _sse_clients:
+                                try:
+                                    event = q.get_nowait()
+                                    if event != last_event:
+                                        last_event = event
+                                        yield f"data: {json.dumps(event)}\n\n"
+                                except asyncio.QueueEmpty:
+                                    pass
+                    else:
+                        # Heartbeat timeout
+                        yield f"event: heartbeat\ndata: {{}}\n\n"
+                        
+                except asyncio.CancelledError:
+                    break
+                    
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            # Log error but continue
+            print(f"Stream error: {e}")
+            await asyncio.sleep(1)
 
 
 @asynccontextmanager
@@ -379,6 +544,127 @@ def get_events(limit: int = 30, offset: int = 0):
         "source": source,
         "total": total
     }
+
+
+import uuid
+from fastapi.responses import StreamingResponse
+
+
+@app.get("/api/events/stream")
+async def events_stream():
+    """Server-Sent Events endpoint for real-time event streaming.
+    
+    Returns a streaming response with content-type text/event-stream.
+    Yields heartbeat events every 15 seconds and new events as they
+    are added to the ring buffer or appended to the events file.
+    """
+    config = load_config()
+    events_path = config.get('events_path')
+    if events_path:
+        events_path = os.path.expanduser(events_path)
+    
+    # Create a unique client ID
+    client_id = str(uuid.uuid4())
+    
+    # Create a queue for this client
+    client_queue = asyncio.Queue(maxsize=100)
+    
+    # Register this client
+    _sse_clients.add(client_queue)
+    # Initialize file position if using file source
+    if events_path and Path(events_path).exists():
+        _file_positions[client_id] = Path(events_path).stat().st_size
+    
+    async def event_generator():
+        """Async generator that yields SSE events."""
+        import time
+        heartbeat_interval = 15
+        use_file = events_path and Path(events_path).exists()
+        last_event = None
+        last_heartbeat = time.time()
+        
+        # Send heartbeat immediately on connect
+        yield f"event: heartbeat\ndata: {{}}\n\n"
+        last_heartbeat = time.time()
+        
+        # For file-based, use the tail function directly
+        if use_file:
+            file_path = Path(events_path)
+            last_pos = _file_positions.get(client_id, file_path.stat().st_size if file_path.exists() else 0)
+            
+            while True:
+                current_time = time.time()
+                
+                # Check for new file content
+                if file_path.exists():
+                    try:
+                        current_size = file_path.stat().st_size
+                        
+                        if current_size > last_pos:
+                            with open(file_path, 'r') as f:
+                                f.seek(last_pos)
+                                new_content = f.read()
+                                last_pos = current_size
+                                _file_positions[client_id] = last_pos
+                            
+                            for line in new_content.strip().split('\n'):
+                                if line.strip():
+                                    try:
+                                        event_data = json.loads(line)
+                                        yield f"data: {json.dumps(event_data)}\n\n"
+                                    except json.JSONDecodeError:
+                                        pass
+                    except Exception:
+                        pass
+                
+                # Send heartbeat if needed
+                if current_time - last_heartbeat >= heartbeat_interval:
+                    yield f"event: heartbeat\ndata: {{}}\n\n"
+                    last_heartbeat = current_time
+                
+                # Small sleep to avoid busy loop
+                await asyncio.sleep(0.5)
+        else:
+            # Ring buffer based - use queue
+            while True:
+                current_time = time.time()
+                
+                # Send heartbeat if needed
+                if current_time - last_heartbeat >= heartbeat_interval:
+                    yield f"event: heartbeat\ndata: {{}}\n\n"
+                    last_heartbeat = current_time
+                
+                # Check for new events in queue (non-blocking)
+                try:
+                    while True:
+                        try:
+                            event = client_queue.get_nowait()
+                            if event != last_event:
+                                last_event = event
+                                yield f"data: {json.dumps(event)}\n\n"
+                        except asyncio.QueueEmpty:
+                            break
+                except Exception:
+                    pass
+                
+                # Small sleep to avoid busy loop
+                await asyncio.sleep(0.5)
+    
+    async def cleanup_wrapper():
+        """Wrapper to handle cleanup properly."""
+        try:
+            async for item in event_generator():
+                yield item
+        finally:
+            # Unregister client
+            _sse_clients.discard(client_queue)
+            if client_id in _file_positions:
+                del _file_positions[client_id]
+    
+    return StreamingResponse(
+        cleanup_wrapper(),
+        media_type="text/event-stream"
+    )
 
 
 @app.get("/api/state")
