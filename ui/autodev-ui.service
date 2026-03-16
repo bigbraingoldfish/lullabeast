@@ -1,0 +1,19 @@
+[Unit]
+Description=AutoDev UI Service
+After=network.target
+
+[Service]
+# EDIT THE PATH BELOW BEFORE INSTALLING - set to your actual application directory
+WorkingDirectory=/path/to/autodev
+ExecStart=/usr/bin/python3 ui/server.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+
+# Installation steps:
+# 1. Copy this file to /etc/systemd/system/autodev-ui.service
+# 2. Run: sudo systemctl daemon-reload
+# 3. Run: sudo systemctl enable autodev-ui
+# 4. Run: sudo systemctl start autodev-ui
