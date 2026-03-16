@@ -50,6 +50,22 @@
         .header-text {
             font-family: 'JetBrains Mono', monospace;
         }
+        
+        /* Amber pulse animation for RUNNING and WAITING_FOR_SENTINEL states */
+        @keyframes amber-pulse {
+            0%, 100% {
+                background-color: #f59e0b;
+                box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.7);
+            }
+            50% {
+                background-color: #fbbf24;
+                box-shadow: 0 0 0 8px rgba(245, 158, 11, 0);
+            }
+        }
+        
+        .status-pulse {
+            animation: amber-pulse 2s ease-in-out infinite;
+        }
     </style>
 </head>
 <body>
@@ -63,10 +79,13 @@
         <!-- Header Bar (Top Panel) -->
         <header class="bg-slate-800 border-b border-slate-700 px-6 py-4">
             <div class="flex items-center justify-between">
-                <h1 class="header-text text-xl font-bold text-blue-400">Pipeline Dashboard</h1>
+                <div class="flex items-center gap-6">
+                    <h1 class="header-text text-2xl font-bold text-amber-400 tracking-tight">AUTODEV</h1>
+                    <span id="project-path" class="header-text text-sm text-slate-500 font-mono">--/--</span>
+                </div>
                 <div class="flex items-center gap-4">
-                    <span id="status-indicator" class="header-text text-sm text-slate-400">Ready</span>
-                    <span id="agent-indicator" class="header-text text-sm text-slate-500">No agent active</span>
+                    <span id="liveness-dot" class="w-2.5 h-2.5 rounded-full bg-green-500"></span>
+                    <span id="status-pill" class="header-text px-3 py-1 rounded-full text-sm font-medium">--</span>
                 </div>
             </div>
         </header>
@@ -108,31 +127,106 @@
     <script type="text/babel">
         const { useState, useEffect } = React;
         
+        // State label mapping
+        const STATE_LABELS = {
+            'RUNNING': 'RUNNING',
+            'WAITING_FOR_SENTINEL': 'WAITING',
+            'WAITING_FOR_HUMAN': 'WAITING FOR HUMAN',
+            'HALTED_SILENT': 'HALTED',
+            'BLOCKED': 'BLOCKED',
+            'COMPLETE': 'COMPLETE'
+        };
+        
+        // CSS classes for each state
+        const STATE_CLASSES = {
+            'RUNNING': 'bg-amber-500 text-slate-900 status-pulse',
+            'WAITING_FOR_SENTINEL': 'bg-amber-500 text-slate-900 status-pulse',
+            'WAITING_FOR_HUMAN': 'bg-orange-500 text-white',
+            'HALTED_SILENT': 'bg-red-600 text-white',
+            'BLOCKED': 'bg-red-600 text-white',
+            'COMPLETE': 'bg-green-600 text-white'
+        };
+        
         // Simple React app component
         function App() {
-            const [status, setStatus] = useState('Loading...');
-            const [events, setEvents] = useState([]);
+            const [state, setState] = useState({
+                pipeline_status: 'Loading...',
+                orchestrator_alive: true,
+                current_agent: null,
+                project_path: null
+            });
             
             useEffect(() => {
                 // Fetch initial state
+                fetchState();
+                
+                // Set up polling every 3 seconds
+                const interval = setInterval(fetchState, 3000);
+                
+                return () => clearInterval(interval);
+            }, []);
+            
+            function fetchState() {
                 fetch('/api/state')
                     .then(res => res.json())
                     .then(data => {
-                        setStatus(data.pipeline_status || 'Unknown');
+                        setState(data);
+                        updateUI(data);
                     })
                     .catch(err => {
                         console.log('State API not available yet');
-                        setStatus('Initializing...');
                     });
+            }
+            
+            function updateUI(data) {
+                const status = data.pipeline_status || 'Unknown';
+                const alive = data.orchestrator_alive;
+                const agent = data.current_agent;
+                const projectPath = data.project_path;
                 
-                // Set up polling for updates
-                const interval = setInterval(() => {
-                    document.getElementById('status-indicator').textContent = status;
-                    document.getElementById('last-update').textContent = 'Last update: ' + new Date().toLocaleTimeString();
-                }, 5000);
+                // Update liveness dot
+                const livenessDot = document.getElementById('liveness-dot');
+                if (livenessDot) {
+                    livenessDot.className = `w-2.5 h-2.5 rounded-full ${alive ? 'bg-green-500' : 'bg-red-600'}`;
+                }
                 
-                return () => clearInterval(interval);
-            }, [status]);
+                // Update project path (show last two segments)
+                const pathSpan = document.getElementById('project-path');
+                if (pathSpan && projectPath) {
+                    const segments = projectPath.split('/').filter(s => s);
+                    const lastTwo = segments.slice(-2).join('/');
+                    pathSpan.textContent = lastTwo || projectPath;
+                }
+                
+                // Determine status label
+                let statusLabel = '--';
+                let statusClass = 'bg-slate-600 text-slate-300';
+                
+                // ORCHESTRATOR DOWN override
+                if (!alive && (status === 'RUNNING' || status === 'WAITING_FOR_SENTINEL')) {
+                    statusLabel = 'ORCHESTRATOR DOWN';
+                    statusClass = 'bg-red-600 text-white';
+                } else if (status in STATE_LABELS) {
+                    statusLabel = STATE_LABELS[status];
+                    if (status === 'WAITING_FOR_SENTINEL' && agent) {
+                        statusLabel = `WAITING — ${agent}`;
+                    }
+                    statusClass = STATE_CLASSES[status] || 'bg-slate-600 text-slate-300';
+                }
+                
+                // Update status pill
+                const statusPill = document.getElementById('status-pill');
+                if (statusPill) {
+                    statusPill.textContent = statusLabel;
+                    statusPill.className = `header-text px-3 py-1 rounded-full text-sm font-medium ${statusClass}`;
+                }
+                
+                // Update last update time
+                const lastUpdate = document.getElementById('last-update');
+                if (lastUpdate) {
+                    lastUpdate.textContent = 'Last update: ' + new Date().toLocaleTimeString();
+                }
+            }
             
             return null; // Static HTML handles the layout
         }
