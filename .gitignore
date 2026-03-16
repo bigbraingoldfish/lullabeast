@@ -8,3 +8,12 @@ build/
 .venv/
 venv/
 node_modules/
+
+# Pipeline metadata — orchestrator-managed per-turn state, never committed
+*.done
+phase_state.json
+planner_output.json
+executor_output.json
+reviewer_output.json
+escalation_output.json
+current_phase.json
