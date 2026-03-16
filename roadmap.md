@@ -169,7 +169,7 @@ These apply to every phase:
 
 ### Milestone 6 — Command Panel
 
-- [ ] `UI-10` | HIGH | Implement the Escalation Command Panel with conditional visibility, all six command buttons, and immediate execution for non-destructive commands
+- [x] `UI-10` | HIGH | Implement the Escalation Command Panel with conditional visibility, all six command buttons, and immediate execution for non-destructive commands
   > Test: Command panel does not render in any state other than `WAITING_FOR_HUMAN` — verified across RUNNING, WAITING_FOR_SENTINEL, HALTED_SILENT, and BLOCKED. Panel renders within the Current Phase panel with an orange border when `pipeline_status` is `WAITING_FOR_HUMAN`. Panel header shows trigger reason from state (or `last_action` fallback). All six buttons (RETRY, RESET EXECUTION, RESET PHASE, SKIP, PROCEED, STOP) render with their PRD descriptions. Clicking RETRY, RESET EXECUTION, or PROCEED sends `POST /api/command` immediately and the panel transitions to "Command sent — waiting for orchestrator..." state. The waiting state displays until the next state poll shows `pipeline_status` has left `WAITING_FOR_HUMAN`.
   > Notes: HIGH risk — conditional rendering must be driven strictly by `pipeline_status` value from state, not by any local UI flag. Trigger reason displayed in header comes from `escalation_trigger_reason` in the state response (added via PATCH-2); fallback to `last_action` when absent.
 
