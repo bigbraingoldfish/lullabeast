@@ -78,7 +78,7 @@ These apply to every phase:
 
 ### Milestone 1 — Foundation
 
-- [ ] `INFRA-1` | LOW | Create the `ui/` directory with `server.py` scaffold, `config.json` defaults, and `requirements.txt`
+- [x] `INFRA-1` | LOW | Create the `ui/` directory with `server.py` scaffold, `config.json` defaults, and `requirements.txt`
   > Test: `ui/server.py` imports cleanly with no errors. `load_config()` with no `config.json` present returns all seven keys (`port`, `pipeline_state_path`, `phase_state_path`, `lock_path`, `events_path`, `roadmap_path`, `project_dir_path`) with `~` expanded to absolute paths matching the verified pre-flight paths. `load_config()` with a partial `config.json` overrides only provided keys and preserves defaults for the rest. `requirements.txt` lists `fastapi` and `uvicorn`.
   > Notes: Verified defaults — `pipeline_state_path: ~/.openclaw/pipeline_state.json`, `lock_path: ~/.openclaw/pipeline.lock`, `project_dir_path: ~/.openclaw/pipeline-project`. Port default: 18790. Server is not yet started in this phase — scaffold only.
 
