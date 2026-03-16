@@ -153,7 +153,7 @@ These apply to every phase:
 
 ### Milestone 5 — Live Feed & Escalation Log
 
-- [ ] `UI-7` | LOW | Implement the Activity Feed panel with static event row rendering, color-coded type badges, and inline row expansion
+- [x] `UI-7` | LOW | Implement the Activity Feed panel with static event row rendering, color-coded type badges, and inline row expansion
   > Test: Up to 30 events from `GET /api/events` render in reverse chronological order. Each row shows: timestamp (time portion only, monospace), event type badge, agent, phase, attempt (or `—` if null), detail (truncated to ~60 chars). Badge colors match: `gate_pass` green tint, `gate_fail` and `retry` amber tint, `escalation_trigger` orange tint, `escalation_resolve` blue tint, `phase_complete` bright green, all others neutral gray. Clicking any row expands inline to show full detail text; clicking again collapses. When the event buffer is empty, a muted "No events recorded yet" placeholder renders.
   > Notes: Initial render populates from `GET /api/events?limit=30`. Color tints are muted (not saturated primaries). Row expand uses the same single-active pattern as UI-6.
 
