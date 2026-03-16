@@ -29,8 +29,8 @@
                     },
                     colors: {
                         'header-bg': '#1e293b',
-                        'panel-bg': '#0f172a',
-                        'accent': '#3b82f6',
+                        'panel-bg': '#141618',
+                        'accent': '#00b4d8',
                     }
                 }
             }
@@ -40,7 +40,7 @@
     <style>
         body {
             font-family: 'IBM Plex Sans', sans-serif;
-            background-color: #0f172a;
+            background-color: #0d0f12;
             color: #e2e8f0;
             margin: 0;
             padding: 0;
@@ -100,7 +100,7 @@
          - Full-width footer panel -->
     <div class="grid grid-rows-[auto_1fr_auto_auto] h-screen">
         <!-- Header Bar (Top Panel) -->
-        <header class="bg-slate-800 border-b border-slate-700 px-6 py-4">
+        <header class="bg-[#141618] border-b border-[#1a1d21] px-6 py-4">
             <div class="flex items-center justify-between">
                 <div class="flex items-center gap-6">
                     <h1 class="header-text text-2xl font-bold text-amber-400 tracking-tight">AUTODEV</h1>
@@ -116,30 +116,30 @@
         <!-- Middle Section: Two-Column Layout -->
         <main class="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 overflow-hidden">
             <!-- Left Panel -->
-            <div class="bg-slate-900 rounded-lg border border-slate-700 p-4 overflow-auto">
+            <div class="bg-[#141618] rounded-lg border border-[#1a1d21] p-4 overflow-auto">
                 <h2 class="header-text text-lg font-semibold text-slate-300 mb-4">Current Phase</h2>
                 <div id="left-panel-root"></div>
             </div>
             
             <!-- Right Panel -->
-            <div class="bg-slate-900 rounded-lg border border-slate-700 p-4 overflow-auto">
+            <div class="bg-[#141618] rounded-lg border border-[#1a1d21] p-4 overflow-auto">
                 <h2 class="header-text text-lg font-semibold text-slate-300 mb-4">Roadmap</h2>
                 <div id="right-panel-root"></div>
             </div>
         </main>
         
         <!-- Activity Feed Panel (Third Row) -->
-        <div class="bg-slate-900 border-t border-slate-700 p-4 overflow-hidden">
+        <div class="bg-[#141618] border-t border-[#1a1d21] p-4 overflow-hidden">
             <h2 class="header-text text-lg font-semibold text-slate-300 mb-2">Activity Feed</h2>
             <div id="activity-feed-root" class="overflow-y-auto max-h-48"></div>
         </div>
         
         <!-- Bottom Panel (Full Width) -->
-        <footer class="bg-slate-800 border-t border-slate-700 px-6 py-3">
+        <footer class="bg-[#141618] border-t border-[#1a1d21] px-6 py-3">
             <div class="flex items-center justify-between">
                 <span class="header-text text-sm text-slate-500">Pipeline Executor v1.0</span>
                 <div class="flex gap-4">
-                    <button id="btn-refresh" class="header-text px-3 py-1 text-sm bg-slate-700 hover:bg-slate-600 rounded transition-colors">
+                    <button id="btn-refresh" class="header-text px-3 py-1 text-sm bg-[#1a1d21] hover:bg-[#252830] rounded transition-colors">
                         Refresh
                     </button>
                     <span id="last-update" class="header-text text-sm text-slate-500">Last update: --</span>
@@ -174,9 +174,9 @@
         
         // Agent badge color mapping
         const AGENT_COLORS = {
-            'PLANNER': 'bg-slate-600 text-white',
+            'PLANNER': 'bg-[#1a1d21] text-white',
             'EXECUTOR': 'bg-emerald-600 text-white',
-            'REVIEWER': 'bg-violet-600 text-white',
+            'REVIEWER': 'bg-[#00b4d8] text-white',
             'ESCALATION': 'bg-amber-600 text-white'
         };
         
@@ -192,7 +192,7 @@
         // Agent Badge component
         function AgentBadge({ agent }) {
             if (!agent) return null;
-            const colorClass = AGENT_COLORS[agent] || 'bg-slate-600 text-white';
+            const colorClass = AGENT_COLORS[agent] || 'bg-[#1a1d21] text-white';
             return (
                 <span className={\`header-text px-2 py-0.5 rounded text-xs font-medium \${colorClass}\`}>
                     {agent}
@@ -214,7 +214,7 @@
                             <span key={i} className="w-2 h-2 rounded-full bg-amber-500 inline-block"></span>
                         ))}
                         {Array.from({length: empty}).map((_, i) => (
-                            <span key={filled + i} className="w-2 h-2 rounded-full bg-slate-700 inline-block"></span>
+                            <span key={filled + i} className="w-2 h-2 rounded-full bg-[#1a1d21] inline-block"></span>
                         ))}
                     </div>
                 </div>
@@ -225,7 +225,7 @@
         function LastErrorCode({ errorCode }) {
             if (!errorCode) return null;
             return (
-                <span className="font-mono text-xs text-red-400 bg-slate-800 px-1.5 py-0.5 rounded">{errorCode}</span>
+                <span className="font-mono text-xs text-red-400 bg-[#141618] px-1.5 py-0.5 rounded">{errorCode}</span>
             );
         }
 
@@ -262,7 +262,7 @@
         function ConfirmationModal({ command, onConfirm, onDismiss }) {
             return (
                 <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-                    <div className="bg-slate-800 border border-slate-600 rounded-lg p-6 max-w-sm mx-4 shadow-xl">
+                    <div className="bg-[#141618] border border-[#1a1d21] rounded-lg p-6 max-w-sm mx-4">
                         <h3 className="header-text text-lg font-semibold text-amber-400 mb-3">
                             Confirm Action
                         </h3>
@@ -270,7 +270,7 @@
                             Are you sure? This cannot be undone.
                         </p>
                         <div className="flex gap-3 justify-end">
-                            <button onClick={onDismiss} className="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">
+                            <button onClick={onDismiss} className="px-4 py-2 rounded bg-[#1a1d21] hover:bg-[#1a1d21] text-slate-300 transition-colors">
                                 Cancel
                             </button>
                             <button onClick={onConfirm} className="px-4 py-2 rounded bg-red-600 hover:bg-red-500 text-white font-medium transition-colors">
@@ -362,8 +362,8 @@
                 setModalCommand(null);
             };
 
-            const buttonClass = "header-text px-3 py-2 rounded text-sm font-medium bg-slate-700 hover:bg-slate-600 transition-colors";
-            const disabledButtonClass = "header-text px-3 py-2 rounded text-sm font-medium bg-slate-700 opacity-50 cursor-not-allowed";
+            const buttonClass = "header-text px-3 py-2 rounded text-sm font-medium bg-[#1a1d21] hover:bg-[#1a1d21] transition-colors";
+            const disabledButtonClass = "header-text px-3 py-2 rounded text-sm font-medium bg-[#1a1d21] opacity-50 cursor-not-allowed";
 
             // Helper to render buttons with reset cap logic
             const renderButton = (command, label) => {
@@ -387,7 +387,7 @@
             };
 
             return (
-                <div className="border-2 border-orange-500 rounded-lg p-4 mt-4 bg-slate-800/50">
+                <div className="border-2 border-orange-500 rounded-lg p-4 mt-4 bg-[#141618]/50">
                     <h3 className="header-text text-sm font-semibold text-orange-400 mb-3">
                         {headerText}
                     </h3>
@@ -471,7 +471,7 @@
                 case 'complete':
                     return 'opacity-60 text-slate-400';
                 case 'in_progress':
-                    return 'border-l-4 border-blue-500 bg-slate-800/50';
+                    return 'border-l-4 border-cyan-500 bg-[#141618]/50';
                 case 'blocked':
                     return 'bg-red-900/30 border-l-4 border-red-600';
                 case 'skipped':
@@ -513,9 +513,9 @@
                             <span>Progress</span>
                             <span>{completeCount} / {totalPhases} complete</span>
                         </div>
-                        <div className="w-full bg-slate-700 rounded-full h-2">
+                        <div className="w-full bg-[#1a1d21] rounded-full h-2">
                             <div 
-                                className="bg-blue-500 h-2 rounded-full transition-all duration-300" 
+                                className="bg-cyan-500 h-2 rounded-full transition-all duration-300" 
                                 style={{ width: `${percentage}%` }}
                             ></div>
                         </div>
@@ -528,7 +528,7 @@
                             return (
                             <div 
                                 key={phase.id || index}
-                                className={`p-3 rounded border border-slate-700 cursor-pointer transition-colors ${getStatusClasses(phase.status)} ${isExpanded ? 'bg-slate-700' : ''}`}
+                                className={`p-3 rounded border border-[#1a1d21] cursor-pointer transition-colors ${getStatusClasses(phase.status)} ${isExpanded ? 'bg-[#1a1d21]' : ''}`}
                                 onClick={() => handlePhaseClick(phase.id)}
                             >
                                 <div className="flex items-start gap-2">
@@ -548,7 +548,7 @@
                                             </p>
                                         )}
                                         {isExpanded && phase.exit_criteria && phase.exit_criteria.length > 0 && (
-                                            <div className="mt-3 pt-2 border-t border-slate-600">
+                                            <div className="mt-3 pt-2 border-t border-[#1a1d21]">
                                                 <div className="text-xs font-semibold text-slate-400 mb-1">Exit Criteria:</div>
                                                 <ul className="text-xs text-slate-400 space-y-1">
                                                     {phase.exit_criteria.map((criteria, idx) => (
@@ -579,7 +579,7 @@
                 case 'escalation_trigger': return 'bg-orange-600 text-white';
                 case 'escalation_resolve': return 'bg-blue-600 text-white';
                 case 'phase_complete': return 'bg-lime-600 text-white';
-                default: return 'bg-slate-600 text-white';
+                default: return 'bg-[#1a1d21] text-white';
             }
         }
 
@@ -602,7 +602,7 @@
             
             return (
                 <div 
-                    className={"event-row p-2 border-b border-slate-700 cursor-pointer rounded" + (isNew ? " event-row-fade-in" : "")}
+                    className={"event-row p-2 border-b border-[#1a1d21] cursor-pointer rounded" + (isNew ? " event-row-fade-in" : "")}
                     onClick={onToggle}
                 >
                     <div className="flex items-center gap-3">
@@ -639,7 +639,7 @@
                     
                     {/* Inline expansion - full detail when expanded */}
                     {isExpanded && event.detail && (
-                        <div className="mt-2 pl-20 text-xs text-slate-300 bg-slate-800 p-2 rounded">
+                        <div className="mt-2 pl-20 text-xs text-slate-300 bg-[#141618] p-2 rounded">
                             {event.detail}
                         </div>
                     )}
@@ -718,7 +718,7 @@
                         const isInProgress = !resolve;
                         
                         return (
-                            <div key={index} className="p-3 bg-slate-800 rounded border border-slate-700">
+                            <div key={index} className="p-3 bg-[#141618] rounded border border-[#1a1d21]">
                                 <div className="flex items-center gap-3 mb-2">
                                     <span className="header-text text-sm font-semibold text-slate-300">
                                         {pair.phase || '—'}
@@ -965,7 +965,7 @@
                     className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
                         activityTab === tab 
                             ? 'bg-blue-600 text-white' 
-                            : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                            : 'bg-[#1a1d21] text-slate-300 hover:bg-[#1a1d21]'
                     }`}
                 >
                     {label}
@@ -1083,7 +1083,7 @@
                 
                 // Determine status label
                 let statusLabel = '--';
-                let statusClass = 'bg-slate-600 text-slate-300';
+                let statusClass = 'bg-[#1a1d21] text-slate-300';
                 
                 // ORCHESTRATOR DOWN override
                 if (!alive && (status === 'RUNNING' || status === 'WAITING_FOR_SENTINEL')) {
@@ -1094,7 +1094,7 @@
                     if (status === 'WAITING_FOR_SENTINEL' && agent) {
                         statusLabel = `WAITING — ${agent}`;
                     }
-                    statusClass = STATE_CLASSES[status] || 'bg-slate-600 text-slate-300';
+                    statusClass = STATE_CLASSES[status] || 'bg-[#1a1d21] text-slate-300';
                 }
                 
                 // Update status pill
