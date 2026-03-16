@@ -121,7 +121,7 @@ These apply to every phase:
 
 ### Milestone 3 — Frontend Shell
 
-- [ ] `UI-1` | LOW | Create `ui/index.html` with a 3-panel grid layout and CDN imports for React, Tailwind, and web fonts
+- [x] `UI-1` | LOW | Create `ui/index.html` with a 3-panel grid layout and CDN imports for React, Tailwind, and web fonts
   > Test: Page loads in browser with no JavaScript console errors. Three layout regions are present and non-overlapping: a header bar (top), a two-column middle section (left panel + right panel), and a full-width bottom panel. Tailwind utility classes apply correctly. React CDN import resolves. JetBrains Mono or Space Mono font loads. IBM Plex Sans or DM Sans body font loads. No build step — all resources loaded via CDN or inline script tags.
   > Notes: No-build React setup: UMD React + ReactDOM via CDN, Babel standalone for JSX transform (or `htm` if preferred). All JS either inline in `index.html` or in a companion `ui/app.js` loaded as a module. Tailwind CDN (Play CDN or standalone script). Responsive layout handled in UI-13 — this phase establishes the desktop grid only.
 

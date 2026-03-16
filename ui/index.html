@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pipeline UI</title>
+    
+    <!-- Google Fonts: JetBrains Mono for headers, IBM Plex Sans for body -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+    
+    <!-- React and ReactDOM UMD -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- Babel for JSX transformation -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Tailwind CSS via Play CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        'header': ['"JetBrains Mono"', 'monospace'],
+                        'body': ['"IBM Plex Sans"', 'sans-serif'],
+                    },
+                    colors: {
+                        'header-bg': '#1e293b',
+                        'panel-bg': '#0f172a',
+                        'accent': '#3b82f6',
+                    }
+                }
+            }
+        }
+    </script>
+    
+    <style>
+        body {
+            font-family: 'IBM Plex Sans', sans-serif;
+            background-color: #0f172a;
+            color: #e2e8f0;
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            overflow: hidden;
+        }
+        .header-text {
+            font-family: 'JetBrains Mono', monospace;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+    
+    <!-- 3-Panel Grid Layout:
+         - Header bar (top)
+         - Two-column middle section (left panel + right panel)
+         - Full-width bottom panel -->
+    <div class="grid grid-rows-[auto_1fr_auto] h-screen">
+        <!-- Header Bar (Top Panel) -->
+        <header class="bg-slate-800 border-b border-slate-700 px-6 py-4">
+            <div class="flex items-center justify-between">
+                <h1 class="header-text text-xl font-bold text-blue-400">Pipeline Dashboard</h1>
+                <div class="flex items-center gap-4">
+                    <span id="status-indicator" class="header-text text-sm text-slate-400">Ready</span>
+                    <span id="agent-indicator" class="header-text text-sm text-slate-500">No agent active</span>
+                </div>
+            </div>
+        </header>
+        
+        <!-- Middle Section: Two-Column Layout -->
+        <main class="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 overflow-hidden">
+            <!-- Left Panel -->
+            <div class="bg-slate-900 rounded-lg border border-slate-700 p-4 overflow-auto">
+                <h2 class="header-text text-lg font-semibold text-slate-300 mb-4">Left Panel</h2>
+                <div id="left-panel-content" class="text-slate-400">
+                    <p>Pipeline status and events will appear here.</p>
+                </div>
+            </div>
+            
+            <!-- Right Panel -->
+            <div class="bg-slate-900 rounded-lg border border-slate-700 p-4 overflow-auto">
+                <h2 class="header-text text-lg font-semibold text-slate-300 mb-4">Right Panel</h2>
+                <div id="right-panel-content" class="text-slate-400">
+                    <p>Additional information and controls.</p>
+                </div>
+            </div>
+        </main>
+        
+        <!-- Bottom Panel (Full Width) -->
+        <footer class="bg-slate-800 border-t border-slate-700 px-6 py-3">
+            <div class="flex items-center justify-between">
+                <span class="header-text text-sm text-slate-500">Pipeline Executor v1.0</span>
+                <div class="flex gap-4">
+                    <button id="btn-refresh" class="header-text px-3 py-1 text-sm bg-slate-700 hover:bg-slate-600 rounded transition-colors">
+                        Refresh
+                    </button>
+                    <span id="last-update" class="header-text text-sm text-slate-500">Last update: --</span>
+                </div>
+            </div>
+        </footer>
+    </div>
+
+    <!-- Inline React App using htm for no-build JSX handling -->
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+        
+        // Simple React app component
+        function App() {
+            const [status, setStatus] = useState('Loading...');
+            const [events, setEvents] = useState([]);
+            
+            useEffect(() => {
+                // Fetch initial state
+                fetch('/api/state')
+                    .then(res => res.json())
+                    .then(data => {
+                        setStatus(data.pipeline_status || 'Unknown');
+                    })
+                    .catch(err => {
+                        console.log('State API not available yet');
+                        setStatus('Initializing...');
+                    });
+                
+                // Set up polling for updates
+                const interval = setInterval(() => {
+                    document.getElementById('status-indicator').textContent = status;
+                    document.getElementById('last-update').textContent = 'Last update: ' + new Date().toLocaleTimeString();
+                }, 5000);
+                
+                return () => clearInterval(interval);
+            }, [status]);
+            
+            return null; // Static HTML handles the layout
+        }
+        
+        // Render the app
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
