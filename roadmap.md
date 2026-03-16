@@ -89,7 +89,7 @@ These apply to every phase:
 
 ### Milestone 2 — Backend
 
-- [ ] `CORE-1` | LOW | Implement a parser for the pipeline project's `roadmap.md` checkbox format returning structured phase data
+- [x] `CORE-1` | LOW | Implement a parser for the pipeline project's `roadmap.md` checkbox format returning structured phase data
   > Test: `- [x] \`INFRA-1\` | LOW | Goal text` parses to `{id: "INFRA-1", goal: "Goal text", status: "complete", exit_criteria: []}`. `[ ]` → `pending`, `[-]` → `skipped`, `[!]` → `blocked`. A phase followed by `> criteria line` has that line in `exit_criteria`. Multiple `>` lines produce multiple exit criteria entries. Non-phase lines (headers, blank lines, comment lines) produce no output. Parser returns empty list for empty or absent file without raising.
   > Notes: Roadmap format: `- [ ] \`phase-id\` | RISK | Goal` with optional `> ` exit criteria lines immediately after. Backticks around phase ID must be stripped from output. The `| RISK |` segment is present in roadmap lines but not needed in the API response — discard it.
 
