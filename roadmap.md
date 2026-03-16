@@ -181,7 +181,7 @@ These apply to every phase:
 
 ### Milestone 7 — Polish & Deployment
 
-- [ ] `UI-12` | LOW | Apply the full design system — dark theme, typography hierarchy, accent palette, and status colors — across all panels
+- [x] `UI-12` | LOW | Apply the full design system — dark theme, typography hierarchy, accent palette, and status colors — across all panels
   > Test: Background is in the `#0d0f12` range (near-black, not pure black). Panel backgrounds are slightly lighter (`#141618` range). Borders are subtle (not white or harsh). AUTODEV wordmark and all phase IDs render in JetBrains Mono or Space Mono. Body text and labels render in IBM Plex Sans or DM Sans (not Inter or system font). Log output, paths, and JSON values use a monospace font. The primary accent color is in the `#00b4d8` (cyan-teal) range and appears on: current phase highlight border, active agent badge background, and progress bar fill. No gradients on backgrounds. No purple anywhere. No drop shadows on panel cards. No emoji anywhere in the UI.
   > Notes: This phase is the full visual pass — all previous UI phases render with minimal/placeholder styling and this phase applies the complete design spec. No new functionality. Pure CSS/style changes. Status color rules: amber for active/waiting states, orange for human-required, red for error/halted, muted green for complete.
 
