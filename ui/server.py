@@ -7,6 +7,8 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
+from ui.roadmap_parser import parse_roadmap
+
 
 # Canonical default values
 DEFAULTS = {
@@ -181,3 +183,44 @@ def get_state():
     response["event_source"] = _determine_event_source(events_path) if events_path else "synthetic"
     
     return response
+
+
+@app.get("/api/roadmap")
+def get_roadmap():
+    """Get the parsed roadmap with in-progress phase identified.
+    
+    Returns a JSON array of phase objects with id, goal, status, and exit_criteria.
+    If pipeline_state.json contains current_phase_raw_id, the matching phase's status
+    is overridden to 'in_progress' (taking precedence over checkbox status).
+    Returns [] when roadmap_path is absent or file is empty.
+    """
+    config = load_config()
+    
+    roadmap_path = config.get('roadmap_path')
+    pipeline_state_path = config.get('pipeline_state_path')
+    
+    # Expand paths if not already expanded
+    roadmap_path = os.path.expanduser(roadmap_path) if roadmap_path else None
+    pipeline_state_path = os.path.expanduser(pipeline_state_path) if pipeline_state_path else None
+    
+    # Parse roadmap - returns [] if absent or empty
+    phases = parse_roadmap(roadmap_path) if roadmap_path else []
+    
+    if not phases:
+        return []
+    
+    # Read pipeline_state to get current_phase_raw_id
+    current_phase_raw_id = None
+    if pipeline_state_path:
+        pipeline_state = _read_json_file(pipeline_state_path)
+        if pipeline_state:
+            current_phase_raw_id = pipeline_state.get('current_phase_raw_id')
+    
+    # Override status to 'in_progress' for matching phase (if not empty string)
+    if current_phase_raw_id:
+        for phase in phases:
+            if phase['id'] == current_phase_raw_id:
+                phase['status'] = 'in_progress'
+                break
+    
+    return phases
