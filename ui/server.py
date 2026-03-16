@@ -690,18 +690,28 @@ def get_state():
     # Read pipeline state
     pipeline_state = _read_json_file(pipeline_state_path) if pipeline_state_path else None
     
+    # Extract counters from pipeline_state
+    counters = pipeline_state.get("counters", {}) if pipeline_state else {}
+    
     # Build response with defaults
     if pipeline_state:
         response = {
             "pipeline_status": pipeline_state.get("pipeline_status", "UNKNOWN"),
             "current_phase": pipeline_state.get("current_phase"),
-            "counters": pipeline_state.get("counters", {"success": 0, "failure": 0, "retry": 0}),
+            "counters": counters,
+            # Add retry counters from pipeline_state counters
+            "planner_retries": counters.get("planner_retries", 0),
+            "executor_retries": counters.get("executor_retries", 0),
+            "reviewer_retries": counters.get("reviewer_retries", 0),
         }
     else:
         response = {
             "pipeline_status": "UNKNOWN",
             "current_phase": None,
             "counters": {"success": 0, "failure": 0, "retry": 0},
+            "planner_retries": 0,
+            "executor_retries": 0,
+            "reviewer_retries": 0,
         }
     
     # Read phase state and conditionally add fields
@@ -712,6 +722,12 @@ def get_state():
                 response["last_error_code"] = phase_state["last_error_code"]
             if "escalation_resets" in phase_state:
                 response["escalation_resets"] = phase_state["escalation_resets"]
+            if "last_action_timestamp" in phase_state:
+                response["last_action_timestamp"] = phase_state["last_action_timestamp"]
+            if "skill_injected" in phase_state:
+                response["skill_injected"] = phase_state["skill_injected"]
+            if "skill_agent" in phase_state:
+                response["skill_agent"] = phase_state["skill_agent"]
     
     # Add server-derived fields
     # Orchestrator liveness
