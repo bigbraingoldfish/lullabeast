@@ -97,3 +97,52 @@ def test_inline_expansion_shows_full_detail(html_content):
 def test_empty_state_renders_placeholder(html_content):
     has_empty_state = bool(re.search(r"No events recorded yet", html_content))
     assert has_empty_state, "Empty state placeholder not found"
+
+# SSE and fallback tests
+def test_sse_connection_via_event_source(html_content):
+    has_sse = bool(re.search(r"new\s+EventSource\s*\(\s*['\"]\/api\/events\/stream['\"]", html_content))
+    assert has_sse, "ActivityFeedPanel does not connect to /api/events/stream via EventSource"
+
+def test_sse_onmessage_handler_parses_events(html_content):
+    has_onmessage = bool(re.search(r"eventSource\.onmessage\s*=", html_content))
+    assert has_onmessage, "ActivityFeedPanel does not have onmessage handler for SSE"
+
+def test_heartbeat_filtering(html_content):
+    has_heartbeat_filter = bool(re.search(r"heartbeat.*\|\|.*event\.data.*\{\}", html_content))
+    assert has_heartbeat_filter, "ActivityFeedPanel does not filter out heartbeat SSE messages"
+
+def test_new_events_prepended_at_top(html_content):
+    has_prepend = bool(re.search(r"return\s*\[\s*newEvent.*\.\.\.prevEvents\s*\]", html_content))
+    assert has_prepend, "New events from SSE are not prepended at the top of the feed"
+
+def test_fade_in_animation_exists(html_content):
+    has_animation = bool(re.search(r"@keyframes\s+fade-in-row|event-row-fade-in", html_content))
+    assert has_animation, "No fade-in animation CSS found for new event rows"
+
+def test_fade_in_animation_duration(html_content):
+    has_duration = bool(re.search(r"animation.*0\.3s|animation.*300ms", html_content))
+    assert has_duration, "Fade-in animation is not ~300ms"
+
+def test_fallback_polling_function_exists(html_content):
+    has_fallback = bool(re.search(r"function\s+startPollingFallback", html_content))
+    assert has_fallback, "startPollingFallback function not found for SSE failure fallback"
+
+def test_fallback_polls_every_5_seconds(html_content):
+    has_fallback_polling = bool(re.search(r"setInterval.*fetchEventsPolling.*5000", html_content))
+    assert has_fallback_polling, "Fallback polling does not poll every 5 seconds"
+
+def test_event_deduplication_by_timestamp(html_content):
+    has_dedup = bool(re.search(r"existingTs.*eventTs|eventTs.*existingTs", html_content))
+    assert has_dedup, "Event deduplication by timestamp not implemented"
+
+def test_sse_reconnection_logic(html_content):
+    has_reconnect = bool(re.search(r"reconnectInterval|setupSSE.*reconnect", html_content))
+    assert has_reconnect, "SSE reconnection logic not found"
+
+def test_event_source_onerror_handler(html_content):
+    has_onerror = bool(re.search(r"eventSource\.onerror\s*=", html_content))
+    assert has_onerror, "EventSource onerror handler not found for connection failure detection"
+
+def test_isnew_prop_passed_to_event_row(html_content):
+    has_isnew = bool(re.search(r"isNew\s*=\s*\{?newEventIds\.has", html_content))
+    assert has_isnew, "isNew prop not passed to EventRow for fade-in animation"
