@@ -3,6 +3,9 @@ import json
 import os
 from pathlib import Path
 
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+
 
 # Canonical default values
 DEFAULTS = {
@@ -43,3 +46,22 @@ def load_config(config_path=None):
             config[key] = os.path.expanduser(value)
     
     return config
+
+
+# FastAPI app
+app = FastAPI()
+
+
+@app.get("/health")
+def health():
+    """Health check endpoint."""
+    return {"ok": True}
+
+
+@app.get("/")
+def root():
+    """Serve index.html if present, otherwise 404."""
+    index_path = Path(__file__).parent / "index.html"
+    if not index_path.exists():
+        raise HTTPException(status_code=404, detail="index.html not found")
+    return FileResponse(index_path, media_type="text/html")

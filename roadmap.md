@@ -82,7 +82,7 @@ These apply to every phase:
   > Test: `ui/server.py` imports cleanly with no errors. `load_config()` with no `config.json` present returns all seven keys (`port`, `pipeline_state_path`, `phase_state_path`, `lock_path`, `events_path`, `roadmap_path`, `project_dir_path`) with `~` expanded to absolute paths matching the verified pre-flight paths. `load_config()` with a partial `config.json` overrides only provided keys and preserves defaults for the rest. `requirements.txt` lists `fastapi` and `uvicorn`.
   > Notes: Verified defaults — `pipeline_state_path: ~/.openclaw/pipeline_state.json`, `lock_path: ~/.openclaw/pipeline.lock`, `project_dir_path: ~/.openclaw/pipeline-project`. Port default: 18790. Server is not yet started in this phase — scaffold only.
 
-- [ ] `INFRA-2` | LOW | Start the FastAPI application, serve `ui/index.html` at `GET /`, and return `{"ok": true}` at `GET /health`
+- [x] `INFRA-2` | LOW | Start the FastAPI application, serve `ui/index.html` at `GET /`, and return `{"ok": true}` at `GET /health`
   > Test: `uvicorn ui.server:app` starts without error. `GET /health` returns 200 `{"ok": true}`. `GET /` with `ui/index.html` present returns 200 with `Content-Type: text/html`. `GET /` with `ui/index.html` absent returns 404. Server starts correctly when `ui/config.json` is absent (uses defaults).
 
 ---

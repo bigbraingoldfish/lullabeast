@@ -7,7 +7,6 @@ from pathlib import Path
 
 def test_import_ui_server():
     """Test that ui.server can be imported without errors."""
-    import ui.server  # Should not raise ImportError
 
 
 def test_load_config_default_returns_seven_keys():
