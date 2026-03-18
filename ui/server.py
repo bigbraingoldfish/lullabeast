@@ -2,6 +2,7 @@
 import fcntl
 import json
 import os
+import uuid
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -11,14 +12,6 @@ import asyncio
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from contextlib import asynccontextmanager
-
-from ui.roadmap_parser import parse_roadmap
-import json
-import os
-from pathlib import Path
-
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
 
 from ui.roadmap_parser import parse_roadmap
 
@@ -56,11 +49,12 @@ def _create_synthetic_event(event_type, agent=None, phase=None, detail=None):
         detail: Additional detail string
     
     Returns:
-        Dict with ts, event, agent, phase, detail fields.
+        Dict with id, ts, event_type, agent, phase, detail fields.
     """
     return {
+        "id": str(uuid.uuid4()),
         "ts": datetime.utcnow().isoformat() + "Z",
-        "event": event_type,
+        "event_type": event_type,
         "agent": agent,
         "phase": phase,
         "detail": detail
@@ -928,3 +922,130 @@ def get_roadmap():
                 break
     
     return phases
+
+
+def _empty_metrics_summary():
+    """Return a zero-valued metrics summary dict."""
+    return {
+        "total_phases": 0,
+        "total_duration_seconds": 0,
+        "total_executor_attempts": 0,
+        "total_reviewer_passes": 0,
+        "total_blame_fires": 0,
+        "total_escalations": 0,
+        "phases": []
+    }
+
+
+@app.get("/api/metrics-summary")
+def get_metrics_summary():
+    """Return aggregated run metrics from metrics.jsonl in the project directory.
+
+    Reads {project_dir_path}/metrics.jsonl. Deduplicates by phase (keeps last row
+    per phase, so cumulative attempt counts are correct even if a phase was reset
+    and re-run). Returns sensible zeros if the file is absent or empty.
+    """
+    config = load_config()
+    project_dir_path = config.get("project_dir_path")
+    if not project_dir_path:
+        return _empty_metrics_summary()
+
+    metrics_path = Path(project_dir_path) / "metrics.jsonl"
+    if not metrics_path.exists():
+        return _empty_metrics_summary()
+
+    rows = []
+    try:
+        with open(metrics_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        return _empty_metrics_summary()
+
+    if not rows:
+        return _empty_metrics_summary()
+
+    # Deduplicate by phase — keep the last occurrence (highest attempt counts)
+    seen: dict = {}
+    for row in rows:
+        phase = row.get("phase")
+        if phase:
+            seen[phase] = row
+
+    phases = list(seen.values())
+
+    total_duration = sum((p.get("duration_seconds") or 0) for p in phases)
+    total_executor = sum((p.get("executor_attempts") or 0) for p in phases)
+    total_reviewer = sum((p.get("reviewer_passes") or 0) for p in phases)
+    total_blame = sum((p.get("blame_fires") or 0) for p in phases)
+    total_escalations = sum((p.get("escalations") or 0) for p in phases)
+
+    return {
+        "total_phases": len(phases),
+        "total_duration_seconds": total_duration,
+        "total_executor_attempts": total_executor,
+        "total_reviewer_passes": total_reviewer,
+        "total_blame_fires": total_blame,
+        "total_escalations": total_escalations,
+        "phases": [
+            {
+                "phase": p.get("phase"),
+                "goal": p.get("goal"),
+                "duration_seconds": p.get("duration_seconds"),
+                "executor_attempts": p.get("executor_attempts", 0),
+                "reviewer_passes": p.get("reviewer_passes", 0),
+                "blame_fires": p.get("blame_fires", 0),
+                "escalations": p.get("escalations", 0),
+                "skill_used": p.get("skill_used"),
+            }
+            for p in phases
+        ],
+    }
+
+
+@app.post("/api/stop")
+def post_stop():
+    """Request a clean pipeline halt after the current agent completes its turn.
+
+    Validates that the pipeline is in a stoppable state (RUNNING or
+    WAITING_FOR_SENTINEL), then writes an empty sentinel file
+    {project_dir_path}/pipeline_stop_requested. The orchestrator consumes
+    this file at the top of its main loop and transitions to STOPPED.
+
+    Returns:
+        200 {"ok": true, "message": "..."} on success.
+        409 if pipeline is not in a stoppable state.
+        503 if pipeline state cannot be read.
+    """
+    config = load_config()
+    pipeline_state_path = config.get("pipeline_state_path")
+    project_dir_path = config.get("project_dir_path")
+
+    pipeline_state_path = os.path.expanduser(pipeline_state_path) if pipeline_state_path else None
+    project_dir_path = os.path.expanduser(project_dir_path) if project_dir_path else None
+
+    pipeline_state = _read_json_file(pipeline_state_path) if pipeline_state_path else None
+    if not pipeline_state:
+        raise HTTPException(status_code=503, detail="Pipeline state not found")
+
+    status = pipeline_state.get("pipeline_status")
+    stoppable = {"RUNNING", "WAITING_FOR_SENTINEL"}
+    if status not in stoppable:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Pipeline is not in a stoppable state (current: {status})"
+        )
+
+    stop_file = Path(project_dir_path) / "pipeline_stop_requested"
+    stop_file.touch()
+
+    return {
+        "ok": True,
+        "message": "Stop requested — pipeline will halt after current agent completes"
+    }
