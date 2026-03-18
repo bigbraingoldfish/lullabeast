@@ -690,7 +690,7 @@ def get_state():
     # Read pipeline state
     pipeline_state = _read_json_file(pipeline_state_path) if pipeline_state_path else None
     
-    # Extract counters from pipeline_state
+    # Extract counters from pipeline_state (counters sub-dict kept for compat)
     counters = pipeline_state.get("counters", {}) if pipeline_state else {}
     
     # Build response with defaults
@@ -698,11 +698,15 @@ def get_state():
         response = {
             "pipeline_status": pipeline_state.get("pipeline_status", "UNKNOWN"),
             "current_phase": pipeline_state.get("current_phase"),
+            "current_phase_raw_id": pipeline_state.get("current_phase_raw_id", ""),
+            "current_agent": pipeline_state.get("current_agent", ""),
+            "project_path": pipeline_state.get("project_path", ""),
+            "last_action_timestamp": pipeline_state.get("last_action_timestamp"),
             "counters": counters,
-            # Add retry counters from pipeline_state counters
-            "planner_retries": counters.get("planner_retries", 0),
-            "executor_retries": counters.get("executor_retries", 0),
-            "reviewer_retries": counters.get("reviewer_retries", 0),
+            # Retry counters are top-level fields in pipeline_state.json written by orchestrator.py
+            "planner_retries": pipeline_state.get("planner_retries", 0),
+            "executor_retries": pipeline_state.get("executor_retries", 0),
+            "reviewer_retries": pipeline_state.get("reviewer_retries", 0),
         }
     else:
         response = {
@@ -741,7 +745,16 @@ def get_state():
     
     # Event source
     response["event_source"] = _determine_event_source(events_path) if events_path else "synthetic"
-    
+
+    # Project path — resolve symlink for display (last two segments shown in header)
+    _symlink_path = config.get("project_dir_path") or config.get("symlink_target") or config.get("project_dir")
+    if _symlink_path:
+        _symlink_path = os.path.expanduser(_symlink_path)
+        try:
+            response["project_path"] = os.path.realpath(_symlink_path)
+        except Exception:
+            response["project_path"] = _symlink_path
+
     return response
 
 
@@ -901,8 +914,14 @@ def get_roadmap():
         if pipeline_state:
             current_phase_raw_id = pipeline_state.get('current_phase_raw_id')
     
-    # Override status to 'in_progress' for matching phase (if not empty string)
-    if current_phase_raw_id:
+    # Override status to 'in_progress' for matching phase only when pipeline is
+    # actively running — not when it has reached a terminal state like PIPELINE_COMPLETE.
+    terminal_statuses = {"PIPELINE_COMPLETE", "HALTED_SILENT", "BLOCKED"}
+    pipeline_status = pipeline_state.get("pipeline_status", "") if pipeline_state_path and _read_json_file(pipeline_state_path) else ""
+    if pipeline_state_path:
+        _ps = _read_json_file(pipeline_state_path)
+        pipeline_status = _ps.get("pipeline_status", "") if _ps else ""
+    if current_phase_raw_id and pipeline_status not in terminal_statuses:
         for phase in phases:
             if phase['id'] == current_phase_raw_id:
                 phase['status'] = 'in_progress'

@@ -159,7 +159,8 @@
             'WAITING_FOR_HUMAN': 'WAITING FOR HUMAN',
             'HALTED_SILENT': 'HALTED',
             'BLOCKED': 'BLOCKED',
-            'COMPLETE': 'COMPLETE'
+            'COMPLETE': 'COMPLETE',
+            'PIPELINE_COMPLETE': 'COMPLETE'
         };
         
         // CSS classes for each state
@@ -169,7 +170,9 @@
             'WAITING_FOR_HUMAN': 'bg-orange-500 text-white',
             'HALTED_SILENT': 'bg-red-600 text-white',
             'BLOCKED': 'bg-red-600 text-white',
-            'COMPLETE': 'bg-green-600 text-white'
+            'COMPLETE': 'bg-green-600 text-white',
+            // Muted green, no pulse — clean successful completion state
+            'PIPELINE_COMPLETE': 'bg-emerald-700 text-white'
         };
         
         // Agent badge color mapping
@@ -194,7 +197,7 @@
             if (!agent) return null;
             const colorClass = AGENT_COLORS[agent] || 'bg-[#1a1d21] text-white';
             return (
-                <span className={\`header-text px-2 py-0.5 rounded text-xs font-medium \${colorClass}\`}>
+                <span className={`header-text px-2 py-0.5 rounded text-xs font-medium ${colorClass}`}>
                     {agent}
                 </span>
             );
@@ -878,8 +881,7 @@
                     }
                 }, 30000);
 
-                // Store reconnect interval for cleanup
-                pollingIntervalRef.current.reconnectInterval = reconnectInterval;
+                // reconnectInterval is self-managed within its own closure; no extra ref needed.
             }
 
             function fetchEvents() {
@@ -934,7 +936,12 @@
                                 // Prepend new events at the top
                                 return [...newEvents, ...prevEvents];
                             });
-}
+                        }
+                    })
+                    .catch(err => {
+                        console.log('Events polling API not available');
+                    });
+            }
 
             function handleRowClick(eventId) {
                 if (expandedEventId === eventId) {
