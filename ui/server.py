@@ -726,6 +726,8 @@ def get_state():
                 response["skill_injected"] = phase_state["skill_injected"]
             if "skill_agent" in phase_state:
                 response["skill_agent"] = phase_state["skill_agent"]
+            if "escalation_trigger_reason" in phase_state:
+                response["escalation_trigger_reason"] = phase_state["escalation_trigger_reason"]
     
     # Add server-derived fields
     # Orchestrator liveness
@@ -875,6 +877,80 @@ def post_command(request: dict):
     _write_escalation_files(project_dir_path, command)
     
     return {"status": "ok", "command": command}
+
+
+@app.post("/api/resume-ready")
+def post_resume_ready():
+    """Transition pipeline from STOPPED to WAITING_FOR_HUMAN so /api/command can be used.
+
+    Reads pipeline_state.json, confirms pipeline_status is STOPPED, then atomically
+    writes pipeline_status: WAITING_FOR_HUMAN (all other fields preserved).
+    Returns 409 if pipeline is not in STOPPED state.
+    """
+    config = load_config()
+    pipeline_state_path = config.get("pipeline_state_path")
+    pipeline_state_path = os.path.expanduser(pipeline_state_path) if pipeline_state_path else None
+
+    if not pipeline_state_path:
+        raise HTTPException(status_code=503, detail="Pipeline state path not configured")
+
+    pipeline_state = _read_json_file(pipeline_state_path)
+    if not pipeline_state:
+        raise HTTPException(status_code=503, detail="Could not read pipeline_state.json")
+
+    if pipeline_state.get("pipeline_status") != "STOPPED":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Pipeline is not in STOPPED state (current: {pipeline_state.get('pipeline_status')})"
+        )
+
+    pipeline_state["pipeline_status"] = "WAITING_FOR_HUMAN"
+
+    tmp_path = pipeline_state_path + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(pipeline_state, f, indent=2)
+    os.replace(tmp_path, pipeline_state_path)
+
+    return {"ok": True}
+
+
+@app.post("/api/resume-orchestrator")
+def post_resume_orchestrator():
+    """Spawn the orchestrator process as a non-blocking subprocess.
+
+    Reads project_path from pipeline_state.json and autodev_repo_path from config.
+    Returns 200 immediately without waiting for the orchestrator to start.
+    """
+    import subprocess
+
+    config = load_config()
+    pipeline_state_path = config.get("pipeline_state_path")
+    pipeline_state_path = os.path.expanduser(pipeline_state_path) if pipeline_state_path else None
+
+    pipeline_state = _read_json_file(pipeline_state_path) if pipeline_state_path else {}
+    project_path = pipeline_state.get("project_path") if pipeline_state else None
+
+    if not project_path:
+        raise HTTPException(status_code=503, detail="No project_path in pipeline_state.json")
+
+    autodev_repo_path = config.get("autodev_repo_path", "/home/pi/.openclaw")
+    orchestrator_script = os.path.join(autodev_repo_path, "orchestrator.py")
+
+    if not os.path.exists(orchestrator_script):
+        raise HTTPException(
+            status_code=503,
+            detail=f"orchestrator.py not found at {orchestrator_script}"
+        )
+
+    log_file = open("/tmp/orchestrator.log", "a")
+    subprocess.Popen(
+        ["python", orchestrator_script, "--project", project_path],
+        cwd=autodev_repo_path,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+    )
+
+    return {"ok": True}
 
 
 @app.get("/api/roadmap")

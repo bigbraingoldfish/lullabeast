@@ -1,1 +1,10 @@
-{"pipeline_state_path": "/tmp/tmph53zi9ni/pipeline_state.json", "phase_state_path": "/tmp/tmph53zi9ni/phase_state.json", "lock_path": "/tmp/tmph53zi9ni/pipeline.lock", "events_path": "/tmp/tmph53zi9ni/pipeline_events.jsonl", "roadmap_path": "/tmp/tmph53zi9ni/roadmap.md", "project_dir_path": "/tmp/tmph53zi9ni/project"}
+{
+  "port": 18790,
+  "pipeline_state_path": "~/.openclaw/pipeline_state.json",
+  "phase_state_path": "~/.openclaw/pipeline-project/phase_state.json",
+  "lock_path": "~/.openclaw/pipeline.lock",
+  "events_path": "~/.openclaw/pipeline_events.jsonl",
+  "roadmap_path": "~/.openclaw/pipeline-project/roadmap.md",
+  "project_dir_path": "~/.openclaw/pipeline-project",
+  "autodev_repo_path": "/home/pi/.openclaw"
+}
