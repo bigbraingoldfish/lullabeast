@@ -905,6 +905,9 @@ def post_resume_ready():
         )
 
     pipeline_state["pipeline_status"] = "WAITING_FOR_HUMAN"
+    # Ensure the orchestrator hits the escalation command handler (WAITING_FOR_HUMAN branch)
+    # regardless of what current_agent was when the pipeline stopped.
+    pipeline_state["current_agent"] = "escalation"
 
     tmp_path = pipeline_state_path + ".tmp"
     with open(tmp_path, "w") as f:
