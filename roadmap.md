@@ -216,7 +216,7 @@ INFRA-B1 is a hard gate — nothing else starts until it is committed. INFRA-E1 
   >
   > **Tool restriction**: Enforced via message instruction only — the OpenClaw webhook has no per-call tool restriction field. The message explicitly prohibits file writes except the result files.
 
-- [ ] `UI-E5` | HIGH | Add progression flow — trigger PRD-to-roadmap conversion, surface outputs, offer navigation to Screen 2
+- [x] `UI-E5` | HIGH | Add progression flow — trigger PRD-to-roadmap conversion, surface outputs, offer navigation to Screen 2
   > Test: A "Generate Roadmap" button appears when `prd_content` contains `> ✅ PRD CONVERSION-READY` OR when the user explicitly clicks it. Clicking triggers conversion. On success: roadmap content is shown in the UI and downloadable as `{name}-roadmap.md`. A "Proceed to Setup" button navigates to Screen 2 with the roadmap pre-populated. If conversion fails (timeout or missing result file), the raw error is displayed and the user can retry. "Generate Roadmap" is disabled if `prd_content` is empty.
   > Notes: **Readiness detection**: `GET /api/ideas/{id}/readiness` — returns `{"ready": bool, "reason": str}`. Ready if `prd_content` contains `> ✅ PRD CONVERSION-READY` OR all 10 required sections are present with non-empty content: `## Problem Statement`, `## Goals & Success Metrics`, `## User Stories`, `## Functional Requirements`, `## Edge Cases`, `## Non-Functional Requirements`, `## Dependencies & Integrations`, `## Risks & Mitigations`, `## Open Questions`, `## Glossary & Domain Terms`. A section is non-empty if content between its `##` header and the next `##` header contains at least one non-blank, non-header line.
   >
