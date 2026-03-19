@@ -1,1749 +1,608 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AutoDev Pipeline</title>
-    
-    <!-- Google Fonts: JetBrains Mono for headers, IBM Plex Sans for body -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
-    
-    <!-- React and ReactDOM UMD -->
-    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    
-    <!-- Babel for JSX transformation -->
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-    
-    <!-- Tailwind CSS via Play CDN -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-        tailwind.config = {
-            theme: {
-                extend: {
-                    fontFamily: {
-                        'header': ['"JetBrains Mono"', 'monospace'],
-                        'body': ['"IBM Plex Sans"', 'sans-serif'],
-                    },
-                    colors: {
-                        'header-bg': '#1e293b',
-                        'panel-bg': '#141618',
-                        'accent': '#00b4d8',
-                    }
-                }
-            }
-        }
-    </script>
-    
-    <style>
-        body {
-            font-family: 'IBM Plex Sans', sans-serif;
-            background-color: #0d0f12;
-            color: #e2e8f0;
-            margin: 0;
-            padding: 0;
-            height: 100vh;
-            overflow: hidden;
-        }
-        #app-root {
-            height: 100vh;
-            overflow: hidden;
-        }
-        .header-text {
-            font-family: 'JetBrains Mono', monospace;
-        }
-        
-        /* Amber pulse animation for RUNNING and WAITING_FOR_SENTINEL states */
-        @keyframes amber-pulse {
-            0%, 100% {
-                background-color: #f59e0b;
-                box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.7);
-            }
-            50% {
-                background-color: #fbbf24;
-                box-shadow: 0 0 0 8px rgba(245, 158, 11, 0);
-            }
-        }
-        
-        .status-pulse {
-            animation: amber-pulse 2s ease-in-out infinite;
-        }
-
-        /* Fade-in animation for new event rows */
-        @keyframes fade-in-row {
-            0% {
-                opacity: 0;
-                transform: translateY(-10px);
-            }
-            100% {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-
-        .event-row-fade-in {
-            animation: fade-in-row 0.3s ease-out forwards;
-        }
-        
-        /* Event row hover states and transitions */
-        .event-row {
-            transition: background-color 0.15s ease-in-out;
-        }
-        .event-row:hover {
-            background-color: rgba(51, 65, 85, 0.5);
-        }
-    </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AutoDev Pipeline Monitor</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { margin: 0; padding: 0; background: #0d0f12; color: #e2e8f0; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .status-pulse { animation: pulse 2s ease-in-out infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .fade-in { animation: fadeIn 0.3s ease-in; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+    .scrollbar-thin::-webkit-scrollbar { width: 6px; }
+    .scrollbar-thin::-webkit-scrollbar-track { background: #1a1d21; }
+    .scrollbar-thin::-webkit-scrollbar-thumb { background: #3f4451; border-radius: 3px; }
+  </style>
 </head>
 <body>
-    <div id="app-root"></div>
+  <div id="root"></div>
+  <script type="text/javascript">
+    const { useState, useEffect, useRef } = React;
 
-    <script type="text/babel">
-        const { useState, useEffect, useRef } = React;
-        
-        // ─── State label and class mappings ───────────────────────────────────────
-        const STATE_LABELS = {
-            'RUNNING': 'RUNNING',
-            'WAITING_FOR_SENTINEL': 'WAITING',
-            'WAITING_FOR_HUMAN': 'WAITING FOR HUMAN',
-            'HALTED_SILENT': 'HALTED',
-            'BLOCKED': 'BLOCKED',
-            'COMPLETE': 'COMPLETE',
-            'PIPELINE_COMPLETE': 'COMPLETE',
-            'STOPPED': 'STOPPED',
+    // ─── Global state helpers ──────────────────────────────────────────────────
+    // These are referenced by IdeasScreen via closures in the same script scope
+
+    // ─── App Component ──────────────────────────────────────────────────────────
+    function App() {
+      const [currentScreen, setCurrentScreen] = useState('ideas');
+      const [seedRoadmap, setSeedRoadmap] = useState('');
+      const [pipelineStatus, setPipelineStatus] = useState(null);
+      const [currentAgent, setCurrentAgent] = useState('');
+      const [currentPhaseRawId, setCurrentPhaseRawId] = useState('');
+      const [currentPhase, setCurrentPhase] = useState(null);
+      const [roadmap, setRoadmap] = useState([]);
+      const [plannerRetries, setPlannerRetries] = useState(0);
+      const [executorRetries, setExecutorRetries] = useState(0);
+      const [reviewerRetries, setReviewerRetries] = useState(0);
+      const [lastErrorCode, setLastErrorCode] = useState(null);
+      const [lastActionTimestamp, setLastActionTimestamp] = useState(null);
+      const [events, setEvents] = useState([]);
+      const [showEscalationPanel, setShowEscalationPanel] = useState(false);
+      const [escalationCommand, setEscalationCommand] = useState('');
+      const [escalationResult, setEscalationResult] = useState(null);
+      const [isEscalationLoading, setIsEscalationLoading] = useState(false);
+      const [activeTab, setActiveTab] = useState('activity');
+      const [isResponsiveCollapsed, setIsResponsiveCollapsed] = useState(false);
+
+      useEffect(() => {
+        fetch('/api/state')
+          .then(r => r.json())
+          .then(data => {
+            setPipelineStatus(data.pipeline_status);
+            setCurrentAgent(data.current_agent || '');
+            setCurrentPhaseRawId(data.current_phase_raw_id || '');
+            setCurrentPhase(data.current_phase);
+            setPlannerRetries(data.planner_retries || 0);
+            setExecutorRetries(data.executor_retries || 0);
+            setReviewerRetries(data.reviewer_retries || 0);
+            setLastErrorCode(data.last_error_code || null);
+            setLastActionTimestamp(data.last_action_timestamp || null);
+          })
+          .catch(() => {});
+
+        fetch('/api/roadmap')
+          .then(r => r.json())
+          .then(data => { if (Array.isArray(data)) setRoadmap(data); })
+          .catch(() => {});
+
+        fetch('/api/events?limit=30')
+          .then(r => r.json())
+          .then(data => { if (data.events) setEvents(data.events); })
+          .catch(() => {});
+
+        const es = new EventSource('/api/events/stream');
+        es.onmessage = (e) => {
+          try {
+            const event = JSON.parse(e.data);
+            setEvents(prev => [event, ...prev].slice(0, 50));
+          } catch {}
         };
-        
-        const STATE_CLASSES = {
-            'RUNNING': 'bg-amber-500 text-slate-900 status-pulse',
-            'WAITING_FOR_SENTINEL': 'bg-amber-500 text-slate-900 status-pulse',
-            'WAITING_FOR_HUMAN': 'bg-orange-500 text-white',
-            'HALTED_SILENT': 'bg-red-600 text-white',
-            'BLOCKED': 'bg-red-600 text-white',
-            'COMPLETE': 'bg-green-600 text-white',
-            'PIPELINE_COMPLETE': 'bg-emerald-700 text-white',
-            'STOPPED': 'bg-red-600 text-white',
-        };
-        
-        const AGENT_COLORS = {
-            'PLANNER': 'bg-[#1a1d21] text-white',
-            'EXECUTOR': 'bg-emerald-600 text-white',
-            'REVIEWER': 'bg-[#00b4d8] text-white',
-            'ESCALATION': 'bg-amber-600 text-white'
-        };
+        es.onerror = () => es.close();
 
-        // ─── Helper functions ─────────────────────────────────────────────────────
+        const interval = setInterval(() => {
+          fetch('/api/state').then(r => r.json()).then(data => {
+            setPipelineStatus(data.pipeline_status);
+            setCurrentAgent(data.current_agent || '');
+            setCurrentPhaseRawId(data.current_phase_raw_id || '');
+            setPlannerRetries(data.planner_retries || 0);
+            setExecutorRetries(data.executor_retries || 0);
+            setReviewerRetries(data.reviewer_retries || 0);
+            setLastErrorCode(data.last_error_code || null);
+          }).catch(() => {});
+        }, 3000);
 
-        function getGoalForPhase(phaseId, roadmap) {
-            if (!phaseId || !roadmap || !Array.isArray(roadmap)) return null;
-            const phase = roadmap.find(p => p.id === phaseId);
-            return phase ? phase.goal : null;
+        return () => { es.close(); clearInterval(interval); };
+      }, []);
+
+      const navigateToPreflight = (roadmapContent) => {
+        setSeedRoadmap(roadmapContent || '');
+        setCurrentScreen('preflight');
+      };
+
+      if (currentScreen === 'ideas') {
+        return React.createElement(IdeasScreen, { navigateToPreflight });
+      }
+
+      if (currentScreen === 'preflight') {
+        return React.createElement(PreflightScreen, { seedRoadmap, onBack: () => setCurrentScreen('ideas') });
+      }
+
+      return React.createElement('div', { className: 'flex flex-col h-screen' },
+        React.createElement(Header, { pipelineStatus, currentAgent, currentPhaseRawId, plannerRetries, executorRetries, reviewerRetries }),
+        React.createElement('div', { className: 'flex flex-1 overflow-hidden' },
+          React.createElement('div', { className: `flex-1 flex flex-col border-r border-[#1a1d21] ${isResponsiveCollapsed ? 'hidden md:flex' : 'flex'}` },
+            React.createElement(ActivityFeedTabBar, { activeTab, setActiveTab }),
+            activeTab === 'activity'
+              ? React.createElement(ActivityFeed, { events })
+              : React.createElement(EscalationLogTab, { events }),
+            React.createElement(EscalationCommandPanel, { showEscalationPanel, setShowEscalationPanel, escalationCommand, setEscalationCommand, escalationResult, setEscalationResult, isEscalationLoading, setIsEscalationLoading, pipelineStatus })
+          ),
+          React.createElement('div', { className: 'flex-1 flex flex-col overflow-hidden' },
+            React.createElement(CurrentPhasePanel, { currentPhase, currentPhaseRawId, pipelineStatus, lastErrorCode, lastActionTimestamp }),
+            React.createElement('div', { className: 'right-panel flex-1 overflow-hidden' },
+              React.createElement(RoadmapPanel, { roadmap })
+            )
+          ),
+          React.createElement('button', {
+            className: 'md:hidden absolute top-16 right-2 z-10 p-2 bg-[#1e2028] rounded border border-[#1a1d21] text-xs',
+            onClick: () => setIsResponsiveCollapsed(c => !c)
+          }, isResponsiveCollapsed ? 'Show Activity' : 'Hide Activity')
+        )
+      );
+    }
+
+    function Header({ pipelineStatus, currentAgent, currentPhaseRawId, plannerRetries, executorRetries, reviewerRetries }) {
+      const statusColor = pipelineStatus === 'RUNNING' ? 'text-green-400' : pipelineStatus === 'WAITING_FOR_HUMAN' ? 'text-yellow-400' : 'text-slate-400';
+      const phaseColor = pipelineStatus === 'RUNNING' ? 'bg-green-500' : 'bg-slate-600';
+      return React.createElement('div', { className: 'flex items-center justify-between px-4 py-2 border-b border-[#1a1d21] bg-[#141618] text-xs' },
+        React.createElement('div', { className: 'flex items-center gap-3' },
+          React.createElement('span', { className: 'font-bold text-[#3b82f6] text-sm' }, 'AutoDev'),
+          React.createElement('span', { className: `flex items-center gap-1.5 ${statusColor}` },
+            React.createElement('span', { className: `w-1.5 h-1.5 rounded-full ${phaseColor} ${pipelineStatus === 'RUNNING' ? 'status-pulse' : ''}` }),
+            pipelineStatus || 'UNKNOWN'
+          ),
+          currentAgent ? React.createElement('span', { className: 'text-slate-500' }, `agent: ${currentAgent}`) : null,
+          currentPhaseRawId ? React.createElement('span', { className: 'text-[#3b82f6]' }, currentPhaseRawId) : null
+        ),
+        React.createElement('div', { className: 'flex items-center gap-3 text-slate-500' },
+          React.createElement('span', null, `planner_retries: ${plannerRetries}`),
+          React.createElement('span', null, `executor_retries: ${executorRetries}`),
+          React.createElement('span', null, `reviewer_retries: ${reviewerRetries}`)
+        )
+      );
+    }
+
+    function ActivityFeedTabBar({ activeTab, setActiveTab }) {
+      return React.createElement('div', { className: 'flex border-b border-[#1a1d21] text-xs' },
+        ['activity', 'log'].map(tab =>
+          React.createElement('button', {
+            key: tab,
+            className: `px-4 py-2 ${activeTab === tab ? 'text-[#3b82f6] border-b-2 border-[#3b82f6]' : 'text-slate-500'}`,
+            onClick: () => setActiveTab(tab)
+          }, tab.charAt(0).toUpperCase() + tab.slice(1))
+        )
+      );
+    }
+
+    function ActivityFeed({ events }) {
+      return React.createElement('div', { className: 'flex-1 overflow-y-auto scrollbar-thin p-4 space-y-2' },
+        events.length === 0
+          ? React.createElement('p', { className: 'text-slate-600 text-xs' }, 'No events yet.')
+          : events.map((ev, i) =>
+              React.createElement('div', {
+                key: ev.id || i,
+                className: `fade-in p-2 rounded bg-[#1e2028] border border-[#1a1d21] ${i === 0 ? 'border-[#3b82f6]/30' : ''}`
+              },
+                React.createElement('div', { className: 'flex items-center justify-between mb-1' },
+                  React.createElement('span', { className: 'text-[#3b82f6] text-xs font-bold' }, ev.event_type || 'event'),
+                  React.createElement('span', { className: 'text-slate-600 text-xs' }, ev.ts ? new Date(ev.ts).toLocaleTimeString() : '')
+                ),
+                ev.agent ? React.createElement('p', { className: 'text-slate-400 text-xs' }, `agent: ${ev.agent}`) : null,
+                ev.phase ? React.createElement('p', { className: 'text-slate-400 text-xs' }, `phase: ${ev.phase}`) : null,
+                ev.detail ? React.createElement('p', { className: 'text-slate-300 text-xs mt-1' }, ev.detail) : null
+              )
+            )
+      );
+    }
+
+    function EscalationLogTab({ events }) {
+      const escalations = events.filter(e => e.event_type === 'escalation' || e.event_type === 'blame');
+      return React.createElement('div', { className: 'flex-1 overflow-y-auto scrollbar-thin p-4 space-y-2' },
+        escalations.length === 0
+          ? React.createElement('p', { className: 'text-slate-600 text-xs' }, 'No escalations.')
+          : escalations.map((ev, i) =>
+              React.createElement('div', { key: ev.id || i, className: 'fade-in p-2 rounded bg-red-900/20 border border-red-800/30' },
+                React.createElement('p', { className: 'text-red-400 text-xs font-bold' }, ev.event_type),
+                ev.detail ? React.createElement('p', { className: 'text-slate-300 text-xs mt-1' }, ev.detail) : null
+              )
+            )
+      );
+    }
+
+    function EscalationCommandPanel({ showEscalationPanel, setShowEscalationPanel, escalationCommand, setEscalationCommand, escalationResult, setEscalationResult, isEscalationLoading, setIsEscalationLoading, pipelineStatus }) {
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        if (!escalationCommand) return;
+        setIsEscalationLoading(true);
+        setEscalationResult(null);
+        try {
+          const r = await fetch('/api/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ command: escalationCommand })
+          });
+          const data = await r.json();
+          setEscalationResult({ status: r.status, body: data });
+        } catch (err) {
+          setEscalationResult({ status: 0, body: { detail: String(err) } });
+        } finally {
+          setIsEscalationLoading(false);
         }
-        
-        function getStatusIcon(status) {
-            switch (status) {
-                case 'complete': return '✓';
-                case 'in_progress': return '▶';
-                case 'pending': return '○';
-                case 'skipped': return '⊘';
-                case 'blocked': return '⚠';
-                default: return '○';
-            }
-        }
-
-        function getStatusClasses(status) {
-            switch (status) {
-                case 'complete': return 'opacity-60 text-slate-400';
-                case 'in_progress': return 'border-l-4 border-cyan-500 bg-[#141618]/50';
-                case 'blocked': return 'bg-red-900/30 border-l-4 border-red-600';
-                case 'skipped': return 'opacity-50 text-slate-500';
-                default: return 'text-slate-300';
-            }
-        }
-
-        function getEventBadgeColor(eventType) {
-            switch (eventType) {
-                case 'gate_pass': return 'bg-green-600 text-white';
-                case 'gate_fail': return 'bg-amber-600 text-white';
-                case 'retry': return 'bg-amber-600 text-white';
-                case 'escalation_trigger': return 'bg-orange-600 text-white';
-                case 'escalation_resolve': return 'bg-blue-600 text-white';
-                case 'phase_complete': return 'bg-lime-600 text-white';
-                case 'status_changed': return 'bg-slate-600 text-white';
-                default: return 'bg-[#1a1d21] text-white';
-            }
-        }
-
-        /** Format seconds as "Xh Ym" or "Ym" or "—" */
-        function formatDuration(seconds) {
-            if (seconds === null || seconds === undefined) return '—';
-            const s = Math.round(Number(seconds) || 0);
-            if (s <= 0) return '—';
-            const h = Math.floor(s / 3600);
-            const m = Math.floor((s % 3600) / 60);
-            if (h > 0) return `${h}h ${m}m`;
-            return `${m}m`;
-        }
-
-        // ─── Primitive components ─────────────────────────────────────────────────
-
-        function AgentBadge({ agent }) {
-            if (!agent) return null;
-            const colorClass = AGENT_COLORS[agent] || 'bg-[#1a1d21] text-white';
-            return (
-                <span className={`header-text px-2 py-0.5 rounded text-xs font-medium ${colorClass}`}>
-                    {agent}
-                </span>
-            );
-        }
-        
-        function DotCounter({ count, label }) {
-            const maxDots = 3;
-            if (count === undefined || count === null) return null;
-            const filled = Math.min(count, maxDots);
-            const empty = maxDots - filled;
-            return (
-                <div className="flex items-center gap-1.5">
-                    <span className="text-slate-500 text-xs w-16">{label}</span>
-                    <div className="flex gap-1">
-                        {Array.from({length: filled}).map((_, i) => (
-                            <span key={i} className="w-2 h-2 rounded-full bg-amber-500 inline-block"></span>
-                        ))}
-                        {Array.from({length: empty}).map((_, i) => (
-                            <span key={filled + i} className="w-2 h-2 rounded-full bg-[#1a1d21] inline-block"></span>
-                        ))}
-                    </div>
-                </div>
-            );
-        }
-
-        function LastErrorCode({ errorCode }) {
-            if (!errorCode) return null;
-            return (
-                <span className="font-mono text-xs text-red-400 bg-[#141618] px-1.5 py-0.5 rounded">{errorCode}</span>
-            );
-        }
-
-        function ElapsedTimer({ lastActionTimestamp, pipeline_status }) {
-            const [elapsed, setElapsed] = useState(0);
-            useEffect(() => {
-                if (!lastActionTimestamp) return;
-                const startTime = new Date(lastActionTimestamp).getTime();
-                const tick = () => setElapsed(Math.floor((Date.now() - startTime) / 1000));
-                tick();
-                const interval = setInterval(tick, 1000);
-                return () => clearInterval(interval);
-            }, [lastActionTimestamp]);
-            if (!lastActionTimestamp) return null;
-            const isOverdue = pipeline_status === 'WAITING_FOR_SENTINEL' && elapsed > 300;
-            const colorClass = isOverdue ? 'text-amber-400' : 'text-slate-400';
-            const mins = Math.floor(elapsed / 60);
-            const secs = elapsed % 60;
-            return (
-                <span className={`header-text text-xs ${colorClass}`}>{mins}m {String(secs).padStart(2, '0')}s</span>
-            );
-        }
-
-        function SkillInjected({ skillInjected, skillAgent }) {
-            if (!skillInjected || !skillAgent) return null;
-            return (
-                <span className="text-slate-500 text-xs">{skillInjected} / {skillAgent}</span>
-            );
-        }
-
-        // ─── Modals ───────────────────────────────────────────────────────────────
-
-        function ConfirmationModal({ command, onConfirm, onDismiss }) {
-            return (
-                <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-                    <div className="bg-[#141618] border border-[#1a1d21] rounded-lg p-6 max-w-sm mx-4">
-                        <h3 className="header-text text-lg font-semibold text-amber-400 mb-3">
-                            Confirm Action
-                        </h3>
-                        <p className="text-slate-300 mb-6">
-                            Are you sure? This cannot be undone.
-                        </p>
-                        <div className="flex gap-3 justify-end">
-                            <button onClick={onDismiss} className="px-4 py-2 rounded bg-[#1a1d21] text-slate-300 hover:bg-[#252830] transition-colors">
-                                Cancel
-                            </button>
-                            <button onClick={onConfirm} className="px-4 py-2 rounded bg-red-600 hover:bg-red-500 text-white font-medium transition-colors">
-                                Confirm
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            );
-        }
-
-        function StopConfirmModal({ onConfirm, onDismiss }) {
-            return (
-                <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-                    <div className="bg-[#141618] border border-[#1a1d21] rounded-lg p-6 max-w-sm mx-4">
-                        <h3 className="header-text text-lg font-semibold text-red-400 mb-3">
-                            Stop Pipeline?
-                        </h3>
-                        <p className="text-slate-300 text-sm mb-6">
-                            Stop the pipeline? The orchestrator will complete its current agent turn before halting — no new retries will be launched. This may take a few minutes depending on the active agent.
-                        </p>
-                        <div className="flex gap-3 justify-end">
-                            <button onClick={onDismiss} className="px-4 py-2 rounded bg-[#1a1d21] text-slate-300 hover:bg-[#252830] transition-colors">
-                                Cancel
-                            </button>
-                            <button onClick={onConfirm} className="px-4 py-2 rounded bg-orange-600 hover:bg-orange-500 text-white font-medium transition-colors">
-                                Stop Pipeline
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            );
-        }
-
-        // ─── EscalationCommandPanel ───────────────────────────────────────────────
-
-        function EscalationCommandPanel({ pipeline_status, escalation_trigger_reason, last_action, escalation_resets }) {
-            const [commandSent, setCommandSent] = useState(false);
-            const [prevStatus, setPrevStatus] = useState(pipeline_status);
-            const [showConfirmModal, setShowConfirmModal] = useState(false);
-            const [modalCommand, setModalCommand] = useState(null);
-
-            const isResetDisabled = escalation_resets >= 3;
-
-            useEffect(() => {
-                if (prevStatus === 'WAITING_FOR_HUMAN' && pipeline_status !== 'WAITING_FOR_HUMAN') {
-                    setCommandSent(false);
-                }
-                setPrevStatus(pipeline_status);
-            }, [pipeline_status, prevStatus]);
-
-            if (pipeline_status !== 'WAITING_FOR_HUMAN') return null;
-
-            const headerText = escalation_trigger_reason || last_action || 'Awaiting human command';
-
-            const handleCommand = (command) => {
-                if (command === 'RESET_PHASE' || command === 'SKIP' || command === 'STOP') {
-                    setModalCommand(command);
-                    setShowConfirmModal(true);
-                    return;
-                }
-                sendCommand(command);
-            };
-
-            const sendCommand = async (command) => {
-                try {
-                    await fetch('/api/command', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ command })
-                    });
-                    setCommandSent(true);
-                } catch (err) {
-                    console.log('Failed to send command:', err);
-                }
-            };
-
-            const modalConfirm = () => {
-                if (modalCommand) sendCommand(modalCommand);
-                setShowConfirmModal(false);
-                setModalCommand(null);
-            };
-
-            const modalDismiss = () => {
-                setShowConfirmModal(false);
-                setModalCommand(null);
-            };
-
-            const buttonClass = "header-text px-3 py-2 rounded text-sm font-medium bg-[#1a1d21] hover:bg-[#252830] transition-colors";
-            const disabledButtonClass = "header-text px-3 py-2 rounded text-sm font-medium bg-[#1a1d21] opacity-50 cursor-not-allowed";
-
-            const renderButton = (command, label) => {
-                const isResetCommand = command === 'RESET_EXECUTION' || command === 'RESET_PHASE';
-                if (isResetCommand && isResetDisabled) {
-                    return (
-                        <button className={disabledButtonClass} disabled={true} title="Reset cap reached (3/3). Use PROCEED or STOP.">
-                            {label}
-                        </button>
-                    );
-                }
-                return (
-                    <button onClick={() => handleCommand(command)} className={buttonClass}>
-                        {label}
-                    </button>
-                );
-            };
-
-            return (
-                <div className="border-2 border-orange-500 rounded-lg p-4 mt-4 bg-[#141618]/50">
-                    <h3 className="header-text text-sm font-semibold text-orange-400 mb-3">
-                        {headerText}
-                    </h3>
-                    {commandSent ? (
-                        <div className="text-center py-4">
-                            <span className="text-amber-400 text-sm">Command sent — waiting for orchestrator...</span>
-                        </div>
-                    ) : (
-                        <div className="grid grid-cols-2 gap-2">
-                            {renderButton('RETRY', 'RETRY')}
-                            {renderButton('RESET_EXECUTION', 'RESET EXECUTION')}
-                            {renderButton('RESET_PHASE', 'RESET PHASE')}
-                            {renderButton('SKIP', 'SKIP')}
-                            {renderButton('PROCEED', 'PROCEED')}
-                            {renderButton('STOP', 'STOP')}
-                        </div>
-                    )}
-                    {showConfirmModal && (
-                        <ConfirmationModal command={modalCommand} onConfirm={modalConfirm} onDismiss={modalDismiss} />
-                    )}
-                </div>
-            );
-        }
-
-        // ─── PipelineCompletePanel ────────────────────────────────────────────────
-
-        function PipelineCompletePanel({ roadmap, metricsSummary }) {
-            const completeCount = roadmap ? roadmap.filter(p => p.status === 'complete').length : 0;
-            const totalCount = roadmap ? roadmap.length : 0;
-
-            return (
-                <div className="space-y-4">
-                    <div className="flex items-center gap-3">
-                        <span className="text-2xl text-emerald-400">✓</span>
-                        <div>
-                            <h3 className="header-text text-base font-semibold text-emerald-400">Pipeline Complete</h3>
-                            <p className="text-slate-400 text-xs">{completeCount} of {totalCount} phases completed</p>
-                        </div>
-                    </div>
-
-                    {metricsSummary && (
-                        <>
-                            <div className="grid grid-cols-2 gap-2 pt-1">
-                                <div className="bg-[#1a1d21] rounded p-2">
-                                    <div className="text-slate-500 text-xs mb-0.5">Phases</div>
-                                    <div className="header-text text-lg font-semibold text-slate-200">{metricsSummary.total_phases}</div>
-                                </div>
-                                <div className="bg-[#1a1d21] rounded p-2">
-                                    <div className="text-slate-500 text-xs mb-0.5">Duration</div>
-                                    <div className="header-text text-lg font-semibold text-slate-200">{formatDuration(metricsSummary.total_duration_seconds)}</div>
-                                </div>
-                                <div className="bg-[#1a1d21] rounded p-2">
-                                    <div className="text-slate-500 text-xs mb-0.5">Exec Attempts</div>
-                                    <div className="header-text text-lg font-semibold text-slate-200">{metricsSummary.total_executor_attempts}</div>
-                                </div>
-                                <div className="bg-[#1a1d21] rounded p-2">
-                                    <div className="text-slate-500 text-xs mb-0.5">Escalations</div>
-                                    <div className="header-text text-lg font-semibold text-slate-200">{metricsSummary.total_escalations}</div>
-                                </div>
-                            </div>
-
-                            {metricsSummary.phases && metricsSummary.phases.length > 0 && (
-                                <div>
-                                    <div className="text-slate-500 text-xs mb-1 header-text uppercase tracking-wide">Per-phase</div>
-                                    <div className="overflow-y-auto max-h-32 border border-[#1a1d21] rounded">
-                                        {metricsSummary.phases.map((phase, idx) => (
-                                            <div key={idx} className="flex items-center gap-3 px-2 py-1.5 text-xs border-b border-[#1a1d21] last:border-b-0">
-                                                <span className="header-text font-semibold text-slate-300 w-14 flex-shrink-0">{phase.phase}</span>
-                                                <span className="text-slate-500 w-10 flex-shrink-0">{formatDuration(phase.duration_seconds)}</span>
-                                                <span className="text-slate-500">{phase.executor_attempts}x exec</span>
-                                                {phase.blame_fires > 0 && (
-                                                    <span className="text-amber-600 ml-auto">{phase.blame_fires} blame</span>
-                                                )}
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-                            )}
-                        </>
-                    )}
-                </div>
-            );
-        }
-
-        // ─── StoppedRecoveryPanel ─────────────────────────────────────────────────
-
-        function StoppedRecoveryPanel({ current_phase_raw_id, escalation_resets }) {
-            const [sent, setSent] = useState(false);
-            const isCapReached = (escalation_resets || 0) >= 3;
-
-            const handleResume = async (command) => {
-                try {
-                    const rr = await fetch('/api/resume-ready', { method: 'POST' });
-                    if (!rr.ok) {
-                        console.error('resume-ready failed', await rr.text());
-                        return;
-                    }
-                    await fetch('/api/command', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ command }),
-                    });
-                    setSent(true);
-                    fetch('/api/resume-orchestrator', { method: 'POST' });
-                } catch (e) {
-                    console.error('Resume flow failed:', e);
-                }
-            };
-
-            const RESUME_OPTIONS = [
-                {
-                    command: 'RETRY',
-                    label: 'Resume',
-                    desc: 'Continue from where it stopped',
-                    capped: false,
-                },
-                {
-                    command: 'RESET_EXECUTION',
-                    label: 'Reset Execution',
-                    desc: 'Keep the plan, retry execution from scratch',
-                    capped: true,
-                },
-                {
-                    command: 'RESET_PHASE',
-                    label: 'Reset Phase',
-                    desc: 'Start the entire phase over from the beginning',
-                    capped: true,
-                },
-            ];
-
-            return (
-                <div className="space-y-3">
-                    <div className="flex items-center gap-2">
-                        <span className="text-red-400 text-lg">◼</span>
-                        <div>
-                            <h3 className="header-text text-base font-semibold text-red-400">Pipeline Stopped</h3>
-                            {current_phase_raw_id && (
-                                <p className="text-slate-400 text-xs">Stopped during phase <span className="font-mono text-slate-300">{current_phase_raw_id}</span></p>
-                            )}
-                        </div>
-                    </div>
-
-                    {sent ? (
-                        <div className="text-center py-4">
-                            <span className="text-amber-400 text-sm">Command sent — restarting orchestrator...</span>
-                        </div>
-                    ) : (
-                        <div className="space-y-2 pt-1">
-                            {RESUME_OPTIONS.map(({ command, label, desc, capped }) => {
-                                const disabled = capped && isCapReached;
-                                return (
-                                    <button
-                                        key={command}
-                                        onClick={() => !disabled && handleResume(command)}
-                                        disabled={disabled}
-                                        title={disabled ? 'Reset cap reached — use Resume or manually intervene' : undefined}
-                                        className={`w-full text-left px-3 py-2.5 rounded border transition-colors ${
-                                            disabled
-                                                ? 'border-[#1a1d21] bg-[#0f1012] text-slate-600 cursor-not-allowed'
-                                                : command === 'RETRY'
-                                                    ? 'border-emerald-800 bg-emerald-950/40 hover:bg-emerald-950/70 text-emerald-300'
-                                                    : 'border-[#1a1d21] bg-[#1a1d21]/50 hover:bg-[#252830] text-slate-300'
-                                        }`}
-                                    >
-                                        <div className="header-text text-xs font-semibold mb-0.5">{label}</div>
-                                        <div className="text-xs text-slate-500">{desc}</div>
-                                    </button>
-                                );
-                            })}
-                            {isCapReached && (
-                                <p className="text-xs text-amber-600 pt-1">Reset cap reached (3/3) — only Resume is available.</p>
-                            )}
-                        </div>
-                    )}
-                </div>
-            );
-        }
-
-        // ─── CurrentPhasePanel ────────────────────────────────────────────────────
-
-        function CurrentPhasePanel({ current_phase_raw_id, current_agent, roadmap, planner_retries, executor_retries, reviewer_retries, last_error_code, last_action_timestamp, skill_injected, skill_agent, pipeline_status, metricsSummary, escalation_resets }) {
-            if (pipeline_status === 'PIPELINE_COMPLETE') {
-                return <PipelineCompletePanel roadmap={roadmap} metricsSummary={metricsSummary} />;
-            }
-            if (pipeline_status === 'STOPPED') {
-                return <StoppedRecoveryPanel current_phase_raw_id={current_phase_raw_id} escalation_resets={escalation_resets} />;
-            }
-
-            const goal = getGoalForPhase(current_phase_raw_id, roadmap);
-
-            if (!current_phase_raw_id) {
-                return (
-                    <div className="text-slate-400 italic">No active phase</div>
-                );
-            }
-
-            return (
-                <div className="space-y-3">
-                    <div className="flex items-center gap-3">
-                        <span className="header-text text-sm font-semibold text-slate-300">{current_phase_raw_id}</span>
-                        <AgentBadge agent={current_agent} />
-                        <ElapsedTimer lastActionTimestamp={last_action_timestamp} pipeline_status={pipeline_status} />
-                    </div>
-                    {goal && (
-                        <p className="text-slate-400 text-sm leading-relaxed">{goal}</p>
-                    )}
-                    <div className="space-y-1">
-                        <DotCounter count={planner_retries} label="Planner" />
-                        <DotCounter count={executor_retries} label="Executor" />
-                        <DotCounter count={reviewer_retries} label="Reviewer" />
-                    </div>
-                    <LastErrorCode errorCode={last_error_code} />
-                    <SkillInjected skillInjected={skill_injected} skillAgent={skill_agent} />
-                </div>
-            );
-        }
-
-        // ─── RoadmapPanel ─────────────────────────────────────────────────────────
-        // Wrapped in React.memo so it only re-renders when roadmap or metricsSummary
-        // props actually change — avoids DOM churn caused by parent pState polling.
-
-        const RoadmapPanel = React.memo(function RoadmapPanel({ roadmap, metricsSummary }) {
-            const [expandedPhaseId, setExpandedPhaseId] = useState(null);
-
-            const handlePhaseClick = (phaseId) => {
-                setExpandedPhaseId(prev => prev === phaseId ? null : phaseId);
-            };
-
-            if (!roadmap || !Array.isArray(roadmap) || roadmap.length === 0) {
-                return (
-                    <div className="text-slate-500 italic">No roadmap data available</div>
-                );
-            }
-
-            const totalPhases = roadmap.length;
-            const completeCount = roadmap.filter(p => p.status === 'complete').length;
-            const percentage = totalPhases > 0 ? Math.round((completeCount / totalPhases) * 100) : 0;
-
-            // Build a lookup map from metrics summary phases array
-            const metricsMap = {};
-            if (metricsSummary && Array.isArray(metricsSummary.phases)) {
-                for (const p of metricsSummary.phases) {
-                    if (p.phase) metricsMap[p.phase] = p;
-                }
-            }
-
-            return (
-                <div className="space-y-4 overflow-y-auto max-h-full">
-                    {/* Progress bar */}
-                    <div className="space-y-1">
-                        <div className="flex justify-between text-xs text-slate-400">
-                            <span>Progress</span>
-                            <span>{completeCount} / {totalPhases} complete</span>
-                        </div>
-                        <div className="w-full bg-[#1a1d21] rounded-full h-2">
-                            <div
-                                className="bg-cyan-500 h-2 rounded-full transition-all duration-300"
-                                style={{ width: `${percentage}%` }}
-                            ></div>
-                        </div>
-                    </div>
-
-                    {/* Phase list */}
-                    <div className="space-y-2">
-                        {roadmap.map((phase, index) => {
-                            const isExpanded = expandedPhaseId === phase.id;
-                            const phaseMeta = metricsMap[phase.id] || null;
-
-                            return (
-                                <div
-                                    key={phase.id || index}
-                                    role="button"
-                                    tabIndex={0}
-                                    aria-label={`${phase.id}: ${phase.goal || ''}`}
-                                    aria-expanded={isExpanded}
-                                    className={`p-3 rounded border border-[#1a1d21] cursor-pointer transition-colors ${getStatusClasses(phase.status)} ${isExpanded ? 'bg-[#1a1d21]' : ''}`}
-                                    onClick={() => handlePhaseClick(phase.id)}
-                                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') handlePhaseClick(phase.id); }}
-                                >
-                                    <div className="flex items-start gap-2">
-                                        <span className="text-lg flex-shrink-0">{getStatusIcon(phase.status)}</span>
-                                        <div className="flex-1 min-w-0">
-                                            <div className="header-text text-sm font-semibold text-slate-300 flex items-center gap-2">
-                                                {phase.id}
-                                                {isExpanded ? (
-                                                    <span className="text-blue-400 text-xs">▼</span>
-                                                ) : (
-                                                    <span className="text-slate-500 text-xs">▶</span>
-                                                )}
-                                            </div>
-                                            {phase.goal && (
-                                                <p className={`text-sm text-slate-400 mt-1 ${isExpanded ? '' : 'truncate'}`}>
-                                                    {phase.goal}
-                                                </p>
-                                            )}
-                                            {/* Expanded: exit criteria (all phases) */}
-                                            {isExpanded && phase.exit_criteria && phase.exit_criteria.length > 0 && (
-                                                <div className="mt-3 pt-2 border-t border-[#1a1d21]">
-                                                    <div className="text-xs font-semibold text-slate-400 mb-1">Exit Criteria:</div>
-                                                    <ul className="text-xs text-slate-400 space-y-1">
-                                                        {phase.exit_criteria.map((criteria, idx) => (
-                                                            <li key={idx} className="flex items-start gap-1">
-                                                                <span className="text-blue-400">•</span>
-                                                                <span>{criteria}</span>
-                                                            </li>
-                                                        ))}
-                                                    </ul>
-                                                </div>
-                                            )}
-                                            {/* Expanded: run metrics for completed phases */}
-                                            {isExpanded && phase.status === 'complete' && (
-                                                <div className="mt-3 pt-2 border-t border-[#1a1d21]">
-                                                    {phaseMeta ? (
-                                                        <div>
-                                                            <div className="text-xs font-semibold text-slate-400 mb-2">Run Metrics:</div>
-                                                            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-                                                                <div>
-                                                                    <span className="text-slate-500">Duration: </span>
-                                                                    <span className="text-slate-300">{formatDuration(phaseMeta.duration_seconds)}</span>
-                                                                </div>
-                                                                <div>
-                                                                    <span className="text-slate-500">Exec attempts: </span>
-                                                                    <span className="text-slate-300">{phaseMeta.executor_attempts}</span>
-                                                                </div>
-                                                                <div>
-                                                                    <span className="text-slate-500">Reviewer passes: </span>
-                                                                    <span className="text-slate-300">{phaseMeta.reviewer_passes}</span>
-                                                                </div>
-                                                                <div>
-                                                                    <span className="text-slate-500">Blame fires: </span>
-                                                                    <span className="text-slate-300">{phaseMeta.blame_fires}</span>
-                                                                </div>
-                                                                <div>
-                                                                    <span className="text-slate-500">Escalations: </span>
-                                                                    <span className="text-slate-300">{phaseMeta.escalations}</span>
-                                                                </div>
-                                                                <div>
-                                                                    <span className="text-slate-500">Skill: </span>
-                                                                    <span className="text-slate-300">{phaseMeta.skill_used || '—'}</span>
-                                                                </div>
-                                                            </div>
-                                                        </div>
-                                                    ) : (
-                                                        <div className="text-xs text-slate-500 italic">No metrics available</div>
-                                                    )}
-                                                    {/* Git branch reference */}
-                                                    <div className="mt-2 pt-2 border-t border-[#1a1d21]">
-                                                        <span className="text-slate-500 text-xs">Branch: </span>
-                                                        <code className="font-mono text-xs text-cyan-400">phase/{phase.id}</code>
-                                                        <span className="text-slate-600 text-xs ml-2">
-                                                            restore via: <code className="font-mono text-slate-600">git checkout phase/{phase.id}</code>
-                                                        </span>
-                                                    </div>
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
-                                </div>
-                            );
-                        })}
-                    </div>
-                </div>
-            );
-        });
-
-        // ─── Activity Feed ────────────────────────────────────────────────────────
-
-        function EventRow({ event, isExpanded, onToggle, isNew }) {
-            if (!event) return null;
-            
-            // Phase 2b fix: server writes "ts", not "timestamp". Support both.
-            const ts = event.ts || event.timestamp;
-            const timeOnly = ts ? ts.slice(11, 16) : '--:--';
-            
-            const truncatedDetail = event.detail && event.detail.length > 60
-                ? event.detail.slice(0, 60) + '...'
-                : event.detail;
-            
-            const attemptDisplay = event.attempt ?? '—';
-            const badgeColor = getEventBadgeColor(event.event_type);
-            
-            return (
-                <div
-                    className={"event-row p-2 border-b border-[#1a1d21] cursor-pointer rounded" + (isNew ? " event-row-fade-in" : "")}
-                    onClick={onToggle}
-                >
-                    <div className="flex items-center gap-3">
-                        <span className="font-mono text-xs text-slate-400 w-14 flex-shrink-0">
-                            {timeOnly}
-                        </span>
-                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${badgeColor} flex-shrink-0`}>
-                            {event.event_type || 'unknown'}
-                        </span>
-                        <span className="text-xs text-slate-300 w-20 flex-shrink-0 truncate">
-                            {event.agent || '—'}
-                        </span>
-                        <span className="text-xs text-slate-300 w-24 flex-shrink-0 truncate">
-                            {event.phase || '—'}
-                        </span>
-                        <span className="text-xs text-slate-400 w-12 flex-shrink-0 text-center">
-                            {attemptDisplay}
-                        </span>
-                        <span className="text-xs text-slate-400 flex-1 truncate">
-                            {truncatedDetail || '—'}
-                        </span>
-                    </div>
-                    {isExpanded && event.detail && (
-                        <div className="mt-2 pl-20 text-xs text-slate-300 bg-[#141618] p-2 rounded">
-                            {event.detail}
-                        </div>
-                    )}
-                </div>
-            );
-        }
-
-        function EscalationLogPanel({ events }) {
-            function pairEscalations(allEvents) {
-                const triggers = allEvents.filter(e => e.event_type === 'escalation_trigger');
-                const resolves = allEvents.filter(e => e.event_type === 'escalation_resolve');
-                const pairs = [];
-                for (const trigger of triggers) {
-                    const phase = trigger.phase;
-                    const matchingResolve = resolves.find(r =>
-                        r.phase === phase &&
-                        r.ts && trigger.ts &&
-                        new Date(r.ts) > new Date(trigger.ts)
-                    );
-                    pairs.push({ trigger, resolve: matchingResolve || null, phase });
-                }
-                return pairs.sort((a, b) => {
-                    const aTs = a.trigger.ts || a.trigger.timestamp || '';
-                    const bTs = b.trigger.ts || b.trigger.timestamp || '';
-                    return bTs.localeCompare(aTs);
-                });
-            }
-            
-            const pairedEscalations = pairEscalations(events);
-            
-            if (!pairedEscalations || pairedEscalations.length === 0) {
-                return (
-                    <div className="text-slate-500 italic text-sm">No escalations recorded in this session.</div>
-                );
-            }
-            
-            function formatTime(ts) {
-                if (!ts) return '—';
-                const tsStr = ts.ts || ts.timestamp || ts;
-                return tsStr.slice(11, 16);
-            }
-            
-            function calculateDuration(triggerTs, resolveTs) {
-                if (!triggerTs) return '—';
-                const trigger = new Date(triggerTs);
-                const resolve = resolveTs ? new Date(resolveTs) : new Date();
-                const diffMs = resolve - trigger;
-                if (diffMs < 0) return '—';
-                const mins = Math.floor(diffMs / 60000);
-                const secs = Math.floor((diffMs % 60000) / 1000);
-                return `${mins}m ${String(secs).padStart(2, '0')}s`;
-            }
-            
-            return (
-                <div className="space-y-2">
-                    {pairedEscalations.map((pair, index) => {
-                        const trigger = pair.trigger;
-                        const resolve = pair.resolve;
-                        const isInProgress = !resolve;
-                        return (
-                            <div key={index} className="p-3 bg-[#141618] rounded border border-[#1a1d21]">
-                                <div className="flex items-center gap-3 mb-2">
-                                    <span className="header-text text-sm font-semibold text-slate-300">
-                                        {pair.phase || '—'}
-                                    </span>
-                                    {isInProgress ? (
-                                        <span className="px-2 py-0.5 rounded text-xs font-medium bg-orange-600 text-white">In Progress</span>
-                                    ) : (
-                                        <span className="px-2 py-0.5 rounded text-xs font-medium bg-green-600 text-white">Resolved</span>
-                                    )}
-                                </div>
-                                <div className="grid grid-cols-2 gap-2 text-xs">
-                                    <div>
-                                        <span className="text-slate-500">Triggered:</span>
-                                        <span className="font-mono text-slate-300 ml-2">{formatTime(trigger)}</span>
-                                    </div>
-                                    <div>
-                                        <span className="text-slate-500">Reason:</span>
-                                        <span className="text-slate-300 ml-2">{trigger.detail || '—'}</span>
-                                    </div>
-                                    <div>
-                                        <span className="text-slate-500">Command:</span>
-                                        <span className="text-slate-300 ml-2">
-                                            {isInProgress ? 'Awaiting command...' : (resolve.detail || '—')}
-                                        </span>
-                                    </div>
-                                    <div>
-                                        <span className="text-slate-500">Resolved:</span>
-                                        <span className="font-mono text-slate-300 ml-2">
-                                            {isInProgress ? 'Awaiting command...' : formatTime(resolve)}
-                                        </span>
-                                    </div>
-                                    <div className="col-span-2">
-                                        <span className="text-slate-500">Duration:</span>
-                                        <span className="text-slate-300 ml-2">
-                                            {isInProgress ? 'In progress...' : calculateDuration(trigger.ts || trigger.timestamp, resolve.ts || resolve.timestamp)}
-                                        </span>
-                                    </div>
-                                </div>
-                            </div>
-                        );
-                    })}
-                </div>
-            );
-        }
-
-        function ActivityFeedPanel() {
-            const [events, setEvents] = useState([]);
-            const [expandedEventId, setExpandedEventId] = useState(null);
-            const [newEventIds, setNewEventIds] = useState(new Set());
-            const [activityTab, setActivityTab] = useState('activity');
-            const eventSourceRef = useRef(null);
-            const pollingIntervalRef = useRef(null);
-            const isUsingSSE = useRef(true);
-
-            useEffect(() => {
-                fetchEvents();
-                setupSSE();
-                return () => {
-                    if (eventSourceRef.current) eventSourceRef.current.close();
-                    if (pollingIntervalRef.current) clearInterval(pollingIntervalRef.current);
-                };
-            }, []);
-
-            function setupSSE() {
-                try {
-                    const eventSource = new EventSource('/api/events/stream');
-                    eventSourceRef.current = eventSource;
-                    eventSource.onmessage = (event) => {
-                        if (event.type === 'heartbeat' || !event.data || event.data === '{}') return;
-                        try {
-                            const newEvent = JSON.parse(event.data);
-                            const eventTs = newEvent.ts || newEvent.timestamp;
-                            if (newEvent && newEvent.id) {
-                                setEvents(prevEvents => {
-                                    const isDuplicate = prevEvents.some(e => {
-                                        const existingTs = e.ts || e.timestamp;
-                                        return existingTs && eventTs && existingTs === eventTs;
-                                    });
-                                    if (isDuplicate) return prevEvents;
-                                    setNewEventIds(prev => new Set([...prev, newEvent.id]));
-                                    setTimeout(() => {
-                                        setNewEventIds(prev => {
-                                            const next = new Set(prev);
-                                            next.delete(newEvent.id);
-                                            return next;
-                                        });
-                                    }, 350);
-                                    return [newEvent, ...prevEvents];
-                                });
-                            }
-                        } catch (e) {
-                            console.log('Failed to parse SSE event:', e);
-                        }
-                    };
-                    eventSource.onerror = () => {
-                        console.log('SSE connection error, falling back to polling');
-                        eventSource.close();
-                        isUsingSSE.current = false;
-                        startPollingFallback();
-                    };
-                } catch (err) {
-                    console.log('Failed to create EventSource, using polling fallback');
-                    startPollingFallback();
-                }
-            }
-
-            function startPollingFallback() {
-                if (pollingIntervalRef.current) return;
-                pollingIntervalRef.current = setInterval(() => { fetchEventsPolling(); }, 5000);
-                const reconnectInterval = setInterval(() => {
-                    if (!isUsingSSE.current) {
-                        isUsingSSE.current = true;
-                        setupSSE();
-                        if (eventSourceRef.current) {
-                            clearInterval(pollingIntervalRef.current);
-                            pollingIntervalRef.current = null;
-                            clearInterval(reconnectInterval);
-                        }
-                    }
-                }, 30000);
-            }
-
-            function fetchEvents() {
-                fetch('/api/events?limit=30')
-                    .then(res => res.json())
-                    .then(data => {
-                        if (data.events && Array.isArray(data.events)) setEvents(data.events);
-                    })
-                    .catch(() => {});
-            }
-
-            function fetchEventsPolling() {
-                fetch('/api/events?limit=30')
-                    .then(res => res.json())
-                    .then(data => {
-                        if (data.events && Array.isArray(data.events)) {
-                            setEvents(prevEvents => {
-                                const existingTs = new Set(prevEvents.map(e => e.ts || e.timestamp));
-                                const newEvents = data.events.filter(e => {
-                                    const ts = e.ts || e.timestamp;
-                                    if (existingTs.has(ts)) return false;
-                                    existingTs.add(ts);
-                                    return true;
-                                });
-                                if (newEvents.length === 0) return prevEvents;
-                                newEvents.forEach(e => {
-                                    setNewEventIds(prev => new Set([...prev, e.id]));
-                                    setTimeout(() => {
-                                        setNewEventIds(prev => {
-                                            const next = new Set(prev);
-                                            next.delete(e.id);
-                                            return next;
-                                        });
-                                    }, 350);
-                                });
-                                return [...newEvents, ...prevEvents];
-                            });
-                        }
-                    })
-                    .catch(() => {});
-            }
-
-            function handleRowClick(eventId) {
-                setExpandedEventId(prev => prev === eventId ? null : eventId);
-            }
-            
-            const escalationEvents = events.filter(e =>
-                e.event_type === 'escalation_trigger' || e.event_type === 'escalation_resolve'
-            );
-
-            const TabButton = ({ tab, label }) => (
-                <button
-                    onClick={() => setActivityTab(tab)}
-                    className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-                        activityTab === tab
-                            ? 'bg-blue-600 text-white'
-                            : 'bg-[#1a1d21] text-slate-300 hover:bg-[#252830]'
-                    }`}
-                >
-                    {label}
-                </button>
-            );
-            
-            return (
-                <div>
-                    <div className="flex gap-2 mb-3">
-                        <TabButton tab="activity" label="Activity" />
-                        <TabButton tab="escalation" label="Escalation" />
-                    </div>
-                    <div className="overflow-y-auto max-h-36">
-                        {activityTab === 'escalation' ? (
-                            <EscalationLogPanel events={escalationEvents} />
-                        ) : events.length === 0 ? (
-                            <div className="text-slate-500 italic text-sm">No events recorded yet</div>
-                        ) : (
-                            <div className="space-y-1">
-                                {events.map((event, index) => (
-                                    <EventRow
-                                        key={event.id || index}
-                                        event={event}
-                                        isExpanded={expandedEventId === event.id}
-                                        onToggle={() => handleRowClick(event.id)}
-                                        isNew={newEventIds.has(event.id)}
-                                    />
-                                ))}
-                            </div>
-                        )}
-                    </div>
-                </div>
-            );
-        }
-
-        // ─── Sidebar navigation ───────────────────────────────────────────────────
-
-        function Sidebar({ currentScreen, onNavigate }) {
-            const navItems = [
-                {
-                    key: 'pipeline',
-                    label: 'Pipeline Monitor',
-                    icon: (
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4 flex-shrink-0">
-                            <rect x="3" y="3" width="7" height="7" rx="1"/>
-                            <rect x="14" y="3" width="7" height="7" rx="1"/>
-                            <rect x="3" y="14" width="7" height="7" rx="1"/>
-                            <rect x="14" y="14" width="7" height="7" rx="1"/>
-                        </svg>
-                    )
-                },
-                {
-                    key: 'preflight',
-                    label: 'Setup & Preflight',
-                    icon: (
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4 flex-shrink-0">
-                            <line x1="4" y1="6" x2="20" y2="6"/>
-                            <line x1="8" y1="12" x2="20" y2="12"/>
-                            <line x1="12" y1="18" x2="20" y2="18"/>
-                            <circle cx="4" cy="6" r="1.5" fill="currentColor" stroke="none"/>
-                            <circle cx="7" cy="12" r="1.5" fill="currentColor" stroke="none"/>
-                            <circle cx="11" cy="18" r="1.5" fill="currentColor" stroke="none"/>
-                        </svg>
-                    )
-                },
-                {
-                    key: 'ideas',
-                    label: 'Project Ideas',
-                    icon: (
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4 flex-shrink-0">
-                            <path d="M9 18h6M10 22h4M12 2C8.13 2 5 5.13 5 9c0 2.38 1.19 4.47 3 5.74V17h8v-2.26C17.81 13.47 19 11.38 19 9c0-3.87-3.13-7-7-7z"/>
-                        </svg>
-                    )
-                }
-            ];
-
-            return (
-                <div className="w-44 flex-shrink-0 bg-[#141618] border-r border-[#1a1d21] flex flex-col">
-                    <div className="px-4 py-5 border-b border-[#1a1d21]">
-                        <h1 className="header-text text-base font-bold text-amber-400 tracking-widest">AUTODEV</h1>
-                    </div>
-                    <nav className="flex-1 py-3">
-                        {navItems.map(item => {
-                            const isActive = currentScreen === item.key;
-                            return (
-                                <button
-                                    key={item.key}
-                                    onClick={() => onNavigate(item.key)}
-                                    className={`w-full flex items-center gap-2.5 px-4 py-2.5 text-left transition-colors ${
-                                        isActive
-                                            ? 'text-[#00b4d8] bg-[#00b4d8]/10 border-r-2 border-[#00b4d8]'
-                                            : 'text-slate-400 hover:text-slate-200 hover:bg-[#1a1d21]'
-                                    }`}
-                                >
-                                    {item.icon}
-                                    <span className="header-text text-xs font-medium leading-tight">{item.label}</span>
-                                </button>
-                            );
-                        })}
-                    </nav>
-                </div>
-            );
-        }
-
-        // ─── Placeholder screens ──────────────────────────────────────────────────
-
-        function PreflightScreen() {
-            return (
-                <div className="flex-1 flex items-center justify-center h-full bg-[#0d0f12]">
-                    <div className="text-center space-y-4">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-12 h-12 text-slate-700 mx-auto">
-                            <line x1="4" y1="6" x2="20" y2="6"/>
-                            <line x1="8" y1="12" x2="20" y2="12"/>
-                            <line x1="12" y1="18" x2="20" y2="18"/>
-                            <circle cx="4" cy="6" r="1.5" fill="currentColor" stroke="none"/>
-                            <circle cx="7" cy="12" r="1.5" fill="currentColor" stroke="none"/>
-                            <circle cx="11" cy="18" r="1.5" fill="currentColor" stroke="none"/>
-                        </svg>
-                        <div>
-                            <p className="header-text text-lg font-semibold text-slate-600">Setup &amp; Preflight</p>
-                            <p className="text-slate-700 text-sm mt-1">Coming soon</p>
-                        </div>
-                    </div>
-                </div>
-            );
-        }
-
-        function IdeasScreen() {
-            const [ideas, setIdeas] = React.useState([]);
-            const [currentIdeaId, setCurrentIdeaId] = React.useState(null);
-            const [messages, setMessages] = React.useState([]);
-            const [prdContent, setPrdContent] = React.useState('');
-            const [isLoading, setIsLoading] = React.useState(false);
-            const [uploadSpinner, setUploadSpinner] = React.useState(false);
-            const [uploadError, setUploadError] = React.useState('');
-            const [clarityPass, setClarityPass] = React.useState(null);
-            const [clarityIssues, setClarityIssues] = React.useState([]);
-            const [clarityMissing, setClarityMissing] = React.useState([]);
-            const [showDeleteModal, setShowDeleteModal] = React.useState(false);
-            const [deleteTargetId, setDeleteTargetId] = React.useState(null);
-
-            // Fetch idea list on mount
-            React.useEffect(() => {
-                fetchIdeas();
-            }, []);
-
-            // Fetch session when currentIdeaId changes
-            React.useEffect(() => {
-                if (!currentIdeaId) return;
-                fetch(`/api/ideas/${currentIdeaId}/session`)
-                    .then(r => r.json())
-                    .then(data => {
-                        if (data.messages) setMessages(data.messages);
-                        else setMessages([]);
-                        if (data.prd_content) setPrdContent(data.prd_content);
-                        else setPrdContent('');
-                    })
-                    .catch(() => {});
-            }, [currentIdeaId]);
-
-            function fetchIdeas() {
-                fetch('/api/ideas')
-                    .then(r => r.json())
-                    .then(data => {
-                        if (Array.isArray(data)) setIdeas(data);
-                    })
-                    .catch(() => {});
-            }
-
-            function handleNewIdea() {
-                fetch('/api/ideas', { method: 'POST' })
-                    .then(r => r.json())
-                    .then(data => {
-                        if (data.id) {
-                            setCurrentIdeaId(data.id);
-                            setMessages([]);
-                            setPrdContent('');
-                            fetchIdeas();
-                        }
-                    })
-                    .catch(() => {});
-            }
-
-            function handleSelectIdea(ideaId) {
-                setCurrentIdeaId(ideaId);
-            }
-
-            function handleDeleteClick(ideaId, e) {
-                e.stopPropagation();
-                setDeleteTargetId(ideaId);
-                setShowDeleteModal(true);
-            }
-
-            function handleDeleteConfirm() {
-                if (!deleteTargetId) return;
-                fetch(`/api/ideas/${deleteTargetId}`, { method: 'DELETE' })
-                    .then(() => {
-                        setShowDeleteModal(false);
-                        setDeleteTargetId(null);
-                        if (currentIdeaId === deleteTargetId) {
-                            setCurrentIdeaId(null);
-                            setMessages([]);
-                            setPrdContent('');
-                        }
-                        fetchIdeas();
-                    })
-                    .catch(() => {});
-            }
-
-            function handleDownload(ideaId, e) {
-                e.stopPropagation();
-                window.open(`/api/ideas/${ideaId}/download`, '_blank');
-            }
-
-            function handleKeyDown(e) {
-                if (e.key !== 'Enter') return;
-                if (!currentIdeaId) return;
-                const input = e.target;
-                const content = input.value.trim();
-                if (!content || isLoading) return;
-                input.value = '';
-
-                const turn = Math.floor(messages.length / 2) + 1;
-                const now = new Date().toISOString();
-
-                setMessages(prev => [...prev, { role: 'user', content, ts: now }]);
-                setIsLoading(true);
-
-                fetch(`/api/ideas/${currentIdeaId}/message`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ content, turn }),
-                })
-                    .then(r => r.json())
-                    .then(data => {
-                        setMessages(prev => [...prev, { role: 'assistant', content: data.response || '', ts: new Date().toISOString() }]);
-                        if (data.prd_content !== undefined) setPrdContent(data.prd_content);
-                        setIsLoading(false);
-                    })
-                    .catch(() => setIsLoading(false));
-            }
-
-            function renderPrd(text) {
-                if (!text) {
-                    return <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>;
-                }
-                return text.split('\n\n').map((block, i) => {
-                    if (block.startsWith('# ')) return <h2 key={i} className="text-slate-200 font-bold text-lg mt-4 first:mt-0">{block.slice(2)}</h2>;
-                    if (block.startsWith('## ')) return <h3 key={i} className="text-slate-300 font-semibold text-base mt-3"><strong>{block.slice(3)}</strong></h3>;
-                    return <p key={i} className="text-slate-400 text-sm mt-1">{block}</p>;
-                });
-            }
-
-            function handleFileChange(e) {
-                const file = e.target.files && e.target.files[0];
-                if (!file) return;
-                if (!file.name.toLowerCase().endsWith('.md')) {
-                    setUploadError('Only .md files are accepted');
-                    return;
-                }
-                setUploadError('');
-                setUploadSpinner(true);
-                const formData = new FormData();
-                formData.append('file', file);
-                fetch(`/api/ideas/${currentIdeaId}/upload`, {
-                    method: 'POST',
-                    body: formData,
-                })
-                    .then(r => {
-                        if (r.status === 422) {
-                            return r.json().then(d => { throw { detail: d.detail || 'Missing required headers' }; });
-                        }
-                        return r.json();
-                    })
-                    .then(data => {
-                        setUploadSpinner(false);
-                        if (data.trigger_clarity_check) {
-                            triggerClarityCheck();
-                        }
-                    })
-                    .catch(err => {
-                        setUploadSpinner(false);
-                        setUploadError((err && err.detail) || 'Upload failed');
-                    });
-            }
-
-            function triggerClarityCheck() {
-                fetch(`/api/ideas/${currentIdeaId}/clarity-check`, { method: 'POST' })
-                    .then(r => r.json())
-                    .then(data => {
-                        setClarityPass(data.pass === true);
-                        setClarityIssues(Array.isArray(data.issues) ? data.issues : []);
-                        setClarityMissing(Array.isArray(data.missing_sections) ? data.missing_sections : []);
-                    })
-                    .catch(() => {});
-            }
-
-            function formatUpdated(ts) {
-                if (!ts) return '—';
-                try {
-                    const d = new Date(ts);
-                    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-                } catch {
-                    return ts;
-                }
-            }
-
-            const selectedIdea = ideas.find(a => a.id === currentIdeaId);
-
-            return (
-                <div className="flex h-full">
-                    {/* Left pane: Idea list */}
-                    <div className="w-56 flex-shrink-0 border-r border-[#1a1d21] flex flex-col bg-[#141618] overflow-hidden">
-                        <div className="p-3 border-b border-[#1a1d21] flex items-center justify-between">
-                            <span className="header-text text-xs font-semibold text-slate-300">Ideas</span>
-                            <button
-                                onClick={handleNewIdea}
-                                className="header-text px-2 py-1 rounded text-xs bg-emerald-700 hover:bg-emerald-600 text-white transition-colors"
-                            >
-                                + New
-                            </button>
-                        </div>
-                        <div className="flex-1 overflow-y-auto">
-                            {ideas.length === 0 ? (
-                                <div className="p-4 text-center text-slate-600 text-xs">No ideas yet</div>
-                            ) : (
-                                ideas.map(idea => (
-                                    <div
-                                        key={idea.id}
-                                        role="button"
-                                        tabIndex={0}
-                                        onClick={() => handleSelectIdea(idea.id)}
-                                        onKeyDown={e => { if (e.key === 'Enter') handleSelectIdea(idea.id); }}
-                                        className={`p-3 border-b border-[#1a1d21] cursor-pointer transition-colors group ${
-                                            currentIdeaId === idea.id
-                                                ? 'bg-[#00b4d8]/10 border-l-2 border-l-[#00b4d8]'
-                                                : 'hover:bg-[#1a1d21]'
-                                        }`}
-                                    >
-                                        <div className="flex items-start justify-between gap-1">
-                                            <div className="flex-1 min-w-0">
-                                                <div className="text-sm font-medium text-slate-200 truncate">{idea.name}</div>
-                                                {idea.summary && (
-                                                    <div className="text-xs text-slate-500 mt-0.5 truncate">{idea.summary}</div>
-                                                )}
-                                                <div className="text-xs text-slate-600 mt-1">{formatUpdated(idea.updated)}</div>
-                                            </div>
-                                            <div className="flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                                <button
-                                                    onClick={e => handleDownload(idea.id, e)}
-                                                    title="Download PRD"
-                                                    className="text-slate-500 hover:text-slate-300 p-0.5"
-                                                >
-                                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3.5 h-3.5">
-                                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
-                                                    </svg>
-                                                </button>
-                                                <button
-                                                    onClick={e => handleDeleteClick(idea.id, e)}
-                                                    title="Delete idea"
-                                                    className="text-slate-500 hover:text-red-400 p-0.5"
-                                                >
-                                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3.5 h-3.5">
-                                                        <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/>
-                                                    </svg>
-                                                </button>
-                                            </div>
-                                        </div>
-                                    </div>
-                                ))
-                            )}
-                        </div>
-                    </div>
-
-                    {/* Right: Conversation + PRD, or empty state */}
-                    {!currentIdeaId ? (
-                        <div className="flex-1 flex items-center justify-center bg-[#0d0f12]">
-                            <div className="text-center">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-10 h-10 text-slate-700 mx-auto mb-3">
-                                    <path d="M9 18h6M10 22h4M12 2C8.13 2 5 5.13 5 9c0 2.38 1.19 4.47 3 5.74V17h8v-2.26C17.81 13.47 19 11.38 19 9c0-3.87-3.13-7-7-7z"/>
-                                </svg>
-                                <p className="text-slate-600 text-sm">Select an idea or create a new one</p>
-                                <button
-                                    onClick={handleNewIdea}
-                                    className="mt-3 header-text px-4 py-2 rounded bg-emerald-700 hover:bg-emerald-600 text-white text-sm transition-colors"
-                                >
-                                    + New Idea
-                                </button>
-                            </div>
-                        </div>
-                    ) : (
-                        <>
-                            {/* Conversation */}
-                            <div className="w-[38%] flex-shrink-0 border-r border-[#1a1d21] flex flex-col bg-[#141618] overflow-hidden">
-                                <div className="px-4 py-2 border-b border-[#1a1d21] flex items-center gap-2">
-                                    <span className="text-sm text-slate-300">{selectedIdea ? selectedIdea.name : currentIdeaId}</span>
-                                </div>
-                                <div className="flex-1 overflow-y-auto p-4 space-y-3">
-                                    {messages.map((msg, i) => (
-                                        msg.role === 'user' ? (
-                                            <div key={i} className="flex justify-end">
-                                                <div className="bg-cyan-900 text-cyan-100 rounded-lg px-3 py-2 text-sm max-w-[80%]">{msg.content}</div>
-                                            </div>
-                                        ) : (
-                                            <div key={i} className="flex justify-start">
-                                                <div className="bg-[#1a1d21] text-slate-300 rounded-lg px-3 py-2 text-sm max-w-[80%]">{msg.content}</div>
-                                            </div>
-                                        )
-                                    ))}
-                                </div>
-                                <div className="border-t border-[#1a1d21] p-3">
-                                    <input
-                                        type="text"
-                                        className="w-full bg-[#1a1d21] border border-[#2a2d31] rounded px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-slate-500"
-                                        placeholder="Type a message..."
-                                        onKeyDown={handleKeyDown}
-                                        disabled={isLoading}
-                                    />
-                                </div>
-                            </div>
-                            {/* PRD Document */}
-                            <div className={`flex-1 flex flex-col bg-[#141618] overflow-hidden ${isLoading ? 'status-pulse' : ''}`}>
-                                <div className="px-4 py-2 border-b border-[#1a1d21] flex items-center gap-2 flex-wrap">
-                                    <label className="cursor-pointer">
-                                        <input
-                                            type="file"
-                                            accept=".md"
-                                            className="hidden"
-                                            onChange={handleFileChange}
-                                            disabled={uploadSpinner}
-                                        />
-                                        <span className="header-text px-3 py-1 rounded text-xs bg-[#1a1d21] hover:bg-[#252830] text-slate-300 border border-[#2a2d31] transition-colors cursor-pointer">
-                                            {uploadSpinner ? '⟳ Uploading...' : 'Upload PRD'}
-                                        </span>
-                                    </label>
-                                    {uploadError && <span className="text-red-400 text-xs">{uploadError}</span>}
-                                    {clarityPass === true && <span className="text-emerald-400 text-xs font-semibold">ready to convert</span>}
-                                    {clarityPass === false && <span className="text-amber-400 text-xs font-semibold">needs revision</span>}
-                                </div>
-                                {clarityPass === false && (clarityMissing.length > 0 || clarityIssues.length > 0) && (
-                                    <div className="px-4 py-2 border-b border-[#1a1d21] text-xs">
-                                        {clarityMissing.length > 0 && (
-                                            <div className="mb-2">
-                                                <div className="text-slate-400 font-semibold mb-1">Missing sections:</div>
-                                                {clarityMissing.map((s, i) => <div key={i} className="text-slate-500 ml-2">• {s}</div>)}
-                                            </div>
-                                        )}
-                                        {clarityIssues.length > 0 && (
-                                            <div>
-                                                <div className="text-slate-400 font-semibold mb-1">Issues:</div>
-                                                {clarityIssues.map((s, i) => <div key={i} className="text-slate-500 ml-2">• {s}</div>)}
-                                            </div>
-                                        )}
-                                    </div>
-                                )}
-                                <div className="flex-1 overflow-y-auto p-4">
-                                    {renderPrd(prdContent)}
-                                </div>
-                            </div>
-                        </>
-                    )}
-
-                    {/* Delete confirmation modal */}
-                    {showDeleteModal && (
-                        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-                            <div className="bg-[#141618] border border-[#1a1d21] rounded-lg p-6 max-w-sm mx-4">
-                                <h3 className="header-text text-lg font-semibold text-red-400 mb-3">Delete Idea?</h3>
-                                <p className="text-slate-300 text-sm mb-6">
-                                    This will permanently delete this idea and all its contents. This cannot be undone.
-                                </p>
-                                <div className="flex gap-3 justify-end">
-                                    <button
-                                        onClick={() => setShowDeleteModal(false)}
-                                        className="px-4 py-2 rounded bg-[#1a1d21] text-slate-300 hover:bg-[#252830] transition-colors"
-                                    >
-                                        Cancel
-                                    </button>
-                                    <button
-                                        onClick={handleDeleteConfirm}
-                                        className="px-4 py-2 rounded bg-red-600 hover:bg-red-500 text-white font-medium transition-colors"
-                                    >
-                                        Delete
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    )}
-                </div>
-            );
-        }
-
-        // ─── PipelineScreen ───────────────────────────────────────────────────────
-
-        function PipelineScreen() {
-            const [pState, setPState] = useState({
-                pipeline_status: 'Loading...',
-                orchestrator_alive: true,
-                current_agent: null,
-                project_path: null,
-                current_phase_raw_id: '',
-                planner_retries: null,
-                executor_retries: null,
-                reviewer_retries: null,
-                last_error_code: null,
-                last_action_timestamp: null,
-                skill_injected: null,
-                skill_agent: null,
-                escalation_trigger_reason: null,
-                last_action: null,
-                escalation_resets: 0,
+      };
+      return React.createElement('div', { className: 'border-t border-[#1a1d21]' },
+        React.createElement('button', {
+          className: 'w-full text-left px-4 py-2 text-xs text-slate-500 hover:text-slate-300 border-t border-[#1a1d21]',
+          onClick: () => setShowEscalationPanel(v => !v)
+        }, showEscalationPanel ? '▲ Escalation Commands' : '▶ Escalation Commands'),
+        showEscalationPanel && React.createElement('form', { onSubmit: handleSubmit, className: 'p-3 space-y-2' },
+          React.createElement('div', { className: 'flex flex-wrap gap-1' },
+            ['RETRY', 'RESET_EXECUTION', 'RESET_PHASE', 'SKIP', 'PROCEED', 'STOP'].map(cmd =>
+              React.createElement('button', {
+                key: cmd, type: 'button',
+                className: `px-2 py-1 text-xs rounded border ${escalationCommand === cmd ? 'bg-[#3b82f6] border-[#3b82f6]' : 'border-[#1a1d21] text-slate-500 hover:border-slate-600'}`,
+                onClick: () => setEscalationCommand(cmd)
+              }, cmd)
+            )
+          ),
+          React.createElement('button', {
+            type: 'submit',
+            disabled: !escalationCommand || isEscalationLoading || pipelineStatus !== 'WAITING_FOR_HUMAN',
+            className: 'px-3 py-1.5 text-xs bg-[#3b82f6] hover:bg-[#2563eb] disabled:opacity-40 disabled:cursor-not-allowed rounded'
+          }, isEscalationLoading ? '...' : 'Execute'),
+          escalationResult && React.createElement('pre', { className: 'text-xs text-slate-400 bg-[#0d0f12] p-2 rounded overflow-x-auto' },
+            JSON.stringify(escalationResult.body, null, 2)
+          )
+        )
+      );
+    }
+
+    function CurrentPhasePanel({ currentPhase, currentPhaseRawId, pipelineStatus, lastErrorCode, lastActionTimestamp }) {
+      const isInProgress = pipelineStatus === 'RUNNING';
+      return React.createElement('div', { className: 'p-3 border-b border-[#1a1d21] bg-[#141618]' },
+        React.createElement('div', { className: 'flex items-center gap-2 mb-1' },
+          isInProgress && React.createElement('span', { className: 'w-2 h-2 rounded-full bg-green-500 status-pulse' }),
+          currentPhaseRawId && React.createElement('span', { className: 'text-xs font-bold text-[#3b82f6]' }, currentPhaseRawId),
+          currentPhase && React.createElement('span', { className: 'text-xs text-slate-400' }, currentPhase.detail || '')
+        ),
+        React.createElement('div', { className: 'flex gap-4 text-xs text-slate-500' },
+          lastErrorCode ? React.createElement('span', { className: 'text-red-400' }, `error: ${lastErrorCode}`) : null,
+          lastActionTimestamp ? React.createElement('span', null, `last: ${new Date(lastActionTimestamp).toLocaleTimeString()}`) : null
+        )
+      );
+    }
+
+    function RoadmapPanel({ roadmap }) {
+      const total = roadmap.length;
+      const complete = roadmap.filter(p => p.status === 'complete').length;
+      const pct = total > 0 ? Math.round((complete / total) * 100) : 0;
+      const statusIcons = { complete: '✓', in_progress: '▶', pending: '○', skipped: '⊘', blocked: '⚠' };
+      const statusColors = { complete: 'text-slate-500', in_progress: 'text-[#3b82f6] border-l-4 border-[#3b82f6]', pending: 'text-slate-400', skipped: 'text-slate-600', blocked: 'text-red-400 bg-red-900/10' };
+      return React.createElement('div', { className: 'flex-1 flex flex-col overflow-hidden p-4' },
+        React.createElement('div', { className: 'mb-3' },
+          React.createElement('div', { className: 'flex justify-between text-xs text-slate-500 mb-1' },
+            React.createElement('span', null, 'Progress'),
+            React.createElement('span', null, `${complete} / ${total} complete`)
+          ),
+          React.createElement('div', { className: 'h-1.5 bg-[#1a1d21] rounded-full overflow-hidden' },
+            React.createElement('div', { className: 'h-full bg-[#3b82f6] transition-all', style: { width: `${pct}%` } })
+          )
+        ),
+        React.createElement('div', { className: 'flex-1 overflow-y-auto scrollbar-thin space-y-1' },
+          roadmap.map((phase, i) =>
+            React.createElement('div', {
+              key: phase.id || i,
+              className: `p-2 rounded text-xs flex items-start gap-2 ${statusColors[phase.status] || 'text-slate-400'} ${phase.status === 'complete' ? 'opacity-60' : ''} ${phase.status === 'in_progress' ? 'bg-[#1e2028]' : ''}`
+            },
+              React.createElement('span', { className: 'mt-0.5 flex-shrink-0' }, statusIcons[phase.status] || '○'),
+              React.createElement('div', { className: 'flex-1 min-w-0' },
+                React.createElement('span', { className: 'font-bold mr-2' }, phase.id),
+                React.createElement('span', { className: 'text-slate-400 truncate' }, phase.goal)
+              )
+            )
+          )
+        )
+      );
+    }
+
+    // ─── triggerClarityCheck ────────────────────────────────────────────────────
+    function triggerClarityCheck(currentIdeaId) {
+      return fetch(`/api/ideas/${currentIdeaId}/clarity-check`, { method: 'POST' })
+        .then(r => r.json())
+        .then(data => data);
+    }
+
+    // ─── handleFileChange ───────────────────────────────────────────────────────
+    function handleFileChange(e, currentIdeaId, setPrdContent, setUploadError, setUploadSpinner, setClarityPass, setClarityIssues, setClarityMissing) {
+      const file = e.target.files[0];
+      if (!file) return;
+      setUploadError('');
+      if (!file.name.toLowerCase().endsWith('.md')) {
+        setUploadError('Only .md files are accepted.');
+        return;
+      }
+      setUploadSpinner(true);
+      const formData = new FormData();
+      formData.append('file', file);
+      fetch(`/api/ideas/${currentIdeaId}/upload`, { method: 'POST', body: formData })
+        .then(r => r.json())
+        .then(data => {
+          if (data.status === 'format_ok') {
+            setPrdContent(prev => prev + '\n\n' + (data._updated_content || ''));
+            triggerClarityCheck(currentIdeaId).then(d => {
+              setClarityPass(d.pass);
+              setClarityIssues(d.issues || []);
+              setClarityMissing(d.missing_sections || []);
             });
-            const [roadmap, setRoadmap] = useState(null);
-            const [metricsSummary, setMetricsSummary] = useState(null);
-            const [lastUpdate, setLastUpdate] = useState(null);
-            const [showStopModal, setShowStopModal] = useState(false);
-            const [stopRequested, setStopRequested] = useState(false);
+          } else {
+            setUploadError(data.detail || 'Upload failed');
+          }
+        })
+        .catch(err => setUploadError('Upload failed: ' + err.message))
+        .finally(() => setUploadSpinner(false));
+    }
 
-            useEffect(() => {
-                fetchState();
-                fetchRoadmap();
-                fetchMetricsSummary();
-                const stateInterval = setInterval(fetchState, 3000);
-                const roadmapInterval = setInterval(fetchRoadmap, 3000);
-                return () => {
-                    clearInterval(stateInterval);
-                    clearInterval(roadmapInterval);
-                };
-            }, []);
+    // ─── IdeasScreen ────────────────────────────────────────────────────────────
+    function IdeasScreen({ navigateToPreflight }) {
+      const [messages, setMessages] = useState([]);
+      const [prdContent, setPrdContent] = useState('');
+      const [isLoading, setIsLoading] = useState(false);
+      const currentIdeaId = '1';
+      const [inputValue, setInputValue] = useState('');
+      const [uploadError, setUploadError] = useState('');
+      const [uploadSpinner, setUploadSpinner] = useState(false);
+      const [clarityPass, setClarityPass] = useState(null);
+      const [clarityIssues, setClarityIssues] = useState([]);
+      const [clarityMissing, setClarityMissing] = useState([]);
+      const [roadmapContent, setRoadmapContent] = useState('');
+      const [isConverting, setIsConverting] = useState(false);
+      const [convertError, setConvertError] = useState('');
+      const [readiness, setReadiness] = useState(null);
+      const [showRoadmap, setShowRoadmap] = useState(false);
 
-            // Clear stop-requested indicator once pipeline leaves stoppable state
-            useEffect(() => {
-                const stoppable = ['RUNNING', 'WAITING_FOR_SENTINEL'];
-                if (!stoppable.includes(pState.pipeline_status)) {
-                    setStopRequested(false);
-                }
-            }, [pState.pipeline_status]);
+      // Load session on mount
+      useEffect(() => {
+        fetch(`/api/ideas/${currentIdeaId}/session`)
+          .then(r => r.json())
+          .then(data => {
+            setMessages(data.messages || []);
+            setPrdContent(data.prd_content || '');
+            setRoadmapContent(data.roadmap_content || '');
+            if (data.roadmap_content) setShowRoadmap(true);
+          })
+          .catch(() => {});
+      }, []);
 
-            function fetchState() {
-                fetch('/api/state')
-                    .then(res => res.json())
-                    .then(data => {
-                        setPState(prev => ({ ...prev, ...data }));
-                        setLastUpdate(new Date().toLocaleTimeString());
-                    })
-                    .catch(() => {});
-            }
+      // Fetch readiness when currentIdeaId or prdContent changes
+      useEffect(() => {
+        if (!currentIdeaId || !prdContent) return;
+        fetch(`/api/ideas/${currentIdeaId}/readiness`)
+          .then(r => r.json())
+          .then(data => setReadiness(data))
+          .catch(() => {});
+      }, [currentIdeaId, prdContent]);
 
-            function fetchRoadmap() {
-                fetch('/api/roadmap')
-                    .then(res => res.json())
-                    .then(data => {
-                        // Only update if data actually changed to avoid unnecessary re-renders
-                        setRoadmap(prev => {
-                            return JSON.stringify(prev) === JSON.stringify(data) ? prev : data;
-                        });
-                    })
-                    .catch(() => {});
-            }
+      const handleSendMessage = async () => {
+        if (!inputValue.trim() || isLoading) return;
+        const userMsg = inputValue.trim();
+        setInputValue('');
+        setIsLoading(true);
+        const turn = Date.now();
+        setMessages(prev => [...prev, { role: 'user', content: userMsg, ts: new Date().toISOString() }]);
+        try {
+          const r = await fetch(`/api/ideas/${currentIdeaId}/message`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content: userMsg, turn })
+          });
+          const data = await r.json();
+          setPrdContent(data.prd_content || '');
+          setMessages(prev => [...prev, { role: 'assistant', content: data.response || '', ts: new Date().toISOString() }]);
+        } catch (e) {
+          setMessages(prev => [...prev, { role: 'assistant', content: 'Error: ' + e.message, ts: new Date().toISOString() }]);
+        } finally {
+          setIsLoading(false);
+        }
+      };
 
-            function fetchMetricsSummary() {
-                fetch('/api/metrics-summary')
-                    .then(res => res.json())
-                    .then(data => { setMetricsSummary(data); })
-                    .catch(() => {});
-            }
+      const handleKeyDown = (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          handleSendMessage();
+        }
+      };
 
-            const handleStopConfirm = async () => {
-                setShowStopModal(false);
-                try {
-                    await fetch('/api/stop', { method: 'POST' });
-                    setStopRequested(true);
-                } catch (e) {
-                    console.log('Stop request failed:', e);
-                }
-            };
+      const handleGenerateRoadmap = async () => {
+        if (!prdContent || isConverting) return;
+        setIsConverting(true);
+        setConvertError('');
+        try {
+          const r = await fetch(`/api/ideas/${currentIdeaId}/convert`, { method: 'POST' });
+          if (r.status === 503) { setConvertError('Conversion prompt file missing (503)'); return; }
+          if (r.status === 408) { setConvertError('Conversion timed out (408)'); return; }
+          if (!r.ok) { setConvertError('Conversion failed: ' + r.status); return; }
+          const data = await r.json();
+          setRoadmapContent(data.roadmap_content || '');
+          setShowRoadmap(true);
+        } catch (e) {
+          setConvertError('Conversion error: ' + e.message);
+        } finally {
+          setIsConverting(false);
+        }
+      };
 
-            const handleRefresh = () => {
-                fetchState();
-                fetchRoadmap();
-                fetchMetricsSummary();
-            };
+      const handleDownloadRoadmap = () => {
+        window.location.href = `/api/ideas/${currentIdeaId}/download-roadmap`;
+      };
 
-            const status = pState.pipeline_status;
-            const alive = pState.orchestrator_alive;
-            const showStopButton = ['RUNNING', 'WAITING_FOR_SENTINEL'].includes(status);
+      const prdSections = [
+        '## Problem Statement',
+        '## Goals & Success Metrics',
+        '## User Stories',
+        '## Functional Requirements',
+        '## Edge Cases',
+        '## Non-Functional Requirements',
+        '## Dependencies & Integrations',
+        '## Milestones & Timeline',
+        '## Risks & Mitigations',
+        '## Open Questions',
+        '## Glossary & Domain Terms',
+        '## Revision History',
+      ];
 
-            // Derive header status label and class
-            let statusLabel = '--';
-            let statusClass = 'bg-[#1a1d21] text-slate-300';
-            if (!alive && (status === 'RUNNING' || status === 'WAITING_FOR_SENTINEL')) {
-                statusLabel = 'ORCHESTRATOR DOWN';
-                statusClass = 'bg-red-600 text-white';
-            } else if (status in STATE_LABELS) {
-                statusLabel = STATE_LABELS[status];
-                if (status === 'WAITING_FOR_SENTINEL' && pState.current_agent) {
-                    statusLabel = `WAITING — ${pState.current_agent}`;
-                }
-                statusClass = STATE_CLASSES[status] || 'bg-[#1a1d21] text-slate-300';
-            }
+      const getSectionContent = (header) => {
+        if (!prdContent) return '';
+        const lines = prdContent.split('\n');
+        const idx = lines.findIndex(l => l.trim() === header);
+        if (idx === -1) return '';
+        const nextIdx = lines.slice(idx + 1).findIndex(l => l.trim().startsWith('## '));
+        const end = nextIdx === -1 ? lines.length : idx + 1 + nextIdx;
+        return lines.slice(idx + 1, end).join('\n').trim();
+      };
 
-            const segments = (pState.project_path || '').split('/').filter(s => s);
-            const projectDisplay = segments.slice(-2).join('/') || '--/--';
+      const canGenerateRoadmap = readiness && readiness.ready && prdContent;
+      const isReady = readiness && readiness.ready;
 
-            return (
-                <div className="grid grid-rows-[auto_1fr_auto_auto] h-full overflow-hidden">
-                    {/* Header bar */}
-                    <header className="bg-[#141618] border-b border-[#1a1d21] px-6 py-4">
-                        <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-6">
-                                <span className="header-text text-sm text-slate-500 font-mono">{projectDisplay}</span>
-                            </div>
-                            <div className="flex items-center gap-3">
-                                {showStopButton && !stopRequested && (
-                                    <button
-                                        onClick={() => setShowStopModal(true)}
-                                        className="header-text px-3 py-1 text-xs bg-red-950 hover:bg-red-900 text-red-400 rounded border border-red-800 transition-colors"
-                                    >
-                                        Stop Pipeline
-                                    </button>
-                                )}
-                                {showStopButton && stopRequested && (
-                                    <button
-                                        disabled
-                                        className="header-text px-3 py-1 text-xs bg-red-950 text-red-400 rounded border border-red-800 opacity-70 status-pulse cursor-not-allowed"
-                                    >
-                                        Stopping...
-                                    </button>
-                                )}
-                                <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${alive ? 'bg-green-500' : 'bg-red-600'}`}></span>
-                                <span className={`header-text px-3 py-1 rounded-full text-sm font-medium ${statusClass}`}>
-                                    {statusLabel}
-                                </span>
-                            </div>
-                        </div>
-                    </header>
+      return (
+        <div className="flex h-full">
+          {/* Left pane: conversation */}
+          <div className="w-[38%] flex-shrink-0 flex flex-col bg-[#141618] border-r border-[#1a1d21] overflow-hidden">
+            <div className="flex-1 overflow-y-auto p-4 space-y-3">
+              {messages.length === 0 && (
+                <p className="text-slate-600 text-sm text-center mt-8">No messages yet. Type below to start.</p>
+              )}
+              {messages.map((m, i) => (
+                <div key={i} className={`fade-in ${m.role === 'user' ? 'text-right' : 'text-left'}`}>
+                  <div className={`inline-block max-w-[85%] px-3 py-2 rounded text-sm ${m.role === 'user' ? 'bg-[#3b82f6] text-white' : 'bg-[#1e2028] text-slate-300'}`}>
+                    {m.content.split('\n').map((line, j) => <p key={j}>{line}</p>)}
+                  </div>
+                </div>
+              ))}
+              {isLoading && (
+                <div className="text-left">
+                  <div className="inline-block bg-[#1e2028] px-3 py-2 rounded text-sm text-slate-400 status-pulse">Thinking...</div>
+                </div>
+              )}
+            </div>
+            <div className="border-t border-[#1a1d21] p-3">
+              <div className="flex gap-2">
+                <input
+                  type="text" value={inputValue}
+                  onChange={e => setInputValue(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder="Type a message..."
+                  className="flex-1 bg-[#1e2028] border border-[#1a1d21] rounded px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#3b82f6]"
+                />
+                <button
+                  onClick={handleSendMessage}
+                  disabled={isLoading || !inputValue.trim()}
+                  className="px-3 py-2 bg-[#3b82f6] hover:bg-[#2563eb] disabled:opacity-40 rounded text-sm"
+                >Send</button>
+              </div>
+            </div>
+          </div>
 
-                    {/* Middle section: two-panel grid (Phase 2a: 32/68 split) */}
-                    <main className="grid grid-cols-1 md:grid-cols-[32%_68%] gap-4 p-4 overflow-hidden">
-                        {/* Left: Current Phase */}
-                        <div className="bg-[#141618] rounded-lg border border-[#1a1d21] p-4 overflow-auto">
-                            <h2 className="header-text text-lg font-semibold text-slate-300 mb-4">Current Phase</h2>
-                            <CurrentPhasePanel
-                                current_phase_raw_id={pState.current_phase_raw_id}
-                                current_agent={pState.current_agent}
-                                roadmap={roadmap}
-                                planner_retries={pState.planner_retries}
-                                executor_retries={pState.executor_retries}
-                                reviewer_retries={pState.reviewer_retries}
-                                last_error_code={pState.last_error_code}
-                                last_action_timestamp={pState.last_action_timestamp}
-                                skill_injected={pState.skill_injected}
-                                skill_agent={pState.skill_agent}
-                                pipeline_status={status}
-                                metricsSummary={metricsSummary}
-                                escalation_resets={pState.escalation_resets || 0}
-                            />
-                            <EscalationCommandPanel
-                                pipeline_status={status}
-                                escalation_trigger_reason={pState.escalation_trigger_reason}
-                                last_action={pState.last_action}
-                                escalation_resets={pState.escalation_resets || 0}
-                            />
-                        </div>
+          {/* Right pane: PRD */}
+          <div className="flex-1 flex flex-col bg-[#141618] overflow-hidden">
+            {/* PRD pane header */}
+            <div className="flex items-center justify-between px-4 py-2 border-b border-[#1a1d21]">
+              <div className="flex items-center gap-3">
+                <span className="text-sm font-bold text-slate-300">PRD Document</span>
+                {clarityPass === true && <span className="text-xs px-2 py-0.5 rounded bg-green-900/30 text-green-400 border border-green-800/30">ready to convert</span>}
+                {clarityPass === false && <span className="text-xs px-2 py-0.5 rounded bg-red-900/30 text-red-400 border border-red-800/30">needs revision</span>}
+                {isReady && <span className="text-xs px-2 py-0.5 rounded bg-blue-900/30 text-blue-400 border border-blue-800/30">✓ ready</span>}
+              </div>
+              <div className="flex items-center gap-2">
+                <input type="file" accept=".md" onChange={e => handleFileChange(e, currentIdeaId, setPrdContent, setUploadError, setUploadSpinner, setClarityPass, setClarityIssues, setClarityMissing)} className="hidden" id="prd-upload" />
+                <label htmlFor="prd-upload" className={`px-3 py-1.5 text-xs rounded border border-[#1a1d21] cursor-pointer hover:border-slate-600 ${uploadSpinner ? 'opacity-50' : ''}`}>
+                  {uploadSpinner ? 'Uploading...' : 'Upload PRD'}
+                </label>
+                <button onClick={handleGenerateRoadmap} disabled={!canGenerateRoadmap || isConverting}
+                  className={`px-3 py-1.5 text-xs rounded border text-white transition-colors ${canGenerateRoadmap && !isConverting ? 'bg-[#3b82f6] hover:bg-[#2563eb] border-[#3b82f6]' : 'bg-slate-700 border-slate-600 opacity-50 cursor-not-allowed'}`}>
+                  {isConverting ? 'Converting...' : 'Generate Roadmap'}
+                </button>
+                {roadmapContent && (
+                  <button onClick={handleDownloadRoadmap}
+                    className="px-3 py-1.5 text-xs rounded border border-[#1a1d21] text-slate-400 hover:text-slate-200 hover:border-slate-600">
+                    Download Roadmap
+                  </button>
+                )}
+                {roadmapContent && (
+                  <button onClick={() => navigateToPreflight && navigateToPreflight(roadmapContent)}
+                    className="px-3 py-1.5 text-xs rounded bg-green-700 hover:bg-green-600 text-white border border-green-600">
+                    Proceed to Setup
+                  </button>
+                )}
+              </div>
+            </div>
 
-                        {/* Right: Roadmap */}
-                        <div className="bg-[#141618] rounded-lg border border-[#1a1d21] p-4 overflow-auto">
-                            <h2 className="header-text text-lg font-semibold text-slate-300 mb-4">Roadmap</h2>
-                            <RoadmapPanel roadmap={roadmap} metricsSummary={metricsSummary} />
-                        </div>
-                    </main>
+            {uploadError && <div className="px-4 py-2 text-xs text-red-400 bg-red-900/10 border-b border-red-800/20">{uploadError}</div>}
+            {convertError && <div className="px-4 py-2 text-xs text-red-400 bg-red-900/10 border-b border-red-800/20">{convertError}</div>}
+            {clarityPass === false && clarityMissing.length > 0 && (
+              <div className="px-4 py-2 text-xs text-red-400 bg-red-900/10 border-b border-red-800/20">
+                Missing sections: {clarityMissing.join(', ')}
+              </div>
+            )}
+            {clarityPass === false && clarityIssues.length > 0 && (
+              <div className="px-4 py-2 text-xs text-yellow-400 bg-yellow-900/10 border-b border-yellow-800/20">
+                {clarityIssues.map((iss, i) => <div key={i}>{iss}</div>)}
+              </div>
+            )}
 
-                    {/* Activity Feed */}
-                    <div className="bg-[#141618] border-t border-[#1a1d21] px-4 pt-3 pb-2 overflow-hidden">
-                        <h2 className="header-text text-sm font-semibold text-slate-400 mb-2">Activity Feed</h2>
-                        <ActivityFeedPanel />
-                    </div>
-
-                    {/* Footer */}
-                    <footer className="bg-[#141618] border-t border-[#1a1d21] px-6 py-3">
-                        <div className="flex items-center justify-between">
-                            <span className="header-text text-sm text-slate-500">Pipeline Executor v1.0</span>
-                            <div className="flex gap-4 items-center">
-                                <button
-                                    onClick={handleRefresh}
-                                    className="header-text px-3 py-1 text-sm bg-[#1a1d21] hover:bg-[#252830] rounded transition-colors"
-                                >
-                                    Refresh
-                                </button>
-                                <span className="header-text text-sm text-slate-500">
-                                    Last update: {lastUpdate || '--'}
-                                </span>
-                            </div>
-                        </div>
-                    </footer>
-
-                    {/* Stop confirmation modal */}
-                    {showStopModal && (
-                        <StopConfirmModal
-                            onConfirm={handleStopConfirm}
-                            onDismiss={() => setShowStopModal(false)}
-                        />
+            {/* PRD content scrollable */}
+            <div className="flex-1 overflow-y-auto scrollbar-thin p-6 space-y-4">
+              {prdSections.map((section, i) => {
+                const content = getSectionContent(section);
+                const isEmpty = !content;
+                return (
+                  <div key={i}>
+                    <h2 className="text-sm font-bold text-slate-300 mb-1">{section.replace('## ', '')}</h2>
+                    {isEmpty ? (
+                      <p className="text-slate-600 italic text-sm">({section.replace('## ', '').toLowerCase()} placeholder)</p>
+                    ) : (
+                      content.split('\n').map((line, j) => <p key={j} className="text-sm text-slate-300 leading-relaxed">{line}</p>)
                     )}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Roadmap section (below PRD panel) */}
+            {showRoadmap && roadmapContent && (
+              <div className="border-t border-[#1a1d21] max-h-64 overflow-y-auto scrollbar-thin p-4 bg-[#0d0f12]">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-sm font-bold text-slate-300">Generated Roadmap</h3>
+                  <button onClick={handleDownloadRoadmap} className="text-xs text-[#3b82f6] hover:text-[#60a5fa]">Download Roadmap</button>
                 </div>
-            );
-        }
+                <pre className="text-xs text-slate-400 whitespace-pre-wrap font-mono">{roadmapContent}</pre>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
 
-        // ─── Root App with routing ────────────────────────────────────────────────
+    // ─── PreflightScreen ────────────────────────────────────────────────────────
+    function PreflightScreen({ seedRoadmap, onBack }) {
+      return (
+        <div className="flex flex-col h-screen bg-[#141618]">
+          <div className="flex items-center gap-4 px-4 py-3 border-b border-[#1a1d21] bg-[#141618]">
+            <button onClick={onBack}
+              className="px-3 py-1.5 text-xs rounded border border-[#1a1d21] text-slate-400 hover:text-slate-200 hover:border-slate-600">
+              ← Back to Ideas
+            </button>
+            <span className="text-sm font-bold text-slate-300">Preflight Check</span>
+            {seedRoadmap && <span className="text-xs text-green-400">✓ Roadmap pre-populated</span>}
+          </div>
+          <div className="flex-1 overflow-y-auto scrollbar-thin p-6">
+            {seedRoadmap ? (
+              <div>
+                <h2 className="text-sm font-bold text-slate-300 mb-4">Pre-populated Roadmap</h2>
+                <pre className="text-xs text-slate-400 whitespace-pre-wrap font-mono bg-[#1e2028] p-4 rounded border border-[#1a1d21]">{seedRoadmap}</pre>
+              </div>
+            ) : (
+              <p className="text-slate-600 text-sm">No roadmap pre-populated. Go back and generate a roadmap first.</p>
+            )}
+          </div>
+        </div>
+      );
+    }
 
-        function App() {
-            const [currentScreen, setCurrentScreen] = useState('pipeline');
-
-            return (
-                <div className="flex h-screen overflow-hidden bg-[#0d0f12]">
-                    <Sidebar currentScreen={currentScreen} onNavigate={setCurrentScreen} />
-                    <div className="flex-1 flex flex-col overflow-hidden">
-                        {currentScreen === 'pipeline' && <PipelineScreen />}
-                        {currentScreen === 'preflight' && <PreflightScreen />}
-                        {currentScreen === 'ideas' && <IdeasScreen />}
-                    </div>
-                </div>
-            );
-        }
-
-        ReactDOM.createRoot(document.getElementById('app-root')).render(<App />);
-    </script>
+    // ─── Render ─────────────────────────────────────────────────────────────────
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
 </body>
 </html>
