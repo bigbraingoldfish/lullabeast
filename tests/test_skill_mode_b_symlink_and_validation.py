@@ -1,0 +1,97 @@
+"""
+Integration tests for init-project skill Mode B (connect existing repo).
+These tests MUST be run AFTER manually executing the skill steps as shell
+commands — they verify the results, they do not invoke the skill themselves.
+The symlink verification uses direct subprocess calls, not pytest tmp_path.
+"""
+import subprocess
+import os
+import re
+
+PROJECT_DIR = "/tmp/infra-e1-test-b"
+PIPELINE_SYMLINK = os.path.expanduser("~/.openclaw/pipeline-project")
+
+
+def test_symlink_points_to_project():
+    """readlink -f ~/.openclaw/pipeline-project equals /tmp/infra-e1-test-b"""
+    result = subprocess.run(
+        ["readlink", "-f", PIPELINE_SYMLINK],
+        capture_output=True, text=True
+    )
+    assert result.returncode == 0, f"readlink failed: {result.stderr}"
+    assert result.stdout.strip() == PROJECT_DIR, (
+        f"Expected {PROJECT_DIR}, got {result.stdout.strip()}"
+    )
+
+
+def test_repo_init_check_passes():
+    """python3 gate_scripts/repo_init_check.py /tmp/infra-e1-test-b exits 0"""
+    gate_script = "/home/pi/.openclaw/gate_scripts/repo_init_check.py"
+    result = subprocess.run(
+        ["python3", gate_script, PROJECT_DIR],
+        capture_output=True, text=True
+    )
+    assert result.returncode == 0, (
+        f"repo_init_check failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
+def test_gitignore_has_all_pipeline_entries():
+    """cat /tmp/infra-e1-test-b/.gitignore contains all 7 required pipeline entries"""
+    gitignore_path = os.path.join(PROJECT_DIR, ".gitignore")
+    with open(gitignore_path) as f:
+        content = f.read()
+
+    required = [
+        "*.done",
+        "phase_state.json",
+        "planner_output.json",
+        "executor_output.json",
+        "reviewer_output.json",
+        "escalation_output.json",
+        "current_phase.json",
+    ]
+    missing = [e for e in required if e not in content]
+    assert not missing, f"Missing .gitignore entries: {missing}"
+
+
+def test_roadmap_format_valid():
+    """roadmap.md passes the Phase line regex"""
+    roadmap_path = os.path.join(PROJECT_DIR, "roadmap.md")
+    with open(roadmap_path) as f:
+        lines = f.readlines()
+
+    phase_pattern = re.compile(r'^\- \[.\] `[A-Z]+-[A-Z]\d+` \| (LOW|HIGH) \| .+')
+    malformed = []
+    for line in lines:
+        line = line.strip()
+        if line.startswith("- ["):
+            if not phase_pattern.match(line):
+                malformed.append(line)
+    assert not malformed, f"Malformed phase lines: {malformed}"
+
+
+def test_roadmap_passes_roadmap_parser():
+    """python3 gate_scripts/roadmap_parser.py /tmp/infra-e1-test-b/roadmap.md exits 0"""
+    gate_script = "/home/pi/.openclaw/gate_scripts/roadmap_parser.py"
+    roadmap_path = os.path.join(PROJECT_DIR, "roadmap.md")
+    result = subprocess.run(
+        ["python3", gate_script, roadmap_path],
+        capture_output=True, text=True
+    )
+    assert result.returncode == 0, (
+        f"roadmap_parser failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
+def test_existing_placeholder_file_not_overwritten():
+    """The existing placeholder file in /tmp/infra-e1-test-b still has its original content"""
+    placeholder_path = os.path.join(PROJECT_DIR, "placeholder.txt")
+    assert os.path.exists(placeholder_path), (
+        f"placeholder.txt was deleted or moved: {placeholder_path}"
+    )
+    with open(placeholder_path) as f:
+        content = f.read()
+    assert "Mode B connects existing repo" in content, (
+        f"placeholder.txt was modified: {content!r}"
+    )
