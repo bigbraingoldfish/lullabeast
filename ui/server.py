@@ -343,6 +343,10 @@ DEFAULTS = {
     "events_path": "~/.openclaw/pipeline_events.jsonl",
     "roadmap_path": "~/.openclaw/pipeline-project/roadmap.md",
     "project_dir_path": "~/.openclaw/pipeline-project",
+    "ideas_dir": "~/.openclaw/ideas",
+    "hooks_url": "http://localhost:18789/hooks/agent",
+    "hooks_token": "pipeline-secret-token",
+    "conversion_prompt_path": "~/.openclaw/deployment-package/Updates/PRD to Roadmap (sonnet 4.5 ideal).txt",
 }
 
 
@@ -947,7 +951,7 @@ def post_resume_orchestrator():
 
     log_file = open("/tmp/orchestrator.log", "a")
     subprocess.Popen(
-        ["python", orchestrator_script, "--project", project_path],
+        ["python", orchestrator_script, "--project-path", project_path],
         cwd=autodev_repo_path,
         stdout=log_file,
         stderr=subprocess.STDOUT,
