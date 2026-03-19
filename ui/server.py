@@ -401,10 +401,10 @@ def root():
 
 def _read_json_file(path):
     """Read a JSON file and return its contents.
-    
+
     Args:
         path: Path to the JSON file.
-    
+
     Returns:
         Parsed JSON dict, or None on error.
     """
@@ -413,6 +413,41 @@ def _read_json_file(path):
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return None
+
+
+def _extract_summary(prd_content):
+    """Extract the first sentence after ## Problem Statement.
+
+    Args:
+        prd_content: Raw string content of the PRD document.
+
+    Returns:
+        The first sentence (up to first '.') after ## Problem Statement,
+        stripped of leading whitespace; empty string if section is absent
+        or blank.
+    """
+    if not prd_content:
+        return ""
+
+    lines = prd_content.split('\n')
+    in_section = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "## Problem Statement":
+            in_section = True
+            continue
+        if in_section:
+            # Skip blank lines
+            if not stripped:
+                continue
+            # Stop if we hit another section heading
+            if stripped.startswith("## "):
+                return ""
+            # Found a non-blank, non-section line — this is the summary
+            if '.' in stripped:
+                return stripped[:stripped.index('.')]
+            return stripped
+    return ""
 
 
 def _check_orchestrator_liveness(lock_path):
@@ -1211,6 +1246,142 @@ async def post_ideas_message(idea_id: str, request: Request):
     os.replace(tmp_path, session_path)
 
     return {"response": agent_response, "prd_content": prd_content}
+
+
+@app.get("/api/ideas")
+def get_ideas():
+    """List all idea documents.
+
+    Returns:
+        JSON array of {id, name, summary, updated} objects, sorted newest-first.
+        Returns [] if ideas_dir is absent or empty.
+    """
+    import shutil
+    config = load_config()
+    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    ideas_path = Path(ideas_dir)
+
+    if not ideas_path.exists():
+        return []
+
+    ideas = []
+    for subdir in ideas_path.iterdir():
+        if not subdir.is_dir():
+            continue
+        session_path = subdir / "session.json"
+        session_data = _read_json_file(str(session_path)) if session_path.exists() else {}
+        prd_content = session_data.get("prd_content", "") or ""
+
+        # Extract name from first # heading or fall back to id
+        name = None
+        for line in prd_content.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("# "):
+                name = stripped[2:].strip()
+                break
+        if not name:
+            name = subdir.name
+
+        summary = _extract_summary(prd_content)
+        updated = session_data.get("updated", "")
+
+        ideas.append({
+            "id": subdir.name,
+            "name": name,
+            "summary": summary,
+            "updated": updated,
+        })
+
+    # Sort newest first by updated timestamp
+    ideas.sort(key=lambda x: x.get("updated") or "", reverse=True)
+    return ideas
+
+
+@app.post("/api/ideas")
+def post_ideas():
+    """Create a new idea document.
+
+    Creates {ideas_dir}/{uuid}/session.json with empty schema.
+    Returns {"id": <uuid>}.
+    """
+    config = load_config()
+    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    ideas_path = Path(ideas_dir)
+    ideas_path.mkdir(parents=True, exist_ok=True)
+
+    idea_id = str(uuid.uuid4())
+    idea_dir = ideas_path / idea_id
+    idea_dir.mkdir(parents=True, exist_ok=True)
+
+    now = datetime.utcnow().isoformat() + "Z"
+    session_data = {
+        "messages": [],
+        "prd_content": "",
+        "created": now,
+        "updated": now,
+    }
+
+    session_path = idea_dir / "session.json"
+    with open(session_path, "w") as f:
+        json.dump(session_data, f)
+
+    return {"id": idea_id}
+
+
+@app.delete("/api/ideas/{idea_id}")
+def delete_ideas(idea_id: str):
+    """Delete an idea document and all its contents.
+
+    Returns 404 if the idea directory does not exist.
+    """
+    import shutil
+    config = load_config()
+    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    idea_path = Path(ideas_dir) / idea_id
+
+    if not idea_path.exists():
+        raise HTTPException(status_code=404, detail="Idea not found")
+
+    shutil.rmtree(idea_path)
+    return {"ok": True}
+
+
+@app.get("/api/ideas/{idea_id}/download")
+def download_ideas(idea_id: str):
+    """Download an idea's prd_content as a markdown file.
+
+    Filename is derived from the first # heading in prd_content,
+    or falls back to the idea id. Suffix is always "-prd.md".
+    Returns 404 if the idea is not found.
+    """
+    config = load_config()
+    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    session_path = Path(ideas_dir) / idea_id / "session.json"
+
+    if not session_path.exists():
+        raise HTTPException(status_code=404, detail="Idea not found")
+
+    session_data = _read_json_file(str(session_path)) or {}
+    prd_content = session_data.get("prd_content", "") or ""
+
+    # Derive filename from first # heading or fall back to id
+    filename = idea_id
+    for line in prd_content.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            heading = stripped[2:].strip()
+            # Sanitize: replace spaces with hyphens, keep alphanum/dash/underscore
+            filename = heading.replace(" ", "-")
+            break
+
+    filename = filename + "-prd.md"
+
+    from fastapi.responses import Response
+    return Response(
+        content=prd_content,
+        media_type="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/api/stop")

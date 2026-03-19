@@ -183,7 +183,7 @@ INFRA-B1 is a hard gate — nothing else starts until it is committed. INFRA-E1 
   >
   > **prd-creator skill behavior**: Conversational, no sentinel files on its own. Signals PRD completion by appending `> ✅ PRD CONVERSION-READY` to `prd_draft.md`. Server detects readiness by checking `prd_content` for this string.
 
-- [ ] `UI-E3` | LOW | Add document management — list, create, resume, and delete idea documents
+- [x] `UI-E3` | LOW | Add document management — list, create, resume, and delete idea documents
   > Test: The Ideas screen shows a document list. Creating a new document generates a UUID, creates `~/.openclaw/ideas/{id}/` and an empty `session.json`, adds it to the list, and opens a fresh session. Selecting an existing document restores conversation history and document state. Deleting a document shows a confirmation prompt, then removes the directory and its entry from the list. Download button produces a valid `.md` file named `{project-name}-prd.md`. Summary line shows the first sentence after `## Problem Statement`, or is blank if unpopulated.
   > Notes: **Storage**: `~/.openclaw/ideas/` (from `config.ideas_dir`). Each idea is a subdirectory `{uuid}/` containing `session.json` and optionally `prd_draft.md`, `roadmap_draft.md`, turn files.
   >
