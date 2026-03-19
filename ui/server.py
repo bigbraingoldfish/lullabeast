@@ -1,4 +1,5 @@
 """UI server module."""
+import aiohttp
 import fcntl
 import json
 import os
@@ -9,7 +10,7 @@ from pathlib import Path
 
 import asyncio
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from contextlib import asynccontextmanager
 
@@ -1090,6 +1091,126 @@ def get_metrics_summary():
             for p in phases
         ],
     }
+
+
+POLL_TIMEOUT = 120  # seconds; patchable in tests
+POLL_INTERVAL = 2   # seconds between sentinel checks
+
+
+@app.get("/api/ideas/{idea_id}/session")
+def get_ideas_session(idea_id: str):
+    """Return the full session.json for an idea, or empty schema if not found."""
+    config = load_config()
+    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    session_path = Path(ideas_dir) / idea_id / "session.json"
+
+    if not session_path.exists():
+        return {
+            "messages": [],
+            "prd_content": "",
+            "created": None,
+            "updated": None,
+        }
+
+    session_data = _read_json_file(str(session_path))
+    if session_data is None:
+        return {
+            "messages": [],
+            "prd_content": "",
+            "created": None,
+            "updated": None,
+        }
+    return session_data
+
+
+@app.post("/api/ideas/{idea_id}/message")
+async def post_ideas_message(idea_id: str, request: Request):
+    """POST a user message to the ideas agent, poll for sentinel, update session."""
+    config = load_config()
+    body = await request.json()
+    content = body.get("content")
+    turn_n = body.get("turn")
+
+    if not content or turn_n is None:
+        raise HTTPException(status_code=422, detail="Body must contain {content: str, turn: int}")
+
+    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
+    hooks_token = config.get("hooks_token", "")
+
+    # Build session key: ideas:{id}:session-{n}
+    session_key = f"ideas:{idea_id}:session-{turn_n}"
+
+    # Webhook payload
+    webhook_payload = {
+        "agentId": "prd-creator",
+        "sessionKey": session_key,
+        "wakeMode": "now",
+        "message": (
+            f"{content}\n\n"
+            f"[SYSTEM] Write your full turn response to ~/.openclaw/ideas/{idea_id}/turns/{turn_n}.md. "
+            f"When done, create the file ~/.openclaw/ideas/{idea_id}/turns/{turn_n}.done. "
+            f"Also write the current complete PRD document (all sections populated so far) "
+            f"to ~/.openclaw/ideas/{idea_id}/prd_draft.md after every turn."
+        ),
+    }
+
+    # Send webhook POST via a per-request aiohttp session
+    headers = {"Authorization": f"Bearer {hooks_token}"}
+    async with aiohttp.ClientSession() as session:
+        await session.post(hooks_url, json=webhook_payload, headers=headers)
+
+    idea_dir = Path(ideas_dir) / idea_id
+    turns_dir = idea_dir / "turns"
+    done_path = turns_dir / f"turn_{turn_n}.done"
+    md_path = turns_dir / f"turn_{turn_n}.md"
+    prd_draft_path = idea_dir / "prd_draft.md"
+
+    deadline = datetime.utcnow().timestamp() + POLL_TIMEOUT
+    while datetime.utcnow().timestamp() < deadline:
+        if done_path.exists():
+            break
+        await asyncio.sleep(POLL_INTERVAL)
+    else:
+        # Timed out
+        raise HTTPException(status_code=408, detail=f"Agent turn timed out after {POLL_TIMEOUT}s")
+
+    # Read agent response
+    agent_response = ""
+    if md_path.exists():
+        agent_response = md_path.read_text()
+
+    # Read updated prd_content from prd_draft.md
+    prd_content = ""
+    if prd_draft_path.exists():
+        prd_content = prd_draft_path.read_text()
+
+    # Load existing session.json
+    session_path = idea_dir / "session.json"
+    if session_path.exists():
+        session_data = _read_json_file(str(session_path)) or {
+            "messages": [], "prd_content": "", "created": None, "updated": None
+        }
+    else:
+        session_data = {"messages": [], "prd_content": "", "created": None, "updated": None}
+
+    # Append user and assistant messages
+    now = datetime.utcnow().isoformat() + "Z"
+    session_data.setdefault("messages", [])
+    session_data["messages"].append({"role": "user", "content": content, "ts": now})
+    session_data["messages"].append({"role": "assistant", "content": agent_response, "ts": now})
+    session_data["prd_content"] = prd_content
+    session_data["updated"] = now
+    if session_data.get("created") is None:
+        session_data["created"] = now
+
+    # Atomic write via .tmp + os.replace
+    tmp_path = str(session_path) + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(session_data, f)
+    os.replace(tmp_path, session_path)
+
+    return {"response": agent_response, "prd_content": prd_content}
 
 
 @app.post("/api/stop")
