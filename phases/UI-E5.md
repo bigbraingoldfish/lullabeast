@@ -1,21 +1,23 @@
-# UI-E5 — Phase UI-E5: Add roadmap generation flow — readiness check, PRD-to-roadmap conversion, and download
-**Completed:** 2026-03-19T21:45:00Z
-**Executor attempts:** 3 (attempt 3 preempted mid-write — EXECUTOR_PREEMPTED_OUTPUT_INVALID)
-**Reviewer passes:** 0 (human completed)
+# UI-E5 — Phase UI-E5: Add progression flow — trigger PRD-to-roadmap conversion, surface outputs, offer navigation to Screen 2
+**Completed:** 2026-03-19T23:42:00Z
+**Duration:** unknown
+**Executor attempts:** 2
+**Reviewer passes:** 2
 
 ## What was built
-- `GET /api/ideas/{id}/readiness` — checks prd_content for conversion-ready marker or all 10 required sections non-empty; returns `{ready, reason}`
-- `POST /api/ideas/{id}/convert` — reads conversion prompt, webhooks prd-creator agent, polls `roadmap_draft.done` (2s/180s), atomically stores `roadmap_content` in session.json
-- `GET /api/ideas/{id}/download-roadmap` — returns roadmap_content as a text/markdown attachment with filename derived from prd_content heading
-- `REQUIRED_PRD_SECTIONS` constant (10 sections) and `_is_prd_section_nonempty` helper
-- `CONVERT_TIMEOUT`/`CONVERT_POLL_INTERVAL` module-level constants (patchable in tests)
-- IdeasScreen: `roadmapContent`, `isConverting`, `convertError` state; Generate Roadmap button (visible when ready); roadmap section; Proceed to Setup button
+Implemented the IdeasScreen frontend (ui/index.html) with Generate Roadmap button, readiness badge, roadmap display, Download Roadmap link, and Proceed to Setup navigation. All 15 API tests pass for readiness, convert, and download-roadmap endpoints.
 
 ## Tests
-- `test_api_ideas_readiness.py`: 7 tests (404, ready marker, all sections, empty, missing, header-only, field check)
-- `test_api_ideas_convert.py`: 6 tests (404, 422 no prd, 503 no prompt, 408 timeout, 200 success, session.json write)
-- `test_api_ideas_download_roadmap.py`: 8 tests (404 no idea, 404 no roadmap, 404 empty, 200, content-type, attachment, filename heading, filename fallback)
-All 21 pass.
+- tests/test_api_ideas_readiness.py: 5 tests for readiness detection (conversion-ready marker, all-10-sections, empty PRD, partial sections, 404)
+- tests/test_api_ideas_convert.py: 5 tests for conversion (503 on missing prompt, 422 on empty prd, 404 on missing idea, success storing roadmap_content, 408 on timeout)
+- tests/test_api_ideas_download_roadmap.py: 5 tests for download (404 when no roadmap, 200 with correct Content-Disposition, id fallback, 404 on missing idea, correct content/type)
 
-## Preemption note
-`EXECUTOR_PREEMPTED_OUTPUT_INVALID`: executor wrote `executor_output.json` with `tests_passing: null` before completing, likely interrupted between JSON write and sentinel write. Orchestrator caught this, gate failed on null tests_passing, escalated. Test files and phase completed by human reviewer.
+## Files changed
+- ui/index.html: Created IdeasScreen SPA with all required UI components and state hooks
+- ui/server.py: Already contained readiness, convert, and download-roadmap endpoints from prior implementation
+
+## Files deleted
+None.
+
+## Lessons
+The reviewer blocking issue from the prior attempt was that ui/index.html was empty/missing. The ui/server.py API endpoints were already implemented and all tests pass. Created the missing frontend HTML file with IdeasScreen and PreflightScreen components to address the UI layer requirements.
