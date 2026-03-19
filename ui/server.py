@@ -10,8 +10,8 @@ from pathlib import Path
 
 import asyncio
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+from fastapi.responses import FileResponse, Response
 from contextlib import asynccontextmanager
 
 from ui.roadmap_parser import parse_roadmap
@@ -1382,6 +1382,152 @@ def download_ideas(idea_id: str):
         media_type="text/markdown",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+REQUIRED_PRD_HEADERS = [
+    "## Problem Statement",
+    "## Goals & Success Metrics",
+    "## Functional Requirements",
+]
+
+
+def _check_prd_headers(content: str) -> list[str]:
+    """Return list of missing required headers from PRD content."""
+    missing = []
+    for header in REQUIRED_PRD_HEADERS:
+        if header not in content:
+            missing.append(header)
+    return missing
+
+
+@app.post("/api/ideas/{idea_id}/upload")
+async def post_ideas_upload(
+    idea_id: str,
+    file: UploadFile = File(...),
+):
+    """Upload and validate a PRD markdown file.
+
+    Validates .md extension, checks for required headers, then atomically
+    writes the content to session.json['prd_content'] via tmp+replace.
+    """
+    # Validate .md extension (case-insensitive)
+    filename = file.filename or ""
+    if not filename.lower().endswith(".md"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only .md files are accepted",
+        )
+
+    content = await file.read()
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="File must be valid UTF-8 text")
+
+    # Check idea exists before doing content-level validation
+    config = load_config()
+    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    idea_dir = Path(ideas_dir) / idea_id
+
+    if not idea_dir.exists():
+        raise HTTPException(status_code=404, detail="Idea not found")
+
+    # Check required headers
+    missing = _check_prd_headers(text)
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Missing required headers: {', '.join(missing)}",
+            headers={"X-Missing-Headers": ",".join(missing)},
+        )
+
+    session_path = idea_dir / "session.json"
+    session_data = _read_json_file(str(session_path)) or {
+        "messages": [],
+        "prd_content": "",
+        "created": None,
+        "updated": None,
+    }
+    session_data["prd_content"] = text
+    session_data["updated"] = datetime.utcnow().isoformat() + "Z"
+
+    tmp_path = str(session_path) + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(session_data, f)
+    os.replace(tmp_path, session_path)
+
+    return {"status": "format_ok", "trigger_clarity_check": True}
+
+
+@app.post("/api/ideas/{idea_id}/clarity-check")
+async def post_ideas_clarity_check(idea_id: str):
+    """Trigger the PRD clarity check agent and poll for its result.
+
+    Reads current prd_content from session.json, sends a webhook POST to
+    hooks_url, then polls for clarity_result.done (2s interval, 60s timeout).
+    Returns the contents of clarity_result.json on success, 504 on timeout.
+    """
+    config = load_config()
+    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
+    hooks_token = config.get("hooks_token", "")
+
+    idea_dir = Path(ideas_dir) / idea_id
+    if not idea_dir.exists():
+        raise HTTPException(status_code=404, detail="Idea not found")
+
+    session_path = idea_dir / "session.json"
+    session_data = _read_json_file(str(session_path))
+    if not session_data:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    prd_content = session_data.get("prd_content", "")
+    if not prd_content:
+        raise HTTPException(status_code=422, detail="No prd_content to check")
+
+    # Build webhook payload
+    timestamp_ms = int(datetime.utcnow().timestamp() * 1000)
+    session_key = f"ideas:{idea_id}:clarity-{timestamp_ms}"
+    webhook_payload = {
+        "agentId": "prd-creator",
+        "sessionKey": session_key,
+        "wakeMode": "now",
+        "message": (
+            "Review the following PRD for clarity and completeness. "
+            "Do not write or modify any files other than clarity_result.json and clarity_result.done listed below. "
+            "Analyze whether all essential sections are present and well-formed. "
+            f"Write a JSON object to ~/.openclaw/ideas/{idea_id}/clarity_result.json with schema "
+            '{"pass": bool, "missing_sections": [str], "issues": [str]}, '
+            f"then create ~/.openclaw/ideas/{idea_id}/clarity_result.done.\n\n"
+            f"PRD CONTENT:\n{prd_content}"
+        ),
+    }
+
+    # Send webhook POST
+    headers = {"Authorization": f"Bearer {hooks_token}"}
+    async with aiohttp.ClientSession() as session:
+        await session.post(hooks_url, json=webhook_payload, headers=headers)
+
+    # Poll for clarity_result.done
+    done_path = idea_dir / "clarity_result.done"
+    result_path = idea_dir / "clarity_result.json"
+    deadline = datetime.utcnow().timestamp() + 60
+
+    while datetime.utcnow().timestamp() < deadline:
+        if done_path.exists():
+            break
+        await asyncio.sleep(2)
+    else:
+        raise HTTPException(status_code=504, detail="Clarity check timed out after 60s")
+
+    if not result_path.exists():
+        raise HTTPException(status_code=500, detail="clarity_result.done exists but clarity_result.json is missing")
+
+    result_data = _read_json_file(str(result_path))
+    if result_data is None:
+        raise HTTPException(status_code=500, detail="clarity_result.json is not valid JSON")
+
+    return result_data
 
 
 @app.post("/api/stop")
