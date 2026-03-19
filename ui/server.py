@@ -1143,6 +1143,7 @@ def get_ideas_session(idea_id: str):
         return {
             "messages": [],
             "prd_content": "",
+            "roadmap_content": "",
             "created": None,
             "updated": None,
         }
@@ -1152,6 +1153,7 @@ def get_ideas_session(idea_id: str):
         return {
             "messages": [],
             "prd_content": "",
+            "roadmap_content": "",
             "created": None,
             "updated": None,
         }
@@ -1317,6 +1319,7 @@ def post_ideas():
     session_data = {
         "messages": [],
         "prd_content": "",
+        "roadmap_content": "",
         "created": now,
         "updated": now,
     }
@@ -1528,6 +1531,233 @@ async def post_ideas_clarity_check(idea_id: str):
         raise HTTPException(status_code=500, detail="clarity_result.json is not valid JSON")
 
     return result_data
+
+
+# ─── Required sections for readiness check ───────────────────────────────────
+_READINESS_SECTIONS = [
+    "## Problem Statement",
+    "## Goals & Success Metrics",
+    "## User Stories",
+    "## Functional Requirements",
+    "## Edge Cases",
+    "## Non-Functional Requirements",
+    "## Dependencies & Integrations",
+    "## Risks & Mitigations",
+    "## Open Questions",
+    "## Glossary & Domain Terms",
+]
+
+CONVERT_TIMEOUT = 180   # seconds; patchable in tests
+CONVERT_POLL_INTERVAL = 2  # seconds between sentinel checks
+
+
+def _check_prd_readiness(prd_content: str):
+    """Determine if PRD content is ready for roadmap conversion.
+
+    Returns (ready: bool, reason: str).
+    Ready if content contains '> ✅ PRD CONVERSION-READY' marker
+    OR all 10 required sections are present with non-empty content.
+    A section is non-empty if it has at least one non-blank, non-header line.
+    """
+    if not prd_content:
+        return False, "prd_content is empty"
+
+    # Check marker
+    if "> ✅ PRD CONVERSION-READY" in prd_content:
+        return True, "conversion-ready marker present"
+
+    # Check all 10 required sections
+    missing = []
+    empty = []
+    lines = prd_content.split("\n")
+
+    for section in _READINESS_SECTIONS:
+        idx = -1
+        for i, line in enumerate(lines):
+            if line.strip() == section:
+                idx = i
+                break
+
+        if idx == -1:
+            missing.append(section)
+            continue
+
+        # Collect content between this section and the next ## header
+        content_lines = []
+        for j in range(idx + 1, len(lines)):
+            stripped = lines[j].strip()
+            if stripped.startswith("## "):
+                break
+            content_lines.append(stripped)
+
+        # Non-empty: at least one non-blank, non-header line
+        non_blank = [l for l in content_lines if l]
+        if not non_blank:
+            empty.append(section)
+
+    if missing:
+        return False, f"Missing sections: {', '.join(missing)}"
+    if empty:
+        return False, f"Empty sections: {', '.join(empty)}"
+
+    return True, "all 10 required sections present with non-empty content"
+
+
+@app.get("/api/ideas/{idea_id}/readiness")
+def get_ideas_readiness(idea_id: str):
+    """Check if an idea's PRD is ready for roadmap conversion.
+
+    Returns {"ready": bool, "reason": str}.
+    Ready if prd_content contains the conversion-ready marker
+    OR all 10 required sections are present with non-empty content.
+    Returns 404 if the idea is not found.
+    """
+    config = load_config()
+    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    session_path = Path(ideas_dir) / idea_id / "session.json"
+
+    if not session_path.exists():
+        raise HTTPException(status_code=404, detail="Idea not found")
+
+    session_data = _read_json_file(str(session_path)) or {}
+    prd_content = session_data.get("prd_content", "") or ""
+
+    ready, reason = _check_prd_readiness(prd_content)
+    return {"ready": ready, "reason": reason}
+
+
+@app.post("/api/ideas/{idea_id}/convert")
+async def post_ideas_convert(idea_id: str):
+    """Trigger PRD-to-roadmap conversion.
+
+    Reads conversion prompt from config.conversion_prompt_path, sends a webhook
+    to the prd-creator agent, polls for roadmap_draft.done (2s interval, 180s
+    timeout), then atomically stores the resulting roadmap_content in
+    session.json and returns it.
+
+    Returns 404 if the idea is not found.
+    Returns 422 if prd_content is empty.
+    Returns 503 if the conversion prompt file is missing.
+    Returns 408 if polling times out.
+    Returns 200 with {"roadmap_content": str} on success.
+    """
+    config = load_config()
+    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
+    hooks_token = config.get("hooks_token", "")
+    conversion_prompt_path = os.path.expanduser(
+        config.get("conversion_prompt_path", "")
+    )
+
+    idea_dir = Path(ideas_dir) / idea_id
+    if not idea_dir.exists():
+        raise HTTPException(status_code=404, detail="Idea not found")
+
+    session_path = idea_dir / "session.json"
+    session_data = _read_json_file(str(session_path)) or {}
+    prd_content = session_data.get("prd_content", "") or ""
+
+    if not prd_content:
+        raise HTTPException(status_code=422, detail="No prd_content to convert")
+
+    # Read conversion prompt — 503 if missing
+    if not Path(conversion_prompt_path).exists():
+        raise HTTPException(status_code=503, detail="Conversion prompt file not found")
+
+    conversion_prompt = Path(conversion_prompt_path).read_text()
+
+    # Build webhook payload
+    timestamp_ms = int(datetime.utcnow().timestamp() * 1000)
+    session_key = f"ideas:{idea_id}:convert-{timestamp_ms}"
+    webhook_payload = {
+        "agentId": "prd-creator",
+        "sessionKey": session_key,
+        "wakeMode": "now",
+        "message": (
+            f"{conversion_prompt.strip()}\n\n"
+            f"---\n\n"
+            f"{prd_content}\n\n"
+            f"Write the resulting roadmap.md content to "
+            f"~/.openclaw/ideas/{idea_id}/roadmap_draft.md, then create "
+            f"~/.openclaw/ideas/{idea_id}/roadmap_draft.done."
+        ),
+    }
+
+    # Send webhook POST
+    headers = {"Authorization": f"Bearer {hooks_token}"}
+    async with aiohttp.ClientSession() as session:
+        await session.post(hooks_url, json=webhook_payload, headers=headers)
+
+    # Poll for roadmap_draft.done
+    done_path = idea_dir / "roadmap_draft.done"
+    deadline = datetime.utcnow().timestamp() + CONVERT_TIMEOUT
+
+    while datetime.utcnow().timestamp() < deadline:
+        if done_path.exists():
+            break
+        await asyncio.sleep(CONVERT_POLL_INTERVAL)
+    else:
+        raise HTTPException(
+            status_code=408,
+            detail=f"Conversion timed out after {CONVERT_TIMEOUT}s"
+        )
+
+    # Read roadmap content
+    roadmap_draft_path = idea_dir / "roadmap_draft.md"
+    roadmap_content = ""
+    if roadmap_draft_path.exists():
+        roadmap_content = roadmap_draft_path.read_text()
+
+    # Atomically store roadmap_content in session.json
+    session_data["roadmap_content"] = roadmap_content
+    session_data["updated"] = datetime.utcnow().isoformat() + "Z"
+    tmp_path = str(session_path) + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(session_data, f)
+    os.replace(tmp_path, session_path)
+
+    return {"roadmap_content": roadmap_content}
+
+
+@app.get("/api/ideas/{idea_id}/download-roadmap")
+def get_ideas_download_roadmap(idea_id: str):
+    """Download the roadmap_content from session.json as a markdown file.
+
+    Filename is derived from the first # heading in prd_content,
+    or falls back to the idea id. Suffix is always "-roadmap.md".
+    Returns 404 if the idea is not found or roadmap_content is empty.
+    """
+    config = load_config()
+    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    session_path = Path(ideas_dir) / idea_id / "session.json"
+
+    if not session_path.exists():
+        raise HTTPException(status_code=404, detail="Idea not found")
+
+    session_data = _read_json_file(str(session_path)) or {}
+    roadmap_content = session_data.get("roadmap_content", "") or ""
+
+    if not roadmap_content:
+        raise HTTPException(status_code=404, detail="No roadmap content available")
+
+    # Derive filename from first # heading in prd_content, or fall back to id
+    prd_content = session_data.get("prd_content", "") or ""
+    filename = idea_id
+    for line in prd_content.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            heading = stripped[2:].strip()
+            filename = heading.replace(" ", "-")
+            break
+
+    filename = filename + "-roadmap.md"
+
+    from fastapi.responses import Response
+    return Response(
+        content=roadmap_content,
+        media_type="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/api/stop")
