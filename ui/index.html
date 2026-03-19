@@ -1149,14 +1149,47 @@
 
         function IdeasScreen() {
             return (
-                <div className="flex-1 flex items-center justify-center h-full bg-[#0d0f12]">
-                    <div className="text-center space-y-4">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-12 h-12 text-slate-700 mx-auto">
-                            <path d="M9 18h6M10 22h4M12 2C8.13 2 5 5.13 5 9c0 2.38 1.19 4.47 3 5.74V17h8v-2.26C17.81 13.47 19 11.38 19 9c0-3.87-3.13-7-7-7z"/>
-                        </svg>
-                        <div>
-                            <p className="header-text text-lg font-semibold text-slate-600">Project Ideas</p>
-                            <p className="text-slate-700 text-sm mt-1">Coming soon</p>
+                <div className="flex h-full">
+                    {/* Left pane: Conversation */}
+                    <div className="w-[38%] flex-shrink-0 border-r border-[#1a1d21] flex flex-col bg-[#141618] overflow-hidden">
+                        <div className="flex-1 overflow-y-auto p-4">
+                            {/* Empty message list */}
+                        </div>
+                        <div className="border-t border-[#1a1d21] p-3">
+                            <input
+                                type="text"
+                                className="w-full bg-[#1a1d21] border border-[#2a2d31] rounded px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-slate-500"
+                                placeholder="Type a message..."
+                            />
+                        </div>
+                    </div>
+                    {/* Right pane: PRD Document */}
+                    <div className="flex-1 flex flex-col bg-[#141618] overflow-hidden">
+                        <div className="flex-1 overflow-y-auto p-4">
+                            <h2 className="text-slate-400 font-semibold text-lg mb-1">Problem Statement</h2>
+                            <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>
+                            <h2 className="text-slate-400 font-semibold text-lg mb-1 mt-4">Goals & Success Metrics</h2>
+                            <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>
+                            <h2 className="text-slate-400 font-semibold text-lg mb-1 mt-4">User Stories</h2>
+                            <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>
+                            <h2 className="text-slate-400 font-semibold text-lg mb-1 mt-4">Functional Requirements</h2>
+                            <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>
+                            <h2 className="text-slate-400 font-semibold text-lg mb-1 mt-4">Edge Cases</h2>
+                            <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>
+                            <h2 className="text-slate-400 font-semibold text-lg mb-1 mt-4">Non-Functional Requirements</h2>
+                            <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>
+                            <h2 className="text-slate-400 font-semibold text-lg mb-1 mt-4">Dependencies & Integrations</h2>
+                            <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>
+                            <h2 className="text-slate-400 font-semibold text-lg mb-1 mt-4">Milestones & Timeline</h2>
+                            <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>
+                            <h2 className="text-slate-400 font-semibold text-lg mb-1 mt-4">Risks & Mitigations</h2>
+                            <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>
+                            <h2 className="text-slate-400 font-semibold text-lg mb-1 mt-4">Open Questions</h2>
+                            <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>
+                            <h2 className="text-slate-400 font-semibold text-lg mb-1 mt-4">Glossary & Domain Terms</h2>
+                            <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>
+                            <h2 className="text-slate-400 font-semibold text-lg mb-1 mt-4">Revision History</h2>
+                            <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>
                         </div>
                     </div>
                 </div>
