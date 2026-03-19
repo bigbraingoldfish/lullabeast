@@ -199,7 +199,7 @@ INFRA-B1 is a hard gate — nothing else starts until it is committed. INFRA-E1 
 
 ### Milestone 3 — Screen 1 Upload & Progression
 
-- [ ] `UI-E4` | HIGH | Add PRD upload flow with agent clarity check and format validation gate
+- [x] `UI-E4` | HIGH | Add PRD upload flow with agent clarity check and format validation gate
   > Test: A file upload input on the Ideas screen accepts `.md` files only. Uploading a file containing `## Problem Statement`, `## Goals & Success Metrics`, and `## Functional Requirements` headers triggers a clarity check agent call and shows "ready to convert" on pass. A file missing any of those three headers is rejected server-side with a message naming each missing header — the agent is never called for a rejected file. A non-`.md` file is rejected client-side. No non-conforming file silently passes. The clarity check uses the sentinel polling pattern (max 60s, 2s intervals).
   > Notes: **Upload endpoint**: `POST /api/ideas/{id}/upload` — body: multipart form with `file` field. Server validates `.md` extension and presence of the 3 required headers before any agent call. On format pass: atomic-write uploaded content to `session.json.prd_content` and trigger clarity check.
   >
