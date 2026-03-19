@@ -16,4 +16,10 @@ planner_output.json
 executor_output.json
 reviewer_output.json
 escalation_output.json
+failure_context.json
 current_phase.json
+
+# mkstemp atomic-write temp files (8-char hex suffix from tempfile.mkstemp)
+pipeline_state_????????
+phase_state_????????
+current_phase_????????

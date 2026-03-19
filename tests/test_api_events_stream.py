@@ -8,7 +8,6 @@ from unittest.mock import patch
 import pytest
 import threading
 import requests
-import shutil
 import uvicorn
 from ui.server import app, load_config, _ring_buffer, _sse_clients, _sse_clients_lock
 
@@ -19,15 +18,9 @@ TEST_PORT = 18810
 
 def start_test_server(port, config):
     """Start the test server in a background thread."""
-    config_path = os.path.join(tempfile.gettempdir(), 'test_ui_config.json')
-    with open(config_path, 'w') as f:
-        json.dump(config, f)
-    # Copy to ui directory
-    shutil.copy(config_path, '/home/pi/.openclaw/workspace-executor/pipeline-project/ui/config.json')
-    
     def run():
         uvicorn.run(app, host='127.0.0.1', port=port, log_level='error')
-    
+
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
     time.sleep(2)  # Wait for server to start

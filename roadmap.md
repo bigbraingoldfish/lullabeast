@@ -89,7 +89,7 @@ INFRA-B1 is a hard gate — nothing else starts until it is committed. INFRA-E1 
 
 ### Milestone 0 — Pre-flight Bug Fix
 
-- [ ] `INFRA-B1` | HIGH | Fix --project-path CLI argument mismatch in server.py, add prd-creator to OpenClaw config, and add all new config keys to server.py
+- [x] `INFRA-B1` | HIGH | Fix --project-path CLI argument mismatch in server.py, add prd-creator to OpenClaw config, and add all new config keys to server.py
   > Test: After this phase: (1) `POST /api/resume-orchestrator` spawns the orchestrator with `--project-path` — verify by inspecting the spawned process args via `ps aux` and confirming `pipeline_state.json` contains `project_path` after a mock resume cycle. (2) `~/.openclaw/openclaw.json` `hooks.allowedAgentIds` contains `"prd-creator"`. (3) `~/.openclaw/openclaw.json` `hooks.allowedSessionKeyPrefixes` contains `"ideas:"`. (4) `server.py` DEFAULTS contains `ideas_dir`, `hooks_url`, `hooks_token`, `conversion_prompt_path`. (5) `ui/config.json` contains `ideas_dir`, `hooks_url`, `hooks_token`, `conversion_prompt_path`.
   > Notes: **Fix 1 — CLI arg**: In `ui/server.py` `post_resume_orchestrator()` (currently at line ~950), change `"--project"` to `"--project-path"`. The orchestrator defines this arg at `orchestrator.py` line 2098 with `dest="project_path"`. No other change to the orchestrator.
   >
