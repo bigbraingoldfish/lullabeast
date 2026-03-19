@@ -1148,48 +1148,92 @@
         }
 
         function IdeasScreen() {
+            const [messages, setMessages] = React.useState([]);
+            const [prdContent, setPrdContent] = React.useState('');
+            const [isLoading, setIsLoading] = React.useState(false);
+            const currentIdeaId = '1';
+
+            // Restore session on mount
+            React.useEffect(() => {
+                fetch(`/api/ideas/${currentIdeaId}/session`)
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.messages) setMessages(data.messages);
+                        if (data.prd_content) setPrdContent(data.prd_content);
+                    })
+                    .catch(() => {});
+            }, []);
+
+            function handleKeyDown(e) {
+                if (e.key !== 'Enter') return;
+                const input = e.target;
+                const content = input.value.trim();
+                if (!content || isLoading) return;
+                input.value = '';
+
+                const turn = Math.floor(messages.length / 2) + 1;
+                const now = new Date().toISOString();
+
+                // Optimistically append user message immediately
+                setMessages(prev => [...prev, { role: 'user', content, ts: now }]);
+                setIsLoading(true);
+
+                fetch(`/api/ideas/${currentIdeaId}/message`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content, turn }),
+                })
+                    .then(r => r.json())
+                    .then(data => {
+                        setMessages(prev => [...prev, { role: 'assistant', content: data.response || '', ts: new Date().toISOString() }]);
+                        if (data.prd_content !== undefined) setPrdContent(data.prd_content);
+                        setIsLoading(false);
+                    })
+                    .catch(() => setIsLoading(false));
+            }
+
+            function renderPrd(text) {
+                if (!text) {
+                    return <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>;
+                }
+                return text.split('\n\n').map((block, i) => {
+                    if (block.startsWith('# ')) return <h2 key={i} className="text-slate-200 font-bold text-lg mt-4 first:mt-0">{block.slice(2)}</h2>;
+                    if (block.startsWith('## ')) return <h3 key={i} className="text-slate-300 font-semibold text-base mt-3"><strong>{block.slice(3)}</strong></h3>;
+                    return <p key={i} className="text-slate-400 text-sm mt-1">{block}</p>;
+                });
+            }
+
             return (
                 <div className="flex h-full">
                     {/* Left pane: Conversation */}
                     <div className="w-[38%] flex-shrink-0 border-r border-[#1a1d21] flex flex-col bg-[#141618] overflow-hidden">
-                        <div className="flex-1 overflow-y-auto p-4">
-                            {/* Empty message list */}
+                        <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                            {messages.map((msg, i) => (
+                                msg.role === 'user' ? (
+                                    <div key={i} className="flex justify-end">
+                                        <div className="bg-cyan-900 text-cyan-100 rounded-lg px-3 py-2 text-sm max-w-[80%]">{msg.content}</div>
+                                    </div>
+                                ) : (
+                                    <div key={i} className="flex justify-start">
+                                        <div className="bg-[#1a1d21] text-slate-300 rounded-lg px-3 py-2 text-sm max-w-[80%]">{msg.content}</div>
+                                    </div>
+                                )
+                            ))}
                         </div>
                         <div className="border-t border-[#1a1d21] p-3">
                             <input
                                 type="text"
                                 className="w-full bg-[#1a1d21] border border-[#2a2d31] rounded px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-slate-500"
                                 placeholder="Type a message..."
+                                onKeyDown={handleKeyDown}
+                                disabled={isLoading}
                             />
                         </div>
                     </div>
                     {/* Right pane: PRD Document */}
-                    <div className="flex-1 flex flex-col bg-[#141618] overflow-hidden">
+                    <div className={`flex-1 flex flex-col bg-[#141618] overflow-hidden ${isLoading ? 'status-pulse' : ''}`}>
                         <div className="flex-1 overflow-y-auto p-4">
-                            <h2 className="text-slate-400 font-semibold text-lg mb-1">Problem Statement</h2>
-                            <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>
-                            <h2 className="text-slate-400 font-semibold text-lg mb-1 mt-4">Goals & Success Metrics</h2>
-                            <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>
-                            <h2 className="text-slate-400 font-semibold text-lg mb-1 mt-4">User Stories</h2>
-                            <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>
-                            <h2 className="text-slate-400 font-semibold text-lg mb-1 mt-4">Functional Requirements</h2>
-                            <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>
-                            <h2 className="text-slate-400 font-semibold text-lg mb-1 mt-4">Edge Cases</h2>
-                            <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>
-                            <h2 className="text-slate-400 font-semibold text-lg mb-1 mt-4">Non-Functional Requirements</h2>
-                            <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>
-                            <h2 className="text-slate-400 font-semibold text-lg mb-1 mt-4">Dependencies & Integrations</h2>
-                            <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>
-                            <h2 className="text-slate-400 font-semibold text-lg mb-1 mt-4">Milestones & Timeline</h2>
-                            <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>
-                            <h2 className="text-slate-400 font-semibold text-lg mb-1 mt-4">Risks & Mitigations</h2>
-                            <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>
-                            <h2 className="text-slate-400 font-semibold text-lg mb-1 mt-4">Open Questions</h2>
-                            <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>
-                            <h2 className="text-slate-400 font-semibold text-lg mb-1 mt-4">Glossary & Domain Terms</h2>
-                            <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>
-                            <h2 className="text-slate-400 font-semibold text-lg mb-1 mt-4">Revision History</h2>
-                            <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>
+                            {renderPrd(prdContent)}
                         </div>
                     </div>
                 </div>

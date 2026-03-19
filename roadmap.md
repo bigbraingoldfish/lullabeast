@@ -147,7 +147,7 @@ INFRA-B1 is a hard gate — nothing else starts until it is committed. INFRA-E1 
   >
   > **No agent wiring in this phase.** Agent wiring is UI-E2. Text input submit does nothing. Message list is empty.
 
-- [ ] `UI-E2` | HIGH | Wire the prd-creator agent session to Screen 1 with sentinel polling, live document updates, and persisted conversation history
+- [x] `UI-E2` | HIGH | Wire the prd-creator agent session to Screen 1 with sentinel polling, live document updates, and persisted conversation history
   > Test: Sending a message in the conversation pane posts to `POST /api/ideas/{id}/message`. The server calls the OpenClaw webhook, then polls for the agent's turn-completion sentinel (max 120s, 2s intervals). While polling is active, the document pane shows a visible loading state. The agent's response appears in the conversation pane after polling completes. The right-panel document updates with the new PRD content. Refreshing the page and reopening the document restores both conversation history and document state without data loss. A unique session key is used per idea document per turn: `ideas:{id}:session-{n}` where n increments each turn.
   > Notes: **Architecture — sentinel polling (not streaming)**: The OpenClaw webhook (`POST /hooks/agent`) returns immediately after queuing the agent. The agent runs asynchronously. The server polls for output. Workflow: send webhook → poll `~/.openclaw/ideas/{id}/turns/{turn_n}.done` every 2 seconds up to 120 seconds → on sentinel found, read `~/.openclaw/ideas/{id}/turns/{turn_n}.md` as the agent's response.
   >
