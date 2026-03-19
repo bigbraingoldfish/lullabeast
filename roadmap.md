@@ -137,7 +137,7 @@ INFRA-B1 is a hard gate — nothing else starts until it is committed. INFRA-E1 
 
 ### Milestone 2 — Screen 1 Core
 
-- [ ] `UI-E1` | LOW | Render the Screen 1 split-panel scaffold with a conversation pane and a static PRD document pane
+- [x] `UI-E1` | LOW | Render the Screen 1 split-panel scaffold with a conversation pane and a static PRD document pane
   > Test: Navigating to the Ideas screen (`currentScreen === 'ideas'`) displays two side-by-side panels filling the available content area. Left panel shows an empty message list area and a text input pinned to the bottom. Right panel shows a placeholder PRD skeleton with all 12 canonical section headers rendered as formatted markdown `##` headings with dim placeholder text under each. Both panels scroll independently. No agent session is wired — all content is static. No console errors.
   > Notes: Replace the existing `IdeasScreen` function (lines 1150–1164 in `ui/index.html`) entirely. Keep the component name `IdeasScreen`.
   >
