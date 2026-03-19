@@ -1148,24 +1148,90 @@
         }
 
         function IdeasScreen() {
+            const [ideas, setIdeas] = React.useState([]);
+            const [currentIdeaId, setCurrentIdeaId] = React.useState(null);
             const [messages, setMessages] = React.useState([]);
             const [prdContent, setPrdContent] = React.useState('');
             const [isLoading, setIsLoading] = React.useState(false);
-            const currentIdeaId = '1';
+            const [showDeleteModal, setShowDeleteModal] = React.useState(false);
+            const [deleteTargetId, setDeleteTargetId] = React.useState(null);
 
-            // Restore session on mount
+            // Fetch idea list on mount
             React.useEffect(() => {
+                fetchIdeas();
+            }, []);
+
+            // Fetch session when currentIdeaId changes
+            React.useEffect(() => {
+                if (!currentIdeaId) return;
                 fetch(`/api/ideas/${currentIdeaId}/session`)
                     .then(r => r.json())
                     .then(data => {
                         if (data.messages) setMessages(data.messages);
+                        else setMessages([]);
                         if (data.prd_content) setPrdContent(data.prd_content);
+                        else setPrdContent('');
                     })
                     .catch(() => {});
-            }, []);
+            }, [currentIdeaId]);
+
+            function fetchIdeas() {
+                fetch('/api/ideas')
+                    .then(r => r.json())
+                    .then(data => {
+                        if (Array.isArray(data)) setIdeas(data);
+                    })
+                    .catch(() => {});
+            }
+
+            function handleNewIdea() {
+                fetch('/api/ideas', { method: 'POST' })
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.id) {
+                            setCurrentIdeaId(data.id);
+                            setMessages([]);
+                            setPrdContent('');
+                            fetchIdeas();
+                        }
+                    })
+                    .catch(() => {});
+            }
+
+            function handleSelectIdea(ideaId) {
+                setCurrentIdeaId(ideaId);
+            }
+
+            function handleDeleteClick(ideaId, e) {
+                e.stopPropagation();
+                setDeleteTargetId(ideaId);
+                setShowDeleteModal(true);
+            }
+
+            function handleDeleteConfirm() {
+                if (!deleteTargetId) return;
+                fetch(`/api/ideas/${deleteTargetId}`, { method: 'DELETE' })
+                    .then(() => {
+                        setShowDeleteModal(false);
+                        setDeleteTargetId(null);
+                        if (currentIdeaId === deleteTargetId) {
+                            setCurrentIdeaId(null);
+                            setMessages([]);
+                            setPrdContent('');
+                        }
+                        fetchIdeas();
+                    })
+                    .catch(() => {});
+            }
+
+            function handleDownload(ideaId, e) {
+                e.stopPropagation();
+                window.open(`/api/ideas/${ideaId}/download`, '_blank');
+            }
 
             function handleKeyDown(e) {
                 if (e.key !== 'Enter') return;
+                if (!currentIdeaId) return;
                 const input = e.target;
                 const content = input.value.trim();
                 if (!content || isLoading) return;
@@ -1174,7 +1240,6 @@
                 const turn = Math.floor(messages.length / 2) + 1;
                 const now = new Date().toISOString();
 
-                // Optimistically append user message immediately
                 setMessages(prev => [...prev, { role: 'user', content, ts: now }]);
                 setIsLoading(true);
 
@@ -1203,39 +1268,163 @@
                 });
             }
 
+            function formatUpdated(ts) {
+                if (!ts) return '—';
+                try {
+                    const d = new Date(ts);
+                    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                } catch {
+                    return ts;
+                }
+            }
+
+            const selectedIdea = ideas.find(a => a.id === currentIdeaId);
+
             return (
                 <div className="flex h-full">
-                    {/* Left pane: Conversation */}
-                    <div className="w-[38%] flex-shrink-0 border-r border-[#1a1d21] flex flex-col bg-[#141618] overflow-hidden">
-                        <div className="flex-1 overflow-y-auto p-4 space-y-3">
-                            {messages.map((msg, i) => (
-                                msg.role === 'user' ? (
-                                    <div key={i} className="flex justify-end">
-                                        <div className="bg-cyan-900 text-cyan-100 rounded-lg px-3 py-2 text-sm max-w-[80%]">{msg.content}</div>
-                                    </div>
-                                ) : (
-                                    <div key={i} className="flex justify-start">
-                                        <div className="bg-[#1a1d21] text-slate-300 rounded-lg px-3 py-2 text-sm max-w-[80%]">{msg.content}</div>
-                                    </div>
-                                )
-                            ))}
+                    {/* Left pane: Idea list */}
+                    <div className="w-56 flex-shrink-0 border-r border-[#1a1d21] flex flex-col bg-[#141618] overflow-hidden">
+                        <div className="p-3 border-b border-[#1a1d21] flex items-center justify-between">
+                            <span className="header-text text-xs font-semibold text-slate-300">Ideas</span>
+                            <button
+                                onClick={handleNewIdea}
+                                className="header-text px-2 py-1 rounded text-xs bg-emerald-700 hover:bg-emerald-600 text-white transition-colors"
+                            >
+                                + New
+                            </button>
                         </div>
-                        <div className="border-t border-[#1a1d21] p-3">
-                            <input
-                                type="text"
-                                className="w-full bg-[#1a1d21] border border-[#2a2d31] rounded px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-slate-500"
-                                placeholder="Type a message..."
-                                onKeyDown={handleKeyDown}
-                                disabled={isLoading}
-                            />
+                        <div className="flex-1 overflow-y-auto">
+                            {ideas.length === 0 ? (
+                                <div className="p-4 text-center text-slate-600 text-xs">No ideas yet</div>
+                            ) : (
+                                ideas.map(idea => (
+                                    <div
+                                        key={idea.id}
+                                        role="button"
+                                        tabIndex={0}
+                                        onClick={() => handleSelectIdea(idea.id)}
+                                        onKeyDown={e => { if (e.key === 'Enter') handleSelectIdea(idea.id); }}
+                                        className={`p-3 border-b border-[#1a1d21] cursor-pointer transition-colors group ${
+                                            currentIdeaId === idea.id
+                                                ? 'bg-[#00b4d8]/10 border-l-2 border-l-[#00b4d8]'
+                                                : 'hover:bg-[#1a1d21]'
+                                        }`}
+                                    >
+                                        <div className="flex items-start justify-between gap-1">
+                                            <div className="flex-1 min-w-0">
+                                                <div className="text-sm font-medium text-slate-200 truncate">{idea.name}</div>
+                                                {idea.summary && (
+                                                    <div className="text-xs text-slate-500 mt-0.5 truncate">{idea.summary}</div>
+                                                )}
+                                                <div className="text-xs text-slate-600 mt-1">{formatUpdated(idea.updated)}</div>
+                                            </div>
+                                            <div className="flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                                <button
+                                                    onClick={e => handleDownload(idea.id, e)}
+                                                    title="Download PRD"
+                                                    className="text-slate-500 hover:text-slate-300 p-0.5"
+                                                >
+                                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3.5 h-3.5">
+                                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+                                                    </svg>
+                                                </button>
+                                                <button
+                                                    onClick={e => handleDeleteClick(idea.id, e)}
+                                                    title="Delete idea"
+                                                    className="text-slate-500 hover:text-red-400 p-0.5"
+                                                >
+                                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3.5 h-3.5">
+                                                        <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/>
+                                                    </svg>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))
+                            )}
                         </div>
                     </div>
-                    {/* Right pane: PRD Document */}
-                    <div className={`flex-1 flex flex-col bg-[#141618] overflow-hidden ${isLoading ? 'status-pulse' : ''}`}>
-                        <div className="flex-1 overflow-y-auto p-4">
-                            {renderPrd(prdContent)}
+
+                    {/* Right: Conversation + PRD, or empty state */}
+                    {!currentIdeaId ? (
+                        <div className="flex-1 flex items-center justify-center bg-[#0d0f12]">
+                            <div className="text-center">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-10 h-10 text-slate-700 mx-auto mb-3">
+                                    <path d="M9 18h6M10 22h4M12 2C8.13 2 5 5.13 5 9c0 2.38 1.19 4.47 3 5.74V17h8v-2.26C17.81 13.47 19 11.38 19 9c0-3.87-3.13-7-7-7z"/>
+                                </svg>
+                                <p className="text-slate-600 text-sm">Select an idea or create a new one</p>
+                                <button
+                                    onClick={handleNewIdea}
+                                    className="mt-3 header-text px-4 py-2 rounded bg-emerald-700 hover:bg-emerald-600 text-white text-sm transition-colors"
+                                >
+                                    + New Idea
+                                </button>
+                            </div>
                         </div>
-                    </div>
+                    ) : (
+                        <>
+                            {/* Conversation */}
+                            <div className="w-[38%] flex-shrink-0 border-r border-[#1a1d21] flex flex-col bg-[#141618] overflow-hidden">
+                                <div className="px-4 py-2 border-b border-[#1a1d21] flex items-center gap-2">
+                                    <span className="text-sm text-slate-300">{selectedIdea ? selectedIdea.name : currentIdeaId}</span>
+                                </div>
+                                <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                                    {messages.map((msg, i) => (
+                                        msg.role === 'user' ? (
+                                            <div key={i} className="flex justify-end">
+                                                <div className="bg-cyan-900 text-cyan-100 rounded-lg px-3 py-2 text-sm max-w-[80%]">{msg.content}</div>
+                                            </div>
+                                        ) : (
+                                            <div key={i} className="flex justify-start">
+                                                <div className="bg-[#1a1d21] text-slate-300 rounded-lg px-3 py-2 text-sm max-w-[80%]">{msg.content}</div>
+                                            </div>
+                                        )
+                                    ))}
+                                </div>
+                                <div className="border-t border-[#1a1d21] p-3">
+                                    <input
+                                        type="text"
+                                        className="w-full bg-[#1a1d21] border border-[#2a2d31] rounded px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-slate-500"
+                                        placeholder="Type a message..."
+                                        onKeyDown={handleKeyDown}
+                                        disabled={isLoading}
+                                    />
+                                </div>
+                            </div>
+                            {/* PRD Document */}
+                            <div className={`flex-1 flex flex-col bg-[#141618] overflow-hidden ${isLoading ? 'status-pulse' : ''}`}>
+                                <div className="flex-1 overflow-y-auto p-4">
+                                    {renderPrd(prdContent)}
+                                </div>
+                            </div>
+                        </>
+                    )}
+
+                    {/* Delete confirmation modal */}
+                    {showDeleteModal && (
+                        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+                            <div className="bg-[#141618] border border-[#1a1d21] rounded-lg p-6 max-w-sm mx-4">
+                                <h3 className="header-text text-lg font-semibold text-red-400 mb-3">Delete Idea?</h3>
+                                <p className="text-slate-300 text-sm mb-6">
+                                    This will permanently delete this idea and all its contents. This cannot be undone.
+                                </p>
+                                <div className="flex gap-3 justify-end">
+                                    <button
+                                        onClick={() => setShowDeleteModal(false)}
+                                        className="px-4 py-2 rounded bg-[#1a1d21] text-slate-300 hover:bg-[#252830] transition-colors"
+                                    >
+                                        Cancel
+                                    </button>
+                                    <button
+                                        onClick={handleDeleteConfirm}
+                                        className="px-4 py-2 rounded bg-red-600 hover:bg-red-500 text-white font-medium transition-colors"
+                                    >
+                                        Delete
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
                 </div>
             );
         }
