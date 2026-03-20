@@ -1892,3 +1892,150 @@ async def post_setup_validate_roadmap(request: Request):
     body = await request.json()
     content = body.get("content", "")
     return _validate_roadmap_content(content)
+
+
+# ─── Preflight checks ────────────────────────────────────────────────────────
+
+_PIPELINE_GITIGNORE_ENTRIES = [
+    "*.done",
+    "phase_state.json",
+    "planner_output.json",
+    "executor_output.json",
+    "reviewer_output.json",
+    "escalation_output.json",
+    "current_phase.json",
+]
+_PIPELINE_GITIGNORE_HEADER = "# Pipeline metadata — orchestrator-managed per-turn state, never committed"
+
+_WORKSPACE_DOCS = ["AGENTS.md", "TOOLS.md", "SOUL.md", "USER.md", "IDENTITY.md"]
+_WORKSPACE_AGENTS = ["planner", "executor", "reviewer", "escalation"]
+
+
+def _run_preflight_checks(repo_path: str) -> list:
+    """Run ordered preflight checks for a project directory.
+
+    Returns list of {"check": str, "status": str, "message": str}
+    where status is "pass", "fail", or "warn".
+    """
+    import subprocess
+    import glob as glob_mod
+
+    repo_path = os.path.expanduser(repo_path)
+    openclaw_dir = os.path.expanduser("~/.openclaw")
+    checks = []
+
+    # 1. Symlink
+    symlink_path = os.path.join(openclaw_dir, "pipeline-project")
+    try:
+        real = os.path.realpath(symlink_path)
+        if real == repo_path:
+            checks.append({"check": "symlink", "status": "pass",
+                            "message": f"Symlink points to {repo_path}"})
+        else:
+            checks.append({"check": "symlink", "status": "fail",
+                            "message": f"Symlink missing or wrong — run: ln -sfn {repo_path} ~/.openclaw/pipeline-project"})
+    except Exception:
+        checks.append({"check": "symlink", "status": "fail",
+                        "message": f"Symlink missing or wrong — run: ln -sfn {repo_path} ~/.openclaw/pipeline-project"})
+
+    # 2. .gitignore presence
+    gitignore_path = os.path.join(repo_path, ".gitignore")
+    if not os.path.exists(gitignore_path):
+        checks.append({"check": ".gitignore", "status": "fail",
+                        "message": ".gitignore file not found"})
+    else:
+        # 3. .gitignore entries — auto-inject missing ones
+        try:
+            with open(gitignore_path, "r") as f:
+                existing = f.read()
+            missing = [e for e in _PIPELINE_GITIGNORE_ENTRIES if e not in existing]
+            if missing:
+                inject = "\n" + _PIPELINE_GITIGNORE_HEADER + "\n" + "\n".join(missing) + "\n"
+                with open(gitignore_path, "a") as f:
+                    f.write(inject)
+                checks.append({"check": ".gitignore entries", "status": "pass",
+                                "message": f"Added {len(missing)} entries: {', '.join(missing)}"})
+            else:
+                checks.append({"check": ".gitignore entries", "status": "pass",
+                                "message": "All required entries present"})
+        except Exception as exc:
+            checks.append({"check": ".gitignore entries", "status": "fail",
+                            "message": f"Could not read/write .gitignore: {exc}"})
+
+    # 4. Git repo + main/master branch
+    git_dir = os.path.join(repo_path, ".git")
+    if not os.path.exists(git_dir):
+        checks.append({"check": "git repo", "status": "fail",
+                        "message": f"{repo_path}/.git not found — not a git repository"})
+    else:
+        result = subprocess.run(
+            ["git", "-C", repo_path, "branch", "--list", "main", "master"],
+            capture_output=True, text=True,
+        )
+        if result.stdout.strip():
+            checks.append({"check": "git repo", "status": "pass",
+                            "message": "Git repo present with main/master branch"})
+        else:
+            checks.append({"check": "git repo", "status": "fail",
+                            "message": "No main or master branch found"})
+
+    # 5. Workspace directories and docs
+    for agent in _WORKSPACE_AGENTS:
+        ws_dir = os.path.join(openclaw_dir, f"workspace-{agent}")
+        if not os.path.isdir(ws_dir):
+            checks.append({"check": f"workspace-{agent}", "status": "fail",
+                            "message": f"workspace-{agent} directory missing"})
+        else:
+            for doc in _WORKSPACE_DOCS:
+                doc_path = os.path.join(ws_dir, doc)
+                if not os.path.exists(doc_path):
+                    checks.append({"check": f"workspace-{agent}/{doc}", "status": "fail",
+                                    "message": f"workspace-{agent}/{doc} missing — operator must install this file."})
+            # Only add pass if no failures for this workspace
+            missing_docs = [d for d in _WORKSPACE_DOCS if not os.path.exists(os.path.join(ws_dir, d))]
+            if not missing_docs:
+                checks.append({"check": f"workspace-{agent}", "status": "pass",
+                                "message": f"workspace-{agent} present with all required docs"})
+
+    # 6. Git remote (warn-only)
+    try:
+        result = subprocess.run(
+            ["git", "-C", repo_path, "remote", "get-url", "origin"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            checks.append({"check": "git remote", "status": "pass",
+                            "message": f"Remote origin: {result.stdout.strip()}"})
+        else:
+            checks.append({"check": "git remote", "status": "warn",
+                            "message": "No git remote configured — pushes will produce warnings."})
+    except Exception:
+        checks.append({"check": "git remote", "status": "warn",
+                        "message": "No git remote configured — pushes will produce warnings."})
+
+    # 7. Roadmap file (warn-only)
+    import glob as glob_mod
+    roadmap_files = glob_mod.glob(os.path.join(repo_path, "*oadmap*.md"))
+    if roadmap_files:
+        checks.append({"check": "roadmap file", "status": "pass",
+                        "message": f"Found: {os.path.basename(roadmap_files[0])}"})
+    else:
+        checks.append({"check": "roadmap file", "status": "warn",
+                        "message": "No roadmap file found — launch step will write roadmap.md from seed."})
+
+    return checks
+
+
+@app.post("/api/setup/preflight")
+async def post_setup_preflight(request: Request):
+    """Run preflight validation checks for a project directory.
+
+    Body: {"repo_path": str}
+    Returns: {"checks": [{"check": str, "status": str, "message": str}]}
+    """
+    body = await request.json()
+    repo_path = body.get("repo_path", "")
+    if not repo_path:
+        raise HTTPException(status_code=422, detail="repo_path is required")
+    checks = _run_preflight_checks(repo_path)
+    return {"checks": checks}
