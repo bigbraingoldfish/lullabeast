@@ -1800,3 +1800,23 @@ def post_stop():
         "ok": True,
         "message": "Stop requested — pipeline will halt after current agent completes"
     }
+
+
+@app.post("/api/setup/roadmap-seed")
+async def post_setup_roadmap_seed(request: Request):
+    """Store roadmap seed content atomically to ~/.openclaw/setup_session.json.
+
+    Body: {"content": str}
+    Returns: {"ok": true}
+    """
+    body = await request.json()
+    content = body.get("content")
+    if content is None:
+        raise HTTPException(status_code=422, detail="Missing required field: content")
+    setup_path = Path("~/.openclaw/setup_session.json").expanduser()
+    setup_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = str(setup_path) + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump({"roadmap_seed": content}, f)
+    os.replace(tmp_path, str(setup_path))
+    return {"ok": True}
