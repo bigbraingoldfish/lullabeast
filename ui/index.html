@@ -28,6 +28,10 @@
     function App() {
       const [currentScreen, setCurrentScreen] = useState('ideas');
       const [seedRoadmap, setSeedRoadmap] = useState('');
+      const [repoPath, setRepoPath] = useState('');
+      const [repoPathLocked, setRepoPathLocked] = useState(false);
+      const [roadmapSeed, setRoadmapSeed] = useState('');
+      const [roadmapSeedLocked, setRoadmapSeedLocked] = useState(false);
       const [pipelineStatus, setPipelineStatus] = useState(null);
       const [currentAgent, setCurrentAgent] = useState('');
       const [currentPhaseRawId, setCurrentPhaseRawId] = useState('');
@@ -98,6 +102,10 @@
 
       const navigateToPreflight = (roadmapContent) => {
         setSeedRoadmap(roadmapContent || '');
+        if (roadmapContent) {
+          setRoadmapSeed(roadmapContent);
+          setRoadmapSeedLocked(true);
+        }
         setCurrentScreen('preflight');
       };
 
@@ -106,7 +114,18 @@
       }
 
       if (currentScreen === 'preflight') {
-        return React.createElement(PreflightScreen, { seedRoadmap, onBack: () => setCurrentScreen('ideas') });
+        return React.createElement(PreflightScreen, {
+          seedRoadmap,
+          repoPath,
+          repoPathLocked,
+          roadmapSeed,
+          roadmapSeedLocked,
+          onRepoPathChange: setRepoPath,
+          onRepoPathLockToggle: () => setRepoPathLocked(v => !v),
+          onRoadmapSeedChange: setRoadmapSeed,
+          onRoadmapSeedLockToggle: () => setRoadmapSeedLocked(v => !v),
+          onBack: () => setCurrentScreen('ideas'),
+        });
       }
 
       return React.createElement('div', { className: 'flex flex-col h-screen' },
@@ -574,7 +593,31 @@
     }
 
     // ─── PreflightScreen ────────────────────────────────────────────────────────
-    function PreflightScreen({ seedRoadmap, onBack }) {
+    function PreflightScreen({
+      seedRoadmap,
+      repoPath,
+      repoPathLocked,
+      roadmapSeed,
+      roadmapSeedLocked,
+      onRepoPathChange,
+      onRepoPathLockToggle,
+      onRoadmapSeedChange,
+      onRoadmapSeedLockToggle,
+      onBack,
+    }) {
+      const handleFileChange = (e) => {
+        const file = e.target.files && e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (ev) => { onRoadmapSeedChange(ev.target.result || ''); };
+        reader.readAsText(file);
+      };
+
+      const roadmapPrePopulated = !!(seedRoadmap && seedRoadmap.length > 0);
+      const roadmapPreview = roadmapSeed.length > 40
+        ? roadmapSeed.substring(0, 40) + '...'
+        : roadmapSeed;
+
       return (
         <div className="flex flex-col h-screen bg-[#141618]">
           <div className="flex items-center gap-4 px-4 py-3 border-b border-[#1a1d21] bg-[#141618]">
@@ -582,18 +625,60 @@
               className="px-3 py-1.5 text-xs rounded border border-[#1a1d21] text-slate-400 hover:text-slate-200 hover:border-slate-600">
               ← Back to Ideas
             </button>
-            <span className="text-sm font-bold text-slate-300">Preflight Check</span>
-            {seedRoadmap && <span className="text-xs text-green-400">✓ Roadmap pre-populated</span>}
+            <span className="text-sm font-bold text-slate-300">Screen 2 — Project Setup</span>
           </div>
-          <div className="flex-1 overflow-y-auto scrollbar-thin p-6">
-            {seedRoadmap ? (
-              <div>
-                <h2 className="text-sm font-bold text-slate-300 mb-4">Pre-populated Roadmap</h2>
-                <pre className="text-xs text-slate-400 whitespace-pre-wrap font-mono bg-[#1e2028] p-4 rounded border border-[#1a1d21]">{seedRoadmap}</pre>
+
+          <div className="flex-1 overflow-y-auto scrollbar-thin p-6 space-y-8">
+
+            {/* ── Repo Path ── */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Repository Path</label>
+                <button onClick={onRepoPathLockToggle}
+                  className={`px-3 py-1 text-xs rounded border ${repoPathLocked ? 'border-yellow-600 text-yellow-500 hover:border-yellow-400' : 'border-[#1a1d21] text-slate-400 hover:border-slate-600'}`}>
+                  {repoPathLocked ? '🔒 Unlock' : '🔓 Lock'}
+                </button>
               </div>
-            ) : (
-              <p className="text-slate-600 text-sm">No roadmap pre-populated. Go back and generate a roadmap first.</p>
-            )}
+              <input
+                type="text"
+                value={repoPath}
+                onChange={(e) => !repoPathLocked && onRepoPathChange(e.target.value)}
+                disabled={repoPathLocked}
+                placeholder="/home/pi/projects/my-project"
+                className={`w-full px-3 py-2 text-sm rounded border font-mono ${repoPathLocked ? 'bg-[#1e2028] border-[#1a1d21] text-slate-500 cursor-not-allowed' : 'bg-[#1e2028] border-[#1a1d21] text-slate-200 focus:outline-none focus:border-[#00b4d8]'}`}
+              />
+            </div>
+
+            {/* ── Roadmap Seed ── */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Roadmap Seed</label>
+                <button onClick={onRoadmapSeedLockToggle}
+                  className={`px-3 py-1 text-xs rounded border ${roadmapSeedLocked ? 'border-yellow-600 text-yellow-500 hover:border-yellow-400' : 'border-[#1a1d21] text-slate-400 hover:border-slate-600'}`}>
+                  {roadmapSeedLocked ? '🔒 Unlock' : '🔓 Lock'}
+                </button>
+              </div>
+              {roadmapSeed ? (
+                <div>
+                  {roadmapPrePopulated && (
+                    <span className="text-xs text-green-400 mb-2 block">
+                      From Project Ideas — {roadmapPreview}
+                    </span>
+                  )}
+                  {!roadmapSeedLocked && (
+                    <input type="file" accept=".md" onChange={handleFileChange}
+                      className="block w-full text-xs text-slate-400 file:mr-4 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-xs file:bg-[#1e2028] file:text-slate-300 hover:file:bg-[#252830] mb-3" />
+                  )}
+                  <pre className="text-xs text-slate-400 whitespace-pre-wrap font-mono bg-[#1e2028] p-4 rounded border border-[#1a1d21] max-h-96 overflow-y-auto scrollbar-thin">
+                    {roadmapSeed}
+                  </pre>
+                </div>
+              ) : (
+                <input type="file" accept=".md" onChange={handleFileChange}
+                  className="block w-full text-xs text-slate-400 file:mr-4 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-xs file:bg-[#1e2028] file:text-slate-300 hover:file:bg-[#252830]" />
+              )}
+            </div>
+
           </div>
         </div>
       );
