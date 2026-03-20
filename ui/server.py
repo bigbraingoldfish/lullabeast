@@ -2039,3 +2039,173 @@ async def post_setup_preflight(request: Request):
         raise HTTPException(status_code=422, detail="repo_path is required")
     checks = _run_preflight_checks(repo_path)
     return {"checks": checks}
+
+
+# ─── Launch sequence ──────────────────────────────────────────────────────────
+
+def _run_init_project(repo_path: str, roadmap_seed: str) -> dict:
+    """Initialize a project directory (Mode A: new repo, Mode B: existing repo).
+
+    Mode A: .git does NOT exist → create full structure, git init, initial commit.
+    Mode B: .git exists → create only missing files, append missing gitignore entries.
+
+    Returns {"ok": bool, "error": str|null}
+    """
+    import subprocess
+    import shutil
+
+    repo_path = os.path.expanduser(repo_path)
+    name = os.path.basename(repo_path.rstrip("/"))
+    now = datetime.utcnow().isoformat() + "Z"
+    mode = "B" if os.path.exists(os.path.join(repo_path, ".git")) else "A"
+
+    def atomic_write(path: str, content: str):
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(content)
+        os.replace(tmp, path)
+
+    try:
+        if mode == "A":
+            # Step 1: directory structure
+            os.makedirs(os.path.join(repo_path, "phases"), exist_ok=True)
+            os.makedirs(os.path.join(repo_path, "tests"), exist_ok=True)
+            src_dir = os.path.join(repo_path, "src", name)
+            os.makedirs(src_dir, exist_ok=True)
+            init_py = os.path.join(src_dir, "__init__.py")
+            if not os.path.exists(init_py):
+                open(init_py, "w").close()
+
+            # Step 2: pipeline.json
+            pipeline = {
+                "project": name,
+                "created": now,
+                "current_phase": None,
+                "current_plan": None,
+                "phase_start_time": None,
+                "completed_count": 0,
+                "status": "idle",
+            }
+            atomic_write(os.path.join(repo_path, "pipeline.json"), json.dumps(pipeline, indent=2))
+
+            # Step 3: roadmap.md
+            atomic_write(os.path.join(repo_path, "roadmap.md"), roadmap_seed)
+
+            # Step 4: validate roadmap
+            validation = _validate_roadmap_content(roadmap_seed)
+            if not validation["valid"]:
+                shutil.rmtree(repo_path, ignore_errors=True)
+                errors_str = "; ".join(e["message"] for e in validation["errors"][:3])
+                return {"ok": False, "error": f"Roadmap invalid: {errors_str}"}
+
+            # Step 5: placeholder files
+            prd_path = os.path.join(repo_path, "prd.md")
+            if not os.path.exists(prd_path):
+                atomic_write(prd_path, "# PRD\n\n_To be completed._\n")
+            lessons_path = os.path.join(repo_path, "lessons.md")
+            if not os.path.exists(lessons_path):
+                atomic_write(lessons_path, "# Lessons\n\n_Hard-won insights go here._\n")
+            metrics_path = os.path.join(repo_path, "metrics.jsonl")
+            if not os.path.exists(metrics_path):
+                open(metrics_path, "w").close()
+
+            # Step 6: .gitignore
+            gitignore_content = (
+                "__pycache__/\n*.pyc\n.pytest_cache/\n*.egg-info/\ndist/\nbuild/\n.venv/\n.ruff_cache/\n\n"
+                + _PIPELINE_GITIGNORE_HEADER + "\n"
+                + "\n".join(_PIPELINE_GITIGNORE_ENTRIES) + "\n"
+            )
+            atomic_write(os.path.join(repo_path, ".gitignore"), gitignore_content)
+
+            # Step 7: git init + commit
+            subprocess.run(["git", "init", repo_path], check=True, capture_output=True)
+            subprocess.run(["git", "-C", repo_path, "checkout", "-b", "main"],
+                           check=True, capture_output=True)
+            subprocess.run(["git", "-C", repo_path, "add", "-A"], check=True, capture_output=True)
+            subprocess.run(
+                ["git", "-C", repo_path, "commit", "-m", "init: project structure with roadmap"],
+                check=True, capture_output=True,
+            )
+
+        else:  # Mode B
+            # Create only missing structure
+            for d in ["phases", "tests"]:
+                os.makedirs(os.path.join(repo_path, d), exist_ok=True)
+            src_dir = os.path.join(repo_path, "src", name)
+            os.makedirs(src_dir, exist_ok=True)
+            init_py = os.path.join(src_dir, "__init__.py")
+            if not os.path.exists(init_py):
+                open(init_py, "w").close()
+
+            for fname, content in [
+                ("pipeline.json", json.dumps({
+                    "project": name, "created": now, "current_phase": None,
+                    "current_plan": None, "phase_start_time": None,
+                    "completed_count": 0, "status": "idle",
+                }, indent=2)),
+                ("roadmap.md", roadmap_seed),
+                ("prd.md", "# PRD\n\n_To be completed._\n"),
+                ("lessons.md", "# Lessons\n\n_Hard-won insights go here._\n"),
+            ]:
+                path = os.path.join(repo_path, fname)
+                if not os.path.exists(path):
+                    atomic_write(path, content)
+
+            metrics_path = os.path.join(repo_path, "metrics.jsonl")
+            if not os.path.exists(metrics_path):
+                open(metrics_path, "w").close()
+
+            # Append missing gitignore entries
+            gitignore_path = os.path.join(repo_path, ".gitignore")
+            if os.path.exists(gitignore_path):
+                with open(gitignore_path) as f:
+                    existing = f.read()
+                missing = [e for e in _PIPELINE_GITIGNORE_ENTRIES if e not in existing]
+                if missing:
+                    with open(gitignore_path, "a") as f:
+                        f.write("\n" + _PIPELINE_GITIGNORE_HEADER + "\n" + "\n".join(missing) + "\n")
+
+            # git add + commit new files only
+            subprocess.run(["git", "-C", repo_path, "add", "-A"], check=True, capture_output=True)
+            result = subprocess.run(
+                ["git", "-C", repo_path, "status", "--porcelain"],
+                capture_output=True, text=True,
+            )
+            if result.stdout.strip():
+                subprocess.run(
+                    ["git", "-C", repo_path, "commit", "-m", "init: add pipeline project structure"],
+                    check=True, capture_output=True,
+                )
+
+        # Step 8 (both modes): set symlink
+        symlink_path = os.path.expanduser("~/.openclaw/pipeline-project")
+        if os.path.lexists(symlink_path):
+            os.remove(symlink_path)
+        os.symlink(repo_path, symlink_path)
+
+        return {"ok": True, "error": None}
+
+    except subprocess.CalledProcessError as exc:
+        if mode == "A":
+            shutil.rmtree(repo_path, ignore_errors=True)
+        return {"ok": False, "error": f"Git command failed: {exc.stderr.decode(errors='replace') if exc.stderr else str(exc)}"}
+    except OSError as exc:
+        if mode == "A":
+            shutil.rmtree(repo_path, ignore_errors=True)
+        return {"ok": False, "error": str(exc)}
+
+
+@app.post("/api/setup/launch")
+async def post_setup_launch(request: Request):
+    """Initialize project directory and set pipeline-project symlink.
+
+    Body: {"repo_path": str, "roadmap_seed": str}
+    Returns: {"ok": bool, "error": str|null}
+    Synchronous/blocking (completes in under 5 seconds).
+    """
+    body = await request.json()
+    repo_path = body.get("repo_path", "")
+    roadmap_seed = body.get("roadmap_seed", "")
+    if not repo_path:
+        raise HTTPException(status_code=422, detail="repo_path is required")
+    return _run_init_project(repo_path, roadmap_seed)

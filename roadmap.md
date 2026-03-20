@@ -241,7 +241,7 @@ INFRA-B1 is a hard gate — nothing else starts until it is committed. INFRA-E1 
 
 ### Milestone 4 — Screen 2: Setup & Preflight
 
-- [ ] `UI-E6` | LOW | Render Screen 2 with repo path input and roadmap seed input, both with lock/confirm behavior
+- [x] `UI-E6` | LOW | Render Screen 2 with repo path input and roadmap seed input, both with lock/confirm behavior
   > Test: Screen 2 (`preflight` screen) displays a repo path text input and a roadmap seed input. Each has a lock/unlock toggle. Locking freezes the field as a read-only display with an unlock option. Unlocking restores editability. Fields are independent. If navigated from Screen 1 after conversion, the roadmap seed field is pre-populated with the generated content and pre-locked. No validation runs in this phase. No console errors.
   > Notes: Replace the existing `PreflightScreen` function (lines 1129–1148 in `ui/index.html`). Keep component name `PreflightScreen` and screen key `'preflight'` — no routing changes needed.
   >
@@ -253,7 +253,7 @@ INFRA-B1 is a hard gate — nothing else starts until it is committed. INFRA-E1 
   >
   > **New server endpoint**: `POST /api/setup/roadmap-seed` — body: `{"content": str}`. Stores roadmap content atomically to `~/.openclaw/setup_session.json` for use by UI-E7 validation. Returns `{"ok": true}`.
 
-- [ ] `UI-E7` | HIGH | Add roadmap seed format validation with line-specific errors
+- [x] `UI-E7` | HIGH | Add roadmap seed format validation with line-specific errors
   > Test: Triggering validation on a locked roadmap seed calls `POST /api/setup/validate-roadmap`. A valid seed returns `{"valid": true, "errors": []}`. A malformed phase line returns an error with the exact line number, the offending content, and the expected format. A phase missing `> Test:` returns an error naming the phase ID. Duplicate IDs are listed by name. No malformed seed silently passes. The validate button is re-runnable.
   > Notes: **Python implementation**: Add `_validate_roadmap_content(content: str) -> dict` to `server.py`. This is a Python reimplementation of the bash checks in `~/.openclaw/workspace/skills/init-project/SKILL.md` Step 4. Do NOT call the skill as a subprocess.
   >
@@ -269,7 +269,7 @@ INFRA-B1 is a hard gate — nothing else starts until it is committed. INFRA-E1 
   >
   > **New server endpoint**: `POST /api/setup/validate-roadmap` — body: `{"content": str}`. Returns validation result. No file writes.
 
-- [ ] `UI-E8` | HIGH | Add orchestrator preflight validation with per-check status display and .gitignore auto-inject
+- [x] `UI-E8` | HIGH | Add orchestrator preflight validation with per-check status display and .gitignore auto-inject
   > Test: "Run Preflight" calls `POST /api/setup/preflight` with `{"repo_path": str}`. Response contains a `checks` array, each with `check`, `status` (`pass`/`fail`/`warn`), and `message`. Checks shown: symlink, .gitignore presence, .gitignore entries (with inject report), git repo with main/master branch, per-workspace directory + required docs, git remote (warn-only), roadmap file (warn-only). Missing .gitignore entries are auto-injected and reported. All failures include specific actionable messages. Launch button disabled until no `fail` status in any check.
   > Notes: **Implementation**: Add `_run_preflight_checks(repo_path: str) -> list[dict]` to `server.py`. All checks are Python — do NOT call `repo_init_check.py` as a subprocess (it exits 0/1 with human-readable stdout, no per-check JSON). Expand `~` in `repo_path` via `os.path.expanduser()` before any checks.
   >
@@ -291,7 +291,7 @@ INFRA-B1 is a hard gate — nothing else starts until it is committed. INFRA-E1 
   >
   > **New server endpoint**: `POST /api/setup/preflight` — body: `{"repo_path": str}`. Returns `{"checks": [{"check": str, "status": str, "message": str}]}`.
 
-- [ ] `UI-E9` | HIGH | Add launch sequence — initialize project directory, set symlink, navigate to pipeline monitor
+- [x] `UI-E9` | HIGH | Add launch sequence — initialize project directory, set symlink, navigate to pipeline monitor
   > Test: Use `/tmp/ui-e9-test-launch` as the fixed test repo path for all executor testing. Launch button is disabled until repo path is locked, roadmap seed is locked and valid (`valid: true` from UI-E7), and preflight passes (no `fail` in any check). Clicking launch calls `POST /api/setup/launch`. On success: `~/.openclaw/pipeline-project` symlink resolves to the test repo path — verify via `readlink -f`. Pipeline monitor shows the new project's roadmap on next poll (within 3s). On failure: verbatim error output is displayed, user stays on Screen 2. **CRITICAL — after all tests pass**: immediately restore the production symlink `ln -sfn /home/pi/projects/autodev-ui ~/.openclaw/pipeline-project` and verify `readlink -f ~/.openclaw/pipeline-project` = `/home/pi/projects/autodev-ui` before committing. The launch endpoint intentionally changes the symlink — failing to restore it will break all orchestrator git operations for the remainder of the pipeline run.
   > Notes: **Execution model**: The server implements init-project logic directly in Python as `_run_init_project(repo_path: str, roadmap_seed: str) -> dict`. This is NOT an OpenClaw agent call — the init-project skill is bash-based and cannot be invoked as a subprocess. The Python reimplementation mirrors `~/.openclaw/workspace/skills/init-project/SKILL.md` steps exactly. No LLM calls are made — only filesystem operations and git shell commands. No API keys are needed for this step. All LLM calls in the UI (prd-creator conversations, clarity checks, conversion) route through the OpenClaw gateway using its configured keys — users need no additional key setup.
   >
