@@ -615,11 +615,27 @@
 
       const [validationResult, setValidationResult] = React.useState(null);
       const [isValidating, setIsValidating] = React.useState(false);
+      const [preflightChecks, setPreflightChecks] = React.useState(null);
+      const [isRunningPreflight, setIsRunningPreflight] = React.useState(false);
 
       const roadmapPrePopulated = !!(seedRoadmap && seedRoadmap.length > 0);
       const roadmapPreview = roadmapSeed.length > 40
         ? roadmapSeed.substring(0, 40) + '...'
         : roadmapSeed;
+
+      const handleRunPreflight = () => {
+        if (!repoPath || !repoPathLocked) return;
+        setIsRunningPreflight(true);
+        setPreflightChecks(null);
+        fetch('/api/setup/preflight', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ repo_path: repoPath }),
+        })
+          .then(r => r.json())
+          .then(data => { setPreflightChecks(data.checks || []); setIsRunningPreflight(false); })
+          .catch(() => setIsRunningPreflight(false));
+      };
 
       const handleValidate = () => {
         if (!roadmapSeed || !roadmapSeedLocked) return;
@@ -724,6 +740,39 @@
                 </div>
               )}
             </div>
+
+            {/* ── Preflight ── */}
+            {repoPathLocked && repoPath && (
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Preflight Check</label>
+                  <button onClick={handleRunPreflight} disabled={isRunningPreflight}
+                    className={`px-3 py-1.5 text-xs rounded border transition-colors ${isRunningPreflight ? 'bg-slate-700 border-slate-600 text-slate-500 cursor-not-allowed' : 'bg-[#1a1d21] border-[#1a1d21] text-slate-300 hover:border-[#00b4d8]'}`}>
+                    {isRunningPreflight ? 'Running...' : 'Run Preflight'}
+                  </button>
+                </div>
+
+                {preflightChecks && (
+                  <div className="space-y-1">
+                    {preflightChecks.map((check, i) => (
+                      <div key={i} className={`flex items-start gap-2 text-xs px-3 py-2 rounded border ${
+                        check.status === 'pass' ? 'border-green-900 bg-green-950 text-green-300' :
+                        check.status === 'fail' ? 'border-red-900 bg-red-950 text-red-300' :
+                        'border-yellow-900 bg-yellow-950 text-yellow-300'
+                      }`}>
+                        <span className="shrink-0">
+                          {check.status === 'pass' ? '✓' : check.status === 'fail' ? '✗' : '⚠'}
+                        </span>
+                        <div>
+                          <span className="font-bold">{check.check}:</span>{' '}
+                          <span>{check.message}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
           </div>
         </div>
