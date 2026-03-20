@@ -613,10 +613,27 @@
         reader.readAsText(file);
       };
 
+      const [validationResult, setValidationResult] = React.useState(null);
+      const [isValidating, setIsValidating] = React.useState(false);
+
       const roadmapPrePopulated = !!(seedRoadmap && seedRoadmap.length > 0);
       const roadmapPreview = roadmapSeed.length > 40
         ? roadmapSeed.substring(0, 40) + '...'
         : roadmapSeed;
+
+      const handleValidate = () => {
+        if (!roadmapSeed || !roadmapSeedLocked) return;
+        setIsValidating(true);
+        setValidationResult(null);
+        fetch('/api/setup/validate-roadmap', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: roadmapSeed }),
+        })
+          .then(r => r.json())
+          .then(data => { setValidationResult(data); setIsValidating(false); })
+          .catch(() => setIsValidating(false));
+      };
 
       return (
         <div className="flex flex-col h-screen bg-[#141618]">
@@ -676,6 +693,35 @@
               ) : (
                 <input type="file" accept=".md" onChange={handleFileChange}
                   className="block w-full text-xs text-slate-400 file:mr-4 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-xs file:bg-[#1e2028] file:text-slate-300 hover:file:bg-[#252830]" />
+              )}
+
+              {/* Validate button — shown when locked with content */}
+              {roadmapSeedLocked && roadmapSeed && (
+                <div className="mt-3">
+                  <button onClick={handleValidate} disabled={isValidating}
+                    className={`px-3 py-1.5 text-xs rounded border transition-colors ${isValidating ? 'bg-slate-700 border-slate-600 text-slate-500 cursor-not-allowed' : 'bg-[#1a1d21] border-[#1a1d21] text-slate-300 hover:border-slate-600'}`}>
+                    {isValidating ? 'Validating...' : 'Validate Roadmap'}
+                  </button>
+                </div>
+              )}
+
+              {/* Validation results */}
+              {validationResult && (
+                <div className={`mt-3 p-3 rounded border text-xs ${validationResult.valid ? 'border-green-800 bg-green-950 text-green-300' : 'border-red-800 bg-red-950 text-red-300'}`}>
+                  {validationResult.valid ? (
+                    <span>✓ Roadmap format is valid</span>
+                  ) : (
+                    <div>
+                      <div className="font-bold mb-2">✗ Validation errors ({validationResult.errors.length}):</div>
+                      {validationResult.errors.map((err, i) => (
+                        <div key={i} className="mb-1 font-mono">
+                          {err.line > 0 && <span className="text-red-400">Line {err.line}: </span>}
+                          {err.message}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               )}
             </div>
 

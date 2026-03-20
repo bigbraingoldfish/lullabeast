@@ -3,6 +3,7 @@ import aiohttp
 import fcntl
 import json
 import os
+import re
 import uuid
 from collections import deque
 from datetime import datetime
@@ -1820,3 +1821,74 @@ async def post_setup_roadmap_seed(request: Request):
         json.dump({"roadmap_seed": content}, f)
     os.replace(tmp_path, str(setup_path))
     return {"ok": True}
+
+
+# ─── Roadmap validation ───────────────────────────────────────────────────────
+
+_PHASE_LINE_RE = re.compile(
+    r"^- \[.\] `([A-Z]+-[A-Z]\d+)` \| (?:LOW|HIGH) \| .+",
+    re.MULTILINE,
+)
+
+
+def _validate_roadmap_content(content: str) -> dict:
+    """Validate roadmap content format.
+
+    Checks:
+    1. Phase lines match the required format.
+    2. Each phase has a '> Test:' line within 10 lines.
+    3. No duplicate phase IDs.
+
+    Returns {"valid": bool, "errors": [{"line": int, "content": str, "message": str}]}
+    """
+    errors = []
+    lines = content.splitlines()
+
+    # Collect phase matches with line numbers (1-based)
+    phase_matches = []  # (line_number, phase_id)
+    for i, line in enumerate(lines, start=1):
+        m = _PHASE_LINE_RE.match(line)
+        if m:
+            phase_matches.append((i, m.group(1), line))
+
+    # Check Test: line within 10 lines of each phase line
+    for line_num, phase_id, line_content in phase_matches:
+        found_test = False
+        for j in range(line_num, min(line_num + 10, len(lines) + 1)):
+            if re.match(r"^\s*> Test:", lines[j - 1]):
+                found_test = True
+                break
+        if not found_test:
+            errors.append({
+                "line": line_num,
+                "content": line_content,
+                "message": f"Phase {phase_id} (line {line_num}) is missing a '> Test:' line",
+            })
+
+    # Check for duplicate phase IDs
+    all_ids = re.findall(r"`([A-Z]+-[A-Z]\d+)`", content)
+    seen: dict = {}
+    for pid in all_ids:
+        seen[pid] = seen.get(pid, 0) + 1
+    for pid, count in seen.items():
+        if count > 1:
+            errors.append({
+                "line": 0,
+                "content": pid,
+                "message": f"Duplicate phase ID: {pid} appears {count} times",
+            })
+
+    return {"valid": len(errors) == 0, "errors": errors}
+
+
+@app.post("/api/setup/validate-roadmap")
+async def post_setup_validate_roadmap(request: Request):
+    """Validate roadmap seed content format.
+
+    Body: {"content": str}
+    Returns: {"valid": bool, "errors": [{"line": int, "content": str, "message": str}]}
+    No file writes.
+    """
+    body = await request.json()
+    content = body.get("content", "")
+    return _validate_roadmap_content(content)
