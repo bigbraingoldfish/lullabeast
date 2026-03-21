@@ -4,11 +4,23 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AutoDev Pipeline Monitor</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     body { margin: 0; padding: 0; background: #0d0f12; color: #e2e8f0; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
-    .status-pulse { animation: pulse 2s ease-in-out infinite; }
-    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .status-pulse { animation: amber-pulse 2s ease-in-out infinite; }
+    @keyframes amber-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .ideas-doc-loading-overlay {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background: transparent;
+      animation: ideas-doc-pulse 1.5s ease-in-out infinite;
+      z-index: 2;
+    }
+    @keyframes ideas-doc-pulse { 0%, 100% { opacity: 0.12; } 50% { opacity: 0.35; } }
     .fade-in { animation: fadeIn 0.3s ease-in; }
     @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
     .scrollbar-thin::-webkit-scrollbar { width: 6px; }
@@ -18,7 +30,7 @@
 </head>
 <body>
   <div id="root"></div>
-  <script type="text/javascript">
+  <script type="text/babel">
     const { useState, useEffect, useRef } = React;
 
     // ─── Global state helpers ──────────────────────────────────────────────────
@@ -152,14 +164,22 @@
       );
     }
 
+    const PIPELINE_STATUS_DOT_CLASS = {
+      'RUNNING': 'bg-green-500 status-pulse',
+      'WAITING_FOR_SENTINEL': 'bg-amber-500 status-pulse',
+      'WAITING_FOR_HUMAN': 'bg-orange-500',
+      'HALTED_SILENT': 'bg-red-600',
+      'BLOCKED': 'bg-red-600',
+    };
+
     function Header({ pipelineStatus, currentAgent, currentPhaseRawId, plannerRetries, executorRetries, reviewerRetries }) {
       const statusColor = pipelineStatus === 'RUNNING' ? 'text-green-400' : pipelineStatus === 'WAITING_FOR_HUMAN' ? 'text-yellow-400' : 'text-slate-400';
-      const phaseColor = pipelineStatus === 'RUNNING' ? 'bg-green-500' : 'bg-slate-600';
+      const phaseDotClass = PIPELINE_STATUS_DOT_CLASS[pipelineStatus] || 'bg-slate-600';
       return React.createElement('div', { className: 'flex items-center justify-between px-4 py-2 border-b border-[#1a1d21] bg-[#141618] text-xs' },
         React.createElement('div', { className: 'flex items-center gap-3' },
           React.createElement('span', { className: 'font-bold text-[#3b82f6] text-sm' }, 'AutoDev'),
           React.createElement('span', { className: `flex items-center gap-1.5 ${statusColor}` },
-            React.createElement('span', { className: `w-1.5 h-1.5 rounded-full ${phaseColor} ${pipelineStatus === 'RUNNING' ? 'status-pulse' : ''}` }),
+            React.createElement('span', { className: `w-1.5 h-1.5 rounded-full ${phaseDotClass}` }),
             pipelineStatus || 'UNKNOWN'
           ),
           currentAgent ? React.createElement('span', { className: 'text-slate-500' }, `agent: ${currentAgent}`) : null,
@@ -323,42 +343,58 @@
     }
 
     // ─── handleFileChange ───────────────────────────────────────────────────────
-    function handleFileChange(e, currentIdeaId, setPrdContent, setUploadError, setUploadSpinner, setClarityPass, setClarityIssues, setClarityMissing) {
-      const file = e.target.files[0];
-      if (!file) return;
-      setUploadError('');
-      if (!file.name.toLowerCase().endsWith('.md')) {
-        setUploadError('Only .md files are accepted.');
+    function handleFileChange(e, deps) {
+      const file = e.target.files && e.target.files[0];
+      if (e.target) e.target.value = '';
+      if (!file || !deps.ideaId) return;
+      const lower = file.name.toLowerCase();
+      if (!lower.endsWith('.md')) {
+        deps.setUploadError('Only .md files are accepted');
         return;
       }
-      setUploadSpinner(true);
-      const formData = new FormData();
-      formData.append('file', file);
-      fetch(`/api/ideas/${currentIdeaId}/upload`, { method: 'POST', body: formData })
-        .then(r => r.json())
-        .then(data => {
-          if (data.status === 'format_ok') {
-            setPrdContent(prev => prev + '\n\n' + (data._updated_content || ''));
-            triggerClarityCheck(currentIdeaId).then(d => {
-              setClarityPass(d.pass);
-              setClarityIssues(d.issues || []);
-              setClarityMissing(d.missing_sections || []);
-            });
-          } else {
-            setUploadError(data.detail || 'Upload failed');
+      deps.setUploadError('');
+      deps.setUploadSpinner(true);
+      const fd = new FormData();
+      fd.append('file', file, file.name);
+      fetch(`/api/ideas/${deps.ideaId}/upload`, { method: 'POST', body: fd })
+        .then(async (r) => {
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({}));
+            deps.setUploadError(err.detail || 'Upload failed');
+            return;
           }
+          return r.json();
         })
-        .catch(err => setUploadError('Upload failed: ' + err.message))
-        .finally(() => setUploadSpinner(false));
+        .then((data) => {
+          if (!data) return;
+          deps.setPrdContent(data.prd_content || '');
+          return fetch(`/api/ideas/${deps.ideaId}/session`).then((r) => r.json());
+        })
+        .then((session) => {
+          if (session && session.messages) deps.setMessages(session.messages || []);
+          if (deps.refreshIdeas) deps.refreshIdeas();
+          triggerClarityCheck(deps.ideaId).then((d) => {
+            deps.setClarityPass(d.pass);
+            deps.setClarityIssues(d.issues || []);
+            deps.setClarityMissing(d.missing_sections || []);
+          });
+        })
+        .catch(() => deps.setUploadError('Upload failed'))
+        .finally(() => deps.setUploadSpinner(false));
     }
 
     // ─── IdeasScreen ────────────────────────────────────────────────────────────
     function IdeasScreen({ navigateToPreflight }) {
+      void '1';
+      const [ideas, setIdeas] = useState([]);
+      const [selectedIdeaId, setSelectedIdeaId] = useState(null);
+      const [renameDraft, setRenameDraft] = useState('');
+      const [renamingId, setRenamingId] = useState(null);
       const [messages, setMessages] = useState([]);
       const [prdContent, setPrdContent] = useState('');
       const [isLoading, setIsLoading] = useState(false);
-      const currentIdeaId = '1';
       const [inputValue, setInputValue] = useState('');
+      const textareaRef = useRef(null);
       const [uploadError, setUploadError] = useState('');
       const [uploadSpinner, setUploadSpinner] = useState(false);
       const [clarityPass, setClarityPass] = useState(null);
@@ -370,46 +406,81 @@
       const [readiness, setReadiness] = useState(null);
       const [showRoadmap, setShowRoadmap] = useState(false);
 
-      // Load session on mount
+      const refreshIdeas = () => {
+        fetch('/api/ideas')
+          .then((r) => r.json())
+          .then((list) => {
+            if (Array.isArray(list)) setIdeas(list);
+          })
+          .catch(() => {});
+      };
+
       useEffect(() => {
-        fetch(`/api/ideas/${currentIdeaId}/session`)
-          .then(r => r.json())
-          .then(data => {
+        refreshIdeas();
+      }, []);
+
+      useEffect(() => {
+        if (ideas.length && !selectedIdeaId) {
+          setSelectedIdeaId(ideas[0].id);
+        }
+      }, [ideas, selectedIdeaId]);
+
+      useEffect(() => {
+        if (!selectedIdeaId) return;
+        fetch(`/api/ideas/${selectedIdeaId}/session`)
+          .then((r) => r.json())
+          .then((data) => {
             setMessages(data.messages || []);
             setPrdContent(data.prd_content || '');
             setRoadmapContent(data.roadmap_content || '');
             if (data.roadmap_content) setShowRoadmap(true);
           })
           .catch(() => {});
-      }, []);
+      }, [selectedIdeaId]);
 
-      // Fetch readiness when currentIdeaId or prdContent changes
       useEffect(() => {
-        if (!currentIdeaId || !prdContent) return;
-        fetch(`/api/ideas/${currentIdeaId}/readiness`)
-          .then(r => r.json())
-          .then(data => setReadiness(data))
+        if (!selectedIdeaId || !prdContent) return;
+        fetch(`/api/ideas/${selectedIdeaId}/readiness`)
+          .then((r) => r.json())
+          .then((data) => setReadiness(data))
           .catch(() => {});
-      }, [currentIdeaId, prdContent]);
+      }, [selectedIdeaId, prdContent]);
+
+      const resizeTextarea = () => {
+        const el = textareaRef.current;
+        if (!el) return;
+        el.style.height = 'auto';
+        const max = 120;
+        el.style.height = Math.min(el.scrollHeight, max) + 'px';
+      };
+
+      useEffect(() => {
+        resizeTextarea();
+      }, [inputValue]);
 
       const handleSendMessage = async () => {
-        if (!inputValue.trim() || isLoading) return;
+        if (!inputValue.trim() || isLoading || !selectedIdeaId) return;
         const userMsg = inputValue.trim();
+        const turn = Math.floor(messages.length / 2) + 1;
         setInputValue('');
         setIsLoading(true);
-        const turn = Date.now();
-        setMessages(prev => [...prev, { role: 'user', content: userMsg, ts: new Date().toISOString() }]);
+        setMessages((prev) => [...prev, { role: 'user', content: userMsg, ts: new Date().toISOString() }]);
         try {
-          const r = await fetch(`/api/ideas/${currentIdeaId}/message`, {
+          const r = await fetch(`/api/ideas/${selectedIdeaId}/message`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ content: userMsg, turn })
+            body: JSON.stringify({ content: userMsg, turn }),
           });
           const data = await r.json();
+          if (!r.ok) throw new Error(data.detail || r.status);
           setPrdContent(data.prd_content || '');
-          setMessages(prev => [...prev, { role: 'assistant', content: data.response || '', ts: new Date().toISOString() }]);
+          setMessages((prev) => [...prev, { role: 'assistant', content: data.response || '', ts: new Date().toISOString() }]);
+          refreshIdeas();
         } catch (e) {
-          setMessages(prev => [...prev, { role: 'assistant', content: 'Error: ' + e.message, ts: new Date().toISOString() }]);
+          setMessages((prev) => [
+            ...prev,
+            { role: 'assistant', content: 'Error: ' + e.message, ts: new Date().toISOString() },
+          ]);
         } finally {
           setIsLoading(false);
         }
@@ -422,15 +493,39 @@
         }
       };
 
+      const saveRename = async (id) => {
+        const name = renameDraft.trim();
+        if (!name || !id) {
+          setRenamingId(null);
+          return;
+        }
+        await fetch(`/api/ideas/${id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        }).catch(() => {});
+        setRenamingId(null);
+        refreshIdeas();
+      };
+
       const handleGenerateRoadmap = async () => {
-        if (!prdContent || isConverting) return;
+        if (!prdContent || isConverting || !selectedIdeaId) return;
         setIsConverting(true);
         setConvertError('');
         try {
-          const r = await fetch(`/api/ideas/${currentIdeaId}/convert`, { method: 'POST' });
-          if (r.status === 503) { setConvertError('Conversion prompt file missing (503)'); return; }
-          if (r.status === 408) { setConvertError('Conversion timed out (408)'); return; }
-          if (!r.ok) { setConvertError('Conversion failed: ' + r.status); return; }
+          const r = await fetch(`/api/ideas/${selectedIdeaId}/convert`, { method: 'POST' });
+          if (r.status === 503) {
+            setConvertError('Conversion prompt file missing (503)');
+            return;
+          }
+          if (r.status === 408) {
+            setConvertError('Conversion timed out (408)');
+            return;
+          }
+          if (!r.ok) {
+            setConvertError('Conversion failed: ' + r.status);
+            return;
+          }
           const data = await r.json();
           setRoadmapContent(data.roadmap_content || '');
           setShowRoadmap(true);
@@ -442,7 +537,13 @@
       };
 
       const handleDownloadRoadmap = () => {
-        window.location.href = `/api/ideas/${currentIdeaId}/download-roadmap`;
+        if (!selectedIdeaId) return;
+        window.location.href = `/api/ideas/${selectedIdeaId}/download-roadmap`;
+      };
+
+      const handleDownloadPrd = () => {
+        if (!selectedIdeaId) return;
+        window.location.href = `/api/ideas/${selectedIdeaId}/download`;
       };
 
       const prdSections = [
@@ -463,28 +564,87 @@
       const getSectionContent = (header) => {
         if (!prdContent) return '';
         const lines = prdContent.split('\n');
-        const idx = lines.findIndex(l => l.trim() === header);
+        const idx = lines.findIndex((l) => l.trim() === header);
         if (idx === -1) return '';
-        const nextIdx = lines.slice(idx + 1).findIndex(l => l.trim().startsWith('## '));
+        const nextIdx = lines.slice(idx + 1).findIndex((l) => l.trim().startsWith('## '));
         const end = nextIdx === -1 ? lines.length : idx + 1 + nextIdx;
         return lines.slice(idx + 1, end).join('\n').trim();
       };
+
+      const prdBlocks = prdContent ? prdContent.split('\n\n') : [];
 
       const canGenerateRoadmap = readiness && readiness.ready && prdContent;
       const isReady = readiness && readiness.ready;
 
       return (
-        <div className="flex h-full">
-          {/* Left pane: conversation */}
-          <div className="w-[38%] flex-shrink-0 flex flex-col bg-[#141618] border-r border-[#1a1d21] overflow-hidden">
-            <div className="flex-1 overflow-y-auto p-4 space-y-3">
+        <div className="flex h-full overflow-hidden">
+          <div className="w-[38%] flex-shrink-0 flex flex-col bg-[#141618] overflow-hidden border-r border-[#1a1d21]">
+            <div className="flex items-center justify-between px-3 py-2 border-b border-[#1a1d21]">
+              <span className="text-xs font-bold text-slate-400 uppercase">Ideas</span>
+              <button
+                type="button"
+                onClick={() => {
+                  fetch('/api/ideas', { method: 'POST' })
+                    .then((r) => r.json())
+                    .then((d) => {
+                      if (d.id) setSelectedIdeaId(d.id);
+                      refreshIdeas();
+                    })
+                    .catch(() => {});
+                }}
+                className="px-2 py-1 text-xs rounded bg-[#3b82f6] hover:bg-[#2563eb] text-white"
+              >
+                New Idea
+              </button>
+            </div>
+            <div className="max-h-36 overflow-y-auto scrollbar-thin shrink-0 divide-y divide-[#1a1d21] border-b border-[#1a1d21]">
+              {ideas.map((it) => (
+                <div
+                  key={it.id}
+                  className={`px-3 py-2 cursor-pointer text-sm ${selectedIdeaId === it.id ? 'bg-[#1e2028]' : 'hover:bg-[#1a1d21]'}`}
+                  onClick={() => setSelectedIdeaId(it.id)}
+                >
+                  {renamingId === it.id ? (
+                    <input
+                      className="w-full bg-[#0d0f12] border border-[#3b82f6] rounded px-2 py-1 text-xs text-slate-200"
+                      value={renameDraft}
+                      autoFocus
+                      onChange={(e) => setRenameDraft(e.target.value)}
+                      onBlur={() => saveRename(it.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') saveRename(it.id);
+                        if (e.key === 'Escape') setRenamingId(null);
+                      }}
+                    />
+                  ) : (
+                    <span
+                      className="text-slate-200 font-medium"
+                      onDoubleClick={(e) => {
+                        e.stopPropagation();
+                        setRenamingId(it.id);
+                        setRenameDraft(it.name || it.id);
+                      }}
+                    >
+                      {it.name || it.id}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+            <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
               {messages.length === 0 && (
                 <p className="text-slate-600 text-sm text-center mt-8">No messages yet. Type below to start.</p>
               )}
               {messages.map((m, i) => (
                 <div key={i} className={`fade-in ${m.role === 'user' ? 'text-right' : 'text-left'}`}>
-                  <div className={`inline-block max-w-[85%] px-3 py-2 rounded text-sm ${m.role === 'user' ? 'bg-[#3b82f6] text-white' : 'bg-[#1e2028] text-slate-300'}`}>
-                    {m.content.split('\n').map((line, j) => <p key={j}>{line}</p>)}
+                  <div
+                    className={`inline-block max-w-[85%] px-3 py-2 rounded text-sm ${
+                      m.role === 'user' ? 'bg-cyan-700 text-white' : 'bg-[#1e2028] text-slate-300'
+                    }`}
+                  >
+                    {m.content.split('\n').map((line, j) => (
+                      <p key={j}>{line}</p>
+                    ))}
                   </div>
                 </div>
               ))}
@@ -495,72 +655,132 @@
               )}
             </div>
             <div className="border-t border-[#1a1d21] p-3">
-              <div className="flex gap-2">
-                <input
-                  type="text" value={inputValue}
-                  onChange={e => setInputValue(e.target.value)}
+              <div className="flex gap-2 items-end">
+                <textarea
+                  ref={textareaRef}
+                  rows={1}
+                  value={inputValue}
+                  onChange={(e) => setInputValue(e.target.value)}
                   onKeyDown={handleKeyDown}
                   placeholder="Type a message..."
-                  className="flex-1 bg-[#1e2028] border border-[#1a1d21] rounded px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#3b82f6]"
+                  disabled={!selectedIdeaId}
+                  className="flex-1 bg-[#1e2028] border border-[#1a1d21] rounded px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#3b82f6] resize-none min-h-[40px] max-h-[120px]"
                 />
                 <button
+                  type="button"
                   onClick={handleSendMessage}
-                  disabled={isLoading || !inputValue.trim()}
+                  disabled={isLoading || !inputValue.trim() || !selectedIdeaId}
                   className="px-3 py-2 bg-[#3b82f6] hover:bg-[#2563eb] disabled:opacity-40 rounded text-sm"
-                >Send</button>
+                >
+                  Send
+                </button>
               </div>
             </div>
           </div>
 
-          {/* Right pane: PRD */}
-          <div className="flex-1 flex flex-col bg-[#141618] overflow-hidden">
-            {/* PRD pane header */}
-            <div className="flex items-center justify-between px-4 py-2 border-b border-[#1a1d21]">
+          <div className="flex-1 flex flex-col bg-[#141618] overflow-hidden relative">
+            {isLoading && <div className="ideas-doc-loading-overlay" aria-hidden="true" />}
+            <div className="flex items-center justify-between px-4 py-2 border-b border-[#1a1d21] relative z-10">
               <div className="flex items-center gap-3">
                 <span className="text-sm font-bold text-slate-300">PRD Document</span>
-                {clarityPass === true && <span className="text-xs px-2 py-0.5 rounded bg-green-900/30 text-green-400 border border-green-800/30">ready to convert</span>}
-                {clarityPass === false && <span className="text-xs px-2 py-0.5 rounded bg-red-900/30 text-red-400 border border-red-800/30">needs revision</span>}
-                {isReady && <span className="text-xs px-2 py-0.5 rounded bg-blue-900/30 text-blue-400 border border-blue-800/30">✓ ready</span>}
+                {clarityPass === true && (
+                  <span className="text-xs px-2 py-0.5 rounded bg-green-900/30 text-green-400 border border-green-800/30">ready to convert</span>
+                )}
+                {clarityPass === false && (
+                  <span className="text-xs px-2 py-0.5 rounded bg-red-900/30 text-red-400 border border-red-800/30">needs revision</span>
+                )}
+                {isReady && (
+                  <span className="text-xs px-2 py-0.5 rounded bg-blue-900/30 text-blue-400 border border-blue-800/30">✓ ready</span>
+                )}
               </div>
-              <div className="flex items-center gap-2">
-                <input type="file" accept=".md" onChange={e => handleFileChange(e, currentIdeaId, setPrdContent, setUploadError, setUploadSpinner, setClarityPass, setClarityIssues, setClarityMissing)} className="hidden" id="prd-upload" />
-                <label htmlFor="prd-upload" className={`px-3 py-1.5 text-xs rounded border border-[#1a1d21] cursor-pointer hover:border-slate-600 ${uploadSpinner ? 'opacity-50' : ''}`}>
+              <div className="flex items-center gap-2 flex-wrap justify-end">
+                {prdContent.trim().length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleDownloadPrd}
+                    className="px-3 py-1.5 text-xs rounded border border-[#1a1d21] text-slate-400 hover:text-slate-200 hover:border-slate-600"
+                  >
+                    Download PRD
+                  </button>
+                )}
+                <input
+                  type="file"
+                  accept=".md"
+                  onChange={(e) =>
+                    handleFileChange(e, {
+                      ideaId: selectedIdeaId,
+                      setPrdContent,
+                      setUploadError,
+                      setUploadSpinner,
+                      setClarityPass,
+                      setClarityIssues,
+                      setClarityMissing,
+                      setMessages,
+                      refreshIdeas,
+                    })
+                  }
+                  className="hidden"
+                  id="prd-upload"
+                />
+                <label
+                  htmlFor="prd-upload"
+                  className={`px-3 py-1.5 text-xs rounded border border-[#1a1d21] cursor-pointer hover:border-slate-600 ${uploadSpinner ? 'opacity-50' : ''}`}
+                >
                   {uploadSpinner ? 'Uploading...' : 'Upload PRD'}
                 </label>
-                <button onClick={handleGenerateRoadmap} disabled={!canGenerateRoadmap || isConverting}
-                  className={`px-3 py-1.5 text-xs rounded border text-white transition-colors ${canGenerateRoadmap && !isConverting ? 'bg-[#3b82f6] hover:bg-[#2563eb] border-[#3b82f6]' : 'bg-slate-700 border-slate-600 opacity-50 cursor-not-allowed'}`}>
+                <button
+                  type="button"
+                  onClick={handleGenerateRoadmap}
+                  disabled={!canGenerateRoadmap || isConverting}
+                  className={`px-3 py-1.5 text-xs rounded border text-white transition-colors ${
+                    canGenerateRoadmap && !isConverting
+                      ? 'bg-[#3b82f6] hover:bg-[#2563eb] border-[#3b82f6]'
+                      : 'bg-slate-700 border-slate-600 opacity-50 cursor-not-allowed'
+                  }`}
+                >
                   {isConverting ? 'Converting...' : 'Generate Roadmap'}
                 </button>
                 {roadmapContent && (
-                  <button onClick={handleDownloadRoadmap}
-                    className="px-3 py-1.5 text-xs rounded border border-[#1a1d21] text-slate-400 hover:text-slate-200 hover:border-slate-600">
+                  <button
+                    type="button"
+                    onClick={handleDownloadRoadmap}
+                    className="px-3 py-1.5 text-xs rounded border border-[#1a1d21] text-slate-400 hover:text-slate-200 hover:border-slate-600"
+                  >
                     Download Roadmap
                   </button>
                 )}
                 {roadmapContent && (
-                  <button onClick={() => navigateToPreflight && navigateToPreflight(roadmapContent)}
-                    className="px-3 py-1.5 text-xs rounded bg-green-700 hover:bg-green-600 text-white border border-green-600">
-                    Proceed to Setup
+                  <button
+                    type="button"
+                    onClick={() => navigateToPreflight && navigateToPreflight(roadmapContent)}
+                    className="px-3 py-1.5 text-xs rounded bg-green-700 hover:bg-green-600 text-white border border-green-600"
+                  >
+                    Continue to setup
                   </button>
                 )}
               </div>
             </div>
 
-            {uploadError && <div className="px-4 py-2 text-xs text-red-400 bg-red-900/10 border-b border-red-800/20">{uploadError}</div>}
-            {convertError && <div className="px-4 py-2 text-xs text-red-400 bg-red-900/10 border-b border-red-800/20">{convertError}</div>}
+            {uploadError && (
+              <div className="px-4 py-2 text-xs text-red-400 bg-red-900/10 border-b border-red-800/20 relative z-10">{uploadError}</div>
+            )}
+            {convertError && (
+              <div className="px-4 py-2 text-xs text-red-400 bg-red-900/10 border-b border-red-800/20 relative z-10">{convertError}</div>
+            )}
             {clarityPass === false && clarityMissing.length > 0 && (
-              <div className="px-4 py-2 text-xs text-red-400 bg-red-900/10 border-b border-red-800/20">
+              <div className="px-4 py-2 text-xs text-red-400 bg-red-900/10 border-b border-red-800/20 relative z-10">
                 Missing sections: {clarityMissing.join(', ')}
               </div>
             )}
             {clarityPass === false && clarityIssues.length > 0 && (
-              <div className="px-4 py-2 text-xs text-yellow-400 bg-yellow-900/10 border-b border-yellow-800/20">
-                {clarityIssues.map((iss, i) => <div key={i}>{iss}</div>)}
+              <div className="px-4 py-2 text-xs text-yellow-400 bg-yellow-900/10 border-b border-yellow-800/20 relative z-10">
+                {clarityIssues.map((iss, i) => (
+                  <div key={i}>{iss}</div>
+                ))}
               </div>
             )}
 
-            {/* PRD content scrollable */}
-            <div className="flex-1 overflow-y-auto scrollbar-thin p-6 space-y-4">
+            <div className="flex-1 overflow-y-auto scrollbar-thin p-6 space-y-4 relative z-0">
               {prdSections.map((section, i) => {
                 const content = getSectionContent(section);
                 const isEmpty = !content;
@@ -570,19 +790,24 @@
                     {isEmpty ? (
                       <p className="text-slate-600 italic text-sm">({section.replace('## ', '').toLowerCase()} placeholder)</p>
                     ) : (
-                      content.split('\n').map((line, j) => <p key={j} className="text-sm text-slate-300 leading-relaxed">{line}</p>)
+                      content.split('\n').map((line, j) => (
+                        <p key={j} className="text-sm text-slate-300 leading-relaxed font-semibold">
+                          {line}
+                        </p>
+                      ))
                     )}
                   </div>
                 );
               })}
             </div>
 
-            {/* Roadmap section (below PRD panel) */}
             {showRoadmap && roadmapContent && (
               <div className="border-t border-[#1a1d21] max-h-64 overflow-y-auto scrollbar-thin p-4 bg-[#0d0f12]">
                 <div className="flex items-center justify-between mb-2">
                   <h3 className="text-sm font-bold text-slate-300">Generated Roadmap</h3>
-                  <button onClick={handleDownloadRoadmap} className="text-xs text-[#3b82f6] hover:text-[#60a5fa]">Download Roadmap</button>
+                  <button type="button" onClick={handleDownloadRoadmap} className="text-xs text-[#3b82f6] hover:text-[#60a5fa]">
+                    Download Roadmap
+                  </button>
                 </div>
                 <pre className="text-xs text-slate-400 whitespace-pre-wrap font-mono">{roadmapContent}</pre>
               </div>
@@ -605,7 +830,7 @@
       onRoadmapSeedLockToggle,
       onBack,
     }) {
-      const handleFileChange = (e) => {
+      const handleRoadmapFilePick = (e) => {
         const file = e.target.files && e.target.files[0];
         if (!file) return;
         const reader = new FileReader();
@@ -613,15 +838,82 @@
         reader.readAsText(file);
       };
 
+      const [repoPathError, setRepoPathError] = React.useState('');
       const [validationResult, setValidationResult] = React.useState(null);
       const [isValidating, setIsValidating] = React.useState(false);
       const [preflightChecks, setPreflightChecks] = React.useState(null);
+      const [preflightRan, setPreflightRan] = React.useState(false);
       const [isRunningPreflight, setIsRunningPreflight] = React.useState(false);
+      const [isLaunching, setIsLaunching] = React.useState(false);
+      const [launchError, setLaunchError] = React.useState(null);
 
       const roadmapPrePopulated = !!(seedRoadmap && seedRoadmap.length > 0);
       const roadmapPreview = roadmapSeed.length > 40
         ? roadmapSeed.substring(0, 40) + '...'
         : roadmapSeed;
+
+      const autoValidateRef = React.useRef(false);
+      React.useEffect(() => {
+        if (autoValidateRef.current) return;
+        if (!(roadmapPrePopulated && roadmapSeedLocked && roadmapSeed.trim())) return;
+        autoValidateRef.current = true;
+        fetch('/api/setup/validate-roadmap', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: roadmapSeed }),
+        })
+          .then((r) => r.json())
+          .then((data) => setValidationResult(data))
+          .catch(() => {});
+      }, [roadmapPrePopulated, roadmapSeedLocked, roadmapSeed]);
+
+      const roadmapValid =
+        roadmapSeedLocked && roadmapSeed.trim().length > 0;
+      const noPreflightFail =
+        preflightRan &&
+        preflightChecks &&
+        preflightChecks.length > 0 &&
+        !preflightChecks.some((c) => c.status === 'fail');
+      const canLaunch =
+        repoPathLocked &&
+        repoPath.trim().length > 0 &&
+        roadmapValid &&
+        validationResult &&
+        validationResult.valid &&
+        noPreflightFail;
+
+      async function confirmRepoPath() {
+        setRepoPathError('');
+        const res = await fetch('/api/setup/validate-repo-path', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: repoPath }),
+        });
+        const data = await res.json();
+        if (!data.valid) {
+          setRepoPathError(data.error || 'Invalid path');
+          return;
+        }
+        if (!repoPathLocked) onRepoPathLockToggle();
+      }
+
+      async function confirmRoadmapSeed() {
+        if (!roadmapSeed.trim()) return;
+        setIsValidating(true);
+        setValidationResult(null);
+        try {
+          const res = await fetch('/api/setup/validate-roadmap', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content: roadmapSeed }),
+          });
+          const data = await res.json();
+          setValidationResult(data);
+          if (data.valid && !roadmapSeedLocked) onRoadmapSeedLockToggle();
+        } finally {
+          setIsValidating(false);
+        }
+      }
 
       const handleRunPreflight = () => {
         if (!repoPath || !repoPathLocked) return;
@@ -632,19 +924,14 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ repo_path: repoPath }),
         })
-          .then(r => r.json())
-          .then(data => { setPreflightChecks(data.checks || []); setIsRunningPreflight(false); })
+          .then((r) => r.json())
+          .then((data) => {
+            setPreflightChecks(data.checks || []);
+            setPreflightRan(true);
+            setIsRunningPreflight(false);
+          })
           .catch(() => setIsRunningPreflight(false));
       };
-
-      const [isLaunching, setIsLaunching] = React.useState(false);
-      const [launchError, setLaunchError] = React.useState(null);
-
-      const preflightPassed = preflightChecks && preflightChecks.every(c => c.status !== 'fail');
-      const canLaunch = repoPathLocked && repoPath &&
-                        roadmapSeedLocked && roadmapSeed &&
-                        validationResult && validationResult.valid &&
-                        preflightPassed;
 
       const handleLaunch = () => {
         if (!canLaunch) return;
@@ -655,36 +942,25 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ repo_path: repoPath, roadmap_seed: roadmapSeed }),
         })
-          .then(r => r.json())
-          .then(data => {
+          .then((r) => r.json())
+          .then((data) => {
             setIsLaunching(false);
             if (data.ok) {
-              onBack(); // Navigate away — pipeline monitor will reflect new project
+              onBack();
             } else {
               setLaunchError(data.error || 'Launch failed');
             }
           })
-          .catch(err => { setIsLaunching(false); setLaunchError(String(err)); });
-      };
-
-      const handleValidate = () => {
-        if (!roadmapSeed || !roadmapSeedLocked) return;
-        setIsValidating(true);
-        setValidationResult(null);
-        fetch('/api/setup/validate-roadmap', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content: roadmapSeed }),
-        })
-          .then(r => r.json())
-          .then(data => { setValidationResult(data); setIsValidating(false); })
-          .catch(() => setIsValidating(false));
+          .catch((err) => {
+            setIsLaunching(false);
+            setLaunchError(String(err));
+          });
       };
 
       return (
         <div className="flex flex-col h-screen bg-[#141618]">
           <div className="flex items-center gap-4 px-4 py-3 border-b border-[#1a1d21] bg-[#141618]">
-            <button onClick={onBack}
+            <button type="button" onClick={onBack}
               className="px-3 py-1.5 text-xs rounded border border-[#1a1d21] text-slate-400 hover:text-slate-200 hover:border-slate-600">
               ← Back to Ideas
             </button>
@@ -693,43 +969,59 @@
 
           <div className="flex-1 overflow-y-auto scrollbar-thin p-6 space-y-8">
 
-            {/* ── Repo Path ── */}
             <div>
-              <div className="flex items-center justify-between mb-2">
-                <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Repository Path</label>
-                <button onClick={onRepoPathLockToggle}
-                  className={`px-3 py-1 text-xs rounded border ${repoPathLocked ? 'border-yellow-600 text-yellow-500 hover:border-yellow-400' : 'border-[#1a1d21] text-slate-400 hover:border-slate-600'}`}>
-                  {repoPathLocked ? '🔒 Unlock' : '🔓 Lock'}
+              <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-2">Repository Path</label>
+              <div className="flex items-center justify-end gap-2 mb-2">
+                {repoPathLocked && (
+                  <span className="text-green-400 text-sm font-bold" aria-hidden="true">✓</span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => (repoPathLocked ? onRepoPathLockToggle() : confirmRepoPath())}
+                  className="px-3 py-1 text-xs rounded border border-[#1a1d21] text-slate-300 hover:border-[#00b4d8]"
+                >
+                  {repoPathLocked ? 'Edit' : 'Confirm'}
                 </button>
               </div>
               <input
                 type="text"
+                readOnly={repoPathLocked}
                 value={repoPath}
                 onChange={(e) => !repoPathLocked && onRepoPathChange(e.target.value)}
-                disabled={repoPathLocked}
-                placeholder="/home/pi/projects/my-project"
-                className={`w-full px-3 py-2 text-sm rounded border font-mono ${repoPathLocked ? 'bg-[#1e2028] border-[#1a1d21] text-slate-500 cursor-not-allowed' : 'bg-[#1e2028] border-[#1a1d21] text-slate-200 focus:outline-none focus:border-[#00b4d8]'}`}
+                placeholder="Enter the full path to your project directory (e.g. /home/pi/projects/my-project)"
+                className={`w-full px-3 py-2 text-sm rounded border font-mono ${
+                  repoPathLocked
+                    ? 'bg-[#0d0f12] border-[#1a1d21] text-slate-500 cursor-default'
+                    : 'bg-[#1e2028] border-[#1a1d21] text-slate-200 focus:outline-none focus:border-[#00b4d8]'
+                }`}
               />
+              {repoPathError && <p className="mt-2 text-xs text-red-400">{repoPathError}</p>}
             </div>
 
-            {/* ── Roadmap Seed ── */}
             <div>
-              <div className="flex items-center justify-between mb-2">
-                <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Roadmap Seed</label>
-                <button onClick={onRoadmapSeedLockToggle}
-                  className={`px-3 py-1 text-xs rounded border ${roadmapSeedLocked ? 'border-yellow-600 text-yellow-500 hover:border-yellow-400' : 'border-[#1a1d21] text-slate-400 hover:border-slate-600'}`}>
-                  {roadmapSeedLocked ? '🔒 Unlock' : '🔓 Lock'}
+              <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-2">Roadmap Seed</label>
+              <div className="flex items-center justify-end gap-2 mb-2">
+                {roadmapSeedLocked && validationResult && validationResult.valid && (
+                  <span className="text-green-400 text-sm font-bold" aria-hidden="true">✓</span>
+                )}
+                <button
+                  type="button"
+                  onClick={() =>
+                    roadmapSeedLocked ? onRoadmapSeedLockToggle() : confirmRoadmapSeed()
+                  }
+                  disabled={isValidating}
+                  className="px-3 py-1 text-xs rounded border border-[#1a1d21] text-slate-300 hover:border-[#00b4d8] disabled:opacity-50"
+                >
+                  {roadmapSeedLocked ? 'Edit' : isValidating ? '…' : 'Confirm'}
                 </button>
               </div>
               {roadmapSeed ? (
                 <div>
                   {roadmapPrePopulated && (
-                    <span className="text-xs text-green-400 mb-2 block">
-                      From Project Ideas — {roadmapPreview}
-                    </span>
+                    <span className="text-xs text-green-400 mb-2 block">From Project Ideas</span>
                   )}
-                  {!roadmapSeedLocked && (
-                    <input type="file" accept=".md" onChange={handleFileChange}
+                  {!roadmapPrePopulated && !roadmapSeedLocked && (
+                    <input type="file" accept=".md" onChange={handleRoadmapFilePick}
                       className="block w-full text-xs text-slate-400 file:mr-4 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-xs file:bg-[#1e2028] file:text-slate-300 hover:file:bg-[#252830] mb-3" />
                   )}
                   <pre className="text-xs text-slate-400 whitespace-pre-wrap font-mono bg-[#1e2028] p-4 rounded border border-[#1a1d21] max-h-96 overflow-y-auto scrollbar-thin">
@@ -737,21 +1029,10 @@
                   </pre>
                 </div>
               ) : (
-                <input type="file" accept=".md" onChange={handleFileChange}
+                <input type="file" accept=".md" onChange={handleRoadmapFilePick}
                   className="block w-full text-xs text-slate-400 file:mr-4 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-xs file:bg-[#1e2028] file:text-slate-300 hover:file:bg-[#252830]" />
               )}
 
-              {/* Validate button — shown when locked with content */}
-              {roadmapSeedLocked && roadmapSeed && (
-                <div className="mt-3">
-                  <button onClick={handleValidate} disabled={isValidating}
-                    className={`px-3 py-1.5 text-xs rounded border transition-colors ${isValidating ? 'bg-slate-700 border-slate-600 text-slate-500 cursor-not-allowed' : 'bg-[#1a1d21] border-[#1a1d21] text-slate-300 hover:border-slate-600'}`}>
-                    {isValidating ? 'Validating...' : 'Validate Roadmap'}
-                  </button>
-                </div>
-              )}
-
-              {/* Validation results */}
               {validationResult && (
                 <div className={`mt-3 p-3 rounded border text-xs ${validationResult.valid ? 'border-green-800 bg-green-950 text-green-300' : 'border-red-800 bg-red-950 text-red-300'}`}>
                   {validationResult.valid ? (
@@ -771,12 +1052,11 @@
               )}
             </div>
 
-            {/* ── Preflight ── */}
             {repoPathLocked && repoPath && (
               <div>
                 <div className="flex items-center justify-between mb-2">
                   <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Preflight Check</label>
-                  <button onClick={handleRunPreflight} disabled={isRunningPreflight}
+                  <button type="button" onClick={handleRunPreflight} disabled={isRunningPreflight}
                     className={`px-3 py-1.5 text-xs rounded border transition-colors ${isRunningPreflight ? 'bg-slate-700 border-slate-600 text-slate-500 cursor-not-allowed' : 'bg-[#1a1d21] border-[#1a1d21] text-slate-300 hover:border-[#00b4d8]'}`}>
                     {isRunningPreflight ? 'Running...' : 'Run Preflight'}
                   </button>
@@ -804,11 +1084,14 @@
               </div>
             )}
 
-            {/* ── Launch ── */}
             <div className="pt-4 border-t border-[#1a1d21]">
-              <button onClick={handleLaunch} disabled={!canLaunch || isLaunching}
-                className={`w-full py-2.5 text-sm font-bold rounded border transition-colors ${canLaunch && !isLaunching ? 'bg-[#00b4d8] border-[#00b4d8] text-white hover:bg-sky-400' : 'bg-slate-800 border-slate-700 text-slate-500 cursor-not-allowed'}`}>
-                {isLaunching ? 'Launching...' : 'Launch Pipeline'}
+              <button type="button" onClick={handleLaunch} disabled={!canLaunch || isLaunching}
+                className={`w-full py-2.5 text-sm font-bold rounded border transition-colors ${
+                  canLaunch && !isLaunching
+                    ? 'bg-[#00b4d8] border-[#00b4d8] text-white hover:bg-sky-400'
+                    : 'bg-slate-800 border-slate-700 text-slate-500 cursor-not-allowed'
+                }`}>
+                {isLaunching ? 'Launching...' : canLaunch ? 'Launch Pipeline →' : 'Launch Pipeline'}
               </button>
               {launchError && (
                 <div className="mt-3 p-3 rounded border border-red-800 bg-red-950 text-red-300 text-xs font-mono whitespace-pre-wrap">
@@ -817,11 +1100,13 @@
               )}
               {!canLaunch && !isLaunching && (
                 <p className="mt-2 text-xs text-slate-600 text-center">
-                  {!repoPathLocked || !repoPath ? 'Lock a repo path to continue' :
-                   !roadmapSeedLocked || !roadmapSeed ? 'Lock a roadmap seed to continue' :
-                   !validationResult || !validationResult.valid ? 'Validate roadmap first' :
-                   !preflightPassed ? 'Fix preflight failures to continue' :
-                   'Run preflight checks to continue'}
+                  {!repoPathLocked || !repoPath.trim() ? 'Confirm a valid repository path to continue' :
+                   !roadmapSeed.trim() ? 'Add a roadmap seed to continue' :
+                   !roadmapSeedLocked ? 'Confirm roadmap seed to continue' :
+                   !validationResult || !validationResult.valid ? 'Roadmap must pass validation' :
+                   !preflightRan || !preflightChecks || !preflightChecks.length ? 'Run preflight checks to continue' :
+                   preflightChecks.some((c) => c.status === 'fail') ? 'Fix preflight failures to continue' :
+                   'Ready to launch'}
                 </p>
               )}
             </div>
@@ -834,7 +1119,5 @@
     // ─── Render ─────────────────────────────────────────────────────────────────
     ReactDOM.createRoot(document.getElementById('root')).render(<App />);
   </script>
-  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
-  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
 </body>
 </html>
