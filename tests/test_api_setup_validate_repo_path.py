@@ -50,3 +50,13 @@ class TestValidateRepoPath:
         )
         assert r.status_code == 200
         assert r.json()["valid"] is False
+
+    def test_relative_path_invalid(self):
+        r = client.post(
+            "/api/setup/validate-repo-path",
+            json={"path": "home/pi/projects/my-app"},
+        )
+        assert r.status_code == 200
+        d = r.json()
+        assert d["valid"] is False
+        assert "absolute" in (d.get("error") or "").lower()
