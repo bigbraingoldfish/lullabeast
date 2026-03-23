@@ -43,8 +43,11 @@ def test_expand_collapse_toggles_state(html_content):
 
 def test_only_one_phase_expanded_at_a_time(html_content):
     """Clicking a different row collapses previous and expands new."""
-    # Check for setting expandedPhaseId to clicked phase's ID
-    has_set_expanded = bool(re.search(r'setExpandedPhaseId\s*\(\s*(?:phase\.id|phaseId)', html_content))
+    # Toggle: setExpandedPhaseId(prev => prev === phaseId ? null : phaseId) or direct phase.id
+    has_set_expanded = bool(
+        re.search(r"setExpandedPhaseId\s*\(\s*(?:phase\.id|phaseId)", html_content)
+        or re.search(r"setExpandedPhaseId\s*\(\s*prev\s*=>", html_content)
+    )
     assert has_set_expanded, "No logic to set expandedPhaseId to phase ID"
 
 

@@ -10,23 +10,25 @@ def test_import_ui_server():
 
 
 def test_load_config_default_returns_seven_keys():
-    """Test load_config() with no args returns dict with exactly seven keys and expanded paths."""
-    from ui.server import load_config
+    """Test load_config() with no args returns merged DEFAULTS + config.json keys and expanded paths."""
+    from ui.server import DEFAULTS, load_config
     result = load_config()
-    
-    expected_keys = [
-        "port", "pipeline_state_path", "phase_state_path", 
-        "lock_path", "events_path", "roadmap_path", "project_dir_path"
-    ]
-    
+
     assert isinstance(result, dict)
-    assert set(result.keys()) == set(expected_keys), f"Keys mismatch: {set(result.keys())}"
+    # At minimum all DEFAULTS keys; config.json may add e.g. autodev_repo_path
+    assert set(DEFAULTS.keys()).issubset(set(result.keys())), (
+        f"Missing keys: {set(DEFAULTS.keys()) - set(result.keys())}"
+    )
     
-    # All path values should be absolute (not starting with ~)
-    path_keys = [k for k in result.keys() if k != "port"]
+    # Path-like string values should have ~ expanded to absolute paths (skip URLs and secrets)
+    non_path_keys = {"port", "hooks_url", "hooks_token"}
+    path_keys = [k for k in result.keys() if k not in non_path_keys]
     for key in path_keys:
-        assert not result[key].startswith("~"), f"{key} should have ~ expanded"
-        assert result[key].startswith("/"), f"{key} should be absolute path"
+        val = result[key]
+        if not isinstance(val, str):
+            continue
+        assert not val.startswith("~"), f"{key} should have ~ expanded"
+        assert val.startswith("/") or val.startswith("http"), f"{key} should be absolute path or URL"
     
     # Check default port
     assert result["port"] == 18790

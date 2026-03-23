@@ -12,20 +12,25 @@ def test_root_with_index_html_present(tmp_path):
     # Create a temporary index.html in the ui directory
     ui_dir = Path(__file__).parent.parent / "ui"
     index_path = ui_dir / "index.html"
-    
-    # Save original state
+
+    # Save original state (must restore content — same pattern as test_server.py)
     original_exists = index_path.exists()
-    
+    original_content = None
+    if original_exists:
+        original_content = index_path.read_text()
+
     try:
         # Create temporary index.html
         index_path.write_text("<html></html>")
-        
+
         client = TestClient(app)
         response = client.get("/")
-        
+
         assert response.status_code == 200
         assert "text/html" in response.headers.get("content-type", "")
     finally:
-        # Clean up - remove temp file if we created it
-        if not original_exists and index_path.exists():
+        # Restore original state
+        if original_exists and original_content is not None:
+            index_path.write_text(original_content)
+        elif index_path.exists():
             index_path.unlink()

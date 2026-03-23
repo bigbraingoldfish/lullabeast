@@ -31,13 +31,11 @@ class TestValidateRoadmapContent:
         assert result["errors"] == []
 
     def test_invalid_phase_line_format_not_flagged(self):
-        """Line missing backticks is not recognised as a phase line, so no missing-test error."""
-        # This line does NOT match the phase regex (missing backticks), so it is
-        # silently ignored — no errors should be emitted for it.
+        """Line missing backticks is not a valid phase — zero phases → error."""
         content = "- [ ] UI-E1 | LOW | Goal\n"
         result = _validate_roadmap_content(content)
-        assert result["valid"] is True
-        assert result["errors"] == []
+        assert result["valid"] is False
+        assert any("At least one valid phase" in e["message"] for e in result["errors"])
 
     def test_correctly_formatted_phase_without_test_is_flagged(self):
         """A correctly formatted phase line with no > Test: within 10 lines returns an error."""
@@ -73,11 +71,11 @@ class TestValidateRoadmapContent:
         assert len(dup_errors) >= 1
         assert "UI-E1" in dup_errors[0]["message"]
 
-    def test_empty_content_returns_valid(self):
-        """Empty string returns valid=True and no errors."""
+    def test_empty_content_returns_invalid(self):
+        """Empty string has no phases → valid=False."""
         result = _validate_roadmap_content("")
-        assert result["valid"] is True
-        assert result["errors"] == []
+        assert result["valid"] is False
+        assert any("At least one valid phase" in e["message"] for e in result["errors"])
 
     def test_multiple_errors_all_returned(self):
         """Roadmap with 2 phases both missing > Test: returns 2 errors."""

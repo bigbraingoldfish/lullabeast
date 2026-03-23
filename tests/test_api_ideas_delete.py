@@ -56,8 +56,12 @@ class TestDeleteIdeas:
 
         post_response = client_obj.post("/api/ideas")
         idea_id = post_response.json()["id"]
+        idea_path = ideas_dir / idea_id
+        turns = idea_path / "turns"
+        turns.mkdir(parents=True, exist_ok=True)
+        (turns / "1.done").write_text("done")
 
-        # Confirm it's in the list
+        # Confirm it's in the list (listed only after first turn completes)
         get_response = client_obj.get("/api/ideas")
         assert any(idea["id"] == idea_id for idea in get_response.json())
 

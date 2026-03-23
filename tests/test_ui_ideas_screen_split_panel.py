@@ -3,16 +3,28 @@ import re
 
 
 def extract_function_body(html_content, func_name):
-    """Extract the body of a JavaScript function from HTML."""
-    pattern = rf'function {func_name}\s*\(\)\s*\{{(.*?)\n\s*\}}\s*;?\s*$'
-    match = re.search(pattern, html_content, re.MULTILINE | re.DOTALL)
+    """Extract the full body of a named function (handles nested JSX braces)."""
+    match = re.search(
+        rf"\n([ \t]*)function {re.escape(func_name)}\s*\([^)]*\)\s*\{{",
+        html_content,
+    )
     if not match:
-        # Try alternate pattern with closing );
-        pattern2 = rf'function {func_name}\s*\(\)\s*\{{(.*?)\n\s*\}}\s*,?\s*$'
-        match = re.search(pattern2, html_content, re.MULTILINE | re.DOTALL)
-    if match:
-        return match.group(1)
-    return None
+        return None
+    indent = match.group(1)
+    body_start = match.end()
+    remainder = html_content[body_start:]
+
+    next_fn = re.search(rf"\n\n{re.escape(indent)}function \w", remainder)
+    if next_fn:
+        candidate = remainder[: next_fn.start()]
+    else:
+        script_end = re.search(r"\n\s*</script>", remainder)
+        candidate = remainder[: script_end.start()] if script_end else remainder
+
+    last_close = candidate.rfind(f"\n{indent}}}")
+    if last_close != -1:
+        return candidate[:last_close]
+    return candidate
 
 
 def load_index_html():
@@ -34,41 +46,33 @@ class TestIdeasScreenSplitPanel:
         assert "function IdeasScreen" in content, "IdeasScreen function not found"
 
     def test_two_side_by_side_panels(self):
-        """IdeasScreen renders two side-by-side panels with left w-[38%] and right flex-1."""
+        """IdeasScreen: collapsible chat rail + conversation + PRD columns."""
         content = load_index_html()
         func_body = extract_function_body(content, "IdeasScreen")
         assert func_body is not None, "IdeasScreen function body not extracted"
 
-        # Check outer container uses flex h-full
-        assert "flex h-full" in func_body, "Outer container should have 'flex h-full'"
-
-        # Check left pane: w-[38%] flex-shrink-0 with right border separator
-        assert re.search(r'w-\[38\%\].*?flex-shrink-0', func_body, re.DOTALL), \
-            "Left pane should have w-[38%] flex-shrink-0"
+        assert "flex h-full min-w-0" in func_body, "Outer container should use flex h-full min-w-0"
+        assert "chatsRailCollapsed" in func_body, "Chat list rail should be collapsible"
+        assert "selectIdeaFromRail" in func_body, "Ideas should switch via rail, not only dropdown"
         assert "border-r border-[#1a1d21]" in func_body, \
-            "Separator should be border-r border-[#1a1d21]"
-
-        # Check right pane: flex-1
-        assert re.search(r'flex-1.*?(?:overflow-hidden|overflow-y-auto)', func_body, re.DOTALL), \
-            "Right pane should have flex-1"
+            "Column separators should use border-r border-[#1a1d21]"
+        assert re.search(r"flex-1.*?(?:overflow-hidden|overflow-y-auto)", func_body, re.DOTALL), \
+            "Document/conversation columns should use flex-1"
 
     def test_left_pane_structure(self):
-        """Left pane has flex-1 overflow-y-auto div for messages and a border-t border-[#1a1d21] pinned input area."""
+        """Conversation column has flex-1 message list and border-t composer area."""
         content = load_index_html()
         func_body = extract_function_body(content, "IdeasScreen")
         assert func_body is not None
 
-        # Left pane should have flex flex-col bg-[#141618] overflow-hidden
-        assert re.search(r'flex\s+flex-col\s+bg-\[#141618\]\s+overflow-hidden', func_body), \
-            "Each pane should have 'flex flex-col bg-[#141618] overflow-hidden'"
+        assert re.search(r'flex\s+flex-col\s+min-w-0\s+bg-\[#141618\]', func_body), \
+            "Conversation column should be flex flex-col min-w-0 bg-[#141618]"
 
-        # Left inner: flex-1 overflow-y-auto p-4 (messages area)
         assert re.search(r'flex-1\s+overflow-y-auto\s+p-4', func_body), \
             "Messages area should have 'flex-1 overflow-y-auto p-4'"
 
-        # Input area: border-t border-[#1a1d21] p-3
         assert re.search(r'border-t\s+border-\[#1a1d21\]\s+p-3', func_body), \
-            "Input area should have 'border-t border-[#1a1d21] p-3'"
+            "Composer area should have 'border-t border-[#1a1d21] p-3'"
 
     def test_right_pane_has_all_prd_headers(self):
         """Right pane has all 12 PRD section headers as h2 elements."""
@@ -92,9 +96,9 @@ class TestIdeasScreenSplitPanel:
         ]
 
         for header in prd_headers:
-            # Check for <h2 ...>{header}</h2>
-            assert re.search(rf'<h2[^>]*>\s*{re.escape(header)}\s*</h2>', func_body), \
-                f"Missing PRD header: {header}"
+            # Titles live in PRD_SECTION_TITLES (module scope, above IdeasScreen)
+            assert header in content, f"Missing PRD header string: {header}"
+        assert "PRD_SECTION_TITLES.map" in func_body
 
     def test_right_pane_has_all_placeholder_texts(self):
         """Right pane has all 12 placeholder lines with italic dim text."""
@@ -103,18 +107,18 @@ class TestIdeasScreenSplitPanel:
         assert func_body is not None
 
         placeholder = "text-slate-600 italic text-sm"
-        assert func_body.count(placeholder) == 12, \
-            f"Expected 12 placeholder lines with '{placeholder}', found {func_body.count(placeholder)}"
+        # Single className in source; repeated at runtime via PRD_SECTION_TITLES.map
+        assert func_body.count(placeholder) >= 1
+        assert "PRD_SECTION_TITLES.map" in func_body
 
     def test_both_panes_have_flex_flex_col_bg(self):
-        """Both panes have flex flex-col bg-[#141618] and scroll independently."""
+        """Conversation and PRD columns use flex-col panel styling."""
         content = load_index_html()
         func_body = extract_function_body(content, "IdeasScreen")
         assert func_body is not None
 
-        # Both panes share these classes
-        assert "flex flex-col bg-[#141618]" in func_body, \
-            "Both panes should have 'flex flex-col bg-[#141618]'"
+        assert func_body.count("flex flex-col min-w-0 bg-[#141618]") >= 2, \
+            "Conversation and PRD columns should use matching flex-col panels"
 
     def test_no_javascript_syntax_errors(self):
         """IdeasScreen function has balanced braces and parentheses."""

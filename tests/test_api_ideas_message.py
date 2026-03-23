@@ -35,11 +35,11 @@ class TestApiIdeasMessage:
         return path
 
     def _write_turn_files(self, idea_id, turn_n, response_text, prd_text=""):
-        """Write turn_n.md and turn_n.done sentinel files."""
+        """Write {n}.md and {n}.done sentinel files (AGENTS.md contract)."""
         turns_dir = self.ideas_dir / idea_id / "turns"
         turns_dir.mkdir(parents=True, exist_ok=True)
-        md_path = turns_dir / f"turn_{turn_n}.md"
-        done_path = turns_dir / f"turn_{turn_n}.done"
+        md_path = turns_dir / f"{turn_n}.md"
+        done_path = turns_dir / f"{turn_n}.done"
         prd_path = self.ideas_dir / idea_id / "prd_draft.md"
         with open(md_path, "w") as f:
             f.write(response_text)
@@ -269,5 +269,5 @@ class TestApiIdeasMessage:
                 )
 
         # Sentinel path should use turn 10
-        turn_done_path = self.ideas_dir / "3" / "turns" / "turn_10.done"
-        assert turn_done_path.exists(), f"Expected turn_10.done at {turn_done_path}"
+        turn_done_path = self.ideas_dir / "3" / "turns" / "10.done"
+        assert turn_done_path.exists(), f"Expected 10.done at {turn_done_path}"

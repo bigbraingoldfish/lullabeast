@@ -118,15 +118,16 @@ class TestIdeasConversationRendering:
             "IdeasScreen should render prdContent in document pane"
 
     def test_prd_content_rendered_as_html_not_raw_text(self):
-        """prdContent is rendered as HTML (dangerouslySetInnerHTML or split on \\n\\n)."""
+        """prdContent is rendered readably (structured HTML, markdown split, or pre-wrap)."""
         content = load_index_html()
         func_body = extract_function_body(content, "IdeasScreen")
         assert func_body is not None
 
-        # Should split on \n\n for markdown-like rendering
-        assert re.search(r'\\n\\n|split\s*\(\s*\\n\\n', func_body) or \
-               re.search(r'dangerouslySetInnerHTML', func_body), \
-            "IdeasScreen should render prdContent as HTML (split on \n\n or dangerouslySetInnerHTML)"
+        assert (
+            re.search(r"\\n\\n|split\s*\(\s*\\n\\n", func_body)
+            or re.search(r"dangerouslySetInnerHTML", func_body)
+            or re.search(r"whitespace-pre-wrap", func_body)
+        ), "IdeasScreen should render prdContent with structure or whitespace-pre-wrap"
 
     def test_document_pane_shows_section_headings_bold(self):
         """Section headings in prdContent are rendered bold."""
@@ -134,6 +135,6 @@ class TestIdeasConversationRendering:
         func_body = extract_function_body(content, "IdeasScreen")
         assert func_body is not None
 
-        # Check for bold rendering of headings
-        assert re.search(r'split.*?\\n\\n|bold|<b>|<strong>', func_body, re.IGNORECASE), \
-            "IdeasScreen should render section headings as bold"
+        # Template section titles use font-semibold on h2
+        assert re.search(r"font-semibold|split.*?\\n\\n|bold|<b>|<strong>", func_body, re.IGNORECASE), \
+            "IdeasScreen should render section headings with emphasis"

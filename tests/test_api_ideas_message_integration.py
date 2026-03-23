@@ -43,8 +43,8 @@ class TestApiIdeasMessageIntegration:
     def _write_turn_files(self, idea_id, turn_n, response_text, prd_text=""):
         turns_dir = self.ideas_dir / idea_id / "turns"
         turns_dir.mkdir(parents=True, exist_ok=True)
-        md_path = turns_dir / f"turn_{turn_n}.md"
-        done_path = turns_dir / f"turn_{turn_n}.done"
+        md_path = turns_dir / f"{turn_n}.md"
+        done_path = turns_dir / f"{turn_n}.done"
         prd_path = self.ideas_dir / idea_id / "prd_draft.md"
         with open(md_path, "w") as f:
             f.write(response_text)

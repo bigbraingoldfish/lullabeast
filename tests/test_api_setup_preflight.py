@@ -133,7 +133,7 @@ class TestSymlinkCheck:
         assert sym["status"] == "pass"
 
     def test_symlink_fail(self, tmp_path):
-        """Symlink points elsewhere → check status 'fail', message contains 'ln -sfn'."""
+        """Symlink points elsewhere → auto-created → status 'fixed'."""
         repo_path = tmp_path / "myproject"
         repo_path.mkdir()
         wrong_path = tmp_path / "other"
@@ -152,11 +152,11 @@ class TestSymlinkCheck:
             results = _run_preflight_checks(str(repo_path))
 
         sym = next(c for c in results if c["check"] == "symlink")
-        assert sym["status"] == "fail"
-        assert "ln -sfn" in sym["message"]
+        assert sym["status"] == "fixed"
+        assert str(repo_path) in sym["message"] or "Symlink" in sym["message"]
 
     def test_symlink_missing_returns_fail(self, tmp_path):
-        """No symlink at all → check status 'fail', message contains 'ln -sfn'."""
+        """No symlink at all → created → status 'fixed'."""
         repo_path = tmp_path / "myproject"
         repo_path.mkdir()
         openclaw = tmp_path / ".openclaw"
@@ -171,14 +171,13 @@ class TestSymlinkCheck:
             results = _run_preflight_checks(str(repo_path))
 
         sym = next(c for c in results if c["check"] == "symlink")
-        assert sym["status"] == "fail"
-        assert "ln -sfn" in sym["message"]
+        assert sym["status"] == "fixed"
 
 
 class TestGitignoreCheck:
 
     def test_gitignore_missing_returns_fail(self, tmp_path):
-        """No .gitignore → check status 'fail'."""
+        """No .gitignore → created → status 'fixed'."""
         repo_path = tmp_path / "myproject"
         repo_path.mkdir()
         openclaw = _make_openclaw_dir(tmp_path, repo_path)
@@ -190,10 +189,10 @@ class TestGitignoreCheck:
             results = _run_preflight_checks(str(repo_path))
 
         gi = next(c for c in results if c["check"] == ".gitignore")
-        assert gi["status"] == "fail"
+        assert gi["status"] == "fixed"
 
     def test_gitignore_entries_injected(self, tmp_path):
-        """When .gitignore is present but missing entries → entries auto-added, status 'pass', message contains 'Added'."""
+        """When .gitignore is present but missing entries → entries auto-added, status 'fixed'."""
         repo_path = tmp_path / "myproject"
         repo_path.mkdir()
         openclaw = _make_openclaw_dir(tmp_path, repo_path)
@@ -207,7 +206,7 @@ class TestGitignoreCheck:
             results = _run_preflight_checks(str(repo_path))
 
         entries_check = next(c for c in results if c["check"] == ".gitignore entries")
-        assert entries_check["status"] == "pass"
+        assert entries_check["status"] == "fixed"
         assert "Added" in entries_check["message"]
 
     def test_gitignore_entries_all_present(self, tmp_path):

@@ -81,8 +81,10 @@ def test_complete_phases_have_reduced_opacity(html_content):
 
 def test_blocked_phases_have_red_tint(html_content):
     """Blocked phases render with red tint background or border."""
-    # Check for red styling on blocked phases
-    has_red_tint = bool(re.search(r'red.*bg|red.*border|red-.*background|red-.*tint', html_content, re.IGNORECASE))
+    # Tailwind uses bg-red-*, border-red-* (substring patterns, not red-before-bg)
+    has_red_tint = bool(
+        re.search(r"bg-red|border-red|red-900|red-800|red-600", html_content, re.IGNORECASE)
+    )
     assert has_red_tint, "Blocked phases do not have red tint styling"
 
 

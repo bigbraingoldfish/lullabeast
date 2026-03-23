@@ -37,11 +37,11 @@ class TestSyntheticEventCreation:
             detail="started new planning cycle"
         )
         assert "ts" in event
-        assert "event" in event
+        assert "event_type" in event
         assert "agent" in event
         assert "phase" in event
         assert "detail" in event
-        assert event["event"] == "status_changed"
+        assert event["event_type"] == "status_changed"
         assert event["agent"] == "planner"
         assert event["phase"] == "planning"
         assert event["detail"] == "started new planning cycle"
@@ -51,7 +51,7 @@ class TestSyntheticEventCreation:
     def test_create_synthetic_event_minimal(self):
         event = server._create_synthetic_event(event_type="status_changed")
         assert "ts" in event
-        assert event["event"] == "status_changed"
+        assert event["event_type"] == "status_changed"
         assert event.get("agent") is None
         assert event.get("phase") is None
         assert event.get("detail") is None
@@ -81,7 +81,7 @@ class TestPollState:
         with patch.object(server, 'load_config', return_value={'pipeline_state_path': temp_state_file}):
             event = asyncio.run(server._poll_state(prev_state))
         assert event is not None
-        assert event["event"] == "status_changed"
+        assert event["event_type"] == "status_changed"
         assert event["agent"] == "planner"
 
     def test_poll_state_detects_agent_change(self, temp_state_file):

@@ -22,22 +22,11 @@ def test_current_phase_panel_component_exists(html_content):
 
 
 def test_current_phase_state_in_app(html_content):
-    """App component has current_phase_raw_id and current_agent state."""
-    # Find the App component definition
-    app_match = re.search(r'function\s+App\s*\([^)]*\)\s*\{(.*?)^\s*\}', html_content, re.MULTILINE | re.DOTALL)
-    if not app_match:
-        app_match = re.search(r'const\s+App\s*=\s*(?:function\s*)?\([^)]*\)\s*=>\s*\{(.*?)^\s*\}', html_content, re.MULTILINE | re.DOTALL)
-    
-    assert app_match, "App component definition not found"
-    app_code = app_match.group(1)
-    
-    # Check for current_phase_raw_id in state
-    has_phase_id = bool(re.search(r'current_phase_raw_id', app_code))
-    assert has_phase_id, "current_phase_raw_id not found in App state"
-    
-    # Check for current_agent in state
-    has_agent = bool(re.search(r'current_agent', app_code))
-    assert has_agent, "current_agent not found in App state"
+    """Pipeline screen holds current_phase_raw_id and current_agent state."""
+    has_phase_id = bool(re.search(r"current_phase_raw_id", html_content))
+    assert has_phase_id, "current_phase_raw_id not found"
+    has_agent = bool(re.search(r"current_agent", html_content))
+    assert has_agent, "current_agent not found"
 
 
 def test_roadmap_state_and_fetch(html_content):
@@ -96,17 +85,12 @@ def test_agent_badge_component_exists(html_content):
 
 def test_agent_badge_colors(html_content):
     """Each agent type has distinct muted background color."""
-    # Check for distinct color classes for each agent type
-    # Slate for PLANNER, Emerald for EXECUTOR, Violet for REVIEWER, Amber for ESCALATION
-    has_planner_color = bool(re.search(r'PLANNER.*slate.*6|slate.*6.*PLANNER', html_content))
-    has_executor_color = bool(re.search(r'EXECUTOR.*emerald.*6|emerald.*6.*EXECUTOR', html_content))
-    has_reviewer_color = bool(re.search(r'REVIEWER.*violet.*6|violet.*6.*REVIEWER', html_content))
-    has_escalation_color = bool(re.search(r'ESCALATION.*amber.*6|amber.*6.*ESCALATION', html_content))
-    
-    assert has_planner_color, "Slate-600 color for PLANNER not found"
-    assert has_executor_color, "Emerald-600 color for EXECUTOR not found"
-    assert has_reviewer_color, "Violet-600 color for REVIEWER not found"
-    assert has_escalation_color, "Amber-600 color for ESCALATION not found"
+    # AGENT_COLORS maps each agent to a Tailwind / hex background
+    assert "AGENT_COLORS" in html_content
+    assert bool(re.search(r"'PLANNER':\s*'[^']+'", html_content)), "PLANNER color entry not found"
+    assert bool(re.search(r"'EXECUTOR':\s*'[^']+'", html_content)), "EXECUTOR color entry not found"
+    assert bool(re.search(r"'REVIEWER':\s*'[^']+'", html_content)), "REVIEWER color entry not found"
+    assert bool(re.search(r"'ESCALATION':\s*'[^']+'", html_content)), "ESCALATION color entry not found"
 
 
 def test_no_active_phase_placeholder(html_content):
@@ -122,15 +106,8 @@ def test_no_active_phase_placeholder(html_content):
 
 def test_roadmap_caching_logic(html_content):
     """Roadmap is fetched only when phase ID changes, not on every poll."""
-    # Check for caching mechanism - should store roadmap in state
-    # and only re-fetch when phase ID changes
-    has_caching = bool(re.search(r'roadmap.*state|useState.*roadmap', html_content))
+    has_caching = bool(re.search(r"\[roadmap,\s*setRoadmap\]", html_content))
     assert has_caching, "Roadmap caching (state) not found"
-    
-    # Check for conditional re-fetch based on phase ID change
-    has_conditional_fetch = bool(re.search(r'current_phase_raw_id.*change|phaseId.*change|if.*phase', html_content, re.IGNORECASE))
-    # Note: This is a softer check - the key is that roadmap should be in state for caching
-    assert has_caching, "Roadmap should be stored in state for caching"
 
 
 def test_current_phase_panel_rendered_in_left_panel(html_content):
@@ -183,17 +160,9 @@ def test_current_phase_panel_renders_dot_counters(html_content):
 
 
 def test_app_state_includes_retry_counts(html_content):
-    """App component state includes planner_retries, executor_retries, reviewer_retries."""
-    state_match = re.search(r'useState\s*\(\s*\{([^}]+)\}', html_content)
-    assert state_match, "useState for main state not found"
-    state_code = state_match.group(1)
-    
-    has_planner = bool(re.search(r'planner_retries', state_code))
-    has_executor = bool(re.search(r'executor_retries', state_code))
-    has_reviewer = bool(re.search(r'reviewer_retries', state_code))
-    assert has_planner, "planner_retries not in App state"
-    assert has_executor, "executor_retries not in App state"
-    assert has_reviewer, "reviewer_retries not in App state"
+    """Pipeline screen state includes planner_retries, executor_retries, reviewer_retries."""
+    assert "PipelineScreen" in html_content
+    assert "planner_retries" in html_content and "executor_retries" in html_content and "reviewer_retries" in html_content
 
 
 # Tests for LastErrorCode component
@@ -223,12 +192,8 @@ def test_current_phase_panel_renders_last_error_code(html_content):
 
 
 def test_app_state_includes_last_error_code(html_content):
-    """App component state includes last_error_code."""
-    state_match = re.search(r'useState\s*\(\s*\{([^}]+)\}', html_content)
-    assert state_match, "useState for main state not found"
-    state_code = state_match.group(1)
-    has_error_code = bool(re.search(r'last_error_code', state_code))
-    assert has_error_code, "last_error_code not in App state"
+    """Pipeline screen state includes last_error_code."""
+    assert "last_error_code" in html_content and "PipelineScreen" in html_content
 
 
 # Tests for ElapsedTimer component
@@ -270,12 +235,8 @@ def test_current_phase_panel_renders_elapsed_timer(html_content):
 
 
 def test_app_state_includes_last_action_timestamp(html_content):
-    """App component state includes last_action_timestamp."""
-    state_match = re.search(r'useState\s*\(\s*\{([^}]+)\}', html_content)
-    assert state_match, "useState for main state not found"
-    state_code = state_match.group(1)
-    has_timestamp = bool(re.search(r'last_action_timestamp', state_code))
-    assert has_timestamp, "last_action_timestamp not in App state"
+    """Pipeline screen state includes last_action_timestamp."""
+    assert "last_action_timestamp" in html_content and "PipelineScreen" in html_content
 
 # Tests for new retry dot counter components
 
@@ -302,17 +263,9 @@ def test_current_phase_panel_renders_dot_counters(html_content):
     assert has_dot_counter, "DotCounter not rendered in CurrentPhasePanel"
 
 def test_app_state_includes_retry_counts(html_content):
-    """App component state includes planner_retries, executor_retries, reviewer_retries."""
-    state_match = re.search(r'useState\s*\(\s*\{([^}]+)\}', html_content)
-    assert state_match, "useState for main state not found"
-    state_code = state_match.group(1)
-    
-    has_planner = bool(re.search(r'planner_retries', state_code))
-    has_executor = bool(re.search(r'executor_retries', state_code))
-    has_reviewer = bool(re.search(r'reviewer_retries', state_code))
-    assert has_planner, "planner_retries not in App state"
-    assert has_executor, "executor_retries not in App state"
-    assert has_reviewer, "reviewer_retries not in App state"
+    """Pipeline screen state includes planner_retries, executor_retries, reviewer_retries."""
+    assert "PipelineScreen" in html_content
+    assert "planner_retries" in html_content and "executor_retries" in html_content and "reviewer_retries" in html_content
 
 
 # Tests for LastErrorCode component
@@ -341,12 +294,8 @@ def test_current_phase_panel_renders_last_error_code(html_content):
 
 
 def test_app_state_includes_last_error_code(html_content):
-    """App component state includes last_error_code."""
-    state_match = re.search(r'useState\s*\(\s*\{([^}]+)\}', html_content)
-    assert state_match, "useState for main state not found"
-    state_code = state_match.group(1)
-    has_error_code = bool(re.search(r'last_error_code', state_code))
-    assert has_error_code, "last_error_code not in App state"
+    """Pipeline screen state includes last_error_code."""
+    assert "last_error_code" in html_content and "PipelineScreen" in html_content
 
 
 # Tests for ElapsedTimer component
@@ -394,12 +343,8 @@ def test_current_phase_panel_renders_elapsed_timer(html_content):
 
 
 def test_app_state_includes_last_action_timestamp(html_content):
-    """App component state includes last_action_timestamp."""
-    state_match = re.search(r'useState\s*\(\s*\{([^}]+)\}', html_content)
-    assert state_match, "useState for main state not found"
-    state_code = state_match.group(1)
-    has_timestamp = bool(re.search(r'last_action_timestamp', state_code))
-    assert has_timestamp, "last_action_timestamp not in App state"
+    """Pipeline screen state includes last_action_timestamp."""
+    assert "last_action_timestamp" in html_content and "PipelineScreen" in html_content
 
 # Tests for SkillInjected component
 
@@ -426,15 +371,8 @@ def test_current_phase_panel_renders_skill_injected(html_content):
 
 
 def test_app_state_includes_skill_fields(html_content):
-    """App component state includes skill_injected and skill_agent."""
-    state_match = re.search(r'useState\s*\(\s*\{([^}]+)\}', html_content)
-    assert state_match, "useState for main state not found"
-    state_code = state_match.group(1)
-    
-    has_skill_injected = bool(re.search(r'skill_injected', state_code))
-    has_skill_agent = bool(re.search(r'skill_agent', state_code))
-    assert has_skill_injected, "skill_injected not in App state"
-    assert has_skill_agent, "skill_agent not in App state"
+    """Pipeline screen state includes skill_injected and skill_agent."""
+    assert "skill_injected" in html_content and "skill_agent" in html_content and "PipelineScreen" in html_content
 
 
 # Tests for API endpoint

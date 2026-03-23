@@ -13,7 +13,11 @@ def html_content():
 
 def test_md_breakpoint_768px_for_two_column_layout(html_content):
     """Verify md: breakpoint (768px) is used for two-column layout."""
-    has_md_breakpoint = bool(re.search(r"md:grid-cols-2", html_content))
+    # Pipeline monitor uses explicit 32%/68% split at md+; same breakpoint semantics as md:grid-cols-2
+    has_md_breakpoint = bool(
+        re.search(r"md:grid-cols-2", html_content)
+        or re.search(r"md:grid-cols-\[32%_68%\]", html_content)
+    )
     assert has_md_breakpoint, "md: breakpoint (768px) for two-column layout not found"
 
 def test_grid_cols_1_for_vertical_stacking(html_content):
@@ -23,5 +27,12 @@ def test_grid_cols_1_for_vertical_stacking(html_content):
 
 def test_responsive_grid_on_main_element(html_content):
     """Verify responsive grid is applied to main content area."""
-    has_responsive_grid = bool(re.search(r"<main[^>]*class=.*grid.*grid-cols-1.*md:grid-cols-2", html_content, re.DOTALL))
+    has_responsive_grid = bool(
+        re.search(r"<main[^>]*className=.*grid.*grid-cols-1.*md:grid-cols-2", html_content, re.DOTALL)
+        or re.search(
+            r"<main[^>]*className=.*grid.*grid-cols-1.*md:grid-cols-\[32%_68%\]",
+            html_content,
+            re.DOTALL,
+        )
+    )
     assert has_responsive_grid, "Responsive grid not applied to main element"
