@@ -82,15 +82,16 @@ class TestIdeasScreenWired:
         assert re.search(r'useState\s*\(\s*false\s*\)', func_body), \
             "IdeasScreen should initialize isLoading with useState(false)"
 
-    def test_has_current_idea_id_hardcoded_to_1(self):
-        """IdeasScreen hardcodes currentIdeaId to '1'."""
+    def test_current_idea_id_starts_null_and_auto_selects(self):
+        """IdeasScreen initializes currentIdeaId to null (no phantom draft)."""
         content = load_index_html()
         func_body = extract_function_body(content, "IdeasScreen")
         assert func_body is not None
 
-        # Should hardcode '1' as the idea ID
-        assert re.search(r'["\']1["\']', func_body), \
-            "IdeasScreen should have hardcoded currentIdeaId='1'"
+        assert re.search(r"useState\s*\(\s*null\s*\)", func_body), \
+            "IdeasScreen should initialize currentIdeaId with useState(null)"
+        assert re.search(r"ideasList\[0\]\.id", func_body), \
+            "IdeasScreen should auto-select first idea from list when currentIdeaId is null"
 
     def test_has_use_effect_for_session_restore(self):
         """IdeasScreen has useEffect that calls GET /api/ideas/{id}/session on mount."""
