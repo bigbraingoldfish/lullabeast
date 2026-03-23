@@ -13,13 +13,16 @@ FastAPI server (`server.py`) and a single-file React app (`index.html`) for the 
 ### Layout notes (Project Ideas)
 
 - **Main nav** (`Sidebar`): collapsible (`«` / `»`); narrow strip shows icons only with tooltips.
-- **Ideas screen**: dedicated **vertical Chats rail** (scrollable list + draft row + per-row delete). Picking a chat **collapses** the rail so conversation + PRD get more width; use **◀ / ▶** to expand/collapse. No session `<select>` dropdown.
+- **Ideas screen**: dedicated **vertical Chats rail** (scrollable list + draft row + per-row delete). Picking a chat **collapses** the rail so conversation + PRD get more width; use **◀ / ▶** to expand/collapse. No session `<select>` dropdown. Each row shows **relative time** from API `updated`. **Delete** uses inline confirm (rail and **Delete session** header); conversation **auto-scrolls** to the latest message after new turns.
 - **Readiness**: `GET /api/ideas/{id}/readiness` serves agent-written `readiness.json` after `readiness.done` exists; **`POST /api/ideas/{id}/message`** triggers a non-blocking readiness webhook (`ideas:{id}:readiness`). UI polls `/readiness/poll` every 3s while status is `updating`.
 - **Assistant messages**: rendered with `marked` (CDN); user messages stay plain text.
 
 ### Setup (Preflight)
 
 - **Launch** is disabled until **Run Preflight** has been executed at least once (`preflightChecks` non-null), both fields are locked, and no check has `fail`. Disabled Launch uses grey styling (not cyan at low opacity).
+- **Repo path**: debounced (500ms) `POST /api/setup/validate-repo-path` drives inline ✓/✗ (format only). **Confirm** calls `POST /api/setup/check-repo-path`; if the path is missing but the parent exists, the UI offers **Create Folder** (`POST /api/setup/create-repo-dir`).
+- **Roadmap seed**: **Paste content** (default) vs **Upload file** toggle; upload uses a hidden `<input type="file">` + accent **Upload .md file** button (filename shown below).
+- **Preflight**: after the first run, the button label is **Re-run Preflight** with **Last run:** relative time; `status-pulse` on the button when any check is `fail`.
 
 ## Editing `index.html`
 

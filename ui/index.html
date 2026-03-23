@@ -115,6 +115,34 @@
     <script type="text/babel">
         const { useState, useEffect, useRef, createContext, useContext } = React;
         const AppCtx = createContext(null);
+
+        /** Relative time for idea list (from API `updated` ISO string). */
+        function relativeTime(dateStr) {
+            if (!dateStr) return "—";
+            const d = new Date(dateStr);
+            if (Number.isNaN(d.getTime())) return "—";
+            const diffMs = Date.now() - d.getTime();
+            const min = Math.floor(diffMs / 60000);
+            const hr = Math.floor(min / 60);
+            const day = Math.floor(hr / 24);
+            if (min < 1) return "< 1 min ago";
+            if (min < 60) return `${min} min ago`;
+            if (hr < 24) return `${hr} hr ago`;
+            if (day < 7) return `${day} day${day === 1 ? "" : "s"} ago`;
+            return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+        }
+
+        /** Short label for preflight last-run timestamp. */
+        function relativeTimeShort(d) {
+            if (!(d instanceof Date) || Number.isNaN(d.getTime())) return "";
+            const diffMs = Date.now() - d.getTime();
+            const min = Math.floor(diffMs / 60000);
+            const hr = Math.floor(min / 60);
+            if (min < 1) return "just now";
+            if (min < 60) return `${min} min ago`;
+            if (hr < 24) return `${hr} hr ago`;
+            return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+        }
         
         // ─── State label and class mappings ───────────────────────────────────────
         const STATE_LABELS = {
@@ -1234,8 +1262,10 @@
             const [showContinueWarning, setShowContinueWarning] = useState(false);
             const [continueNavPending, setContinueNavPending] = useState(false);
             const [chatsRailCollapsed, setChatsRailCollapsed] = useState(false);
+            const [deleteConfirmId, setDeleteConfirmId] = useState(null);
             const taRef = useRef(null);
             const fileRef = useRef(null);
+            const messagesEndRef = useRef(null);
             const readinessPollRef = useRef(null);
 
             const stopReadinessPoll = () => {
@@ -1378,10 +1408,9 @@
                 setChatsRailCollapsed(true);
             };
 
-            const deleteIdea = (id, ev) => {
-                ev.stopPropagation();
-                if (!confirm("Delete this idea?")) return;
+            const executeDelete = (id) => {
                 fetch(`/api/ideas/${id}`, { method: "DELETE" }).then(() => {
+                    setDeleteConfirmId(null);
                     refreshIdeas();
                     if (currentIdeaId === id) {
                         setMessages([]);
@@ -1499,16 +1528,47 @@
                                                 className="flex-1 min-w-0 text-left px-2 py-2"
                                             >
                                                 <div className="text-slate-200 truncate text-xs font-medium header-text">{it.name || it.id}</div>
-                                                <div className="text-slate-500 truncate text-[11px]">{it.summary || "—"}</div>
+                                                <div className="text-slate-500 truncate text-[11px]">{it.updated ? relativeTime(it.updated) : "—"}</div>
                                             </button>
-                                            <button
-                                                type="button"
-                                                className="px-1.5 text-slate-500 hover:text-red-400 hover:bg-[#141618] text-sm shrink-0"
-                                                onClick={(e) => deleteIdea(it.id, e)}
-                                                aria-label="Delete idea"
-                                            >
-                                                ×
-                                            </button>
+                                            {deleteConfirmId === it.id ? (
+                                                <div className="flex flex-col gap-1 px-1.5 py-1 border-l border-[#1a1d21] bg-[#141618]/80 shrink-0 min-w-[88px]">
+                                                    <span className="text-[10px] text-slate-400 header-text">Delete?</span>
+                                                    <div className="flex gap-1 flex-wrap">
+                                                        <button
+                                                            type="button"
+                                                            className="text-[11px] text-red-400 hover:underline"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                executeDelete(it.id);
+                                                            }}
+                                                        >
+                                                            Delete
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            className="text-[11px] text-slate-500 hover:text-slate-300"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                setDeleteConfirmId(null);
+                                                            }}
+                                                        >
+                                                            Cancel
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            ) : (
+                                                <button
+                                                    type="button"
+                                                    className="px-1.5 text-slate-500 hover:text-red-400 hover:bg-[#141618] text-sm shrink-0"
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        setDeleteConfirmId(it.id);
+                                                    }}
+                                                    aria-label="Delete idea"
+                                                >
+                                                    ×
+                                                </button>
+                                            )}
                                         </div>
                                     ))}
                                     {ideasList.length === 0 && !showUnlistedSession ? (
@@ -1536,14 +1596,36 @@
                     <div className="flex-1 flex flex-col min-w-0 bg-[#141618] overflow-hidden border-r border-[#1a1d21]">
                         <div className="flex-shrink-0 border-b border-[#1a1d21] px-3 py-2 flex items-center justify-between gap-2">
                             <span className="header-text text-xs text-slate-500">Conversation</span>
-                            <button
-                                type="button"
-                                disabled={!currentIdeaId}
-                                onClick={(e) => deleteIdea(currentIdeaId, e)}
-                                className="header-text text-xs px-2 py-1 rounded border border-[#1a1d21] text-slate-400 hover:text-red-400 disabled:opacity-40 disabled:pointer-events-none"
-                            >
-                                Delete session
-                            </button>
+                            {deleteConfirmId === currentIdeaId && currentIdeaId ? (
+                                <div className="flex flex-col gap-1 items-end text-right max-w-[min(100%,20rem)]">
+                                    <p className="text-[11px] text-slate-400">Delete this idea? This cannot be undone.</p>
+                                    <div className="flex gap-2 flex-wrap justify-end">
+                                        <button
+                                            type="button"
+                                            onClick={() => executeDelete(currentIdeaId)}
+                                            className="header-text text-xs px-2 py-1 rounded border border-red-900/60 text-red-400 hover:bg-red-950/30"
+                                        >
+                                            Delete
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setDeleteConfirmId(null)}
+                                            className="header-text text-xs px-2 py-1 rounded border border-[#1a1d21] text-slate-400 hover:text-slate-200"
+                                        >
+                                            Cancel
+                                        </button>
+                                    </div>
+                                </div>
+                            ) : (
+                                <button
+                                    type="button"
+                                    disabled={!currentIdeaId}
+                                    onClick={() => currentIdeaId && setDeleteConfirmId(currentIdeaId)}
+                                    className="header-text text-xs px-2 py-1 rounded border border-[#1a1d21] text-slate-400 hover:text-red-400 disabled:opacity-40 disabled:pointer-events-none"
+                                >
+                                    Delete session
+                                </button>
+                            )}
                         </div>
                         <div className="flex-1 overflow-y-auto p-4 space-y-2 min-h-0">
                             {!currentIdeaId ? (
@@ -1572,6 +1654,7 @@
                                     )}
                                 </div>
                             ))}
+                            <div ref={messagesEndRef} />
                         </div>
                         <div className="flex-shrink-0 border-t border-[#1a1d21] p-3 space-y-2 bg-[#141618]">
                             <input ref={fileRef} type="file" accept=".md" className="hidden" onChange={(e) => handleFileChange(e, currentIdeaId, setUploadError, setUploadSpinner, triggerClarityCheck, setClarityPass, setClarityIssues, setClarityMissing)} />
@@ -1781,7 +1864,20 @@
                 onLaunch,
                 launchError,
                 launchDisabled,
+                repoPathFormatValid,
+                showCreateFolderPrompt,
+                createFolderError,
+                onCreateRepoDir,
+                onCancelCreateFolder,
+                preflightLastRun,
+                hasFail,
             } = props;
+
+            const [roadmapInputMode, setRoadmapInputMode] = useState("paste");
+            const [roadmapSeedFileName, setRoadmapSeedFileName] = useState("");
+            const roadmapSeedFileRef = useRef(null);
+
+            const preflightBtnLabel = preflightChecks ? "Re-run Preflight" : "Run Preflight";
 
             return (
                 <div className="flex-1 overflow-y-auto bg-[#0d0f12] p-6">
@@ -1789,16 +1885,50 @@
                         <h2 className="header-text text-lg text-slate-300">Setup &amp; Preflight</h2>
                         <div className="space-y-2">
                             <label className="text-xs text-slate-500 header-text">Repository path</label>
-                            <input
-                                type="text"
-                                disabled={repoPathLocked}
-                                readOnly={repoPathLocked}
-                                value={repoPath}
-                                onChange={(e) => onRepoPathChange(e.target.value)}
-                                placeholder="Enter the full path to your project directory (e.g. /home/pi/projects/my-project)"
-                                className={`w-full rounded border border-[#1a1d21] px-3 py-2 text-sm ${repoPathLocked ? "bg-[#0d0f12] text-slate-300" : "bg-[#1a1d21] text-slate-200"}`}
-                            />
+                            <div className="flex gap-2 items-stretch">
+                                <input
+                                    type="text"
+                                    disabled={repoPathLocked}
+                                    readOnly={repoPathLocked}
+                                    value={repoPath}
+                                    onChange={(e) => onRepoPathChange(e.target.value)}
+                                    placeholder="Enter the full path to your project directory (e.g. /home/pi/projects/my-project)"
+                                    className={`flex-1 min-w-0 rounded border border-[#1a1d21] px-3 py-2 text-sm ${repoPathLocked ? "bg-[#0d0f12] text-slate-300" : "bg-[#1a1d21] text-slate-200"}`}
+                                />
+                                {!repoPathLocked && repoPathFormatValid === true && (
+                                    <span className="flex items-center text-emerald-500 shrink-0" title="Path format OK">
+                                        ✓
+                                    </span>
+                                )}
+                                {!repoPathLocked && repoPathFormatValid === false && (
+                                    <span className="flex items-center text-red-400 shrink-0" title="Invalid path format">
+                                        ✗
+                                    </span>
+                                )}
+                            </div>
                             {repoPathError && <p className="text-red-400 text-xs">{repoPathError}</p>}
+                            {createFolderError && <p className="text-red-400 text-xs">{createFolderError}</p>}
+                            {showCreateFolderPrompt && !repoPathLocked && (
+                                <div className="rounded border border-[#2a2d31] bg-[#141618] px-3 py-2 text-xs text-slate-300 space-y-2">
+                                    <p>This folder doesn&apos;t exist. Create it?</p>
+                                    <div className="flex gap-2 flex-wrap">
+                                        <button
+                                            type="button"
+                                            onClick={onCreateRepoDir}
+                                            className="header-text text-xs px-2 py-1 rounded bg-[#00b4d8] text-[#0d0f12] font-medium"
+                                        >
+                                            Create Folder
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={onCancelCreateFolder}
+                                            className="header-text text-xs px-2 py-1 rounded border border-[#1a1d21] text-slate-400"
+                                        >
+                                            Cancel
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
                             <div className="flex gap-2 items-center">
                                 {!repoPathLocked ? (
                                     <button type="button" onClick={onRepoPathConfirm} className="header-text text-sm px-3 py-1 rounded bg-[#00b4d8] text-[#0d0f12] font-medium">
@@ -1819,36 +1949,86 @@
                             {seedRoadmap ? (
                                 <p className="text-xs text-[#00b4d8]">From Project Ideas</p>
                             ) : null}
-                            {roadmapSeed ? (
+                            {roadmapSeedLocked ? (
                                 <textarea
                                     value={roadmapSeed}
                                     onChange={(e) => onRoadmapSeedChange(e.target.value)}
-                                    readOnly={roadmapSeedLocked}
-                                    disabled={roadmapSeedLocked}
+                                    readOnly
+                                    disabled
                                     placeholder="Paste roadmap markdown…"
-                                    className={`w-full min-h-[120px] rounded border border-[#1a1d21] px-3 py-2 text-sm ${roadmapSeedLocked ? "bg-[#0d0f12] text-slate-300" : "bg-[#1a1d21] text-slate-200"}`}
+                                    className="w-full min-h-[120px] rounded border border-[#1a1d21] px-3 py-2 text-sm bg-[#0d0f12] text-slate-300"
+                                />
+                            ) : roadmapSeed ? (
+                                <textarea
+                                    value={roadmapSeed}
+                                    onChange={(e) => onRoadmapSeedChange(e.target.value)}
+                                    placeholder="Paste roadmap markdown…"
+                                    className="w-full min-h-[120px] rounded border border-[#1a1d21] px-3 py-2 text-sm bg-[#1a1d21] text-slate-200"
                                 />
                             ) : (
                                 <div className="space-y-2">
                                     {!seedRoadmap ? (
-                                        <input
-                                            type="file"
-                                            accept=".md"
-                                            onChange={(e) => {
-                                                const file = e.target.files && e.target.files[0];
-                                                if (!file) return;
-                                                const reader = new FileReader();
-                                                reader.onload = () => onRoadmapSeedChange(String(reader.result || ""));
-                                                reader.readAsText(file);
-                                            }}
-                                        />
+                                        <div className="flex gap-2 flex-wrap">
+                                            <button
+                                                type="button"
+                                                onClick={() => setRoadmapInputMode("upload")}
+                                                className={`header-text text-xs px-3 py-1.5 rounded border ${
+                                                    roadmapInputMode === "upload"
+                                                        ? "border-[#00b4d8] text-[#00b4d8] bg-[#00b4d8]/10"
+                                                        : "border-[#1a1d21] text-slate-400 hover:border-slate-600"
+                                                }`}
+                                            >
+                                                Upload file
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => setRoadmapInputMode("paste")}
+                                                className={`header-text text-xs px-3 py-1.5 rounded border ${
+                                                    roadmapInputMode === "paste"
+                                                        ? "border-[#00b4d8] text-[#00b4d8] bg-[#00b4d8]/10"
+                                                        : "border-[#1a1d21] text-slate-400 hover:border-slate-600"
+                                                }`}
+                                            >
+                                                Paste content
+                                            </button>
+                                        </div>
                                     ) : null}
-                                    <textarea
-                                        value={roadmapSeed}
-                                        onChange={(e) => onRoadmapSeedChange(e.target.value)}
-                                        placeholder="Paste roadmap markdown…"
-                                        className="w-full min-h-[120px] rounded border border-[#1a1d21] px-3 py-2 text-sm bg-[#1a1d21] text-slate-200"
-                                    />
+                                    {seedRoadmap || roadmapInputMode === "paste" ? (
+                                        <textarea
+                                            value={roadmapSeed}
+                                            onChange={(e) => onRoadmapSeedChange(e.target.value)}
+                                            placeholder="Paste roadmap markdown…"
+                                            className="w-full min-h-[120px] rounded border border-[#1a1d21] px-3 py-2 text-sm bg-[#1a1d21] text-slate-200"
+                                        />
+                                    ) : (
+                                        <div className="space-y-2">
+                                            <input
+                                                ref={roadmapSeedFileRef}
+                                                type="file"
+                                                accept=".md"
+                                                className="hidden"
+                                                onChange={(e) => {
+                                                    const file = e.target.files && e.target.files[0];
+                                                    if (!file) return;
+                                                    setRoadmapSeedFileName(file.name);
+                                                    const reader = new FileReader();
+                                                    reader.onload = () => onRoadmapSeedChange(String(reader.result || ""));
+                                                    reader.readAsText(file);
+                                                    e.target.value = "";
+                                                }}
+                                            />
+                                            <button
+                                                type="button"
+                                                onClick={() => roadmapSeedFileRef.current && roadmapSeedFileRef.current.click()}
+                                                className="header-text w-full sm:w-auto text-sm px-4 py-2 rounded bg-[#1a1d21] text-[#00b4d8] border border-[#00b4d8]/40 hover:border-[#00b4d8]/70"
+                                            >
+                                                Upload .md file
+                                            </button>
+                                            {roadmapSeedFileName ? (
+                                                <p className="text-[11px] text-slate-500 truncate">{roadmapSeedFileName}</p>
+                                            ) : null}
+                                        </div>
+                                    )}
                                 </div>
                             )}
                             {roadmapSeedError && roadmapSeedError.length > 0 && (
@@ -1873,10 +2053,22 @@
                                 )}
                             </div>
                         </div>
-                        <div className="flex gap-3 flex-wrap">
-                            <button type="button" onClick={onRunPreflight} disabled={!repoPathLocked || !roadmapSeedLocked} className="header-text text-sm px-4 py-2 rounded bg-[#1a1d21] text-slate-200 border border-[#1a1d21] disabled:opacity-40">
-                                Run Preflight
-                            </button>
+                        <div className="flex gap-3 flex-wrap items-start">
+                            <div className="flex flex-col gap-1">
+                                <button
+                                    type="button"
+                                    onClick={onRunPreflight}
+                                    disabled={!repoPathLocked || !roadmapSeedLocked}
+                                    className={`header-text text-sm px-4 py-2 rounded bg-[#1a1d21] text-slate-200 border border-[#1a1d21] disabled:opacity-40 ${hasFail ? "status-pulse" : ""}`}
+                                >
+                                    {preflightBtnLabel}
+                                </button>
+                                {preflightLastRun ? (
+                                    <span className="text-[11px] text-slate-600 pl-0.5">
+                                        Last run: {relativeTimeShort(preflightLastRun)}
+                                    </span>
+                                ) : null}
+                            </div>
                             <button type="button" onClick={onLaunch} disabled={launchDisabled} className="header-text text-sm px-4 py-2 rounded bg-[#00b4d8] text-[#0d0f12] font-medium disabled:bg-[#2a2d31] disabled:text-slate-600 disabled:cursor-not-allowed">
                                 Launch
                             </button>
@@ -2125,8 +2317,13 @@
             const [repoPathError, setRepoPathError] = useState("");
             const [roadmapSeedError, setRoadmapSeedError] = useState([]);
             const [preflightChecks, setPreflightChecks] = useState(null);
+            const [preflightLastRun, setPreflightLastRun] = useState(null);
             const [launchError, setLaunchError] = useState("");
             const [launchLoading, setLaunchLoading] = useState(false);
+            const [repoPathFormatValid, setRepoPathFormatValid] = useState(null);
+            const [showCreateFolderPrompt, setShowCreateFolderPrompt] = useState(false);
+            const [createFolderError, setCreateFolderError] = useState("");
+            const repoPathValidateTimerRef = useRef(null);
 
             const navigateToPreflightWithSeed = (content) => {
                 const text = content || "";
@@ -2144,13 +2341,47 @@
                     setRepoPathError("");
                     setRoadmapSeedError([]);
                     setPreflightChecks(null);
+                    setPreflightLastRun(null);
                     setLaunchError("");
+                    setRepoPathFormatValid(null);
+                    setShowCreateFolderPrompt(false);
+                    setCreateFolderError("");
                 }
                 setCurrentScreen(screen);
             };
 
+            const handleRepoPathChange = (value) => {
+                setRepoPath(value);
+                setRepoPathError("");
+                setShowCreateFolderPrompt(false);
+                setCreateFolderError("");
+                const trimmed = (value || "").trim();
+                if (repoPathValidateTimerRef.current) {
+                    clearTimeout(repoPathValidateTimerRef.current);
+                }
+                if (!trimmed) {
+                    setRepoPathFormatValid(null);
+                    return;
+                }
+                setRepoPathFormatValid(null);
+                repoPathValidateTimerRef.current = setTimeout(() => {
+                    fetch("/api/setup/validate-repo-path", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ path: trimmed }),
+                    })
+                        .then((r) => r.json())
+                        .then((d) => {
+                            setRepoPathFormatValid(!!d.valid);
+                        })
+                        .catch(() => setRepoPathFormatValid(false));
+                }, 500);
+            };
+
             const onRepoPathConfirm = () => {
                 setRepoPathError("");
+                setCreateFolderError("");
+                setShowCreateFolderPrompt(false);
                 const path = (repoPath || "").trim();
                 fetch("/api/setup/validate-repo-path", {
                     method: "POST",
@@ -2165,16 +2396,55 @@
                                 ? detail.map((x) => x.msg || JSON.stringify(x)).join("; ")
                                 : detail || d.message || `Request failed (${r.status})`;
                             setRepoPathError(String(msg));
-                            return;
+                            return null;
                         }
-                        if (d.valid) {
+                        if (!d.valid) {
+                            setRepoPathError(d.error || "Path validation failed");
+                            return null;
+                        }
+                        return fetch("/api/setup/check-repo-path", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ path }),
+                        }).then((r2) => r2.json());
+                    })
+                    .then((check) => {
+                        if (!check) return;
+                        if (check.exists) {
                             setRepoPathLocked(true);
                             setRepoPath(path);
+                        } else if (check.parent_exists) {
+                            setShowCreateFolderPrompt(true);
                         } else {
-                            setRepoPathError(d.error || "Path validation failed");
+                            setRepoPathError("Parent directory does not exist. Check the path.");
                         }
                     })
                     .catch((e) => setRepoPathError(String(e.message || "Request failed")));
+            };
+
+            const onCreateRepoDir = () => {
+                const path = (repoPath || "").trim();
+                setCreateFolderError("");
+                fetch("/api/setup/create-repo-dir", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ path }),
+                })
+                    .then((r) => r.json())
+                    .then((d) => {
+                        if (d.ok) {
+                            setRepoPathLocked(true);
+                            setRepoPath(path);
+                            setShowCreateFolderPrompt(false);
+                        } else {
+                            setCreateFolderError(d.error || "Failed to create directory");
+                        }
+                    })
+                    .catch((e) => setCreateFolderError(String(e)));
+            };
+
+            const onCancelCreateFolder = () => {
+                setShowCreateFolderPrompt(false);
             };
 
             const onRoadmapSeedConfirm = () => {
@@ -2209,6 +2479,7 @@
                 })
                     .then(async (r) => {
                         const d = await r.json().catch(() => ({}));
+                        setPreflightLastRun(new Date());
                         if (!r.ok) {
                             const detail = d.detail;
                             const msg = Array.isArray(detail)
@@ -2221,11 +2492,12 @@
                         }
                         setPreflightChecks(d.checks || []);
                     })
-                    .catch(() =>
+                    .catch(() => {
+                        setPreflightLastRun(new Date());
                         setPreflightChecks([
                             { check: "preflight", status: "fail", message: "Request failed" },
-                        ])
-                    );
+                        ]);
+                    });
             };
 
             const hasFail = preflightChecks && preflightChecks.some((c) => c.status === "fail");
@@ -2272,8 +2544,11 @@
                                     repoPathLocked={repoPathLocked}
                                     roadmapSeed={roadmapSeed}
                                     roadmapSeedLocked={roadmapSeedLocked}
-                                    onRepoPathChange={setRepoPath}
-                                    onRepoPathLockToggle={() => setRepoPathLocked(false)}
+                                    onRepoPathChange={handleRepoPathChange}
+                                    onRepoPathLockToggle={() => {
+                                        setRepoPathLocked(false);
+                                        setRepoPathFormatValid(null);
+                                    }}
                                     onRoadmapSeedChange={setRoadmapSeed}
                                     onRoadmapSeedLockToggle={() => setRoadmapSeedLocked(false)}
                                     onBack={() => setCurrentScreen("ideas")}
@@ -2286,6 +2561,13 @@
                                     onLaunch={onLaunch}
                                     launchError={launchError}
                                     launchDisabled={launchDisabled}
+                                    repoPathFormatValid={repoPathFormatValid}
+                                    showCreateFolderPrompt={showCreateFolderPrompt}
+                                    createFolderError={createFolderError}
+                                    onCreateRepoDir={onCreateRepoDir}
+                                    onCancelCreateFolder={onCancelCreateFolder}
+                                    preflightLastRun={preflightLastRun}
+                                    hasFail={hasFail}
                                 />
                             )}
                             {currentScreen === "ideas" && <IdeasScreen />}
