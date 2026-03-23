@@ -36,7 +36,7 @@ class TestReadinessGet:
         r = client.get("/api/ideas/missing/readiness")
         assert r.status_code == 404
 
-    def test_returns_updating_when_no_sentinel(self, tmp_path, monkeypatch):
+    def test_returns_unavailable_when_no_sentinel_and_no_active_job(self, tmp_path, monkeypatch):
         client, ideas_dir = _client(tmp_path, monkeypatch)
         iid = "idea-a"
         (ideas_dir / iid).mkdir()
@@ -44,7 +44,23 @@ class TestReadinessGet:
 
         r = client.get(f"/api/ideas/{iid}/readiness")
         assert r.status_code == 200
-        assert r.json() == {"status": "updating", "data": None}
+        assert r.json() == {"status": "unavailable", "data": None}
+
+    def test_returns_updating_when_active_job_exists(self, tmp_path, monkeypatch):
+        client, ideas_dir = _client(tmp_path, monkeypatch)
+        iid = "idea-active"
+        (ideas_dir / iid).mkdir()
+        (ideas_dir / iid / "session.json").write_text(json.dumps({"prd_content": ""}))
+
+        from ui import server
+
+        server._active_readiness_jobs.add(iid)
+        try:
+            r = client.get(f"/api/ideas/{iid}/readiness")
+            assert r.status_code == 200
+            assert r.json() == {"status": "updating", "data": None}
+        finally:
+            server._active_readiness_jobs.discard(iid)
 
     def test_returns_ready_when_sentinel_and_valid_json(self, tmp_path, monkeypatch):
         client, ideas_dir = _client(tmp_path, monkeypatch)

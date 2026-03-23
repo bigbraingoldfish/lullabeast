@@ -1258,11 +1258,14 @@
             const [clarityMissing, setClarityMissing] = useState("");
             const [readinessStatus, setReadinessStatus] = useState("unavailable");
             const [readinessData, setReadinessData] = useState(null);
+            const [hadReadyReadiness, setHadReadyReadiness] = useState(false);
+            const [readinessTimedOut, setReadinessTimedOut] = useState(false);
             const [readinessSectionsOpen, setReadinessSectionsOpen] = useState(false);
             const [showContinueWarning, setShowContinueWarning] = useState(false);
             const [continueNavPending, setContinueNavPending] = useState(false);
             const [chatsRailCollapsed, setChatsRailCollapsed] = useState(false);
             const [deleteConfirmId, setDeleteConfirmId] = useState(null);
+            const [ideasLoading, setIdeasLoading] = useState(true);
             const taRef = useRef(null);
             const fileRef = useRef(null);
             const messagesEndRef = useRef(null);
@@ -1278,7 +1281,16 @@
             const startReadinessPoll = (ideaId) => {
                 stopReadinessPoll();
                 if (!ideaId) return;
+                let pollCount = 0;
                 readinessPollRef.current = setInterval(() => {
+                    pollCount += 1;
+                    if (pollCount >= 40) {
+                        stopReadinessPoll();
+                        setReadinessStatus("unavailable");
+                        setReadinessData(null);
+                        setReadinessTimedOut(true);
+                        return;
+                    }
                     fetch(`/api/ideas/${ideaId}/readiness/poll`)
                         .then((r) => r.json())
                         .then((p) => {
@@ -1287,8 +1299,12 @@
                                 fetch(`/api/ideas/${ideaId}/readiness`)
                                     .then((rr) => rr.json())
                                     .then((d) => {
-                                        setReadinessStatus(d.status || "unavailable");
-                                        setReadinessData(d.data || null);
+                                        const nextStatus = d.status || "unavailable";
+                                        const nextData = d.data || null;
+                                        setReadinessStatus(nextStatus);
+                                        setReadinessData(nextData);
+                                        setReadinessTimedOut(false);
+                                        if (nextStatus === "ready" && nextData) setHadReadyReadiness(true);
                                     })
                                     .catch(() => {});
                             }
@@ -1297,15 +1313,19 @@
                 }, 3000);
             };
 
-            const refreshIdeas = () => {
+            const refreshIdeas = ({ showLoading = false } = {}) => {
+                if (showLoading) setIdeasLoading(true);
                 fetch("/api/ideas")
                     .then((r) => r.json())
                     .then((d) => setIdeasList(Array.isArray(d) ? d : []))
-                    .catch(() => {});
+                    .catch(() => {})
+                    .finally(() => {
+                        if (showLoading) setIdeasLoading(false);
+                    });
             };
 
             useEffect(() => {
-                refreshIdeas();
+                refreshIdeas({ showLoading: true });
             }, []);
 
             useEffect(() => {
@@ -1318,6 +1338,8 @@
 
             useEffect(() => {
                 if (!currentIdeaId) return;
+                setReadinessTimedOut(false);
+                setHadReadyReadiness(false);
                 fetch(`/api/ideas/${currentIdeaId}/session`)
                     .then((r) => r.json())
                     .then((d) => {
@@ -1329,8 +1351,11 @@
                 fetch(`/api/ideas/${currentIdeaId}/readiness`)
                     .then((r) => r.json())
                     .then((d) => {
-                        setReadinessStatus(d.status || "unavailable");
-                        setReadinessData(d.data || null);
+                        const nextStatus = d.status || "unavailable";
+                        const nextData = d.data || null;
+                        setReadinessStatus(nextStatus);
+                        setReadinessData(nextData);
+                        if (nextStatus === "ready" && nextData) setHadReadyReadiness(true);
                         if (d.status === "updating") startReadinessPoll(currentIdeaId);
                         else stopReadinessPoll();
                     })
@@ -1374,6 +1399,7 @@
                         setIsLoading(false);
                         setReadinessStatus("updating");
                         setReadinessData(null);
+                        setReadinessTimedOut(false);
                         startReadinessPoll(currentIdeaId);
                         refreshIdeas();
                     })
@@ -1398,6 +1424,10 @@
                         setPrdContent("");
                         setRoadmapContent("");
                         setInputText("");
+                        setReadinessStatus("unavailable");
+                        setReadinessData(null);
+                        setHadReadyReadiness(false);
+                        setReadinessTimedOut(false);
                         setClarityPass(null);
                         setChatsRailCollapsed(false);
                     });
@@ -1415,6 +1445,10 @@
                     if (currentIdeaId === id) {
                         setMessages([]);
                         setPrdContent("");
+                        setReadinessStatus("unavailable");
+                        setReadinessData(null);
+                        setHadReadyReadiness(false);
+                        setReadinessTimedOut(false);
                         setCurrentIdeaId(null);
                     }
                 });
@@ -1499,6 +1533,17 @@
                                     </button>
                                 </div>
                                 <div className="flex-1 overflow-y-auto py-2 px-2 space-y-1 min-h-0">
+                                    {ideasLoading ? (
+                                        <>
+                                            {[0, 1, 2].map((idx) => (
+                                                <div key={`idea-skel-${idx}`} className="rounded border border-[#1a1d21] bg-[#1a1d21] px-2 py-2 animate-pulse">
+                                                    <div className="h-2.5 w-3/4 rounded bg-[#2a2d31]"></div>
+                                                    <div className="mt-2 h-2 w-1/3 rounded bg-[#24282d]"></div>
+                                                </div>
+                                            ))}
+                                        </>
+                                    ) : (
+                                        <>
                                     {showUnlistedSession ? (
                                         <div className="rounded border border-dashed border-[#2a2d31] bg-[#141618]/50">
                                             <button
@@ -1574,6 +1619,8 @@
                                     {ideasList.length === 0 && !showUnlistedSession ? (
                                         <p className="text-slate-600 text-xs italic px-1 py-2">No ideas yet. Click + New.</p>
                                     ) : null}
+                                        </>
+                                    )}
                                 </div>
                             </>
                         ) : (
@@ -1663,15 +1710,25 @@
                             </button>
                             {uploadError && <p className="text-red-400 text-xs">{uploadError}</p>}
                             {uploadSpinner && <p className="text-slate-500 text-xs">Working…</p>}
-                            <textarea
-                                ref={taRef}
-                                rows={1}
-                                value={inputText}
-                                onChange={(e) => { setInputText(e.target.value); adjustTa(); }}
-                                onKeyDown={onKeyDown}
-                                placeholder="Type a message…"
-                                className="w-full bg-[#1a1d21] border border-[#2a2d31] rounded px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-slate-500 resize-none max-h-[110px] overflow-y-auto"
-                            />
+                            <div className="flex items-stretch gap-2">
+                                <textarea
+                                    ref={taRef}
+                                    rows={1}
+                                    value={inputText}
+                                    onChange={(e) => { setInputText(e.target.value); adjustTa(); }}
+                                    onKeyDown={onKeyDown}
+                                    placeholder="Type a message…"
+                                    className="flex-1 bg-[#1a1d21] border border-[#2a2d31] rounded px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-slate-500 resize-none max-h-[110px] overflow-y-auto"
+                                />
+                                <button
+                                    type="button"
+                                    onClick={submitMessage}
+                                    disabled={!currentIdeaId || !inputText.trim() || isLoading}
+                                    className="header-text px-3 rounded border border-[#00b4d8]/50 bg-[#00b4d8] text-[#0d0f11] text-xs font-semibold hover:brightness-110 disabled:bg-[#2a2d31] disabled:text-slate-600 disabled:border-[#2a2d31] disabled:cursor-not-allowed"
+                                >
+                                    {isLoading ? "..." : "Send"}
+                                </button>
+                            </div>
                         </div>
                     </div>
                     <div className="flex-1 flex flex-col min-w-0 bg-[#141618] overflow-hidden">
@@ -1679,6 +1736,12 @@
                             <div className="px-4 py-2 space-y-2">
                                 {readinessStatus === "updating" && (
                                     <p className="text-xs text-slate-500 animate-pulse">Updating readiness assessment…</p>
+                                )}
+                                {readinessTimedOut && (
+                                    <p className="text-xs text-slate-500">Readiness assessment timed out. It will update after your next message.</p>
+                                )}
+                                {!readinessTimedOut && readinessStatus === "unavailable" && hadReadyReadiness && (
+                                    <p className="text-xs text-slate-500">Readiness data unavailable</p>
                                 )}
                                 {readinessStatus === "ready" && readinessData && (
                                     <div className="space-y-2 text-xs border border-[#1a1d21] rounded p-2 bg-[#0d0f11]">
