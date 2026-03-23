@@ -16,6 +16,7 @@
     
     <!-- Babel for JSX transformation -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     
     <!-- Tailwind CSS via Play CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -94,6 +95,18 @@
         .event-row:hover {
             background-color: rgba(51, 65, 85, 0.5);
         }
+
+        /* Assistant message markdown (marked.js output) */
+        .msg-md h1, .msg-md h2, .msg-md h3 { color: #e2e8f0; font-weight: 600; margin: 0.5em 0 0.25em; }
+        .msg-md h1 { font-size: 1.125rem; }
+        .msg-md h2 { font-size: 1.05rem; }
+        .msg-md h3 { font-size: 1rem; }
+        .msg-md p { margin: 0.35em 0; }
+        .msg-md ul, .msg-md ol { margin: 0.35em 0; padding-left: 1.25rem; }
+        .msg-md code { background: #0d0f12; color: #67e8f9; padding: 0.1em 0.35em; border-radius: 0.25rem; font-size: 0.85em; }
+        .msg-md pre { background: #0d0f12; padding: 0.75rem; border-radius: 0.35rem; overflow-x: auto; margin: 0.5em 0; }
+        .msg-md pre code { background: transparent; padding: 0; color: #e2e8f0; }
+        .msg-md a { color: #00b4d8; }
     </style>
 </head>
 <body>
@@ -1207,7 +1220,7 @@
             const [isLoading, setIsLoading] = useState(false);
             const [convertLoading, setConvertLoading] = useState(false);
             const [convertError, setConvertError] = useState("");
-            const [currentIdeaId, setCurrentIdeaId] = useState("1");
+            const [currentIdeaId, setCurrentIdeaId] = useState(null);
             const [ideasList, setIdeasList] = useState([]);
             const [inputText, setInputText] = useState("");
             const [uploadError, setUploadError] = useState("");
@@ -1215,10 +1228,44 @@
             const [clarityPass, setClarityPass] = useState(null);
             const [clarityIssues, setClarityIssues] = useState([]);
             const [clarityMissing, setClarityMissing] = useState("");
-            const [readiness, setReadiness] = useState({ ready: false, reason: "" });
+            const [readinessStatus, setReadinessStatus] = useState("unavailable");
+            const [readinessData, setReadinessData] = useState(null);
+            const [readinessSectionsOpen, setReadinessSectionsOpen] = useState(false);
+            const [showContinueWarning, setShowContinueWarning] = useState(false);
+            const [continueNavPending, setContinueNavPending] = useState(false);
             const [chatsRailCollapsed, setChatsRailCollapsed] = useState(false);
             const taRef = useRef(null);
             const fileRef = useRef(null);
+            const readinessPollRef = useRef(null);
+
+            const stopReadinessPoll = () => {
+                if (readinessPollRef.current) {
+                    clearInterval(readinessPollRef.current);
+                    readinessPollRef.current = null;
+                }
+            };
+
+            const startReadinessPoll = (ideaId) => {
+                stopReadinessPoll();
+                if (!ideaId) return;
+                readinessPollRef.current = setInterval(() => {
+                    fetch(`/api/ideas/${ideaId}/readiness/poll`)
+                        .then((r) => r.json())
+                        .then((p) => {
+                            if (p.done) {
+                                stopReadinessPoll();
+                                fetch(`/api/ideas/${ideaId}/readiness`)
+                                    .then((rr) => rr.json())
+                                    .then((d) => {
+                                        setReadinessStatus(d.status || "unavailable");
+                                        setReadinessData(d.data || null);
+                                    })
+                                    .catch(() => {});
+                            }
+                        })
+                        .catch(() => {});
+                }, 3000);
+            };
 
             const refreshIdeas = () => {
                 fetch("/api/ideas")
@@ -1232,6 +1279,14 @@
             }, []);
 
             useEffect(() => {
+                if (currentIdeaId === null && ideasList.length > 0) {
+                    setCurrentIdeaId(ideasList[0].id);
+                }
+            }, [ideasList, currentIdeaId]);
+
+            useEffect(() => () => stopReadinessPoll(), []);
+
+            useEffect(() => {
                 if (!currentIdeaId) return;
                 fetch(`/api/ideas/${currentIdeaId}/session`)
                     .then((r) => r.json())
@@ -1243,8 +1298,16 @@
                     .catch(() => {});
                 fetch(`/api/ideas/${currentIdeaId}/readiness`)
                     .then((r) => r.json())
-                    .then((d) => setReadiness(d))
-                    .catch(() => {});
+                    .then((d) => {
+                        setReadinessStatus(d.status || "unavailable");
+                        setReadinessData(d.data || null);
+                        if (d.status === "updating") startReadinessPoll(currentIdeaId);
+                        else stopReadinessPoll();
+                    })
+                    .catch(() => {
+                        setReadinessStatus("unavailable");
+                        setReadinessData(null);
+                    });
             }, [currentIdeaId]);
 
             const adjustTa = () => {
@@ -1279,6 +1342,9 @@
                         setPrdContent(data.prd_content || "");
                         setInputText("");
                         setIsLoading(false);
+                        setReadinessStatus("updating");
+                        setReadinessData(null);
+                        startReadinessPoll(currentIdeaId);
                         refreshIdeas();
                     })
                     .catch(() => {
@@ -1320,7 +1386,7 @@
                     if (currentIdeaId === id) {
                         setMessages([]);
                         setPrdContent("");
-                        setCurrentIdeaId("1");
+                        setCurrentIdeaId(null);
                     }
                 });
             };
@@ -1345,6 +1411,36 @@
             };
 
             const continueSetup = () => {
+                const rm = roadmapContent || "";
+                if (rm.includes("Transformation Aborted")) {
+                    setShowContinueWarning(true);
+                    return;
+                }
+                setContinueNavPending(true);
+                fetch("/api/setup/validate-roadmap", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ content: rm }),
+                })
+                    .then(async (r) => {
+                        const d = await r.json().catch(() => ({}));
+                        setContinueNavPending(false);
+                        if (!r.ok || !d.valid) {
+                            setShowContinueWarning(true);
+                            return;
+                        }
+                        if (ctx && ctx.navigateToPreflightWithSeed) {
+                            ctx.navigateToPreflightWithSeed(rm);
+                        }
+                    })
+                    .catch(() => {
+                        setContinueNavPending(false);
+                        setShowContinueWarning(true);
+                    });
+            };
+
+            const proceedContinueAnyway = () => {
+                setShowContinueWarning(false);
                 if (ctx && ctx.navigateToPreflightWithSeed) {
                     ctx.navigateToPreflightWithSeed(roadmapContent || "");
                 }
@@ -1442,27 +1538,44 @@
                             <span className="header-text text-xs text-slate-500">Conversation</span>
                             <button
                                 type="button"
+                                disabled={!currentIdeaId}
                                 onClick={(e) => deleteIdea(currentIdeaId, e)}
-                                className="header-text text-xs px-2 py-1 rounded border border-[#1a1d21] text-slate-400 hover:text-red-400"
+                                className="header-text text-xs px-2 py-1 rounded border border-[#1a1d21] text-slate-400 hover:text-red-400 disabled:opacity-40 disabled:pointer-events-none"
                             >
                                 Delete session
                             </button>
                         </div>
                         <div className="flex-1 overflow-y-auto p-4 space-y-2 min-h-0">
-                            {messages.length === 0 ? (
+                            {!currentIdeaId ? (
+                                <p className="text-slate-600 text-xs italic">Select an idea from the list or click + New to start.</p>
+                            ) : messages.length === 0 ? (
                                 <p className="text-slate-600 text-xs italic">No messages yet — type below to start.</p>
                             ) : null}
                             {messages.map((msg, i) => (
                                 <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-                                    <div className={`max-w-[95%] rounded px-3 py-2 text-sm ${msg.role === "user" ? "bg-[#00b4d8]/20 text-slate-100" : "bg-[#1a1d21] text-slate-200"}`}>
-                                        {msg.content}
-                                    </div>
+                                    {msg.role === "user" ? (
+                                        <div className="max-w-[95%] rounded px-3 py-2 text-sm bg-[#00b4d8]/20 text-slate-100">
+                                            {msg.content}
+                                        </div>
+                                    ) : (
+                                        <div
+                                            className="msg-md max-w-[95%] rounded px-3 py-2 text-sm bg-[#1a1d21] text-slate-200"
+                                            dangerouslySetInnerHTML={{
+                                                __html:
+                                                    typeof marked !== "undefined" && marked.parse
+                                                        ? marked.parse(msg.content || "", { breaks: true })
+                                                        : String(msg.content || "")
+                                                              .replace(/&/g, "&amp;")
+                                                              .replace(/</g, "&lt;"),
+                                            }}
+                                        />
+                                    )}
                                 </div>
                             ))}
                         </div>
                         <div className="flex-shrink-0 border-t border-[#1a1d21] p-3 space-y-2 bg-[#141618]">
                             <input ref={fileRef} type="file" accept=".md" className="hidden" onChange={(e) => handleFileChange(e, currentIdeaId, setUploadError, setUploadSpinner, triggerClarityCheck, setClarityPass, setClarityIssues, setClarityMissing)} />
-                            <button type="button" onClick={() => fileRef.current && fileRef.current.click()} className="header-text w-full text-xs py-1.5 rounded bg-[#1a1d21] text-slate-300 border border-[#1a1d21] hover:border-slate-500">
+                            <button type="button" disabled={!currentIdeaId} onClick={() => fileRef.current && fileRef.current.click()} className="header-text w-full text-xs py-1.5 rounded bg-[#1a1d21] text-slate-300 border border-[#1a1d21] hover:border-slate-500 disabled:opacity-40 disabled:pointer-events-none">
                                 Upload .md seed
                             </button>
                             {uploadError && <p className="text-red-400 text-xs">{uploadError}</p>}
@@ -1479,31 +1592,120 @@
                         </div>
                     </div>
                     <div className="flex-1 flex flex-col min-w-0 bg-[#141618] overflow-hidden">
-                        <div className="flex-shrink-0 border-b border-[#1a1d21] px-4 py-2 flex flex-wrap gap-2 items-center justify-between">
-                            <div className="flex flex-wrap gap-2 items-center">
-                                {clarityPass === true && <span className="text-xs text-emerald-400 border border-emerald-700 rounded px-2 py-0.5">ready to convert</span>}
-                                {clarityPass === false && <span className="text-xs text-amber-400 border border-amber-700 rounded px-2 py-0.5">needs revision</span>}
-                                {readiness.ready && <span className="text-xs text-slate-500">ready: {readiness.reason}</span>}
-                            </div>
-                            <div className="flex gap-2">
-                                {prdContent.trim().length > 0 && (
-                                    <a href={`/api/ideas/${currentIdeaId}/download`} className="header-text text-xs px-2 py-1 rounded bg-[#1a1d21] text-[#00b4d8] border border-[#1a1d21]">
-                                        Download PRD
-                                    </a>
+                        <div className="flex-shrink-0 border-b border-[#1a1d21]">
+                            <div className="px-4 py-2 space-y-2">
+                                {readinessStatus === "updating" && (
+                                    <p className="text-xs text-slate-500 animate-pulse">Updating readiness assessment…</p>
                                 )}
-                                <button type="button" disabled={!prdContent.trim() || convertLoading} onClick={doConvert} className="header-text text-xs px-2 py-1 rounded bg-[#1a1d21] text-slate-200 border border-[#1a1d21] disabled:opacity-40">
-                                    {convertLoading ? "Generating…" : "Generate Roadmap"}
-                                </button>
-                                {roadmapContent && (
-                                    <a href={`/api/ideas/${currentIdeaId}/download-roadmap`} className="header-text text-xs px-2 py-1 rounded bg-[#1a1d21] text-slate-300 border border-[#1a1d21]">
-                                        Download Roadmap
-                                    </a>
+                                {readinessStatus === "ready" && readinessData && (
+                                    <div className="space-y-2 text-xs border border-[#1a1d21] rounded p-2 bg-[#0d0f11]">
+                                        {Array.isArray(readinessData.blocking_gaps) && readinessData.blocking_gaps.length > 0 && (
+                                            <div className="rounded border border-amber-700/50 bg-amber-950/30 px-2 py-1.5 text-amber-200">
+                                                <span className="font-semibold header-text">Before converting: </span>
+                                                {readinessData.blocking_gaps.join(" · ")}
+                                            </div>
+                                        )}
+                                        <div className="flex flex-wrap items-center gap-2">
+                                            <span
+                                                className={`header-text font-semibold ${
+                                                    readinessData.overall_status === "ready"
+                                                        ? "text-emerald-400"
+                                                        : readinessData.overall_status === "approaching_ready"
+                                                          ? "text-amber-400"
+                                                          : "text-red-400"
+                                                }`}
+                                            >
+                                                Readiness: {typeof readinessData.score === "number" ? readinessData.score : "—"} / 10
+                                            </span>
+                                            {readinessData.conversion_confidence && (
+                                                <span className="text-[10px] px-1.5 py-0.5 rounded border border-slate-600 text-slate-400">
+                                                    Conversion confidence: {readinessData.conversion_confidence}
+                                                </span>
+                                            )}
+                                        </div>
+                                        {readinessData.recommendation && (
+                                            <p className="text-slate-500 italic">{readinessData.recommendation}</p>
+                                        )}
+                                        <button
+                                            type="button"
+                                            className="text-[10px] text-[#00b4d8] hover:underline"
+                                            onClick={() => setReadinessSectionsOpen((o) => !o)}
+                                        >
+                                            {readinessSectionsOpen ? "Hide section details" : "Show section details"}
+                                        </button>
+                                        {readinessSectionsOpen && readinessData.sections && (
+                                            <ul className="list-none space-y-1 pl-0 border-t border-[#1a1d21] pt-2">
+                                                {Object.entries(readinessData.sections).map(([secName, info]) => {
+                                                    const st = info && info.status;
+                                                    const icon = st === "complete" ? "✓" : st === "partial" ? "~" : "✗";
+                                                    return (
+                                                        <li key={secName} className="flex gap-2 text-slate-400" title={info && info.reason ? info.reason : ""}>
+                                                            <span className="shrink-0 w-4">{icon}</span>
+                                                            <span className="flex-1">
+                                                                <span className="text-slate-300">{secName}</span>
+                                                                {info && info.criticality && (
+                                                                    <span className="ml-1 text-[10px] text-slate-600">({info.criticality})</span>
+                                                                )}
+                                                            </span>
+                                                        </li>
+                                                    );
+                                                })}
+                                            </ul>
+                                        )}
+                                    </div>
                                 )}
-                                {roadmapContent && (
-                                    <button type="button" onClick={continueSetup} className="header-text text-xs px-2 py-1 rounded bg-[#00b4d8]/20 text-[#00b4d8] border border-[#00b4d8]/40">
-                                        Continue to Setup →
-                                    </button>
-                                )}
+                                <div className="flex flex-wrap gap-2 items-center justify-between">
+                                    <div className="flex flex-wrap gap-2 items-center">
+                                        {clarityPass === true && <span className="text-xs text-emerald-400 border border-emerald-700 rounded px-2 py-0.5">ready to convert</span>}
+                                        {clarityPass === false && <span className="text-xs text-amber-400 border border-amber-700 rounded px-2 py-0.5">needs revision</span>}
+                                    </div>
+                                    <div className="flex flex-wrap gap-2 justify-end">
+                                        {prdContent.trim().length > 0 && currentIdeaId && (
+                                            <a href={`/api/ideas/${currentIdeaId}/download`} className="header-text text-xs px-2 py-1 rounded bg-[#1a1d21] text-[#00b4d8] border border-[#1a1d21]">
+                                                Download PRD
+                                            </a>
+                                        )}
+                                        <button
+                                            type="button"
+                                            disabled={!prdContent.trim() || convertLoading}
+                                            title={
+                                                readinessData &&
+                                                readinessData.overall_status &&
+                                                readinessData.overall_status !== "ready" &&
+                                                typeof readinessData.score === "number"
+                                                    ? `Readiness score is ${readinessData.score}/10 — roadmap quality may be low.`
+                                                    : undefined
+                                            }
+                                            onClick={doConvert}
+                                            className="header-text text-xs px-2 py-1 rounded bg-[#1a1d21] text-slate-200 border border-[#1a1d21] disabled:opacity-40"
+                                        >
+                                            {convertLoading ? "Generating…" : "Generate Roadmap"}
+                                        </button>
+                                        {readinessData &&
+                                            readinessData.overall_status &&
+                                            readinessData.overall_status !== "ready" &&
+                                            typeof readinessData.score === "number" && (
+                                                <span className="text-[10px] text-slate-500 max-w-[14rem]">
+                                                    Readiness {readinessData.score}/10 — roadmap quality may be low.
+                                                </span>
+                                            )}
+                                        {roadmapContent && currentIdeaId && (
+                                            <a href={`/api/ideas/${currentIdeaId}/download-roadmap`} className="header-text text-xs px-2 py-1 rounded bg-[#1a1d21] text-slate-300 border border-[#1a1d21]">
+                                                Download Roadmap
+                                            </a>
+                                        )}
+                                        {roadmapContent && (
+                                            <button
+                                                type="button"
+                                                disabled={continueNavPending}
+                                                onClick={continueSetup}
+                                                className="header-text text-xs px-2 py-1 rounded bg-[#00b4d8]/20 text-[#00b4d8] border border-[#00b4d8]/40 disabled:opacity-40"
+                                            >
+                                                {continueNavPending ? "Checking…" : "Continue to Setup →"}
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
                             </div>
                         </div>
                         {clarityPass === false && (
@@ -1523,6 +1725,29 @@
                                     <pre className="text-xs text-slate-400 whitespace-pre-wrap">{roadmapContent}</pre>
                                 </div>
                             ) : null}
+                            {showContinueWarning && (
+                                <div className="mb-4 rounded border border-amber-600/80 bg-amber-950/40 px-3 py-2 text-xs text-amber-100">
+                                    <p className="mb-2">
+                                        This roadmap did not pass validation or may be unsuitable for the pipeline. You can edit it above or continue with awareness of risk.
+                                    </p>
+                                    <div className="flex flex-wrap gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowContinueWarning(false)}
+                                            className="header-text px-2 py-1 rounded bg-[#1a1d21] border border-[#1a1d21] text-slate-200"
+                                        >
+                                            Review Roadmap
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={proceedContinueAnyway}
+                                            className="header-text px-2 py-1 rounded bg-amber-900/50 border border-amber-700 text-amber-100"
+                                        >
+                                            Proceed Anyway
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
                             {PRD_SECTION_TITLES.map((title) => (
                                 <div key={title} className="mb-4">
                                     <h2 className="text-slate-400 font-semibold text-lg mb-1">{title}</h2>
@@ -1652,7 +1877,7 @@
                             <button type="button" onClick={onRunPreflight} disabled={!repoPathLocked || !roadmapSeedLocked} className="header-text text-sm px-4 py-2 rounded bg-[#1a1d21] text-slate-200 border border-[#1a1d21] disabled:opacity-40">
                                 Run Preflight
                             </button>
-                            <button type="button" onClick={onLaunch} disabled={launchDisabled} className="header-text text-sm px-4 py-2 rounded bg-[#00b4d8] text-[#0d0f12] font-medium disabled:opacity-40">
+                            <button type="button" onClick={onLaunch} disabled={launchDisabled} className="header-text text-sm px-4 py-2 rounded bg-[#00b4d8] text-[#0d0f12] font-medium disabled:bg-[#2a2d31] disabled:text-slate-600 disabled:cursor-not-allowed">
                                 Launch
                             </button>
                             <button type="button" onClick={onBack} className="header-text text-sm px-4 py-2 rounded border border-[#1a1d21] text-slate-400">
@@ -2005,7 +2230,7 @@
 
             const hasFail = preflightChecks && preflightChecks.some((c) => c.status === "fail");
             const launchDisabled =
-                !repoPathLocked || !roadmapSeedLocked || hasFail || launchLoading;
+                !repoPathLocked || !roadmapSeedLocked || !preflightChecks || hasFail || launchLoading;
 
             const onLaunch = () => {
                 setLaunchError("");
