@@ -1864,7 +1864,7 @@
                 onLaunch,
                 launchError,
                 launchDisabled,
-                repoPathFormatValid,
+                repoPathFsStatus,
                 showCreateFolderPrompt,
                 createFolderError,
                 onCreateRepoDir,
@@ -1895,13 +1895,21 @@
                                     placeholder="Enter the full path to your project directory (e.g. /home/pi/projects/my-project)"
                                     className={`flex-1 min-w-0 rounded border border-[#1a1d21] px-3 py-2 text-sm ${repoPathLocked ? "bg-[#0d0f12] text-slate-300" : "bg-[#1a1d21] text-slate-200"}`}
                                 />
-                                {!repoPathLocked && repoPathFormatValid === true && (
-                                    <span className="flex items-center text-emerald-500 shrink-0" title="Path format OK">
+                                {!repoPathLocked && repoPathFsStatus === "exists" && (
+                                    <span className="flex items-center text-emerald-500 shrink-0" title="Directory exists on the server">
                                         ✓
                                     </span>
                                 )}
-                                {!repoPathLocked && repoPathFormatValid === false && (
-                                    <span className="flex items-center text-red-400 shrink-0" title="Invalid path format">
+                                {!repoPathLocked && repoPathFsStatus === "parent" && (
+                                    <span
+                                        className="flex items-center text-amber-400 shrink-0 text-lg leading-none"
+                                        title="Path does not exist yet; parent exists — use Confirm to create or pick a path"
+                                    >
+                                        +
+                                    </span>
+                                )}
+                                {!repoPathLocked && repoPathFsStatus === "bad" && (
+                                    <span className="flex items-center text-red-400 shrink-0" title="Invalid path, or not reachable from the server">
                                         ✗
                                     </span>
                                 )}
@@ -2320,7 +2328,8 @@
             const [preflightLastRun, setPreflightLastRun] = useState(null);
             const [launchError, setLaunchError] = useState("");
             const [launchLoading, setLaunchLoading] = useState(false);
-            const [repoPathFormatValid, setRepoPathFormatValid] = useState(null);
+            /** null | "exists" | "parent" | "bad" — from filesystem check on server (debounced). */
+            const [repoPathFsStatus, setRepoPathFsStatus] = useState(null);
             const [showCreateFolderPrompt, setShowCreateFolderPrompt] = useState(false);
             const [createFolderError, setCreateFolderError] = useState("");
             const repoPathValidateTimerRef = useRef(null);
@@ -2343,7 +2352,7 @@
                     setPreflightChecks(null);
                     setPreflightLastRun(null);
                     setLaunchError("");
-                    setRepoPathFormatValid(null);
+                    setRepoPathFsStatus(null);
                     setShowCreateFolderPrompt(false);
                     setCreateFolderError("");
                 }
@@ -2360,10 +2369,10 @@
                     clearTimeout(repoPathValidateTimerRef.current);
                 }
                 if (!trimmed) {
-                    setRepoPathFormatValid(null);
+                    setRepoPathFsStatus(null);
                     return;
                 }
-                setRepoPathFormatValid(null);
+                setRepoPathFsStatus(null);
                 repoPathValidateTimerRef.current = setTimeout(() => {
                     fetch("/api/setup/validate-repo-path", {
                         method: "POST",
@@ -2372,9 +2381,26 @@
                     })
                         .then((r) => r.json())
                         .then((d) => {
-                            setRepoPathFormatValid(!!d.valid);
+                            if (!d.valid) {
+                                setRepoPathFsStatus("bad");
+                                return;
+                            }
+                            return fetch("/api/setup/check-repo-path", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ path: trimmed }),
+                            }).then(async (r2) => {
+                                const j = await r2.json().catch(() => ({}));
+                                if (!r2.ok) {
+                                    setRepoPathFsStatus("bad");
+                                    return;
+                                }
+                                if (j.exists) setRepoPathFsStatus("exists");
+                                else if (j.parent_exists) setRepoPathFsStatus("parent");
+                                else setRepoPathFsStatus("bad");
+                            });
                         })
-                        .catch(() => setRepoPathFormatValid(false));
+                        .catch(() => setRepoPathFsStatus("bad"));
                 }, 500);
             };
 
@@ -2406,7 +2432,18 @@
                             method: "POST",
                             headers: { "Content-Type": "application/json" },
                             body: JSON.stringify({ path }),
-                        }).then((r2) => r2.json());
+                        }).then(async (r2) => {
+                            const check = await r2.json().catch(() => ({}));
+                            if (!r2.ok) {
+                                const detail = check.detail;
+                                const msg = Array.isArray(detail)
+                                    ? detail.map((x) => x.msg || JSON.stringify(x)).join("; ")
+                                    : detail || check.message || `Request failed (${r2.status})`;
+                                setRepoPathError(String(msg));
+                                return null;
+                            }
+                            return check;
+                        });
                     })
                     .then((check) => {
                         if (!check) return;
@@ -2416,7 +2453,11 @@
                         } else if (check.parent_exists) {
                             setShowCreateFolderPrompt(true);
                         } else {
-                            setRepoPathError("Parent directory does not exist. Check the path.");
+                            setRepoPathError(
+                                "Path does not exist and the parent directory is not reachable. " +
+                                    "Use an absolute path starting with / (e.g. /home/pi/projects/my-app). " +
+                                    "If the path is correct, the server must be able to access it (home dirs are often mode 700 — run the UI server as the same user)."
+                            );
                         }
                     })
                     .catch((e) => setRepoPathError(String(e.message || "Request failed")));
@@ -2547,7 +2588,7 @@
                                     onRepoPathChange={handleRepoPathChange}
                                     onRepoPathLockToggle={() => {
                                         setRepoPathLocked(false);
-                                        setRepoPathFormatValid(null);
+                                        setRepoPathFsStatus(null);
                                     }}
                                     onRoadmapSeedChange={setRoadmapSeed}
                                     onRoadmapSeedLockToggle={() => setRoadmapSeedLocked(false)}
@@ -2561,7 +2602,7 @@
                                     onLaunch={onLaunch}
                                     launchError={launchError}
                                     launchDisabled={launchDisabled}
-                                    repoPathFormatValid={repoPathFormatValid}
+                                    repoPathFsStatus={repoPathFsStatus}
                                     showCreateFolderPrompt={showCreateFolderPrompt}
                                     createFolderError={createFolderError}
                                     onCreateRepoDir={onCreateRepoDir}

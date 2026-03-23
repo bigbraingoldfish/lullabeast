@@ -1963,19 +1963,47 @@ def _validate_roadmap_content(content: str) -> dict:
     return {"valid": len(errors) == 0, "errors": errors}
 
 
+def _normalize_setup_repo_path(raw) -> Path:
+    """Strip, expanduser, and require an absolute path (avoids CWD-relative mistakes)."""
+    s = str(raw or "").strip()
+    if not s:
+        raise ValueError("empty")
+    if "\x00" in s:
+        raise ValueError("null")
+    if len(s) >= 512:
+        raise ValueError("long")
+    p = Path(s).expanduser()
+    if not p.is_absolute():
+        raise ValueError("relative")
+    return p
+
+
 @app.post("/api/setup/validate-repo-path")
 async def post_setup_validate_repo_path(request: Request):
-    """Validate repo path string (no filesystem existence check)."""
+    """Validate repo path string (format + absolute path; no filesystem existence check)."""
     body = await request.json()
     path = body.get("path", "")
     if path is None:
         path = ""
-    if not str(path).strip():
-        return {"valid": False, "error": "Enter a directory path to continue"}
-    if "\x00" in str(path):
-        return {"valid": False, "error": "Path contains invalid characters"}
-    if len(str(path)) >= 512:
-        return {"valid": False, "error": "Path is too long"}
+    try:
+        _normalize_setup_repo_path(path)
+    except ValueError as exc:
+        code = str(exc)
+        if code == "empty":
+            return {"valid": False, "error": "Enter a directory path to continue"}
+        if code == "null":
+            return {"valid": False, "error": "Path contains invalid characters"}
+        if code == "long":
+            return {"valid": False, "error": "Path is too long"}
+        if code == "relative":
+            return {
+                "valid": False,
+                "error": (
+                    "Use an absolute path starting with / "
+                    "(e.g. /home/pi/projects/my-app)"
+                ),
+            }
+        raise
     return {"valid": True, "error": None}
 
 
@@ -1984,7 +2012,16 @@ async def post_setup_check_repo_path(request: Request):
     """Return filesystem existence and git metadata for a path string."""
     body = await request.json()
     raw = body.get("path", "")
-    path = Path(str(raw).strip()).expanduser()
+    try:
+        path = _normalize_setup_repo_path(raw)
+    except ValueError:
+        return {
+            "path": str(raw or "").strip(),
+            "exists": False,
+            "parent_exists": False,
+            "is_git_repo": False,
+            "error": "invalid_path",
+        }
     return {
         "path": str(path),
         "exists": path.exists(),
@@ -1998,7 +2035,13 @@ async def post_setup_create_repo_dir(request: Request):
     """Create a single directory (no parents). Body: {"path": str}."""
     body = await request.json()
     raw = body.get("path", "")
-    path = Path(str(raw).strip()).expanduser()
+    try:
+        path = _normalize_setup_repo_path(raw)
+    except ValueError:
+        return {
+            "ok": False,
+            "error": "Use an absolute path starting with / (e.g. /home/pi/projects/my-app)",
+        }
     try:
         path.mkdir(parents=False, exist_ok=False)
         return {"ok": True}
