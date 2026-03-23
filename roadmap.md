@@ -338,3 +338,4 @@ PRD:         docs/prd/autodev-ui-screens.prd.md
 - **Roadmap seed**: `roadmap.md` content for Screen 2. From Screen 1 conversion or user-supplied file. Must pass full template validation before locking.
 - **Init-project logic**: `_run_init_project()` in `server.py` — Python reimplementation of `init-project/SKILL.md`. Pure filesystem + git. No LLM calls.
 - **Conversion prompt**: `~/.openclaw/deployment-package/Updates/PRD to Roadmap (sonnet 4.5 ideal).txt` — confirmed on disk.
+- **Readiness (FIX-PASS-1)**: `GET /api/ideas/{id}/readiness` returns `{"status","data"}` from `readiness.json` / `readiness.done` (agent assessment via `readiness-reviewer` skill), not Python heuristics. `GET /api/ideas/{id}/readiness/poll` returns `{"done": bool}`.

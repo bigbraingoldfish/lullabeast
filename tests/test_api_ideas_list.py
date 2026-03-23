@@ -84,8 +84,8 @@ class TestGetIdeasList:
         assert data[0]["summary"] == "This is a summary sentence"
         assert data[0]["updated"] == "2026-01-02T00:00:00Z"
 
-    def test_name_falls_back_to_id_when_no_heading(self, client, monkeypatch):
-        """When prd_content has no # heading, name falls back to idea id."""
+    def test_name_falls_back_to_untitled_when_no_heading_or_messages(self, client, monkeypatch):
+        """When prd_content has no # heading and no user messages, name is Untitled Idea."""
         client_obj, ideas_dir = client
 
         idea_id = "fallback-test"
@@ -107,7 +107,34 @@ class TestGetIdeasList:
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 1
-        assert data[0]["name"] == idea_id
+        assert data[0]["name"] == "Untitled Idea"
+        # Resolved name persisted
+        saved = json.loads((idea_path / "session.json").read_text())
+        assert saved["name"] == "Untitled Idea"
+
+    def test_uuid_stored_name_resolves_from_prd_heading(self, client, monkeypatch):
+        """Session name equal to UUID is replaced with prd_draft / prd heading."""
+        client_obj, ideas_dir = client
+        uid = "67fbade1-7150-46e3-814b-3029a489d0a5"
+        idea_path = ideas_dir / uid
+        idea_path.mkdir()
+        turns = idea_path / "turns"
+        turns.mkdir()
+        (turns / "1.done").write_text("done")
+        session = {
+            "name": uid,
+            "messages": [],
+            "prd_content": "# Resolved Title\n\n## Problem Statement\nx.",
+            "updated": "2026-01-01T00:00:00Z",
+        }
+        (idea_path / "session.json").write_text(json.dumps(session))
+
+        response = client_obj.get("/api/ideas")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["name"] == "Resolved Title"
+        assert uid not in data[0]["name"]
 
     def test_summary_is_blank_when_no_problem_statement(self, client, monkeypatch):
         """When prd_content has no ## Problem Statement, summary is blank."""

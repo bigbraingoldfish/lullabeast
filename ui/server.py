@@ -427,6 +427,51 @@ def _extract_first_h1_heading(prd_content: str) -> str:
     return ""
 
 
+_UUID_ID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.I,
+)
+
+
+def _should_resolve_idea_name(name: str) -> bool:
+    """True if stored name is empty, placeholder, or a raw UUID string."""
+    n = (name or "").strip()
+    if not n or n == "New Idea":
+        return True
+    return bool(_UUID_ID_RE.match(n))
+
+
+def _atomic_write_json_file(path: Path, data: dict) -> None:
+    """Write JSON atomically (tmp + replace)."""
+    tmp_path = str(path) + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(data, f)
+    os.replace(tmp_path, str(path))
+
+
+def _resolve_display_name_for_listing(idea_dir: Path, session_data: dict) -> tuple:
+    """Return (display_name, should_persist) for idea list; never expose UUID."""
+    prd_text = ""
+    prd_path = idea_dir / "prd_draft.md"
+    if prd_path.exists():
+        prd_text = prd_path.read_text()
+    if not prd_text:
+        prd_text = session_data.get("prd_content") or ""
+
+    heading = _extract_first_h1_heading(prd_text)
+    if heading:
+        return heading, True
+
+    first_user = next(
+        (m["content"] for m in session_data.get("messages", []) if m.get("role") == "user"),
+        "",
+    )
+    if first_user.strip():
+        return first_user.strip()[:40].title(), True
+
+    return "Untitled Idea", True
+
+
 def _extract_summary(prd_content):
     """Extract the first sentence after ## Problem Statement.
 
@@ -1174,6 +1219,37 @@ def get_ideas_session(idea_id: str):
     return session_data
 
 
+async def _trigger_readiness_assessment(idea_id: str, config: dict) -> None:
+    """Fire non-blocking readiness webhook; deletes prior readiness.done first."""
+    try:
+        ideas_dir = Path(os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas")))
+        sentinel = ideas_dir / idea_id / "readiness.done"
+        sentinel.unlink(missing_ok=True)
+        hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
+        hooks_token = config.get("hooks_token", "")
+        payload = {
+            "agentId": "prd-creator",
+            "sessionKey": f"ideas:{idea_id}:readiness",
+            "wakeMode": "now",
+            "message": (
+                f"[SESSION] ideas:{idea_id}:readiness\n\n"
+                f"A new PRD draft is available. Read "
+                f"~/.openclaw/ideas/{idea_id}/prd_draft.md and produce an "
+                f"updated readiness assessment. Apply the readiness-reviewer "
+                f"skill. Write readiness.json then readiness.done as specified."
+            ),
+        }
+        async with aiohttp.ClientSession() as session:
+            await session.post(
+                hooks_url,
+                json=payload,
+                headers={"Authorization": f"Bearer {hooks_token}"},
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+    except Exception:
+        pass
+
+
 @app.post("/api/ideas/{idea_id}/message")
 async def post_ideas_message(idea_id: str, request: Request):
     """POST a user message to the ideas agent, poll for sentinel, update session."""
@@ -1271,6 +1347,8 @@ async def post_ideas_message(idea_id: str, request: Request):
         json.dump(session_data, f)
     os.replace(tmp_path, session_path)
 
+    asyncio.create_task(_trigger_readiness_assessment(idea_id, config))
+
     return {"response": agent_response, "prd_content": prd_content}
 
 
@@ -1302,16 +1380,14 @@ def get_ideas():
         session_data = _read_json_file(str(session_path)) if session_path.exists() else {}
         prd_content = session_data.get("prd_content", "") or ""
 
-        # Prefer session.json name; else first # heading; else id
-        name = session_data.get("name") or None
-        if not name:
-            for line in prd_content.split("\n"):
-                stripped = line.strip()
-                if stripped.startswith("# "):
-                    name = stripped[2:].strip()
-                    break
-        if not name:
-            name = subdir.name
+        raw_name = (session_data.get("name") or "").strip()
+        if _should_resolve_idea_name(raw_name):
+            name, _ = _resolve_display_name_for_listing(subdir, session_data)
+            if session_path.exists():
+                session_data["name"] = name
+                _atomic_write_json_file(session_path, session_data)
+        else:
+            name = raw_name
 
         summary = _extract_summary(prd_content)
         updated = session_data.get("updated", "")
@@ -1591,97 +1667,37 @@ async def post_ideas_clarity_check(idea_id: str):
     return result_data
 
 
-# ─── Required sections for readiness check ───────────────────────────────────
-_READINESS_SECTIONS = [
-    "## Problem Statement",
-    "## Goals & Success Metrics",
-    "## User Stories",
-    "## Functional Requirements",
-    "## Edge Cases",
-    "## Non-Functional Requirements",
-    "## Dependencies & Integrations",
-    "## Risks & Mitigations",
-    "## Open Questions",
-    "## Glossary & Domain Terms",
-]
-
 CONVERT_TIMEOUT = 180   # seconds; patchable in tests
 CONVERT_POLL_INTERVAL = 2  # seconds between sentinel checks
 
 
-def _check_prd_readiness(prd_content: str):
-    """Determine if PRD content is ready for roadmap conversion.
-
-    Returns (ready: bool, reason: str).
-    Ready if content contains '> ✅ PRD CONVERSION-READY' marker
-    OR all 10 required sections are present with non-empty content.
-    A section is non-empty if it has at least one non-blank, non-header line.
-    """
-    if not prd_content:
-        return False, "prd_content is empty"
-
-    # Check marker
-    if "> ✅ PRD CONVERSION-READY" in prd_content:
-        return True, "conversion-ready marker present"
-
-    # Check all 10 required sections
-    missing = []
-    empty = []
-    lines = prd_content.split("\n")
-
-    for section in _READINESS_SECTIONS:
-        idx = -1
-        for i, line in enumerate(lines):
-            if line.strip() == section:
-                idx = i
-                break
-
-        if idx == -1:
-            missing.append(section)
-            continue
-
-        # Collect content between this section and the next ## header
-        content_lines = []
-        for j in range(idx + 1, len(lines)):
-            stripped = lines[j].strip()
-            if stripped.startswith("## "):
-                break
-            content_lines.append(stripped)
-
-        # Non-empty: at least one non-blank, non-header line
-        non_blank = [l for l in content_lines if l]
-        if not non_blank:
-            empty.append(section)
-
-    if missing:
-        return False, f"Missing sections: {', '.join(missing)}"
-    if empty:
-        return False, f"Empty sections: {', '.join(empty)}"
-
-    return True, "all 10 required sections present with non-empty content"
-
-
 @app.get("/api/ideas/{idea_id}/readiness")
-def get_ideas_readiness(idea_id: str):
-    """Check if an idea's PRD is ready for roadmap conversion.
-
-    Returns {"ready": bool, "reason": str}.
-    Ready if prd_content contains the conversion-ready marker
-    OR all 10 required sections are present with non-empty content.
-    Returns 404 if the idea is not found.
-    """
+def get_idea_readiness(idea_id: str):
+    """Serve agent-written readiness.json; status reflects sentinel + JSON validity."""
     config = load_config()
-    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
-    session_path = Path(ideas_dir) / idea_id / "session.json"
-
-    if not session_path.exists():
+    ideas_dir = Path(os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas")))
+    idea_dir = ideas_dir / idea_id
+    if not idea_dir.exists():
         raise HTTPException(status_code=404, detail="Idea not found")
+    sentinel = idea_dir / "readiness.done"
+    json_path = idea_dir / "readiness.json"
+    if not sentinel.exists():
+        return {"status": "updating", "data": None}
+    data = _read_json_file(str(json_path))
+    if data is None:
+        return {"status": "unavailable", "data": None}
+    return {"status": "ready", "data": data}
 
-    session_data = _read_json_file(str(session_path)) or {}
-    prd_content = session_data.get("prd_content", "") or ""
 
-    ready, reason = _check_prd_readiness(prd_content)
-    return {"ready": ready, "reason": reason}
+@app.get("/api/ideas/{idea_id}/readiness/poll")
+def poll_readiness_done(idea_id: str):
+    """Lightweight poll for readiness.done sentinel."""
+    config = load_config()
+    ideas_dir = Path(os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas")))
+    idea_dir = ideas_dir / idea_id
+    if not idea_dir.exists():
+        raise HTTPException(status_code=404, detail="Idea not found")
+    return {"done": (idea_dir / "readiness.done").exists()}
 
 
 @app.post("/api/ideas/{idea_id}/convert")
@@ -2096,7 +2112,10 @@ def _run_preflight_checks(repo_path: str) -> list:
     git_dir = os.path.join(repo_path, ".git")
     if not os.path.exists(git_dir):
         checks.append({"check": "git repo", "status": "fail",
-                        "message": f"{repo_path}/.git not found — not a git repository"})
+                        "message": (
+                            "Not a git repository. Run: "
+                            f"git -C {repo_path} init && git -C {repo_path} checkout -b main"
+                        )})
     else:
         result = subprocess.run(
             ["git", "-C", repo_path, "branch", "--list", "main", "master"],
@@ -2107,7 +2126,10 @@ def _run_preflight_checks(repo_path: str) -> list:
                             "message": "Git repo present with main/master branch"})
         else:
             checks.append({"check": "git repo", "status": "fail",
-                            "message": "No main or master branch found"})
+                            "message": (
+                                "No main or master branch found. Run: "
+                                f"git -C {repo_path} checkout -b main"
+                            )})
 
     # 5. Workspace directories and docs
     for agent in _WORKSPACE_AGENTS:

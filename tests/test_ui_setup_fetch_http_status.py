@@ -12,3 +12,10 @@ def test_repo_path_confirm_checks_response_ok_before_valid_field():
     assert "if (!r.ok)" in text
     assert "validate-repo-path" in text
     assert "d.detail" in text or "detail" in text
+
+
+def test_launch_disabled_requires_preflight_checks_ran():
+    """Launch must stay disabled until preflight has been run (preflightChecks non-null)."""
+    text = INDEX.read_text()
+    assert "launchDisabled" in text
+    assert "!preflightChecks" in text

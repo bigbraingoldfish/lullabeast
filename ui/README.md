@@ -8,12 +8,18 @@ FastAPI server (`server.py`) and a single-file React app (`index.html`) for the 
 |------|---------|
 | `server.py` | API routes, OpenClaw webhook helpers, setup/preflight/launch |
 | `index.html` | Inline Babel/React UI (all screens in one file) |
-| `_build_screens.py` | Splices the large Ideas + Preflight block between the placeholder marker and `function PipelineScreen()` |
+| `_build_screens.py` | Optional splice helper for `MIDDLE` → `index.html` — **may lag** `index.html`; treat `index.html` as source of truth for Ideas/Preflight until regenerated |
 
 ### Layout notes (Project Ideas)
 
 - **Main nav** (`Sidebar`): collapsible (`«` / `»`); narrow strip shows icons only with tooltips.
 - **Ideas screen**: dedicated **vertical Chats rail** (scrollable list + draft row + per-row delete). Picking a chat **collapses** the rail so conversation + PRD get more width; use **◀ / ▶** to expand/collapse. No session `<select>` dropdown.
+- **Readiness**: `GET /api/ideas/{id}/readiness` serves agent-written `readiness.json` after `readiness.done` exists; **`POST /api/ideas/{id}/message`** triggers a non-blocking readiness webhook (`ideas:{id}:readiness`). UI polls `/readiness/poll` every 3s while status is `updating`.
+- **Assistant messages**: rendered with `marked` (CDN); user messages stay plain text.
+
+### Setup (Preflight)
+
+- **Launch** is disabled until **Run Preflight** has been executed at least once (`preflightChecks` non-null), both fields are locked, and no check has `fail`. Disabled Launch uses grey styling (not cyan at low opacity).
 
 ## Editing `index.html`
 
