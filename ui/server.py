@@ -2,6 +2,7 @@
 import aiohttp
 import fcntl
 import json
+import logging
 import os
 import re
 import uuid
@@ -39,6 +40,24 @@ _sse_clients = set()  # Set of asyncio.Queue objects for each connected client
 _sse_clients_lock = asyncio.Lock()
 _file_positions = {}  # Track file positions per client for file-based tailing
 _sse_notify_event = asyncio.Event()  # Event to notify when new events are available
+
+logger = logging.getLogger("autodev.readiness")
+logger.setLevel(logging.DEBUG)
+if not logger.handlers:
+    _fmt = logging.Formatter("%(levelname)s:%(name)s:%(message)s")
+    _stream = logging.StreamHandler()
+    _stream.setFormatter(_fmt)
+    logger.addHandler(_stream)
+    try:
+        _file = logging.FileHandler("/tmp/ui-server.log")
+        _file.setFormatter(_fmt)
+        logger.addHandler(_file)
+    except Exception:
+        pass
+logger.propagate = False
+_active_readiness_jobs: set[str] = set()  # idea IDs currently sending readiness webhook
+_readiness_job_started_at: dict[str, float] = {}  # idea ID -> epoch seconds
+READINESS_ACTIVE_WINDOW_SECONDS = 180
 
 
 def _create_synthetic_event(event_type, agent=None, phase=None, detail=None):
@@ -1221,6 +1240,9 @@ def get_ideas_session(idea_id: str):
 
 async def _trigger_readiness_assessment(idea_id: str, config: dict) -> None:
     """Fire non-blocking readiness webhook; deletes prior readiness.done first."""
+    _active_readiness_jobs.add(idea_id)
+    _readiness_job_started_at[idea_id] = datetime.utcnow().timestamp()
+    logger.info(f"[READINESS] Triggering assessment for idea {idea_id}")
     try:
         ideas_dir = Path(os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas")))
         sentinel = ideas_dir / idea_id / "readiness.done"
@@ -1240,14 +1262,20 @@ async def _trigger_readiness_assessment(idea_id: str, config: dict) -> None:
             ),
         }
         async with aiohttp.ClientSession() as session:
-            await session.post(
+            resp = await session.post(
                 hooks_url,
                 json=payload,
                 headers={"Authorization": f"Bearer {hooks_token}"},
                 timeout=aiohttp.ClientTimeout(total=10),
             )
-    except Exception:
-        pass
+            logger.info(f"[READINESS] Webhook sent for {idea_id}, response: {resp.status}")
+    except Exception as exc:
+        if isinstance(exc, asyncio.TimeoutError):
+            logger.warning(f"[READINESS] Assessment timed out for {idea_id}")
+        else:
+            logger.error(f"[READINESS] Webhook failed for {idea_id}: {exc}")
+    finally:
+        _active_readiness_jobs.discard(idea_id)
 
 
 @app.post("/api/ideas/{idea_id}/message")
@@ -1347,6 +1375,7 @@ async def post_ideas_message(idea_id: str, request: Request):
         json.dump(session_data, f)
     os.replace(tmp_path, session_path)
 
+    _readiness_job_started_at[idea_id] = datetime.utcnow().timestamp()
     asyncio.create_task(_trigger_readiness_assessment(idea_id, config))
 
     return {"response": agent_response, "prd_content": prd_content}
@@ -1681,12 +1710,37 @@ def get_idea_readiness(idea_id: str):
         raise HTTPException(status_code=404, detail="Idea not found")
     sentinel = idea_dir / "readiness.done"
     json_path = idea_dir / "readiness.json"
-    if not sentinel.exists():
-        return {"status": "updating", "data": None}
-    data = _read_json_file(str(json_path))
-    if data is None:
-        return {"status": "unavailable", "data": None}
-    return {"status": "ready", "data": data}
+    if sentinel.exists():
+        data = _read_json_file(str(json_path))
+        _active_readiness_jobs.discard(idea_id)
+        _readiness_job_started_at.pop(idea_id, None)
+        if data is None:
+            status = "unavailable"
+            logger.debug(f"[READINESS] Status for {idea_id}: {status}")
+            return {"status": status, "data": None}
+        status = "ready"
+        logger.info(f"[READINESS] Sentinel found for {idea_id}")
+        logger.debug(f"[READINESS] Status for {idea_id}: {status}")
+        return {"status": status, "data": data}
+
+    if idea_id in _active_readiness_jobs:
+        status = "updating"
+        logger.debug(f"[READINESS] Status for {idea_id}: {status}")
+        return {"status": status, "data": None}
+
+    started_at = _readiness_job_started_at.get(idea_id)
+    if started_at is not None:
+        age = datetime.utcnow().timestamp() - started_at
+        if age <= READINESS_ACTIVE_WINDOW_SECONDS:
+            status = "updating"
+            logger.debug(f"[READINESS] Status for {idea_id}: {status}")
+            return {"status": status, "data": None}
+        logger.warning(f"[READINESS] Assessment timed out for {idea_id}")
+        _readiness_job_started_at.pop(idea_id, None)
+
+    status = "unavailable"
+    logger.debug(f"[READINESS] Status for {idea_id}: {status}")
+    return {"status": status, "data": None}
 
 
 @app.get("/api/ideas/{idea_id}/readiness/poll")
@@ -2195,11 +2249,24 @@ def _run_preflight_checks(repo_path: str) -> list:
             checks.append({"check": "git repo", "status": "pass",
                             "message": "Git repo present with main/master branch"})
         else:
-            checks.append({"check": "git repo", "status": "fail",
-                            "message": (
-                                "No main or master branch found. Run: "
-                                f"git -C {repo_path} checkout -b main"
-                            )})
+            sym = subprocess.run(
+                ["git", "-C", repo_path, "symbolic-ref", "--short", "HEAD"],
+                capture_output=True, text=True,
+            )
+            current_branch = (sym.stdout or "").strip()
+            if current_branch in ("main", "master"):
+                checks.append({"check": "git repo", "status": "warn",
+                                "message": (
+                                    f"Git repo is on '{current_branch}' but has no commits yet. "
+                                    f"Make an initial commit before launching the pipeline. "
+                                    f"Run: git -C {repo_path} add -A && git -C {repo_path} commit -m 'init'"
+                                )})
+            else:
+                checks.append({"check": "git repo", "status": "fail",
+                                "message": (
+                                    "No main or master branch found. Run: "
+                                    f"git -C {repo_path} checkout -b main"
+                                )})
 
     # 5. Workspace directories and docs
     for agent in _WORKSPACE_AGENTS:

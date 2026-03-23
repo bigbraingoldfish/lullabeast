@@ -13,8 +13,9 @@ FastAPI server (`server.py`) and a single-file React app (`index.html`) for the 
 ### Layout notes (Project Ideas)
 
 - **Main nav** (`Sidebar`): collapsible (`«` / `»`); narrow strip shows icons only with tooltips.
-- **Ideas screen**: dedicated **vertical Chats rail** (scrollable list + draft row + per-row delete). Picking a chat **collapses** the rail so conversation + PRD get more width; use **◀ / ▶** to expand/collapse. No session `<select>` dropdown. Each row shows **relative time** from API `updated`. **Delete** uses inline confirm (rail and **Delete session** header); conversation **auto-scrolls** to the latest message after new turns.
-- **Readiness**: `GET /api/ideas/{id}/readiness` serves agent-written `readiness.json` after `readiness.done` exists; **`POST /api/ideas/{id}/message`** triggers a non-blocking readiness webhook (`ideas:{id}:readiness`). UI polls `/readiness/poll` every 3s while status is `updating`.
+- **Ideas screen**: dedicated **vertical Chats rail** (scrollable list + draft row + per-row delete). Picking a chat **collapses** the rail so conversation + PRD get more width; use **◀ / ▶** to expand/collapse. No session `<select>` dropdown. Each row shows **relative time** from API `updated`. Initial ideas fetch uses **skeleton rows** (no transient "No ideas yet" flash). **Delete** uses inline confirm (rail and **Delete session** header); conversation **auto-scrolls** to the latest message after new turns.
+- **Readiness**: status model is `unavailable` / `updating` / `ready`. `POST /api/ideas/{id}/message` triggers readiness (`ideas:{id}:readiness`) and `/api/ideas/{id}/readiness` reports state based on sentinel + active/recent job window (180s). UI polls `/readiness/poll` every 3s while `updating`, stops after 120s with neutral timeout text, and logs structured `[READINESS]` lifecycle lines to `/tmp/ui-server.log`.
+- **Conversation input**: Enter-to-send is retained and a visible **Send** button is present for discoverability; it is disabled when empty or while a turn is in progress.
 - **Assistant messages**: rendered with `marked` (CDN); user messages stay plain text.
 
 ### Setup (Preflight)

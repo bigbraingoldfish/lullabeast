@@ -270,6 +270,40 @@ class TestGitRepoCheck:
         git = next(c for c in results if c["check"] == "git repo")
         assert git["status"] == "fail"
 
+    def test_git_repo_unborn_main_branch_warns_not_fails(self, tmp_path):
+        """Unborn main/master branch should warn with initial commit guidance."""
+        repo_path = tmp_path / "myproject"
+        repo_path.mkdir()
+        openclaw = _make_openclaw_dir(tmp_path, repo_path)
+        _make_gitignore(repo_path, _full_gitignore_content())
+        _make_git_repo(repo_path)
+
+        def unborn_main(cmd, **kwargs):
+            mock = MagicMock()
+            mock.stderr = ""
+            if "branch" in cmd and "--list" in cmd:
+                mock.returncode = 0
+                mock.stdout = ""  # no listed main/master branch (unborn case)
+            elif "symbolic-ref" in cmd:
+                mock.returncode = 0
+                mock.stdout = "main\n"
+            elif "get-url" in cmd:
+                mock.returncode = 0
+                mock.stdout = "https://github.com/x/y.git\n"
+            else:
+                mock.returncode = 0
+                mock.stdout = ""
+            return mock
+
+        with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
+             patch("subprocess.run", side_effect=unborn_main):
+            results = _run_preflight_checks(str(repo_path))
+
+        git = next(c for c in results if c["check"] == "git repo")
+        assert git["status"] == "warn"
+        assert "no commits yet" in git["message"].lower()
+        assert "commit -m 'init'" in git["message"]
+
 
 class TestGitRemoteCheck:
 
