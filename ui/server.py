@@ -1979,6 +1979,33 @@ async def post_setup_validate_repo_path(request: Request):
     return {"valid": True, "error": None}
 
 
+@app.post("/api/setup/check-repo-path")
+async def post_setup_check_repo_path(request: Request):
+    """Return filesystem existence and git metadata for a path string."""
+    body = await request.json()
+    raw = body.get("path", "")
+    path = Path(str(raw).strip()).expanduser()
+    return {
+        "path": str(path),
+        "exists": path.exists(),
+        "parent_exists": path.parent.exists(),
+        "is_git_repo": (path / ".git").exists(),
+    }
+
+
+@app.post("/api/setup/create-repo-dir")
+async def post_setup_create_repo_dir(request: Request):
+    """Create a single directory (no parents). Body: {"path": str}."""
+    body = await request.json()
+    raw = body.get("path", "")
+    path = Path(str(raw).strip()).expanduser()
+    try:
+        path.mkdir(parents=False, exist_ok=False)
+        return {"ok": True}
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 @app.post("/api/setup/validate-roadmap")
 async def post_setup_validate_roadmap(request: Request):
     """Validate roadmap seed content format.
