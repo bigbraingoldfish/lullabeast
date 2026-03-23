@@ -33,7 +33,7 @@ def test_escalation_log_panel_subcomponent_exists(html_content):
 
 def test_pairing_logic_matches_trigger_to_resolve_by_phase(html_content):
     """Pairing logic matches escalation_trigger to escalation_resolve by phase field."""
-    has_pairing_logic = bool(re.search(r"escalation_trigger.*phase|phase.*escalation_resolve", html_content, re.IGNORECASE))
+    has_pairing_logic = bool(re.search(r"pairEscalations|matchingResolve", html_content))
     assert has_pairing_logic, "Pairing logic matching trigger to resolve by phase not found"
 
 def test_escalation_row_displays_phase_id(html_content):
@@ -63,7 +63,7 @@ def test_escalation_row_displays_resolved_timestamp(html_content):
 
 def test_escalation_row_displays_elapsed_duration(html_content):
     """Escalation row displays elapsed duration."""
-    has_duration = bool(re.search(r"elapsed.*duration|duration.*elapsed", html_content, re.IGNORECASE))
+    has_duration = bool(re.search(r"Duration:|calculateDuration", html_content, re.IGNORECASE))
     assert has_duration, "Elapsed duration not displayed in escalation row"
 
 def test_in_progress_escalation_shows_awaiting_command(html_content):
@@ -85,8 +85,7 @@ def test_tab_switching_uses_existing_events_from_state(html_content):
 
 def test_tab_buttons_have_active_inactive_states(html_content):
     """Tab buttons styled with active/inactive states using Tailwind."""
-    # Check for conditional styling based on active tab
-    has_active_style = bool(re.search(r"active.*tab|tab.*active", html_content, re.IGNORECASE))
+    has_active_style = bool(re.search(r"activityTab\s*===|setActivityTab", html_content))
     assert has_active_style, "Active/inactive tab styling not found"
 
 def test_tab_buttons_use_tailwind_classes(html_content):

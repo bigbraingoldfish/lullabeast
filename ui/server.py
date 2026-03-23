@@ -416,6 +416,17 @@ def _read_json_file(path):
         return None
 
 
+def _extract_first_h1_heading(prd_content: str) -> str:
+    """Return text from the first markdown `# ` heading line, or empty string."""
+    if not prd_content:
+        return ""
+    for line in prd_content.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            return stripped[2:].strip()
+    return ""
+
+
 def _extract_summary(prd_content):
     """Extract the first sentence after ## Problem Statement.
 
@@ -1142,6 +1153,7 @@ def get_ideas_session(idea_id: str):
 
     if not session_path.exists():
         return {
+            "name": "",
             "messages": [],
             "prd_content": "",
             "roadmap_content": "",
@@ -1152,6 +1164,7 @@ def get_ideas_session(idea_id: str):
     session_data = _read_json_file(str(session_path))
     if session_data is None:
         return {
+            "name": "",
             "messages": [],
             "prd_content": "",
             "roadmap_content": "",
@@ -1179,18 +1192,12 @@ async def post_ideas_message(idea_id: str, request: Request):
     # Build session key: ideas:{id}:session-{n}
     session_key = f"ideas:{idea_id}:session-{turn_n}"
 
-    # Webhook payload
+    # Webhook payload — first line MUST be [SESSION] for agent output path parsing (AGENTS.md)
     webhook_payload = {
         "agentId": "prd-creator",
         "sessionKey": session_key,
         "wakeMode": "now",
-        "message": (
-            f"{content}\n\n"
-            f"[SYSTEM] Write your full turn response to ~/.openclaw/ideas/{idea_id}/turns/{turn_n}.md. "
-            f"When done, create the file ~/.openclaw/ideas/{idea_id}/turns/{turn_n}.done. "
-            f"Also write the current complete PRD document (all sections populated so far) "
-            f"to ~/.openclaw/ideas/{idea_id}/prd_draft.md after every turn."
-        ),
+        "message": f"[SESSION] ideas:{idea_id}:session-{turn_n}\n\n{content}",
     }
 
     # Send webhook POST via a per-request aiohttp session
@@ -1200,8 +1207,9 @@ async def post_ideas_message(idea_id: str, request: Request):
 
     idea_dir = Path(ideas_dir) / idea_id
     turns_dir = idea_dir / "turns"
-    done_path = turns_dir / f"turn_{turn_n}.done"
-    md_path = turns_dir / f"turn_{turn_n}.md"
+    # Sentinel paths per ~/.openclaw/workspace-prd-creator/AGENTS.md: turns/{n}.md / turns/{n}.done
+    done_path = turns_dir / f"{turn_n}.done"
+    md_path = turns_dir / f"{turn_n}.md"
     prd_draft_path = idea_dir / "prd_draft.md"
 
     deadline = datetime.utcnow().timestamp() + POLL_TIMEOUT
@@ -1242,6 +1250,21 @@ async def post_ideas_message(idea_id: str, request: Request):
     if session_data.get("created") is None:
         session_data["created"] = now
 
+    # Auto-name from first # heading in prd_draft (only while still "New Idea" or empty)
+    nm = session_data.get("name", "")
+    if nm in ("", "New Idea"):
+        heading_name = _extract_first_h1_heading(prd_content)
+        if heading_name:
+            session_data["name"] = heading_name
+        else:
+            # Fallback: first 40 chars of user's first message, title-cased
+            first_user = next(
+                (m["content"] for m in session_data.get("messages", []) if m.get("role") == "user"),
+                "",
+            )
+            if first_user.strip():
+                session_data["name"] = first_user.strip()[:40].title()
+
     # Atomic write via .tmp + os.replace
     tmp_path = str(session_path) + ".tmp"
     with open(tmp_path, "w") as f:
@@ -1271,17 +1294,22 @@ def get_ideas():
     for subdir in ideas_path.iterdir():
         if not subdir.is_dir():
             continue
+        # Only list ideas that have completed at least one agent turn (UI-E3 contract)
+        first_done = subdir / "turns" / "1.done"
+        if not first_done.exists():
+            continue
         session_path = subdir / "session.json"
         session_data = _read_json_file(str(session_path)) if session_path.exists() else {}
         prd_content = session_data.get("prd_content", "") or ""
 
-        # Extract name from first # heading or fall back to id
-        name = None
-        for line in prd_content.split("\n"):
-            stripped = line.strip()
-            if stripped.startswith("# "):
-                name = stripped[2:].strip()
-                break
+        # Prefer session.json name; else first # heading; else id
+        name = session_data.get("name") or None
+        if not name:
+            for line in prd_content.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith("# "):
+                    name = stripped[2:].strip()
+                    break
         if not name:
             name = subdir.name
 
@@ -1318,6 +1346,7 @@ def post_ideas():
 
     now = datetime.utcnow().isoformat() + "Z"
     session_data = {
+        "name": "New Idea",
         "messages": [],
         "prd_content": "",
         "roadmap_content": "",
@@ -1326,8 +1355,10 @@ def post_ideas():
     }
 
     session_path = idea_dir / "session.json"
-    with open(session_path, "w") as f:
+    tmp_path = str(session_path) + ".tmp"
+    with open(tmp_path, "w") as f:
         json.dump(session_data, f)
+    os.replace(tmp_path, session_path)
 
     return {"id": idea_id}
 
@@ -1388,33 +1419,15 @@ def download_ideas(idea_id: str):
     )
 
 
-REQUIRED_PRD_HEADERS = [
-    "## Problem Statement",
-    "## Goals & Success Metrics",
-    "## Functional Requirements",
-]
-
-
-def _check_prd_headers(content: str) -> list[str]:
-    """Return list of missing required headers from PRD content."""
-    missing = []
-    for header in REQUIRED_PRD_HEADERS:
-        if header not in content:
-            missing.append(header)
-    return missing
-
-
 @app.post("/api/ideas/{idea_id}/upload")
 async def post_ideas_upload(
     idea_id: str,
     file: UploadFile = File(...),
 ):
-    """Upload and validate a PRD markdown file.
+    """Upload any .md file, write uploaded_seed.md, trigger synthesis webhook, poll sentinel.
 
-    Validates .md extension, checks for required headers, then atomically
-    writes the content to session.json['prd_content'] via tmp+replace.
+    Does not reject for template/format — the agent synthesizes into the canonical PRD structure.
     """
-    # Validate .md extension (case-insensitive)
     filename = file.filename or ""
     if not filename.lower().endswith(".md"):
         raise HTTPException(
@@ -1428,31 +1441,75 @@ async def post_ideas_upload(
     except UnicodeDecodeError:
         raise HTTPException(status_code=400, detail="File must be valid UTF-8 text")
 
-    # Check idea exists before doing content-level validation
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="File must be non-empty")
+
     config = load_config()
     ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
+    hooks_token = config.get("hooks_token", "")
     idea_dir = Path(ideas_dir) / idea_id
 
     if not idea_dir.exists():
         raise HTTPException(status_code=404, detail="Idea not found")
 
-    # Check required headers
-    missing = _check_prd_headers(text)
-    if missing:
+    # Atomic write: uploaded_seed.md
+    seed_path = idea_dir / "uploaded_seed.md"
+    tmp_seed = str(seed_path) + ".tmp"
+    with open(tmp_seed, "w") as f:
+        f.write(text)
+    os.replace(tmp_seed, seed_path)
+
+    # Next available turn index for sentinel polling (avoid colliding with chat turns)
+    turns_dir = idea_dir / "turns"
+    turns_dir.mkdir(parents=True, exist_ok=True)
+    upload_turn = 1
+    while (turns_dir / f"{upload_turn}.done").exists():
+        upload_turn += 1
+
+    session_key = f"ideas:{idea_id}:upload-{upload_turn}"
+    webhook_payload = {
+        "agentId": "prd-creator",
+        "sessionKey": session_key,
+        "wakeMode": "now",
+        "message": (
+            f"[SESSION] ideas:{idea_id}:upload-{upload_turn}\n\n"
+            f"I uploaded a file. Please read ~/.openclaw/ideas/{idea_id}/uploaded_seed.md "
+            f"and synthesize its content into the canonical PRD template (all sections), "
+            f"preserving my intent. Explain briefly what you structured in your reply."
+        ),
+    }
+
+    headers = {"Authorization": f"Bearer {hooks_token}"}
+    async with aiohttp.ClientSession() as session:
+        await session.post(hooks_url, json=webhook_payload, headers=headers)
+
+    done_path = turns_dir / f"{upload_turn}.done"
+    deadline = datetime.utcnow().timestamp() + POLL_TIMEOUT
+    while datetime.utcnow().timestamp() < deadline:
+        if done_path.exists():
+            break
+        await asyncio.sleep(POLL_INTERVAL)
+    else:
         raise HTTPException(
-            status_code=422,
-            detail=f"Missing required headers: {', '.join(missing)}",
-            headers={"X-Missing-Headers": ",".join(missing)},
+            status_code=408,
+            detail=f"Upload synthesis timed out after {POLL_TIMEOUT}s",
         )
+
+    prd_draft_path = idea_dir / "prd_draft.md"
+    prd_content = prd_draft_path.read_text() if prd_draft_path.exists() else text
 
     session_path = idea_dir / "session.json"
     session_data = _read_json_file(str(session_path)) or {
+        "name": "New Idea",
         "messages": [],
         "prd_content": "",
+        "roadmap_content": "",
         "created": None,
         "updated": None,
     }
-    session_data["prd_content"] = text
+    session_data.setdefault("name", "New Idea")
+    session_data["prd_content"] = prd_content
     session_data["updated"] = datetime.utcnow().isoformat() + "Z"
 
     tmp_path = str(session_path) + ".tmp"
@@ -1838,6 +1895,7 @@ def _validate_roadmap_content(content: str) -> dict:
     1. Phase lines match the required format.
     2. Each phase has a '> Test:' line within 10 lines.
     3. No duplicate phase IDs.
+    4. At least one phase line exists.
 
     Returns {"valid": bool, "errors": [{"line": int, "content": str, "message": str}]}
     """
@@ -1850,6 +1908,14 @@ def _validate_roadmap_content(content: str) -> dict:
         m = _PHASE_LINE_RE.match(line)
         if m:
             phase_matches.append((i, m.group(1), line))
+
+    if not phase_matches:
+        errors.append({
+            "line": 0,
+            "content": "",
+            "message": "At least one valid phase line is required",
+        })
+        return {"valid": False, "errors": errors}
 
     # Check Test: line within 10 lines of each phase line
     for line_num, phase_id, line_content in phase_matches:
@@ -1879,6 +1945,22 @@ def _validate_roadmap_content(content: str) -> dict:
             })
 
     return {"valid": len(errors) == 0, "errors": errors}
+
+
+@app.post("/api/setup/validate-repo-path")
+async def post_setup_validate_repo_path(request: Request):
+    """Validate repo path string (no filesystem existence check)."""
+    body = await request.json()
+    path = body.get("path", "")
+    if path is None:
+        path = ""
+    if not str(path).strip():
+        return {"valid": False, "error": "Enter a directory path to continue"}
+    if "\x00" in str(path):
+        return {"valid": False, "error": "Path contains invalid characters"}
+    if len(str(path)) >= 512:
+        return {"valid": False, "error": "Path is too long"}
+    return {"valid": True, "error": None}
 
 
 @app.post("/api/setup/validate-roadmap")
@@ -1914,37 +1996,76 @@ _WORKSPACE_AGENTS = ["planner", "executor", "reviewer", "escalation"]
 def _run_preflight_checks(repo_path: str) -> list:
     """Run ordered preflight checks for a project directory.
 
-    Returns list of {"check": str, "status": str, "message": str}
-    where status is "pass", "fail", or "warn".
+    Auto-fixes symlink and .gitignore when possible. Returns list of
+    {"check": str, "status": str, "message": str} with status pass|fail|warn|fixed.
     """
     import subprocess
     import glob as glob_mod
 
-    repo_path = os.path.expanduser(repo_path)
+    repo_path = os.path.realpath(os.path.expanduser(repo_path))
     openclaw_dir = os.path.expanduser("~/.openclaw")
     checks = []
 
-    # 1. Symlink
+    # 1. Symlink — create or repair ~/.openclaw/pipeline-project → repo_path
     symlink_path = os.path.join(openclaw_dir, "pipeline-project")
     try:
-        real = os.path.realpath(symlink_path)
-        if real == repo_path:
-            checks.append({"check": "symlink", "status": "pass",
-                            "message": f"Symlink points to {repo_path}"})
+        ok = os.path.lexists(symlink_path) and os.path.realpath(symlink_path) == repo_path
+        if ok:
+            checks.append({
+                "check": "symlink",
+                "status": "pass",
+                "message": f"Symlink points to {repo_path}",
+            })
         else:
-            checks.append({"check": "symlink", "status": "fail",
-                            "message": f"Symlink missing or wrong — run: ln -sfn {repo_path} ~/.openclaw/pipeline-project"})
-    except Exception:
-        checks.append({"check": "symlink", "status": "fail",
-                        "message": f"Symlink missing or wrong — run: ln -sfn {repo_path} ~/.openclaw/pipeline-project"})
+            if os.path.lexists(symlink_path):
+                os.remove(symlink_path)
+            os.symlink(repo_path, symlink_path)
+            checks.append({
+                "check": "symlink",
+                "status": "fixed",
+                "message": f"Symlink created → {repo_path}",
+            })
+    except OSError as exc:
+        checks.append({
+            "check": "symlink",
+            "status": "fail",
+            "message": (
+                f"Could not create symlink ({exc}). Run: "
+                f"ln -sfn {repo_path} ~/.openclaw/pipeline-project"
+            ),
+        })
 
-    # 2. .gitignore presence
+    # 2. .gitignore presence — create with pipeline block if missing
     gitignore_path = os.path.join(repo_path, ".gitignore")
     if not os.path.exists(gitignore_path):
-        checks.append({"check": ".gitignore", "status": "fail",
-                        "message": ".gitignore file not found"})
+        try:
+            body = (
+                _PIPELINE_GITIGNORE_HEADER + "\n"
+                + "\n".join(_PIPELINE_GITIGNORE_ENTRIES)
+                + "\n"
+            )
+            with open(gitignore_path, "w") as f:
+                f.write(body)
+            checks.append({
+                "check": ".gitignore",
+                "status": "fixed",
+                "message": "Created .gitignore with pipeline entries.",
+            })
+        except OSError as exc:
+            checks.append({
+                "check": ".gitignore",
+                "status": "fail",
+                "message": f"Could not create .gitignore: {exc}",
+            })
     else:
-        # 3. .gitignore entries — auto-inject missing ones
+        checks.append({
+            "check": ".gitignore",
+            "status": "pass",
+            "message": ".gitignore present",
+        })
+
+    # 3. .gitignore entries — append missing pipeline lines
+    if os.path.exists(gitignore_path):
         try:
             with open(gitignore_path, "r") as f:
                 existing = f.read()
@@ -1953,14 +2074,23 @@ def _run_preflight_checks(repo_path: str) -> list:
                 inject = "\n" + _PIPELINE_GITIGNORE_HEADER + "\n" + "\n".join(missing) + "\n"
                 with open(gitignore_path, "a") as f:
                     f.write(inject)
-                checks.append({"check": ".gitignore entries", "status": "pass",
-                                "message": f"Added {len(missing)} entries: {', '.join(missing)}"})
+                checks.append({
+                    "check": ".gitignore entries",
+                    "status": "fixed",
+                    "message": f"Added {len(missing)} missing entries: {', '.join(missing)}",
+                })
             else:
-                checks.append({"check": ".gitignore entries", "status": "pass",
-                                "message": "All required entries present"})
+                checks.append({
+                    "check": ".gitignore entries",
+                    "status": "pass",
+                    "message": "All required entries present",
+                })
         except Exception as exc:
-            checks.append({"check": ".gitignore entries", "status": "fail",
-                            "message": f"Could not read/write .gitignore: {exc}"})
+            checks.append({
+                "check": ".gitignore entries",
+                "status": "fail",
+                "message": f"Could not read/write .gitignore: {exc}",
+            })
 
     # 4. Git repo + main/master branch
     git_dir = os.path.join(repo_path, ".git")

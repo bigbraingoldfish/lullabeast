@@ -66,11 +66,12 @@ class TestPostIdeas:
 
         assert session["messages"] == []
         assert session["prd_content"] == ""
+        assert session.get("name") == "New Idea"
         assert "created" in session
         assert "updated" in session
 
     def test_subsequent_get_includes_new_idea(self, client, monkeypatch):
-        """After POST, GET /api/ideas includes the new idea."""
+        """After POST, GET /api/ideas does not list the idea until first turn completes."""
         client_obj, ideas_dir = client
 
         post_response = client_obj.post("/api/ideas")
@@ -79,4 +80,4 @@ class TestPostIdeas:
         get_response = client_obj.get("/api/ideas")
         assert get_response.status_code == 200
         data = get_response.json()
-        assert any(idea["id"] == idea_id for idea in data)
+        assert not any(idea["id"] == idea_id for idea in data)

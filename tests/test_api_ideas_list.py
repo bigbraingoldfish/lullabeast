@@ -58,10 +58,13 @@ class TestGetIdeasList:
         """When ideas exist, returns array of {id, name, summary, updated}."""
         client_obj, ideas_dir = client
 
-        # Create an idea subdirectory
+        # Create an idea subdirectory (listed only after first turn completes)
         idea_id = "abc123"
         idea_path = ideas_dir / idea_id
         idea_path.mkdir()
+        turns = idea_path / "turns"
+        turns.mkdir()
+        (turns / "1.done").write_text("done")
 
         # Write session.json with prd_content
         session = {
@@ -88,6 +91,9 @@ class TestGetIdeasList:
         idea_id = "fallback-test"
         idea_path = ideas_dir / idea_id
         idea_path.mkdir()
+        turns = idea_path / "turns"
+        turns.mkdir()
+        (turns / "1.done").write_text("done")
 
         session = {
             "messages": [],
@@ -110,6 +116,9 @@ class TestGetIdeasList:
         idea_id = "no-problem"
         idea_path = ideas_dir / idea_id
         idea_path.mkdir()
+        turns = idea_path / "turns"
+        turns.mkdir()
+        (turns / "1.done").write_text("done")
 
         session = {
             "messages": [],
@@ -131,6 +140,9 @@ class TestGetIdeasList:
         for idea_id, updated in [("old", "2026-01-01T00:00:00Z"), ("new", "2026-03-01T00:00:00Z")]:
             idea_path = ideas_dir / idea_id
             idea_path.mkdir()
+            turns = idea_path / "turns"
+            turns.mkdir()
+            (turns / "1.done").write_text("done")
             session = {
                 "messages": [],
                 "prd_content": "# Idea " + idea_id,
