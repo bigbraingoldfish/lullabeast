@@ -17,6 +17,7 @@ FastAPI server (`server.py`) and a single-file React app (`index.html`) for the 
 - **Action hierarchy**: `Generate Roadmap` is the primary CTA; `Continue to Setup →` appears only after roadmap generation; downloads moved into overflow menu (`⋮`) to reduce visual competition.
 - **PRD checklist + document**: right pane starts with a 12-row PRD completeness checklist (status + criticality) that scrolls to sections. Toggle allows showing/hiding empty section placeholders.
 - **Markdown rendering parity**: conversation assistant bubbles and PRD document pane both use `marked.parse()` + `dangerouslySetInnerHTML` with shared `.msg-md` styling (headers, lists, tables, code blocks).
+- **Submission feedback**: user messages are appended optimistically (input clears immediately), and the UI shows explicit in-progress indicators while the backend/agent turn is running: pending assistant bubble + processing banner + PRD buffering state.
 - **Readiness**: status model is `unavailable` / `updating` / `ready`. `POST /api/ideas/{id}/message` triggers readiness (`ideas:{id}:readiness`) and `/api/ideas/{id}/readiness` reports state based on sentinel + active/recent job window (180s). UI polls `/readiness/poll` every 3s while `updating`, stops after 120s with neutral timeout text, and logs structured `[READINESS]` lifecycle lines to `/tmp/ui-server.log`.
 
 ### Setup (Preflight)
@@ -35,6 +36,10 @@ FastAPI server (`server.py`) and a single-file React app (`index.html`) for the 
 ## Tests
 
 From repo root: `pytest tests/ -q`
+
+### Session self-heal behavior
+
+If an idea has turn artifacts (`turns/*.md`, `turns/1.done`, `prd_draft.md`) but `session.json` is stale/empty, the backend now rebuilds conversation/PRD payloads on read (`GET /api/ideas/{id}/session` and listing path). This prevents "named idea appears in list but opens blank" regressions after interrupted writes.
 
 ### Setup: validate-repo-path UI bug (fixed)
 

@@ -1208,33 +1208,101 @@ POLL_TIMEOUT = 120  # seconds; patchable in tests
 POLL_INTERVAL = 2   # seconds between sentinel checks
 
 
+def _default_idea_session(name: str = "") -> dict:
+    return {
+        "name": name,
+        "messages": [],
+        "prd_content": "",
+        "roadmap_content": "",
+        "created": None,
+        "updated": None,
+    }
+
+
+def _iso_from_mtime(path: Path) -> str:
+    return datetime.utcfromtimestamp(path.stat().st_mtime).isoformat() + "Z"
+
+
+def _rehydrate_session_from_artifacts(idea_dir: Path, session_data: dict) -> tuple[dict, bool]:
+    """Backfill empty session.json from turns/*.md and prd_draft.md if available."""
+    if not isinstance(session_data, dict):
+        session_data = _default_idea_session()
+    else:
+        session_data.setdefault("name", "")
+        session_data.setdefault("messages", [])
+        session_data.setdefault("prd_content", "")
+        session_data.setdefault("roadmap_content", "")
+        session_data.setdefault("created", None)
+        session_data.setdefault("updated", None)
+
+    has_messages = bool(session_data.get("messages"))
+    has_prd = bool((session_data.get("prd_content") or "").strip())
+    if has_messages and has_prd:
+        return session_data, False
+
+    turns_dir = idea_dir / "turns"
+    md_turns = []
+    if turns_dir.exists():
+        for md_file in turns_dir.glob("*.md"):
+            try:
+                turn_num = int(md_file.stem)
+            except ValueError:
+                continue
+            md_turns.append((turn_num, md_file))
+    md_turns.sort(key=lambda x: x[0])
+
+    changed = False
+    if not has_messages and md_turns:
+        rebuilt_messages = []
+        for _turn_num, md_file in md_turns:
+            rebuilt_messages.append(
+                {
+                    "role": "assistant",
+                    "content": md_file.read_text(),
+                    "ts": _iso_from_mtime(md_file),
+                }
+            )
+        session_data["messages"] = rebuilt_messages
+        if not session_data.get("created"):
+            session_data["created"] = rebuilt_messages[0]["ts"]
+        changed = True
+
+    if not has_prd:
+        prd_path = idea_dir / "prd_draft.md"
+        if prd_path.exists():
+            session_data["prd_content"] = prd_path.read_text()
+            changed = True
+
+    if changed:
+        ts_candidates = []
+        if session_data.get("messages"):
+            ts_candidates.extend([m.get("ts") for m in session_data["messages"] if m.get("ts")])
+        if (idea_dir / "prd_draft.md").exists():
+            ts_candidates.append(_iso_from_mtime(idea_dir / "prd_draft.md"))
+        latest_ts = max(ts_candidates) if ts_candidates else datetime.utcnow().isoformat() + "Z"
+        if not session_data.get("updated") or str(session_data.get("updated")) < latest_ts:
+            session_data["updated"] = latest_ts
+
+    return session_data, changed
+
+
 @app.get("/api/ideas/{idea_id}/session")
 def get_ideas_session(idea_id: str):
     """Return the full session.json for an idea, or empty schema if not found."""
     config = load_config()
     ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
-    session_path = Path(ideas_dir) / idea_id / "session.json"
+    idea_dir = Path(ideas_dir) / idea_id
+    session_path = idea_dir / "session.json"
 
     if not session_path.exists():
-        return {
-            "name": "",
-            "messages": [],
-            "prd_content": "",
-            "roadmap_content": "",
-            "created": None,
-            "updated": None,
-        }
+        return _default_idea_session()
 
     session_data = _read_json_file(str(session_path))
     if session_data is None:
-        return {
-            "name": "",
-            "messages": [],
-            "prd_content": "",
-            "roadmap_content": "",
-            "created": None,
-            "updated": None,
-        }
+        return _default_idea_session()
+    session_data, changed = _rehydrate_session_from_artifacts(idea_dir, session_data)
+    if changed:
+        _atomic_write_json_file(session_path, session_data)
     return session_data
 
 
@@ -1406,7 +1474,10 @@ def get_ideas():
         if not first_done.exists():
             continue
         session_path = subdir / "session.json"
-        session_data = _read_json_file(str(session_path)) if session_path.exists() else {}
+        session_data = _read_json_file(str(session_path)) if session_path.exists() else _default_idea_session()
+        session_data, changed = _rehydrate_session_from_artifacts(subdir, session_data)
+        if changed:
+            _atomic_write_json_file(session_path, session_data)
         prd_content = session_data.get("prd_content", "") or ""
 
         raw_name = (session_data.get("name") or "").strip()

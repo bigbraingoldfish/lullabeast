@@ -126,5 +126,37 @@ class TestApiIdeasSession:
             response = client.get("/api/ideas/0/session")
         assert response.status_code in (200, 404, 422)
 
+    def test_rebuilds_empty_session_from_turn_artifacts(self):
+        """If session is empty but turns/prd files exist, endpoint self-heals session."""
+        client = load_server()
+        idea_id = "rebuild-1"
+        idea_dir = self.ideas_dir / idea_id
+        idea_dir.mkdir(parents=True, exist_ok=True)
+        turns = idea_dir / "turns"
+        turns.mkdir(parents=True, exist_ok=True)
+        (turns / "1.md").write_text("# Turn 1\n\nAgent response")
+        (turns / "1.done").write_text("done")
+        (idea_dir / "prd_draft.md").write_text("# Rebuilt PRD\n\n## Problem Statement\nRecovered content.")
+        self._write_session(
+            idea_id,
+            {
+                "name": "Recovered Idea",
+                "messages": [],
+                "prd_content": "",
+                "roadmap_content": "",
+                "created": "2026-03-24T00:00:00Z",
+                "updated": "2026-03-24T00:00:00Z",
+            },
+        )
+
+        with patch("ui.server.load_config", return_value=self._mock_config()):
+            response = client.get(f"/api/ideas/{idea_id}/session")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body["messages"]) >= 1
+        assert any(m.get("role") == "assistant" for m in body["messages"])
+        assert "Recovered content" in body["prd_content"]
+
 
 from unittest.mock import patch
