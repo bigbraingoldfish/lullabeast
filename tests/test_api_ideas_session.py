@@ -2,6 +2,7 @@
 import pytest
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 
 def load_server():
@@ -53,7 +54,10 @@ class TestApiIdeasSession:
 
         assert response.status_code == 200, f"Expected 200, got {response.status_code}"
         body = response.json()
-        assert body.get("messages") == session_data["messages"], f"Messages mismatch: {body}"
+        msgs = body.get("messages") or []
+        assert msgs[0] == session_data["messages"][0]
+        assert msgs[1]["role"] == "assistant" and msgs[1]["content"] == "Hi there"
+        assert "parsed" in msgs[1], "Assistant messages should carry parsed for UI reload"
         assert body.get("prd_content") == session_data["prd_content"], f"prd_content mismatch: {body}"
         assert body.get("created") == session_data["created"], f"created mismatch: {body}"
         assert body.get("updated") == session_data["updated"], f"updated mismatch: {body}"
@@ -157,6 +161,3 @@ class TestApiIdeasSession:
         assert len(body["messages"]) >= 1
         assert any(m.get("role") == "assistant" for m in body["messages"])
         assert "Recovered content" in body["prd_content"]
-
-
-from unittest.mock import patch
