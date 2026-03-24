@@ -12,11 +12,12 @@ FastAPI server (`server.py`) and a single-file React app (`index.html`) for the 
 
 ### Layout notes (Project Ideas)
 
-- **Main nav** (`Sidebar`): collapsible (`«` / `»`); narrow strip shows icons only with tooltips.
-- **Ideas screen**: dedicated **vertical Chats rail** (scrollable list + draft row + per-row delete). Picking a chat **collapses** the rail so conversation + PRD get more width; use **◀ / ▶** to expand/collapse. No session `<select>` dropdown. Each row shows **relative time** from API `updated`. Initial ideas fetch uses **skeleton rows** (no transient "No ideas yet" flash). **Delete** uses inline confirm (rail and **Delete session** header); conversation **auto-scrolls** to the latest message after new turns.
+- **Main nav** (`Sidebar`): collapses to an icon-only abbreviated state (wider than a thin strip) and uses a centered divider toggle (`‹` / `›`) shared with the chats rail.
+- **Chats rail**: dedicated vertical list with per-row kebab menu (`⋮`) for destructive action (`Delete idea`). The rail can collapse to a compact width; width is intentionally wider than before to prevent divider/button overlap.
+- **Action hierarchy**: `Generate Roadmap` is the primary CTA; `Continue to Setup →` appears only after roadmap generation; downloads moved into overflow menu (`⋮`) to reduce visual competition.
+- **PRD checklist + document**: right pane starts with a 12-row PRD completeness checklist (status + criticality) that scrolls to sections. Toggle allows showing/hiding empty section placeholders.
+- **Markdown rendering parity**: conversation assistant bubbles and PRD document pane both use `marked.parse()` + `dangerouslySetInnerHTML` with shared `.msg-md` styling (headers, lists, tables, code blocks).
 - **Readiness**: status model is `unavailable` / `updating` / `ready`. `POST /api/ideas/{id}/message` triggers readiness (`ideas:{id}:readiness`) and `/api/ideas/{id}/readiness` reports state based on sentinel + active/recent job window (180s). UI polls `/readiness/poll` every 3s while `updating`, stops after 120s with neutral timeout text, and logs structured `[READINESS]` lifecycle lines to `/tmp/ui-server.log`.
-- **Conversation input**: Enter-to-send is retained and a visible **Send** button is present for discoverability; it is disabled when empty or while a turn is in progress.
-- **Assistant messages**: rendered with `marked` (CDN); user messages stay plain text.
 
 ### Setup (Preflight)
 
