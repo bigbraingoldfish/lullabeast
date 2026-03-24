@@ -1351,6 +1351,97 @@
             );
         }
 
+        function QuestionFlow({ questions, onSubmit }) {
+            const [index, setIndex] = React.useState(0);
+            const [selections, setSelections] = React.useState({});
+            const [freeTexts, setFreeTexts] = React.useState({});
+
+            const q = questions[index];
+            if (!q) return null;
+
+            const sel = selections[index] || [];
+            const ft = freeTexts[index] || "";
+            const hasAnswer = sel.length > 0 || ft.trim().length > 0;
+            const isLast = index === questions.length - 1;
+
+            const toggleOption = (opt) => {
+                if (q.type === "single") {
+                    setSelections((prev) => ({ ...prev, [index]: [opt] }));
+                } else {
+                    setSelections((prev) => {
+                        const current = prev[index] || [];
+                        const next = current.includes(opt)
+                            ? current.filter((o) => o !== opt)
+                            : [...current, opt];
+                        return { ...prev, [index]: next };
+                    });
+                }
+            };
+
+            const advance = () => {
+                if (!hasAnswer) return;
+                if (isLast) {
+                    const parts = questions.map((qItem, i) => {
+                        const chosen = selections[i] || [];
+                        const free = (freeTexts[i] || "").trim();
+                        const answerParts = [...chosen];
+                        if (free) answerParts.push(free);
+                        return `Q: ${qItem.text}\nA: ${answerParts.join(", ")}`;
+                    });
+                    onSubmit(`[ANSWERS]\n${parts.join("\n")}\n[/ANSWERS]`);
+                } else {
+                    setIndex((i) => i + 1);
+                }
+            };
+
+            return (
+                <div className="mt-3 rounded border border-[#2a2d31] bg-[#0d0f11] p-4 space-y-3">
+                    <div className="flex items-start justify-between gap-2">
+                        <p className="text-sm text-slate-200 font-medium leading-snug">{q.text}</p>
+                        <span className="text-[10px] text-slate-600 shrink-0 mt-0.5">{index + 1}/{questions.length}</span>
+                    </div>
+                    <div className="space-y-1.5">
+                        {q.options.map((opt) => {
+                            const active = sel.includes(opt);
+                            return (
+                                <button
+                                    key={opt}
+                                    type="button"
+                                    onClick={() => toggleOption(opt)}
+                                    className={`w-full text-left text-xs px-3 py-2 rounded border transition-colors ${
+                                        active
+                                            ? "border-[#00b4d8]/60 bg-[#00b4d8]/15 text-[#7dd3fc]"
+                                            : "border-[#2a2d31] bg-[#141618] text-slate-400 hover:border-slate-500 hover:text-slate-300"
+                                    }`}
+                                >
+                                    {q.type === "single" ? (active ? "● " : "○ ") : (active ? "☑ " : "☐ ")}{opt}
+                                </button>
+                            );
+                        })}
+                    </div>
+                    <div>
+                        <input
+                            type="text"
+                            value={ft}
+                            onChange={(e) => setFreeTexts((prev) => ({ ...prev, [index]: e.target.value }))}
+                            placeholder="Or add your own answer…"
+                            className="w-full bg-[#141618] border border-[#2a2d31] rounded px-3 py-1.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-500"
+                        />
+                    </div>
+                    <div className="flex justify-end">
+                        <button
+                            type="button"
+                            onClick={advance}
+                            disabled={!hasAnswer}
+                            className="header-text text-xs px-4 py-1.5 rounded border border-[#00b4d8]/50 bg-[#00b4d8] text-[#0d0f11] font-semibold hover:brightness-110 disabled:bg-[#2a2d31] disabled:text-slate-600 disabled:border-[#2a2d31] disabled:cursor-not-allowed"
+                        >
+                            {isLast ? "Submit Answers" : "Next →"}
+                        </button>
+                    </div>
+                </div>
+            );
+        }
+
         function IdeasScreen() {
             const ctx = useContext(AppCtx);
             const [messages, setMessages] = useState([]);
@@ -1382,6 +1473,9 @@
             const [showSessionModal, setShowSessionModal] = useState(false);
             const [sessionModalIdeaId, setSessionModalIdeaId] = useState(null);
             const [stagedAttachment, setStagedAttachment] = useState(null);
+            const [draftingIndicator, setDraftingIndicator] = useState(null);
+            const [answeredFlowIds, setAnsweredFlowIds] = useState(new Set());
+            const draftingTimerRef = useRef(null);
             const taRef = useRef(null);
             const fileRef = useRef(null);
             const attachFileRef = useRef(null);
@@ -1492,6 +1586,12 @@
                 el.style.height = Math.min(el.scrollHeight, maxH) + "px";
             };
 
+            const triggerDraftingIndicator = (sectionName) => {
+                if (draftingTimerRef.current) clearTimeout(draftingTimerRef.current);
+                setDraftingIndicator(sectionName);
+                draftingTimerRef.current = setTimeout(() => setDraftingIndicator(null), 3000);
+            };
+
             const submitMessage = (overrideText) => {
                 const t = (overrideText !== undefined ? overrideText : inputText).trim();
                 if (!t || isLoading || !currentIdeaId) return;
@@ -1523,6 +1623,7 @@
                     .then((data) => {
                         const parsed = data.parsed || null;
                         const displayContent = (parsed && parsed.prose) ? parsed.prose : (data.response || "No agent output returned for this turn.");
+                        if (parsed && parsed.drafting) triggerDraftingIndicator(parsed.drafting);
                         setMessages((prev) =>
                             prev.map((m) =>
                                 m.id === assistantPendingId
@@ -1599,11 +1700,13 @@
                 fetch(`/api/ideas/${ideaId}/start`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
                     .then((r) => { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
                     .then((data) => {
+                        const parsed = data.parsed || null;
+                        if (parsed && parsed.drafting) triggerDraftingIndicator(parsed.drafting);
                         setMessages([{
                             id: assistantPendingId, role: "assistant",
-                            content: (data.parsed && data.parsed.prose) ? data.parsed.prose : (data.response || ""),
+                            content: (parsed && parsed.prose) ? parsed.prose : (data.response || ""),
                             ts: new Date().toISOString(), pending: false,
-                            parsed: data.parsed || null,
+                            parsed,
                         }]);
                         setPrdContent(data.prd_content || "");
                         setIsLoading(false);
@@ -1930,23 +2033,45 @@
                                             {msg.content}
                                         </div>
                                     ) : (
-                                        <div
-                                            className={`msg-md max-w-[95%] rounded px-3 py-2 text-sm ${
-                                                msg.error
-                                                    ? "bg-red-950/30 border border-red-900/60 text-red-200"
-                                                    : msg.pending
-                                                      ? "bg-[#1a1d21] text-slate-300 status-pulse"
-                                                      : "bg-[#1a1d21] text-slate-200"
-                                            }`}
-                                            dangerouslySetInnerHTML={{
-                                                __html:
-                                                    typeof marked !== "undefined" && marked.parse
-                                                        ? marked.parse(msg.content || "", { breaks: true })
-                                                        : String(msg.content || "")
-                                                              .replace(/&/g, "&amp;")
-                                                              .replace(/</g, "&lt;"),
-                                            }}
-                                        />
+                                        <div className="max-w-[95%] w-full flex flex-col gap-1">
+                                            {/* Assumption blocks */}
+                                            {msg.parsed && msg.parsed.assumptions && msg.parsed.assumptions.map((assumption, ai) => (
+                                                <div key={ai} className="flex items-start gap-2 rounded border border-amber-700/50 bg-amber-950/20 px-3 py-2 text-xs text-amber-200">
+                                                    <span className="shrink-0 mt-0.5">⚠</span>
+                                                    <span className="italic">{assumption}</span>
+                                                </div>
+                                            ))}
+                                            {/* Prose bubble */}
+                                            {(msg.content || "").trim().length > 0 && (
+                                                <div
+                                                    className={`msg-md rounded px-3 py-2 text-sm ${
+                                                        msg.error
+                                                            ? "bg-red-950/30 border border-red-900/60 text-red-200"
+                                                            : msg.pending
+                                                              ? "bg-[#1a1d21] text-slate-300 status-pulse"
+                                                              : "bg-[#1a1d21] text-slate-200"
+                                                    }`}
+                                                    dangerouslySetInnerHTML={{
+                                                        __html:
+                                                            typeof marked !== "undefined" && marked.parse
+                                                                ? marked.parse(msg.content || "", { breaks: true })
+                                                                : String(msg.content || "")
+                                                                      .replace(/&/g, "&amp;")
+                                                                      .replace(/</g, "&lt;"),
+                                                    }}
+                                                />
+                                            )}
+                                            {/* Question flow — shown for the last assistant message if questions present and not yet answered */}
+                                            {msg.parsed && msg.parsed.questions && msg.parsed.questions.length > 0 && !answeredFlowIds.has(msg.id) && (
+                                                <QuestionFlow
+                                                    questions={msg.parsed.questions}
+                                                    onSubmit={(bundled) => {
+                                                        setAnsweredFlowIds((prev) => new Set([...prev, msg.id]));
+                                                        submitMessage(bundled);
+                                                    }}
+                                                />
+                                            )}
+                                        </div>
                                     )}
                                 </div>
                             ))}
@@ -2129,6 +2254,11 @@
                             </div>
                         )}
                         {convertError && <div className="px-4 py-2 text-xs text-red-400 border-b border-[#1a1d21]">{convertError}</div>}
+                        {draftingIndicator && (
+                            <div className="flex-shrink-0 border-b border-[#1a1d21] px-4 py-1.5 bg-[#0d0f11]">
+                                <p className="text-xs text-[#00b4d8] header-text animate-pulse">✏ Drafting {draftingIndicator}…</p>
+                            </div>
+                        )}
                         <div ref={docPaneRef} className={`flex-1 overflow-y-auto p-4 bg-[#141618] ${isLoading ? "status-pulse opacity-60" : ""}`}>
                             {isLoading && (
                                 <div className="mb-4 rounded border border-[#2a2d31] bg-[#0d0f11] px-3 py-2">
