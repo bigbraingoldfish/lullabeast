@@ -1313,7 +1313,7 @@
         function SessionStartModal({ onStartConversation, onUpload, onClose }) {
             return (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
-                    <div className="relative w-full max-w-md mx-4 rounded-xl border border-[#2a2d31] bg-[#141618] p-8 shadow-2xl">
+                    <div className="relative w-full max-w-md mx-4 rounded-xl border border-[#2a2d31] bg-[#141618] p-8">
                         <button
                             type="button"
                             onClick={onClose}
@@ -1328,7 +1328,7 @@
                                 onClick={onStartConversation}
                                 className="w-full flex items-center gap-3 rounded-lg border border-[#00b4d8]/40 bg-[#0d1f26] px-4 py-3.5 text-left hover:bg-[#0d2c36] transition-colors group"
                             >
-                                <span className="text-xl">💬</span>
+                                <span className="w-7 h-7 flex items-center justify-center rounded bg-[#00b4d8]/20 text-[#00b4d8] text-sm">▶</span>
                                 <div>
                                     <p className="header-text text-sm text-[#00b4d8] font-semibold group-hover:text-[#33c5e8]">Start a conversation</p>
                                     <p className="text-xs text-slate-500 mt-0.5">The agent opens with a focused question to guide you through the PRD.</p>
@@ -1339,7 +1339,7 @@
                                 onClick={onUpload}
                                 className="w-full flex items-center gap-3 rounded-lg border border-[#2a2d31] bg-[#0d0f11] px-4 py-3.5 text-left hover:bg-[#1a1d21] transition-colors group"
                             >
-                                <span className="text-xl">📄</span>
+                                <span className="w-7 h-7 flex items-center justify-center rounded bg-[#1a1d21] text-slate-400 text-sm">↑</span>
                                 <div>
                                     <p className="header-text text-sm text-slate-300 group-hover:text-slate-100">Upload existing documentation</p>
                                     <p className="text-xs text-slate-500 mt-0.5">Provide a .md file — the agent synthesizes it into the PRD structure.</p>
@@ -2187,14 +2187,14 @@
                                 <div className="flex flex-wrap gap-1.5">
                                     {stagedAttachment && (
                                         <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-[#1a1d21] border border-[#2a2d31] text-xs text-slate-300">
-                                            <span>📎</span>
+                                            <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
                                             <span className="max-w-[180px] truncate">{stagedAttachment.filename}</span>
                                             <button type="button" onClick={() => setStagedAttachment(null)} className="text-slate-500 hover:text-slate-200 ml-0.5">✕</button>
                                         </div>
                                     )}
                                     {annotations.filter((a) => !a.submitted).length > 0 && (
                                         <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-amber-950/30 border border-amber-700/40 text-xs text-amber-300">
-                                            <span>📝</span>
+                                            <span>✎</span>
                                             <span>{annotations.filter((a) => !a.submitted).length} section note{annotations.filter((a) => !a.submitted).length !== 1 ? "s" : ""} ready</span>
                                         </div>
                                     )}
@@ -2368,6 +2368,7 @@
                                     <p className="text-[11px] text-slate-500 mt-1">Buffering the latest assistant output and rebuilding section content.</p>
                                 </div>
                             )}
+                            {/* PRD completeness checklist — Show empty section placeholders / Hide empty sections */}
                             <CompactProgress
                                 checklistRows={checklistRows}
                                 annotations={annotations}
@@ -2403,10 +2404,10 @@
                                                                     title={sectionAnnotation.submitted ? "Submitted: " + sectionAnnotation.comment : sectionAnnotation.comment}
                                                                     className={`text-[11px] px-1.5 py-0.5 rounded border ${sectionAnnotation.submitted ? "border-slate-600 text-slate-500" : "border-amber-700/50 bg-amber-950/20 text-amber-300"}`}
                                                                 >
-                                                                    {sectionAnnotation.submitted ? "✓ Submitted" : "💬"}
+                                                                    {sectionAnnotation.submitted ? "✓ Submitted" : "✎ note"}
                                                                 </button>
                                                                 {openAnnotationBubble === title && !sectionAnnotation.submitted && (
-                                                                    <div className="absolute right-0 top-7 z-10 w-64 rounded border border-[#2a2d31] bg-[#0d0f11] p-3 shadow-lg space-y-2">
+                                                                    <div className="absolute right-0 top-7 z-10 w-64 rounded border border-[#2a2d31] bg-[#0d0f11] p-3 space-y-2">
                                                                         <p className="text-xs text-slate-400 italic">{sectionAnnotation.comment}</p>
                                                                         <div className="flex gap-2">
                                                                             <button type="button" onClick={() => { setEditingAnnotationSection(title); setAnnotationDraft(sectionAnnotation.comment); setOpenAnnotationBubble(null); }} className="text-xs text-[#00b4d8] hover:underline">Edit</button>
