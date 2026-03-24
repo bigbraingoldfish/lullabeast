@@ -1442,6 +1442,79 @@
             );
         }
 
+        function CompactProgress({ checklistRows, annotations, onDotClick, expanded, onToggleExpand, showEmptyPlaceholders, onTogglePlaceholders }) {
+            const totalComplete = checklistRows.filter((r) => r.status === "complete").length;
+            const unsubAnnotationSections = new Set((annotations || []).filter((a) => !a.submitted).map((a) => a.section));
+
+            const dotColor = (row) => {
+                if (row.status === "complete") return "bg-emerald-500";
+                if (row.status === "partial") return "bg-amber-400";
+                return "bg-[#2a2d31]";
+            };
+
+            return (
+                <div className="mb-4 rounded border border-[#1a1d21] bg-[#0d0f11] p-3">
+                    {/* Compact row */}
+                    <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-1 flex-wrap">
+                            {checklistRows.map((row) => {
+                                const hasAnnotation = unsubAnnotationSections.has(row.title);
+                                return (
+                                    <div key={row.title} className="relative group/dot">
+                                        <button
+                                            type="button"
+                                            onClick={() => onDotClick(row.title)}
+                                            title={`${row.title} — ${row.status}${row.criticality ? " (" + row.criticality + ")" : ""}`}
+                                            className={`w-2.5 h-2.5 rounded-full transition-transform hover:scale-125 ${dotColor(row)}`}
+                                        />
+                                        {hasAnnotation && (
+                                            <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-amber-400 pointer-events-none" />
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                        <span className="text-[11px] text-slate-500 flex-1">{totalComplete}/{checklistRows.length} sections complete</span>
+                        <button
+                            type="button"
+                            onClick={onToggleExpand}
+                            title={expanded ? "Collapse checklist" : "Expand checklist"}
+                            className="text-slate-500 hover:text-slate-300 text-sm leading-none"
+                        >
+                            {expanded ? "⌃" : "⌄"}
+                        </button>
+                    </div>
+                    {/* Expanded checklist */}
+                    {expanded && (
+                        <div className="mt-3 space-y-1 border-t border-[#1a1d21] pt-3">
+                            {checklistRows.map((row) => (
+                                <button
+                                    key={row.title}
+                                    type="button"
+                                    onClick={() => onDotClick(row.title)}
+                                    className="w-full flex items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-[#1a1d21]"
+                                >
+                                    <span className={`w-4 shrink-0 text-xs ${iconColorForStatus(row.status)}`}>{iconForStatus(row.status)}</span>
+                                    <span className="flex-1 text-xs text-slate-300">{row.title}</span>
+                                    {unsubAnnotationSections.has(row.title) && (
+                                        <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" title="Has unsent note" />
+                                    )}
+                                    {row.criticality && (
+                                        <span className={`text-[10px] px-1.5 py-0.5 rounded border ${row.criticality === "critical" ? "border-red-900/60 bg-red-950/30 text-red-300" : "border-slate-700 text-slate-400"}`}>
+                                            {row.criticality}
+                                        </span>
+                                    )}
+                                </button>
+                            ))}
+                            <button type="button" className="mt-1 text-[11px] text-[#00b4d8] hover:underline" onClick={onTogglePlaceholders}>
+                                {showEmptyPlaceholders ? "Hide empty sections" : "Show empty section placeholders"}
+                            </button>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
         function IdeasScreen() {
             const ctx = useContext(AppCtx);
             const [messages, setMessages] = useState([]);
@@ -1470,6 +1543,7 @@
             const [showActionMenu, setShowActionMenu] = useState(false);
             const [activeIdeaMenuId, setActiveIdeaMenuId] = useState(null);
             const [showEmptyPlaceholders, setShowEmptyPlaceholders] = useState(false);
+            const [checklistExpanded, setChecklistExpanded] = useState(false);
             const [showSessionModal, setShowSessionModal] = useState(false);
             const [sessionModalIdeaId, setSessionModalIdeaId] = useState(null);
             const [stagedAttachment, setStagedAttachment] = useState(null);
@@ -2294,40 +2368,15 @@
                                     <p className="text-[11px] text-slate-500 mt-1">Buffering the latest assistant output and rebuilding section content.</p>
                                 </div>
                             )}
-                            <div className="mb-4 rounded border border-[#1a1d21] bg-[#0d0f11] p-3">
-                                <h3 className="header-text text-xs text-slate-400 mb-2">PRD completeness checklist</h3>
-                                <div className="space-y-1">
-                                    {checklistRows.map((row) => (
-                                        <button
-                                            key={row.title}
-                                            type="button"
-                                            onClick={() => scrollToSection(row.title)}
-                                            className="w-full flex items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-[#1a1d21]"
-                                        >
-                                            <span className={`w-4 shrink-0 text-xs ${iconColorForStatus(row.status)}`}>{iconForStatus(row.status)}</span>
-                                            <span className="flex-1 text-xs text-slate-300">{row.title}</span>
-                                            {row.criticality && (
-                                                <span
-                                                    className={`text-[10px] px-1.5 py-0.5 rounded border ${
-                                                        row.criticality === "critical"
-                                                            ? "border-red-900/60 bg-red-950/30 text-red-300"
-                                                            : "border-slate-700 text-slate-400"
-                                                    }`}
-                                                >
-                                                    {row.criticality}
-                                                </span>
-                                            )}
-                                        </button>
-                                    ))}
-                                </div>
-                                <button
-                                    type="button"
-                                    className="mt-2 text-[11px] text-[#00b4d8] hover:underline"
-                                    onClick={() => setShowEmptyPlaceholders((s) => !s)}
-                                >
-                                    {showEmptyPlaceholders ? "Hide empty sections" : "Show empty section placeholders"}
-                                </button>
-                            </div>
+                            <CompactProgress
+                                checklistRows={checklistRows}
+                                annotations={annotations}
+                                onDotClick={scrollToSection}
+                                expanded={checklistExpanded}
+                                onToggleExpand={() => setChecklistExpanded((x) => !x)}
+                                showEmptyPlaceholders={showEmptyPlaceholders}
+                                onTogglePlaceholders={() => setShowEmptyPlaceholders((s) => !s)}
+                            />
 
                             {prdContent.trim() ? (
                                 <div className="mb-6 border-b border-[#1a1d21] pb-4">
