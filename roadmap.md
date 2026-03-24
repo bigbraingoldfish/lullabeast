@@ -95,6 +95,8 @@ INFRA-B1 and INFRA-E1 are complete — confirmed infrastructure.
 
 **Follow-up (2026-03-22, Pass 4 redo):** Ideas screen UX restructured: document pane renders PRD as fully formatted markdown, actions use primary/secondary/overflow hierarchy, delete moved from conversation header into rail-row kebab menu, PRD completeness checklist added with click-to-scroll + empty-section toggle, and both sidebars now use consistent centered divider chevrons. Collapsed rail widths were widened to avoid overlapping controls.
 
+**Follow-up (2026-03-24):** Ideas turn UX and resiliency pass: message submit now uses optimistic append + immediate input clear with explicit in-progress signals (chat pending bubble, processing banner, PRD buffering banner). Backend added session self-heal logic to rebuild empty `session.json` from existing `turns/*.md` + `prd_draft.md` so legacy/interrupted sessions load usable history and PRD content instead of appearing blank.
+
 ---
 
 ## 3) Phase Catalog
