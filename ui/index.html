@@ -1476,6 +1476,10 @@
             const [draftingIndicator, setDraftingIndicator] = useState(null);
             const [answeredFlowIds, setAnsweredFlowIds] = useState(new Set());
             const draftingTimerRef = useRef(null);
+            const [annotations, setAnnotations] = useState([]);
+            const [editingAnnotationSection, setEditingAnnotationSection] = useState(null);
+            const [annotationDraft, setAnnotationDraft] = useState("");
+            const [openAnnotationBubble, setOpenAnnotationBubble] = useState(null);
             const taRef = useRef(null);
             const fileRef = useRef(null);
             const attachFileRef = useRef(null);
@@ -1548,10 +1552,22 @@
 
             useEffect(() => () => stopReadinessPoll(), []);
 
+            const refreshAnnotations = (ideaId) => {
+                if (!ideaId) return;
+                fetch(`/api/ideas/${ideaId}/annotations`)
+                    .then((r) => r.ok ? r.json() : [])
+                    .then((data) => setAnnotations(data || []))
+                    .catch(() => setAnnotations([]));
+            };
+
             useEffect(() => {
                 if (!currentIdeaId) return;
                 setReadinessTimedOut(false);
                 setHadReadyReadiness(false);
+                setAnnotations([]);
+                setEditingAnnotationSection(null);
+                setAnnotationDraft("");
+                setOpenAnnotationBubble(null);
                 fetch(`/api/ideas/${currentIdeaId}/session`)
                     .then((r) => r.json())
                     .then((d) => {
@@ -1560,6 +1576,7 @@
                         setRoadmapContent(d.roadmap_content || "");
                     })
                     .catch(() => {});
+                refreshAnnotations(currentIdeaId);
                 fetch(`/api/ideas/${currentIdeaId}/readiness`)
                     .then((r) => r.json())
                     .then((d) => {
@@ -1637,6 +1654,7 @@
                         setReadinessData(null);
                         setReadinessTimedOut(false);
                         startReadinessPoll(currentIdeaId);
+                        refreshAnnotations(currentIdeaId);
                         refreshIdeas();
                     })
                     .catch(() => {
@@ -2090,12 +2108,22 @@
                             }} />
                             {uploadSpinner && <p className="text-slate-500 text-xs">Synthesizing document…</p>}
                             {uploadError && <p className="text-red-400 text-xs">{uploadError}</p>}
-                            {/* Staged attachment pill */}
-                            {stagedAttachment && (
-                                <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-[#1a1d21] border border-[#2a2d31] text-xs text-slate-300 w-fit">
-                                    <span>📎</span>
-                                    <span className="max-w-[180px] truncate">{stagedAttachment.filename}</span>
-                                    <button type="button" onClick={() => setStagedAttachment(null)} className="text-slate-500 hover:text-slate-200 ml-0.5">✕</button>
+                            {/* Staged attachment pill + annotation pill */}
+                            {(stagedAttachment || annotations.filter((a) => !a.submitted).length > 0) && (
+                                <div className="flex flex-wrap gap-1.5">
+                                    {stagedAttachment && (
+                                        <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-[#1a1d21] border border-[#2a2d31] text-xs text-slate-300">
+                                            <span>📎</span>
+                                            <span className="max-w-[180px] truncate">{stagedAttachment.filename}</span>
+                                            <button type="button" onClick={() => setStagedAttachment(null)} className="text-slate-500 hover:text-slate-200 ml-0.5">✕</button>
+                                        </div>
+                                    )}
+                                    {annotations.filter((a) => !a.submitted).length > 0 && (
+                                        <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-amber-950/30 border border-amber-700/40 text-xs text-amber-300">
+                                            <span>📝</span>
+                                            <span>{annotations.filter((a) => !a.submitted).length} section note{annotations.filter((a) => !a.submitted).length !== 1 ? "s" : ""} ready</span>
+                                        </div>
+                                    )}
                                 </div>
                             )}
                             <div className="flex items-stretch gap-2">
@@ -2310,10 +2338,84 @@
                                             if (isEmpty && !showEmptyPlaceholders) return null;
                                             const raw = (prdSections[title] || "").trim();
                                             const sectionMarkdown = raw.length > 0 ? `## ${title}\n\n${raw}` : `## ${title}\n\n*Empty - start a conversation to populate this section.*`;
+                                            const sectionAnnotation = annotations.find((a) => a.section === title);
+                                            const isEditing = editingAnnotationSection === title;
+
                                             return (
-                                                <div key={title} id={`prd-sec-${slugifySectionName(title)}`} className="msg-md mb-5">
+                                                <div key={title} id={`prd-sec-${slugifySectionName(title)}`} className="mb-5 group/section">
+                                                    {/* Section header row: annotation controls */}
+                                                    <div className="flex items-center gap-2 mb-1">
+                                                        <span className="flex-1 header-text text-sm font-semibold text-slate-300">{title}</span>
+                                                        {sectionAnnotation ? (
+                                                            <div className="relative">
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => setOpenAnnotationBubble(openAnnotationBubble === title ? null : title)}
+                                                                    title={sectionAnnotation.submitted ? "Submitted: " + sectionAnnotation.comment : sectionAnnotation.comment}
+                                                                    className={`text-[11px] px-1.5 py-0.5 rounded border ${sectionAnnotation.submitted ? "border-slate-600 text-slate-500" : "border-amber-700/50 bg-amber-950/20 text-amber-300"}`}
+                                                                >
+                                                                    {sectionAnnotation.submitted ? "✓ Submitted" : "💬"}
+                                                                </button>
+                                                                {openAnnotationBubble === title && !sectionAnnotation.submitted && (
+                                                                    <div className="absolute right-0 top-7 z-10 w-64 rounded border border-[#2a2d31] bg-[#0d0f11] p-3 shadow-lg space-y-2">
+                                                                        <p className="text-xs text-slate-400 italic">{sectionAnnotation.comment}</p>
+                                                                        <div className="flex gap-2">
+                                                                            <button type="button" onClick={() => { setEditingAnnotationSection(title); setAnnotationDraft(sectionAnnotation.comment); setOpenAnnotationBubble(null); }} className="text-xs text-[#00b4d8] hover:underline">Edit</button>
+                                                                            <button type="button" onClick={() => {
+                                                                                fetch(`/api/ideas/${currentIdeaId}/annotations/${sectionAnnotation.id}`, { method: "DELETE" })
+                                                                                    .then(() => refreshAnnotations(currentIdeaId));
+                                                                                setOpenAnnotationBubble(null);
+                                                                            }} className="text-xs text-red-400 hover:underline">Remove</button>
+                                                                        </div>
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        ) : (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => { setEditingAnnotationSection(title); setAnnotationDraft(""); }}
+                                                                title="Add a note for the agent"
+                                                                className="opacity-0 group-hover/section:opacity-100 transition-opacity text-[11px] text-[#64748b] hover:text-slate-300 px-1"
+                                                            >+</button>
+                                                        )}
+                                                    </div>
+                                                    {/* Inline comment input */}
+                                                    {isEditing && (
+                                                        <div className="mb-2 rounded border border-[#2a2d31] bg-[#1a1d21] p-2 space-y-2">
+                                                            <textarea
+                                                                rows={2}
+                                                                value={annotationDraft}
+                                                                onChange={(e) => setAnnotationDraft(e.target.value)}
+                                                                placeholder={`Note for the agent about "${title}"…`}
+                                                                className="w-full bg-[#0d0f11] border border-[#2a2d31] rounded px-2 py-1.5 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-slate-500 resize-none"
+                                                            />
+                                                            <div className="flex gap-2">
+                                                                <button
+                                                                    type="button"
+                                                                    disabled={!annotationDraft.trim()}
+                                                                    onClick={() => {
+                                                                        if (sectionAnnotation) {
+                                                                            fetch(`/api/ideas/${currentIdeaId}/annotations/${sectionAnnotation.id}`, {
+                                                                                method: "PATCH", headers: { "Content-Type": "application/json" },
+                                                                                body: JSON.stringify({ comment: annotationDraft }),
+                                                                            }).then(() => refreshAnnotations(currentIdeaId));
+                                                                        } else {
+                                                                            fetch(`/api/ideas/${currentIdeaId}/annotations`, {
+                                                                                method: "POST", headers: { "Content-Type": "application/json" },
+                                                                                body: JSON.stringify({ section: title, comment: annotationDraft }),
+                                                                            }).then(() => refreshAnnotations(currentIdeaId));
+                                                                        }
+                                                                        setEditingAnnotationSection(null);
+                                                                        setAnnotationDraft("");
+                                                                    }}
+                                                                    className="header-text text-xs px-3 py-1 rounded bg-[#00b4d8]/20 border border-[#00b4d8]/40 text-[#00b4d8] disabled:opacity-40 disabled:cursor-not-allowed"
+                                                                >Save</button>
+                                                                <button type="button" onClick={() => { setEditingAnnotationSection(null); setAnnotationDraft(""); }} className="text-xs text-slate-500 hover:text-slate-300">Cancel</button>
+                                                            </div>
+                                                        </div>
+                                                    )}
                                                     <div
-                                                        className="text-sm"
+                                                        className="msg-md text-sm"
                                                         dangerouslySetInnerHTML={{
                                                             __html:
                                                                 typeof marked !== "undefined" && marked.parse
