@@ -96,17 +96,87 @@
             background-color: rgba(51, 65, 85, 0.5);
         }
 
-        /* Assistant message markdown (marked.js output) */
-        .msg-md h1, .msg-md h2, .msg-md h3 { color: #e2e8f0; font-weight: 600; margin: 0.5em 0 0.25em; }
-        .msg-md h1 { font-size: 1.125rem; }
+        /* Shared markdown rendering for conversation and document panes */
+        .msg-md h1, .msg-md h2, .msg-md h3, .msg-md h4 {
+            color: #00b4d8;
+            font-weight: 600;
+            margin: 0.65em 0 0.35em;
+        }
+        .msg-md h1 { font-size: 1.2rem; }
         .msg-md h2 { font-size: 1.05rem; }
-        .msg-md h3 { font-size: 1rem; }
-        .msg-md p { margin: 0.35em 0; }
+        .msg-md h3 { font-size: 0.98rem; }
+        .msg-md p, .msg-md li, .msg-md blockquote {
+            color: #e2e8f0;
+            margin: 0.35em 0;
+            line-height: 1.45;
+        }
+        .msg-md em { color: #64748b; }
         .msg-md ul, .msg-md ol { margin: 0.35em 0; padding-left: 1.25rem; }
-        .msg-md code { background: #0d0f12; color: #67e8f9; padding: 0.1em 0.35em; border-radius: 0.25rem; font-size: 0.85em; }
-        .msg-md pre { background: #0d0f12; padding: 0.75rem; border-radius: 0.35rem; overflow-x: auto; margin: 0.5em 0; }
+        .msg-md code {
+            background: #1a1d21;
+            color: #67e8f9;
+            padding: 0.1em 0.35em;
+            border-radius: 0.25rem;
+            font-size: 0.85em;
+        }
+        .msg-md pre {
+            background: #1a1d21;
+            padding: 0.75rem;
+            border-radius: 0.35rem;
+            overflow-x: auto;
+            margin: 0.5em 0;
+            border: 1px solid #2a2d31;
+        }
         .msg-md pre code { background: transparent; padding: 0; color: #e2e8f0; }
         .msg-md a { color: #00b4d8; }
+        .msg-md table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 0.6em 0;
+            border: 1px solid #2a2d31;
+            background: #141618;
+        }
+        .msg-md th, .msg-md td {
+            border: 1px solid #2a2d31;
+            padding: 0.4rem 0.5rem;
+            text-align: left;
+            color: #e2e8f0;
+            font-size: 0.85rem;
+        }
+        .msg-md th { background: #1a1d21; color: #cbd5e1; }
+
+        .side-divider {
+            width: 2px;
+            background: #1a1d21;
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            right: 0;
+        }
+        .side-divider-btn {
+            position: absolute;
+            top: 50%;
+            right: 0;
+            transform: translate(50%, -50%);
+            width: 24px;
+            height: 48px;
+            border: 1px solid #1a1d21;
+            border-radius: 6px;
+            background: #141618;
+            color: #94a3b8;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 16px;
+            line-height: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 20;
+        }
+        .side-divider-btn:hover {
+            color: #00b4d8;
+            border-color: #334155;
+            background: #1a1d21;
+        }
     </style>
 </head>
 <body>
@@ -1142,8 +1212,8 @@
             return (
                 <div
                     className={`${
-                        navCollapsed ? "w-12" : "w-44"
-                    } flex-shrink-0 bg-[#141618] border-r border-[#1a1d21] flex flex-col transition-[width] duration-200 ease-out`}
+                        navCollapsed ? "w-14" : "w-44"
+                    } relative flex-shrink-0 bg-[#141618] border-r border-[#1a1d21] flex flex-col transition-[width] duration-200 ease-out`}
                 >
                     <div className="px-2 py-4 border-b border-[#1a1d21] flex items-center justify-center gap-1 min-h-[52px]">
                         {!navCollapsed ? (
@@ -1179,16 +1249,16 @@
                             );
                         })}
                     </nav>
-                    <div className="border-t border-[#1a1d21] p-1">
-                        <button
-                            type="button"
-                            onClick={() => setNavCollapsed((c) => !c)}
-                            className="w-full py-2 text-xs text-slate-500 hover:text-[#00b4d8] hover:bg-[#1a1d21]/80 rounded header-text"
-                            title={navCollapsed ? "Expand menu" : "Collapse menu"}
-                        >
-                            {navCollapsed ? "»" : "«"}
-                        </button>
-                    </div>
+                    <div className="side-divider"></div>
+                    <button
+                        type="button"
+                        onClick={() => setNavCollapsed((c) => !c)}
+                        className="side-divider-btn"
+                        title={navCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+                        aria-label={navCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+                    >
+                        {navCollapsed ? "›" : "‹"}
+                    </button>
                 </div>
             );
         }
@@ -1260,16 +1330,19 @@
             const [readinessData, setReadinessData] = useState(null);
             const [hadReadyReadiness, setHadReadyReadiness] = useState(false);
             const [readinessTimedOut, setReadinessTimedOut] = useState(false);
-            const [readinessSectionsOpen, setReadinessSectionsOpen] = useState(false);
             const [showContinueWarning, setShowContinueWarning] = useState(false);
             const [continueNavPending, setContinueNavPending] = useState(false);
             const [chatsRailCollapsed, setChatsRailCollapsed] = useState(false);
             const [deleteConfirmId, setDeleteConfirmId] = useState(null);
             const [ideasLoading, setIdeasLoading] = useState(true);
+            const [showActionMenu, setShowActionMenu] = useState(false);
+            const [activeIdeaMenuId, setActiveIdeaMenuId] = useState(null);
+            const [showEmptyPlaceholders, setShowEmptyPlaceholders] = useState(false);
             const taRef = useRef(null);
             const fileRef = useRef(null);
             const messagesEndRef = useRef(null);
             const readinessPollRef = useRef(null);
+            const docPaneRef = useRef(null);
 
             const stopReadinessPoll = () => {
                 if (readinessPollRef.current) {
@@ -1430,12 +1503,14 @@
                         setReadinessTimedOut(false);
                         setClarityPass(null);
                         setChatsRailCollapsed(false);
+                        setActiveIdeaMenuId(null);
+                        setShowActionMenu(false);
                     });
             };
 
             const selectIdeaFromRail = (id) => {
                 setCurrentIdeaId(id);
-                setChatsRailCollapsed(true);
+                setActiveIdeaMenuId(null);
             };
 
             const executeDelete = (id) => {
@@ -1511,14 +1586,77 @@
 
             const listedIds = new Set((ideasList || []).map((it) => it.id));
             const showUnlistedSession = currentIdeaId && !listedIds.has(currentIdeaId);
+            const currentIdeaName =
+                (ideasList.find((it) => it.id === currentIdeaId) || {}).name ||
+                (currentIdeaId ? currentIdeaId.slice(0, 8) : "Conversation");
+
+            const slugifySectionName = (name) =>
+                String(name || "")
+                    .toLowerCase()
+                    .replace(/&/g, "and")
+                    .replace(/[^a-z0-9]+/g, "-")
+                    .replace(/^-+|-+$/g, "");
+
+            const parsePrdSections = (content) => {
+                const out = {};
+                PRD_SECTION_TITLES.forEach((t) => {
+                    out[t] = "";
+                });
+                if (!content || !content.trim()) return out;
+                const lines = String(content).split("\n");
+                let current = null;
+                for (const line of lines) {
+                    const heading = line.match(/^#{1,3}\s+(.+)\s*$/);
+                    if (heading) {
+                        const matched = PRD_SECTION_TITLES.find(
+                            (t) => t.toLowerCase() === heading[1].trim().toLowerCase()
+                        );
+                        if (matched) {
+                            current = matched;
+                            continue;
+                        }
+                    }
+                    if (current) {
+                        out[current] = out[current] ? `${out[current]}\n${line}` : line;
+                    }
+                }
+                return out;
+            };
+
+            const prdSections = parsePrdSections(prdContent || "");
+            const readinessSectionMap =
+                readinessStatus === "ready" && readinessData && readinessData.sections
+                    ? readinessData.sections
+                    : {};
+            const checklistRows = PRD_SECTION_TITLES.map((title) => {
+                const info = readinessSectionMap[title] || {};
+                const status =
+                    info.status === "complete" || info.status === "partial" ? info.status : "empty";
+                return {
+                    title,
+                    status,
+                    criticality: info.criticality || "",
+                    content: (prdSections[title] || "").trim(),
+                };
+            });
+
+            const iconForStatus = (st) => (st === "complete" ? "✓" : st === "partial" ? "~" : "○");
+            const iconColorForStatus = (st) =>
+                st === "complete" ? "text-emerald-400" : st === "partial" ? "text-amber-400" : "text-slate-600";
+
+            const scrollToSection = (title) => {
+                const sectionEl = document.getElementById(`prd-sec-${slugifySectionName(title)}`);
+                if (sectionEl) sectionEl.scrollIntoView({ behavior: "smooth", block: "start" });
+                else if (docPaneRef.current) docPaneRef.current.scrollTop = 0;
+            };
 
             return (
                 <div className="flex h-full min-w-0">
                     {/* Vertical chat list — collapses after picking a chat so conversation + PRD get space */}
                     <div
                         className={`${
-                            chatsRailCollapsed ? "w-11" : "w-56 sm:w-60"
-                        } flex-shrink-0 flex flex-col bg-[#0d0f11] border-r border-[#1a1d21] transition-[width] duration-200 ease-out`}
+                            chatsRailCollapsed ? "w-16" : "w-56 sm:w-60"
+                        } relative flex-shrink-0 flex flex-col bg-[#0d0f11] border-r border-[#1a1d21] transition-[width] duration-200 ease-out`}
                     >
                         {!chatsRailCollapsed ? (
                             <>
@@ -1563,7 +1701,7 @@
                                     {ideasList.map((it) => (
                                         <div
                                             key={it.id}
-                                            className={`flex rounded border border-transparent overflow-hidden ${
+                                            className={`group flex rounded border border-transparent ${
                                                 currentIdeaId === it.id ? "border-[#00b4d8]/40 bg-[#1a1d21]" : "hover:bg-[#1a1d21]/70"
                                             }`}
                                         >
@@ -1602,17 +1740,34 @@
                                                     </div>
                                                 </div>
                                             ) : (
-                                                <button
-                                                    type="button"
-                                                    className="px-1.5 text-slate-500 hover:text-red-400 hover:bg-[#141618] text-sm shrink-0"
-                                                    onClick={(e) => {
-                                                        e.stopPropagation();
-                                                        setDeleteConfirmId(it.id);
-                                                    }}
-                                                    aria-label="Delete idea"
-                                                >
-                                                    ×
-                                                </button>
+                                                <div className="relative shrink-0">
+                                                    <button
+                                                        type="button"
+                                                        className="px-2 text-slate-500 hover:text-slate-200 hover:bg-[#141618] text-sm opacity-40 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            setActiveIdeaMenuId((id) => (id === it.id ? null : it.id));
+                                                        }}
+                                                        aria-label="Idea actions"
+                                                    >
+                                                        ⋮
+                                                    </button>
+                                                    {activeIdeaMenuId === it.id && (
+                                                        <div className="absolute right-1 top-7 z-30 min-w-[120px] rounded border border-[#2a2d31] bg-[#141618]">
+                                                            <button
+                                                                type="button"
+                                                                className="w-full text-left px-3 py-2 text-xs text-red-400 hover:bg-[#1a1d21]"
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    setDeleteConfirmId(it.id);
+                                                                    setActiveIdeaMenuId(null);
+                                                                }}
+                                                            >
+                                                                Delete idea
+                                                            </button>
+                                                        </div>
+                                                    )}
+                                                </div>
                                             )}
                                         </div>
                                     ))}
@@ -1623,56 +1778,22 @@
                                     )}
                                 </div>
                             </>
-                        ) : (
-                            <div className="flex-1 flex flex-col items-center justify-center gap-1 min-h-[120px] px-1">
-                                <span className="header-text text-[10px] text-slate-600 [writing-mode:vertical-rl] rotate-180">chats</span>
-                            </div>
-                        )}
-                        <div className="flex-shrink-0 border-t border-[#1a1d21]">
-                            <button
-                                type="button"
-                                onClick={() => setChatsRailCollapsed((c) => !c)}
-                                className="w-full py-2.5 text-xs text-slate-500 hover:text-[#00b4d8] hover:bg-[#1a1d21]/60 header-text"
-                                title={chatsRailCollapsed ? "Expand chat list" : "Collapse chat list"}
-                            >
-                                {chatsRailCollapsed ? "▶" : "◀"}
-                            </button>
-                        </div>
+                        ) : null}
+                        <div className="side-divider"></div>
+                        <button
+                            type="button"
+                            onClick={() => setChatsRailCollapsed((c) => !c)}
+                            className="side-divider-btn"
+                            title={chatsRailCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+                            aria-label={chatsRailCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+                        >
+                            {chatsRailCollapsed ? "›" : "‹"}
+                        </button>
                     </div>
 
                     <div className="flex-1 flex flex-col min-w-0 bg-[#141618] overflow-hidden border-r border-[#1a1d21]">
                         <div className="flex-shrink-0 border-b border-[#1a1d21] px-3 py-2 flex items-center justify-between gap-2">
-                            <span className="header-text text-xs text-slate-500">Conversation</span>
-                            {deleteConfirmId === currentIdeaId && currentIdeaId ? (
-                                <div className="flex flex-col gap-1 items-end text-right max-w-[min(100%,20rem)]">
-                                    <p className="text-[11px] text-slate-400">Delete this idea? This cannot be undone.</p>
-                                    <div className="flex gap-2 flex-wrap justify-end">
-                                        <button
-                                            type="button"
-                                            onClick={() => executeDelete(currentIdeaId)}
-                                            className="header-text text-xs px-2 py-1 rounded border border-red-900/60 text-red-400 hover:bg-red-950/30"
-                                        >
-                                            Delete
-                                        </button>
-                                        <button
-                                            type="button"
-                                            onClick={() => setDeleteConfirmId(null)}
-                                            className="header-text text-xs px-2 py-1 rounded border border-[#1a1d21] text-slate-400 hover:text-slate-200"
-                                        >
-                                            Cancel
-                                        </button>
-                                    </div>
-                                </div>
-                            ) : (
-                                <button
-                                    type="button"
-                                    disabled={!currentIdeaId}
-                                    onClick={() => currentIdeaId && setDeleteConfirmId(currentIdeaId)}
-                                    className="header-text text-xs px-2 py-1 rounded border border-[#1a1d21] text-slate-400 hover:text-red-400 disabled:opacity-40 disabled:pointer-events-none"
-                                >
-                                    Delete session
-                                </button>
-                            )}
+                            <span className="header-text text-xs text-slate-500 truncate">{currentIdeaName}</span>
                         </div>
                         <div className="flex-1 overflow-y-auto p-4 space-y-2 min-h-0">
                             {!currentIdeaId ? (
@@ -1735,7 +1856,7 @@
                         <div className="flex-shrink-0 border-b border-[#1a1d21]">
                             <div className="px-4 py-2 space-y-2">
                                 {readinessStatus === "updating" && (
-                                    <p className="text-xs text-slate-500 animate-pulse">Updating readiness assessment…</p>
+                                    <p className="text-xs text-slate-500 animate-pulse">Updating readiness assessment...</p>
                                 )}
                                 {readinessTimedOut && (
                                     <p className="text-xs text-slate-500">Readiness assessment timed out. It will update after your next message.</p>
@@ -1769,35 +1890,7 @@
                                                 </span>
                                             )}
                                         </div>
-                                        {readinessData.recommendation && (
-                                            <p className="text-slate-500 italic">{readinessData.recommendation}</p>
-                                        )}
-                                        <button
-                                            type="button"
-                                            className="text-[10px] text-[#00b4d8] hover:underline"
-                                            onClick={() => setReadinessSectionsOpen((o) => !o)}
-                                        >
-                                            {readinessSectionsOpen ? "Hide section details" : "Show section details"}
-                                        </button>
-                                        {readinessSectionsOpen && readinessData.sections && (
-                                            <ul className="list-none space-y-1 pl-0 border-t border-[#1a1d21] pt-2">
-                                                {Object.entries(readinessData.sections).map(([secName, info]) => {
-                                                    const st = info && info.status;
-                                                    const icon = st === "complete" ? "✓" : st === "partial" ? "~" : "✗";
-                                                    return (
-                                                        <li key={secName} className="flex gap-2 text-slate-400" title={info && info.reason ? info.reason : ""}>
-                                                            <span className="shrink-0 w-4">{icon}</span>
-                                                            <span className="flex-1">
-                                                                <span className="text-slate-300">{secName}</span>
-                                                                {info && info.criticality && (
-                                                                    <span className="ml-1 text-[10px] text-slate-600">({info.criticality})</span>
-                                                                )}
-                                                            </span>
-                                                        </li>
-                                                    );
-                                                })}
-                                            </ul>
-                                        )}
+                                        {readinessData.recommendation && <p className="text-slate-500 italic">{readinessData.recommendation}</p>}
                                     </div>
                                 )}
                                 <div className="flex flex-wrap gap-2 items-center justify-between">
@@ -1805,40 +1898,56 @@
                                         {clarityPass === true && <span className="text-xs text-emerald-400 border border-emerald-700 rounded px-2 py-0.5">ready to convert</span>}
                                         {clarityPass === false && <span className="text-xs text-amber-400 border border-amber-700 rounded px-2 py-0.5">needs revision</span>}
                                     </div>
-                                    <div className="flex flex-wrap gap-2 justify-end">
-                                        {prdContent.trim().length > 0 && currentIdeaId && (
-                                            <a href={`/api/ideas/${currentIdeaId}/download`} className="header-text text-xs px-2 py-1 rounded bg-[#1a1d21] text-[#00b4d8] border border-[#1a1d21]">
-                                                Download PRD
-                                            </a>
-                                        )}
-                                        <button
-                                            type="button"
-                                            disabled={!prdContent.trim() || convertLoading}
-                                            title={
-                                                readinessData &&
-                                                readinessData.overall_status &&
-                                                readinessData.overall_status !== "ready" &&
-                                                typeof readinessData.score === "number"
-                                                    ? `Readiness score is ${readinessData.score}/10 — roadmap quality may be low.`
-                                                    : undefined
-                                            }
-                                            onClick={doConvert}
-                                            className="header-text text-xs px-2 py-1 rounded bg-[#1a1d21] text-slate-200 border border-[#1a1d21] disabled:opacity-40"
-                                        >
-                                            {convertLoading ? "Generating…" : "Generate Roadmap"}
-                                        </button>
-                                        {readinessData &&
-                                            readinessData.overall_status &&
-                                            readinessData.overall_status !== "ready" &&
-                                            typeof readinessData.score === "number" && (
-                                                <span className="text-[10px] text-slate-500 max-w-[14rem]">
-                                                    Readiness {readinessData.score}/10 — roadmap quality may be low.
-                                                </span>
-                                            )}
-                                        {roadmapContent && currentIdeaId && (
-                                            <a href={`/api/ideas/${currentIdeaId}/download-roadmap`} className="header-text text-xs px-2 py-1 rounded bg-[#1a1d21] text-slate-300 border border-[#1a1d21]">
-                                                Download Roadmap
-                                            </a>
+                                    <div className="flex flex-wrap gap-2 justify-end items-center">
+                                        {prdContent.trim().length > 0 && (
+                                            <>
+                                                <button
+                                                    type="button"
+                                                    disabled={convertLoading}
+                                                    title={
+                                                        readinessData &&
+                                                        readinessData.overall_status &&
+                                                        readinessData.overall_status !== "ready" &&
+                                                        typeof readinessData.score === "number"
+                                                            ? `Readiness score is ${readinessData.score}/10 — roadmap quality may be low.`
+                                                            : undefined
+                                                    }
+                                                    onClick={doConvert}
+                                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-[#0d0f11] border border-[#00b4d8]/60 font-semibold disabled:opacity-40"
+                                                >
+                                                    {convertLoading ? "Generating..." : "Generate Roadmap"}
+                                                </button>
+                                                <div className="relative">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setShowActionMenu((o) => !o)}
+                                                        className="header-text text-sm px-2 py-1 rounded bg-[#1a1d21] text-slate-300 border border-[#1a1d21] hover:border-slate-500"
+                                                        aria-label="Open action menu"
+                                                    >
+                                                        ⋮
+                                                    </button>
+                                                    {showActionMenu && (
+                                                        <div className="absolute right-0 top-8 z-30 min-w-[165px] rounded border border-[#2a2d31] bg-[#141618]">
+                                                            {currentIdeaId && (
+                                                                <a
+                                                                    href={`/api/ideas/${currentIdeaId}/download`}
+                                                                    className="block px-3 py-2 text-xs text-slate-200 hover:bg-[#1a1d21]"
+                                                                >
+                                                                    Download PRD
+                                                                </a>
+                                                            )}
+                                                            {roadmapContent && currentIdeaId && (
+                                                                <a
+                                                                    href={`/api/ideas/${currentIdeaId}/download-roadmap`}
+                                                                    className="block px-3 py-2 text-xs text-slate-200 hover:bg-[#1a1d21]"
+                                                                >
+                                                                    Download Roadmap
+                                                                </a>
+                                                            )}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </>
                                         )}
                                         {roadmapContent && (
                                             <button
@@ -1847,7 +1956,7 @@
                                                 onClick={continueSetup}
                                                 className="header-text text-xs px-2 py-1 rounded bg-[#00b4d8]/20 text-[#00b4d8] border border-[#00b4d8]/40 disabled:opacity-40"
                                             >
-                                                {continueNavPending ? "Checking…" : "Continue to Setup →"}
+                                                {continueNavPending ? "Checking..." : "Continue to Setup →"}
                                             </button>
                                         )}
                                     </div>
@@ -1861,9 +1970,77 @@
                             </div>
                         )}
                         {convertError && <div className="px-4 py-2 text-xs text-red-400 border-b border-[#1a1d21]">{convertError}</div>}
-                        <div className={`flex-1 overflow-y-auto p-4 bg-[#141618] ${isLoading ? "status-pulse opacity-60" : ""}`}>
+                        <div ref={docPaneRef} className={`flex-1 overflow-y-auto p-4 bg-[#141618] ${isLoading ? "status-pulse opacity-60" : ""}`}>
+                            <div className="mb-4 rounded border border-[#1a1d21] bg-[#0d0f11] p-3">
+                                <h3 className="header-text text-xs text-slate-400 mb-2">PRD completeness checklist</h3>
+                                <div className="space-y-1">
+                                    {checklistRows.map((row) => (
+                                        <button
+                                            key={row.title}
+                                            type="button"
+                                            onClick={() => scrollToSection(row.title)}
+                                            className="w-full flex items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-[#1a1d21]"
+                                        >
+                                            <span className={`w-4 shrink-0 text-xs ${iconColorForStatus(row.status)}`}>{iconForStatus(row.status)}</span>
+                                            <span className="flex-1 text-xs text-slate-300">{row.title}</span>
+                                            {row.criticality && (
+                                                <span
+                                                    className={`text-[10px] px-1.5 py-0.5 rounded border ${
+                                                        row.criticality === "critical"
+                                                            ? "border-red-900/60 bg-red-950/30 text-red-300"
+                                                            : "border-slate-700 text-slate-400"
+                                                    }`}
+                                                >
+                                                    {row.criticality}
+                                                </span>
+                                            )}
+                                        </button>
+                                    ))}
+                                </div>
+                                <button
+                                    type="button"
+                                    className="mt-2 text-[11px] text-[#00b4d8] hover:underline"
+                                    onClick={() => setShowEmptyPlaceholders((s) => !s)}
+                                >
+                                    {showEmptyPlaceholders ? "Hide empty sections" : "Show empty section placeholders"}
+                                </button>
+                            </div>
+
                             {prdContent.trim() ? (
-                                <div className="text-sm text-slate-300 whitespace-pre-wrap mb-6 border-b border-[#1a1d21] pb-4">{prdContent}</div>
+                                <div className="mb-6 border-b border-[#1a1d21] pb-4">
+                                    {PRD_SECTION_TITLES.some((t) => (prdSections[t] || "").trim().length > 0) ? (
+                                        PRD_SECTION_TITLES.map((title) => {
+                                            const row = checklistRows.find((r) => r.title === title);
+                                            const isEmpty = !row || row.status === "empty";
+                                            if (isEmpty && !showEmptyPlaceholders) return null;
+                                            const raw = (prdSections[title] || "").trim();
+                                            const sectionMarkdown = raw.length > 0 ? `## ${title}\n\n${raw}` : `## ${title}\n\n*Empty - start a conversation to populate this section.*`;
+                                            return (
+                                                <div key={title} id={`prd-sec-${slugifySectionName(title)}`} className="msg-md mb-5">
+                                                    <div
+                                                        className="text-sm"
+                                                        dangerouslySetInnerHTML={{
+                                                            __html:
+                                                                typeof marked !== "undefined" && marked.parse
+                                                                    ? marked.parse(sectionMarkdown, { breaks: true })
+                                                                    : String(sectionMarkdown).replace(/&/g, "&amp;").replace(/</g, "&lt;"),
+                                                        }}
+                                                    />
+                                                </div>
+                                            );
+                                        })
+                                    ) : (
+                                        <div
+                                            className="msg-md text-sm"
+                                            dangerouslySetInnerHTML={{
+                                                __html:
+                                                    typeof marked !== "undefined" && marked.parse
+                                                        ? marked.parse(prdContent || "", { breaks: true })
+                                                        : String(prdContent || "").replace(/&/g, "&amp;").replace(/</g, "&lt;"),
+                                            }}
+                                        />
+                                    )}
+                                </div>
                             ) : null}
                             {roadmapContent ? (
                                 <div className="border-b border-[#1a1d21] pb-4 mb-4">
@@ -1894,12 +2071,6 @@
                                     </div>
                                 </div>
                             )}
-                            {PRD_SECTION_TITLES.map((title) => (
-                                <div key={title} className="mb-4">
-                                    <h2 className="text-slate-400 font-semibold text-lg mb-1">{title}</h2>
-                                    <p className="text-slate-600 italic text-sm">*Empty — start a conversation to populate this section.*</p>
-                                </div>
-                            ))}
                         </div>
                     </div>
                 </div>

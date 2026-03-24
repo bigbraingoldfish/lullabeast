@@ -93,6 +93,8 @@ INFRA-B1 and INFRA-E1 are complete — confirmed infrastructure.
 
 **Follow-up (2026-03-22):** **Preflight** “Invalid path” on good paths was a **frontend bug**: `fetch` handlers ignored HTTP status and treated FastAPI `{detail: ...}` bodies as `{valid: false}` → generic error. Fixed with `if (!r.ok)` + `detail` parsing; path is trimmed on confirm. **Ideas UX (later same day):** **collapsible main `Sidebar`**; **vertical Chats rail** (list of ideas, no dropdown) **collapses** when opening a chat; conversation + PRD share remaining width.
 
+**Follow-up (2026-03-22, Pass 4 redo):** Ideas screen UX restructured: document pane renders PRD as fully formatted markdown, actions use primary/secondary/overflow hierarchy, delete moved from conversation header into rail-row kebab menu, PRD completeness checklist added with click-to-scroll + empty-section toggle, and both sidebars now use consistent centered divider chevrons. Collapsed rail widths were widened to avoid overlapping controls.
+
 ---
 
 ## 3) Phase Catalog

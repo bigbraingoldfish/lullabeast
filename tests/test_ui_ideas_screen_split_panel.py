@@ -100,16 +100,15 @@ class TestIdeasScreenSplitPanel:
             assert header in content, f"Missing PRD header string: {header}"
         assert "PRD_SECTION_TITLES.map" in func_body
 
-    def test_right_pane_has_all_placeholder_texts(self):
-        """Right pane has all 12 placeholder lines with italic dim text."""
+    def test_right_pane_has_toggle_for_empty_placeholders(self):
+        """Right pane offers toggle for showing/hiding empty sections."""
         content = load_index_html()
         func_body = extract_function_body(content, "IdeasScreen")
         assert func_body is not None
 
-        placeholder = "text-slate-600 italic text-sm"
-        # Single className in source; repeated at runtime via PRD_SECTION_TITLES.map
-        assert func_body.count(placeholder) >= 1
-        assert "PRD_SECTION_TITLES.map" in func_body
+        assert "Show empty section placeholders" in func_body
+        assert "Hide empty sections" in func_body
+        assert "PRD completeness checklist" in func_body
 
     def test_both_panes_have_flex_flex_col_bg(self):
         """Conversation and PRD columns use flex-col panel styling."""
