@@ -47,5 +47,5 @@ def test_document_pane_has_explicit_working_banner():
     content = load_index_html()
     func_body = extract_function_body(content, "IdeasScreen")
     assert func_body is not None
-    assert "Processing your latest message..." in func_body
-    assert "Updating PRD draft..." in func_body
+    # PRD pane only (no duplicate header strip); chat uses pending bubble
+    assert "Updating PRD draft" in func_body

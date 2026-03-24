@@ -72,6 +72,15 @@
             animation: amber-pulse 2s ease-in-out infinite;
         }
 
+        /* Pending assistant message — subtle opacity pulse, no amber flash */
+        @keyframes chat-pending-soft {
+            0%, 100% { opacity: 0.72; }
+            50% { opacity: 1; }
+        }
+        .chat-pending-soft {
+            animation: chat-pending-soft 2s ease-in-out infinite;
+        }
+
         /* Fade-in animation for new event rows */
         @keyframes fade-in-row {
             0% {
@@ -1310,14 +1319,86 @@
             "Risks & Mitigations", "Open Questions", "Glossary & Domain Terms", "Revision History",
         ];
 
-        function SessionStartModal({ onStartConversation, onUpload, onClose }) {
+        /** Client fallback if API parsed.questions is empty but raw response still has a QUESTIONS block */
+        function parseAgentResponseClient(content) {
+            if (!content || typeof content !== "string") {
+                return { prose: "", drafting: null, assumptions: [], questions: [] };
+            }
+            const lines = content.split(/\r?\n/);
+            let drafting = null;
+            const assumptions = [];
+            const questions = [];
+            const proseLines = [];
+            let startIdx = 0;
+            if (lines.length && lines[0].startsWith("DRAFTING:")) {
+                drafting = lines[0].slice("DRAFTING:".length).trim();
+                startIdx = 1;
+            }
+            let inQuestions = false;
+            let current = null;
+            const flushQ = () => {
+                if (current) {
+                    questions.push(current);
+                    current = null;
+                }
+            };
+            let i = startIdx;
+            while (i < lines.length) {
+                const line = lines[i];
+                const stripped = line.trim();
+                const qu = stripped.toUpperCase();
+                if (qu === "QUESTIONS" || qu.startsWith("QUESTIONS:")) {
+                    inQuestions = true;
+                    flushQ();
+                    i++;
+                    continue;
+                }
+                if (inQuestions) {
+                    if (stripped.startsWith("[SINGLE]") || stripped.startsWith("[MULTI]")) {
+                        flushQ();
+                        const isSingle = stripped.startsWith("[SINGLE]");
+                        const rest = stripped.slice(isSingle ? "[SINGLE]".length : "[MULTI]".length).trim();
+                        current = { type: isSingle ? "single" : "multi", text: rest, options: [] };
+                    } else if (/^\d+[\.\)]\s+/.test(stripped)) {
+                        flushQ();
+                        const qtext = stripped.replace(/^\d+[\.\)]\s+/, "").trim();
+                        current = { type: "single", text: qtext, options: [] };
+                    } else if ((stripped.startsWith("- ") || stripped.startsWith("* ")) && current) {
+                        current.options.push(stripped.slice(2).trim());
+                    } else if (!stripped) {
+                        /* keep */
+                    } else if (!current && stripped && !stripped.startsWith("[")) {
+                        current = { type: "single", text: stripped, options: [] };
+                    } else {
+                        flushQ();
+                        inQuestions = false;
+                        if (line.startsWith("ASSUMPTION:")) assumptions.push(line.slice("ASSUMPTION:".length).trim());
+                        else proseLines.push(line);
+                    }
+                    i++;
+                    continue;
+                }
+                if (line.startsWith("ASSUMPTION:")) {
+                    assumptions.push(line.slice("ASSUMPTION:".length).trim());
+                    i++;
+                    continue;
+                }
+                proseLines.push(line);
+                i++;
+            }
+            flushQ();
+            return { prose: proseLines.join("\n").trim(), drafting, assumptions, questions };
+        }
+
+        function SessionStartModal({ onStartConversation, onUpload, onClose, busy }) {
             return (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
                     <div className="relative w-full max-w-md mx-4 rounded-xl border border-[#2a2d31] bg-[#141618] p-8">
                         <button
                             type="button"
                             onClick={onClose}
-                            className="absolute top-4 right-4 text-slate-500 hover:text-slate-300 text-lg leading-none"
+                            disabled={!!busy}
+                            className="absolute top-4 right-4 text-slate-500 hover:text-slate-300 text-lg leading-none disabled:opacity-40"
                             aria-label="Close"
                         >✕</button>
                         <h2 className="header-text text-base text-slate-200 mb-1">Start a new idea</h2>
@@ -1325,19 +1406,21 @@
                         <div className="space-y-3">
                             <button
                                 type="button"
+                                disabled={!!busy}
                                 onClick={onStartConversation}
-                                className="w-full flex items-center gap-3 rounded-lg border border-[#00b4d8]/40 bg-[#0d1f26] px-4 py-3.5 text-left hover:bg-[#0d2c36] transition-colors group"
+                                className="w-full flex items-center gap-3 rounded-lg border border-[#00b4d8]/40 bg-[#0d1f26] px-4 py-3.5 text-left hover:bg-[#0d2c36] transition-colors group disabled:opacity-50 disabled:pointer-events-none"
                             >
                                 <span className="w-7 h-7 flex items-center justify-center rounded bg-[#00b4d8]/20 text-[#00b4d8] text-sm">▶</span>
                                 <div>
                                     <p className="header-text text-sm text-[#00b4d8] font-semibold group-hover:text-[#33c5e8]">Start a conversation</p>
-                                    <p className="text-xs text-slate-500 mt-0.5">The agent opens with a focused question to guide you through the PRD.</p>
+                                    <p className="text-xs text-slate-500 mt-0.5">You send the first message; the agent builds the PRD from your description.</p>
                                 </div>
                             </button>
                             <button
                                 type="button"
+                                disabled={!!busy}
                                 onClick={onUpload}
-                                className="w-full flex items-center gap-3 rounded-lg border border-[#2a2d31] bg-[#0d0f11] px-4 py-3.5 text-left hover:bg-[#1a1d21] transition-colors group"
+                                className="w-full flex items-center gap-3 rounded-lg border border-[#2a2d31] bg-[#0d0f11] px-4 py-3.5 text-left hover:bg-[#1a1d21] transition-colors group disabled:opacity-50 disabled:pointer-events-none"
                             >
                                 <span className="w-7 h-7 flex items-center justify-center rounded bg-[#1a1d21] text-slate-400 text-sm">↑</span>
                                 <div>
@@ -1486,7 +1569,7 @@
                     </div>
                     {/* Expanded checklist */}
                     {expanded && (
-                        <div className="mt-3 space-y-1 border-t border-[#1a1d21] pt-3">
+                        <div className="mt-3 space-y-1 border-t border-[#1a1d21] pt-3 max-h-52 overflow-y-auto">
                             {checklistRows.map((row) => (
                                 <button
                                     key={row.title}
@@ -1554,6 +1637,8 @@
             const [editingAnnotationSection, setEditingAnnotationSection] = useState(null);
             const [annotationDraft, setAnnotationDraft] = useState("");
             const [openAnnotationBubble, setOpenAnnotationBubble] = useState(null);
+            const [userFirstTurnPending, setUserFirstTurnPending] = useState(false);
+            const [sessionModalBusy, setSessionModalBusy] = useState(false);
             const taRef = useRef(null);
             const fileRef = useRef(null);
             const attachFileRef = useRef(null);
@@ -1642,10 +1727,17 @@
                 setEditingAnnotationSection(null);
                 setAnnotationDraft("");
                 setOpenAnnotationBubble(null);
+                setUserFirstTurnPending(false);
                 fetch(`/api/ideas/${currentIdeaId}/session`)
                     .then((r) => r.json())
                     .then((d) => {
-                        setMessages(d.messages || []);
+                        const rawMsgs = d.messages || [];
+                        setMessages(
+                            rawMsgs.map((m, idx) => ({
+                                ...m,
+                                id: m.id || `${m.role}-${idx}-${(m.ts || "").slice(0, 19) || idx}`,
+                            }))
+                        );
                         setPrdContent(d.prd_content || "");
                         setRoadmapContent(d.roadmap_content || "");
                     })
@@ -1686,6 +1778,7 @@
             const submitMessage = (overrideText) => {
                 const t = (overrideText !== undefined ? overrideText : inputText).trim();
                 if (!t || isLoading || !currentIdeaId) return;
+                setUserFirstTurnPending(false);
                 const turn = messages.filter((m) => m.role === "user").length + 1;
                 const userMsgId = `u-${Date.now()}`;
                 const assistantPendingId = `a-${Date.now()}`;
@@ -1712,7 +1805,15 @@
                         return r.json();
                     })
                     .then((data) => {
-                        const parsed = data.parsed || null;
+                        let parsed = data.parsed || null;
+                        if (data.response) {
+                            const clientParsed = parseAgentResponseClient(data.response);
+                            if (!parsed) {
+                                parsed = clientParsed;
+                            } else if ((!parsed.questions || parsed.questions.length === 0) && clientParsed.questions && clientParsed.questions.length > 0) {
+                                parsed = { ...parsed, questions: clientParsed.questions };
+                            }
+                        }
                         const displayContent = (parsed && parsed.prose) ? parsed.prose : (data.response || "No agent output returned for this turn.");
                         if (parsed && parsed.drafting) triggerDraftingIndicator(parsed.drafting);
                         setMessages((prev) =>
@@ -1781,40 +1882,25 @@
             };
 
             const handleSessionStartConversation = () => {
+                if (sessionModalBusy) return;
                 const ideaId = sessionModalIdeaId;
+                if (!ideaId) return;
+                setSessionModalBusy(true);
                 setShowSessionModal(false);
                 setSessionModalIdeaId(null);
-                if (!ideaId) return;
-                const assistantPendingId = `a-${Date.now()}`;
-                const nowIso = new Date().toISOString();
-                setMessages([{ id: assistantPendingId, role: "assistant", content: "Starting session…", ts: nowIso, pending: true }]);
-                setIsLoading(true);
-                fetch(`/api/ideas/${ideaId}/start`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
-                    .then((r) => { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
-                    .then((data) => {
-                        const parsed = data.parsed || null;
-                        if (parsed && parsed.drafting) triggerDraftingIndicator(parsed.drafting);
-                        setMessages([{
-                            id: assistantPendingId, role: "assistant",
-                            content: (parsed && parsed.prose) ? parsed.prose : (data.response || ""),
-                            ts: new Date().toISOString(), pending: false,
-                            parsed,
-                        }]);
-                        setPrdContent(data.prd_content || "");
-                        setIsLoading(false);
-                        setReadinessStatus("updating");
-                        startReadinessPoll(ideaId);
-                        refreshIdeas();
-                    })
-                    .catch(() => {
-                        setMessages([{ id: assistantPendingId, role: "assistant", content: "Session start failed. Type a message to begin.", ts: new Date().toISOString(), error: true }]);
-                        setIsLoading(false);
-                    });
+                setUserFirstTurnPending(true);
+                setMessages([]);
+                setIsLoading(false);
+                setSessionModalBusy(false);
             };
 
             const handleSessionUpload = () => {
+                if (sessionModalBusy) return;
+                setSessionModalBusy(true);
+                setUserFirstTurnPending(false);
                 setShowSessionModal(false);
                 setSessionModalIdeaId(null);
+                setSessionModalBusy(false);
                 if (fileRef.current) fileRef.current.click();
             };
 
@@ -1926,6 +2012,17 @@
                             continue;
                         }
                     }
+                    const numHeading = line.match(/^\d+\.\s*(.+)\s*$/);
+                    if (numHeading) {
+                        const rawTitle = numHeading[1].trim();
+                        const matched = PRD_SECTION_TITLES.find(
+                            (t) => t.toLowerCase() === rawTitle.toLowerCase()
+                        );
+                        if (matched) {
+                            current = matched;
+                            continue;
+                        }
+                    }
                     if (current) {
                         out[current] = out[current] ? `${out[current]}\n${line}` : line;
                     }
@@ -1955,18 +2052,24 @@
                 st === "complete" ? "text-emerald-400" : st === "partial" ? "text-amber-400" : "text-slate-600";
 
             const scrollToSection = (title) => {
-                const sectionEl = document.getElementById(`prd-sec-${slugifySectionName(title)}`);
-                if (sectionEl) sectionEl.scrollIntoView({ behavior: "smooth", block: "start" });
-                else if (docPaneRef.current) docPaneRef.current.scrollTop = 0;
+                const id = `prd-sec-${slugifySectionName(title)}`;
+                const root = docPaneRef.current;
+                const sectionEl = root ? root.querySelector(`[id="${id}"]`) : document.getElementById(id);
+                if (sectionEl) {
+                    sectionEl.scrollIntoView({ behavior: "smooth", block: "start" });
+                } else if (root) {
+                    root.scrollTop = 0;
+                }
             };
 
             return (
                 <div className="flex h-full min-w-0">
                     {showSessionModal && (
                         <SessionStartModal
+                            busy={sessionModalBusy}
                             onStartConversation={handleSessionStartConversation}
                             onUpload={handleSessionUpload}
-                            onClose={() => { setShowSessionModal(false); setSessionModalIdeaId(null); }}
+                            onClose={() => { if (!sessionModalBusy) { setShowSessionModal(false); setSessionModalIdeaId(null); } }}
                         />
                     )}
                     {/* Vertical chat list — collapses after picking a chat so conversation + PRD get space */}
@@ -2115,6 +2218,13 @@
                         <div className="flex-1 overflow-y-auto p-4 space-y-2 min-h-0">
                             {!currentIdeaId ? (
                                 <p className="text-slate-600 text-xs italic">Select an idea from the list or click + New to start.</p>
+                            ) : userFirstTurnPending && messages.length === 0 ? (
+                                <div className="flex flex-col items-center justify-center text-center px-6 py-10 min-h-[180px]">
+                                    <p className="text-slate-200 text-sm header-text mb-2">Tell us about your idea</p>
+                                    <p className="text-slate-500 text-xs max-w-sm leading-relaxed">
+                                        Let's build documentation together. Describe what you're building in the box below and send your first message — the agent will pick up from there.
+                                    </p>
+                                </div>
                             ) : messages.length === 0 ? (
                                 <p className="text-slate-600 text-xs italic">No messages yet — type below to start.</p>
                             ) : null}
@@ -2140,7 +2250,7 @@
                                                         msg.error
                                                             ? "bg-red-950/30 border border-red-900/60 text-red-200"
                                                             : msg.pending
-                                                              ? "bg-[#1a1d21] text-slate-300 status-pulse"
+                                                              ? "bg-[#1a1d21] text-slate-400 border border-slate-600/50 chat-pending-soft"
                                                               : "bg-[#1a1d21] text-slate-200"
                                                     }`}
                                                     dangerouslySetInnerHTML={{
@@ -2219,7 +2329,7 @@
                                     value={inputText}
                                     onChange={(e) => { setInputText(e.target.value); adjustTa(); }}
                                     onKeyDown={onKeyDown}
-                                    placeholder="Type a message…"
+                                    placeholder={userFirstTurnPending && messages.filter((m) => m.role === "user").length === 0 ? "Describe what you're building…" : "Type a message…"}
                                     className="flex-1 bg-[#1a1d21] border border-[#2a2d31] rounded px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-slate-500 resize-none max-h-[110px] overflow-y-auto"
                                 />
                                 <button
@@ -2238,11 +2348,6 @@
                             <div className="px-4 py-2 space-y-2">
                                 {readinessStatus === "updating" && (
                                     <p className="text-xs text-slate-500 animate-pulse">Updating readiness assessment...</p>
-                                )}
-                                {isLoading && (
-                                    <div className="rounded border border-[#00b4d8]/40 bg-[#00b4d8]/10 px-2.5 py-1.5">
-                                        <p className="text-xs text-[#7dd3fc] header-text animate-pulse">Processing your latest message...</p>
-                                    </div>
                                 )}
                                 {readinessTimedOut && (
                                     <p className="text-xs text-slate-500">Readiness assessment timed out. It will update after your next message.</p>
@@ -2361,13 +2466,20 @@
                                 <p className="text-xs text-[#00b4d8] header-text animate-pulse">✏ Drafting {draftingIndicator}…</p>
                             </div>
                         )}
-                        <div ref={docPaneRef} className={`flex-1 overflow-y-auto p-4 bg-[#141618] ${isLoading ? "status-pulse opacity-60" : ""}`}>
-                            {isLoading && (
-                                <div className="mb-4 rounded border border-[#2a2d31] bg-[#0d0f11] px-3 py-2">
-                                    <p className="text-xs text-slate-300 header-text animate-pulse">Updating PRD draft...</p>
-                                    <p className="text-[11px] text-slate-500 mt-1">Buffering the latest assistant output and rebuilding section content.</p>
+                        <div ref={docPaneRef} className={`flex-1 overflow-y-auto p-4 bg-[#141618] min-h-0 ${isLoading && !prdContent.trim() ? "flex flex-col" : ""}`}>
+                            {isLoading && !prdContent.trim() ? (
+                                <div className="flex-1 flex items-center justify-center rounded border border-[#2a2d31] bg-[#16191c] min-h-[240px] mb-4">
+                                    <p className="text-xs text-slate-500 header-text">Updating PRD draft…</p>
                                 </div>
-                            )}
+                            ) : null}
+                            {isLoading && prdContent.trim() ? (
+                                <div className="mb-3 rounded border border-[#2a2d31] bg-[#16191c] px-3 py-2">
+                                    <p className="text-xs text-slate-500">Updating PRD draft…</p>
+                                </div>
+                            ) : null}
+                            {currentIdeaId && prdContent.trim() ? (
+                                <p className="text-[11px] text-slate-600 mb-2">Add a section note (Note) for the agent — it is included on your next message.</p>
+                            ) : null}
                             {/* PRD completeness checklist — Show empty section placeholders / Hide empty sections */}
                             <CompactProgress
                                 checklistRows={checklistRows}
@@ -2424,9 +2536,9 @@
                                                             <button
                                                                 type="button"
                                                                 onClick={() => { setEditingAnnotationSection(title); setAnnotationDraft(""); }}
-                                                                title="Add a note for the agent"
-                                                                className="opacity-0 group-hover/section:opacity-100 transition-opacity text-[11px] text-[#64748b] hover:text-slate-300 px-1"
-                                                            >+</button>
+                                                                title="Add a note for the agent (sent with your next message)"
+                                                                className="text-[11px] text-[#64748b] hover:text-slate-300 px-1.5 py-0.5 rounded border border-[#2a2d31] hover:border-slate-600 shrink-0 header-text"
+                                                            >Note</button>
                                                         )}
                                                     </div>
                                                     {/* Inline comment input */}

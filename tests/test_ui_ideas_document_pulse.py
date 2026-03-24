@@ -1,4 +1,4 @@
-"""Tests for IdeasScreen document pane status-pulse animation."""
+"""Tests for IdeasScreen loading UX (no amber pulse on document pane)."""
 import pytest
 import re
 
@@ -49,27 +49,26 @@ def load_index_html():
 
 
 class TestIdeasDocumentPulse:
-    """Tests for IdeasScreen document pane status-pulse animation."""
+    """Document pane uses muted loading, not full-pane amber pulse."""
 
     def test_status_pulse_css_exists(self):
-        """status-pulse CSS class is defined in index.html."""
+        """status-pulse CSS may remain for pipeline UI; document pane must not use it."""
         content = load_index_html()
         assert ".status-pulse" in content, \
             "status-pulse CSS class should be defined in index.html"
 
-    def test_document_pane_wrapper_gets_status_pulse_class_when_loading(self):
-        """Document pane wrapper div gets status-pulse class when isLoading=true."""
+    def test_document_pane_does_not_apply_status_pulse_when_loading(self):
+        """Document scroll area must not use status-pulse (avoids yellow full-pane flash)."""
         content = load_index_html()
         func_body = extract_function_body(content, "IdeasScreen")
         assert func_body is not None, "IdeasScreen function body not extracted"
-
-        # The right pane (document pane) should conditionally get status-pulse
-        # Look for ternary or && expression that applies status-pulse based on isLoading
-        # Pattern: className={..., isLoading ? 'status-pulse' : ''}
-        # or: className={`...${isLoading ? ' status-pulse' : ''}`}
-        # or: isLoading && 'status-pulse'
-        assert re.search(r'status-pulse', func_body), \
-            "IdeasScreen should reference 'status-pulse' class for document pane"
+        assert "ref={docPaneRef}" in func_body
+        for line in func_body.splitlines():
+            if "ref={docPaneRef}" in line:
+                assert "status-pulse" not in line, "Document pane must not apply status-pulse"
+                break
+        else:
+            pytest.fail("docPaneRef line not found")
 
     def test_status_pulse_removed_immediately_on_response(self):
         """status-pulse is removed immediately when prd_draft is read (response received)."""
@@ -83,15 +82,10 @@ class TestIdeasDocumentPulse:
         assert re.search(r'set\w*Loading\s*\(\s*false\s*\)', func_body), \
             "IdeasScreen should call setIsLoading(false) when response is received"
 
-    def test_document_pane_wrapper_is_target_of_pulse_animation(self):
-        """The document pane (right panel) wrapper div is the element receiving status-pulse."""
+    def test_muted_prd_loading_copy_present(self):
+        """PRD area shows neutral Updating PRD draft copy while loading."""
         content = load_index_html()
         func_body = extract_function_body(content, "IdeasScreen")
         assert func_body is not None
-
-        # Find the right pane div — it should have className conditional expression
-        # involving status-pulse
-        # Pattern: flex-1 flex flex-col bg-[#141618] + conditional class
-        right_pane_pattern = r'className=\{[^}]*status-pulse[^}]*\}'
-        assert re.search(right_pane_pattern, func_body, re.DOTALL), \
-            "Right pane div should have conditional className including status-pulse"
+        assert "Updating PRD draft" in func_body
+        assert "chat-pending-soft" in func_body

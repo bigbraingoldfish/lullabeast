@@ -143,3 +143,39 @@ def test_no_options_question():
     assert "Here is some prose." in result["prose"]
     assert len(result["questions"]) == 1
     assert result["questions"][0]["options"] == ["AWS", "GCP"]
+
+
+FIXTURE_QUESTIONS_NO_COLON = """\
+Some intro.
+
+QUESTIONS
+[SINGLE] Pick one
+- A
+- B
+"""
+
+FIXTURE_QUESTIONS_NUMBERED = """\
+QUESTIONS:
+1. What is your primary use case?
+- Internal tooling
+- Customer-facing product
+2. Which region?
+- US
+- EU
+"""
+
+
+def test_questions_heading_without_colon():
+    result = _parse_agent_response(FIXTURE_QUESTIONS_NO_COLON)
+    assert len(result["questions"]) == 1
+    assert result["questions"][0]["type"] == "single"
+    assert result["questions"][0]["options"] == ["A", "B"]
+
+
+def test_questions_numbered_question_lines():
+    result = _parse_agent_response(FIXTURE_QUESTIONS_NUMBERED)
+    assert len(result["questions"]) == 2
+    assert "primary use case" in result["questions"][0]["text"].lower()
+    assert result["questions"][0]["options"] == ["Internal tooling", "Customer-facing product"]
+    assert "region" in result["questions"][1]["text"].lower()
+    assert result["questions"][1]["options"] == ["US", "EU"]
