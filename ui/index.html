@@ -1310,6 +1310,47 @@
             "Risks & Mitigations", "Open Questions", "Glossary & Domain Terms", "Revision History",
         ];
 
+        function SessionStartModal({ onStartConversation, onUpload, onClose }) {
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+                    <div className="relative w-full max-w-md mx-4 rounded-xl border border-[#2a2d31] bg-[#141618] p-8 shadow-2xl">
+                        <button
+                            type="button"
+                            onClick={onClose}
+                            className="absolute top-4 right-4 text-slate-500 hover:text-slate-300 text-lg leading-none"
+                            aria-label="Close"
+                        >✕</button>
+                        <h2 className="header-text text-base text-slate-200 mb-1">Start a new idea</h2>
+                        <p className="text-xs text-slate-500 mb-6">How would you like to begin this PRD session?</p>
+                        <div className="space-y-3">
+                            <button
+                                type="button"
+                                onClick={onStartConversation}
+                                className="w-full flex items-center gap-3 rounded-lg border border-[#00b4d8]/40 bg-[#0d1f26] px-4 py-3.5 text-left hover:bg-[#0d2c36] transition-colors group"
+                            >
+                                <span className="text-xl">💬</span>
+                                <div>
+                                    <p className="header-text text-sm text-[#00b4d8] font-semibold group-hover:text-[#33c5e8]">Start a conversation</p>
+                                    <p className="text-xs text-slate-500 mt-0.5">The agent opens with a focused question to guide you through the PRD.</p>
+                                </div>
+                            </button>
+                            <button
+                                type="button"
+                                onClick={onUpload}
+                                className="w-full flex items-center gap-3 rounded-lg border border-[#2a2d31] bg-[#0d0f11] px-4 py-3.5 text-left hover:bg-[#1a1d21] transition-colors group"
+                            >
+                                <span className="text-xl">📄</span>
+                                <div>
+                                    <p className="header-text text-sm text-slate-300 group-hover:text-slate-100">Upload existing documentation</p>
+                                    <p className="text-xs text-slate-500 mt-0.5">Provide a .md file — the agent synthesizes it into the PRD structure.</p>
+                                </div>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
         function IdeasScreen() {
             const ctx = useContext(AppCtx);
             const [messages, setMessages] = useState([]);
@@ -1338,8 +1379,12 @@
             const [showActionMenu, setShowActionMenu] = useState(false);
             const [activeIdeaMenuId, setActiveIdeaMenuId] = useState(null);
             const [showEmptyPlaceholders, setShowEmptyPlaceholders] = useState(false);
+            const [showSessionModal, setShowSessionModal] = useState(false);
+            const [sessionModalIdeaId, setSessionModalIdeaId] = useState(null);
+            const [stagedAttachment, setStagedAttachment] = useState(null);
             const taRef = useRef(null);
             const fileRef = useRef(null);
+            const attachFileRef = useRef(null);
             const messagesEndRef = useRef(null);
             const readinessPollRef = useRef(null);
             const docPaneRef = useRef(null);
@@ -1447,40 +1492,41 @@
                 el.style.height = Math.min(el.scrollHeight, maxH) + "px";
             };
 
-            const submitMessage = () => {
-                const t = inputText.trim();
+            const submitMessage = (overrideText) => {
+                const t = (overrideText !== undefined ? overrideText : inputText).trim();
                 if (!t || isLoading || !currentIdeaId) return;
                 const turn = messages.filter((m) => m.role === "user").length + 1;
                 const userMsgId = `u-${Date.now()}`;
                 const assistantPendingId = `a-${Date.now()}`;
                 const nowIso = new Date().toISOString();
+                const attachment = stagedAttachment;
                 setMessages((prev) => [
                     ...prev,
                     { id: userMsgId, role: "user", content: t, ts: nowIso },
                     { id: assistantPendingId, role: "assistant", content: "Working on your request...", ts: nowIso, pending: true },
                 ]);
-                setInputText("");
+                if (overrideText === undefined) setInputText("");
                 setTimeout(() => adjustTa(), 0);
+                setStagedAttachment(null);
                 setIsLoading(true);
+                const body = { content: t, turn };
+                if (attachment) body.attachment = attachment;
                 fetch(`/api/ideas/${currentIdeaId}/message`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ content: t, turn }),
+                    body: JSON.stringify(body),
                 })
                     .then((r) => {
                         if (!r.ok) throw new Error(String(r.status));
                         return r.json();
                     })
                     .then((data) => {
+                        const parsed = data.parsed || null;
+                        const displayContent = (parsed && parsed.prose) ? parsed.prose : (data.response || "No agent output returned for this turn.");
                         setMessages((prev) =>
                             prev.map((m) =>
                                 m.id === assistantPendingId
-                                    ? {
-                                          ...m,
-                                          pending: false,
-                                          content: data.response || "No agent output returned for this turn.",
-                                          ts: new Date().toISOString(),
-                                      }
+                                    ? { ...m, pending: false, content: displayContent, ts: new Date().toISOString(), parsed }
                                     : m
                             )
                         );
@@ -1506,6 +1552,7 @@
                                     : m
                             )
                         );
+                        setStagedAttachment(null);
                         setIsLoading(false);
                     });
             };
@@ -1534,7 +1581,46 @@
                         setChatsRailCollapsed(false);
                         setActiveIdeaMenuId(null);
                         setShowActionMenu(false);
+                        setStagedAttachment(null);
+                        setSessionModalIdeaId(d.id);
+                        setShowSessionModal(true);
                     });
+            };
+
+            const handleSessionStartConversation = () => {
+                const ideaId = sessionModalIdeaId;
+                setShowSessionModal(false);
+                setSessionModalIdeaId(null);
+                if (!ideaId) return;
+                const assistantPendingId = `a-${Date.now()}`;
+                const nowIso = new Date().toISOString();
+                setMessages([{ id: assistantPendingId, role: "assistant", content: "Starting session…", ts: nowIso, pending: true }]);
+                setIsLoading(true);
+                fetch(`/api/ideas/${ideaId}/start`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+                    .then((r) => { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
+                    .then((data) => {
+                        setMessages([{
+                            id: assistantPendingId, role: "assistant",
+                            content: (data.parsed && data.parsed.prose) ? data.parsed.prose : (data.response || ""),
+                            ts: new Date().toISOString(), pending: false,
+                            parsed: data.parsed || null,
+                        }]);
+                        setPrdContent(data.prd_content || "");
+                        setIsLoading(false);
+                        setReadinessStatus("updating");
+                        startReadinessPoll(ideaId);
+                        refreshIdeas();
+                    })
+                    .catch(() => {
+                        setMessages([{ id: assistantPendingId, role: "assistant", content: "Session start failed. Type a message to begin.", ts: new Date().toISOString(), error: true }]);
+                        setIsLoading(false);
+                    });
+            };
+
+            const handleSessionUpload = () => {
+                setShowSessionModal(false);
+                setSessionModalIdeaId(null);
+                if (fileRef.current) fileRef.current.click();
             };
 
             const selectIdeaFromRail = (id) => {
@@ -1681,6 +1767,13 @@
 
             return (
                 <div className="flex h-full min-w-0">
+                    {showSessionModal && (
+                        <SessionStartModal
+                            onStartConversation={handleSessionStartConversation}
+                            onUpload={handleSessionUpload}
+                            onClose={() => { setShowSessionModal(false); setSessionModalIdeaId(null); }}
+                        />
+                    )}
                     {/* Vertical chat list — collapses after picking a chat so conversation + PRD get space */}
                     <div
                         className={`${
@@ -1860,13 +1953,39 @@
                             <div ref={messagesEndRef} />
                         </div>
                         <div className="flex-shrink-0 border-t border-[#1a1d21] p-3 space-y-2 bg-[#141618]">
+                            {/* Hidden file inputs */}
                             <input ref={fileRef} type="file" accept=".md" className="hidden" onChange={(e) => handleFileChange(e, currentIdeaId, setUploadError, setUploadSpinner, triggerClarityCheck, setClarityPass, setClarityIssues, setClarityMissing)} />
-                            <button type="button" disabled={!currentIdeaId} onClick={() => fileRef.current && fileRef.current.click()} className="header-text w-full text-xs py-1.5 rounded bg-[#1a1d21] text-slate-300 border border-[#1a1d21] hover:border-slate-500 disabled:opacity-40 disabled:pointer-events-none">
-                                Upload .md seed
-                            </button>
+                            <input ref={attachFileRef} type="file" accept=".md" className="hidden" onChange={(e) => {
+                                const f = e.target.files && e.target.files[0];
+                                if (!f) return;
+                                const reader = new FileReader();
+                                reader.onload = (ev) => setStagedAttachment({ filename: f.name, content: ev.target.result });
+                                reader.readAsText(f);
+                                e.target.value = "";
+                            }} />
+                            {uploadSpinner && <p className="text-slate-500 text-xs">Synthesizing document…</p>}
                             {uploadError && <p className="text-red-400 text-xs">{uploadError}</p>}
-                            {uploadSpinner && <p className="text-slate-500 text-xs">Working…</p>}
+                            {/* Staged attachment pill */}
+                            {stagedAttachment && (
+                                <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-[#1a1d21] border border-[#2a2d31] text-xs text-slate-300 w-fit">
+                                    <span>📎</span>
+                                    <span className="max-w-[180px] truncate">{stagedAttachment.filename}</span>
+                                    <button type="button" onClick={() => setStagedAttachment(null)} className="text-slate-500 hover:text-slate-200 ml-0.5">✕</button>
+                                </div>
+                            )}
                             <div className="flex items-stretch gap-2">
+                                {/* Attachment button */}
+                                <button
+                                    type="button"
+                                    disabled={!currentIdeaId || isLoading}
+                                    onClick={() => attachFileRef.current && attachFileRef.current.click()}
+                                    title="Attach a .md file to this message"
+                                    className="flex items-center justify-center w-8 rounded border border-[#2a2d31] bg-[#1a1d21] text-slate-400 hover:text-slate-200 hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                                >
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                                        <path strokeLinecap="round" strokeLinejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+                                    </svg>
+                                </button>
                                 <textarea
                                     ref={taRef}
                                     rows={1}

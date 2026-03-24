@@ -1208,6 +1208,97 @@ POLL_TIMEOUT = 120  # seconds; patchable in tests
 POLL_INTERVAL = 2   # seconds between sentinel checks
 
 
+def _parse_agent_response(content: str) -> dict:
+    """Parse agent response content into structured components.
+
+    Returns:
+        {
+            "prose": str,           # conversational text (markers stripped)
+            "drafting": str | None, # section name if DRAFTING: present on first line
+            "assumptions": [str],   # list of ASSUMPTION: values
+            "questions": [          # parsed questions from QUESTIONS: block
+                {"type": "single"|"multi", "text": str, "options": [str]}
+            ]
+        }
+    """
+    lines = content.splitlines()
+    drafting = None
+    assumptions: list[str] = []
+    questions: list[dict] = []
+    prose_lines: list[str] = []
+
+    # Check first non-empty line for DRAFTING marker
+    start_idx = 0
+    if lines and lines[0].startswith("DRAFTING:"):
+        drafting = lines[0][len("DRAFTING:"):].strip()
+        start_idx = 1
+
+    # Parse remaining lines: handle ASSUMPTION, QUESTIONS block, and prose
+    in_questions_block = False
+    current_question: dict | None = None
+    questions_block_lines: list[int] = []
+    i = start_idx
+
+    while i < len(lines):
+        line = lines[i]
+
+        if line.strip() == "QUESTIONS:":
+            in_questions_block = True
+            questions_block_lines.append(i)
+            i += 1
+            continue
+
+        if in_questions_block:
+            questions_block_lines.append(i)
+            stripped = line.strip()
+
+            if stripped.startswith("[SINGLE]") or stripped.startswith("[MULTI]"):
+                if current_question is not None:
+                    questions.append(current_question)
+                qtype = "single" if stripped.startswith("[SINGLE]") else "multi"
+                qtext = stripped[len("[SINGLE]"):].strip() if qtype == "single" else stripped[len("[MULTI]"):].strip()
+                current_question = {"type": qtype, "text": qtext, "options": []}
+            elif stripped.startswith("- ") and current_question is not None:
+                current_question["options"].append(stripped[2:].strip())
+            elif stripped == "" and current_question is not None:
+                # Blank line inside questions block — keep going
+                pass
+            else:
+                # Non-question content ends the block
+                if current_question is not None:
+                    questions.append(current_question)
+                    current_question = None
+                in_questions_block = False
+                # This line is prose
+                if line.startswith("ASSUMPTION:"):
+                    assumptions.append(line[len("ASSUMPTION:"):].strip())
+                else:
+                    prose_lines.append(line)
+
+            i += 1
+            continue
+
+        if line.startswith("ASSUMPTION:"):
+            assumptions.append(line[len("ASSUMPTION:"):].strip())
+            i += 1
+            continue
+
+        prose_lines.append(line)
+        i += 1
+
+    # Flush last question
+    if current_question is not None:
+        questions.append(current_question)
+
+    prose = "\n".join(prose_lines).strip()
+    return {
+        "prose": prose,
+        "drafting": drafting,
+        "assumptions": assumptions,
+        "questions": questions,
+    }
+
+
 def _default_idea_session(name: str = "") -> dict:
     return {
         "name": name,
@@ -1346,6 +1437,80 @@ async def _trigger_readiness_assessment(idea_id: str, config: dict) -> None:
         _active_readiness_jobs.discard(idea_id)
 
 
+@app.post("/api/ideas/{idea_id}/start")
+async def post_ideas_start(idea_id: str, request: Request):
+    """Fire the automated first-turn webhook so the agent opens the conversation.
+
+    Sends a pre-set first-turn message instructing the agent to follow first-turn
+    behavior from AGENTS.md. Returns the same shape as POST /api/ideas/{id}/message.
+    """
+    config = load_config()
+    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
+    hooks_token = config.get("hooks_token", "")
+
+    idea_dir = Path(ideas_dir) / idea_id
+    if not idea_dir.exists():
+        raise HTTPException(status_code=404, detail="Idea not found")
+
+    turns_dir = idea_dir / "turns"
+    turns_dir.mkdir(parents=True, exist_ok=True)
+
+    # Always use turn 1 for the automated session start
+    turn_n = 1
+    session_key = f"ideas:{idea_id}:session-{turn_n}"
+    auto_message = (
+        f"[SESSION] ideas:{idea_id}:session-{turn_n}\n\n"
+        f"Begin a new PRD session. Follow your first-turn behavior from AGENTS.md."
+    )
+
+    webhook_payload = {
+        "agentId": "prd-creator",
+        "sessionKey": session_key,
+        "wakeMode": "now",
+        "message": auto_message,
+    }
+
+    headers = {"Authorization": f"Bearer {hooks_token}"}
+    async with aiohttp.ClientSession() as session:
+        await session.post(hooks_url, json=webhook_payload, headers=headers)
+
+    done_path = turns_dir / f"{turn_n}.done"
+    md_path = turns_dir / f"{turn_n}.md"
+    prd_draft_path = idea_dir / "prd_draft.md"
+
+    deadline = datetime.utcnow().timestamp() + POLL_TIMEOUT
+    while datetime.utcnow().timestamp() < deadline:
+        if done_path.exists():
+            break
+        await asyncio.sleep(POLL_INTERVAL)
+    else:
+        raise HTTPException(status_code=408, detail=f"Agent turn timed out after {POLL_TIMEOUT}s")
+
+    agent_response = md_path.read_text() if md_path.exists() else ""
+    prd_content = prd_draft_path.read_text() if prd_draft_path.exists() else ""
+
+    session_path = idea_dir / "session.json"
+    session_data = _read_json_file(str(session_path)) or {
+        "messages": [], "prd_content": "", "created": None, "updated": None
+    }
+    now = datetime.utcnow().isoformat() + "Z"
+    session_data.setdefault("messages", [])
+    session_data["messages"].append({"role": "assistant", "content": agent_response, "ts": now})
+    session_data["prd_content"] = prd_content
+    session_data["updated"] = now
+    if session_data.get("created") is None:
+        session_data["created"] = now
+
+    tmp_path = str(session_path) + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(session_data, f)
+    os.replace(tmp_path, session_path)
+
+    parsed = _parse_agent_response(agent_response)
+    return {"response": agent_response, "prd_content": prd_content, "parsed": parsed}
+
+
 @app.post("/api/ideas/{idea_id}/message")
 async def post_ideas_message(idea_id: str, request: Request):
     """POST a user message to the ideas agent, poll for sentinel, update session."""
@@ -1353,6 +1518,7 @@ async def post_ideas_message(idea_id: str, request: Request):
     body = await request.json()
     content = body.get("content")
     turn_n = body.get("turn")
+    attachment = body.get("attachment")  # optional: {"filename": str, "content": str}
 
     if not content or turn_n is None:
         raise HTTPException(status_code=422, detail="Body must contain {content: str, turn: int}")
@@ -1360,6 +1526,13 @@ async def post_ideas_message(idea_id: str, request: Request):
     ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
     hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
     hooks_token = config.get("hooks_token", "")
+
+    # Prepend attachment context when provided
+    message_content = content
+    if attachment and isinstance(attachment, dict):
+        fname = attachment.get("filename", "attachment.md")
+        fcontent = attachment.get("content", "")
+        message_content = f"[ATTACHMENT: {fname}]\n{fcontent}\n[/ATTACHMENT]\n\n{content}"
 
     # Build session key: ideas:{id}:session-{n}
     session_key = f"ideas:{idea_id}:session-{turn_n}"
@@ -1369,7 +1542,7 @@ async def post_ideas_message(idea_id: str, request: Request):
         "agentId": "prd-creator",
         "sessionKey": session_key,
         "wakeMode": "now",
-        "message": f"[SESSION] ideas:{idea_id}:session-{turn_n}\n\n{content}",
+        "message": f"[SESSION] ideas:{idea_id}:session-{turn_n}\n\n{message_content}",
     }
 
     # Send webhook POST via a per-request aiohttp session
@@ -1446,7 +1619,8 @@ async def post_ideas_message(idea_id: str, request: Request):
     _readiness_job_started_at[idea_id] = datetime.utcnow().timestamp()
     asyncio.create_task(_trigger_readiness_assessment(idea_id, config))
 
-    return {"response": agent_response, "prd_content": prd_content}
+    parsed = _parse_agent_response(agent_response)
+    return {"response": agent_response, "prd_content": prd_content, "parsed": parsed}
 
 
 @app.get("/api/ideas")
