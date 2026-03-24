@@ -1534,6 +1534,18 @@ async def post_ideas_message(idea_id: str, request: Request):
         fcontent = attachment.get("content", "")
         message_content = f"[ATTACHMENT: {fname}]\n{fcontent}\n[/ATTACHMENT]\n\n{content}"
 
+    # Inject unsubmitted annotations into message context
+    idea_dir = Path(ideas_dir) / idea_id
+    session_path_pre = idea_dir / "session.json"
+    pending_annotation_ids: list[str] = []
+    if session_path_pre.exists():
+        pre_session = _read_json_file(str(session_path_pre)) or {}
+        unsubmitted = [a for a in pre_session.get("annotations", []) if not a.get("submitted")]
+        if unsubmitted:
+            ann_lines = "\n".join(f'Section "{a["section"]}": "{a["comment"]}"' for a in unsubmitted)
+            message_content = f"[USER ANNOTATIONS]\n{ann_lines}\n[/USER ANNOTATIONS]\n\n{message_content}"
+            pending_annotation_ids = [a["id"] for a in unsubmitted]
+
     # Build session key: ideas:{id}:session-{n}
     session_key = f"ideas:{idea_id}:session-{turn_n}"
 
@@ -1549,8 +1561,6 @@ async def post_ideas_message(idea_id: str, request: Request):
     headers = {"Authorization": f"Bearer {hooks_token}"}
     async with aiohttp.ClientSession() as session:
         await session.post(hooks_url, json=webhook_payload, headers=headers)
-
-    idea_dir = Path(ideas_dir) / idea_id
     turns_dir = idea_dir / "turns"
     # Sentinel paths per ~/.openclaw/workspace-prd-creator/AGENTS.md: turns/{n}.md / turns/{n}.done
     done_path = turns_dir / f"{turn_n}.done"
@@ -1595,6 +1605,12 @@ async def post_ideas_message(idea_id: str, request: Request):
     if session_data.get("created") is None:
         session_data["created"] = now
 
+    # Mark submitted annotations
+    if pending_annotation_ids:
+        for ann in session_data.get("annotations", []):
+            if ann.get("id") in pending_annotation_ids:
+                ann["submitted"] = True
+
     # Auto-name from first # heading in prd_draft (only while still "New Idea" or empty)
     nm = session_data.get("name", "")
     if nm in ("", "New Idea"):
@@ -1621,6 +1637,134 @@ async def post_ideas_message(idea_id: str, request: Request):
 
     parsed = _parse_agent_response(agent_response)
     return {"response": agent_response, "prd_content": prd_content, "parsed": parsed}
+
+
+# ---------------------------------------------------------------------------
+# Annotations endpoints (Phase 4)
+# ---------------------------------------------------------------------------
+
+def _load_session_for_idea(idea_dir: Path) -> dict:
+    """Load session.json for an idea, returning empty schema on missing file."""
+    session_path = idea_dir / "session.json"
+    if not session_path.exists():
+        return {"messages": [], "prd_content": "", "annotations": [], "created": None, "updated": None}
+    data = _read_json_file(str(session_path)) or {}
+    data.setdefault("annotations", [])
+    return data
+
+
+def _save_session_for_idea(idea_dir: Path, session_data: dict) -> None:
+    """Atomic write of session.json."""
+    session_path = idea_dir / "session.json"
+    session_data.setdefault("annotations", [])
+    tmp_path = str(session_path) + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(session_data, f)
+    os.replace(tmp_path, session_path)
+
+
+@app.post("/api/ideas/{idea_id}/annotations")
+async def post_idea_annotation(idea_id: str, request: Request):
+    """Create a new annotation for a PRD section.
+
+    Body: {"section": str, "comment": str}
+    Returns: {"id": uuid}
+    """
+    config = load_config()
+    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    idea_dir = Path(ideas_dir) / idea_id
+    if not idea_dir.exists():
+        raise HTTPException(status_code=404, detail="Idea not found")
+
+    body = await request.json()
+    section = body.get("section", "").strip()
+    comment = body.get("comment", "").strip()
+    if not section or not comment:
+        raise HTTPException(status_code=422, detail="Body must contain {section: str, comment: str}")
+
+    annotation_id = str(uuid.uuid4())
+    annotation = {
+        "id": annotation_id,
+        "section": section,
+        "comment": comment,
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "submitted": False,
+    }
+
+    session_data = _load_session_for_idea(idea_dir)
+    session_data["annotations"].append(annotation)
+    _save_session_for_idea(idea_dir, session_data)
+
+    return {"id": annotation_id}
+
+
+@app.patch("/api/ideas/{idea_id}/annotations/{annotation_id}")
+async def patch_idea_annotation(idea_id: str, annotation_id: str, request: Request):
+    """Update annotation comment text if not yet submitted.
+
+    Body: {"comment": str}
+    Returns 409 if annotation is already submitted.
+    """
+    config = load_config()
+    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    idea_dir = Path(ideas_dir) / idea_id
+    if not idea_dir.exists():
+        raise HTTPException(status_code=404, detail="Idea not found")
+
+    body = await request.json()
+    new_comment = body.get("comment", "").strip()
+    if not new_comment:
+        raise HTTPException(status_code=422, detail="Body must contain {comment: str}")
+
+    session_data = _load_session_for_idea(idea_dir)
+    for ann in session_data.get("annotations", []):
+        if ann.get("id") == annotation_id:
+            if ann.get("submitted"):
+                raise HTTPException(status_code=409, detail="Annotation already submitted and cannot be edited")
+            ann["comment"] = new_comment
+            _save_session_for_idea(idea_dir, session_data)
+            return {"ok": True}
+
+    raise HTTPException(status_code=404, detail="Annotation not found")
+
+
+@app.delete("/api/ideas/{idea_id}/annotations/{annotation_id}")
+def delete_idea_annotation(idea_id: str, annotation_id: str):
+    """Delete an annotation by id.
+
+    Returns 404 if annotation not found.
+    """
+    config = load_config()
+    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    idea_dir = Path(ideas_dir) / idea_id
+    if not idea_dir.exists():
+        raise HTTPException(status_code=404, detail="Idea not found")
+
+    session_data = _load_session_for_idea(idea_dir)
+    annotations = session_data.get("annotations", [])
+    new_annotations = [a for a in annotations if a.get("id") != annotation_id]
+    if len(new_annotations) == len(annotations):
+        raise HTTPException(status_code=404, detail="Annotation not found")
+
+    session_data["annotations"] = new_annotations
+    _save_session_for_idea(idea_dir, session_data)
+    return {"ok": True}
+
+
+@app.get("/api/ideas/{idea_id}/annotations")
+def get_idea_annotations(idea_id: str):
+    """Return all annotations for an idea.
+
+    Returns [] if idea has no annotations.
+    """
+    config = load_config()
+    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    idea_dir = Path(ideas_dir) / idea_id
+    if not idea_dir.exists():
+        raise HTTPException(status_code=404, detail="Idea not found")
+
+    session_data = _load_session_for_idea(idea_dir)
+    return session_data.get("annotations", [])
 
 
 @app.get("/api/ideas")
