@@ -1,6 +1,5 @@
 """Tests for POST /api/ideas/{id}/convert endpoint."""
 import json
-import asyncio
 import pytest
 from pathlib import Path
 from unittest.mock import patch, AsyncMock, MagicMock
@@ -94,10 +93,9 @@ class TestApiIdeasConvert:
         roadmap_text = "# Project Roadmap\n\n- [ ] `phase-1` | LOW | First phase"
         mock_cls, _ = self._make_mock_aiohttp()
 
-        def write_sentinel(*args, **kwargs):
+        async def write_sentinel(*args, **kwargs):
             (idea_dir / "roadmap_draft.md").write_text(roadmap_text)
             (idea_dir / "roadmap_draft.done").write_text("")
-            return asyncio.sleep(0)
 
         with patch("ui.server.load_config", return_value=self._mock_config()), \
              patch("ui.server.aiohttp.ClientSession", mock_cls), \
@@ -117,10 +115,9 @@ class TestApiIdeasConvert:
         roadmap_text = "# My Roadmap\n\n- [ ] `phase-1` | LOW | Step one"
         mock_cls, _ = self._make_mock_aiohttp()
 
-        def write_sentinel(*args, **kwargs):
+        async def write_sentinel(*args, **kwargs):
             (idea_dir / "roadmap_draft.md").write_text(roadmap_text)
             (idea_dir / "roadmap_draft.done").write_text("")
-            return asyncio.sleep(0)
 
         with patch("ui.server.load_config", return_value=self._mock_config()), \
              patch("ui.server.aiohttp.ClientSession", mock_cls), \

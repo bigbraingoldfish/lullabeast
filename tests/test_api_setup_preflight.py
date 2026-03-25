@@ -7,6 +7,9 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+# Real subprocess.run before tests patch subprocess.run (avoids recursion in delegate).
+_REAL_SUBPROCESS_RUN = subprocess.run
+
 
 def load_server():
     from ui.server import app
@@ -14,12 +17,17 @@ def load_server():
     return TestClient(app)
 
 
-from ui.server import _run_preflight_checks
+from ui.server import _run_preflight_checks, _preflight_materialize
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+VALID_ROADMAP_SEED = (
+    "- [ ] `TEST-E1` | LOW | Do the thing\n"
+    "  > Test: It works.\n"
+)
 
 WORKSPACE_AGENTS = ["planner", "executor", "reviewer", "escalation"]
 WORKSPACE_DOCS = ["AGENTS.md", "TOOLS.md", "SOUL.md", "USER.md", "IDENTITY.md"]
@@ -79,35 +87,46 @@ def _mock_subprocess_branch_pass(cmd, **kwargs):
     return mock
 
 
-def _mock_subprocess_remote_pass(url="https://github.com/example/repo.git"):
+def _mock_subprocess_preflight_pass():
+    """Mock git subprocess calls used by preflight when no real git repo is needed."""
     def _inner(cmd, **kwargs):
         mock = MagicMock()
-        if "get-url" in cmd:
-            mock.returncode = 0
-            mock.stdout = url + "\n"
-        elif "branch" in cmd:
-            mock.returncode = 0
-            mock.stdout = "  main\n"
-        else:
+        mock.stderr = ""
+        if not isinstance(cmd, list) or not cmd:
             mock.returncode = 0
             mock.stdout = ""
-        mock.stderr = ""
+            return mock
+        if cmd[0] == "git" and len(cmd) >= 2 and cmd[1] == "--version":
+            mock.returncode = 0
+            mock.stdout = "git version 2.40.0\n"
+            return mock
+        if "branch" in cmd and "--list" in cmd:
+            mock.returncode = 0
+            mock.stdout = "  main\n"
+            return mock
+        if "symbolic-ref" in cmd:
+            mock.returncode = 0
+            mock.stdout = "main\n"
+            return mock
+        if cmd[0] == "git" and "init" in cmd:
+            mock.returncode = 0
+            mock.stdout = ""
+            return mock
+        if cmd[0] == "git" and "-C" in cmd and "branch" in cmd:
+            mock.returncode = 0
+            mock.stdout = ""
+            return mock
+        mock.returncode = 0
+        mock.stdout = ""
         return mock
     return _inner
 
 
-def _mock_subprocess_remote_fail(cmd, **kwargs):
-    """Simulate subprocess.run where remote get-url fails but branch listing passes."""
-    mock = MagicMock()
-    mock.stderr = ""
-    if "get-url" in cmd:
-        mock.returncode = 1
-        mock.stdout = ""
-    else:
-        # branch --list
-        mock.returncode = 0
-        mock.stdout = "  main\n"
-    return mock
+def _delegate_git_subprocess_preflight(cmd, **kwargs):
+    """Run real git for integration; fall back to mock for any other commands."""
+    if isinstance(cmd, list) and cmd and cmd[0] == "git":
+        return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
+    return _mock_subprocess_preflight_pass()(cmd, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +145,7 @@ class TestSymlinkCheck:
         (repo_path / "roadmap.md").write_text("# Roadmap\n")
 
         with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_mock_subprocess_remote_pass()):
+             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
             results = _run_preflight_checks(str(repo_path))
 
         sym = next(c for c in results if c["check"] == "symlink")
@@ -148,7 +167,7 @@ class TestSymlinkCheck:
         _make_git_repo(repo_path)
 
         with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_mock_subprocess_remote_pass()):
+             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
             results = _run_preflight_checks(str(repo_path))
 
         sym = next(c for c in results if c["check"] == "symlink")
@@ -167,7 +186,7 @@ class TestSymlinkCheck:
         _make_git_repo(repo_path)
 
         with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_mock_subprocess_remote_pass()):
+             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
             results = _run_preflight_checks(str(repo_path))
 
         sym = next(c for c in results if c["check"] == "symlink")
@@ -185,7 +204,7 @@ class TestGitignoreCheck:
         # No .gitignore
 
         with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_mock_subprocess_remote_pass()):
+             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
             results = _run_preflight_checks(str(repo_path))
 
         gi = next(c for c in results if c["check"] == ".gitignore")
@@ -202,7 +221,7 @@ class TestGitignoreCheck:
         (repo_path / "roadmap.md").write_text("# Roadmap\n")
 
         with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_mock_subprocess_remote_pass()):
+             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
             results = _run_preflight_checks(str(repo_path))
 
         entries_check = next(c for c in results if c["check"] == ".gitignore entries")
@@ -219,7 +238,7 @@ class TestGitignoreCheck:
         (repo_path / "roadmap.md").write_text("# Roadmap\n")
 
         with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_mock_subprocess_remote_pass()):
+             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
             results = _run_preflight_checks(str(repo_path))
 
         entries_check = next(c for c in results if c["check"] == ".gitignore entries")
@@ -229,20 +248,21 @@ class TestGitignoreCheck:
 
 class TestGitRepoCheck:
 
-    def test_git_repo_missing_returns_fail(self, tmp_path):
-        """No .git dir → 'git repo' check status 'fail'."""
+    def test_git_repo_missing_auto_inits(self, tmp_path):
+        """No .git dir → preflight runs git init and reports 'git repo' fixed."""
         repo_path = tmp_path / "myproject"
         repo_path.mkdir()
         openclaw = _make_openclaw_dir(tmp_path, repo_path)
         _make_gitignore(repo_path, _full_gitignore_content())
-        # No .git dir
+        # No .git dir — use real git for init/branch
 
         with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_mock_subprocess_remote_pass()):
+             patch("subprocess.run", side_effect=_delegate_git_subprocess_preflight):
             results = _run_preflight_checks(str(repo_path))
 
         git = next(c for c in results if c["check"] == "git repo")
-        assert git["status"] == "fail"
+        assert git["status"] == "fixed"
+        assert (repo_path / ".git").is_dir()
 
     def test_git_repo_no_main_or_master_fails(self, tmp_path):
         """A .git dir exists but branch listing returns empty → 'git repo' check 'fail'."""
@@ -255,12 +275,16 @@ class TestGitRepoCheck:
         def no_branch(cmd, **kwargs):
             mock = MagicMock()
             mock.stderr = ""
-            if "branch" in cmd:
+            if isinstance(cmd, list) and len(cmd) >= 2 and cmd[0] == "git" and cmd[1] == "--version":
+                mock.returncode = 0
+                mock.stdout = "git version 2.40\n"
+                return mock
+            if "branch" in cmd and "--list" in cmd:
                 mock.returncode = 0
                 mock.stdout = ""  # empty = no main/master
-            else:
-                mock.returncode = 0
-                mock.stdout = "https://github.com/x/y.git\n"
+                return mock
+            mock.returncode = 0
+            mock.stdout = ""
             return mock
 
         with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
@@ -281,15 +305,16 @@ class TestGitRepoCheck:
         def unborn_main(cmd, **kwargs):
             mock = MagicMock()
             mock.stderr = ""
+            if isinstance(cmd, list) and len(cmd) >= 2 and cmd[0] == "git" and cmd[1] == "--version":
+                mock.returncode = 0
+                mock.stdout = "git version 2.40\n"
+                return mock
             if "branch" in cmd and "--list" in cmd:
                 mock.returncode = 0
                 mock.stdout = ""  # no listed main/master branch (unborn case)
             elif "symbolic-ref" in cmd:
                 mock.returncode = 0
                 mock.stdout = "main\n"
-            elif "get-url" in cmd:
-                mock.returncode = 0
-                mock.stdout = "https://github.com/x/y.git\n"
             else:
                 mock.returncode = 0
                 mock.stdout = ""
@@ -305,10 +330,10 @@ class TestGitRepoCheck:
         assert "commit -m 'init'" in git["message"]
 
 
-class TestGitRemoteCheck:
+class TestGitExecutableCheck:
 
-    def test_git_remote_missing_returns_warn(self, tmp_path):
-        """When git remote get-url fails → 'git remote' check status 'warn'."""
+    def test_git_version_passes(self, tmp_path):
+        """git --version succeeds → 'git' check status 'pass'."""
         repo_path = tmp_path / "myproject"
         repo_path.mkdir()
         openclaw = _make_openclaw_dir(tmp_path, repo_path)
@@ -316,11 +341,11 @@ class TestGitRemoteCheck:
         _make_git_repo(repo_path)
 
         with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_mock_subprocess_remote_fail):
+             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
             results = _run_preflight_checks(str(repo_path))
 
-        remote = next(c for c in results if c["check"] == "git remote")
-        assert remote["status"] == "warn"
+        git = next(c for c in results if c["check"] == "git")
+        assert git["status"] == "pass"
 
 
 class TestRoadmapFileCheck:
@@ -335,7 +360,7 @@ class TestRoadmapFileCheck:
         # No roadmap file
 
         with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_mock_subprocess_remote_pass()):
+             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
             results = _run_preflight_checks(str(repo_path))
 
         roadmap = next(c for c in results if c["check"] == "roadmap file")
@@ -351,7 +376,7 @@ class TestRoadmapFileCheck:
         (repo_path / "roadmap.md").write_text("# Roadmap\n")
 
         with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_mock_subprocess_remote_pass()):
+             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
             results = _run_preflight_checks(str(repo_path))
 
         roadmap = next(c for c in results if c["check"] == "roadmap file")
@@ -361,7 +386,7 @@ class TestRoadmapFileCheck:
 class TestAllChecksInResponse:
 
     def test_all_checks_in_response(self, tmp_path):
-        """Response includes check names covering symlink, .gitignore, git repo, workspace, git remote, roadmap."""
+        """Response includes symlink, .gitignore, git cli, git repo, workspace, roadmap."""
         repo_path = tmp_path / "myproject"
         repo_path.mkdir()
         openclaw = _make_openclaw_dir(tmp_path, repo_path)
@@ -370,15 +395,15 @@ class TestAllChecksInResponse:
         (repo_path / "roadmap.md").write_text("# Roadmap\n")
 
         with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_mock_subprocess_remote_pass()):
+             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
             results = _run_preflight_checks(str(repo_path))
 
         check_names = [c["check"] for c in results]
         assert "symlink" in check_names
         assert ".gitignore" in check_names or ".gitignore entries" in check_names
+        assert "git" in check_names
         assert "git repo" in check_names
         assert any("workspace" in n for n in check_names)
-        assert "git remote" in check_names
         assert "roadmap file" in check_names
 
     def test_each_check_has_required_fields(self, tmp_path):
@@ -390,14 +415,14 @@ class TestAllChecksInResponse:
         _make_git_repo(repo_path)
 
         with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_mock_subprocess_remote_pass()):
+             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
             results = _run_preflight_checks(str(repo_path))
 
         for item in results:
             assert "check" in item
             assert "status" in item
             assert "message" in item
-            assert item["status"] in ("pass", "fail", "warn")
+            assert item["status"] in ("pass", "fail", "warn", "fixed")
 
 
 # ---------------------------------------------------------------------------
@@ -417,7 +442,7 @@ class TestPreflightEndpoint:
         client = load_server()
 
         with patch("ui.server.os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_mock_subprocess_remote_pass()):
+             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
             response = client.post("/api/setup/preflight", json={"repo_path": str(repo_path)})
 
         assert response.status_code == 200
@@ -449,12 +474,12 @@ class TestPreflightEndpoint:
         client = load_server()
 
         with patch("ui.server.os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_mock_subprocess_remote_pass()):
+             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
             response = client.post("/api/setup/preflight", json={"repo_path": str(repo_path)})
 
         assert response.status_code == 200
         for check in response.json()["checks"]:
-            assert check["status"] in ("pass", "fail", "warn"), \
+            assert check["status"] in ("pass", "fail", "warn", "fixed"), \
                 f"Unexpected status '{check['status']}' for check '{check['check']}'"
 
     def test_endpoint_response_schema(self, tmp_path):
@@ -468,10 +493,59 @@ class TestPreflightEndpoint:
         client = load_server()
 
         with patch("ui.server.os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_mock_subprocess_remote_pass()):
+             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
             response = client.post("/api/setup/preflight", json={"repo_path": str(repo_path)})
 
         data = response.json()
         assert "checks" in data
         for item in data["checks"]:
             assert set(item.keys()) >= {"check", "status", "message"}
+
+
+class TestPreflightMaterialize:
+    """Unit tests for _preflight_materialize (roadmap/prd writes + conflicts)."""
+
+    def test_writes_roadmap_when_missing(self, tmp_path):
+        repo = tmp_path / "myproject"
+        repo.mkdir()
+        checks = _preflight_materialize(str(repo), VALID_ROADMAP_SEED, None)
+        assert any(c["check"] == "roadmap write" and c["status"] == "fixed" for c in checks)
+        assert (repo / "roadmap.md").read_text().strip() == VALID_ROADMAP_SEED.strip()
+
+    def test_conflict_when_disk_differs(self, tmp_path):
+        repo = tmp_path / "myproject"
+        repo.mkdir()
+        (repo / "roadmap.md").write_text("# Other\n")
+        checks = _preflight_materialize(str(repo), VALID_ROADMAP_SEED, None)
+        assert any(c["check"] == "roadmap conflict" and c["status"] == "fail" for c in checks)
+
+    def test_prd_conflict(self, tmp_path):
+        repo = tmp_path / "myproject"
+        repo.mkdir()
+        (repo / "prd.md").write_text("# A\n")
+        checks = _preflight_materialize(str(repo), None, "# B\n")
+        assert any(c["check"] == "prd conflict" and c["status"] == "fail" for c in checks)
+
+
+class TestPreflightEndpointWithSeed:
+    """POST /api/setup/preflight with roadmap_seed."""
+
+    def test_writes_roadmap_via_seed(self, tmp_path):
+        repo_path = tmp_path / "myproject"
+        repo_path.mkdir()
+        openclaw = _make_openclaw_dir(tmp_path, repo_path)
+        _make_gitignore(repo_path, _full_gitignore_content())
+        _make_git_repo(repo_path)
+
+        client = load_server()
+        with patch("ui.server.os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
+             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
+            response = client.post(
+                "/api/setup/preflight",
+                json={"repo_path": str(repo_path), "roadmap_seed": VALID_ROADMAP_SEED},
+            )
+
+        assert response.status_code == 200
+        assert (repo_path / "roadmap.md").read_text().strip() == VALID_ROADMAP_SEED.strip()
+        names = [c["check"] for c in response.json()["checks"]]
+        assert "roadmap seed" in names
