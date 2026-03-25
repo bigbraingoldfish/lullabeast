@@ -1,4 +1,5 @@
 """Tests for POST /api/ideas/{idea_id}/upload"""
+import asyncio
 import json
 import os
 import sys
@@ -58,6 +59,7 @@ class TestUploadMdFileSynthesis:
             turns.mkdir(parents=True, exist_ok=True)
             (turns / "1.done").write_text("done")
             (ideas_dir / existing_idea / "prd_draft.md").write_text("# Synth\n\n## Problem Statement\nOK.")
+            return asyncio.sleep(0)
 
         mock_resp = MagicMock()
         mock_resp.status = 200
@@ -75,7 +77,7 @@ class TestUploadMdFileSynthesis:
                 "hooks_token": "t",
             }
             with patch("ui.server.aiohttp.ClientSession", return_value=mock_session):
-                with patch("asyncio.sleep", side_effect=sleep_then_sentinel):
+                with patch("ui.server.asyncio.sleep", side_effect=sleep_then_sentinel):
                     response = client.post(
                         f"/api/ideas/{existing_idea}/upload",
                         files={"file": ("myidea.md", content.encode(), "text/markdown")},
@@ -101,6 +103,7 @@ class TestUploadMdFileSynthesis:
             turns.mkdir(parents=True, exist_ok=True)
             (turns / "1.done").write_text("done")
             (ideas_dir / existing_idea / "prd_draft.md").write_text(content)
+            return asyncio.sleep(0)
 
         mock_resp = MagicMock()
         mock_resp.status = 200
@@ -118,7 +121,7 @@ class TestUploadMdFileSynthesis:
                 "hooks_token": "t",
             }
             with patch("ui.server.aiohttp.ClientSession", return_value=mock_session):
-                with patch("asyncio.sleep", side_effect=sleep_then_sentinel):
+                with patch("ui.server.asyncio.sleep", side_effect=sleep_then_sentinel):
                     response = client.post(
                         f"/api/ideas/{existing_idea}/upload",
                         files={"file": ("myidea.md", content.encode(), "text/markdown")},
@@ -141,6 +144,7 @@ class TestUploadArbitraryMarkdown:
             turns.mkdir(parents=True, exist_ok=True)
             (turns / "1.done").write_text("done")
             (ideas_dir / existing_idea / "prd_draft.md").write_text("# Out\n")
+            return asyncio.sleep(0)
 
         mock_resp = MagicMock()
         mock_resp.status = 200
@@ -158,7 +162,7 @@ class TestUploadArbitraryMarkdown:
                 "hooks_token": "t",
             }
             with patch("ui.server.aiohttp.ClientSession", return_value=mock_session):
-                with patch("asyncio.sleep", side_effect=sleep_then_sentinel):
+                with patch("ui.server.asyncio.sleep", side_effect=sleep_then_sentinel):
                     response = client.post(
                         f"/api/ideas/{existing_idea}/upload",
                         files={"file": ("incomplete.md", content.encode(), "text/markdown")},
@@ -213,6 +217,7 @@ class TestUploadNonMdFile:
             turns.mkdir(parents=True, exist_ok=True)
             (turns / "1.done").write_text("done")
             (ideas_dir / existing_idea / "prd_draft.md").write_text(content)
+            return asyncio.sleep(0)
 
         mock_resp = MagicMock()
         mock_resp.status = 200
@@ -230,7 +235,7 @@ class TestUploadNonMdFile:
                 "hooks_token": "t",
             }
             with patch("ui.server.aiohttp.ClientSession", return_value=mock_session):
-                with patch("asyncio.sleep", side_effect=sleep_then_sentinel):
+                with patch("ui.server.asyncio.sleep", side_effect=sleep_then_sentinel):
                     response = client.post(
                         f"/api/ideas/{existing_idea}/upload",
                         files={"file": ("myidea.MD", content.encode(), "text/markdown")},

@@ -2460,6 +2460,125 @@ _WORKSPACE_DOCS = ["AGENTS.md", "TOOLS.md", "SOUL.md", "USER.md", "IDENTITY.md"]
 _WORKSPACE_AGENTS = ["planner", "executor", "reviewer", "escalation"]
 
 
+def _normalize_doc_text_for_compare(s: str) -> str:
+    """Normalize markdown for equality checks (line endings + trailing whitespace)."""
+    if not s:
+        return ""
+    text = s.replace("\r\n", "\n").replace("\r", "\n")
+    return "\n".join(line.rstrip() for line in text.split("\n")).rstrip()
+
+
+def _atomic_write_file(path: str, content: str) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(content)
+    os.replace(tmp, path)
+
+
+def _preflight_materialize(repo_path: str, roadmap_seed, prd_content) -> list:
+    """Write roadmap/prd from preflight request when valid. Returns extra check rows."""
+    import glob as glob_mod
+
+    checks = []
+    os.makedirs(repo_path, exist_ok=True)
+
+    rs = roadmap_seed if roadmap_seed is not None else ""
+    rs = rs.strip()
+    if rs:
+        val = _validate_roadmap_content(rs)
+        if not val["valid"]:
+            em = "; ".join(e["message"] for e in val["errors"][:3])
+            checks.append({
+                "check": "roadmap seed",
+                "status": "fail",
+                "message": f"Invalid roadmap format: {em}",
+            })
+            return checks
+
+        matches = sorted(glob_mod.glob(os.path.join(repo_path, "*oadmap*.md")))
+        mismatch_names = []
+        for p in matches:
+            try:
+                with open(p) as f:
+                    disk = f.read()
+            except OSError as exc:
+                checks.append({
+                    "check": "roadmap conflict",
+                    "status": "fail",
+                    "message": f"Could not read {os.path.basename(p)}: {exc}",
+                })
+                return checks
+            if _normalize_doc_text_for_compare(disk) != _normalize_doc_text_for_compare(rs):
+                mismatch_names.append(os.path.basename(p))
+
+        if mismatch_names:
+            checks.append({
+                "check": "roadmap conflict",
+                "status": "fail",
+                "message": (
+                    "Roadmap on disk does not match the seed in the UI. Edit the seed, replace the file(s), or remove them. "
+                    f"Conflicting: {', '.join(mismatch_names)}"
+                ),
+            })
+            return checks
+
+        roadmap_path = os.path.join(repo_path, "roadmap.md")
+        if not matches:
+            try:
+                _atomic_write_file(roadmap_path, rs)
+            except OSError as exc:
+                checks.append({
+                    "check": "roadmap write",
+                    "status": "fail",
+                    "message": str(exc),
+                })
+                return checks
+            checks.append({
+                "check": "roadmap write",
+                "status": "fixed",
+                "message": "Wrote roadmap.md from seed",
+            })
+
+    pc = prd_content if prd_content is not None else ""
+    pc = pc.strip()
+    if pc:
+        prd_path = os.path.join(repo_path, "prd.md")
+        if os.path.exists(prd_path):
+            try:
+                existing = Path(prd_path).read_text()
+            except OSError as exc:
+                checks.append({
+                    "check": "prd conflict",
+                    "status": "fail",
+                    "message": f"Could not read prd.md: {exc}",
+                })
+                return checks
+            if _normalize_doc_text_for_compare(existing) != _normalize_doc_text_for_compare(pc):
+                checks.append({
+                    "check": "prd conflict",
+                    "status": "fail",
+                    "message": "prd.md on disk does not match the PRD staged in the UI.",
+                })
+                return checks
+        else:
+            try:
+                _atomic_write_file(prd_path, pc)
+            except OSError as exc:
+                checks.append({
+                    "check": "prd write",
+                    "status": "fail",
+                    "message": str(exc),
+                })
+                return checks
+            checks.append({
+                "check": "prd write",
+                "status": "fixed",
+                "message": "Wrote prd.md",
+            })
+
+    return checks
+
+
 def _run_preflight_checks(repo_path: str) -> list:
     """Run ordered preflight checks for a project directory.
 
@@ -2559,15 +2678,56 @@ def _run_preflight_checks(repo_path: str) -> list:
                 "message": f"Could not read/write .gitignore: {exc}",
             })
 
-    # 4. Git repo + main/master branch
+    # 3b. Git executable on PATH (required for init/commits)
+    gv = subprocess.run(["git", "--version"], capture_output=True, text=True)
+    if gv.returncode == 0:
+        checks.append({
+            "check": "git",
+            "status": "pass",
+            "message": (gv.stdout or "").strip() or "git is available",
+        })
+    else:
+        checks.append({
+            "check": "git",
+            "status": "fail",
+            "message": "git is not available on PATH — install git or fix PATH.",
+        })
+
+    # 4. Git repo + main/master branch (auto-init when .git is missing)
+    did_fresh_init = False
     git_dir = os.path.join(repo_path, ".git")
     if not os.path.exists(git_dir):
-        checks.append({"check": "git repo", "status": "fail",
-                        "message": (
-                            "Not a git repository. Run: "
-                            f"git -C {repo_path} init && git -C {repo_path} checkout -b main"
-                        )})
-    else:
+        try:
+            subprocess.run(["git", "init", repo_path], check=True, capture_output=True)
+            subprocess.run(
+                ["git", "-C", repo_path, "branch", "-M", "main"],
+                check=True,
+                capture_output=True,
+            )
+            did_fresh_init = True
+            checks.append({
+                "check": "git repo",
+                "status": "fixed",
+                "message": "Initialized git repository (branch main)",
+            })
+        except (subprocess.CalledProcessError, OSError) as exc:
+            stderr = getattr(exc, "stderr", None)
+            if stderr is not None and isinstance(stderr, bytes):
+                stderr = stderr.decode(errors="replace")
+            else:
+                stderr = str(exc)
+            checks.append({
+                "check": "git repo",
+                "status": "fail",
+                "message": (
+                    "Not a git repository and auto-init failed. Run: "
+                    f"git -C {repo_path} init && git -C {repo_path} branch -M main"
+                    + (f" — {stderr}" if stderr else "")
+                ),
+            })
+
+    git_dir = os.path.join(repo_path, ".git")
+    if os.path.exists(git_dir) and not did_fresh_init:
         result = subprocess.run(
             ["git", "-C", repo_path, "branch", "--list", "main", "master"],
             capture_output=True, text=True,
@@ -2613,23 +2773,7 @@ def _run_preflight_checks(repo_path: str) -> list:
                 checks.append({"check": f"workspace-{agent}", "status": "pass",
                                 "message": f"workspace-{agent} present with all required docs"})
 
-    # 6. Git remote (warn-only)
-    try:
-        result = subprocess.run(
-            ["git", "-C", repo_path, "remote", "get-url", "origin"],
-            capture_output=True, text=True,
-        )
-        if result.returncode == 0:
-            checks.append({"check": "git remote", "status": "pass",
-                            "message": f"Remote origin: {result.stdout.strip()}"})
-        else:
-            checks.append({"check": "git remote", "status": "warn",
-                            "message": "No git remote configured — pushes will produce warnings."})
-    except Exception:
-        checks.append({"check": "git remote", "status": "warn",
-                        "message": "No git remote configured — pushes will produce warnings."})
-
-    # 7. Roadmap file (warn-only)
+    # 6. Roadmap file on disk (warn if missing)
     import glob as glob_mod
     roadmap_files = glob_mod.glob(os.path.join(repo_path, "*oadmap*.md"))
     if roadmap_files:
@@ -2637,7 +2781,10 @@ def _run_preflight_checks(repo_path: str) -> list:
                         "message": f"Found: {os.path.basename(roadmap_files[0])}"})
     else:
         checks.append({"check": "roadmap file", "status": "warn",
-                        "message": "No roadmap file found — launch step will write roadmap.md from seed."})
+                        "message": (
+                            "No roadmap file found — lock a seed and Run Preflight to write roadmap.md, "
+                            "or use Launch to bootstrap the project."
+                        )})
 
     return checks
 
@@ -2646,20 +2793,44 @@ def _run_preflight_checks(repo_path: str) -> list:
 async def post_setup_preflight(request: Request):
     """Run preflight validation checks for a project directory.
 
-    Body: {"repo_path": str}
+    Body: {"repo_path": str, "roadmap_seed": str optional, "prd_content": str optional}
+    When roadmap_seed / prd_content are provided, valid content is written to disk before checks.
     Returns: {"checks": [{"check": str, "status": str, "message": str}]}
     """
     body = await request.json()
     repo_path = body.get("repo_path", "")
+    roadmap_seed = body.get("roadmap_seed")
+    prd_content = body.get("prd_content")
     if not repo_path:
         raise HTTPException(status_code=422, detail="repo_path is required")
-    checks = _run_preflight_checks(repo_path)
-    return {"checks": checks}
+    repo_abs = os.path.realpath(os.path.expanduser(repo_path.strip()))
+    try:
+        os.makedirs(repo_abs, exist_ok=True)
+    except OSError as exc:
+        raise HTTPException(status_code=422, detail=f"Cannot use repo path: {exc}") from exc
+
+    mat = _preflight_materialize(repo_abs, roadmap_seed, prd_content)
+    if any(c.get("status") == "fail" for c in mat):
+        return {"checks": mat}
+
+    header_checks = []
+    if roadmap_seed is not None and isinstance(roadmap_seed, str) and roadmap_seed.strip():
+        header_checks.append({
+            "check": "roadmap seed",
+            "status": "warn",
+            "message": (
+                "Seed format is validated here; content quality is not. "
+                "For a substantive PRD-first workflow, use Project Ideas and add a starting document there."
+            ),
+        })
+
+    checks = _run_preflight_checks(repo_abs)
+    return {"checks": header_checks + mat + checks}
 
 
 # ─── Launch sequence ──────────────────────────────────────────────────────────
 
-def _run_init_project(repo_path: str, roadmap_seed: str) -> dict:
+def _run_init_project(repo_path: str, roadmap_seed: str, prd_content=None) -> dict:
     """Initialize a project directory (Mode A: new repo, Mode B: existing repo).
 
     Mode A: .git does NOT exist → create full structure, git init, initial commit.
@@ -2714,9 +2885,11 @@ def _run_init_project(repo_path: str, roadmap_seed: str) -> dict:
                 errors_str = "; ".join(e["message"] for e in validation["errors"][:3])
                 return {"ok": False, "error": f"Roadmap invalid: {errors_str}"}
 
-            # Step 5: placeholder files
+            # Step 5: PRD (Ideas handoff or placeholder)
             prd_path = os.path.join(repo_path, "prd.md")
-            if not os.path.exists(prd_path):
+            if prd_content and str(prd_content).strip():
+                atomic_write(prd_path, str(prd_content))
+            elif not os.path.exists(prd_path):
                 atomic_write(prd_path, "# PRD\n\n_To be completed._\n")
             lessons_path = os.path.join(repo_path, "lessons.md")
             if not os.path.exists(lessons_path):
@@ -2760,12 +2933,17 @@ def _run_init_project(repo_path: str, roadmap_seed: str) -> dict:
                     "completed_count": 0, "status": "idle",
                 }, indent=2)),
                 ("roadmap.md", roadmap_seed),
-                ("prd.md", "# PRD\n\n_To be completed._\n"),
                 ("lessons.md", "# Lessons\n\n_Hard-won insights go here._\n"),
             ]:
                 path = os.path.join(repo_path, fname)
                 if not os.path.exists(path):
                     atomic_write(path, content)
+
+            prd_path = os.path.join(repo_path, "prd.md")
+            if prd_content and str(prd_content).strip():
+                atomic_write(prd_path, str(prd_content))
+            elif not os.path.exists(prd_path):
+                atomic_write(prd_path, "# PRD\n\n_To be completed._\n")
 
             metrics_path = os.path.join(repo_path, "metrics.jsonl")
             if not os.path.exists(metrics_path):
@@ -2822,6 +3000,7 @@ async def post_setup_launch(request: Request):
     body = await request.json()
     repo_path = body.get("repo_path", "")
     roadmap_seed = body.get("roadmap_seed", "")
+    prd_content = body.get("prd_content")
     if not repo_path:
         raise HTTPException(status_code=422, detail="repo_path is required")
-    return _run_init_project(repo_path, roadmap_seed)
+    return _run_init_project(repo_path, roadmap_seed, prd_content)

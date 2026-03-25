@@ -150,7 +150,7 @@ class TestApiIdeasMessage:
             with patch("ui.server.aiohttp.ClientSession", return_value=mock_session):
                 # Patch POLL_TIMEOUT to 2s so the test completes quickly
                 with patch("ui.server.POLL_TIMEOUT", 2):
-                    with patch("asyncio.sleep", side_effect=fake_sleep):
+                    with patch("ui.server.asyncio.sleep", side_effect=fake_sleep):
                         response = client.post(
                             "/api/ideas/9/message",
                             json={"content": "Timeout test", "turn": 1},

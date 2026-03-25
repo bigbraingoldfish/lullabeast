@@ -380,6 +380,20 @@ class TestModeBExistingRepo:
         assert (repo_path / "tests").is_dir()
         assert (repo_path / "src" / "myproject").is_dir()
 
+    def test_mode_b_writes_prd_from_handoff(self, tmp_path):
+        """Optional prd_content overwrites missing prd.md with Ideas handoff text."""
+        repo_path = tmp_path / "myproject"
+        self._make_git_repo(repo_path)
+        prd = "# Product requirements\n\n## Problem\nFrom Ideas.\n"
+
+        with patch("ui.server.os.symlink"), \
+             patch("ui.server.os.path.lexists", return_value=False), \
+             patch("ui.server.os.remove"):
+            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, prd)
+
+        assert result["ok"] is True
+        assert (repo_path / "prd.md").read_text() == prd
+
 
 # ---------------------------------------------------------------------------
 # Symlink tests

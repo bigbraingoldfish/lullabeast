@@ -1964,7 +1964,7 @@
                             return;
                         }
                         if (ctx && ctx.navigateToPreflightWithSeed) {
-                            ctx.navigateToPreflightWithSeed(rm);
+                            ctx.navigateToPreflightWithSeed(rm, prdContent || "");
                         }
                     })
                     .catch(() => {
@@ -1976,7 +1976,7 @@
             const proceedContinueAnyway = () => {
                 setShowContinueWarning(false);
                 if (ctx && ctx.navigateToPreflightWithSeed) {
-                    ctx.navigateToPreflightWithSeed(roadmapContent || "");
+                    ctx.navigateToPreflightWithSeed(roadmapContent || "", prdContent || "");
                 }
             };
 
@@ -2853,6 +2853,11 @@
                                     </>
                                 )}
                             </div>
+                            <p className="text-[11px] text-slate-500 leading-relaxed max-w-prose">
+                                Locking checks roadmap format only, not content quality. Run Preflight may write{" "}
+                                <span className="font-mono text-slate-400">roadmap.md</span> and{" "}
+                                <span className="font-mono text-slate-400">prd.md</span> (from Project Ideas) into the repository path and initialize git there. Launch adds pipeline scaffolding and sets the active project symlink.
+                            </p>
                         </div>
                         <div className="flex gap-3 flex-wrap items-start">
                             <div className="flex flex-col gap-1">
@@ -3115,6 +3120,8 @@
             const [repoPathLocked, setRepoPathLocked] = useState(false);
             const [roadmapSeed, setRoadmapSeed] = useState("");
             const [roadmapSeedLocked, setRoadmapSeedLocked] = useState(false);
+            /** PRD text from Project Ideas, passed to preflight + launch when non-empty. */
+            const [launchPrdContent, setLaunchPrdContent] = useState("");
             const [repoPathError, setRepoPathError] = useState("");
             const [roadmapSeedError, setRoadmapSeedError] = useState([]);
             const [preflightChecks, setPreflightChecks] = useState(null);
@@ -3127,11 +3134,12 @@
             const [createFolderError, setCreateFolderError] = useState("");
             const repoPathValidateTimerRef = useRef(null);
 
-            const navigateToPreflightWithSeed = (content) => {
+            const navigateToPreflightWithSeed = (content, prdText) => {
                 const text = content || "";
                 setSeedRoadmap(text);
                 setRoadmapSeed(text);
                 setRoadmapSeedLocked(!!text.trim());
+                setLaunchPrdContent(typeof prdText === "string" ? prdText : "");
                 setCurrentScreen("preflight");
             };
 
@@ -3140,6 +3148,7 @@
                     setSeedRoadmap("");
                     setRoadmapSeed("");
                     setRoadmapSeedLocked(false);
+                    setLaunchPrdContent("");
                     setRepoPathError("");
                     setRoadmapSeedError([]);
                     setPreflightChecks(null);
@@ -3306,10 +3315,17 @@
 
             const onRunPreflight = () => {
                 setPreflightChecks(null);
+                const body = { repo_path: (repoPath || "").trim() };
+                if (roadmapSeedLocked && (roadmapSeed || "").trim()) {
+                    body.roadmap_seed = roadmapSeed;
+                }
+                if ((launchPrdContent || "").trim()) {
+                    body.prd_content = launchPrdContent;
+                }
                 fetch("/api/setup/preflight", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ repo_path: (repoPath || "").trim() }),
+                    body: JSON.stringify(body),
                 })
                     .then(async (r) => {
                         const d = await r.json().catch(() => ({}));
@@ -3341,10 +3357,14 @@
             const onLaunch = () => {
                 setLaunchError("");
                 setLaunchLoading(true);
+                const launchBody = { repo_path: repoPath, roadmap_seed: roadmapSeed };
+                if ((launchPrdContent || "").trim()) {
+                    launchBody.prd_content = launchPrdContent;
+                }
                 fetch("/api/setup/launch", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ repo_path: repoPath, roadmap_seed: roadmapSeed }),
+                    body: JSON.stringify(launchBody),
                 })
                     .then((r) => r.json())
                     .then((d) => {
