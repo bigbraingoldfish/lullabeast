@@ -7,13 +7,13 @@ import os
 import re
 import uuid
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import asyncio
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse
 from contextlib import asynccontextmanager
 
 from ui.roadmap_parser import parse_roadmap
@@ -551,6 +551,232 @@ def _check_orchestrator_liveness(lock_path):
         return True
 
 
+# Whitelisted filenames under project root for user-confirmed destructive repair (switch-project).
+_SWITCH_DESTRUCTIVE_WHITELIST = frozenset({"current_phase.json", "phase_state.json"})
+
+
+def _expand_lock_path(config: dict) -> str | None:
+    lp = config.get("lock_path")
+    return os.path.expanduser(lp) if lp else None
+
+
+def _clean_pipeline_state_for_project(project_real: str) -> dict:
+    """Match orchestrator.py reset template when switching projects."""
+    return {
+        "current_phase": 0,
+        "current_phase_raw_id": "",
+        "current_agent": "planner",
+        "planner_retries": 0,
+        "executor_retries": 0,
+        "reviewer_retries": 0,
+        "last_action": "initialized for new project",
+        "last_action_timestamp": datetime.now(timezone.utc).isoformat(),
+        "pipeline_status": "RUNNING",
+        "project_path": project_real,
+    }
+
+
+def _write_json_atomic(path: str, obj: dict) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f, indent=2)
+    os.replace(tmp, path)
+
+
+def _spawn_orchestrator(project_path: str, config: dict | None = None) -> dict:
+    """Start orchestrator.py with --project-path. Returns {"ok": bool, "error": str|None}."""
+    import subprocess
+
+    if config is None:
+        config = load_config()
+    autodev_repo_path = config.get("autodev_repo_path", "/home/pi/.openclaw")
+    orchestrator_script = os.path.join(autodev_repo_path, "orchestrator.py")
+    if not os.path.exists(orchestrator_script):
+        return {"ok": False, "error": f"orchestrator.py not found at {orchestrator_script}"}
+    log_file = open("/tmp/orchestrator.log", "a")
+    subprocess.Popen(
+        ["python", orchestrator_script, "--project-path", project_path],
+        cwd=autodev_repo_path,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+    )
+    return {"ok": True, "error": None}
+
+
+def _ui_recent_projects_path() -> str:
+    # Join after expanding ~ only so test patches that match ".openclaw" substrings still get a file path.
+    return os.path.join(os.path.expanduser("~"), ".openclaw", "ui_recent_projects.json")
+
+
+def _read_recent_projects() -> list:
+    path = _ui_recent_projects_path()
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return data
+    except (OSError, json.JSONDecodeError):
+        pass
+    return []
+
+
+def _write_recent_projects_atomic(entries: list) -> None:
+    path = _ui_recent_projects_path()
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(entries, f, indent=2)
+    os.replace(tmp, path)
+
+
+def append_recent_project(repo_abs: str) -> None:
+    """Record repo_abs (realpath) at the front of the recent-projects list (cap 20)."""
+    repo_abs = os.path.realpath(os.path.expanduser(repo_abs))
+    entries = _read_recent_projects()
+    now = datetime.utcnow().isoformat() + "Z"
+    entries = [e for e in entries if isinstance(e, dict) and e.get("path") != repo_abs]
+    entries.insert(0, {"path": repo_abs, "last_used": now})
+    entries = entries[:20]
+    _write_recent_projects_atomic(entries)
+
+
+def _glob_project_roadmap_paths(repo_abs: str) -> list:
+    import glob as glob_mod
+
+    return sorted(glob_mod.glob(os.path.join(repo_abs, "*oadmap*.md")))
+
+
+def _recommended_keep_roadmap_basename(repo_abs: str) -> str:
+    paths = _glob_project_roadmap_paths(repo_abs)
+    if not paths:
+        return "roadmap.md"
+    basenames = {os.path.basename(p) for p in paths}
+    if "roadmap.md" in basenames:
+        return "roadmap.md"
+    best = max(paths, key=lambda p: os.path.getmtime(p))
+    return os.path.basename(best)
+
+
+def _archive_extra_roadmaps(repo_abs: str, keep_basename: str) -> None:
+    """Move every *oadmap*.md except keep_basename into repo_abs/autodev_archive/."""
+    archive_dir = os.path.join(repo_abs, "autodev_archive")
+    os.makedirs(archive_dir, exist_ok=True)
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    for p in _glob_project_roadmap_paths(repo_abs):
+        base = os.path.basename(p)
+        if base == keep_basename:
+            continue
+        dest_name = f"{ts}_{base}"
+        dest = os.path.join(archive_dir, dest_name)
+        while os.path.exists(dest):
+            dest_name = f"{ts}_{uuid.uuid4().hex[:8]}_{base}"
+            dest = os.path.join(archive_dir, dest_name)
+        os.replace(p, dest)
+
+
+def _canonical_roadmap_path(repo_abs: str) -> str | None:
+    paths = _glob_project_roadmap_paths(repo_abs)
+    if not paths:
+        return None
+    if len(paths) == 1:
+        return paths[0]
+    if os.path.exists(os.path.join(repo_abs, "roadmap.md")):
+        return os.path.join(repo_abs, "roadmap.md")
+    return paths[0]
+
+
+def _validate_project_coherence(repo_abs: str) -> dict:
+    """Return {"ok": bool, "issues": list} for roadmap vs current_phase.json."""
+    rpath = _canonical_roadmap_path(repo_abs)
+    if not rpath or not os.path.exists(rpath):
+        return {
+            "ok": False,
+            "issues": [
+                {
+                    "kind": "missing_roadmap",
+                    "detail": "No readable roadmap (*oadmap*.md) in project directory.",
+                    "destructive_options": [],
+                }
+            ],
+        }
+    phases = parse_roadmap(rpath)
+    phase_ids = {p["id"] for p in phases}
+    cp = os.path.join(repo_abs, "current_phase.json")
+    if not os.path.exists(cp):
+        return {"ok": True, "issues": []}
+    try:
+        with open(cp) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "ok": False,
+            "issues": [
+                {
+                    "kind": "unreadable_current_phase",
+                    "detail": str(exc),
+                    "destructive_options": ["current_phase.json"],
+                }
+            ],
+        }
+    raw_id = data.get("raw_id") or data.get("current_phase_raw_id")
+    if not raw_id:
+        return {
+            "ok": False,
+            "issues": [
+                {
+                    "kind": "current_phase_missing_raw_id",
+                    "detail": "current_phase.json has no raw_id.",
+                    "destructive_options": ["current_phase.json"],
+                }
+            ],
+        }
+    if raw_id not in phase_ids:
+        return {
+            "ok": False,
+            "issues": [
+                {
+                    "kind": "phase_not_in_roadmap",
+                    "detail": f"Phase {raw_id!r} is not in the roadmap.",
+                    "destructive_options": ["current_phase.json", "phase_state.json"],
+                }
+            ],
+        }
+    return {"ok": True, "issues": []}
+
+
+def _apply_destructive_project_files(repo_abs: str, names: list) -> tuple[bool, str]:
+    for n in names:
+        if n not in _SWITCH_DESTRUCTIVE_WHITELIST:
+            return False, f"Destructive action not allowed for {n!r}"
+        p = os.path.join(repo_abs, n)
+        if os.path.lexists(p):
+            try:
+                os.remove(p)
+            except OSError as exc:
+                return False, str(exc)
+    return True, ""
+
+
+def _pipeline_allows_project_switch() -> tuple[bool, str | None]:
+    """True when global pipeline_state allows switching project (STOPPED/UNKNOWN/missing)."""
+    config = load_config()
+    psp = config.get("pipeline_state_path")
+    psp = os.path.expanduser(psp) if psp else None
+    if not psp or not os.path.exists(psp):
+        return True, None
+    st = _read_json_file(psp)
+    if not st:
+        return True, None
+    ps = st.get("pipeline_status")
+    if ps in ("STOPPED", "UNKNOWN", None):
+        return True, None
+    return False, ps
+
+
 def _determine_event_source(events_path):
     """Determine the event source based on whether the events file exists.
     
@@ -1038,10 +1264,10 @@ def post_resume_orchestrator():
     """Spawn the orchestrator process as a non-blocking subprocess.
 
     Reads project_path from pipeline_state.json and autodev_repo_path from config.
+    If pipeline_state.project_path disagrees with the pipeline-project symlink target,
+    uses the symlink realpath so resume targets the active project directory.
     Returns 200 immediately without waiting for the orchestrator to start.
     """
-    import subprocess
-
     config = load_config()
     pipeline_state_path = config.get("pipeline_state_path")
     pipeline_state_path = os.path.expanduser(pipeline_state_path) if pipeline_state_path else None
@@ -1049,25 +1275,31 @@ def post_resume_orchestrator():
     pipeline_state = _read_json_file(pipeline_state_path) if pipeline_state_path else {}
     project_path = pipeline_state.get("project_path") if pipeline_state else None
 
+    project_dir = config.get("project_dir_path") or config.get("symlink_target") or config.get("project_dir")
+    project_dir = os.path.expanduser(project_dir) if project_dir else None
+    symlink_real = None
+    if project_dir:
+        try:
+            symlink_real = os.path.realpath(project_dir)
+        except OSError:
+            symlink_real = None
+
+    if symlink_real and project_path:
+        try:
+            state_real = os.path.realpath(os.path.expanduser(str(project_path)))
+        except OSError:
+            state_real = str(project_path)
+        if state_real != symlink_real:
+            project_path = symlink_real
+    elif symlink_real and not project_path:
+        project_path = symlink_real
+
     if not project_path:
         raise HTTPException(status_code=503, detail="No project_path in pipeline_state.json")
 
-    autodev_repo_path = config.get("autodev_repo_path", "/home/pi/.openclaw")
-    orchestrator_script = os.path.join(autodev_repo_path, "orchestrator.py")
-
-    if not os.path.exists(orchestrator_script):
-        raise HTTPException(
-            status_code=503,
-            detail=f"orchestrator.py not found at {orchestrator_script}"
-        )
-
-    log_file = open("/tmp/orchestrator.log", "a")
-    subprocess.Popen(
-        ["python", orchestrator_script, "--project-path", project_path],
-        cwd=autodev_repo_path,
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-    )
+    spawned = _spawn_orchestrator(project_path, config)
+    if not spawned.get("ok"):
+        raise HTTPException(status_code=503, detail=spawned.get("error") or "Failed to spawn orchestrator")
 
     return {"ok": True}
 
@@ -2793,14 +3025,17 @@ def _run_preflight_checks(repo_path: str) -> list:
 async def post_setup_preflight(request: Request):
     """Run preflight validation checks for a project directory.
 
-    Body: {"repo_path": str, "roadmap_seed": str optional, "prd_content": str optional}
-    When roadmap_seed / prd_content are provided, valid content is written to disk before checks.
-    Returns: {"checks": [{"check": str, "status": str, "message": str}]}
+    Body: {"repo_path": str, "roadmap_seed": optional, "prd_content": optional,
+           "confirm_roadmap_archive": optional bool, "keep_filename": optional str}
+    When multiple *oadmap*.md exist, returns roadmap_ambiguous until confirm_roadmap_archive.
+    Returns: {"checks": [...], optional roadmap_ambiguous, roadmap_files, recommended_keep}
     """
     body = await request.json()
     repo_path = body.get("repo_path", "")
     roadmap_seed = body.get("roadmap_seed")
     prd_content = body.get("prd_content")
+    confirm_roadmap_archive = bool(body.get("confirm_roadmap_archive"))
+    keep_filename = body.get("keep_filename")
     if not repo_path:
         raise HTTPException(status_code=422, detail="repo_path is required")
     repo_abs = os.path.realpath(os.path.expanduser(repo_path.strip()))
@@ -2808,6 +3043,34 @@ async def post_setup_preflight(request: Request):
         os.makedirs(repo_abs, exist_ok=True)
     except OSError as exc:
         raise HTTPException(status_code=422, detail=f"Cannot use repo path: {exc}") from exc
+
+    roadmap_paths = _glob_project_roadmap_paths(repo_abs)
+    if len(roadmap_paths) > 1:
+        basenames = [os.path.basename(p) for p in roadmap_paths]
+        if not confirm_roadmap_archive:
+            rk = _recommended_keep_roadmap_basename(repo_abs)
+            return {
+                "checks": [
+                    {
+                        "check": "roadmap files",
+                        "status": "warn",
+                        "message": (
+                            f"Multiple roadmap files: {', '.join(basenames)}. "
+                            "Confirm to archive extras under autodev_archive/."
+                        ),
+                    }
+                ],
+                "roadmap_ambiguous": True,
+                "roadmap_files": basenames,
+                "recommended_keep": rk,
+            }
+        keep = (keep_filename or _recommended_keep_roadmap_basename(repo_abs)).strip()
+        if keep not in basenames:
+            raise HTTPException(
+                status_code=422,
+                detail=f"keep_filename must be one of: {', '.join(basenames)}",
+            )
+        _archive_extra_roadmaps(repo_abs, keep)
 
     mat = _preflight_materialize(repo_abs, roadmap_seed, prd_content)
     if any(c.get("status") == "fail" for c in mat):
@@ -2825,7 +3088,166 @@ async def post_setup_preflight(request: Request):
         })
 
     checks = _run_preflight_checks(repo_abs)
-    return {"checks": header_checks + mat + checks}
+    all_checks = header_checks + mat + checks
+    if not any(c.get("status") == "fail" for c in all_checks):
+        append_recent_project(repo_abs)
+    return {"checks": all_checks}
+
+
+@app.get("/api/setup/recent-projects")
+def get_setup_recent_projects():
+    """Recent project directories (real paths) that passed preflight or switch validation."""
+    return {"projects": _read_recent_projects()}
+
+
+@app.post("/api/setup/switch-project")
+async def post_setup_switch_project(request: Request):
+    """Validate and optionally switch active project (pipeline must be STOPPED).
+
+    Body: repo_path, optional roadmap_seed/prd_content, confirm_roadmap_archive, keep_filename,
+          confirm_destructive (list of basenames), start_orchestrator (bool).
+    """
+    allowed, cur_status = _pipeline_allows_project_switch()
+    if not allowed:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Stop the pipeline before changing the project directory "
+                f"(current status: {cur_status})."
+            ),
+        )
+
+    body = await request.json()
+    repo_path = (body.get("repo_path") or "").strip()
+    roadmap_seed = body.get("roadmap_seed")
+    prd_content = body.get("prd_content")
+    confirm_roadmap_archive = bool(body.get("confirm_roadmap_archive"))
+    keep_filename = body.get("keep_filename")
+    confirm_destructive = body.get("confirm_destructive")
+    if confirm_destructive is None:
+        confirm_destructive = []
+    if not isinstance(confirm_destructive, list):
+        raise HTTPException(status_code=422, detail="confirm_destructive must be a list")
+    start_orchestrator = bool(body.get("start_orchestrator"))
+
+    if not repo_path:
+        raise HTTPException(status_code=422, detail="repo_path is required")
+
+    repo_abs = os.path.realpath(os.path.expanduser(repo_path))
+    try:
+        os.makedirs(repo_abs, exist_ok=True)
+    except OSError as exc:
+        raise HTTPException(status_code=422, detail=f"Cannot use repo path: {exc}") from exc
+
+    roadmap_paths = _glob_project_roadmap_paths(repo_abs)
+    if len(roadmap_paths) > 1:
+        basenames = [os.path.basename(p) for p in roadmap_paths]
+        if not confirm_roadmap_archive:
+            return {
+                "ok": False,
+                "roadmap_ambiguous": True,
+                "roadmap_files": basenames,
+                "recommended_keep": _recommended_keep_roadmap_basename(repo_abs),
+            }
+        keep = (keep_filename or _recommended_keep_roadmap_basename(repo_abs)).strip()
+        if keep not in basenames:
+            raise HTTPException(
+                status_code=422,
+                detail=f"keep_filename must be one of: {', '.join(basenames)}",
+            )
+        _archive_extra_roadmaps(repo_abs, keep)
+
+    mat = _preflight_materialize(repo_abs, roadmap_seed, prd_content)
+    if any(c.get("status") == "fail" for c in mat):
+        return {"ok": False, "checks": mat, "coherence": None}
+
+    checks = _run_preflight_checks(repo_abs)
+    all_pre = mat + checks
+    if any(c.get("status") == "fail" for c in checks):
+        return {"ok": False, "checks": all_pre, "coherence": None}
+
+    coherence = _validate_project_coherence(repo_abs)
+    if not coherence.get("ok"):
+        if confirm_destructive:
+            ok_del, err = _apply_destructive_project_files(repo_abs, confirm_destructive)
+            if not ok_del:
+                return {
+                    "ok": False,
+                    "checks": all_pre,
+                    "coherence": {"ok": False, "issues": coherence.get("issues", [])},
+                    "destructive_error": err,
+                }
+            coherence = _validate_project_coherence(repo_abs)
+        if not coherence.get("ok"):
+            return {
+                "ok": False,
+                "checks": all_pre,
+                "coherence": {"ok": False, "issues": coherence.get("issues", [])},
+            }
+
+    append_recent_project(repo_abs)
+
+    if not start_orchestrator:
+        return {
+            "ok": True,
+            "checks": all_pre,
+            "coherence": {"ok": True, "issues": []},
+            "ready_to_start": True,
+        }
+
+    config = load_config()
+    lock_path = _expand_lock_path(config)
+    if lock_path and _check_orchestrator_liveness(lock_path):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "ok": False,
+                "code": "orchestrator_running",
+                "error": (
+                    "An orchestrator is already running. Stop it before starting the pipeline "
+                    "for this project."
+                ),
+            },
+        )
+
+    pipeline_state_path = config.get("pipeline_state_path")
+    pipeline_state_path = os.path.expanduser(pipeline_state_path) if pipeline_state_path else None
+    if not pipeline_state_path:
+        return {
+            "ok": False,
+            "checks": all_pre,
+            "coherence": {"ok": True, "issues": []},
+            "error": "pipeline_state_path is not configured",
+        }
+
+    parent = os.path.dirname(pipeline_state_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    try:
+        _write_json_atomic(pipeline_state_path, _clean_pipeline_state_for_project(repo_abs))
+    except OSError as exc:
+        return {
+            "ok": False,
+            "checks": all_pre,
+            "coherence": {"ok": True, "issues": []},
+            "error": f"Could not write pipeline_state.json: {exc}",
+        }
+
+    spawned = _spawn_orchestrator(repo_abs, config)
+    if not spawned.get("ok"):
+        return {
+            "ok": False,
+            "checks": all_pre,
+            "coherence": {"ok": True, "issues": []},
+            "error": spawned.get("error") or "Failed to spawn orchestrator",
+        }
+
+    return {
+        "ok": True,
+        "checks": all_pre,
+        "coherence": {"ok": True, "issues": []},
+        "started": True,
+    }
 
 
 # ─── Launch sequence ──────────────────────────────────────────────────────────
@@ -2991,11 +3413,10 @@ def _run_init_project(repo_path: str, roadmap_seed: str, prd_content=None) -> di
 
 @app.post("/api/setup/launch")
 async def post_setup_launch(request: Request):
-    """Initialize project directory and set pipeline-project symlink.
+    """Initialize project directory, set symlink, sync pipeline_state.json, spawn orchestrator.
 
-    Body: {"repo_path": str, "roadmap_seed": str}
-    Returns: {"ok": bool, "error": str|null}
-    Synchronous/blocking (completes in under 5 seconds).
+    Body: {"repo_path": str, "roadmap_seed": str, "prd_content": optional}
+    Returns: {"ok": bool, "error": str|null}; 409 with code orchestrator_running if lock held.
     """
     body = await request.json()
     repo_path = body.get("repo_path", "")
@@ -3003,4 +3424,44 @@ async def post_setup_launch(request: Request):
     prd_content = body.get("prd_content")
     if not repo_path:
         raise HTTPException(status_code=422, detail="repo_path is required")
-    return _run_init_project(repo_path, roadmap_seed, prd_content)
+
+    result = _run_init_project(repo_path, roadmap_seed, prd_content)
+    if not result.get("ok"):
+        return result
+
+    project_real = os.path.realpath(os.path.expanduser(repo_path.strip()))
+    config = load_config()
+    lock_path = _expand_lock_path(config)
+    if lock_path and _check_orchestrator_liveness(lock_path):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "ok": False,
+                "error": (
+                    "An orchestrator is already running. Stop the pipeline or wait before launching a new project."
+                ),
+                "code": "orchestrator_running",
+            },
+        )
+
+    pipeline_state_path = config.get("pipeline_state_path")
+    pipeline_state_path = os.path.expanduser(pipeline_state_path) if pipeline_state_path else None
+    if not pipeline_state_path:
+        return {
+            "ok": False,
+            "error": "pipeline_state_path is not configured; cannot sync state or start orchestrator.",
+        }
+
+    parent = os.path.dirname(pipeline_state_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    try:
+        _write_json_atomic(pipeline_state_path, _clean_pipeline_state_for_project(project_real))
+    except OSError as exc:
+        return {"ok": False, "error": f"Could not write pipeline_state.json: {exc}"}
+
+    spawned = _spawn_orchestrator(project_real, config)
+    if not spawned.get("ok"):
+        return {"ok": False, "error": spawned.get("error") or "Failed to spawn orchestrator"}
+
+    return {"ok": True, "error": None}

@@ -2653,6 +2653,8 @@
                 onRepoPathConfirm,
                 onRoadmapSeedConfirm,
                 onRunPreflight,
+                onConfirmRoadmapArchive,
+                preflightRoadmapAmbiguous,
                 preflightChecks,
                 onLaunch,
                 launchError,
@@ -2859,6 +2861,26 @@
                                 <span className="font-mono text-slate-400">prd.md</span> (from Project Ideas) into the repository path and initialize git there. Launch adds pipeline scaffolding and sets the active project symlink.
                             </p>
                         </div>
+                        {preflightRoadmapAmbiguous && (
+                            <div className="rounded border border-amber-600/80 bg-amber-950/40 px-3 py-3 text-sm text-amber-100 space-y-2">
+                                <p>
+                                    Multiple roadmap files found:{" "}
+                                    <span className="font-mono text-xs">
+                                        {(preflightRoadmapAmbiguous.roadmap_files || []).join(", ")}
+                                    </span>
+                                    . Keep <span className="font-mono">{preflightRoadmapAmbiguous.recommended_keep}</span>{" "}
+                                    and move the rest into <span className="font-mono">autodev_archive/</span>.
+                                </p>
+                                <button
+                                    type="button"
+                                    onClick={onConfirmRoadmapArchive}
+                                    disabled={!repoPathLocked || !roadmapSeedLocked}
+                                    className="header-text text-xs px-3 py-1.5 rounded bg-amber-900/60 border border-amber-600 text-amber-50 disabled:opacity-40"
+                                >
+                                    Archive extras &amp; continue preflight
+                                </button>
+                            </div>
+                        )}
                         <div className="flex gap-3 flex-wrap items-start">
                             <div className="flex flex-col gap-1">
                                 <button
@@ -2921,6 +2943,17 @@
             const [lastUpdate, setLastUpdate] = useState(null);
             const [showStopModal, setShowStopModal] = useState(false);
             const [stopRequested, setStopRequested] = useState(false);
+            const [projectSwitchOpen, setProjectSwitchOpen] = useState(false);
+            const [swPath, setSwPath] = useState("");
+            const [swRecents, setSwRecents] = useState([]);
+            const [swBusy, setSwBusy] = useState(false);
+            const [swErr, setSwErr] = useState("");
+            const [swChecks, setSwChecks] = useState(null);
+            const [swCoherence, setSwCoherence] = useState(null);
+            const [swReady, setSwReady] = useState(false);
+            const [swRoadmapAmbiguous, setSwRoadmapAmbiguous] = useState(null);
+            const [swDestructiveSelected, setSwDestructiveSelected] = useState([]);
+            const swPendingRef = useRef({});
 
             useEffect(() => {
                 fetchState();
@@ -2941,6 +2974,116 @@
                     setStopRequested(false);
                 }
             }, [pState.pipeline_status]);
+
+            useEffect(() => {
+                if (!projectSwitchOpen) return;
+                fetch("/api/setup/recent-projects")
+                    .then((r) => r.json())
+                    .then((d) => setSwRecents(Array.isArray(d.projects) ? d.projects : []))
+                    .catch(() => setSwRecents([]));
+            }, [projectSwitchOpen]);
+
+            function openProjectSwitch() {
+                swPendingRef.current = {};
+                setSwErr("");
+                setSwChecks(null);
+                setSwCoherence(null);
+                setSwReady(false);
+                setSwRoadmapAmbiguous(null);
+                setSwDestructiveSelected([]);
+                setSwPath(pState.project_path || "");
+                setProjectSwitchOpen(true);
+            }
+
+            function closeProjectSwitch() {
+                setProjectSwitchOpen(false);
+                swPendingRef.current = {};
+            }
+
+            function postSwitchProject(body) {
+                setSwBusy(true);
+                setSwErr("");
+                fetch("/api/setup/switch-project", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(body),
+                })
+                    .then(async (r) => {
+                        const d = await r.json().catch(() => ({}));
+                        setSwBusy(false);
+                        if (r.status === 409) {
+                            const msg =
+                                typeof d.detail === "string"
+                                    ? d.detail
+                                    : d.error || "Stop the pipeline before switching project.";
+                            setSwErr(msg);
+                            return;
+                        }
+                        if (d.destructive_error) {
+                            setSwErr(String(d.destructive_error));
+                            return;
+                        }
+                        if (d.roadmap_ambiguous) {
+                            setSwRoadmapAmbiguous(d);
+                            setSwCoherence(null);
+                            setSwReady(false);
+                            setSwChecks(d.checks || null);
+                            return;
+                        }
+                        setSwRoadmapAmbiguous(null);
+                        setSwChecks(d.checks || null);
+                        setSwCoherence(d.coherence || null);
+                        if (d.ok && d.started) {
+                            closeProjectSwitch();
+                            fetchState();
+                            fetchRoadmap();
+                            fetchMetricsSummary();
+                            return;
+                        }
+                        if (d.ok && d.ready_to_start) {
+                            const n = { ...swPendingRef.current };
+                            if (body.confirm_roadmap_archive) {
+                                n.confirm_roadmap_archive = true;
+                                if (body.keep_filename) n.keep_filename = body.keep_filename;
+                            }
+                            if (body.confirm_destructive) {
+                                n.confirm_destructive = body.confirm_destructive;
+                            }
+                            swPendingRef.current = n;
+                            setSwReady(true);
+                            return;
+                        }
+                        if (!d.ok && d.coherence && d.coherence.ok === false) {
+                            setSwReady(false);
+                            const opts = [];
+                            const seen = new Set();
+                            for (const iss of d.coherence.issues || []) {
+                                for (const o of iss.destructive_options || []) {
+                                    if (!seen.has(o)) {
+                                        seen.add(o);
+                                        opts.push(o);
+                                    }
+                                }
+                            }
+                            if (opts.length === 0) {
+                                const iss0 = (d.coherence.issues || [])[0];
+                                setSwErr(
+                                    iss0
+                                        ? `${iss0.kind}: ${iss0.detail}`
+                                        : "Coherence check failed (no automatic fix available)."
+                                );
+                                return;
+                            }
+                            setSwDestructiveSelected(opts);
+                            return;
+                        }
+                        setSwErr(d.error || "Switch project failed");
+                    })
+                    .catch((e) => {
+                        setSwBusy(false);
+                        setSwErr(String(e));
+                    });
+            }
 
             function fetchState() {
                 fetch('/api/state')
@@ -3007,14 +3150,52 @@
 
             const segments = (pState.project_path || '').split('/').filter(s => s);
             const projectDisplay = segments.slice(-2).join('/') || '--/--';
+            const pathInteractive = status === "STOPPED" || status === "UNKNOWN";
+            const showMustStopForPath =
+                !pathInteractive && (status === "RUNNING" || status === "WAITING_FOR_SENTINEL");
+            const showGenericPathBlock =
+                !pathInteractive && !showMustStopForPath && status !== "Loading...";
+
+            const swDestructiveOptions = [];
+            const swSeen = new Set();
+            if (swCoherence && swCoherence.issues) {
+                for (const iss of swCoherence.issues) {
+                    for (const o of iss.destructive_options || []) {
+                        if (!swSeen.has(o)) {
+                            swSeen.add(o);
+                            swDestructiveOptions.push(o);
+                        }
+                    }
+                }
+            }
 
             return (
                 <div className="grid grid-rows-[auto_1fr_auto_auto] h-full overflow-hidden">
                     {/* Header bar */}
                     <header className="bg-[#141618] border-b border-[#1a1d21] px-6 py-4">
                         <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-6">
-                                <span className="header-text text-sm text-slate-500 font-mono">{projectDisplay}</span>
+                            <div className="flex flex-col items-start gap-1 gap-x-6 sm:flex-row sm:items-center">
+                                {pathInteractive ? (
+                                    <button
+                                        type="button"
+                                        onClick={openProjectSwitch}
+                                        className="header-text text-sm text-[#00b4d8] font-mono hover:underline text-left focus:outline-none focus:ring-2 focus:ring-[#00b4d8]/50 rounded"
+                                    >
+                                        {projectDisplay}
+                                    </button>
+                                ) : (
+                                    <span className="header-text text-sm text-slate-500 font-mono">{projectDisplay}</span>
+                                )}
+                                {showMustStopForPath ? (
+                                    <span className="header-text text-xs text-slate-500 max-w-md">
+                                        Stop the pipeline before you can change the project directory.
+                                    </span>
+                                ) : null}
+                                {showGenericPathBlock ? (
+                                    <span className="header-text text-xs text-slate-500 max-w-md">
+                                        The pipeline must be stopped before you can change the project directory.
+                                    </span>
+                                ) : null}
                             </div>
                             <div className="flex items-center gap-3">
                                 {showStopButton && !stopRequested && (
@@ -3107,6 +3288,190 @@
                             onDismiss={() => setShowStopModal(false)}
                         />
                     )}
+
+                    {projectSwitchOpen && (
+                        <div
+                            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+                            role="dialog"
+                            aria-modal="true"
+                            aria-labelledby="switch-project-title"
+                        >
+                            <div className="bg-[#141618] border border-[#1a1d21] rounded-lg max-w-lg w-full max-h-[90vh] overflow-y-auto p-5">
+                                <h2 id="switch-project-title" className="header-text text-lg text-slate-200 mb-3">
+                                    Switch project
+                                </h2>
+                                <p className="text-xs text-slate-500 mb-3">
+                                    Run preflight checks and coherence validation, then start the pipeline for this directory.
+                                </p>
+                                <label className="text-xs text-slate-500 header-text block mb-1">Absolute project path</label>
+                                <input
+                                    type="text"
+                                    value={swPath}
+                                    onChange={(e) => setSwPath(e.target.value)}
+                                    className="w-full rounded border border-[#1a1d21] px-3 py-2 text-sm bg-[#1a1d21] text-slate-200 mb-2 font-mono"
+                                />
+                                {swRecents.length > 0 ? (
+                                    <div className="mb-3">
+                                        <label className="text-xs text-slate-500 header-text">Recent</label>
+                                        <select
+                                            className="mt-1 w-full rounded border border-[#1a1d21] px-2 py-1.5 text-xs bg-[#0d0f12] text-slate-300"
+                                            value=""
+                                            onChange={(e) => {
+                                                if (e.target.value) setSwPath(e.target.value);
+                                            }}
+                                        >
+                                            <option value="">Select a recent project…</option>
+                                            {swRecents.map((p, i) => (
+                                                <option key={i} value={p.path || ""}>
+                                                    {p.path || ""}
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                ) : null}
+                                {swErr ? <p className="text-red-400 text-sm mb-2 whitespace-pre-wrap">{swErr}</p> : null}
+                                {swRoadmapAmbiguous ? (
+                                    <div className="rounded border border-amber-700/60 bg-amber-950/30 p-3 mb-3 text-sm text-amber-100">
+                                        <p className="mb-2">
+                                            Multiple roadmaps: {(swRoadmapAmbiguous.roadmap_files || []).join(", ")}. Keep{" "}
+                                            <span className="font-mono">{swRoadmapAmbiguous.recommended_keep}</span> and
+                                            archive the rest under <span className="font-mono">autodev_archive/</span>.
+                                        </p>
+                                        <button
+                                            type="button"
+                                            disabled={swBusy}
+                                            onClick={() => {
+                                                const keep = swRoadmapAmbiguous.recommended_keep;
+                                                const merged = {
+                                                    ...swPendingRef.current,
+                                                    confirm_roadmap_archive: true,
+                                                    keep_filename: keep,
+                                                };
+                                                swPendingRef.current = merged;
+                                                postSwitchProject({
+                                                    repo_path: (swPath || "").trim(),
+                                                    start_orchestrator: false,
+                                                    ...merged,
+                                                });
+                                            }}
+                                            className="header-text text-xs px-3 py-1.5 rounded bg-amber-900/60 border border-amber-600 text-amber-50 disabled:opacity-40"
+                                        >
+                                            Archive extras &amp; continue
+                                        </button>
+                                    </div>
+                                ) : null}
+                                {swCoherence && swCoherence.ok === false && swDestructiveOptions.length > 0 ? (
+                                    <div className="rounded border border-[#2a2d31] p-3 mb-3 text-sm text-slate-300">
+                                        <p className="mb-2 text-slate-400">Coherence issues — allow deleting whitelisted files to continue:</p>
+                                        <ul className="mb-2 space-y-1">
+                                            {(swCoherence.issues || []).map((iss, idx) => (
+                                                <li key={idx} className="text-xs">
+                                                    <span className="font-mono text-amber-400">{iss.kind}</span>: {iss.detail}
+                                                </li>
+                                            ))}
+                                        </ul>
+                                        {swDestructiveOptions.map((name) => (
+                                            <label key={name} className="flex items-center gap-2 text-xs mb-1 cursor-pointer">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={swDestructiveSelected.includes(name)}
+                                                    onChange={(e) => {
+                                                        if (e.target.checked) {
+                                                            setSwDestructiveSelected((s) =>
+                                                                s.includes(name) ? s : [...s, name]
+                                                            );
+                                                        } else {
+                                                            setSwDestructiveSelected((s) => s.filter((x) => x !== name));
+                                                        }
+                                                    }}
+                                                />
+                                                <span className="font-mono">{name}</span>
+                                            </label>
+                                        ))}
+                                        <button
+                                            type="button"
+                                            disabled={swBusy || swDestructiveSelected.length === 0}
+                                            onClick={() => {
+                                                const merged = {
+                                                    ...swPendingRef.current,
+                                                    confirm_destructive: swDestructiveSelected,
+                                                };
+                                                swPendingRef.current = merged;
+                                                postSwitchProject({
+                                                    repo_path: (swPath || "").trim(),
+                                                    start_orchestrator: false,
+                                                    ...merged,
+                                                });
+                                            }}
+                                            className="mt-2 header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-[#0d0f12] disabled:opacity-40"
+                                        >
+                                            Apply selected fixes &amp; re-validate
+                                        </button>
+                                    </div>
+                                ) : null}
+                                {swChecks && swChecks.length > 0 && !swRoadmapAmbiguous ? (
+                                    <ul className="space-y-1 text-xs mb-3 max-h-40 overflow-y-auto border border-[#1a1d21] rounded p-2">
+                                        {swChecks.map((c, i) => (
+                                            <li
+                                                key={i}
+                                                className={
+                                                    c.status === "fail"
+                                                        ? "text-red-400"
+                                                        : c.status === "warn"
+                                                          ? "text-amber-400"
+                                                          : c.status === "fixed"
+                                                            ? "text-[#00b4d8]"
+                                                            : "text-emerald-400"
+                                                }
+                                            >
+                                                [{c.status}] {c.check}: {c.message}
+                                            </li>
+                                        ))}
+                                    </ul>
+                                ) : null}
+                                <div className="flex flex-wrap gap-2 justify-end">
+                                    <button
+                                        type="button"
+                                        onClick={closeProjectSwitch}
+                                        className="header-text text-sm px-3 py-1.5 rounded border border-[#1a1d21] text-slate-400"
+                                    >
+                                        Close
+                                    </button>
+                                    {!swReady ? (
+                                        <button
+                                            type="button"
+                                            disabled={swBusy || !(swPath || "").trim()}
+                                            onClick={() =>
+                                                postSwitchProject({
+                                                    repo_path: (swPath || "").trim(),
+                                                    start_orchestrator: false,
+                                                    ...swPendingRef.current,
+                                                })
+                                            }
+                                            className="header-text text-sm px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 disabled:opacity-40"
+                                        >
+                                            {swBusy ? "Working…" : "Switch & run checks"}
+                                        </button>
+                                    ) : (
+                                        <button
+                                            type="button"
+                                            disabled={swBusy}
+                                            onClick={() =>
+                                                postSwitchProject({
+                                                    repo_path: (swPath || "").trim(),
+                                                    start_orchestrator: true,
+                                                    ...swPendingRef.current,
+                                                })
+                                            }
+                                            className="header-text text-sm px-3 py-1.5 rounded bg-[#00b4d8] text-[#0d0f12] disabled:opacity-40"
+                                        >
+                                            {swBusy ? "Starting…" : "Start pipeline"}
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    )}
                 </div>
             );
         }
@@ -3125,6 +3490,8 @@
             const [repoPathError, setRepoPathError] = useState("");
             const [roadmapSeedError, setRoadmapSeedError] = useState([]);
             const [preflightChecks, setPreflightChecks] = useState(null);
+            /** When set, preflight found multiple *oadmap*.md — launch blocked until user confirms archive. */
+            const [preflightRoadmapAmbiguous, setPreflightRoadmapAmbiguous] = useState(null);
             const [preflightLastRun, setPreflightLastRun] = useState(null);
             const [launchError, setLaunchError] = useState("");
             const [launchLoading, setLaunchLoading] = useState(false);
@@ -3152,6 +3519,7 @@
                     setRepoPathError("");
                     setRoadmapSeedError([]);
                     setPreflightChecks(null);
+                    setPreflightRoadmapAmbiguous(null);
                     setPreflightLastRun(null);
                     setLaunchError("");
                     setRepoPathFsStatus(null);
@@ -3313,7 +3681,11 @@
                     .catch(() => setRoadmapSeedError([{ line: 0, message: "Request failed" }]));
             };
 
-            const onRunPreflight = () => {
+            const onRunPreflight = (confirmRoadmapArchive) => {
+                const archiveMeta = confirmRoadmapArchive ? preflightRoadmapAmbiguous : null;
+                if (!confirmRoadmapArchive) {
+                    setPreflightRoadmapAmbiguous(null);
+                }
                 setPreflightChecks(null);
                 const body = { repo_path: (repoPath || "").trim() };
                 if (roadmapSeedLocked && (roadmapSeed || "").trim()) {
@@ -3321,6 +3693,10 @@
                 }
                 if ((launchPrdContent || "").trim()) {
                     body.prd_content = launchPrdContent;
+                }
+                if (confirmRoadmapArchive && archiveMeta) {
+                    body.confirm_roadmap_archive = true;
+                    body.keep_filename = archiveMeta.recommended_keep;
                 }
                 fetch("/api/setup/preflight", {
                     method: "POST",
@@ -3340,6 +3716,14 @@
                             ]);
                             return;
                         }
+                        if (d.roadmap_ambiguous) {
+                            setPreflightRoadmapAmbiguous({
+                                roadmap_files: d.roadmap_files || [],
+                                recommended_keep: d.recommended_keep || "roadmap.md",
+                            });
+                        } else {
+                            setPreflightRoadmapAmbiguous(null);
+                        }
                         setPreflightChecks(d.checks || []);
                     })
                     .catch(() => {
@@ -3352,7 +3736,12 @@
 
             const hasFail = preflightChecks && preflightChecks.some((c) => c.status === "fail");
             const launchDisabled =
-                !repoPathLocked || !roadmapSeedLocked || !preflightChecks || hasFail || launchLoading;
+                !repoPathLocked ||
+                !roadmapSeedLocked ||
+                !preflightChecks ||
+                hasFail ||
+                !!preflightRoadmapAmbiguous ||
+                launchLoading;
 
             const onLaunch = () => {
                 setLaunchError("");
@@ -3366,9 +3755,13 @@
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(launchBody),
                 })
-                    .then((r) => r.json())
-                    .then((d) => {
+                    .then(async (r) => {
+                        const d = await r.json().catch(() => ({}));
                         setLaunchLoading(false);
+                        if (r.status === 409 && d.code === "orchestrator_running") {
+                            setLaunchError(d.error || "An orchestrator is already running. Stop it or wait before launching.");
+                            return;
+                        }
                         if (d.ok) setCurrentScreen("pipeline");
                         else setLaunchError(d.error || "Launch failed");
                     })
@@ -3410,7 +3803,9 @@
                                     roadmapSeedError={roadmapSeedError}
                                     onRepoPathConfirm={onRepoPathConfirm}
                                     onRoadmapSeedConfirm={onRoadmapSeedConfirm}
-                                    onRunPreflight={onRunPreflight}
+                                    onRunPreflight={() => onRunPreflight(false)}
+                                    onConfirmRoadmapArchive={() => onRunPreflight(true)}
+                                    preflightRoadmapAmbiguous={preflightRoadmapAmbiguous}
                                     preflightChecks={preflightChecks}
                                     onLaunch={onLaunch}
                                     launchError={launchError}

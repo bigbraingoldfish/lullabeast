@@ -77,15 +77,33 @@ def _symlink_patches():
 
 class TestEndpointBasics:
 
+    def _launch_orchestrator_patches(self, tmp_path):
+        state_file = tmp_path / "launch_pipeline_state.json"
+        orch_dir = tmp_path / "launch_orch"
+        orch_dir.mkdir()
+        (orch_dir / "orchestrator.py").write_text("# mock\n", encoding="utf-8")
+        cfg = {
+            "pipeline_state_path": str(state_file),
+            "lock_path": str(tmp_path / "launch_pipeline.lock"),
+            "autodev_repo_path": str(orch_dir),
+        }
+        return (
+            patch("ui.server.load_config", return_value=cfg),
+            patch("ui.server._check_orchestrator_liveness", return_value=False),
+            patch("ui.server._spawn_orchestrator", return_value={"ok": True, "error": None}),
+        )
+
     def test_endpoint_returns_200(self, tmp_path):
         """POST with valid repo_path and roadmap_seed (Mode A) returns 200 with ok=True."""
         repo_path = tmp_path / "myproject"
         client = load_server()
+        p1, p2, p3 = self._launch_orchestrator_patches(tmp_path)
 
         with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
              patch("ui.server.os.symlink"), \
              patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"):
+             patch("ui.server.os.remove"), \
+             p1, p2, p3:
             response = client.post(
                 "/api/setup/launch",
                 json={"repo_path": str(repo_path), "roadmap_seed": VALID_ROADMAP_SEED},
@@ -117,11 +135,13 @@ class TestEndpointBasics:
         """Response body always has 'ok' and 'error' fields."""
         repo_path = tmp_path / "myproject"
         client = load_server()
+        p1, p2, p3 = self._launch_orchestrator_patches(tmp_path)
 
         with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
              patch("ui.server.os.symlink"), \
              patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"):
+             patch("ui.server.os.remove"), \
+             p1, p2, p3:
             response = client.post(
                 "/api/setup/launch",
                 json={"repo_path": str(repo_path), "roadmap_seed": VALID_ROADMAP_SEED},
@@ -494,3 +514,76 @@ class TestReturnValues:
         assert result["ok"] is False
         assert isinstance(result["error"], str)
         assert len(result["error"]) > 0
+
+
+class TestLaunchSpawnsOrchestrator:
+
+    def test_launch_calls_spawn_after_init(self, tmp_path):
+        """Successful launch writes pipeline_state and invokes _spawn_orchestrator."""
+        import json
+
+        repo_path = tmp_path / "myproject"
+        state_file = tmp_path / "pipeline_state.json"
+        orch_dir = tmp_path / "openclaw"
+        orch_dir.mkdir()
+        (orch_dir / "orchestrator.py").write_text("# mock orchestrator\n", encoding="utf-8")
+
+        cfg = {
+            "pipeline_state_path": str(state_file),
+            "lock_path": str(tmp_path / "pipeline.lock"),
+            "autodev_repo_path": str(orch_dir),
+        }
+        client = load_server()
+
+        with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
+             patch("ui.server.os.symlink"), \
+             patch("ui.server.os.path.lexists", return_value=False), \
+             patch("ui.server.os.remove"), \
+             patch("ui.server.load_config", return_value=cfg), \
+             patch("ui.server._check_orchestrator_liveness", return_value=False), \
+             patch("ui.server._spawn_orchestrator") as spawn_m:
+            response = client.post(
+                "/api/setup/launch",
+                json={"repo_path": str(repo_path), "roadmap_seed": VALID_ROADMAP_SEED},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+        spawn_m.assert_called_once()
+        called_path = spawn_m.call_args[0][0]
+        assert os.path.samefile(called_path, str(repo_path.resolve()))
+        assert state_file.exists()
+        written = json.loads(state_file.read_text(encoding="utf-8"))
+        assert written.get("pipeline_status") == "RUNNING"
+        assert written.get("project_path") == str(repo_path.resolve())
+
+    def test_launch_409_when_orchestrator_lock_held(self, tmp_path):
+        repo_path = tmp_path / "myproject"
+        state_file = tmp_path / "pipeline_state.json"
+        orch_dir = tmp_path / "openclaw"
+        orch_dir.mkdir()
+        (orch_dir / "orchestrator.py").write_text("# mock\n", encoding="utf-8")
+        cfg = {
+            "pipeline_state_path": str(state_file),
+            "lock_path": str(tmp_path / "pipeline.lock"),
+            "autodev_repo_path": str(orch_dir),
+        }
+        client = load_server()
+
+        with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
+             patch("ui.server.os.symlink"), \
+             patch("ui.server.os.path.lexists", return_value=False), \
+             patch("ui.server.os.remove"), \
+             patch("ui.server.load_config", return_value=cfg), \
+             patch("ui.server._check_orchestrator_liveness", return_value=True), \
+             patch("ui.server._spawn_orchestrator") as spawn_m:
+            response = client.post(
+                "/api/setup/launch",
+                json={"repo_path": str(repo_path), "roadmap_seed": VALID_ROADMAP_SEED},
+            )
+
+        assert response.status_code == 409
+        data = response.json()
+        assert data.get("code") == "orchestrator_running"
+        assert data.get("ok") is False
+        spawn_m.assert_not_called()
