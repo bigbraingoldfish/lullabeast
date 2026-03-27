@@ -238,7 +238,9 @@ class TestPostApiCommand:
                 response = test_client.post("/api/command", json={"command": "RETRY"})
                 
                 assert response.status_code == 503
-                assert "not found" in response.json()["detail"].lower()
+                detail = response.json()["detail"]
+                assert "broken" in detail.lower() or "missing" in detail.lower()
+                assert "Technical:" in detail
 
     def test_command_when_project_dir_symlink_dangling_returns_503(self, test_client, temp_project_dir):
         dangling_link = os.path.join(temp_project_dir, "dangling_link")
@@ -262,7 +264,10 @@ class TestPostApiCommand:
                 response = test_client.post("/api/command", json={"command": "RETRY"})
                 
                 assert response.status_code == 503
-                assert "dangling" in response.json()["detail"].lower()
+                detail = response.json()["detail"]
+                assert "broken" in detail.lower() or "missing" in detail.lower()
+                assert "Technical:" in detail
+                assert "symlink" in detail.lower()
 
     @pytest.mark.parametrize("command", ["RETRY", "RESET_EXECUTION", "RESET_PHASE", "SKIP", "PROCEED", "STOP"])
     def test_all_valid_commands_return_200(self, test_client, temp_project_dir, command):

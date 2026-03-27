@@ -172,7 +172,7 @@ class TestConfirmationModal:
         assert should_show_modal is True
     
     def test_clicking_stop_shows_confirmation_modal(self):
-        """Clicking STOP shows confirmation modal with 'Are you sure? This cannot be undone.'"""
+        """Clicking STOP shows confirmation modal (copy: Send STOP to the orchestrator?)."""
         command = 'STOP'
         should_show_modal = command in self.DESTRUCTIVE_COMMANDS
         assert should_show_modal is True

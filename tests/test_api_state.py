@@ -25,11 +25,14 @@ def temp_dir():
 @pytest.fixture
 def mock_config(temp_dir):
     """Create a mock configuration with temp directory paths."""
+    project_root = os.path.join(temp_dir, "pipeline_project")
+    os.makedirs(project_root, exist_ok=True)
     return {
         "pipeline_state_path": os.path.join(temp_dir, "pipeline_state.json"),
         "phase_state_path": os.path.join(temp_dir, "phase_state.json"),
         "lock_path": os.path.join(temp_dir, "pipeline.lock"),
         "events_path": os.path.join(temp_dir, "pipeline_events.jsonl"),
+        "project_dir_path": project_root,
     }
 
 
@@ -173,6 +176,8 @@ class TestApiStateEndpoint:
         assert data["escalation_resets"] == 3
         assert data["orchestrator_alive"] is False
         assert data["event_source"] == "file"
+        assert data.get("project_dir_ok") is True
+        assert data.get("project_dir_message") is None
 
     def test_returns_unknown_when_pipeline_state_missing(self, mock_config, mock_phase_state):
         """Test endpoint returns defaults when pipeline_state.json is absent."""
@@ -186,6 +191,27 @@ class TestApiStateEndpoint:
         assert data["counters"]["failure"] == 0
         assert data["counters"]["retry"] == 0
         assert data["orchestrator_alive"] is False
+        assert data.get("project_dir_ok") is True
+
+    def test_project_dir_ok_false_when_symlink_dangling(self, temp_dir, mock_pipeline_state, mock_phase_state, mock_events_file):
+        openclaw = os.path.join(temp_dir, ".openclaw")
+        os.makedirs(openclaw, exist_ok=True)
+        bad_link = os.path.join(openclaw, "pipeline-project")
+        os.symlink("/tmp/nonexistent_autodev_target_xyz", bad_link)
+        cfg = {
+            "pipeline_state_path": os.path.join(temp_dir, "pipeline_state.json"),
+            "phase_state_path": os.path.join(temp_dir, "phase_state.json"),
+            "lock_path": os.path.join(temp_dir, "pipeline.lock"),
+            "events_path": os.path.join(temp_dir, "pipeline_events.jsonl"),
+            "project_dir_path": bad_link,
+        }
+        with patch("ui.server.load_config", return_value=cfg):
+            response = client.get("/api/state")
+        assert response.status_code == 200
+        data = response.json()
+        assert data.get("project_dir_ok") is False
+        assert data.get("project_dir_message")
+        assert "broken" in data["project_dir_message"].lower() or "missing" in data["project_dir_message"].lower()
 
     def test_omits_phase_fields_when_phase_state_missing(self, mock_config, mock_pipeline_state):
         """Test endpoint omits last_error_code and escalation_resets when phase_state.json is absent."""

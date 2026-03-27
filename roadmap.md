@@ -72,6 +72,7 @@ These apply to every phase. No exceptions.
 - **M4 — Screen 2: Setup & Preflight**: `UI-E6`, `UI-E7`, `UI-E8`, `UI-E9`
 - **M4 follow-up — Launch + project switch**: Launch starts the orchestrator and syncs global `pipeline_state.json`; pipeline monitor supports **STOPPED**/**UNKNOWN** project switching (`POST /api/setup/switch-project`) with preflight, coherence checks, optional destructive fixes (`current_phase.json`, `phase_state.json`), multi-roadmap archive confirm, recent-project history, and a two-step validate → start flow.
 - **M4 follow-up — Pipeline monitor stop/resume UX**: `POST /api/stop` routes **WAITING_FOR_HUMAN** through escalation STOP (realpath project root); header **Stop** for RUNNING / SENTINEL / human wait; header **Resume** (RETRY flow) when **STOPPED**; escalation commands surface API errors; confirmation copy is command-specific; elapsed timer hidden during human wait; path hint copy fixed for that state.
+- **M4 follow-up — Broken project path recovery**: `GET /api/state` exposes **`project_dir_ok`** / **`project_dir_message`**; friendly multi-line **503** `detail` for missing/dangling `project_dir_path`; **switch-project** allowed while pipeline is active **only** when that configured path is broken (repair via same modal as STOPPED); pipeline monitor unlocks clickable project path + amber banner in that case.
 
 ### Dependency Order
 

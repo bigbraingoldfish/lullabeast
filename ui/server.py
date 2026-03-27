@@ -777,6 +777,61 @@ def _pipeline_allows_project_switch() -> tuple[bool, str | None]:
     return False, ps
 
 
+USER_PROJECT_PATH_BROKEN_FRIENDLY = (
+    "The pipeline's project folder link is broken or missing. "
+    "Pipeline commands can't run until it's fixed."
+)
+
+
+def _expand_project_dir_config(config: dict) -> str | None:
+    p = config.get("project_dir_path") or config.get("symlink_target") or config.get("project_dir")
+    if not p or not str(p).strip():
+        return None
+    return os.path.expanduser(str(p))
+
+
+def _project_dir_unhealthy(expanded_path: str | None) -> bool:
+    """True if configured project dir is missing or symlink target is missing."""
+    if not expanded_path:
+        return True
+    project_path = Path(expanded_path)
+    try:
+        if project_path.is_symlink():
+            return not project_path.resolve().exists()
+        return not project_path.exists()
+    except OSError:
+        return True
+
+
+def _project_path_503_detail(expanded_path: str | None, *, dangling: bool) -> str:
+    """End-user first line + newline + technical line for operators."""
+    disp = expanded_path or "(not configured)"
+    if dangling:
+        tech = (
+            f"Technical: symlink at {disp} points to a missing folder. "
+            "Repair from Pipeline Monitor (click project path) or Setup & Preflight, "
+            "or: ln -sfn <your-project> ~/.openclaw/pipeline-project"
+        )
+    else:
+        tech = (
+            f"Technical: project_dir_path {disp} does not exist or is not set. "
+            "Create the folder or update ui/config.json."
+        )
+    return f"{USER_PROJECT_PATH_BROKEN_FRIENDLY}\n{tech}"
+
+
+def _project_switch_allowed() -> tuple[bool, str | None]:
+    """Allow switch-project when pipeline stopped, or when a configured project_dir_path is broken."""
+    allowed, cur = _pipeline_allows_project_switch()
+    if allowed:
+        return True, None
+    config = load_config()
+    pdp = _expand_project_dir_config(config)
+    if pdp is not None and _project_dir_unhealthy(pdp):
+        return True, None
+    return False, cur
+
+
 def _determine_event_source(events_path):
     """Determine the event source based on whether the events file exists.
     
@@ -1093,6 +1148,11 @@ def get_state():
         except Exception:
             response["project_path"] = _symlink_path
 
+    pdp_exp = _expand_project_dir_config(config)
+    unhealthy = _project_dir_unhealthy(pdp_exp)
+    response["project_dir_ok"] = not unhealthy
+    response["project_dir_message"] = None if not unhealthy else USER_PROJECT_PATH_BROKEN_FRIENDLY
+
     return response
 
 
@@ -1116,16 +1176,17 @@ def _validate_command_request(project_dir_path, pipeline_status, escalation_rese
         Tuple of (is_valid, error_message, error_status_code).
         If valid, returns (True, None, None).
     """
-    # Check symlink validity (dangling or absent)
+    expanded = os.path.expanduser(str(project_dir_path)) if project_dir_path else None
+    if not project_dir_path:
+        return False, _project_path_503_detail(None, dangling=False), 503
+
     project_path = Path(project_dir_path)
 
-    # Check if it's a symlink first
     if project_path.is_symlink():
         if not project_path.resolve().exists():
-            return False, "Project directory symlink is dangling", 503
+            return False, _project_path_503_detail(expanded, dangling=True), 503
     elif not project_path.exists():
-        # Not a symlink, just doesn't exist
-        return False, "Project directory not found", 503
+        return False, _project_path_503_detail(expanded, dangling=False), 503
 
     # Check pipeline status
     if pipeline_status != "WAITING_FOR_HUMAN":
@@ -3142,7 +3203,7 @@ async def post_setup_switch_project(request: Request):
     Body: repo_path, optional roadmap_seed/prd_content, confirm_roadmap_archive, keep_filename,
           confirm_destructive (list of basenames), start_orchestrator (bool).
     """
-    allowed, cur_status = _pipeline_allows_project_switch()
+    allowed, cur_status = _project_switch_allowed()
     if not allowed:
         raise HTTPException(
             status_code=409,
