@@ -1139,18 +1139,12 @@ def _validate_command_request(project_dir_path, pipeline_status, escalation_rese
 
 
 def _write_escalation_files(project_dir_path, command):
-    """Write escalation output files atomically.
-    
-    Args:
-        project_dir_path: Path to the project directory.
-        command: The command to write.
-    
-    Returns:
-        True on success.
+    """Write escalation output files atomically under the resolved project root.
+
+    Uses realpath so writes land in the symlink target when project_dir_path is a symlink.
     """
-    from fastapi import HTTPException
-    
-    project_path = Path(project_dir_path)
+    root = os.path.realpath(os.path.expanduser(str(project_dir_path)))
+    project_path = Path(root)
     json_path = project_path / "escalation_output.json"
     done_path = project_path / "escalation_output.done"
     
@@ -2447,46 +2441,87 @@ def get_ideas_download_roadmap(idea_id: str):
     )
 
 
+def _orchestrator_alive_from_config(config: dict) -> bool:
+    """Best-effort liveness from pipeline.lock (same semantics as /api/state)."""
+    lp = config.get("lock_path")
+    lp = os.path.expanduser(lp) if lp else None
+    if not lp:
+        return False
+    try:
+        return _check_orchestrator_liveness(lp)
+    except Exception:
+        return False
+
+
 @app.post("/api/stop")
 def post_stop():
-    """Request a clean pipeline halt after the current agent completes its turn.
+    """Request pipeline halt: sentinel file for active agents, or escalation STOP when waiting for human.
 
-    Validates that the pipeline is in a stoppable state (RUNNING or
-    WAITING_FOR_SENTINEL), then writes an empty sentinel file
-    {project_dir_path}/pipeline_stop_requested. The orchestrator consumes
-    this file at the top of its main loop and transitions to STOPPED.
+    - RUNNING / WAITING_FOR_SENTINEL: writes ``pipeline_stop_requested`` under the project directory.
+    - WAITING_FOR_HUMAN: validates and writes ``escalation_output.json`` + ``escalation_output.done``
+      (same contract as ``POST /api/command`` with STOP).
 
     Returns:
-        200 {"ok": true, "message": "..."} on success.
+        200 with ok, message, orchestrator_alive, and optional hint when escalation stop may need a running orchestrator.
         409 if pipeline is not in a stoppable state.
         503 if pipeline state cannot be read.
     """
     config = load_config()
     pipeline_state_path = config.get("pipeline_state_path")
     project_dir_path = config.get("project_dir_path")
+    phase_state_path = config.get("phase_state_path")
 
     pipeline_state_path = os.path.expanduser(pipeline_state_path) if pipeline_state_path else None
     project_dir_path = os.path.expanduser(project_dir_path) if project_dir_path else None
+    phase_state_path = os.path.expanduser(phase_state_path) if phase_state_path else None
 
     pipeline_state = _read_json_file(pipeline_state_path) if pipeline_state_path else None
     if not pipeline_state:
         raise HTTPException(status_code=503, detail="Pipeline state not found")
 
     status = pipeline_state.get("pipeline_status")
-    stoppable = {"RUNNING", "WAITING_FOR_SENTINEL"}
-    if status not in stoppable:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Pipeline is not in a stoppable state (current: {status})"
+    alive = _orchestrator_alive_from_config(config)
+
+    if status in ("RUNNING", "WAITING_FOR_SENTINEL"):
+        stop_file = Path(os.path.realpath(project_dir_path)) / "pipeline_stop_requested"
+        stop_file.parent.mkdir(parents=True, exist_ok=True)
+        stop_file.touch()
+
+        return {
+            "ok": True,
+            "message": "Stop requested — pipeline will halt after current agent completes",
+            "orchestrator_alive": alive,
+        }
+
+    if status == "WAITING_FOR_HUMAN":
+        phase_state = _read_json_file(phase_state_path) if phase_state_path else {}
+        escalation_resets = phase_state.get("escalation_resets", 0) if phase_state else 0
+
+        is_valid, error_msg, error_code = _validate_command_request(
+            project_dir_path, status, escalation_resets, "STOP"
         )
+        if not is_valid:
+            raise HTTPException(status_code=error_code, detail=error_msg)
 
-    stop_file = Path(project_dir_path) / "pipeline_stop_requested"
-    stop_file.touch()
+        _write_escalation_files(project_dir_path, "STOP")
 
-    return {
-        "ok": True,
-        "message": "Stop requested — pipeline will halt after current agent completes"
-    }
+        hint = None
+        if not alive:
+            hint = (
+                "Orchestrator does not appear to be running — resume or start it so the stop command is applied."
+            )
+
+        return {
+            "ok": True,
+            "message": "Stop command queued for orchestrator",
+            "orchestrator_alive": alive,
+            **({"hint": hint} if hint else {}),
+        }
+
+    raise HTTPException(
+        status_code=409,
+        detail=f"Pipeline is not in a stoppable state (current: {status})",
+    )
 
 
 @app.post("/api/setup/roadmap-seed")

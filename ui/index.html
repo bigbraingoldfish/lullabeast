@@ -348,13 +348,14 @@
         function ElapsedTimer({ lastActionTimestamp, pipeline_status }) {
             const [elapsed, setElapsed] = useState(0);
             useEffect(() => {
-                if (!lastActionTimestamp) return;
+                if (!lastActionTimestamp || pipeline_status === "WAITING_FOR_HUMAN") return;
                 const startTime = new Date(lastActionTimestamp).getTime();
                 const tick = () => setElapsed(Math.floor((Date.now() - startTime) / 1000));
                 tick();
                 const interval = setInterval(tick, 1000);
                 return () => clearInterval(interval);
-            }, [lastActionTimestamp]);
+            }, [lastActionTimestamp, pipeline_status]);
+            if (pipeline_status === "WAITING_FOR_HUMAN") return null;
             if (!lastActionTimestamp) return null;
             const isOverdue = pipeline_status === 'WAITING_FOR_SENTINEL' && elapsed > 300;
             const colorClass = isOverdue ? 'text-amber-400' : 'text-slate-400';
@@ -374,22 +375,50 @@
 
         // ─── Modals ───────────────────────────────────────────────────────────────
 
-        function ConfirmationModal({ command, onConfirm, onDismiss }) {
+        function ConfirmationModal({ command, onConfirm, onDismiss, busy }) {
+            let title = "Confirm action";
+            let body = "Are you sure?";
+            if (command === "STOP") {
+                title = "Confirm STOP";
+                body =
+                    "Send STOP to the orchestrator? It will process this command and you can start the pipeline again from this screen once it reaches STOPPED. This is not a permanent lockout.";
+            } else if (command === "SKIP") {
+                title = "Confirm SKIP";
+                body =
+                    "Skip the current phase? In-progress work for this phase may be discarded. This is difficult to undo — only continue if you intend to skip.";
+            } else if (command === "RESET_PHASE") {
+                title = "Confirm RESET PHASE";
+                body =
+                    "Reset the entire phase? This clears phase execution state and retries. Use only when you intend to restart the phase from the beginning.";
+            } else {
+                title = "Confirm action";
+                body = "Are you sure you want to run this command?";
+            }
             return (
                 <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
                     <div className="bg-[#141618] border border-[#1a1d21] rounded-lg p-6 max-w-sm mx-4">
                         <h3 className="header-text text-lg font-semibold text-amber-400 mb-3">
-                            Confirm Action
+                            {title}
                         </h3>
-                        <p className="text-slate-300 mb-6">
-                            Are you sure? This cannot be undone.
+                        <p className="text-slate-300 text-sm mb-6">
+                            {body}
                         </p>
                         <div className="flex gap-3 justify-end">
-                            <button onClick={onDismiss} className="px-4 py-2 rounded bg-[#1a1d21] text-slate-300 hover:bg-[#252830] transition-colors">
+                            <button
+                                type="button"
+                                onClick={onDismiss}
+                                disabled={busy}
+                                className="px-4 py-2 rounded bg-[#1a1d21] text-slate-300 hover:bg-[#252830] transition-colors disabled:opacity-50"
+                            >
                                 Cancel
                             </button>
-                            <button onClick={onConfirm} className="px-4 py-2 rounded bg-red-600 hover:bg-red-500 text-white font-medium transition-colors">
-                                Confirm
+                            <button
+                                type="button"
+                                onClick={onConfirm}
+                                disabled={busy}
+                                className="px-4 py-2 rounded bg-red-600 hover:bg-red-500 text-white font-medium transition-colors disabled:opacity-50"
+                            >
+                                {busy ? "Sending…" : "Confirm"}
                             </button>
                         </div>
                     </div>
@@ -397,15 +426,18 @@
             );
         }
 
-        function StopConfirmModal({ onConfirm, onDismiss }) {
+        function StopConfirmModal({ onConfirm, onDismiss, pipelineStatus }) {
+            const escalationStop = pipelineStatus === "WAITING_FOR_HUMAN";
             return (
                 <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
                     <div className="bg-[#141618] border border-[#1a1d21] rounded-lg p-6 max-w-sm mx-4">
                         <h3 className="header-text text-lg font-semibold text-red-400 mb-3">
-                            Stop Pipeline?
+                            {escalationStop ? "Stop (human prompt)?" : "Stop Pipeline?"}
                         </h3>
                         <p className="text-slate-300 text-sm mb-6">
-                            Stop the pipeline? The orchestrator will complete its current agent turn before halting — no new retries will be launched. This may take a few minutes depending on the active agent.
+                            {escalationStop
+                                ? "Queue STOP for the orchestrator via the escalation channel. When the pipeline reaches STOPPED you can resume from this screen. You can start the pipeline again later — this is not a permanent lockout."
+                                : "Stop the pipeline? The orchestrator will complete its current agent turn before halting — no new retries will be launched. This may take a few minutes depending on the active agent."}
                         </p>
                         <div className="flex gap-3 justify-end">
                             <button onClick={onDismiss} className="px-4 py-2 rounded bg-[#1a1d21] text-slate-300 hover:bg-[#252830] transition-colors">
@@ -422,27 +454,40 @@
 
         // ─── EscalationCommandPanel ───────────────────────────────────────────────
 
-        function EscalationCommandPanel({ pipeline_status, escalation_trigger_reason, last_action, escalation_resets }) {
+        function EscalationCommandPanel({
+            pipeline_status,
+            escalation_trigger_reason,
+            last_action,
+            escalation_resets,
+            orchestrator_alive,
+        }) {
             const [commandSent, setCommandSent] = useState(false);
+            const [lastSubmittedCommand, setLastSubmittedCommand] = useState(null);
+            const [commandError, setCommandError] = useState("");
             const [prevStatus, setPrevStatus] = useState(pipeline_status);
             const [showConfirmModal, setShowConfirmModal] = useState(false);
             const [modalCommand, setModalCommand] = useState(null);
+            const [confirmBusy, setConfirmBusy] = useState(false);
 
             const isResetDisabled = escalation_resets >= 3;
 
             useEffect(() => {
-                if (prevStatus === 'WAITING_FOR_HUMAN' && pipeline_status !== 'WAITING_FOR_HUMAN') {
+                if (prevStatus === "WAITING_FOR_HUMAN" && pipeline_status !== "WAITING_FOR_HUMAN") {
                     setCommandSent(false);
+                    setLastSubmittedCommand(null);
+                    setCommandError("");
                 }
                 setPrevStatus(pipeline_status);
             }, [pipeline_status, prevStatus]);
 
-            if (pipeline_status !== 'WAITING_FOR_HUMAN') return null;
+            if (pipeline_status !== "WAITING_FOR_HUMAN") return null;
 
-            const headerText = escalation_trigger_reason || last_action || 'Awaiting human command';
+            const headerText = commandSent
+                ? "Command submitted"
+                : escalation_trigger_reason || last_action || "Awaiting human command";
 
             const handleCommand = (command) => {
-                if (command === 'RESET_PHASE' || command === 'SKIP' || command === 'STOP') {
+                if (command === "RESET_PHASE" || command === "SKIP" || command === "STOP") {
                     setModalCommand(command);
                     setShowConfirmModal(true);
                     return;
@@ -451,25 +496,65 @@
             };
 
             const sendCommand = async (command) => {
+                setCommandError("");
                 try {
-                    await fetch('/api/command', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ command })
+                    const r = await fetch("/api/command", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ command }),
                     });
+                    const d = await r.json().catch(() => ({}));
+                    if (!r.ok) {
+                        const msg =
+                            typeof d.detail === "string"
+                                ? d.detail
+                                : d.message || `Request failed (${r.status})`;
+                        setCommandError(msg);
+                        return;
+                    }
+                    setLastSubmittedCommand(command);
                     setCommandSent(true);
                 } catch (err) {
-                    console.log('Failed to send command:', err);
+                    setCommandError(String(err?.message || err));
                 }
             };
 
-            const modalConfirm = () => {
-                if (modalCommand) sendCommand(modalCommand);
-                setShowConfirmModal(false);
-                setModalCommand(null);
+            const modalConfirm = async () => {
+                if (!modalCommand) return;
+                setConfirmBusy(true);
+                setCommandError("");
+                try {
+                    const r = await fetch("/api/command", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ command: modalCommand }),
+                    });
+                    const d = await r.json().catch(() => ({}));
+                    if (!r.ok) {
+                        const msg =
+                            typeof d.detail === "string"
+                                ? d.detail
+                                : d.message || `Request failed (${r.status})`;
+                        setCommandError(msg);
+                        setShowConfirmModal(false);
+                        setModalCommand(null);
+                        return;
+                    }
+                    setLastSubmittedCommand(modalCommand);
+                    setCommandSent(true);
+                    setShowConfirmModal(false);
+                    setModalCommand(null);
+                } catch (err) {
+                    setCommandError(String(err?.message || err));
+                    setShowConfirmModal(false);
+                    setModalCommand(null);
+                } finally {
+                    setConfirmBusy(false);
+                }
             };
 
             const modalDismiss = () => {
+                if (confirmBusy) return;
                 setShowConfirmModal(false);
                 setModalCommand(null);
             };
@@ -498,22 +583,40 @@
                     <h3 className="header-text text-sm font-semibold text-orange-400 mb-3">
                         {headerText}
                     </h3>
+                    {commandError ? (
+                        <p className="text-red-400 text-xs mb-2">{commandError}</p>
+                    ) : null}
                     {commandSent ? (
-                        <div className="text-center py-4">
-                            <span className="text-amber-400 text-sm">Command sent — waiting for orchestrator...</span>
+                        <div className="text-center py-4 space-y-2">
+                            <span className="text-amber-400 text-sm block">
+                                {lastSubmittedCommand === "STOP"
+                                    ? "Stop submitted — waiting for orchestrator to apply it."
+                                    : "Command submitted — waiting for orchestrator to apply it."}
+                            </span>
+                            {!orchestrator_alive ? (
+                                <span className="text-amber-600 text-xs block">
+                                    Orchestrator is not running — it must be up to apply the command. After STOPPED, use
+                                    Resume in the header or start the orchestrator on the server.
+                                </span>
+                            ) : null}
                         </div>
                     ) : (
                         <div className="grid grid-cols-2 gap-2">
-                            {renderButton('RETRY', 'RETRY')}
-                            {renderButton('RESET_EXECUTION', 'RESET EXECUTION')}
-                            {renderButton('RESET_PHASE', 'RESET PHASE')}
-                            {renderButton('SKIP', 'SKIP')}
-                            {renderButton('PROCEED', 'PROCEED')}
-                            {renderButton('STOP', 'STOP')}
+                            {renderButton("RETRY", "RETRY")}
+                            {renderButton("RESET_EXECUTION", "RESET EXECUTION")}
+                            {renderButton("RESET_PHASE", "RESET PHASE")}
+                            {renderButton("SKIP", "SKIP")}
+                            {renderButton("PROCEED", "PROCEED")}
+                            {renderButton("STOP", "STOP")}
                         </div>
                     )}
                     {showConfirmModal && (
-                        <ConfirmationModal command={modalCommand} onConfirm={modalConfirm} onDismiss={modalDismiss} />
+                        <ConfirmationModal
+                            command={modalCommand}
+                            onConfirm={modalConfirm}
+                            onDismiss={modalDismiss}
+                            busy={confirmBusy}
+                        />
                     )}
                 </div>
             );
@@ -579,6 +682,31 @@
             );
         }
 
+        // ─── Stopped resume flow (shared: header Resume + StoppedRecoveryPanel) ───
+
+        async function runStoppedResumeFlow(command) {
+            const rr = await fetch("/api/resume-ready", { method: "POST" });
+            const rd = await rr.json().catch(() => ({}));
+            if (!rr.ok) {
+                const msg =
+                    typeof rd.detail === "string" ? rd.detail : `Resume-ready failed (${rr.status})`;
+                return { ok: false, error: msg };
+            }
+            const cr = await fetch("/api/command", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ command }),
+            });
+            const cd = await cr.json().catch(() => ({}));
+            if (!cr.ok) {
+                const msg =
+                    typeof cd.detail === "string" ? cd.detail : `Command failed (${cr.status})`;
+                return { ok: false, error: msg };
+            }
+            await fetch("/api/resume-orchestrator", { method: "POST" });
+            return { ok: true };
+        }
+
         // ─── StoppedRecoveryPanel ─────────────────────────────────────────────────
 
         function StoppedRecoveryPanel({ current_phase_raw_id, escalation_resets }) {
@@ -587,20 +715,14 @@
 
             const handleResume = async (command) => {
                 try {
-                    const rr = await fetch('/api/resume-ready', { method: 'POST' });
-                    if (!rr.ok) {
-                        console.error('resume-ready failed', await rr.text());
+                    const result = await runStoppedResumeFlow(command);
+                    if (!result.ok) {
+                        console.error(result.error);
                         return;
                     }
-                    await fetch('/api/command', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ command }),
-                    });
                     setSent(true);
-                    fetch('/api/resume-orchestrator', { method: 'POST' });
                 } catch (e) {
-                    console.error('Resume flow failed:', e);
+                    console.error("Resume flow failed:", e);
                 }
             };
 
@@ -2943,6 +3065,10 @@
             const [lastUpdate, setLastUpdate] = useState(null);
             const [showStopModal, setShowStopModal] = useState(false);
             const [stopRequested, setStopRequested] = useState(false);
+            const [stopError, setStopError] = useState("");
+            const [stopHint, setStopHint] = useState("");
+            const [resumeBusy, setResumeBusy] = useState(false);
+            const [resumeError, setResumeError] = useState("");
             const [projectSwitchOpen, setProjectSwitchOpen] = useState(false);
             const [swPath, setSwPath] = useState("");
             const [swRecents, setSwRecents] = useState([]);
@@ -2969,7 +3095,7 @@
 
             // Clear stop-requested indicator once pipeline leaves stoppable state
             useEffect(() => {
-                const stoppable = ['RUNNING', 'WAITING_FOR_SENTINEL'];
+                const stoppable = ["RUNNING", "WAITING_FOR_SENTINEL", "WAITING_FOR_HUMAN"];
                 if (!stoppable.includes(pState.pipeline_status)) {
                     setStopRequested(false);
                 }
@@ -3115,12 +3241,41 @@
             }
 
             const handleStopConfirm = async () => {
+                setStopError("");
+                setStopHint("");
                 setShowStopModal(false);
                 try {
-                    await fetch('/api/stop', { method: 'POST' });
+                    const r = await fetch("/api/stop", { method: "POST" });
+                    const d = await r.json().catch(() => ({}));
+                    if (!r.ok) {
+                        const msg =
+                            typeof d.detail === "string"
+                                ? d.detail
+                                : d.message || `Stop failed (${r.status})`;
+                        setStopError(msg);
+                        return;
+                    }
                     setStopRequested(true);
+                    if (typeof d.hint === "string" && d.hint) setStopHint(d.hint);
                 } catch (e) {
-                    console.log('Stop request failed:', e);
+                    setStopError(String(e));
+                }
+            };
+
+            const handleHeaderResume = async () => {
+                setResumeError("");
+                setResumeBusy(true);
+                try {
+                    const result = await runStoppedResumeFlow("RETRY");
+                    if (!result.ok) {
+                        setResumeError(result.error);
+                        return;
+                    }
+                    fetchState();
+                } catch (e) {
+                    setResumeError(String(e));
+                } finally {
+                    setResumeBusy(false);
                 }
             };
 
@@ -3132,7 +3287,10 @@
 
             const status = pState.pipeline_status;
             const alive = pState.orchestrator_alive;
-            const showStopButton = ['RUNNING', 'WAITING_FOR_SENTINEL'].includes(status);
+            const showStopButton = ["RUNNING", "WAITING_FOR_SENTINEL", "WAITING_FOR_HUMAN"].includes(
+                status
+            );
+            const showResumeButton = status === "STOPPED";
 
             // Derive header status label and class
             let statusLabel = '--';
@@ -3153,8 +3311,13 @@
             const pathInteractive = status === "STOPPED" || status === "UNKNOWN";
             const showMustStopForPath =
                 !pathInteractive && (status === "RUNNING" || status === "WAITING_FOR_SENTINEL");
+            const showWaitingHumanPathHint =
+                !pathInteractive && status === "WAITING_FOR_HUMAN";
             const showGenericPathBlock =
-                !pathInteractive && !showMustStopForPath && status !== "Loading...";
+                !pathInteractive &&
+                !showMustStopForPath &&
+                !showWaitingHumanPathHint &&
+                status !== "Loading...";
 
             const swDestructiveOptions = [];
             const swSeen = new Set();
@@ -3191,33 +3354,75 @@
                                         Stop the pipeline before you can change the project directory.
                                     </span>
                                 ) : null}
+                                {showWaitingHumanPathHint ? (
+                                    <span className="header-text text-xs text-slate-500 max-w-md">
+                                        Resolve or stop the human prompt before changing project directory.
+                                    </span>
+                                ) : null}
                                 {showGenericPathBlock ? (
                                     <span className="header-text text-xs text-slate-500 max-w-md">
                                         The pipeline must be stopped before you can change the project directory.
                                     </span>
                                 ) : null}
                             </div>
-                            <div className="flex items-center gap-3">
-                                {showStopButton && !stopRequested && (
-                                    <button
-                                        onClick={() => setShowStopModal(true)}
-                                        className="header-text px-3 py-1 text-xs bg-red-950 hover:bg-red-900 text-red-400 rounded border border-red-800 transition-colors"
+                            <div className="flex flex-col items-end gap-1">
+                                <div className="flex items-center gap-3 flex-wrap justify-end">
+                                    {showResumeButton && (
+                                        <button
+                                            type="button"
+                                            onClick={handleHeaderResume}
+                                            disabled={resumeBusy}
+                                            className="header-text px-3 py-1 text-xs bg-emerald-950 hover:bg-emerald-900 text-emerald-300 rounded border border-emerald-800 transition-colors disabled:opacity-50"
+                                        >
+                                            {resumeBusy ? "Resuming…" : "Resume"}
+                                        </button>
+                                    )}
+                                    {showStopButton && !stopRequested && (
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setStopError("");
+                                                setStopHint("");
+                                                setShowStopModal(true);
+                                            }}
+                                            className="header-text px-3 py-1 text-xs bg-red-950 hover:bg-red-900 text-red-400 rounded border border-red-800 transition-colors"
+                                        >
+                                            Stop Pipeline
+                                        </button>
+                                    )}
+                                    {showStopButton && stopRequested && (
+                                        <button
+                                            type="button"
+                                            disabled
+                                            className="header-text px-3 py-1 text-xs bg-red-950 text-red-400 rounded border border-red-800 opacity-70 status-pulse cursor-not-allowed"
+                                        >
+                                            Stopping...
+                                        </button>
+                                    )}
+                                    <span
+                                        className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${alive ? "bg-green-500" : "bg-red-600"}`}
+                                    ></span>
+                                    <span
+                                        className={`header-text px-3 py-1 rounded-full text-sm font-medium ${statusClass}`}
                                     >
-                                        Stop Pipeline
-                                    </button>
-                                )}
-                                {showStopButton && stopRequested && (
-                                    <button
-                                        disabled
-                                        className="header-text px-3 py-1 text-xs bg-red-950 text-red-400 rounded border border-red-800 opacity-70 status-pulse cursor-not-allowed"
-                                    >
-                                        Stopping...
-                                    </button>
-                                )}
-                                <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${alive ? 'bg-green-500' : 'bg-red-600'}`}></span>
-                                <span className={`header-text px-3 py-1 rounded-full text-sm font-medium ${statusClass}`}>
-                                    {statusLabel}
-                                </span>
+                                        {statusLabel}
+                                    </span>
+                                </div>
+                                {resumeError ? (
+                                    <span className="header-text text-xs text-red-400 max-w-md text-right">
+                                        {resumeError}
+                                    </span>
+                                ) : null}
+                                {stopError ? (
+                                    <span className="header-text text-xs text-red-400 max-w-md text-right">
+                                        {stopError}
+                                    </span>
+                                ) : null}
+                                {stopHint ? (
+                                    <span className="header-text text-xs text-amber-500 max-w-md text-right">
+                                        {stopHint}
+                                    </span>
+                                ) : null}
                             </div>
                         </div>
                     </header>
@@ -3247,6 +3452,7 @@
                                 escalation_trigger_reason={pState.escalation_trigger_reason}
                                 last_action={pState.last_action}
                                 escalation_resets={pState.escalation_resets || 0}
+                                orchestrator_alive={alive}
                             />
                         </div>
 
@@ -3284,6 +3490,7 @@
                     {/* Stop confirmation modal */}
                     {showStopModal && (
                         <StopConfirmModal
+                            pipelineStatus={status}
                             onConfirm={handleStopConfirm}
                             onDismiss={() => setShowStopModal(false)}
                         />
