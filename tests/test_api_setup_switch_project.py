@@ -122,6 +122,57 @@ class TestSwitchProject:
 
         assert r.status_code == 409
 
+    def test_switch_allowed_when_waiting_human_and_project_dir_dangling(self, tmp_path, client):
+        repo_path = tmp_path / "proj"
+        repo_path.mkdir()
+        (repo_path / "roadmap.md").write_text(VALID_ROADMAP_SEED, encoding="utf-8")
+        (repo_path / ".git").mkdir()
+        (repo_path / ".gitignore").write_text("*.pyc\n", encoding="utf-8")
+        openclaw = _make_openclaw_dir(tmp_path, repo_path)
+        bad_link = tmp_path / "dangling_project_dir"
+        bad_link.symlink_to("/tmp/nonexistent_autodev_switch_target")
+        state = tmp_path / "pipeline_state.json"
+        state.write_text(
+            json.dumps({"pipeline_status": "WAITING_FOR_HUMAN"}),
+            encoding="utf-8",
+        )
+        cfg = {
+            "pipeline_state_path": str(state),
+            "project_dir_path": str(bad_link),
+        }
+
+        with patch("ui.server.os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in str(p) else p), \
+             patch("ui.server.load_config", return_value=cfg), \
+             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
+            r = client.post(
+                "/api/setup/switch-project",
+                json={"repo_path": str(repo_path), "start_orchestrator": False},
+            )
+
+        assert r.status_code == 200
+        assert r.json().get("ok") is True
+
+    def test_switch_rejects_when_waiting_human_and_project_dir_healthy(self, tmp_path, client):
+        repo_path = tmp_path / "proj"
+        repo_path.mkdir()
+        (repo_path / "roadmap.md").write_text(VALID_ROADMAP_SEED, encoding="utf-8")
+        openclaw = _make_openclaw_dir(tmp_path, repo_path)
+        state = tmp_path / "pipeline_state.json"
+        state.write_text(
+            json.dumps({"pipeline_status": "WAITING_FOR_HUMAN"}),
+            encoding="utf-8",
+        )
+        cfg = {
+            "pipeline_state_path": str(state),
+            "project_dir_path": str(repo_path),
+        }
+
+        with patch("ui.server.os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in str(p) else p), \
+             patch("ui.server.load_config", return_value=cfg):
+            r = client.post("/api/setup/switch-project", json={"repo_path": str(repo_path)})
+
+        assert r.status_code == 409
+
     def test_switch_ready_after_single_roadmap(self, tmp_path, client):
         repo_path = tmp_path / "proj"
         repo_path.mkdir()

@@ -373,6 +373,16 @@
             );
         }
 
+        /** Split FastAPI detail: friendly first line + optional technical rest (after newline). */
+        function splitApiDetail(detail) {
+            if (typeof detail !== "string") {
+                return { friendly: detail ? String(detail) : "", technical: "" };
+            }
+            const i = detail.indexOf("\n");
+            if (i === -1) return { friendly: detail, technical: "" };
+            return { friendly: detail.slice(0, i), technical: detail.slice(i + 1).trim() };
+        }
+
         // ─── Modals ───────────────────────────────────────────────────────────────
 
         function ConfirmationModal({ command, onConfirm, onDismiss, busy }) {
@@ -380,8 +390,7 @@
             let body = "Are you sure?";
             if (command === "STOP") {
                 title = "Confirm STOP";
-                body =
-                    "Send STOP to the orchestrator? It will process this command and you can start the pipeline again from this screen once it reaches STOPPED. This is not a permanent lockout.";
+                body = "Send STOP to the orchestrator?";
             } else if (command === "SKIP") {
                 title = "Confirm SKIP";
                 body =
@@ -436,8 +445,8 @@
                         </h3>
                         <p className="text-slate-300 text-sm mb-6">
                             {escalationStop
-                                ? "Queue STOP for the orchestrator via the escalation channel. When the pipeline reaches STOPPED you can resume from this screen. You can start the pipeline again later — this is not a permanent lockout."
-                                : "Stop the pipeline? The orchestrator will complete its current agent turn before halting — no new retries will be launched. This may take a few minutes depending on the active agent."}
+                                ? "Send STOP to the orchestrator?"
+                                : "Note that the stop will only take place after the current agent has finished their turn."}
                         </p>
                         <div className="flex gap-3 justify-end">
                             <button onClick={onDismiss} className="px-4 py-2 rounded bg-[#1a1d21] text-slate-300 hover:bg-[#252830] transition-colors">
@@ -485,6 +494,7 @@
             const headerText = commandSent
                 ? "Command submitted"
                 : escalation_trigger_reason || last_action || "Awaiting human command";
+            const commandErrParts = commandError ? splitApiDetail(commandError) : null;
 
             const handleCommand = (command) => {
                 if (command === "RESET_PHASE" || command === "SKIP" || command === "STOP") {
@@ -583,8 +593,15 @@
                     <h3 className="header-text text-sm font-semibold text-orange-400 mb-3">
                         {headerText}
                     </h3>
-                    {commandError ? (
-                        <p className="text-red-400 text-xs mb-2">{commandError}</p>
+                    {commandErrParts ? (
+                        <div className="mb-2 space-y-1">
+                            <p className="text-red-400 text-xs">{commandErrParts.friendly}</p>
+                            {commandErrParts.technical ? (
+                                <p className="text-slate-500 text-xs font-mono leading-snug">
+                                    {commandErrParts.technical}
+                                </p>
+                            ) : null}
+                        </div>
                     ) : null}
                     {commandSent ? (
                         <div className="text-center py-4 space-y-2">
@@ -3059,6 +3076,8 @@
                 escalation_trigger_reason: null,
                 last_action: null,
                 escalation_resets: 0,
+                project_dir_ok: true,
+                project_dir_message: null,
             });
             const [roadmap, setRoadmap] = useState(null);
             const [metricsSummary, setMetricsSummary] = useState(null);
@@ -3308,7 +3327,12 @@
 
             const segments = (pState.project_path || '').split('/').filter(s => s);
             const projectDisplay = segments.slice(-2).join('/') || '--/--';
-            const pathInteractive = status === "STOPPED" || status === "UNKNOWN";
+            const pathBroken = pState.project_dir_ok === false;
+            const pathInteractive =
+                status === "STOPPED" || status === "UNKNOWN" || pathBroken;
+            const repairPathHintText =
+                pState.project_dir_message ||
+                "Project folder link is broken — click the path to choose your project folder and repair it.";
             const showMustStopForPath =
                 !pathInteractive && (status === "RUNNING" || status === "WAITING_FOR_SENTINEL");
             const showWaitingHumanPathHint =
@@ -3414,9 +3438,14 @@
                                     </span>
                                 ) : null}
                                 {stopError ? (
-                                    <span className="header-text text-xs text-red-400 max-w-md text-right">
-                                        {stopError}
-                                    </span>
+                                    <div className="header-text text-xs text-red-400 max-w-md text-right space-y-1">
+                                        <span className="block">{splitApiDetail(stopError).friendly}</span>
+                                        {splitApiDetail(stopError).technical ? (
+                                            <span className="block text-slate-500 font-mono text-[10px] leading-snug">
+                                                {splitApiDetail(stopError).technical}
+                                            </span>
+                                        ) : null}
+                                    </div>
                                 ) : null}
                                 {stopHint ? (
                                     <span className="header-text text-xs text-amber-500 max-w-md text-right">
@@ -3425,6 +3454,11 @@
                                 ) : null}
                             </div>
                         </div>
+                        {pathBroken ? (
+                            <div className="border-t border-amber-800/50 bg-amber-950/20 px-6 py-2">
+                                <p className="header-text text-xs text-amber-200/90">{repairPathHintText}</p>
+                            </div>
+                        ) : null}
                     </header>
 
                     {/* Middle section: two-panel grid (Phase 2a: 32/68 split) */}
