@@ -1,0 +1,1631 @@
+# PIPELINE-SPEC.md — Architecture Specification
+
+> **Purpose:** Single source of truth for *what* the system is and *how each component behaves*.
+> Organized by component, not by flow position.
+> **Audience:** AI coding agents implementing the system.
+
+---
+
+## 1. System Overview
+
+The pipeline is an autonomous multi-agent software development system. A Python orchestrator running on a Raspberry Pi 5 drives four LLM agents (planner, executor, reviewer, escalation) through deterministic gate scripts, producing tested code phase-by-phase against a project roadmap. Agents are invoked via OpenClaw webhook POST — not spawned as subagents. All agents share a project workspace via a stable symlink. Human notifications go exclusively via Signal.
+
+### Component Inventory
+
+| Component | Type | Runs On |
+|---|---|---|
+| `orchestrator.py` | Pure Python script | Raspberry Pi 5 |
+| OpenClaw gateway | Agent gateway | Raspberry Pi 5 |
+| Planner agent | LLM (cloud — OpenRouter) | OpenRouter → MiniMax M2.5 |
+| Executor agent | LLM (cloud — OpenRouter) | OpenRouter → MiniMax M2.5 |
+| Reviewer agent | LLM (cloud — OpenRouter) | OpenRouter → MiniMax M2.5 |
+| Escalation agent | LLM (local) | Main machine via llama-server (Qwen3.5-27B, port 11434) |
+| Gate scripts (×4) | Deterministic Python | Raspberry Pi 5 |
+
+### Infrastructure Topology
+
+```
+Raspberry Pi 5                         Main Machine (Windows 11 + RTX 4090)
+┌─────────────────────┐                ┌─────────────────────────────────────┐
+│ orchestrator.py     │                │ llama-server :11434                 │
+│ OpenClaw gateway    │──local reqs──▶ │   Qwen3.5-27B (escalation only)     │
+│   :18789            │                │                                     │
+│ Gate scripts        │                └─────────────────────────────────────┘
+└────────┬────────────┘
+         │ cloud reqs (planner, executor, reviewer)
+         ▼
+   OpenRouter API → MiniMax M2.5
+```
+
+- Local model requests (escalation only) go directly to llama-server at `http://<llama-server-host>:11434`
+- Cloud requests (planner, executor, reviewer) route via OpenRouter; inference provider: MiniMax M2.5
+- OpenClaw webhook endpoint: `POST http://localhost:18789/hooks/agent` — requires `Authorization: Bearer <token>` header. Token source: `hooks.token` in `~/.openclaw/openclaw.json`. Do not use query string auth (`?token=...` returns 400).
+
+### Agent LLM Configuration
+
+Current production configuration (updated 2026-03-18 after E2E validation run):
+
+| Agent | Model | Provider | Inference | Config Source |
+|---|---|---|---|---|
+| Planner | MiniMax M2.5 (`openrouter/minimax/minimax-m2.5`) | OpenRouter | Cloud | `openclaw.json` default |
+| Executor | MiniMax M2.5 (`openrouter/minimax/minimax-m2.5`) | OpenRouter | Cloud | **Hardcoded in `orchestrator.py`** — overrides `openclaw.json` |
+| Reviewer | MiniMax M2.5 (`openrouter/minimax/minimax-m2.5`) | OpenRouter | Cloud | `openclaw.json` default |
+| Escalation | Qwen3.5-27B (Q6_K) | llama-local (llama-server :11434) | Local | `openclaw.json` per-agent |
+
+> ⚠️ **Config inconsistency:** The `openclaw.json` template in §9 shows executor → `llama-local/qwen3-coder-next` and reviewer → `llama-local/qwen3.5-27b`. These entries are **ignored** — `orchestrator.py` hardcodes the model string `"openrouter/minimax/minimax-m2.5"` in the executor invocation path (line ~1268) and passes it directly in the webhook `sessionKey`. The `openclaw.json` per-agent model field is not read at runtime for planner, executor, or reviewer. If the model needs to be changed, update `orchestrator.py` directly. The §9 template should be treated as reference config, not as the runtime source of truth for cloud agent models.
+
+OpenRouter is the inference provider for all cloud agents. An OpenRouter API key is required in the `openrouter` provider entry in `openclaw.json`.
+
+#### Configuration History / Original Intent
+
+This pipeline was originally designed as local-first, using llama.cpp on a local RTX 4090 for all agent inference. After smoke testing confirmed unacceptable latency for local planner/executor/reviewer inference and prohibitive cloud API costs via direct provider access, MiniMax M2.5 via OpenRouter was adopted for those three agents. The escalation agent remains on local inference. The local inference infrastructure is preserved and can be restored by updating the agent LLM config and re-enabling the SSH recovery path.
+
+---
+
+## 2. Orchestrator (`orchestrator.py`)
+
+### Identity
+
+Pure Python script running on Raspberry Pi 5. Not an LLM. Not an OpenClaw agent. Not using subagents.
+
+### Event Loop
+
+```
+[startup] temp-file cleanup → repo init check → read state → check gate → POST webhook → poll for sentinel → repeat
+```
+
+**Startup temp-file cleanup:** On every startup, after acquiring the lock and before `run_repo_init_check()`, the orchestrator calls `cleanup_stranded_temp_files(~/.openclaw/)`. This globs `~/.openclaw/` (and the resolved `pipeline-project/` real path) for files matching `pipeline_state_????????`, `phase_state_????????`, and `current_phase_????????` — the 8-character hex suffix produced by `tempfile.mkstemp()` when an atomic write was interrupted by a prior crash. Any matches are deleted and logged at INFO level. Canonical filenames (`pipeline_state.json`, etc.) are never matched by the `????????` wildcard.
+
+The stop sentinel check runs at the **top of every main loop iteration** via `_check_stop_requested()`, and also **inside every sentinel polling loop** (planner, executor, reviewer). If the sentinel file `pipeline_stop_requested` exists in the project directory, it is consumed (deleted) and the orchestrator writes `pipeline_status: STOPPED` atomically, logs `[STOP] Stop sentinel detected — halting pipeline cleanly`, and breaks out of the main loop. This check at the top of the main loop runs before any gate evaluation or webhook dispatch in that iteration. The intra-poll check ensures that a stop request issued while an agent is being waited on takes effect within 2 seconds rather than waiting for the full 600s timeout to expire.
+
+```python
+def _check_stop_requested(self) -> bool:
+    stop_file = os.path.join(SYMLINK_TARGET, "pipeline_stop_requested")
+    if os.path.exists(stop_file):
+        try:
+            os.remove(stop_file)   # consume — prevents re-trigger on restart
+        except OSError:
+            pass
+        return True
+    return False
+```
+
+The stop sentinel is created by the UI server `POST /api/stop` endpoint (see §14 > UI Server API Reference). The sentinel is consumed on first detection so a subsequent orchestrator restart does not re-halt.
+
+The stop sentinel file is written to SYMLINK_TARGET (the pipeline project directory on disk), not to RAM or a temp location. This means the sentinel survives a Pi reboot or orchestrator crash. On cold restart, `_check_stop_requested()` runs on the first loop iteration before any webhook is fired — if the sentinel is present, the orchestrator writes `STOPPED` and exits cleanly without launching any agent turns. Operators should be aware that a stop request issued before a reboot will be honored on the next orchestrator start.
+
+The repo init check runs once per startup (before the phase loop) via `run_repo_init_check()` in `orchestrator.py`. On failure it invokes escalation immediately and returns — the phase loop never starts. See §13 > Repo Initialization Check.
+
+The orchestrator polls for output files via a simple `time.sleep()` polling loop — does not use OpenClaw session polling. **Do not use inotify or third-party file watchers** to avoid Linux symlink/inode detachment issues.
+
+**All webhook POSTs require auth** — header: `Authorization: Bearer <token>`. Token source: `~/.openclaw/openclaw.json` → `hooks.token`. Load at orchestrator startup, not hardcoded. A POST without the header will silently fail to route.
+
+### State Machine
+
+`pipeline_state.json` tracks the current pipeline state. Valid states:
+
+| State | Meaning | Heartbeat Action |
+|---|---|---|
+| `RUNNING` | Orchestrator is actively processing | No action needed |
+| `WAITING_FOR_SENTINEL` | Agent invoked, polling for `.done` file | If elapsed > timeout → trigger recovery |
+| `WAITING_FOR_HUMAN` | Escalation sent, awaiting Signal reply | Do nothing — correctly paused |
+| `HALTED_SILENT` | Escalation delivery failed (all fallbacks exhausted) | Do nothing — same as WAITING_FOR_HUMAN |
+| `BLOCKED` | Roadmap phase marked `[!]` | Pipeline halts entirely; manual unblock required |
+| `PIPELINE_COMPLETE` | All roadmap phases complete (`[x]`); written instead of `HALTED_SILENT` at clean completion | Do nothing — terminal state; heartbeat treats same as `WAITING_FOR_HUMAN` |
+| `STOPPED` | Operator-initiated clean halt via stop sentinel; written by orchestrator after `_check_stop_requested()` consumes `pipeline_stop_requested` | Do nothing — terminal halt; heartbeat treats same as `WAITING_FOR_HUMAN` |
+
+> ⚠️ AMBIGUITY: `RUNNING` is inferred as logically necessary; the source document explicitly names the other four states but does not name an active-processing state.
+> **Note:** `HALTED_SILENT` is written **only** when escalation delivery fails (all Signal and raw-webhook fallbacks exhausted). It is **not** used for clean pipeline completion. `PIPELINE_COMPLETE` is the correct terminal state for clean completion. Any description of `HALTED_SILENT` that includes "pipeline fully complete" as a trigger is incorrect.
+> **Note:** `STOPPED` is written **only** when the operator requests a clean halt via the UI stop button (which writes the `pipeline_stop_requested` sentinel file). It is distinct from `HALTED_SILENT` (which is a delivery-failure fallback) and from `PIPELINE_COMPLETE` (which is the natural completion state). `STOPPED` terminates the orchestrator loop without escalation.
+
+### `pipeline_state.json` Contents
+
+```json
+{
+  "current_phase": "<int>",
+  "current_phase_raw_id": "<string — full phase ID e.g. 'CORE-2'; avoids int-suffix collisions>",
+  "current_agent": "<planner|executor|reviewer|escalation>",
+  "planner_retries": "<int>",
+  "executor_retries": "<int>",
+  "reviewer_retries": "<int>",
+  "last_action": "<string — description of last webhook/gate action>",
+  "last_action_timestamp": "<ISO 8601>",
+  "pipeline_status": "<RUNNING|WAITING_FOR_SENTINEL|WAITING_FOR_HUMAN|HALTED_SILENT|BLOCKED|PIPELINE_COMPLETE|STOPPED>",
+  "project_path": "<string — absolute path to project directory; stored so heartbeat cron can re-pass it on restart (B4)>",
+  "phase_base_commit": "<string — git SHA of HEAD before current phase branch was created; used by reset_phase() to rewind (B6)>"
+}
+```
+
+### Atomic Write Requirement
+
+Every state transition is written to `pipeline_state.json` atomically **before** the action it records — write-then-act, never act-then-write. This enables crash recovery: the heartbeat cron can resume from the last committed state.
+
+### Lockfile
+
+- File: `pipeline.lock`
+- Locking mechanism: **`fcntl.flock` (POSIX advisory lock)**, not raw PID checking
+- Orchestrator acquires an exclusive lock (`fcntl.flock(fd, LOCK_EX | LOCK_NB)`) on start; holds the file descriptor open for the lifetime of the process
+- On clean exit: file descriptor closes, OS releases lock automatically
+- On crash or reboot: OS drops the lock automatically — no stale lock possible
+- Heartbeat cron tests liveness by attempting `fcntl.flock(fd, LOCK_EX | LOCK_NB)`:
+  - If lock acquisition **fails** (`EWOULDBLOCK`) → orchestrator is alive, check `pipeline_state.json` for stuck state
+  - If lock acquisition **succeeds** → orchestrator is dead, heartbeat takes ownership and resumes from last committed state in `pipeline_state.json`
+- The lock file also contains PID + timestamp as metadata (for logging and diagnostics), but these are **not used for liveness detection**
+
+> ⚠️ Do NOT use raw PID checks for liveness. After a Pi reboot, the OS resets the PID counter and an unrelated process (e.g., a system service) may be assigned the orchestrator's old PID. A PID-alive check would falsely report the orchestrator as running, causing a silent permanent halt. `fcntl.flock` is immune to this because the OS drops the lock on process death or reboot.
+
+### What the Orchestrator is NOT
+
+- Not an LLM orchestrator — zero model calls during gate evaluation (exception: blame attribution LLM fallback; see § Gate Scripts > Blame Attribution)
+- Not using `sessions_spawn` subagent pattern — unreliable (non-blocking spawn + LLM must maintain poll loop)
+- Not routing via messaging channels — webhook only for agent invocation; Signal used exclusively for human escalation notifications
+
+---
+
+## 3. Planner Agent
+
+### Model
+
+`openrouter/minimax/minimax-m2.5` (cloud via OpenRouter)
+
+### Invocation Contract
+
+```
+POST /hooks/agent
+  agentId: "planner"
+  sessionKey: "pipeline:phase-N:{raw_id}:planner-attempt-1"
+  wakeMode: "now"
+```
+
+> ⚠️ AMBIGUITY: The HTML uses `pipeline:phase-N` in the planner flow diagram but the session management section uses `pipeline:phase-N:{raw_id}:planner-attempt-X`. The session management section is the authoritative reference for session key patterns. Use `pipeline:phase-N:planner-attempt-X`.
+
+### Input Files
+
+- `current_phase.json` — phase detail, category, exit_criteria
+- `phase_state.json` — retry count, prior failures
+- Retained context: AGENTS.md, SOUL.md, session history
+
+### Shared Workspace
+
+`~/.openclaw/pipeline-project` (symlink) — all agents read from same directory; no file copying.
+
+### Output Schema — `planner_output.json`
+
+```json
+{
+  "implementation_plan": {
+    "type": "array",
+    "items": { "type": "string" },
+    "minItems": 1,
+    "description": "Explicit task list for the executor"
+  },
+  "tdd_test_structure": {
+    "type": "array",
+    "items": { "type": "string" },
+    "minItems": 1,
+    "description": "Test cases defined upfront before implementation"
+  },
+  "pass_criteria": {
+    "type": "array",
+    "items": {
+      "type": "object",
+      "properties": {
+        "condition": { "type": "string", "description": "Explicit, verifiable condition" }
+      },
+      "required": ["condition"]
+    },
+    "minItems": 1,
+    "description": "Verifiable conditions that prove the phase is complete"
+  }
+}
+```
+
+All three fields are **required**.
+
+### Sentinel
+
+`planner_output.done` — written by the agent as its final act, after `planner_output.json`.
+
+### Retry Behavior
+
+On gate failure: re-invoke planner with failure detail appended to context. Max 3 retries. On retry exhaustion → escalation agent.
+
+### Crash-Recovery Skip (RR-2)
+
+When the orchestrator restarts mid-phase with `current_agent=planner` and `planner_retries=0`, it MUST check whether valid planner output already exists on disk before invoking the webhook. The guard conditions:
+
+```
+IF planner_retries == 0
+   AND planner_output_preserved == True   (written to phase_state.json after gate pass)
+   AND planner_output_is_valid() == True  (sentinel + gate re-check on disk)
+THEN  skip planner invocation → advance current_agent to executor
+```
+
+**`planner_output_preserved` flag lifecycle:**
+- Written atomically to `phase_state.json` BEFORE `transition_state` after planner gate passes (crash-safe ordering)
+- Cleared explicitly in ROUTE_PLANNER branch (reviewer's blame-plan rejection) — prevents skip from firing on intentional re-runs where the previous plan was rejected
+- Cleared by `reset_phase()` — new phase starts with no preserved output
+- Never touched by `reset_execution()` — executor failure does NOT invalidate planner output
+
+**Why the flag is necessary:** Without it, both crash-recovery AND ROUTE_PLANNER result in `planner_retries=0` with stale output files on disk. The flag makes the states distinguishable:
+- Crash-recovery: flag is `True` (was set on prior gate pass, not cleared)
+- ROUTE_PLANNER: flag is `False` (cleared explicitly before routing back to planner)
+
+---
+
+## 4. Executor Agent
+
+### Model
+
+`openrouter/minimax/minimax-m2.5` (cloud via OpenRouter)
+
+### Invocation Contract
+
+```
+POST /hooks/agent
+  agentId: "executor"
+  sessionKey: "pipeline:phase-N:{raw_id}:executor-attempt-X"
+```
+
+### Input Files
+
+- `planner_output.json` — read directly from shared workspace, no copy step
+- Task message: initial phase task only — fresh session each attempt, no failure history injected
+
+### Executor Terminal State Classification (RR-3)
+
+After the sentinel polling window closes, the orchestrator classifies the executor's terminal state before taking any retry action:
+
+| State | Sentinel (`.done`) | Output JSON | Action |
+|---|---|---|---|
+| `executor_succeeded` | ✓ present | ✓ present | Run executor gate → if pass: advance to reviewer; if fail: `reset_execution("auto")` |
+| `executor_preempted` | ✗ absent | ✓ present | Run executor gate → if pass: advance to reviewer (no `executor_retries` consumed); if fail: route to escalation (no `executor_retries` consumed) |
+| `executor_crashed` | ✗ absent | ✗ absent | `reset_execution("auto")` — increments `executor_retries` |
+
+**Preemption rule:** `executor_preempted` occurs when the executor session was interrupted (model swap, OpenClaw restart, etc.) but had already written `executor_output.json`. Since the executor did not fail — it was interrupted — the gate gets one chance to validate the output. If it passes, the pipeline advances normally. If it fails, the failure is escalated rather than burned against `executor_retries`, which is reserved for genuine executor failures.
+
+### Two Retry Scenarios
+
+**Failed-to-complete** (executor timed out / crashed / sentinel never appeared):
+- Fresh session, fresh key, initial task only
+- Partial work is noise, not signal
+- Working tree reset: `git reset --hard HEAD` then `git clean -fd`
+
+**Reviewer-rejection** (executor completed, reviewer rejected):
+- Generate new attempt key dynamically (e.g., `pipeline:phase-N:executor-attempt-X`)
+- Inject ONLY the original planner output and the reviewer `blocking_issues` into the prompt
+- Fresh session context — do NOT load previous attempt's history (prevents VRAM overflow)
+- Leave working tree exactly as-is — executor's files are the right starting point
+
+### Tool Execution (OpenClaw Runtime Layer)
+
+The executor generates tool calls; OpenClaw executes them:
+- File reads/writes from LLM tool call JSON
+- Shell commands: `npm test`, `pytest`, `cargo test`, etc.
+- Feeds stdout/stderr back into LLM context for next loop iteration
+- Tests run with minimal verbosity flags (`pytest -q` etc.) — full verbose output on final confirmation pass only
+
+### Output Schema — `executor_output.json`
+
+```json
+{
+  "status": {
+    "type": "string",
+    "enum": ["complete", "failed", "stuck"],
+    "description": "Executor self-reported completion state. 'stuck' = hit tool-call hard stop mid-implementation. GATE-CHECKED."
+  },
+  "tests_written": {
+    "type": "array",
+    "items": { "type": "string" },
+    "description": "Paths to test files written, matching tdd_test_structure from planner. GATE-CHECKED."
+  },
+  "test_results": {
+    "type": "object",
+    "properties": {
+      "all_passing": { "type": "boolean" }
+    },
+    "required": ["all_passing"],
+    "description": "Parsed from test runner exit code. GATE-CHECKED."
+  },
+  "file_manifest": {
+    "type": "array",
+    "items": { "type": "string" },
+    "description": "All expected files that must exist on disk. GATE-CHECKED."
+  },
+  "lint_passing": {
+    "type": "boolean",
+    "description": "Lint check result. Not gate-checked in v1."
+  },
+  "failure_reason": {
+    "type": "string",
+    "description": "Explanation of failure if status != complete. Must include raw stderr, tracebacks, or specific compiler/interpreter error names (e.g., AttributeError, TypeError). Not gate-checked — context for reviewer/escalation/blame."
+  },
+  "troubleshooting_attempts": {
+    "type": "array",
+    "items": { "type": "string" },
+    "description": "What the executor tried before giving up. Not gate-checked — context for reviewer/escalation."
+  },
+  "files_deleted": {
+    "type": "array",
+    "items": { "type": "string" },
+    "description": "Optional. Pre-existing files intentionally removed during this phase. Files created and deleted within the same phase do not need to be listed. Any file present at phase_base_commit that is absent from both file_manifest and files_deleted triggers ERR_UNACCOUNTED_DELETION at the gate. GATE-CHECKED."
+  },
+  "lessons_appended": {
+    "type": "boolean",
+    "description": "Whether executor wrote to lessons.md. Not gate-checked."
+  }
+}
+```
+
+Fields marked `GATE-CHECKED` are validated by the executor output gate (see § Gate Scripts > Executor Output Gate). Remaining fields are written by the executor per AGENTS.md contract and available as context for reviewer and escalation agents.
+
+### Sentinel
+
+`executor_output.done` — written after `executor_output.json`.
+
+---
+
+## 5. Reviewer Agent
+
+### Model
+
+`openrouter/minimax/minimax-m2.5` (cloud via OpenRouter)
+
+> **Model update — 2026-03-12:** Reviewer migrated from local Qwen3.5-27B to MiniMax M2.5 via OpenRouter after smoke testing confirmed unacceptable latency for local reviewer inference. The escalation agent remains on local Qwen3.5-27B. See §1 > Agent LLM Configuration > Configuration History / Original Intent.
+
+### Invocation Contract
+
+```
+POST /hooks/agent
+  agentId: "reviewer"
+  sessionKey: "pipeline:phase-N:{raw_id}:reviewer-attempt-1"
+```
+
+> ⚠️ AMBIGUITY: The HTML uses `pipeline:phase-N-review` in the flow diagram (line 630) but the session management section (line 941) uses the pattern `pipeline:phase-N:{raw_id}:reviewer-attempt-X`. The session management section is the authoritative reference for session key patterns. Use `pipeline:phase-N:reviewer-attempt-X`.
+
+### Input Files
+
+- `executor_output.json`
+- `planner_output.json`
+- `current_phase.json`
+- `phase_state.json` (includes which pass this is)
+
+### 3-Pass Logic
+
+The reviewer gate runs the same script on each pass. Routing on failure varies by pass number:
+
+| Pass | On Blocking Issues | Routing |
+|---|---|---|
+| 1 | Blocking issues present | Re-run executor with `blocking_issues` in context |
+| 2 | Blocking issues present | Check `attribution` field: `plan` → planner, `impl` → executor (final retry) |
+| 3 | Blocking issues present | → Escalation agent (no more retries) |
+| Any | No blocking issues + tests passing + intent validated | → Merge |
+
+### Output Schema — `reviewer_output.json`
+
+```json
+{
+  "blocking_issues": {
+    "type": "array",
+    "items": {
+      "type": "object",
+      "properties": {
+        "description": { "type": "string" },
+        "attribution": { "type": "string", "enum": ["plan", "impl"] },
+        "affected_file": { "type": "string" }
+      },
+      "required": ["description", "attribution", "affected_file"]
+    },
+    "description": "Empty array means pass"
+  },
+  "suggestions": {
+    "type": "array",
+    "items": { "type": "string" },
+    "description": "Non-blocking suggestions, appended to suggestions.md on merge"
+  },
+  "integration_tests_passing": {
+    "type": "boolean"
+  },
+  "phase_intent_validated": {
+    "type": "boolean"
+  }
+}
+```
+
+### Sentinel
+
+`reviewer_output.done` — written after `reviewer_output.json`.
+
+---
+
+## 6. Escalation Agent
+
+### Model
+
+`llama-local/qwen3.5-27b` (local via llama-server)
+
+### Triggers
+
+- Planner retries exhausted
+- Executor retries exhausted (including cloud fallback failure)
+- Reviewer pass 3 still blocking
+- Repo init check fails
+- Tool-call-count threshold exceeded (executor context pressure)
+- Unhandled exception in `orchestrator.py`
+- Merge conflict on phase completion
+
+### Tool Policy (Hard Limits)
+
+Enforced via OpenClaw per-agent tool policy in `openclaw.json` — not just AGENTS.md instruction.
+
+| Category | Allowed |
+|---|---|
+| Read tools | Workspace files, logs, `phase_state.json`, output JSONs |
+| Shell read-only | Process checks, network reachability (e.g., `curl http://<llama-server-host>:11434/health`) |
+| Write tools | **SANDBOXED** — `write` is allowed but scoped to the agent's declared workspace directory. Writes to absolute paths outside the workspace silently discard the data. The `pipeline-project/` symlink inside the workspace provides the only write path to shared pipeline files (`escalation_output.json`, `escalation_output.done`). All other write-adjacent tools (`edit`, `apply_patch`) remain denied. |
+| Exec tools | **DENIED** — cannot restart services, run scripts, or modify pipeline state |
+
+```json
+// openclaw.json tool policy for escalation agent
+"tools": {
+  "allow": ["read", "write"],
+  "deny": ["edit", "apply_patch", "exec", "process", "browser"]
+}
+```
+
+> **Write sandboxing:** OpenClaw sandboxes the `write` tool to each agent's declared workspace directory. When `"write"` is denied entirely, the agent cannot produce its required sentinel files (`escalation_output.json`, `escalation_output.done`). No path-scoped write exception mechanism exists in OpenClaw. Write access is granted but sandboxed — the agent can only write to files within its workspace boundary. The `pipeline-project/` symlink inside the workspace provides the only write path to shared pipeline files.
+
+### Signal Delivery
+
+The agent reads workspace context (`phase_state.json`, failure logs, relevant output files), performs environment checks where relevant (e.g., llama-server health at `http://<llama-server-host>:11434/health` on executor failures), then sends a precise, non-verbose Signal message containing: what paused, why, what it found, open questions, available actions.
+
+Pipeline completion is also notified via Signal (not just escalation).
+
+### Resume Commands
+
+| Command | Behavior | Valid For |
+|---|---|---|
+| `RETRY` | Re-POST the exact webhook that failed, no state change | Any transient failure (network, timeout, fluke) |
+| `RESET_PHASE` | Full phase reset with cap enforcement. Resets git to `phase_base_commit`, deletes phase branch, clears all 6 output pairs, re-initializes `phase_state.json` (agent counters → 0, `escalation_resets` preserved), re-invokes planner. Increments `escalation_resets`. Cap: 3. | Plan is fundamentally flawed; start phase from scratch |
+| `RESET_EXECUTION` | Partial reset. Preserves planner output (`planner_output.json/done`). Clears executor and reviewer outputs, resets working tree to HEAD, re-invokes executor. Increments `escalation_resets`. Cap: 3. | Plan is sound but executor implementation failed; preserve the plan, retry execution |
+| `SKIP` | Mark phase N as `[-]` skipped in roadmap (no commit), advance to N+1, discard working files | Only when manually verified the phase outcome is acceptable |
+| `STOP` | Pipeline stays halted, full manual intervention required | Always valid |
+| `PROCEED` | Human has resolved the issue externally (e.g., manual merge conflict resolution); orchestrator runs post-merge cleanup (tag, roadmap update, working file clear) and advances to next phase | Merge conflicts or other git-state issues fixed manually via SSH |
+
+> **`RESTART PHASE` is a legacy alias for `RESET_PHASE`** — accepted by the orchestrator for backward compatibility with in-flight Signal conversations. Use `RESET_PHASE` in new invocations.
+
+**Escalation reset cap:** Both `RESET_PHASE` and `RESET_EXECUTION` share the same cap: `escalation_resets >= 3`. After 3 escalation-triggered resets, the orchestrator sends a Signal notification and stays in `WAITING_FOR_HUMAN`. Only `PROCEED` or `STOP` can advance past the cap. The `escalation_resets` counter is NOT zeroed inside `reset_phase()` — it is only zeroed when the roadmap genuinely advances to a new phase. This prevents circumventing the cap by repeatedly triggering phase resets.
+
+**Separation of counters:** `executor_retries` tracks automatic retry-path resets (incremented by `reset_execution("auto")`). `escalation_resets` tracks human-triggered resets via `RESET_PHASE`/`RESET_EXECUTION` (incremented by `reset_execution("escalation")` and the `RESET_PHASE` handler). Never both in one operation.
+
+Resume commands trigger `orchestrator.py` operations.
+**Sentinel Pattern Bridge:** The human's response from Signal is passed back to the orchestrator via the `escalation_output.json` file. The Escalation Agent has a strict tool policy carve-out in `openclaw.json` allowing it to write exactly this file and its sentinel (`escalation_output.done`). While awaiting a reply (`WAITING_FOR_HUMAN`), the orchestrator actively polls for this sentinel, parses the command, and triggers the corresponding state transition.
+**`PROCEED` implementation detail:** On receiving `PROCEED`, the orchestrator skips the merge step (assumes git state is already correct), then runs the remaining post-merge sequence: `git tag --force phase-N-complete`, update roadmap to `[x]`, append `reviewer_output.suggestions` to `suggestions.md`, clear working files, loop back to roadmap gate. If the tag or roadmap update fails, escalate again — do not silently advance.
+
+### Ambiguous Reply Protocol
+
+1. If reply is not clearly one of the six commands → escalation agent re-prompts once, restating the options explicitly
+2. If second reply is also ambiguous → default to `STOP`; do not guess intent on pipeline state changes
+
+While awaiting reply: pipeline status is `WAITING_FOR_HUMAN`; heartbeat cron does not attempt restart. No timeout on human reply — pipeline waits indefinitely (intentional).
+
+### Escalation Agent Failure — Fallback Chain
+
+Sequential, not parallel:
+
+1. Orchestrator invokes escalation agent via webhook → waits for escalation agent's sentinel
+2. If sentinel appears → confirmed delivery, no fallback needed
+3. If sentinel does NOT appear within timeout → orchestrator sends raw Signal template directly via OpenClaw webhook (no LLM, plain text with phase/gate/error context). **Note:** this requires OpenClaw gateway to be reachable; if OpenClaw is down, skip to step 4
+4. If raw Signal also fails → write `escalation_failed.json` to workspace, set pipeline status to `HALTED_SILENT`, stop
+
+### `escalation_failed.json`
+
+```json
+{
+  "timestamp": "<ISO 8601>",
+  "phase": "<int>",
+  "gate": "<string>",
+  "original_failure_reason": "<string>"
+}
+```
+
+### Silent Halt Behavior
+
+- `HALTED_SILENT` is written **only** when escalation delivery fails — all three fallbacks (escalation agent webhook, raw Signal webhook, direct write) have been exhausted. It is **not** the terminal state for clean pipeline completion; `PIPELINE_COMPLETE` is used for that.
+- `HALTED_SILENT` prevents heartbeat from restarting orchestrator (same as `WAITING_FOR_HUMAN`)
+- Detection is by absence — no Signal activity, pipeline idle — manual check required
+- No infinite notification retry loop — systematic failure will not be self-resolving
+
+---
+
+## 7. Gate Scripts
+
+All gates are deterministic Python scripts on the Pi. Zero LLM tokens (exception: blame attribution LLM fallback). Completion detected via sentinel files (`.done`), not JSON file presence. Gates poll for sentinel then parse JSON.
+
+Gate scripts always wrap JSON load in `try/except` — unhandled parse exception must never crash the orchestrator.
+Any updates back to `phase_state.json` must be written atomically (e.g., write to a tempfile then replace) to prevent corruption from power loss or race conditions across invocations.
+
+### Planner Output Gate
+
+**Validation checks:**
+```
+IF planner_output.json does NOT exist         → FAIL
+IF implementation_plan missing OR empty array  → FAIL
+IF tdd_test_structure missing OR empty array   → FAIL
+IF pass_criteria missing OR length < 1         → FAIL
+IF any pass_criteria item lacks "condition"    → FAIL
+ELSE                                           → PASS
+```
+
+**On FAIL:** Increment `planner_retries` in `phase_state.json`.
+
+**Branching:**
+```
+IF PASS                    → proceed to executor
+IF FAIL AND retries < 3    → re-invoke planner with failure detail appended
+IF FAIL AND retries >= 3   → escalation agent
+```
+
+### Executor Output Gate
+
+**Validation checks:**
+```
+IF executor_output.json does NOT exist                       → FAIL
+IF status != "complete"                                      → FAIL
+IF tests_written: NOT all tests from tdd_test_structure
+    present on disk                                          → FAIL
+IF test_results.all_passing != true                          → FAIL
+IF file_manifest: NOT all expected files exist on disk       → FAIL
+IF any paths in tests_written or file_manifest attempt path
+    traversal outside the shared workspace                   → FAIL
+IF git diff --diff-filter=D <phase_base_commit> HEAD reveals
+    a deleted file absent from BOTH file_manifest AND
+    files_deleted                                            → FAIL (ERR_UNACCOUNTED_DELETION)
+ELSE                                                         → PASS
+```
+
+**`ERR_UNACCOUNTED_DELETION`:** The gate runs `git diff --name-only --diff-filter=D <phase_base_commit> HEAD` in the workspace, plus `git ls-files --deleted` for uncommitted deletions, then cross-references the union against `file_manifest` and the optional `files_deleted` array. Any file that appears in neither list triggers this error. If `phase_base_commit` is absent from `pipeline_state.json`, or if the git command fails, the check is skipped with a warning (non-fatal). This catches models that delete files under token pressure and self-report `all_passing: true` — see PIPELINE-CONSTRAINTS.md §2 > MiniMax M2.5 File Deletion Under Token Pressure.
+
+The `status` check runs first. An executor that self-reports `"stuck"` or `"failed"` is an immediate gate failure regardless of test results — see PIPELINE-CONSTRAINTS.md § Executor Status Corner Case for rationale.
+
+**On FAIL:** Increment `executor_retries` in `phase_state.json`.
+
+**Branching:**
+```
+IF PASS                    → proceed to reviewer
+IF FAIL AND retries < 3    → re-invoke executor with failure detail
+IF FAIL AND retries >= 3   → run blame attribution
+```
+
+### `failure_context.json` — Failure Context Artifact
+
+Written atomically by the orchestrator **before every routing decision** that follows an agent failure. This happens at four call sites: planner gate fail, executor gate fail, executor retries exhausted (blame path), and reviewer gate fail. The file is cleared at phase start alongside other working files.
+
+**Schema:**
+```json
+{
+  "timestamp": "<ISO 8601 UTC>",
+  "phase_raw_id": "<string>",
+  "failing_agent": "<planner|executor|reviewer>",
+  "attempt_number": "<int>",
+  "gate_error_codes": ["<ERR_...>"],
+  "agent_status": "<complete|failed|stuck|null>",
+  "agent_failure_reason": "<string|null>",
+  "agent_troubleshooting_attempts": ["<string>"],
+  "blocking_issues": [{"description": "...", "attribution": "...", "affected_file": "..."}],
+  "tests_written": ["<path>"],
+  "tests_passing": "<bool|null>",
+  "file_manifest": ["<path>"],
+  "files_present_on_disk": ["<path — glob of SYMLINK_TARGET, excluding pipeline metadata>"],
+  "planner_retries_at_failure": "<int>",
+  "executor_retries_at_failure": "<int>",
+  "reviewer_retries_at_failure": "<int>",
+  "prior_blame_attributions": [{"layer": 1, "fault": "...", "routing": "..."}]
+}
+```
+
+`files_present_on_disk` vs `file_manifest` comparison is the primary signal for the blame analyst: missing files indicate deletion or failed write; unexpected files indicate scope creep. The file is consumed by Layer 1 blame analyst (see below).
+
+### Blame Attribution — Three-Layer System
+
+Runs after executor retries are exhausted (retries ≥ 3). Reads `failure_context.json` from the shared workspace. Every routing decision is logged to `lessons.md` in the format:
+```
+[BLAME] ts=<ISO> phase=<id> attempt=<n> layer=<1|2|3> fault=<fault> confidence=<confidence> routing=<plan|impl|escalate|default|fallback> reasoning=<string>
+```
+
+**Layer 1 — LLM analyst (always runs first):**
+
+A single structured LLM call to `qwen3.5-27b` via direct POST — not a full agent turn; one prompt, one response, parsed immediately. This is the **only** point in the pipeline where the orchestrator itself makes an LLM call.
+
+```python
+POST http://<llama-server-host>:11434/v1/chat/completions
+{
+  "model": "qwen3.5-27b",
+  "response_format": {"type": "json_object"},
+  "messages": [{"role": "user", "content": "<failure_context.json contents>"}]
+}
+```
+
+The standard OpenAI-compatible payload format is required because this POST bypasses OpenClaw and goes directly to llama-server.
+
+The analyst returns `{"fault": "<plan|impl|infrastructure|unknown>", "confidence": "<high|medium|low>", "reasoning": "<string>"}`.
+
+**Layer 1 routing table:**
+
+| `fault` | `confidence` | Routing |
+|---|---|---|
+| `"plan"` | `"high"` | → re-route to planner |
+| `"impl"` | `"high"` | → `reset_execution("auto")` (re-run executor) then escalate |
+| `"infrastructure"` | `"high"` or `"medium"` | → escalation agent |
+| Any other combination | — | Fall through to Layer 2 |
+
+If the Layer 1 call fails (network error, timeout, unparseable response), fall through to Layer 2 without crashing.
+
+**Layer 2 — Deterministic heuristics (fallback when Layer 1 is inconclusive or unavailable):**
+```
+IF tests failing on undefined interface       → planner blame (ambiguous schema)
+                                              → re-route to PLANNER with failure logged
+IF tests failing on implementation logic
+    with correct interface                    → executor blame
+                                              → ESCALATE
+IF inconclusive                               → fall through to Layer 3
+```
+
+**Layer 3 — Hard default (fallback when both Layer 1 and Layer 2 are inconclusive):**
+
+Returns `blame: "impl"` unconditionally. Routes to escalation agent. Logs `layer=3, routing=default` in `lessons.md`. Repeated Layer 3 fires signal that planner needs tighter phase scoping or that failure context collection is insufficient.
+
+Blame attribution history is accumulated in `phase_state.json` under `prior_blame_attributions` for use by subsequent blame calls and agents.
+
+**Impl blame cap — escalation after 3 consecutive `impl` attributions:**
+
+After each blame attribution that returns `"impl"`, the orchestrator counts the number of consecutive `"impl"` entries at the tail of `prior_blame_attributions`. If this count reaches **3**, the orchestrator routes to the escalation agent instead of calling `reset_execution("auto")` again. This cap prevents an infinite retry loop when the executor LLM consistently produces structurally invalid output (e.g., empty `file_manifest`, `ERR_UNACCOUNTED_DELETION`) that the blame analyst correctly attributes to implementation failure but that no amount of automatic retries will resolve.
+
+```
+IF blame == "impl":
+    consecutive_impl = count of trailing "impl" entries in prior_blame_attributions
+    IF consecutive_impl >= 3 → escalation agent (impl blame cap reached)
+    ELSE                     → reset_execution("auto") → re-invoke executor
+```
+
+The escalation agent receives the full `failure_context.json` and can issue `RESET_PHASE`, `RESET_EXECUTION`, or `STOP` as appropriate. The `escalation_resets` counter applies to any subsequent escalation-triggered resets.
+
+### Reviewer Output Gate
+
+**Done-criteria pre-check (runs before reviewer agent is invoked):**
+
+The gate checks for two mandatory completion artifacts before evaluating reviewer output. If either is absent, it returns `MISSING_ARTIFACTS` immediately without consuming `reviewer_retries`.
+
+```
+IF phases/{phase_raw_id}.md does NOT exist       → MISSING_ARTIFACTS
+IF metrics.jsonl does NOT exist OR last non-empty
+    line does not contain phase_raw_id           → MISSING_ARTIFACTS
+ELSE                                             → proceed to validation checks
+```
+
+**Orchestrator handling of `MISSING_ARTIFACTS`:**
+```
+reviewer_artifacts_retries += 1
+IF reviewer_artifacts_retries >= 2  → escalation agent
+ELSE:
+    set artifact_instruction in phase_state.json
+    reset executor_retries to 0
+    re-invoke executor with artifact-creation instruction
+```
+
+`reviewer_artifacts_retries` is a separate counter that does NOT consume `reviewer_retries`. It is preserved across `reset_execution()` and only zeroed by `reset_phase()`. The `artifact_instruction` in `phase_state.json` tells the executor it must write the phase archive and metrics row before its sentinel.
+
+**Validation checks:**
+```
+IF blocking_issues array is NOT empty            → FAIL
+IF integration_tests_passing != true             → FAIL
+IF phase_intent_validated != true                → FAIL
+ELSE                                             → PASS
+```
+
+**On FAIL:** Increment `reviewer_retries` in `phase_state.json`.
+
+**Branching (pass-dependent):**
+```
+IF PASS                              → merge
+IF FAIL AND pass == 1                → re-run executor with blocking_issues
+IF FAIL AND pass == 2                → check attribution field:
+                                        IF "plan" → re-run planner
+                                        IF "impl" → re-run executor (final retry)
+IF FAIL AND pass == 3                → escalation agent
+```
+
+**INFRA_FAILURE pre-check (RR-1):**
+
+`reviewer_gate.py` returns `"INFRA_FAILURE"` when `reviewer_output.json` is missing or unparseable — indicating the reviewer never produced output, rather than that it rejected the work. The orchestrator distinguishes this from a genuine rejection:
+
+```
+IF gate_result == "INFRA_FAILURE":
+    IF traffic_cop_healthy():
+        reviewer_infra_retries += 1
+        IF reviewer_infra_retries >= 3  → escalation
+        ELSE                             → re-invoke reviewer (soft retry)
+    ELSE (unhealthy):
+        IF within 10-minute recovery cooldown:
+            reviewer_infra_recovery_attempts += 1
+            IF attempts >= 2  → escalation
+            ELSE              → wait_for_model_stable() → re-invoke reviewer
+        ELSE (outside cooldown — first time):
+            write timestamp to phase_state.json (atomic, before SSH)
+            invoke SSH recovery: ssh -i <key> Z@<host> recovery
+            exit 0 → recovery succeeded → wait_for_model_stable() → re-invoke reviewer
+            exit 2 → already healthy → wait_for_model_stable() → re-invoke reviewer
+            exit 1 or timeout → escalation
+```
+
+INFRA_FAILURE does NOT increment `reviewer_retries` — that counter is reserved for genuine LLM rejections. The separate `reviewer_infra_retries` and `reviewer_infra_recovery_attempts` counters are preserved across `reset_execution()` and only zeroed by `reset_phase()`.
+
+**SSH recovery interface** (reads from `recovery` section of `openclaw.json`):
+
+| Field | Value |
+|---|---|
+| User | `Z` |
+| Host | `<llama-server-host>` |
+| Key | `/home/pi/.ssh/autodev_recovery_key` |
+| Command | `recovery` (server-side script; `command=` restriction ignores arg, runs `restart_llama.sh`) |
+| Exit 0 | Recovery succeeded |
+| Exit 1 | Recovery failed |
+| Exit 2 | Already healthy / skipped |
+| Timeout | 70s subprocess timeout → treated as exit 1 |
+
+> **Note — cloud-routed agents (planner, executor, reviewer):** For these agents, infra failures present as HTTP errors, API timeouts, or malformed responses from OpenRouter rather than local process crashes. The SSH recovery script is not applicable for these failure modes. The soft retry and escalation paths remain valid. Rate limit errors (HTTP 429) should be treated as soft infra failures with a brief backoff before retry. The SSH recovery path remains active for the escalation agent, which runs on local inference.
+
+---
+
+### Mandatory Completion Artifacts
+
+Two artifacts must be written by the executor **before** `executor_output.done` on every phase. Their presence is verified by the reviewer gate done-criteria pre-check. Write ordering is strict:
+
+```
+1. phases/{phase_raw_id}.md   ← phase archive (write first)
+2. metrics.jsonl              ← append metrics row (write second)
+3. executor_output.done       ← sentinel (write last)
+```
+
+**Phase archive — `phases/{phase_raw_id}.md`**
+
+Written to `pipeline-project/phases/` (create directory if absent). Documents what was built so future agents and operators have per-phase history without reading git logs.
+
+```markdown
+# {phase_raw_id} — {goal from current_phase.json detail field}
+**Completed:** {ISO 8601 UTC timestamp}
+**Duration:** {elapsed if known, else "unknown"}
+**Executor attempts:** {executor_retries + 1}
+**Reviewer passes:** {reviewer_retries + 1}
+
+## What was built
+## Tests
+## Files changed
+## Files deleted
+## Lessons
+```
+
+Read `phase_state.json` for `executor_retries` and `reviewer_retries`; default to 0 if absent.
+
+**Metrics row — `metrics.jsonl`**
+
+Append one JSON line to `pipeline-project/metrics.jsonl`:
+
+```json
+{"ts": "<ISO 8601 UTC>", "phase": "<phase_raw_id>", "goal": "<detail from current_phase.json>", "executor_attempts": <int>, "reviewer_passes": <int>, "blame_fires": 0, "escalations": 0, "duration_seconds": null, "skill_used": "<discipline name or null>"}
+```
+
+- `executor_attempts` = `executor_retries + 1` (from `phase_state.json`, default 0 if absent)
+- `reviewer_passes` = `reviewer_retries + 1`
+- `blame_fires` / `escalations`: 0 unless definitive evidence otherwise
+- `duration_seconds`: `null` unless computable from timestamps
+- `skill_used`: discipline name string from `phase_state.json → skill_injected` (e.g. `"core-logic"`, `"infra-config"`), or `null` if no skill was injected. Written by the orchestrator's canonical post-merge row; read from `phase_state.json` before it is deleted at phase completion.
+
+The reviewer gate verifies that the last non-empty line of `metrics.jsonl` contains `phase_raw_id` — this confirms the row was written for the current phase, not a prior one.
+
+> **Metrics write authority — dual-write design:** The executor writes an interim row to `metrics.jsonl` during execution. This row is required for the reviewer gate done-criteria pre-check (which verifies the row exists before running validation). After the reviewer gate passes and the merge commit completes, the **orchestrator** writes a single canonical row for the phase, stripping any prior rows for the same `phase_raw_id` written by the executor. The orchestrator's canonical row is the authoritative record — it uses final counts from `pipeline_state.json` and computes `duration_seconds` from the recorded `phase_start_time`. On phases where the executor was retried multiple times, the executor may have written multiple rows; the orchestrator deduplication step ensures exactly one row per phase in the final `metrics.jsonl`.
+
+---
+
+## 8. ~~Traffic Cop~~ Retired 2026-03-04
+
+Replaced by direct llama-server endpoint at `http://<llama-server-host>:11434`. All local model requests (executor, reviewer, escalation) now go directly to llama-server. See §1 Infrastructure Topology.
+
+---
+
+## 9. OpenClaw Configuration
+
+### `openclaw.json` — Complete Structure
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "skipBootstrap": true,
+      "model": {
+        "primary": "anthropic/claude-sonnet-4-6"
+      },
+      "models": {
+        "anthropic/claude-sonnet-4-6": {
+          "alias": "sonnet",
+          "params": {
+            "cacheRetention": "short"
+          }
+        }
+      }
+    },
+    "list": [
+      {
+        "id": "planner",
+        "workspace": "~/.openclaw/workspace-planner"
+      },
+      {
+        "id": "executor",
+        "workspace": "~/.openclaw/workspace-executor",
+        "model": "llama-local/qwen3-coder-next"
+      },
+      {
+        "id": "reviewer",
+        "workspace": "~/.openclaw/workspace-reviewer",
+        "model": "llama-local/qwen3.5-27b"
+      },
+      {
+        "id": "escalation",
+        "workspace": "~/.openclaw/workspace-escalation",
+        "default": true,
+        "tools": {
+          "allow": ["read", "write"],
+          "deny": ["edit", "apply_patch", "exec", "process", "browser"]
+        }
+      }
+    ]
+  },
+  "models": {
+    "providers": {
+      "llama-local": {
+        "baseUrl": "http://<llama-server-host>:11434/v1",
+        "apiKey": "no-key",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "qwen3-coder-next",
+            "name": "Qwen3-Coder-Next",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 65536,
+            "maxTokens": 16384,
+            "params": {
+              "temperature": 0.7,
+              "top_p": 0.8,
+              "top_k": 20,
+              "min_p": 0.0,
+              "repeat_penalty": 1.05
+            }
+          },
+          {
+            "id": "qwen3.5-27b",
+            "name": "Qwen3.5-27B (Q6_K)",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 65536,
+            "maxTokens": 16384,
+            "params": {
+              "temperature": 0.6,
+              "top_p": 0.95,
+              "top_k": 20,
+              "min_p": 0.0,
+              "presence_penalty": 0.8
+            }
+          },
+          {
+            "id": "darkqwen3.5-27b",
+            "name": "DarkQwen3.5-27B",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 65536,
+            "maxTokens": 16384,
+            "params": {
+              "temperature": 0.6,
+              "top_p": 0.95,
+              "top_k": 20,
+              "min_p": 0.0,
+              "presence_penalty": 0.8
+            }
+          },
+          {
+            "id": "qwen3.5-9b",
+            "name": "Qwen3.5-9B (Q8_0)",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 65536,
+            "maxTokens": 16384,
+            "params": {
+              "temperature": 0.6,
+              "top_p": 0.95,
+              "top_k": 20,
+              "min_p": 0.0,
+              "presence_penalty": 0.8
+            }
+          },
+          {
+            "id": "darkqwen3.5-9b",
+            "name": "DarkQwen3.5-9B",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 65536,
+            "maxTokens": 16384,
+            "params": {
+              "temperature": 0.6,
+              "top_p": 0.95,
+              "top_k": 20,
+              "min_p": 0.0,
+              "presence_penalty": 0.8
+            }
+          }
+        ]
+      }
+    }
+  },
+  "hooks": {
+    "enabled": true,
+    "token": "<shared-secret>",
+    "allowedAgentIds": ["planner", "executor", "reviewer", "escalation"],
+    "allowRequestSessionKey": true,
+    "allowedSessionKeyPrefixes": ["pipeline:"],
+    "defaultSessionKey": "pipeline:default"
+  },
+  "bindings": [
+    {
+      "agentId": "escalation",
+      "comment": "Route all inbound Signal messages exclusively to the escalation agent. Only escalation has messaging rights in the pipeline.",
+      "match": { "channel": "signal" }
+    }
+  ]
+}
+```
+
+> **`defaultSessionKey` prefix requirement:** The `defaultSessionKey` must satisfy the `allowedSessionKeyPrefixes` restriction. The original value `"hook:pipeline"` does not match the `"pipeline:"` prefix and causes a gateway startup validation error.
+
+### Key Configuration Notes
+
+**Per-agent workspaces:** Do NOT use `agents.defaults.workspace` — each agent must be explicit to avoid collisions with any default agent.
+
+**`agents.defaults.skipBootstrap: true`:** Applied globally to all pipeline agents via `agents.defaults`. Without this, OpenClaw reports `BOOTSTRAP.md` as missing on first run and attempts the identity ritual, overwriting hand-crafted `IDENTITY.md` / `SOUL.md` / `USER.md`. With `skipBootstrap: true`, the warning is suppressed and pre-seeded files are used as-is.
+
+**Prompt caching:** Controlled via `agents.defaults.models["anthropic/claude-sonnet-4-6"].params.cacheRetention`. Set to `"short"` (5-minute TTL) for the Anthropic model used by planner and escalation agents. Local model (Qwen3.5-27B) has zero API cost, so caching is irrelevant — its cost fields are set to `0` in the `models.providers` registration. Files that should benefit from cache reuse: `SOUL.md`, `USER.md`, `IDENTITY.md`, `AGENTS.md`, `TOOLS.md` — all stable between invocations, never updated mid-run. Batch planner/escalation invocations within the 5-minute cache window where possible.
+
+**Per-agent tool policies:** OpenClaw supports per-agent `tools.allow`/`tools.deny` with individual tool names and `group:*` shorthand. This is granular, not all-or-nothing.
+
+**Webhook `agentId` routing:** The `POST /hooks/agent` endpoint accepts an `agentId` field in the request body, which routes the request to the matching agent from `agents.list[]`. This is a built-in feature — no custom `hooks.mappings` entry is needed. The `hooks.allowedAgentIds` array restricts which agents can be targeted via webhook.
+
+**Local model registration:** All local models are registered under the `llama-local` provider in `models.providers`. This gives OpenClaw the provider prefix, endpoint, and cost/context metadata. When invoking via webhook, use the `provider/model` format (e.g., `llama-local/qwen3-coder-next`). All local models are registered at `contextWindow: 65536` (64K) in OpenClaw config. Server-side `--ctx-size` by model (as of 2026-03-10): `qwen3-coder-next` 65536 (bumped from 32K), `qwen3.5-27b` / `darkqwen3.5-27b` 65536, `qwen3.5-9b` / `darkqwen3.5-9b` 32768. Active role assignments: executor → `qwen3-coder-next`, reviewer → `qwen3.5-27b`, escalation → `qwen3.5-27b`. Registered but not currently utilized: `darkqwen3.5-27b`, `qwen3.5-9b`, `darkqwen3.5-9b`. Per-model sampling parameters are set via `params` blocks in the model registration. Qwen3.5 family uses `presence_penalty`; Qwen3-Coder-Next uses `repeat_penalty`. Do not cross-apply — they are different algorithms.
+
+**`apiKey: "no-key"` is required on the `llama-local` provider** — even though llama-server has no authentication. Without this field, OpenClaw falls back to the `anthropic:default` auth profile, which injects an Anthropic API key into the request header. The local server rejects this as an auth failure, triggering a silent cloud fallback to `anthropic/claude-sonnet-4-6`. The value `"no-key"` is a placeholder that satisfies the provider auth requirement without sending a real credential. This is the root cause of Signal DM sessions landing on Sonnet 4.6 despite correct per-agent model config.
+
+**Default agent:** The escalation agent must be marked `"default": true` in its `agents.list` entry. Without this, the first agent in the list (`planner`) becomes the implicit default. Any unrouted inbound Signal message would land in a planner session — the wrong agent. Explicit `default: true` on escalation, combined with the `bindings` entry below, provides two layers of defence.
+
+**Signal bindings:** A top-level `"bindings"` array hard-wires Signal channel messages to the escalation agent regardless of default-agent configuration. Structure: `{"agentId": "escalation", "match": {"channel": "signal"}}`. This is a second layer — even if the default agent ever changed, Signal DMs still route exclusively to escalation.
+
+**Memory/vector index:** Disabled for all pipeline agents. Fresh context per phase is by design; agents read explicit JSON files, not memory search.
+
+**Hook authentication:** Configured via `hooks.token`. Every webhook POST must include this token as `Authorization: Bearer <token>` or `x-openclaw-token: <token>` header. Query-string tokens are rejected (`?token=...` returns 400). Use a dedicated hook token — do not reuse gateway auth tokens.
+
+**Session key policy:** `hooks.allowRequestSessionKey: true` is required because the orchestrator passes a unique `sessionKey` per agent invocation (e.g., `pipeline:phase-N:planner`). Without this, the field is silently rejected and all hooks share the `defaultSessionKey`. The `allowedSessionKeyPrefixes: ["pipeline:"]` restriction ensures only pipeline-prefixed keys are accepted.
+
+---
+
+## 10. Infrastructure
+
+### File Paths
+
+| File | Location | Purpose |
+|---|---|---|
+| `pipeline.lock` | Working directory on Pi | Concurrency lock via `fcntl.flock`, PID + timestamp as metadata |
+| `pipeline_state.json` | Working directory on Pi | Orchestrator state, atomically written |
+| `current_phase.json` | Shared workspace (via symlink) | Phase detail, category, exit_criteria |
+| `phase_state.json` | Shared workspace | Retry counts, blame context, error codes |
+| `planner_output.json` | Shared workspace | Planner deliverable |
+| `planner_output.done` | Shared workspace | Planner sentinel |
+| `executor_output.json` | Shared workspace | Executor deliverable |
+| `executor_output.done` | Shared workspace | Executor sentinel |
+| `reviewer_output.json` | Shared workspace | Reviewer deliverable |
+| `reviewer_output.done` | Shared workspace | Reviewer sentinel |
+| `escalation_output.json` | Shared workspace | Human resume command logged by escalation agent |
+| `escalation_output.done` | Shared workspace | Sentinel for human resume command |
+| `escalation_failed.json` | Shared workspace | Written when escalation delivery fails |
+| `suggestions.md` | Project directory | Accumulated reviewer suggestions |
+| `lessons.md` | Project directory | Blame attribution LLM call log |
+| `pipeline_stop_requested` | Project directory (symlink target) | Stop sentinel written by `POST /api/stop`; consumed and deleted by `_check_stop_requested()` on next loop iteration |
+
+> **Workspace-relative paths:** Agents access these files via the workspace-relative path `pipeline-project/filename.json`. The absolute paths listed in this table are from the orchestrator's perspective. Agents must not use absolute paths for writes due to the workspace sandbox restriction.
+
+### Symlink Pattern
+
+```bash
+ln -sfn /path/to/project ~/.openclaw/pipeline-project
+```
+
+Updated by orchestrator at project start (one-time per project). All agents already point here via absolute paths in their config. Shared project files (JSON outputs, sentinels, source code) live at this symlink target — not in any agent workspace.
+
+### Agent Workspaces (Separate Per Role)
+
+Each agent gets its own `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `TOOLS.md` — different behavioral constraints per role require different files.
+
+```
+~/.openclaw/workspace-planner/
+~/.openclaw/workspace-executor/
+~/.openclaw/workspace-reviewer/
+~/.openclaw/workspace-escalation/
+```
+
+### Workspace Write Sandbox and Symlinks
+
+OpenClaw sandboxes each agent's `write` tool to its declared workspace directory. Writes targeting absolute paths outside the workspace silently report success but discard the file — this is platform behavior, not configurable.
+
+Each agent workspace contains a symlink providing write access to the shared project directory:
+
+```
+~/.openclaw/workspace-planner/pipeline-project    → ~/.openclaw/pipeline-project
+~/.openclaw/workspace-executor/pipeline-project   → ~/.openclaw/pipeline-project
+~/.openclaw/workspace-reviewer/pipeline-project   → ~/.openclaw/pipeline-project
+~/.openclaw/workspace-escalation/pipeline-project → ~/.openclaw/pipeline-project
+```
+
+The outer symlink `~/.openclaw/pipeline-project` resolves to the actual project directory. When the orchestrator swaps projects (via `ln -sfn`), all four workspace symlinks follow automatically.
+
+Agent `AGENTS.md` files instruct agents to use the workspace-relative path `pipeline-project/` for all reads and writes (e.g., `pipeline-project/planner_output.json`), not the absolute path `~/.openclaw/pipeline-project/`.
+
+### Git Operations
+
+**Strict timing rule:** No git operations during planner, executor, or reviewer turns — agents write only to shared workspace.
+
+Git operations happen only after reviewer gate passes:
+
+```bash
+git add .
+git commit -m "phase({phase_id}): {goal_summary}"
+git checkout main
+git merge phase/N --no-ff
+git tag phase-N-complete
+```
+
+**Branch creation:**
+```bash
+git checkout phase/N 2>/dev/null || git checkout -b phase/N
+```
+This handles both first-run and restart cases safely.
+
+**On RESTART PHASE — working tree handling depends on restart reason:**
+
+| Scenario | Working Tree Action |
+|---|---|
+| Failed-to-complete (timeout/crash) | `git reset --hard HEAD` then `git clean -fd` |
+| Reviewer-rejection | Leave as-is — executor's files are the starting point |
+
+**Merge conflict:** → escalation agent immediately; do not attempt auto-resolve. After manual resolution via SSH, use the `PROCEED` resume command to trigger post-merge cleanup (tag, roadmap update, working file clear). See § Escalation Agent > Resume Commands.
+
+### Sentinel Pattern
+
+1. **Pre-Webhook Cleanup**: Before transitioning state to `WAITING_FOR_SENTINEL` and before POSTing the webhook (including on retries), the orchestrator MUST explicitly delete the target `.done` file and the target `.json` file (`missing_ok=True`). The workspace must be completely clear of prior outputs before the agent is invoked.
+2. Agent writes output JSON first
+3. Agent writes sentinel file (`.done`) as final act
+4. Orchestrator polls for `.done` file — not the JSON itself. Must use a simple `time.sleep()` loop (e.g., checking every 2 seconds).
+5. `JSON present + sentinel present` = safe to read
+6. `JSON present without sentinel` = agent still writing, do not parse
+
+Sentinel is a soft dependency on agent instruction-following — requires careful AGENTS.md guidance. Orchestrator enforces a timeout per agent turn (default: 10 minutes) — if sentinel does not appear within the timeout, treat as failure and increment retry counter.
+
+**Executor idle detection (OB-4 fix, updated 2026-03-14):** For the executor specifically, the orchestrator uses `sentinel_poller.poll_for_sentinel_with_idle_detect()` which monitors two activity signals in parallel: (1) the executor session JSONL mtime, and (2) the mtime of any file in the project directory (`watch_dirs=[SYMLINK_TARGET]`). If ALL sources go quiet for `idle_threshold` seconds with no sentinel, the poll exits early (treated identically to a timeout → `reset_execution("auto")`). The idle clock resets on any JSONL write OR any project file write, so models that write code files between JSONL flushes are never falsely flagged as idle. Current parameters: `startup_grace=90s`, `idle_threshold=120s`, outer `timeout_seconds=600` unchanged.
+
+Additionally, the orchestrator records a `min_sentinel_mtime` (wall-clock time captured immediately before `cleanup_output_files()`) and passes it to the poller. If a `.done` sentinel is found with an mtime older than this value, it is discarded as belonging to an orphaned prior session — this prevents stale sentinels from consuming the executor retry budget while the reset-cleaned working tree causes an inevitable gate failure.
+
+Full parameter signature: `poll_for_sentinel_with_idle_detect(sentinel_path, jsonl_path, startup_grace, idle_threshold, timeout_seconds, watch_dirs, min_sentinel_mtime, stop_sentinel_path)`. The `stop_sentinel_path` parameter (also present on the simpler `poll_for_sentinel`) is checked on every loop iteration — if the file exists the poll returns `False` immediately, and the caller's next main-loop iteration calls `_check_stop_requested()` to consume the sentinel and transition to `STOPPED`. Note: `session:end` OpenClaw hook (planned) would be a cleaner trigger — revisit when available.
+
+**Executor → Reviewer model swap (OB-6 fix):** After the executor gate passes, the orchestrator calls `wait_for_model_stable()` before firing the reviewer webhook. This polls `GET http://<llama-server-host>:11434/v1/models` every 5s until all models report a stable status (`loaded` or `unloaded` — none transitioning). Timeout: 300s (proceeds anyway). Prevents HTTP 500 cascades caused by the traffic cop force-killing qwen3-coder-next mid-eviction if the GPU swap takes >10s. Replaces the prior fixed `time.sleep(60)`. Implemented in `Orchestrator.wait_for_model_stable()` (`orchestrator.py`); URL derived from `openclaw_config["models"]["providers"]["llama-local"]["baseUrl"]`.
+
+Sentinel files cleared by orchestrator at phase start alongside working JSONs.
+
+### Session Key Naming
+
+**Dynamic Session Keys Required:**
+For all agent invocations, dynamically append the current attempt/retry counter as a suffix.
+
+```
+pipeline:phase-N:{raw_id}:planner-attempt-1
+pipeline:phase-N:{raw_id}:executor-attempt-1
+pipeline:phase-N:{raw_id}:reviewer-attempt-1
+```
+
+> **Note:** The key includes `{raw_id}` (e.g., `CORE-2`) to avoid session key collisions between phases with the same phase number across different projects. The `executor-fallback-attempt-N` variant shown in earlier documentation is not used in the current implementation — all executor retries (both automatic and reviewer-rejection retries) use `executor-attempt-N` with the current `executor_retries + 1` counter. The `attempt_label` field visible in orchestrator logs (e.g., `"Local"`) is a display string for log output, not part of the session key itself.
+
+New attempt → new suffix in key → completely fresh session, zero prior context loaded. This prevents VRAM overflow on local models.
+
+### Heartbeat Cron
+
+Runs on Pi. Every 30 minutes (tunable to 15).
+
+- **Staggered Timeouts:** To prevent race conditions with the internal event loop, the cron's stuck-sentinel detection threshold is explicitly set to **15 minutes** (900 seconds), staggering it behind the Orchestrator's internal 10-minute circuit breaker timeout.
+- The Heartbeat Cron acts strictly as a safety net. It only intervenes if the lock is dead OR if the Orchestrator is alive but has been stuck in `WAITING_FOR_SENTINEL` for > 15 minutes, meaning the internal timeout failed.
+
+```
+1. Attempt fcntl.flock(pipeline.lock, LOCK_EX | LOCK_NB)
+2. IF lock acquisition FAILS (EWOULDBLOCK):
+     Orchestrator is alive
+     Read pipeline_state.json
+     IF status == WAITING_FOR_SENTINEL
+        AND elapsed > 15 min threshold → kill PID, loop back to step 1
+     ELSE → do nothing (alive + healthy)
+3. IF lock acquisition SUCCEEDS:
+     Orchestrator is dead (crashed or rebooted)
+     Read pipeline_state.json
+     Query local llama-server (http://<llama-server-host>:11434) for RESUME/WAIT/NOTIFY decision
+       → RESUME  : restart orchestrator.py --project-path <project_path from state>
+       → WAIT    : log and exit (pipeline is correctly paused: WAITING_FOR_HUMAN, HALTED_SILENT, etc.)
+       → NOTIFY  : send raw Signal notification, do not restart
+     IF model unreachable → send Signal notification, do not restart (fail safe, not fail open)
+4. Recovery re-invokes last recorded webhook action
+   — does NOT re-run gate checks that already passed
+   — project_path is re-passed from pipeline_state.json (B4) so symlink is correctly set
+```
+
+**B7 Model Decision Rules (system prompt):**
+- `RESUME` — pipeline_status is `RUNNING` or `WAITING_FOR_SENTINEL` and lock is free (orchestrator confirmed dead)
+- `WAIT` — pipeline_status is `WAITING_FOR_HUMAN`, `HALTED_SILENT`, `BLOCKED`, `PIPELINE_COMPLETE`, or `STOPPED`; do not intervene
+- `NOTIFY` — state does not clearly match RESUME or WAIT; alert human
+- Unexpected output → treated as NOTIFY (conservative default)
+
+### Session Cleanup Cron
+
+Runs on Pi, once daily.
+
+- Prunes OpenClaw session JSONs directly and deletes associated `.jsonl` files
+- Deletes any session older than 30–60 days
+- Dead sessions don't affect runtime (never loaded), but disk accumulation is real over time
+- Do NOT delete escalation agent sessions automatically — may be needed for audit trail
+- **Log Rotation**: Includes steps to rotate/truncate `heartbeat.log` (keeping up to ~5MB) to prevent SD card exhaustion
+
+### Audit Archive
+
+```
+/home/pi/pipeline-audit/{project-name}/phase-N/
+```
+
+Archive written **before** clearing working files. Project name in path prevents cross-project conflicts. Archive failure is a non-blocking informational escalation only (logs a warning to stdout/log file, does NOT trigger the Signal webhook).
+
+---
+
+## 11. Output Schemas
+
+Complete JSON schemas for all pipeline data files. Schemas in §3–§6 define agent output contracts. Additional state files:
+
+### `current_phase.json`
+
+> ⚠️ AMBIGUITY: `phase_number` field name is inferred; source describes "phase N" context without naming this field explicitly.
+
+```json
+{
+  "phase_number": { "type": "integer" },
+  "detail": { "type": "string", "description": "Phase description from roadmap" },
+  "category": { "type": "string" },
+  "exit_criteria": {
+    "type": "array",
+    "items": { "type": "string" }
+  }
+}
+```
+
+### `phase_state.json`
+
+```json
+{
+  "planner_retries": { "type": "integer", "default": 0 },
+  "executor_retries": { "type": "integer", "default": 0, "description": "Incremented by reset_execution('auto') — automatic retry path only." },
+  "reviewer_retries": { "type": "integer", "default": 0, "description": "Genuine LLM rejection counter. Zeroed by reset_execution() and reset_phase(). Cap: 3 passes before escalation." },
+  "reviewer_rejected": { "type": "boolean", "default": false, "description": "Set by reviewer gate on ROUTE_EXECUTOR. Cleared by reset_execution()." },
+  "reviewer_infra_retries": { "type": "integer", "default": 0, "description": "RR-4: Incremented when reviewer gate returns INFRA_FAILURE AND traffic cop is healthy (soft retry). Cap: 3. Zeroed by reset_phase() only — NOT by reset_execution(). Distinct from reviewer_retries (which tracks genuine LLM rejections)." },
+  "reviewer_infra_recovery_attempts": { "type": "integer", "default": 0, "description": "RR-4: Incremented when reviewer gate returns INFRA_FAILURE AND traffic cop is unhealthy AND within the 10-minute recovery cooldown. Cap: 2. Zeroed by reset_phase() only." },
+  "reviewer_infra_recovery_attempted": { "type": "boolean", "default": false, "description": "RR-1: Set to true before SSH recovery is attempted. Used with reviewer_infra_recovery_timestamp to enforce 10-minute cooldown preventing re-invocation storms." },
+  "reviewer_infra_recovery_timestamp": { "type": "string", "description": "RR-1: ISO 8601 UTC timestamp written atomically immediately before the SSH recovery subprocess is launched. Paired with reviewer_infra_recovery_attempted for cooldown enforcement." },
+  "reviewer_infra_recovery_exit_code": { "type": "integer", "description": "RR-1: SSH subprocess return code. 0 = success, 1 = failed, 2 = skipped/already-healthy. Written to phase_state after invocation for audit trail." },
+  "reviewer_infra_recovery_succeeded": { "type": "boolean", "description": "RR-1: True when exit code was 0 or 2; false when exit code was 1 or SSH timed out." },
+  "planner_output_preserved": { "type": "boolean", "default": false, "description": "RR-2: Set to true atomically after planner gate passes. Enables crash-recovery skip: if current_agent=planner, planner_retries=0, and this flag is true, the orchestrator skips planner re-invocation and advances directly to executor. Cleared by ROUTE_PLANNER (intentional reviewer-reject re-run) and by reset_phase(). Never set by reset_execution()." },
+  "escalation_resets": { "type": "integer", "default": 0, "description": "Incremented by RESET_PHASE and RESET_EXECUTION resume commands. Cap: 3. NOT zeroed inside reset_phase() — only zeroed when roadmap genuinely advances to a new phase. Distinct from executor_retries." },
+  "blame_context": { "type": "string", "description": "Appended by blame attribution" },
+  "last_error_code": { "type": "string", "description": "Distinct codes for parse vs. structural failures" },
+  "skill_injected": { "type": "string|null", "description": "Discipline name of the skill injected for the most recent agent turn (e.g. 'core-logic', 'infra-config'). null if no skill was injected (disabled, not mapped, or source file missing). Written atomically by _record_injected_skill() immediately after each inject_skill() call." },
+  "skill_agent": { "type": "string", "description": "Agent role for which the skill_injected value was recorded ('planner', 'executor', or 'reviewer'). Always written alongside skill_injected." },
+  "escalation_trigger_reason": { "type": "string", "description": "Human-readable reason the pipeline transitioned to WAITING_FOR_HUMAN. Written atomically immediately before transition_state('WAITING_FOR_HUMAN', ...) at all three escalation trigger points. Used by the UI command panel header and audit log. Preserved until phase_state.json is deleted at phase completion." }
+}
+```
+
+> `phase_state.json` is deleted at phase completion and re-created lazily on first counter increment. On re-creation the fallback init includes `escalation_resets: 0` — so the counter genuinely resets only when a new phase begins, never on a phase reset.
+
+**Counter reset matrix:**
+
+| Counter | `reset_execution()` | `reset_phase()` | Phase complete (new phase) |
+|---|---|---|---|
+| `planner_retries` | — | ✓ zeroed | ✓ zeroed |
+| `executor_retries` | — (auto only increments, does not zero) | ✓ zeroed | ✓ zeroed |
+| `reviewer_retries` | ✓ zeroed | ✓ zeroed | ✓ zeroed |
+| `reviewer_rejected` | ✓ cleared | ✓ cleared | ✓ cleared |
+| `reviewer_infra_retries` | ✗ preserved | ✓ zeroed | ✓ zeroed |
+| `reviewer_infra_recovery_attempts` | ✗ preserved | ✓ zeroed | ✓ zeroed |
+| `planner_output_preserved` | — | ✓ cleared | ✓ cleared |
+| `escalation_resets` | — | ✗ preserved | ✓ zeroed |
+
+### `pipeline_state.json`
+
+See § Orchestrator > `pipeline_state.json` Contents.
+
+### `escalation_failed.json`
+
+See § Escalation Agent > `escalation_failed.json`.
+
+---
+
+## 12. Error Classification
+
+All error types and their retry counter behavior, consolidated in one place.
+
+### Webhook POST Failures (Inner Retry Loop)
+
+**Note:** Both webhook POST failures and Anthropic API infra failures (`429`, `5xx`) are handled via an **in-memory synchronous loop** directly surrounding the webhook invocation. They do not persist an `infra_retries` counter to `phase_state.json`. If this loop exhausts all attempts, it routes directly to the escalation agent.
+
+**Webhook Return Protocol:**
+The `invoke_agent_webhook` function returns one of three structured string statuses:
+- `"SUCCESS"`: The webhook fired successfully and returned `200 OK`.
+- `"AUTH_ERROR"`: The webhook returned `401` or `403`. The orchestrator must immediately transition to the Escalation path without attempting an infra retry.
+- `"INFRA_ERROR"`: The webhook failed due to network exhaustion, `429`, or `>=500` after the in-memory backoff loop was exhausted. The orchestrator transitions to the Escalation path.
+
+| Condition | Action | Counter |
+|---|---|---|
+| POST fails (gateway down, network drop, DNS) | Retry up to 3 times, 30-second backoff between each | Own counter (infra, in-memory loop), does NOT burn agent retry |
+| All 3 POST attempts fail (`INFRA_ERROR`) | → Escalation agent | Infra failure, not agent retry |
+
+### Anthropic API Errors
+
+| Condition | Action | Counter |
+|---|---|---|
+| Timeout / 5xx | Infrastructure retry, 3 attempts | Own counter (infra, in-memory loop), does NOT burn agent retry |
+| 401 / 403 | Config problem, no retry | → Escalation immediately |
+| 429 rate limit | Backoff + retry | Own counter (infra, in-memory loop), does NOT burn agent retry |
+| Bad model output (parse fail, validation fail) | Agent retry | Agent retry counter increments |
+
+### JSON Parse Errors
+
+- Unparseable JSON (malformed, truncated) → treated identically to structural validation failure — same retry counter, same branch logic
+- Parse error type logged to `phase_state.json` with distinct error code so audit trail distinguishes parse failures from structural validation failures
+- Gate script always wraps JSON load in `try/except` — unhandled parse exception must never crash the orchestrator
+
+### Roadmap Checkbox States
+
+| Checkbox | Meaning | Orchestrator Behavior |
+|---|---|---|
+| `[ ]` | Pending | Pick first pending phase and run it |
+| `[x]` | Complete | Skip, move to next pending |
+| `[-]` | Skipped | Discard working files, clear sentinels, mark `[-] skipped — reason`, no git commit, advance |
+| `[!]` | Blocked | Pipeline halts entirely; requires manual unblock (edit to `[ ]` or `[-]`); heartbeat does not auto-resume |
+
+Blocked is a true halt — programmatic detection is worth the cost: false alarms are informative signals worth investigating.
+
+---
+
+## 13. Pure Script Inventory
+
+Components that require no LLM at all:
+
+- Repo initialization check (folder structure, support docs, roadmap file)
+- Roadmap validation + phase identification
+- Symlink update (`ln -sfn`) per new project
+- Git add / commit / merge / tag (reviewer gate pass only)
+- Cycle counter + sentinel + working file cleanup
+- Audit archive write (before clear, non-blocking on failure)
+- Lockfile management (`pipeline.lock` via `fcntl.flock`)
+- Daily session cleanup cron (30–60 day TTL)
+- Heartbeat cron (30 min, tunable to 15)
+
+### Repo Initialization Check
+
+- `os.path.exists()` checks on required folder structure
+- Verify support docs present (`AGENTS.md`, `TOOLS.md`, `SOUL.md`, `USER.md`, `IDENTITY.md`) in all four agent workspaces
+- Verify `.gitignore` exists in the project root (shared workspace symlink target)
+- Verify roadmap file exists via glob patterns (`*oadmap*.md`, `*Roadmap*.md`, `*oadmap*.yaml`, `*oadmap*.json`)
+- Exit 0 → proceed to roadmap gate | Exit 1 → escalate immediately (no retry)
+
+**Implementation:** `gate_scripts/repo_init_check.py` — exposes a `check_repo_init()` function and calls `sys.exit(0)`/`sys.exit(1)` directly, so it **must** be called as a subprocess (not imported as a module — `sys.exit` would kill the orchestrator process). Called via `subprocess.run([sys.executable, gate_script], capture_output=True, text=True)` in `orchestrator.py::run_repo_init_check()`.
+
+**Call location:** `orchestrator.py` method `run()` — runs after `self.read_state()`, before `while True:` (the phase loop). Runs on every startup including heartbeat cron resume.
+
+**Failure behavior:** On non-zero exit, `run()` writes `current_agent = "escalation"` and `last_action = "Repo init check failed: <stdout+stderr>"` to state, invokes the escalation webhook directly (session key: `pipeline:phase-N:repo-init-failure`), then `return`s — the phase loop never executes. No retry counter is incremented. If escalation webhook fails, writes `escalation_failed.json` and transitions to `HALTED_SILENT`.
+
+**Stdout format on failure:** The script prints `[ERROR] <specific check message>` identifying exactly which check failed (missing symlink, missing roadmap, missing `AGENTS.md` in which workspace, missing `.gitignore`). This text is captured and included verbatim in the escalation context so the operator knows what to fix.
+
+### Roadmap Validation Gate
+
+- Parse roadmap file — extract phases array
+- Find first phase where `status !== "complete"`
+- If none found → `PIPELINE_COMPLETE`
+- If found → write phase context to `current_phase.json` → identify phase
+
+### Identify Next Phase + Project Init
+
+- Read `current_phase.json` — load detail, category, exit_criteria
+- Initialize `phase_state.json`: `planner_retries=0`, `executor_retries=0`, `reviewer_retries=0`
+- Update shared workspace symlink
+- `git checkout -b phase/N`
+- Write phase context file → POST webhook to invoke planner
+
+### Merge & Commit — Phase N
+
+- `git merge phase/N --no-ff`
+- Write `[x]` checkbox to `roadmap.md` in-place (atomic: phase N must be marked complete in the merge commit itself)
+- `git add roadmap.md`
+- `git commit --amend --no-edit` ← folds the checkbox update into the merge commit; no separate commit
+- `git tag --force phase-N-complete` ← placed AFTER amend so tag points to the amended commit
+- Append `reviewer_output.suggestions` to `suggestions.md`
+- Clear `phase_state.json`, `planner_output.json`, `executor_output.json`, all sentinels
+- Loop back → roadmap gate
+
+> **Why amend, not a separate commit?** `git checkout -b phase/NEXT` resets the working tree to HEAD. If the checkbox write is not part of HEAD (the merge commit), the next branch checkout silently discards it. Folding it into the merge commit via `--amend` ensures `roadmap.md` shows `[x]` on every branch derived from the merge. This is a behavioral fix, not a style choice.
+
+### Signal Notification Implementation
+
+- Orchestrator sends via OpenClaw webhook with `channel: "signal"` targeting registered Signal number
+- Message payload: phase N, failing gate, failure reason, retry counts, timestamp
+- Signal account must be registered in OpenClaw channels config — verify with `openclaw channels status` before first pipeline run
+
+---
+
+## §Skills — Optional Discipline Skill Injection
+
+> **Status: Validated in production E2E run (2026-03-14).** All 6 phases of a cli-snake project completed with correct skill injection — discipline switched from `infra-config` → `core-logic` → `ui-frontend` → `core-logic` at each subsystem boundary, confirmed via `[SKILL] Status=loaded` log lines on every agent invocation.
+
+### Overview
+
+The pipeline supports optional per-agent, per-phase discipline skills. Before invoking each agent webhook, the orchestrator optionally injects a `SKILL.md` into the agent's workspace skills directory. OpenClaw auto-loads workspace-level skills (`<workspace>/skills/{name}/SKILL.md`) at session start. Skills are supplemental domain guidance — they do NOT replace or modify AGENTS.md, SOUL.md, TOOLS.md, IDENTITY.md, or USER.md.
+
+### File Locations
+
+| Path | Role |
+|------|------|
+| `~/.openclaw/skill-library/{discipline}/{role}/SKILL.md` | Source library — operator-maintained, never modified by orchestrator |
+| `~/.openclaw/config/skill_mapping.yaml` | Subsystem → discipline mapping (YAML, operator-editable) |
+| `~/.openclaw/skill_manager.py` | `SkillManager` class — all injection logic |
+| `~/.openclaw/workspace-{agent}/skills/{discipline}-{role}/SKILL.md` | Active injection target for live agent sessions |
+
+> **Critical:** `~/.openclaw/skills/` is OpenClaw's global tier (loads for ALL sessions). Discipline skills must NOT be placed there. Only workspace-level `workspace-{agent}/skills/` is used.
+
+### Config Schema (`openclaw.json`)
+
+```json
+"pipeline": {
+  "skills": {
+    "enabled": true,                    // Global kill switch — false disables all skills
+    "planner_skills_enabled": true,     // Per-agent toggle
+    "executor_skills_enabled": true,
+    "reviewer_skills_enabled": true
+  }
+}
+```
+
+All flags default to `true` when absent. Config is read from the in-memory `openclaw_config` dict (loaded at orchestrator startup). Flag changes require orchestrator restart.
+
+### Skill Resolution Algorithm
+
+```
+Input: phase_raw_id = "CORE-E2", agent_role = "executor"
+
+Step 1: Check config flags
+        If skills.enabled == false → clean workspace, log Status=disabled, done
+        If executor_skills_enabled == false → clean workspace, log Status=disabled, done
+
+Step 2: Extract subsystem
+        subsystem = "CORE-E2".split("-")[0].upper() → "CORE"
+        If phase_raw_id is empty → clean, log Status=none_mapped Reason=empty_phase_id, done
+
+Step 3: Look up mapping
+        discipline = skill_mapping.yaml["CORE"] → "core-logic"
+        If no entry → clean, log Status=none_mapped, done
+
+Step 4: Locate source file
+        path = skill-library/core-logic/executor/SKILL.md
+        If not exists → clean, log Status=none_found, done
+
+Step 5: Inject
+        Clean workspace-executor/skills/ entirely (rmtree + recreate)
+        Copy source → workspace-executor/skills/core-logic-executor/SKILL.md
+        Log Status=loaded
+```
+
+### Skill Mapping File Format (`config/skill_mapping.yaml`)
+
+```yaml
+INFRA: infra-config
+CORE: core-logic
+DATA: data-persistence
+API: api-service
+AUTH: auth-security
+UI: ui-frontend
+INTEGRATION: integration-wiring
+TEST: testing-quality
+E2E: testing-quality
+CLI: cli-tooling
+# Unmapped subsystems run without skills — MCP, HOOK, APPR, CTX, WORK, GIT, DASH, OPS
+```
+
+Keys are uppercase subsystem prefixes. Values are discipline directory names in `skill-library/`. Keys are case-normalised at load time. Missing file or bad YAML → empty mapping → all phases run without skills (graceful degradation).
+
+### Orchestrator Integration Points
+
+Three calls in `orchestrator.py`, each immediately after `cleanup_output_files()` and before `invoke_agent_webhook()`:
+
+```python
+# Planner (~line 814):
+self.skill_manager.inject_skill(
+    self.state.get("current_phase_raw_id", ""), "planner", self.openclaw_config
+)
+
+# Executor (~line 916):
+self.skill_manager.inject_skill(
+    self.state.get("current_phase_raw_id", ""), "executor", self.openclaw_config
+)
+
+# Reviewer (~line 1004):
+self.skill_manager.inject_skill(
+    self.state.get("current_phase_raw_id", ""), "reviewer", self.openclaw_config
+)
+```
+
+**Post-inject phase_state.json write:** Immediately after each `inject_skill()` call, `_record_injected_skill(agent_role)` reads the workspace skills directory to determine what was placed and writes `skill_injected` (discipline name string, or `null` if no skill was injected) and `skill_agent` (role string) to `phase_state.json` atomically. This makes the injected skill visible to the UI and audit log without parsing workspace directories externally.
+
+### Graceful Degradation Contract
+
+Every failure mode results in "run normally without skills":
+
+| Failure | Behaviour |
+|---------|-----------|
+| `config/skill_mapping.yaml` missing | Warn once at init, all phases run without skills |
+| Bad YAML in mapping file | Log error at init, all phases run without skills |
+| Subsystem not in mapping | Clean workspace, log `Status=none_mapped`, continue |
+| Skill file not in library | Clean workspace, log `Status=none_found`, continue |
+| Copy fails (OSError) | Clean workspace, log `Status=none_found`, continue |
+| `pipeline.skills` absent from config | All flags default to `true` |
+
+### Log Format
+
+```
+[SKILL] ts={ISO8601} Phase={raw_id} Agent={role} Skill={path or NONE} Status={status} [Reason=...]
+```
+
+Status values: `loaded` | `none_mapped` | `none_found` | `disabled`
+
+---
+
+## 14. UI Server API Reference
+
+The pipeline dashboard runs a FastAPI server (`ui/server.py`) at `http://localhost:18790`. All endpoints are local-only — no auth, no multi-user.
+
+### Core State Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/health` | Returns `{"ok": true}` — liveness check |
+| `GET` | `/api/state` | Returns `pipeline_state.json` contents |
+| `GET` | `/api/roadmap` | Returns parsed roadmap phases array |
+| `GET` | `/api/events` | Returns recent activity feed events (ring buffer, last 200) |
+| `GET` | `/api/phase-state` | Returns `phase_state.json` contents |
+
+### Completion & Metrics
+
+#### `GET /api/metrics-summary`
+
+Reads `metrics.jsonl` from `project_dir_path`. Deduplicates phase entries (keeping the latest row per `phase` ID — the orchestrator's canonical post-merge row). Returns aggregated totals and a per-phase breakdown.
+
+**Response schema:**
+```json
+{
+  "total_phases": 6,
+  "total_duration_seconds": 1980,
+  "total_executor_attempts": 9,
+  "total_reviewer_passes": 7,
+  "total_blame_fires": 2,
+  "total_escalations": 0,
+  "phases": [
+    {
+      "phase": "INFRA-1",
+      "goal": "...",
+      "duration_seconds": 180,
+      "executor_attempts": 1,
+      "reviewer_passes": 1,
+      "blame_fires": 0,
+      "escalations": 0,
+      "skill_used": "infra-config"
+    }
+  ]
+}
+```
+
+If `metrics.jsonl` is absent or empty, returns all-zero totals with an empty `phases` array. `null` duration values count as 0 in the sum.
+
+**UI usage:** Displayed in the Current Phase panel when `pipeline_status` is `PIPELINE_COMPLETE`, and in expanded rows of completed phases in the Roadmap panel.
+
+### Pipeline Control
+
+#### `POST /api/stop`
+
+Requests a clean halt of the running orchestrator. The orchestrator detects and consumes the sentinel at the top of its next main loop iteration and transitions to `STOPPED`.
+
+**Preconditions:** `pipeline_status` must be `RUNNING` or `WAITING_FOR_SENTINEL`.
+
+**Success response (HTTP 200):**
+```json
+{"ok": true, "message": "Stop requested — pipeline will halt after current agent completes"}
+```
+
+**Error response (HTTP 409) — pipeline not in a stoppable state:**
+```json
+{"error": "Pipeline is not in a stoppable state"}
+```
+
+**Side effect:** Writes an empty file `{project_dir_path}/pipeline_stop_requested`. The orchestrator's `_check_stop_requested()` method removes this file when it detects it, preventing re-trigger on restart.
+
+**UI behavior:** The stop button is visible only during `RUNNING` / `WAITING_FOR_SENTINEL`. Clicking shows a confirmation modal. On confirm, `POST /api/stop` is called and the button enters a pulsing "Stopping..." disabled state. The button disappears once `pipeline_status` changes away from the stoppable states.
+
+#### `POST /api/command`
+
+Issues a resume command to the escalation handler. Writes `escalation_output.json` then `escalation_output.done` atomically to the project directory (write order is critical — orchestrator reads `.done` as the signal that `.json` is complete).
+
+**Preconditions:** `pipeline_status` must be `WAITING_FOR_HUMAN`. `escalation_resets` must be `< 3` if the command is `RESET_PHASE` or `RESET_EXECUTION`.
+
+**Request body:**
+```json
+{"command": "RETRY"}
+```
+
+**Valid commands:** `RETRY`, `RESET_EXECUTION`, `RESET_PHASE`, `SKIP`, `PROCEED`, `STOP`. Any other value returns HTTP 400.
+
+**Success response (HTTP 200):**
+```json
+{"ok": true}
+```
+
+**Error responses:**
+- HTTP 409 — `{"error": "Pipeline is not waiting for human input"}` — status is not `WAITING_FOR_HUMAN`
+- HTTP 409 — `{"error": "Reset cap reached"}` — `escalation_resets >= 3` and command is `RESET_PHASE` or `RESET_EXECUTION`
+- HTTP 400 — `{"error": "Unknown command"}` — unrecognized command token
+
+#### `POST /api/resume-ready`
+
+Transitions `pipeline_status` from `STOPPED` to `WAITING_FOR_HUMAN` atomically. Also sets `current_agent: "escalation"` so the restarted orchestrator enters the escalation command handler regardless of what agent was active when the pipeline was stopped.
+
+**Preconditions:** `pipeline_status` must be `STOPPED`.
+
+**Success response (HTTP 200):**
+```json
+{"ok": true}
+```
+
+**Error response (HTTP 409) — pipeline not in STOPPED state:**
+```json
+{"error": "Pipeline is not in STOPPED state (current: <status>)"}
+```
+
+**UI usage:** Called by the StoppedRecoveryPanel immediately before `POST /api/command` when the operator clicks Resume, Reset Execution, or Reset Phase.
+
+#### `POST /api/resume-orchestrator`
+
+Spawns a new `orchestrator.py` process non-blocking. Reads `project_path` from `pipeline_state.json` and `autodev_repo_path` from `config.json`. Logs to `/tmp/orchestrator.log`.
+
+**Success response (HTTP 200):**
+```json
+{"ok": true}
+```
+
+Returns immediately — does not wait for the orchestrator to reach a stable state. The UI's polling loop detects the state transition.
+
+**UI usage:** Called after `POST /api/command` as the final step of the resume flow from the StoppedRecoveryPanel.

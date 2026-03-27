@@ -1,0 +1,36 @@
+# config/skill_mapping.yaml
+#
+# Maps roadmap phase subsystem prefixes to skill discipline directory names.
+# If a phase subsystem is not listed here, no skill is loaded for that phase.
+# The mapping is case-insensitive on the key side (normalised to uppercase at load time).
+#
+# Format: SUBSYSTEM_PREFIX: skill-discipline-directory-name
+#
+# STRICT 1:1 MAPPINGS ONLY
+# Each entry maps a roadmap phase subsystem prefix to exactly one skill discipline.
+# Only map subsystems where the relationship is unambiguous and direct.
+# If a subsystem is NOT listed here, no skill is loaded — this is the safe default.
+# DO NOT add "best guess" or "closest match" mappings. Incorrect skill context is
+# worse than no skill context (e.g., mapping MCP to api-service would cause agents
+# to build REST endpoints instead of MCP protocol implementations).
+
+INFRA: infra-config
+CORE: core-logic
+DATA: data-persistence
+API: api-service
+AUTH: auth-security
+UI: ui-frontend
+INTEGRATION: integration-wiring
+TEST: testing-quality
+E2E: testing-quality
+CLI: cli-tooling
+
+# INTENTIONALLY UNMAPPED subsystems — run without skills until explicit mappings are
+# validated by the operator and added here:
+#   MCP, HOOK, APPR, CTX, WORK, GIT, DASH, OPS
+#
+# FUTURE CONSIDERATION: Adaptive/semantic matching
+# In a future enhancement, this mapping could be extended with fuzzy or semantic
+# matching (e.g., analysing the phase Goal text to infer discipline). For now,
+# strict 1:1 prefix matching is intentional to avoid poisoning agent context
+# with mismatched domain guidance.

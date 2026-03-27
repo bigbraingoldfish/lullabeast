@@ -390,15 +390,19 @@
             let body = "Are you sure?";
             if (command === "STOP") {
                 title = "Confirm STOP";
-                body = "Send STOP to the orchestrator?";
+                body = "Halt the pipeline entirely? No further phases will run. You can resume from the STOPPED state if needed.";
             } else if (command === "SKIP") {
                 title = "Confirm SKIP";
                 body =
-                    "Skip the current phase? In-progress work for this phase may be discarded. This is difficult to undo — only continue if you intend to skip.";
+                    "Skip the current phase? The phase will be marked skipped in the roadmap and the pipeline advances to the next phase. In-progress work is not committed.";
             } else if (command === "RESET_PHASE") {
                 title = "Confirm RESET PHASE";
                 body =
-                    "Reset the entire phase? This clears phase execution state and retries. Use only when you intend to restart the phase from the beginning.";
+                    "Full phase reset: git will rewind to the pre-phase commit, the phase branch will be deleted, and a fresh planner run will start. Use only when the plan itself is flawed.";
+            } else if (command === "RESET_REVIEWER") {
+                title = "Confirm RESET REVIEWER";
+                body =
+                    "Clear reviewer output and re-run the reviewer from scratch. Executor output is preserved. Use when the reviewer failed but the implementation looks correct.";
             } else {
                 title = "Confirm action";
                 body = "Are you sure you want to run this command?";
@@ -466,6 +470,7 @@
         function EscalationCommandPanel({
             pipeline_status,
             escalation_trigger_reason,
+            escalation_message,
             last_action,
             escalation_resets,
             orchestrator_alive,
@@ -497,7 +502,7 @@
             const commandErrParts = commandError ? splitApiDetail(commandError) : null;
 
             const handleCommand = (command) => {
-                if (command === "RESET_PHASE" || command === "SKIP" || command === "STOP") {
+                if (command === "RESET_PHASE" || command === "RESET_REVIEWER" || command === "SKIP" || command === "STOP") {
                     setModalCommand(command);
                     setShowConfirmModal(true);
                     return;
@@ -569,30 +574,52 @@
                 setModalCommand(null);
             };
 
-            const buttonClass = "header-text px-3 py-2 rounded text-sm font-medium bg-[#1a1d21] hover:bg-[#252830] transition-colors";
-            const disabledButtonClass = "header-text px-3 py-2 rounded text-sm font-medium bg-[#1a1d21] opacity-50 cursor-not-allowed";
+            // Commands shown in the main grid (non-destructive enough for direct layout)
+            const GRID_COMMANDS = [
+                { command: "RESET_EXECUTION", label: "RESET EXECUTION", desc: "Keep the plan. Re-run executor from a clean working tree.", capped: true },
+                { command: "RESET_REVIEWER",  label: "RESET REVIEWER",  desc: "Keep executor output. Re-run reviewer from scratch.", capped: true },
+                { command: "RESET_PHASE",     label: "RESET PHASE",     desc: "Full reset: git rewind, new plan, re-run from the top.", capped: true },
+                { command: "SKIP",            label: "SKIP",            desc: "Mark this phase skipped and advance to the next.", capped: false },
+                { command: "PROCEED",         label: "PROCEED",         desc: "Accept current output as-is and advance (skips merge).", capped: false },
+            ];
 
-            const renderButton = (command, label) => {
-                const isResetCommand = command === 'RESET_EXECUTION' || command === 'RESET_PHASE';
-                if (isResetCommand && isResetDisabled) {
-                    return (
-                        <button className={disabledButtonClass} disabled={true} title="Reset cap reached (3/3). Use PROCEED or STOP.">
-                            {label}
-                        </button>
-                    );
-                }
+            const renderGridButton = ({ command, label, desc, capped }) => {
+                const disabled = capped && isResetDisabled;
+                const baseClass = "flex flex-col items-start text-left px-3 py-2 rounded bg-[#1a1d21] transition-colors";
+                const cls = disabled
+                    ? `${baseClass} opacity-50 cursor-not-allowed`
+                    : `${baseClass} hover:bg-[#252830]`;
+                const title = disabled ? "Reset cap reached (3/3). Use PROCEED or STOP." : undefined;
                 return (
-                    <button onClick={() => handleCommand(command)} className={buttonClass}>
-                        {label}
+                    <button
+                        key={command}
+                        className={cls}
+                        disabled={disabled}
+                        title={title}
+                        onClick={disabled ? undefined : () => handleCommand(command)}
+                    >
+                        <span className="header-text text-sm font-medium">{label}</span>
+                        <span className="text-slate-400 text-xs mt-0.5 leading-snug">{desc}</span>
                     </button>
                 );
             };
 
             return (
                 <div className="border-2 border-orange-500 rounded-lg p-4 mt-4 bg-[#141618]/50">
-                    <h3 className="header-text text-sm font-semibold text-orange-400 mb-3">
+                    <h3 className="header-text text-sm font-semibold text-orange-400 mb-1">
                         {headerText}
                     </h3>
+                    {escalation_message && !commandSent ? (
+                        <p className="text-slate-300 text-xs mb-3 leading-relaxed">
+                            {escalation_message}
+                        </p>
+                    ) : null}
+                    {isResetDisabled && !commandSent ? (
+                        <p className="text-amber-500 text-xs mb-3">
+                            Reset cap reached (3/3). RESET EXECUTION, RESET REVIEWER, and RESET PHASE are disabled.
+                            Use PROCEED to advance or STOP to halt.
+                        </p>
+                    ) : null}
                     {commandErrParts ? (
                         <div className="mb-2 space-y-1">
                             <p className="text-red-400 text-xs">{commandErrParts.friendly}</p>
@@ -607,24 +634,27 @@
                         <div className="text-center py-4 space-y-2">
                             <span className="text-amber-400 text-sm block">
                                 {lastSubmittedCommand === "STOP"
-                                    ? "Stop submitted — waiting for orchestrator to apply it."
-                                    : "Command submitted — waiting for orchestrator to apply it."}
+                                    ? "STOP submitted — pipeline will halt after the current agent finishes."
+                                    : `${lastSubmittedCommand} submitted — waiting for orchestrator to apply it.`}
                             </span>
                             {!orchestrator_alive ? (
                                 <span className="text-amber-600 text-xs block">
-                                    Orchestrator is not running — it must be up to apply the command. After STOPPED, use
-                                    Resume in the header or start the orchestrator on the server.
+                                    Orchestrator is not running — start it on the server for this command to take effect.
                                 </span>
                             ) : null}
                         </div>
                     ) : (
-                        <div className="grid grid-cols-2 gap-2">
-                            {renderButton("RETRY", "RETRY")}
-                            {renderButton("RESET_EXECUTION", "RESET EXECUTION")}
-                            {renderButton("RESET_PHASE", "RESET PHASE")}
-                            {renderButton("SKIP", "SKIP")}
-                            {renderButton("PROCEED", "PROCEED")}
-                            {renderButton("STOP", "STOP")}
+                        <div className="space-y-2">
+                            <div className="grid grid-cols-2 gap-2">
+                                {GRID_COMMANDS.map(renderGridButton)}
+                            </div>
+                            <button
+                                className="w-full flex flex-col items-start text-left px-3 py-2 rounded bg-red-950/60 hover:bg-red-900/60 transition-colors border border-red-800/40"
+                                onClick={() => handleCommand("STOP")}
+                            >
+                                <span className="header-text text-sm font-medium text-red-400">STOP</span>
+                                <span className="text-slate-400 text-xs mt-0.5 leading-snug">Halt the pipeline entirely. No further phases will run.</span>
+                            </button>
                         </div>
                     )}
                     {showConfirmModal && (
@@ -3484,6 +3514,7 @@
                             <EscalationCommandPanel
                                 pipeline_status={status}
                                 escalation_trigger_reason={pState.escalation_trigger_reason}
+                                escalation_message={pState.escalation_message}
                                 last_action={pState.last_action}
                                 escalation_resets={pState.escalation_resets || 0}
                                 orchestrator_alive={alive}

@@ -18,7 +18,10 @@ from contextlib import asynccontextmanager
 
 from ui.roadmap_parser import parse_roadmap
 
-
+ORCHESTRATOR_FILENAME = "orchestrator.py"
+WEBHOOK_AGENT_ID = "prd-creator"
+# POLL_TIMEOUT is defined later in this file (line ~1494); ORCHESTRATOR_POLL_TIMEOUT aliases it.
+ORCHESTRATOR_POLL_TIMEOUT = 120
 
 
 # Ring buffer for synthetic events (max 50 entries)
@@ -368,6 +371,7 @@ DEFAULTS = {
     "hooks_url": "http://localhost:18789/hooks/agent",
     "hooks_token": "pipeline-secret-token",
     "conversion_prompt_path": "~/.openclaw/deployment-package/Updates/PRD to Roadmap (sonnet 4.5 ideal).txt",
+    "autodev_repo_path": os.environ.get("AUTODEV_REPO_PATH", os.path.expanduser("~/.openclaw")),
 }
 
 
@@ -589,10 +593,10 @@ def _spawn_orchestrator(project_path: str, config: dict | None = None) -> dict:
 
     if config is None:
         config = load_config()
-    autodev_repo_path = config.get("autodev_repo_path", "/home/pi/.openclaw")
-    orchestrator_script = os.path.join(autodev_repo_path, "orchestrator.py")
+    autodev_repo_path = config.get("autodev_repo_path", os.environ.get("AUTODEV_REPO_PATH", os.path.expanduser("~/.openclaw")))
+    orchestrator_script = os.path.join(autodev_repo_path, ORCHESTRATOR_FILENAME)
     if not os.path.exists(orchestrator_script):
-        return {"ok": False, "error": f"orchestrator.py not found at {orchestrator_script}"}
+        return {"ok": False, "error": f"{ORCHESTRATOR_FILENAME} not found at {orchestrator_script}"}
     log_file = open("/tmp/orchestrator.log", "a")
     subprocess.Popen(
         ["python", orchestrator_script, "--project-path", project_path],
@@ -778,8 +782,8 @@ def _pipeline_allows_project_switch() -> tuple[bool, str | None]:
 
 
 USER_PROJECT_PATH_BROKEN_FRIENDLY = (
-    "The pipeline's project folder link is broken or missing. "
-    "Pipeline commands can't run until it's fixed."
+    "Pipeline project folder is broken or missing — "
+    "commands can't run until it's fixed."
 )
 
 
@@ -808,14 +812,13 @@ def _project_path_503_detail(expanded_path: str | None, *, dangling: bool) -> st
     disp = expanded_path or "(not configured)"
     if dangling:
         tech = (
-            f"Technical: symlink at {disp} points to a missing folder. "
-            "Repair from Pipeline Monitor (click project path) or Setup & Preflight, "
-            "or: ln -sfn <your-project> ~/.openclaw/pipeline-project"
+            f"Technical: {disp} is a symlink pointing to a folder that no longer exists. "
+            "Fix: ln -sfn /path/to/your-project ~/.openclaw/pipeline-project"
         )
     else:
         tech = (
-            f"Technical: project_dir_path {disp} does not exist or is not set. "
-            "Create the folder or update ui/config.json."
+            f"Technical: project_dir_path {disp!r} does not exist. "
+            "Set the correct path in ui/config.json or create the project folder."
         )
     return f"{USER_PROJECT_PATH_BROKEN_FRIENDLY}\n{tech}"
 
@@ -1125,6 +1128,12 @@ def get_state():
                 response["skill_agent"] = phase_state["skill_agent"]
             if "escalation_trigger_reason" in phase_state:
                 response["escalation_trigger_reason"] = phase_state["escalation_trigger_reason"]
+            # escalation_message: richer human-readable escalation context for the UI.
+            # Reads dedicated field first; falls back to escalation_trigger_reason.
+            if "escalation_message" in phase_state:
+                response["escalation_message"] = phase_state["escalation_message"]
+            elif "escalation_trigger_reason" in phase_state:
+                response["escalation_message"] = phase_state["escalation_trigger_reason"]
     
     # Add server-derived fields
     # Orchestrator liveness
@@ -1157,10 +1166,10 @@ def get_state():
 
 
 # Valid commands for escalation
-VALID_COMMANDS = {"RETRY", "RESET_EXECUTION", "RESET_PHASE", "SKIP", "PROCEED", "STOP"}
+VALID_COMMANDS = {"RETRY", "RESET_EXECUTION", "RESET_PHASE", "RESET_REVIEWER", "SKIP", "PROCEED", "STOP"}
 
 
-RESET_CAP_COMMANDS = {"RESET_PHASE", "RESET_EXECUTION"}
+RESET_CAP_COMMANDS = {"RESET_PHASE", "RESET_EXECUTION", "RESET_REVIEWER"}
 
 
 def _validate_command_request(project_dir_path, pipeline_status, escalation_resets, command):
@@ -1190,11 +1199,17 @@ def _validate_command_request(project_dir_path, pipeline_status, escalation_rese
 
     # Check pipeline status
     if pipeline_status != "WAITING_FOR_HUMAN":
-        return False, "Pipeline is not waiting for human input", 409
+        return False, (
+            f"Pipeline is not waiting for human input (current status: {pipeline_status}). "
+            "This command can only be sent when the status is WAITING FOR HUMAN."
+        ), 409
 
-    # Check reset cap — only applies to RESET_PHASE and RESET_EXECUTION
+    # Check reset cap — only applies to RESET_PHASE, RESET_EXECUTION, RESET_REVIEWER
     if command in RESET_CAP_COMMANDS and escalation_resets >= 3:
-        return False, "Reset cap reached", 409
+        return False, (
+            "Reset cap reached (3/3 resets used this phase). "
+            "Use PROCEED to advance past this phase or STOP to halt the pipeline."
+        ), 409
 
     return True, None, None
 
@@ -1289,11 +1304,17 @@ def post_resume_ready():
     pipeline_state_path = os.path.expanduser(pipeline_state_path) if pipeline_state_path else None
 
     if not pipeline_state_path:
-        raise HTTPException(status_code=503, detail="Pipeline state path not configured")
+        raise HTTPException(
+            status_code=503,
+            detail="pipeline_state_path is not set in config. Open Setup & Preflight to configure it.",
+        )
 
     pipeline_state = _read_json_file(pipeline_state_path)
     if not pipeline_state:
-        raise HTTPException(status_code=503, detail="Could not read pipeline_state.json")
+        raise HTTPException(
+            status_code=503,
+            detail="Failed to read pipeline_state.json — it may be corrupt or empty. Check the file at the configured path.",
+        )
 
     if pipeline_state.get("pipeline_status") != "STOPPED":
         raise HTTPException(
@@ -1705,7 +1726,7 @@ async def _trigger_readiness_assessment(idea_id: str, config: dict) -> None:
         hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
         hooks_token = config.get("hooks_token", "")
         payload = {
-            "agentId": "prd-creator",
+            "agentId": WEBHOOK_AGENT_ID,
             "sessionKey": f"ideas:{idea_id}:readiness",
             "wakeMode": "now",
             "message": (
@@ -1773,7 +1794,7 @@ async def post_ideas_message(idea_id: str, request: Request):
 
     # Webhook payload — first line MUST be [SESSION] for agent output path parsing (AGENTS.md)
     webhook_payload = {
-        "agentId": "prd-creator",
+        "agentId": WEBHOOK_AGENT_ID,
         "sessionKey": session_key,
         "wakeMode": "now",
         "message": f"[SESSION] ideas:{idea_id}:session-{turn_n}\n\n{message_content}",
@@ -1796,7 +1817,10 @@ async def post_ideas_message(idea_id: str, request: Request):
         await asyncio.sleep(POLL_INTERVAL)
     else:
         # Timed out
-        raise HTTPException(status_code=408, detail=f"Agent turn timed out after {POLL_TIMEOUT}s")
+        raise HTTPException(
+            status_code=408,
+            detail=f"No agent response after {POLL_TIMEOUT}s — the model may be slow or the agent session may be stalled.",
+        )
 
     # Read agent response
     agent_response = ""
@@ -2188,7 +2212,7 @@ async def post_ideas_upload(
 
     session_key = f"ideas:{idea_id}:upload-{upload_turn}"
     webhook_payload = {
-        "agentId": "prd-creator",
+        "agentId": WEBHOOK_AGENT_ID,
         "sessionKey": session_key,
         "wakeMode": "now",
         "message": (
@@ -2212,7 +2236,7 @@ async def post_ideas_upload(
     else:
         raise HTTPException(
             status_code=408,
-            detail=f"Upload synthesis timed out after {POLL_TIMEOUT}s",
+            detail=f"PRD synthesis timed out after {POLL_TIMEOUT}s — the model may be slow or the agent session may be stalled.",
         )
 
     prd_draft_path = idea_dir / "prd_draft.md"
@@ -2269,7 +2293,7 @@ async def post_ideas_clarity_check(idea_id: str):
     timestamp_ms = int(datetime.utcnow().timestamp() * 1000)
     session_key = f"ideas:{idea_id}:clarity-{timestamp_ms}"
     webhook_payload = {
-        "agentId": "prd-creator",
+        "agentId": WEBHOOK_AGENT_ID,
         "sessionKey": session_key,
         "wakeMode": "now",
         "message": (
@@ -2404,7 +2428,10 @@ async def post_ideas_convert(idea_id: str):
 
     # Read conversion prompt — 503 if missing
     if not Path(conversion_prompt_path).exists():
-        raise HTTPException(status_code=503, detail="Conversion prompt file not found")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Conversion prompt file not found at {conversion_prompt_path}. Set conversion_prompt_path in ui/config.json.",
+        )
 
     conversion_prompt = Path(conversion_prompt_path).read_text()
 
@@ -2412,7 +2439,7 @@ async def post_ideas_convert(idea_id: str):
     timestamp_ms = int(datetime.utcnow().timestamp() * 1000)
     session_key = f"ideas:{idea_id}:convert-{timestamp_ms}"
     webhook_payload = {
-        "agentId": "prd-creator",
+        "agentId": WEBHOOK_AGENT_ID,
         "sessionKey": session_key,
         "wakeMode": "now",
         "message": (
@@ -2569,7 +2596,8 @@ def post_stop():
         hint = None
         if not alive:
             hint = (
-                "Orchestrator does not appear to be running — resume or start it so the stop command is applied."
+                "Orchestrator is not running — the STOP command is queued but won't be applied until "
+                "the orchestrator starts. Use Resume in the header, or start it manually on the server."
             )
 
         return {
