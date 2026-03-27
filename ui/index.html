@@ -107,10 +107,13 @@
 
         /* Shared markdown rendering for conversation and document panes */
         .msg-md h1, .msg-md h2, .msg-md h3, .msg-md h4 {
-            color: #00b4d8;
             font-weight: 600;
             margin: 0.65em 0 0.35em;
         }
+        /* h2 = top-level category grouper in PRD sections → white */
+        .msg-md h1, .msg-md h2 { color: #e2e8f0; }
+        /* h3/h4 = actual subsection headers → teal accent */
+        .msg-md h3, .msg-md h4 { color: #00b4d8; }
         .msg-md h1 { font-size: 1.2rem; }
         .msg-md h2 { font-size: 1.05rem; }
         .msg-md h3 { font-size: 0.98rem; }
@@ -1694,79 +1697,6 @@
             );
         }
 
-        function CompactProgress({ checklistRows, annotations, onDotClick, expanded, onToggleExpand, showEmptyPlaceholders, onTogglePlaceholders }) {
-            const totalComplete = checklistRows.filter((r) => r.status === "complete").length;
-            const unsubAnnotationSections = new Set((annotations || []).filter((a) => !a.submitted).map((a) => a.section));
-
-            const dotColor = (row) => {
-                if (row.status === "complete") return "bg-emerald-500";
-                if (row.status === "partial") return "bg-amber-400";
-                return "bg-[#2a2d31]";
-            };
-
-            return (
-                <div className="mb-4 rounded border border-[#1a1d21] bg-[#0d0f11] p-3">
-                    {/* Compact row */}
-                    <div className="flex items-center gap-2">
-                        <div className="flex items-center gap-1 flex-wrap">
-                            {checklistRows.map((row) => {
-                                const hasAnnotation = unsubAnnotationSections.has(row.title);
-                                return (
-                                    <div key={row.title} className="relative group/dot">
-                                        <button
-                                            type="button"
-                                            onClick={() => onDotClick(row.title)}
-                                            title={`${row.title} — ${row.status}${row.criticality ? " (" + row.criticality + ")" : ""}`}
-                                            className={`w-2.5 h-2.5 rounded-full transition-transform hover:scale-125 ${dotColor(row)}`}
-                                        />
-                                        {hasAnnotation && (
-                                            <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-amber-400 pointer-events-none" />
-                                        )}
-                                    </div>
-                                );
-                            })}
-                        </div>
-                        <span className="text-[11px] text-slate-500 flex-1">{totalComplete}/{checklistRows.length} sections complete</span>
-                        <button
-                            type="button"
-                            onClick={onToggleExpand}
-                            title={expanded ? "Collapse checklist" : "Expand checklist"}
-                            className="text-slate-500 hover:text-slate-300 text-sm leading-none"
-                        >
-                            {expanded ? "⌃" : "⌄"}
-                        </button>
-                    </div>
-                    {/* Expanded checklist */}
-                    {expanded && (
-                        <div className="mt-3 space-y-1 border-t border-[#1a1d21] pt-3 max-h-52 overflow-y-auto">
-                            {checklistRows.map((row) => (
-                                <button
-                                    key={row.title}
-                                    type="button"
-                                    onClick={() => onDotClick(row.title)}
-                                    className="w-full flex items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-[#1a1d21]"
-                                >
-                                    <span className={`w-4 shrink-0 text-xs ${iconColorForStatus(row.status)}`}>{iconForStatus(row.status)}</span>
-                                    <span className="flex-1 text-xs text-slate-300">{row.title}</span>
-                                    {unsubAnnotationSections.has(row.title) && (
-                                        <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" title="Has unsent note" />
-                                    )}
-                                    {row.criticality && (
-                                        <span className={`text-[10px] px-1.5 py-0.5 rounded border ${row.criticality === "critical" ? "border-red-900/60 bg-red-950/30 text-red-300" : "border-slate-700 text-slate-400"}`}>
-                                            {row.criticality}
-                                        </span>
-                                    )}
-                                </button>
-                            ))}
-                            <button type="button" className="mt-1 text-[11px] text-[#00b4d8] hover:underline" onClick={onTogglePlaceholders}>
-                                {showEmptyPlaceholders ? "Hide empty sections" : "Show empty section placeholders"}
-                            </button>
-                        </div>
-                    )}
-                </div>
-            );
-        }
-
         function IdeasScreen() {
             const ctx = useContext(AppCtx);
             const [messages, setMessages] = useState([]);
@@ -1794,8 +1724,7 @@
             const [ideasLoading, setIdeasLoading] = useState(true);
             const [showActionMenu, setShowActionMenu] = useState(false);
             const [activeIdeaMenuId, setActiveIdeaMenuId] = useState(null);
-            const [showEmptyPlaceholders, setShowEmptyPlaceholders] = useState(false);
-            const [checklistExpanded, setChecklistExpanded] = useState(false);
+            const showEmptyPlaceholders = false; // CompactProgress removed; empty sections always hidden
             const [showSessionModal, setShowSessionModal] = useState(false);
             const [sessionModalIdeaId, setSessionModalIdeaId] = useState(null);
             const [stagedAttachment, setStagedAttachment] = useState(null);
@@ -2216,21 +2145,6 @@
                 };
             });
 
-            const iconForStatus = (st) => (st === "complete" ? "✓" : st === "partial" ? "~" : "○");
-            const iconColorForStatus = (st) =>
-                st === "complete" ? "text-emerald-400" : st === "partial" ? "text-amber-400" : "text-slate-600";
-
-            const scrollToSection = (title) => {
-                const id = `prd-sec-${slugifySectionName(title)}`;
-                const root = docPaneRef.current;
-                const sectionEl = root ? root.querySelector(`[id="${id}"]`) : document.getElementById(id);
-                if (sectionEl) {
-                    sectionEl.scrollIntoView({ behavior: "smooth", block: "start" });
-                } else if (root) {
-                    root.scrollTop = 0;
-                }
-            };
-
             return (
                 <div className="flex h-full min-w-0">
                     {showSessionModal && (
@@ -2383,6 +2297,14 @@
                     <div className="flex-1 flex flex-col min-w-0 bg-[#141618] overflow-hidden border-r border-[#1a1d21]">
                         <div className="flex-shrink-0 border-b border-[#1a1d21] px-3 py-2 flex items-center justify-between gap-2">
                             <span className="header-text text-xs text-slate-500 truncate">{currentIdeaName}</span>
+                            {currentIdeaId && readinessStatus === "updating" && (
+                                <span className="text-[10px] shrink-0 text-slate-500 animate-pulse header-text">Assessing…</span>
+                            )}
+                            {currentIdeaId && readinessStatus === "ready" && readinessData && (
+                                <span className={`text-[10px] shrink-0 header-text font-semibold ${readinessData.overall_status === "ready" ? "text-emerald-400" : readinessData.overall_status === "approaching_ready" ? "text-amber-400" : "text-red-400"}`}>
+                                    {typeof readinessData.score === "number" ? readinessData.score : "—"}/10{readinessData.conversion_confidence ? ` · ${readinessData.conversion_confidence}` : ""}
+                                </span>
+                            )}
                         </div>
                         <div className="flex-1 overflow-y-auto p-4 space-y-2 min-h-0">
                             {!currentIdeaId ? (
@@ -2503,7 +2425,7 @@
                                 />
                                 <button
                                     type="button"
-                                    onClick={submitMessage}
+                                    onClick={() => submitMessage()}
                                     disabled={!currentIdeaId || !inputText.trim() || isLoading}
                                     className="header-text px-3 rounded border border-[#00b4d8]/50 bg-[#00b4d8] text-[#0d0f11] text-xs font-semibold hover:brightness-110 disabled:bg-[#2a2d31] disabled:text-slate-600 disabled:border-[#2a2d31] disabled:cursor-not-allowed"
                                 >
@@ -2513,123 +2435,6 @@
                         </div>
                     </div>
                     <div className="flex-1 flex flex-col min-w-0 bg-[#141618] overflow-hidden">
-                        <div className="flex-shrink-0 border-b border-[#1a1d21]">
-                            <div className="px-4 py-2 space-y-2">
-                                {readinessStatus === "updating" && (
-                                    <p className="text-xs text-slate-500 animate-pulse">Updating readiness assessment...</p>
-                                )}
-                                {readinessTimedOut && (
-                                    <p className="text-xs text-slate-500">Readiness assessment timed out. It will update after your next message.</p>
-                                )}
-                                {!readinessTimedOut && readinessStatus === "unavailable" && hadReadyReadiness && (
-                                    <p className="text-xs text-slate-500">Readiness data unavailable</p>
-                                )}
-                                {readinessStatus === "ready" && readinessData && (
-                                    <div className="space-y-2 text-xs border border-[#1a1d21] rounded p-2 bg-[#0d0f11]">
-                                        {Array.isArray(readinessData.blocking_gaps) && readinessData.blocking_gaps.length > 0 && (
-                                            <div className="rounded border border-amber-700/50 bg-amber-950/30 px-2 py-1.5 text-amber-200">
-                                                <span className="font-semibold header-text">Before converting: </span>
-                                                {readinessData.blocking_gaps.join(" · ")}
-                                            </div>
-                                        )}
-                                        <div className="flex flex-wrap items-center gap-2">
-                                            <span
-                                                className={`header-text font-semibold ${
-                                                    readinessData.overall_status === "ready"
-                                                        ? "text-emerald-400"
-                                                        : readinessData.overall_status === "approaching_ready"
-                                                          ? "text-amber-400"
-                                                          : "text-red-400"
-                                                }`}
-                                            >
-                                                Readiness: {typeof readinessData.score === "number" ? readinessData.score : "—"} / 10
-                                            </span>
-                                            {readinessData.conversion_confidence && (
-                                                <span className="text-[10px] px-1.5 py-0.5 rounded border border-slate-600 text-slate-400">
-                                                    Conversion confidence: {readinessData.conversion_confidence}
-                                                </span>
-                                            )}
-                                        </div>
-                                        {readinessData.recommendation && <p className="text-slate-500 italic">{readinessData.recommendation}</p>}
-                                    </div>
-                                )}
-                                <div className="flex flex-wrap gap-2 items-center justify-between">
-                                    <div className="flex flex-wrap gap-2 items-center">
-                                        {clarityPass === true && <span className="text-xs text-emerald-400 border border-emerald-700 rounded px-2 py-0.5">ready to convert</span>}
-                                        {clarityPass === false && <span className="text-xs text-amber-400 border border-amber-700 rounded px-2 py-0.5">needs revision</span>}
-                                    </div>
-                                    <div className="flex flex-wrap gap-2 justify-end items-center">
-                                        {prdContent.trim().length > 0 && (
-                                            <>
-                                                <button
-                                                    type="button"
-                                                    disabled={convertLoading}
-                                                    title={
-                                                        readinessData &&
-                                                        readinessData.overall_status &&
-                                                        readinessData.overall_status !== "ready" &&
-                                                        typeof readinessData.score === "number"
-                                                            ? `Readiness score is ${readinessData.score}/10 — roadmap quality may be low.`
-                                                            : undefined
-                                                    }
-                                                    onClick={doConvert}
-                                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-[#0d0f11] border border-[#00b4d8]/60 font-semibold disabled:opacity-40"
-                                                >
-                                                    {convertLoading ? "Generating..." : "Generate Roadmap"}
-                                                </button>
-                                                <div className="relative">
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => setShowActionMenu((o) => !o)}
-                                                        className="header-text text-sm px-2 py-1 rounded bg-[#1a1d21] text-slate-300 border border-[#1a1d21] hover:border-slate-500"
-                                                        aria-label="Open action menu"
-                                                    >
-                                                        ⋮
-                                                    </button>
-                                                    {showActionMenu && (
-                                                        <div className="absolute right-0 top-8 z-30 min-w-[165px] rounded border border-[#2a2d31] bg-[#141618]">
-                                                            {currentIdeaId && (
-                                                                <a
-                                                                    href={`/api/ideas/${currentIdeaId}/download`}
-                                                                    className="block px-3 py-2 text-xs text-slate-200 hover:bg-[#1a1d21]"
-                                                                >
-                                                                    Download PRD
-                                                                </a>
-                                                            )}
-                                                            {roadmapContent && currentIdeaId && (
-                                                                <a
-                                                                    href={`/api/ideas/${currentIdeaId}/download-roadmap`}
-                                                                    className="block px-3 py-2 text-xs text-slate-200 hover:bg-[#1a1d21]"
-                                                                >
-                                                                    Download Roadmap
-                                                                </a>
-                                                            )}
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            </>
-                                        )}
-                                        {roadmapContent && (
-                                            <button
-                                                type="button"
-                                                disabled={continueNavPending}
-                                                onClick={continueSetup}
-                                                className="header-text text-xs px-2 py-1 rounded bg-[#00b4d8]/20 text-[#00b4d8] border border-[#00b4d8]/40 disabled:opacity-40"
-                                            >
-                                                {continueNavPending ? "Checking..." : "Continue to Setup →"}
-                                            </button>
-                                        )}
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        {clarityPass === false && (
-                            <div className="px-4 py-2 text-xs text-slate-400 border-b border-[#1a1d21]">
-                                {clarityMissing && <div>Missing: {clarityMissing}</div>}
-                                <ul className="list-disc pl-4">{clarityIssues.map((x, j) => <li key={j}>{typeof x === "string" ? x : JSON.stringify(x)}</li>)}</ul>
-                            </div>
-                        )}
-                        {convertError && <div className="px-4 py-2 text-xs text-red-400 border-b border-[#1a1d21]">{convertError}</div>}
                         {draftingIndicator && (
                             <div className="flex-shrink-0 border-b border-[#1a1d21] px-4 py-1.5 bg-[#0d0f11]">
                                 <p className="text-xs text-[#00b4d8] header-text animate-pulse">✏ Drafting {draftingIndicator}…</p>
@@ -2649,17 +2454,6 @@
                             {currentIdeaId && prdContent.trim() ? (
                                 <p className="text-[11px] text-slate-600 mb-2">Add a section note (Note) for the agent — it is included on your next message.</p>
                             ) : null}
-                            {/* PRD completeness checklist — Show empty section placeholders / Hide empty sections */}
-                            <CompactProgress
-                                checklistRows={checklistRows}
-                                annotations={annotations}
-                                onDotClick={scrollToSection}
-                                expanded={checklistExpanded}
-                                onToggleExpand={() => setChecklistExpanded((x) => !x)}
-                                showEmptyPlaceholders={showEmptyPlaceholders}
-                                onTogglePlaceholders={() => setShowEmptyPlaceholders((s) => !s)}
-                            />
-
                             {prdContent.trim() ? (
                                 <div className="mb-6 border-b border-[#1a1d21] pb-4">
                                     {PRD_SECTION_TITLES.some((t) => (prdSections[t] || "").trim().length > 0) ? (
@@ -2676,7 +2470,7 @@
                                                 <div key={title} id={`prd-sec-${slugifySectionName(title)}`} className="mb-5 group/section">
                                                     {/* Section header row: annotation controls */}
                                                     <div className="flex items-center gap-2 mb-1">
-                                                        <span className="flex-1 header-text text-sm font-semibold text-slate-300">{title}</span>
+                                                        <span className="flex-1 header-text text-sm font-semibold text-[#00b4d8]">{title}</span>
                                                         {sectionAnnotation ? (
                                                             <div className="relative">
                                                                 <button
@@ -2800,6 +2594,112 @@
                                 </div>
                             )}
                         </div>
+                        {/* ── Sticky action bar ─────────────────────────────────────────── */}
+                        {prdContent.trim().length > 0 && (
+                            <div className="flex-shrink-0 border-t border-[#1a1d21] px-4 py-2 bg-[#0d0f11] space-y-2">
+                                {readinessStatus === "updating" && (
+                                    <p className="text-xs text-slate-500 animate-pulse">Updating readiness assessment...</p>
+                                )}
+                                {readinessTimedOut && (
+                                    <p className="text-xs text-slate-500">Readiness assessment timed out. It will update after your next message.</p>
+                                )}
+                                {!readinessTimedOut && readinessStatus === "unavailable" && hadReadyReadiness && (
+                                    <p className="text-xs text-slate-500">Readiness data unavailable</p>
+                                )}
+                                {readinessStatus === "ready" && readinessData && (
+                                    <div className="space-y-2 text-xs border border-[#1a1d21] rounded p-2 bg-[#141618]">
+                                        {Array.isArray(readinessData.blocking_gaps) && readinessData.blocking_gaps.length > 0 && (
+                                            <div className="rounded border border-amber-700/50 bg-amber-950/30 px-2 py-1.5 text-amber-200">
+                                                <span className="font-semibold header-text">Before converting: </span>
+                                                {readinessData.blocking_gaps.join(" · ")}
+                                            </div>
+                                        )}
+                                        <div className="flex flex-wrap items-center gap-2">
+                                            <span
+                                                className={`header-text font-semibold ${
+                                                    readinessData.overall_status === "ready"
+                                                        ? "text-emerald-400"
+                                                        : readinessData.overall_status === "approaching_ready"
+                                                          ? "text-amber-400"
+                                                          : "text-red-400"
+                                                }`}
+                                            >
+                                                Readiness: {typeof readinessData.score === "number" ? readinessData.score : "—"} / 10
+                                            </span>
+                                            {readinessData.conversion_confidence && (
+                                                <span className="text-[10px] px-1.5 py-0.5 rounded border border-slate-600 text-slate-400">
+                                                    Conversion confidence: {readinessData.conversion_confidence}
+                                                </span>
+                                            )}
+                                        </div>
+                                        {readinessData.recommendation && <p className="text-slate-500 italic">{readinessData.recommendation}</p>}
+                                    </div>
+                                )}
+                                {clarityPass === true && (
+                                    <div><span className="text-xs text-emerald-400 border border-emerald-700 rounded px-2 py-0.5">ready to convert</span></div>
+                                )}
+                                {clarityPass === false && (
+                                    <div className="space-y-1">
+                                        <span className="text-xs text-amber-400 border border-amber-700 rounded px-2 py-0.5">needs revision</span>
+                                        {clarityMissing && <div className="text-xs text-slate-400">Missing: {clarityMissing}</div>}
+                                        <ul className="list-disc pl-4 text-xs text-slate-400">{clarityIssues.map((x, j) => <li key={j}>{typeof x === "string" ? x : JSON.stringify(x)}</li>)}</ul>
+                                    </div>
+                                )}
+                                {convertError && <div className="text-xs text-red-400">{convertError}</div>}
+                                <div className="flex flex-wrap gap-2 justify-end items-center">
+                                    <button
+                                        type="button"
+                                        disabled={convertLoading}
+                                        title={
+                                            readinessData &&
+                                            readinessData.overall_status &&
+                                            readinessData.overall_status !== "ready" &&
+                                            typeof readinessData.score === "number"
+                                                ? `Readiness score is ${readinessData.score}/10 — roadmap quality may be low.`
+                                                : undefined
+                                        }
+                                        onClick={doConvert}
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-[#0d0f11] border border-[#00b4d8]/60 font-semibold disabled:opacity-40"
+                                    >
+                                        {convertLoading ? "Generating..." : "Generate Roadmap"}
+                                    </button>
+                                    <div className="relative">
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowActionMenu((o) => !o)}
+                                            className="header-text text-sm px-2 py-1 rounded bg-[#1a1d21] text-slate-300 border border-[#1a1d21] hover:border-slate-500"
+                                            aria-label="Open action menu"
+                                        >
+                                            ⋮
+                                        </button>
+                                        {showActionMenu && (
+                                            <div className="absolute right-0 bottom-8 z-30 min-w-[165px] rounded border border-[#2a2d31] bg-[#141618]">
+                                                {currentIdeaId && (
+                                                    <a href={`/api/ideas/${currentIdeaId}/download`} className="block px-3 py-2 text-xs text-slate-200 hover:bg-[#1a1d21]">
+                                                        Download PRD
+                                                    </a>
+                                                )}
+                                                {roadmapContent && currentIdeaId && (
+                                                    <a href={`/api/ideas/${currentIdeaId}/download-roadmap`} className="block px-3 py-2 text-xs text-slate-200 hover:bg-[#1a1d21]">
+                                                        Download Roadmap
+                                                    </a>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+                                    {roadmapContent && (
+                                        <button
+                                            type="button"
+                                            disabled={continueNavPending}
+                                            onClick={continueSetup}
+                                            className="header-text text-xs px-2 py-1 rounded bg-[#00b4d8]/20 text-[#00b4d8] border border-[#00b4d8]/40 disabled:opacity-40"
+                                        >
+                                            {continueNavPending ? "Checking..." : "Continue to Setup →"}
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </div>
             );
