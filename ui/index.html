@@ -3795,7 +3795,103 @@
 
         // ─── Root App with routing ────────────────────────────────────────────────
 
+        function FirstRunScreen({ missingItems, onCheckAgain, onContinue, loading }) {
+            const allClear = missingItems.length === 0;
+            const itemLabels = {
+                openclaw_root: "OpenClaw root directory (~/.openclaw) not found",
+                openclaw_json: "openclaw.json missing from OpenClaw root",
+                roadmap_converter_agent: "roadmap-converter agent not registered in openclaw.json",
+                conversion_prompt: "PRD-to-roadmap conversion prompt file missing",
+                exec_approvals_stale_paths: "Gate script paths in exec-approvals.json are stale — re-approve via OpenClaw UI",
+            };
+            const labelFor = (item) => {
+                if (item.startsWith("workspace-")) {
+                    return `Agent workspace missing: ${item}`;
+                }
+                return itemLabels[item] || item;
+            };
+            return (
+                <div className="flex h-screen items-center justify-center bg-[#0d0f12]">
+                    <div className="max-w-xl w-full mx-4 space-y-6">
+                        <div>
+                            <h1 className="text-2xl font-semibold text-white header-text mb-1">
+                                Welcome to AutoDev
+                            </h1>
+                            <p className="text-slate-400 text-sm">
+                                Run the installer to configure your environment before using the pipeline.
+                            </p>
+                        </div>
+                        <div className="bg-[#141618] border border-slate-700 rounded-lg p-4">
+                            <p className="text-xs text-slate-500 uppercase tracking-wider mb-2">Run in your terminal</p>
+                            <pre className="text-accent font-mono text-sm select-all">./install.sh</pre>
+                        </div>
+                        <div className="bg-[#141618] border border-slate-700 rounded-lg p-4 space-y-2">
+                            <p className="text-xs text-slate-500 uppercase tracking-wider mb-3">Setup checklist</p>
+                            {allClear ? (
+                                <div className="flex items-center gap-2 text-green-400 text-sm">
+                                    <span>✓</span>
+                                    <span>All checks passed — ready to start</span>
+                                </div>
+                            ) : (
+                                <ul className="space-y-1.5">
+                                    {missingItems.map((item) => (
+                                        <li key={item} className="flex items-start gap-2 text-amber-400 text-sm">
+                                            <span className="mt-0.5 flex-shrink-0">⚠</span>
+                                            <span>{labelFor(item)}</span>
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
+                        </div>
+                        <div className="flex gap-3">
+                            <button
+                                onClick={onCheckAgain}
+                                disabled={loading}
+                                className="px-4 py-2 text-sm rounded border border-slate-600 text-slate-300 hover:border-slate-500 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                            >
+                                {loading ? "Checking…" : "Check again"}
+                            </button>
+                            <button
+                                onClick={onContinue}
+                                disabled={!allClear}
+                                className="px-4 py-2 text-sm rounded bg-accent text-white hover:bg-blue-400 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                            >
+                                Continue to AutoDev →
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
         function App() {
+            const [setupComplete, setSetupComplete] = useState(null);  // null=loading, false=show screen, true=normal app
+            const [setupMissing, setSetupMissing] = useState([]);
+            const [setupChecking, setSetupChecking] = useState(false);
+
+            const checkSetupStatus = () => {
+                setSetupChecking(true);
+                fetch("/api/setup/status")
+                    .then((r) => r.json())
+                    .then((d) => {
+                        setSetupMissing(d.missing_items || []);
+                        setSetupChecking(false);
+                        if (d.setup_complete) setSetupComplete(true);
+                    })
+                    .catch(() => setSetupChecking(false));
+            };
+
+            useEffect(() => {
+                fetch("/api/state")
+                    .then((r) => r.json())
+                    .then((d) => setSetupComplete(d.setup_complete === true))
+                    .catch(() => setSetupComplete(true));  // fail open: don't block on API error
+            }, []);
+
+            useEffect(() => {
+                if (setupComplete === false) checkSetupStatus();
+            }, [setupComplete]);
+
             const [currentScreen, setCurrentScreen] = useState("pipeline");
             const [seedRoadmap, setSeedRoadmap] = useState("");
             const [repoPath, setRepoPath] = useState("");
@@ -4094,6 +4190,24 @@
                 setRoadmapSeedLocked,
                 setCurrentScreen,
             };
+
+            if (setupComplete === null) {
+                return (
+                    <div className="flex h-screen items-center justify-center bg-[#0d0f12]">
+                        <span className="text-slate-500 text-sm font-mono">Loading…</span>
+                    </div>
+                );
+            }
+            if (setupComplete === false) {
+                return (
+                    <FirstRunScreen
+                        missingItems={setupMissing}
+                        loading={setupChecking}
+                        onCheckAgain={checkSetupStatus}
+                        onContinue={() => setSetupComplete(true)}
+                    />
+                );
+            }
 
             return (
                 <AppCtx.Provider value={appCtxValue}>

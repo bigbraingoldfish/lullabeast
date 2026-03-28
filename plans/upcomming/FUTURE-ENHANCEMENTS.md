@@ -27,6 +27,13 @@ After pipeline completion: a summary of what was built, which phases succeeded c
 
 ---
 
+## Installer and Setup
+
+**Signal/Messaging Escalation Agent Generalization**
+The escalation agent identity docs (`autodev/agents/escalation/`) currently contain Signal-specific guidance for operator notifications (hardcoded Docker/Signal port configuration). This should be updated to reference whatever messaging integration is enabled in the user's `openclaw.json` config rather than assuming Signal. Deferred from Task 01 installer work because the current setup uses a specific Docker/Signal configuration that would break if the guidance were changed to a generic template. When generalizing: read the messaging provider from `openclaw.json`, render agent instructions dynamically at workspace provisioning time (step 6 of install.sh), and update the workspace files accordingly.
+
+---
+
 ## Escalation Experience
 
 **Escalation Agent Chat in Monitor**
