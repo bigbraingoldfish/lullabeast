@@ -112,8 +112,8 @@
         }
         /* h2 = top-level category grouper in PRD sections → white */
         .msg-md h1, .msg-md h2 { color: #e2e8f0; }
-        /* h3/h4 = actual subsection headers → teal accent */
-        .msg-md h3, .msg-md h4 { color: #00b4d8; }
+        /* h3/h4 = actual subsection headers → slate (teal reserved for section labels only) */
+        .msg-md h3, .msg-md h4 { color: #94a3b8; }
         .msg-md h1 { font-size: 1.2rem; }
         .msg-md h2 { font-size: 1.05rem; }
         .msg-md h3 { font-size: 0.98rem; }
@@ -1692,9 +1692,10 @@
                                     key={opt}
                                     type="button"
                                     onClick={() => toggleOption(opt)}
+                                    onKeyDown={(e) => { if (e.key === " ") { e.preventDefault(); toggleOption(opt); } }}
                                     className={`w-full text-left text-xs px-3 py-2 rounded border transition-colors ${
                                         active
-                                            ? "border-[#00b4d8]/60 bg-[#00b4d8]/15 text-[#7dd3fc]"
+                                            ? "border-[#00b4d8] bg-[#00b4d8]/20 text-[#7dd3fc]"
                                             : "border-[#2a2d31] bg-[#141618] text-slate-400 hover:border-slate-500 hover:text-slate-300"
                                     }`}
                                 >
@@ -1708,6 +1709,7 @@
                             type="text"
                             value={ft}
                             onChange={(e) => setFreeTexts((prev) => ({ ...prev, [index]: e.target.value }))}
+                            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); advance(); } }}
                             placeholder="Or add your own answer…"
                             className="w-full bg-[#141618] border border-[#2a2d31] rounded px-3 py-1.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-500"
                         />
@@ -1764,6 +1766,8 @@
             const [editingAnnotationSection, setEditingAnnotationSection] = useState(null);
             const [annotationDraft, setAnnotationDraft] = useState("");
             const [openAnnotationBubble, setOpenAnnotationBubble] = useState(null);
+            const [copiedSection, setCopiedSection] = useState(null);
+            const [readinessExpanded, setReadinessExpanded] = useState(false);
             const [userFirstTurnPending, setUserFirstTurnPending] = useState(false);
             const [sessionModalBusy, setSessionModalBusy] = useState(false);
             const taRef = useRef(null);
@@ -2469,7 +2473,7 @@
                                 <p className="text-xs text-[#00b4d8] header-text animate-pulse">✏ Drafting {draftingIndicator}…</p>
                             </div>
                         )}
-                        <div ref={docPaneRef} className={`flex-1 overflow-y-auto p-4 bg-[#141618] min-h-0 ${isLoading && !prdContent.trim() ? "flex flex-col" : ""}`}>
+                        <div ref={docPaneRef} className={`flex-1 overflow-y-auto px-6 py-4 bg-[#141618] min-h-0 ${isLoading && !prdContent.trim() ? "flex flex-col" : ""}`}>
                             {isLoading && !prdContent.trim() ? (
                                 <div className="flex-1 flex items-center justify-center rounded border border-[#2a2d31] bg-[#16191c] min-h-[240px] mb-4">
                                     <p className="text-xs text-slate-500 header-text">Updating PRD draft…</p>
@@ -2484,6 +2488,9 @@
                                 <p className="text-[11px] text-slate-600 mb-2">Add a section note (Note) for the agent — it is included on your next message.</p>
                             ) : null}
                             {prdContent.trim() ? (
+                                <h1 className="text-slate-100 text-lg font-semibold mb-4 pb-2 border-b border-[#1a1d21]">{currentIdeaName}</h1>
+                            ) : null}
+                            {prdContent.trim() ? (
                                 <div className="mb-6 border-b border-[#1a1d21] pb-4">
                                     {PRD_SECTION_TITLES.some((t) => (prdSections[t] || "").trim().length > 0) ? (
                                         PRD_SECTION_TITLES.map((title) => {
@@ -2491,12 +2498,12 @@
                                             const isEmpty = !row || row.status === "empty";
                                             if (isEmpty && !showEmptyPlaceholders) return null;
                                             const raw = (prdSections[title] || "").trim();
-                                            const sectionMarkdown = raw.length > 0 ? `## ${title}\n\n${raw}` : `## ${title}\n\n*Empty - start a conversation to populate this section.*`;
+                                            const sectionMarkdown = raw.length > 0 ? raw : `*Empty - start a conversation to populate this section.*`;
                                             const sectionAnnotation = annotations.find((a) => a.section === title);
                                             const isEditing = editingAnnotationSection === title;
 
                                             return (
-                                                <div key={title} id={`prd-sec-${slugifySectionName(title)}`} className="mb-5 group/section">
+                                                <div key={title} id={`prd-sec-${slugifySectionName(title)}`} className={`mb-5 group/section ${draftingIndicator === title ? "ring-1 ring-[#00b4d8]/20 rounded" : ""}`}>
                                                     {/* Section header row: annotation controls */}
                                                     <div className="flex items-center gap-2 mb-1">
                                                         <span className="flex-1 header-text text-sm font-semibold text-[#00b4d8]">{title}</span>
@@ -2531,6 +2538,19 @@
                                                                 title="Add a note for the agent (sent with your next message)"
                                                                 className="text-[11px] text-[#64748b] hover:text-slate-300 px-1.5 py-0.5 rounded border border-[#2a2d31] hover:border-slate-600 shrink-0 header-text"
                                                             >Note</button>
+                                                        )}
+                                                        {raw.length > 0 && (
+                                                            <button
+                                                                type="button"
+                                                                title="Copy section markdown"
+                                                                onClick={() => {
+                                                                    navigator.clipboard.writeText(raw).then(() => {
+                                                                        setCopiedSection(title);
+                                                                        setTimeout(() => setCopiedSection(null), 2000);
+                                                                    });
+                                                                }}
+                                                                className="text-[11px] text-[#64748b] hover:text-slate-300 px-1.5 py-0.5 rounded border border-[#2a2d31] hover:border-slate-600 shrink-0 header-text"
+                                                            >{copiedSection === title ? "Copied" : "⎘"}</button>
                                                         )}
                                                     </div>
                                                     {/* Inline comment input */}
@@ -2567,6 +2587,9 @@
                                                                 <button type="button" onClick={() => { setEditingAnnotationSection(null); setAnnotationDraft(""); }} className="text-xs text-slate-500 hover:text-slate-300">Cancel</button>
                                                             </div>
                                                         </div>
+                                                    )}
+                                                    {draftingIndicator === title && (
+                                                        <p className="text-[11px] text-[#00b4d8] header-text animate-pulse mb-1">✏ Updating…</p>
                                                     )}
                                                     <div
                                                         className="msg-md text-sm"
@@ -2636,13 +2659,7 @@
                                     <p className="text-xs text-slate-500">Readiness data unavailable</p>
                                 )}
                                 {readinessStatus === "ready" && readinessData && (
-                                    <div className="space-y-2 text-xs border border-[#1a1d21] rounded p-2 bg-[#141618]">
-                                        {Array.isArray(readinessData.blocking_gaps) && readinessData.blocking_gaps.length > 0 && (
-                                            <div className="rounded border border-amber-700/50 bg-amber-950/30 px-2 py-1.5 text-amber-200">
-                                                <span className="font-semibold header-text">Before converting: </span>
-                                                {readinessData.blocking_gaps.join(" · ")}
-                                            </div>
-                                        )}
+                                    <div className="space-y-1.5 text-xs border border-[#1a1d21] rounded p-2 bg-[#141618]">
                                         <div className="flex flex-wrap items-center gap-2">
                                             <span
                                                 className={`header-text font-semibold ${
@@ -2660,8 +2677,27 @@
                                                     Conversion confidence: {readinessData.conversion_confidence}
                                                 </span>
                                             )}
+                                            <div className="flex-1"/>
+                                            {(Array.isArray(readinessData.blocking_gaps) && readinessData.blocking_gaps.length > 0 || readinessData.recommendation) && (
+                                                <button
+                                                    type="button"
+                                                    title="Show details"
+                                                    onClick={() => setReadinessExpanded((v) => !v)}
+                                                    className="text-slate-500 hover:text-slate-300 text-[11px] px-1 leading-none"
+                                                >{readinessExpanded ? "▲" : "▼"}</button>
+                                            )}
                                         </div>
-                                        {readinessData.recommendation && <p className="text-slate-500 italic">{readinessData.recommendation}</p>}
+                                        {readinessExpanded && (
+                                            <React.Fragment>
+                                                {Array.isArray(readinessData.blocking_gaps) && readinessData.blocking_gaps.length > 0 && (
+                                                    <div className="rounded border border-amber-700/50 bg-amber-950/30 px-2 py-1.5 text-amber-200">
+                                                        <span className="font-semibold header-text">Before converting: </span>
+                                                        {readinessData.blocking_gaps.join(" · ")}
+                                                    </div>
+                                                )}
+                                                {readinessData.recommendation && <p className="text-slate-500 italic">{readinessData.recommendation}</p>}
+                                            </React.Fragment>
+                                        )}
                                     </div>
                                 )}
                                 {clarityPass === true && (
