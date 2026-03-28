@@ -3864,10 +3864,19 @@
             );
         }
 
+        const SETUP_DISMISSED_KEY = "autodev_first_run_dismissed";
+
         function App() {
-            const [setupComplete, setSetupComplete] = useState(null);  // null=loading, false=show screen, true=normal app
+            // If the user has already dismissed setup (or installer ran), skip straight to app.
+            // This prevents the welcome screen from re-appearing on every refresh.
+            const _alreadyDismissed = localStorage.getItem(SETUP_DISMISSED_KEY) === "true";
+
+            const [setupComplete, setSetupComplete] = useState(_alreadyDismissed ? true : null);
             const [setupMissing, setSetupMissing] = useState([]);
             const [setupChecking, setSetupChecking] = useState(false);
+
+            // Persist dismissal so it survives refresh
+            const _markDismissed = () => localStorage.setItem(SETUP_DISMISSED_KEY, "true");
 
             const checkSetupStatus = () => {
                 setSetupChecking(true);
@@ -3876,15 +3885,19 @@
                     .then((d) => {
                         setSetupMissing(d.missing_items || []);
                         setSetupChecking(false);
-                        if (d.setup_complete) setSetupComplete(true);
+                        if (d.setup_complete) { _markDismissed(); setSetupComplete(true); }
                     })
                     .catch(() => setSetupChecking(false));
             };
 
             useEffect(() => {
+                if (_alreadyDismissed) return;  // already dismissed — skip the fetch
                 fetch("/api/state")
                     .then((r) => r.json())
-                    .then((d) => setSetupComplete(d.setup_complete === true))
+                    .then((d) => {
+                        if (d.setup_complete === true) _markDismissed();
+                        setSetupComplete(d.setup_complete === true);
+                    })
                     .catch(() => setSetupComplete(true));  // fail open: don't block on API error
             }, []);
 
@@ -4204,7 +4217,7 @@
                         missingItems={setupMissing}
                         loading={setupChecking}
                         onCheckAgain={checkSetupStatus}
-                        onContinue={() => setSetupComplete(true)}
+                        onContinue={() => { _markDismissed(); setSetupComplete(true); }}
                     />
                 );
             }
