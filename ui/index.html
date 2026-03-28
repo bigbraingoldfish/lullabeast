@@ -3132,6 +3132,9 @@
             const [swRoadmapAmbiguous, setSwRoadmapAmbiguous] = useState(null);
             const [swDestructiveSelected, setSwDestructiveSelected] = useState([]);
             const swPendingRef = useRef({});
+            const [showPathStopModal, setShowPathStopModal] = useState(false);
+            const [pathStopDone, setPathStopDone] = useState(false);
+            const [pathStopErr, setPathStopErr] = useState("");
 
             useEffect(() => {
                 fetchState();
@@ -3362,19 +3365,13 @@
             const projectDisplay = segments.slice(-2).join('/') || '--/--';
             const pathBroken = pState.project_dir_ok === false;
             const pathInteractive =
-                status === "STOPPED" || status === "UNKNOWN" || pathBroken;
+                status === "STOPPED" || status === "UNKNOWN" || pathBroken ||
+                status === "PIPELINE_COMPLETE" || status === "HALTED_SILENT" || status === "BLOCKED";
             const repairPathHintText =
                 pState.project_dir_message ||
                 "Project folder link is broken — click the path to choose your project folder and repair it.";
-            const showMustStopForPath =
-                !pathInteractive && (status === "RUNNING" || status === "WAITING_FOR_SENTINEL");
-            const showWaitingHumanPathHint =
-                !pathInteractive && status === "WAITING_FOR_HUMAN";
-            const showGenericPathBlock =
-                !pathInteractive &&
-                !showMustStopForPath &&
-                !showWaitingHumanPathHint &&
-                status !== "Loading...";
+            const pathCanOfferStop =
+                status === "RUNNING" || status === "WAITING_FOR_SENTINEL" || status === "WAITING_FOR_HUMAN";
 
             const swDestructiveOptions = [];
             const swSeen = new Set();
@@ -3394,33 +3391,26 @@
                     {/* Header bar */}
                     <header className="bg-[#141618] border-b border-[#1a1d21] px-6 py-4">
                         <div className="flex items-center justify-between">
-                            <div className="flex flex-col items-start gap-1 gap-x-6 sm:flex-row sm:items-center">
-                                {pathInteractive ? (
+                            <div className="flex items-center gap-2">
+                                <span className="header-text text-sm text-slate-300 font-mono">{projectDisplay}</span>
+                                {status !== "Loading..." && (
                                     <button
                                         type="button"
-                                        onClick={openProjectSwitch}
-                                        className="header-text text-sm text-[#00b4d8] font-mono hover:underline text-left focus:outline-none focus:ring-2 focus:ring-[#00b4d8]/50 rounded"
+                                        onClick={() => {
+                                            if (pathInteractive) {
+                                                openProjectSwitch();
+                                            } else if (pathCanOfferStop) {
+                                                setPathStopDone(false);
+                                                setPathStopErr("");
+                                                setShowPathStopModal(true);
+                                            }
+                                        }}
+                                        className="header-text text-xs text-slate-500 hover:text-[#00b4d8] transition-colors px-1.5 py-0.5 rounded border border-[#2a2d31] hover:border-[#00b4d8]/40"
+                                        title="Change project directory"
                                     >
-                                        {projectDisplay}
+                                        Change
                                     </button>
-                                ) : (
-                                    <span className="header-text text-sm text-slate-500 font-mono">{projectDisplay}</span>
                                 )}
-                                {showMustStopForPath ? (
-                                    <span className="header-text text-xs text-slate-500 max-w-md">
-                                        Stop the pipeline before you can change the project directory.
-                                    </span>
-                                ) : null}
-                                {showWaitingHumanPathHint ? (
-                                    <span className="header-text text-xs text-slate-500 max-w-md">
-                                        Resolve or stop the human prompt before changing project directory.
-                                    </span>
-                                ) : null}
-                                {showGenericPathBlock ? (
-                                    <span className="header-text text-xs text-slate-500 max-w-md">
-                                        The pipeline must be stopped before you can change the project directory.
-                                    </span>
-                                ) : null}
                             </div>
                             <div className="flex flex-col items-end gap-1">
                                 <div className="flex items-center gap-3 flex-wrap justify-end">
@@ -3562,6 +3552,58 @@
                             onConfirm={handleStopConfirm}
                             onDismiss={() => setShowStopModal(false)}
                         />
+                    )}
+
+                    {showPathStopModal && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" role="dialog" aria-modal="true">
+                            <div className="bg-[#141618] border border-[#1a1d21] rounded-lg max-w-sm w-full p-5 space-y-3">
+                                <h2 className="header-text text-base text-slate-200">Change project directory</h2>
+                                {pathStopDone ? (
+                                    <p className="text-sm text-slate-300">
+                                        Stop confirmed — the pipeline will halt after the current agent completes. You can then change the project directory.
+                                    </p>
+                                ) : (
+                                    <>
+                                        <p className="text-sm text-slate-400">
+                                            The pipeline must be stopped before changing the project directory.
+                                            {status === "WAITING_FOR_HUMAN" ? " An escalation is awaiting input — stopping will halt once it resolves." : " It will halt cleanly after the current agent finishes."}
+                                        </p>
+                                        {pathStopErr && <p className="text-xs text-red-400">{pathStopErr}</p>}
+                                        <p className="text-sm text-slate-300">Would you like to stop the pipeline?</p>
+                                    </>
+                                )}
+                                <div className="flex justify-end gap-2 pt-1">
+                                    <button
+                                        type="button"
+                                        onClick={() => { setShowPathStopModal(false); setPathStopDone(false); setPathStopErr(""); }}
+                                        className="header-text text-xs px-3 py-1.5 rounded border border-[#2a2d31] text-slate-400 hover:text-slate-200 transition-colors"
+                                    >
+                                        {pathStopDone ? "Close" : "Cancel"}
+                                    </button>
+                                    {!pathStopDone && (
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setPathStopErr("");
+                                                fetch("/api/stop", { method: "POST" })
+                                                    .then(async (r) => {
+                                                        if (!r.ok) {
+                                                            const d = await r.json().catch(() => ({}));
+                                                            setPathStopErr(typeof d.detail === "string" ? d.detail : `Stop failed (${r.status})`);
+                                                        } else {
+                                                            setPathStopDone(true);
+                                                        }
+                                                    })
+                                                    .catch((e) => setPathStopErr(String(e?.message || e)));
+                                            }}
+                                            className="header-text text-xs px-3 py-1.5 rounded bg-red-950 hover:bg-red-900 text-red-400 border border-red-800 transition-colors"
+                                        >
+                                            Stop Pipeline
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
                     )}
 
                     {projectSwitchOpen && (
