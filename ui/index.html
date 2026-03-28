@@ -189,6 +189,35 @@
             border-color: #334155;
             background: #1a1d21;
         }
+
+        /* ── Dark-theme scrollbars (Webkit / Blink) ──────────────────────────
+           Track: matches the darkest panel bg (#0d0f11).
+           Thumb: mid-tone (#2a2d31) at rest → lighter (#3d4249) on hover.
+           Thin (6 px) so it feels unobtrusive; rounded for polish.
+           Firefox: scrollbar-color with the same values via * selector.
+        ─────────────────────────────────────────────────────────────────────── */
+        * {
+            scrollbar-width: thin;
+            scrollbar-color: #2a2d31 #0d0f11;
+        }
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #0d0f11;
+            border-radius: 3px;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #2a2d31;
+            border-radius: 3px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #3d4249;
+        }
+        ::-webkit-scrollbar-corner {
+            background: #0d0f11;
+        }
     </style>
 </head>
 <body>
