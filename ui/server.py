@@ -776,7 +776,7 @@ def _pipeline_allows_project_switch() -> tuple[bool, str | None]:
     if not st:
         return True, None
     ps = st.get("pipeline_status")
-    if ps in ("STOPPED", "UNKNOWN", None):
+    if ps in ("STOPPED", "UNKNOWN", "PIPELINE_COMPLETE", "HALTED_SILENT", "BLOCKED", None):
         return True, None
     return False, ps
 
