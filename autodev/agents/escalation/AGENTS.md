@@ -28,24 +28,25 @@ Once the human responds with a resume command, write:
 
 **CRITICAL PATH NOTE:** Write to `pipeline-project/escalation_output.json` — this is the workspace-relative path through the symlink inside your workspace. Do NOT use absolute paths like `~/.openclaw/pipeline-project/escalation_output.json` or `/home/pi/.openclaw/pipeline-project/escalation_output.json`. OpenClaw sandboxes your write tool to your workspace directory — writes to absolute paths outside your workspace are silently accepted but the files are discarded. The `pipeline-project/` symlink is your only valid write path to shared pipeline files.
 
-## Resume Commands — All Six
+## Resume Commands — All Seven
 
-The operator may respond with one of these commands:
+The operator may respond with one of these commands. UI button labels are shown in parentheses so you can match operator language to command tokens.
 
-| Command | What the orchestrator does |
-|---|---|
-| `RETRY` | Re-invokes the same agent that last failed (planner, executor, or reviewer) with the same phase, incrementing its retry counter |
-| `RESET_PHASE` | Full phase-level reset with cap enforcement. Resets git to pre-phase commit, deletes phase branch, clears all six output pairs, re-initializes phase_state.json (agent counters → 0), and re-invokes planner. Increments `escalation_resets` counter. |
-| `RESET_EXECUTION` | Partial reset. Preserves planner output. Clears executor and reviewer outputs, resets working tree to HEAD, and re-invokes executor. Use when the plan is sound but the executor failed to implement it. Increments `escalation_resets` counter. |
-| `SKIP` | Marks the current phase as skipped and advances to the next phase in the roadmap |
-| `STOP` | Halts the pipeline entirely. No further phases are run. |
-| `PROCEED` | Skips the merge step. Runs post-merge cleanup only: applies the phase tag, appends to suggestions.md, appends to the roadmap update log, and clears working files. Use when the phase outcome is acceptable but a clean merge is not appropriate. |
+| Command | UI label | What the orchestrator does |
+|---|---|---|
+| `RETRY` | Resume | Re-invokes the same agent that last failed (planner, executor, or reviewer) with the same phase, incrementing its retry counter |
+| `RESET_PHASE` | Revert to Planner / Reset Phase | Full phase-level reset with cap enforcement. Resets git to pre-phase commit, deletes phase branch, clears all output pairs, re-initializes phase_state.json (agent counters → 0), and re-invokes planner. Increments `escalation_resets` counter. |
+| `RESET_EXECUTION` | Revert to Executor / Reset Execution | Partial reset. Preserves planner output. Clears executor and reviewer outputs, resets working tree to HEAD, and re-invokes executor. Use when the plan is sound but the executor failed to implement it. Increments `escalation_resets` counter. |
+| `RESET_REVIEWER` | Revert to Reviewer | Reviewer-only reset. Preserves planner and executor output. Clears only reviewer outputs and re-invokes the reviewer. Use when the reviewer failed but the implementation looks correct. Increments `escalation_resets` counter. |
+| `SKIP` | Skip | Marks the current phase as skipped and advances to the next phase in the roadmap |
+| `PROCEED` | Proceed | Accept current output as-is and advance. Skips the merge step: applies the phase tag, appends to suggestions.md, appends to the roadmap update log, and clears working files. Use when the phase outcome is acceptable but a clean merge is not appropriate. |
+| `STOP` | Stop | Halts the pipeline entirely. No further phases are run. |
 
 > **RESTART PHASE is retired.** It is accepted as a legacy alias for `RESET_PHASE` but should not be used in new Signal messages. Use `RESET_PHASE` instead.
 
 ## Escalation Reset Commands — Decision Guide
 
-Both `RESET_PHASE` and `RESET_EXECUTION` increment the `escalation_resets` counter. The cap is **3 total across both types per phase**. After 3, neither command will execute — the orchestrator sends a Signal notification and stays in `WAITING_FOR_HUMAN` until a human issues `PROCEED` or `STOP`.
+`RESET_PHASE`, `RESET_EXECUTION`, and `RESET_REVIEWER` all increment the `escalation_resets` counter. The cap is **3 total across all three types per phase**. After 3, none of them will execute — the orchestrator sends a Signal notification and stays in `WAITING_FOR_HUMAN` until a human issues `PROCEED` or `STOP`.
 
 **When to use `RESET_EXECUTION`:**
 - The planner output (plan) looks correct and well-scoped
@@ -57,6 +58,11 @@ Both `RESET_PHASE` and `RESET_EXECUTION` increment the `escalation_resets` count
 - The executor produced output that cannot be salvaged by re-running
 - You want to start the entire phase from scratch with a fresh planner invocation
 
+**When to use `RESET_REVIEWER`:**
+- The executor output looks correct (code is implemented, tests pass or are close)
+- The reviewer is blocking on issues that seem incorrect or overly strict
+- You want to re-run only the reviewer without touching the executor output
+
 **Cap fallback behavior:**
 When `escalation_resets >= 3`, the orchestrator sends a Signal message explaining that the cap has been reached. The pipeline stays in `WAITING_FOR_HUMAN`. Issue `PROCEED` (to advance despite the issues) or `STOP` (to halt) — these two commands are not capped.
 
@@ -64,9 +70,9 @@ When `escalation_resets >= 3`, the orchestrator sends a Signal message explainin
 
 ## Ambiguous Reply Protocol
 
-If the operator's reply does not clearly map to one of the six commands:
+If the operator's reply does not clearly map to one of the seven commands:
 
-1. Re-prompt once: ask them to clarify and list the five commands with one-line descriptions
+1. Re-prompt once: ask them to clarify and list the available commands with one-line descriptions
 2. If the second reply is also ambiguous, write `{"command": "STOP"}` and the sentinel
 
 Default to STOP on persistent ambiguity — it is the safest action.
@@ -79,7 +85,7 @@ Your Signal message to the operator MUST be self-contained. Include all of the f
 2. **Which component failed** — planner / executor / reviewer / gate / infrastructure
 3. **What the failure was** — specific error text, gate failure reason, or blocking_issues
 4. **What you found in diagnostic reads** — any additional context from logs or agent output JSONs
-5. **Available resume commands** — all six commands with one-line descriptions each
+5. **Available resume commands** — all seven commands with UI label and one-line description each
 
 The operator may be away from their computer and receiving this on their phone. Do not assume they have context from previous messages. Every Signal message must stand alone.
 
