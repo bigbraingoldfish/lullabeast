@@ -1682,7 +1682,11 @@
                 <div className="mt-3 rounded border border-[#2a2d31] bg-[#0d0f11] p-4 space-y-3">
                     <div className="flex items-start justify-between gap-2">
                         <p className="text-sm text-slate-200 font-medium leading-snug">{q.text}</p>
-                        <span className="text-[10px] text-slate-600 shrink-0 mt-0.5">{index + 1}/{questions.length}</span>
+                        <div className="flex items-center gap-1 shrink-0 mt-0.5">
+                            <button type="button" onClick={() => setIndex((i) => i - 1)} disabled={index === 0} className="text-[10px] text-slate-500 hover:text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed px-0.5">&lt;</button>
+                            <span className="text-[10px] text-slate-600">{index + 1}/{questions.length}</span>
+                            <button type="button" onClick={() => setIndex((i) => i + 1)} disabled={index >= questions.length - 1} className="text-[10px] text-slate-500 hover:text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed px-0.5">&gt;</button>
+                        </div>
                     </div>
                     <div className="space-y-1.5">
                         {q.options.map((opt) => {
@@ -2484,9 +2488,6 @@
                                     <p className="text-xs text-slate-500">Updating PRD draft…</p>
                                 </div>
                             ) : null}
-                            {currentIdeaId && prdContent.trim() ? (
-                                <p className="text-[11px] text-slate-600 mb-2">Add a section note (Note) for the agent — it is included on your next message.</p>
-                            ) : null}
                             {prdContent.trim() ? (
                                 <h1 className="text-slate-100 text-lg font-semibold mb-4 pb-2 border-b border-[#1a1d21]">{currentIdeaName}</h1>
                             ) : null}
@@ -2544,10 +2545,16 @@
                                                                 type="button"
                                                                 title="Copy section markdown"
                                                                 onClick={() => {
-                                                                    navigator.clipboard.writeText(raw).then(() => {
-                                                                        setCopiedSection(title);
-                                                                        setTimeout(() => setCopiedSection(null), 2000);
-                                                                    });
+                                                                    const done = () => { setCopiedSection(title); setTimeout(() => setCopiedSection(null), 2000); };
+                                                                    if (navigator.clipboard) {
+                                                                        navigator.clipboard.writeText(raw).then(done).catch(() => {});
+                                                                    } else {
+                                                                        const ta = document.createElement("textarea");
+                                                                        ta.value = raw; ta.style.position = "fixed"; ta.style.opacity = "0";
+                                                                        document.body.appendChild(ta); ta.select();
+                                                                        try { document.execCommand("copy"); done(); } catch(e) {}
+                                                                        document.body.removeChild(ta);
+                                                                    }
                                                                 }}
                                                                 className="text-[11px] text-[#64748b] hover:text-slate-300 px-1.5 py-0.5 rounded border border-[#2a2d31] hover:border-slate-600 shrink-0 header-text"
                                                             >{copiedSection === title ? "Copied" : "⎘"}</button>
