@@ -163,3 +163,45 @@ class TestAppFirstRunGating:
         # catch block should set setupComplete to true (fail open) so user isn't blocked
         assert re.search(r'catch.*true|\.catch', app_body, re.DOTALL), \
             "App should fail open (show normal UI) if /api/state fetch fails"
+
+
+class TestLocalStoragePersistence:
+    """Setup dismissal must survive page refresh via localStorage."""
+
+    def test_app_reads_localstorage_on_load(self):
+        html = load_html()
+        app_body = extract_function(html, "App")
+        assert app_body is not None
+        assert "localStorage" in app_body, \
+            "App should read localStorage to check if setup was previously dismissed"
+
+    def test_app_uses_named_localstorage_key(self):
+        html = load_html()
+        # The key constant should be defined (outside App or inside)
+        assert re.search(r'autodev_first_run_dismissed', html), \
+            "A named localStorage key 'autodev_first_run_dismissed' should be used"
+
+    def test_app_skips_api_fetch_when_already_dismissed(self):
+        html = load_html()
+        app_body = extract_function(html, "App")
+        assert app_body is not None
+        # useEffect should guard against fetching when already dismissed
+        assert re.search(r'_alreadyDismissed|alreadyDismissed|dismissed.*return', app_body), \
+            "App should skip /api/state fetch when localStorage shows already dismissed"
+
+    def test_on_continue_writes_localstorage(self):
+        html = load_html()
+        app_body = extract_function(html, "App")
+        assert app_body is not None
+        # The onContinue callback (passed to FirstRunScreen) must call the persist helper
+        assert re.search(r'_markDismissed|markDismissed|localStorage.*setItem', app_body), \
+            "onContinue should write to localStorage so dismissal persists across refreshes"
+
+    def test_server_setup_complete_also_writes_localstorage(self):
+        html = load_html()
+        app_body = extract_function(html, "App")
+        assert app_body is not None
+        # When the server confirms setup_complete, also set localStorage
+        # so subsequent loads skip the API fetch entirely
+        assert re.search(r'setup_complete.*_markDismissed|_markDismissed.*setup_complete', app_body, re.DOTALL), \
+            "App should write localStorage when server confirms setup_complete"
