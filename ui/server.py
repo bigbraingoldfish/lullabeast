@@ -1162,6 +1162,10 @@ def get_state():
     response["project_dir_ok"] = not unhealthy
     response["project_dir_message"] = None if not unhealthy else USER_PROJECT_PATH_BROKEN_FRIENDLY
 
+    # Setup completion marker
+    _setup_marker = os.path.expanduser("~/.autodev_setup_complete")
+    response["setup_complete"] = os.path.exists(_setup_marker)
+
     return response
 
 
@@ -3222,6 +3226,107 @@ async def post_setup_preflight(request: Request):
 def get_setup_recent_projects():
     """Recent project directories (real paths) that passed preflight or switch validation."""
     return {"projects": _read_recent_projects()}
+
+
+def _check_installer_status(config: dict) -> dict:
+    """Run read-only installer health checks and return status dict.
+
+    Checks (all read-only, no writes):
+    - OpenClaw root directory exists
+    - openclaw.json exists and is parseable
+    - roadmap-converter agent registered in openclaw.json
+    - Agent workspace directories for the 5 core agents
+    - Conversion prompt file exists
+    - exec-approvals.json stale path detection
+
+    Returns:
+        {
+            "setup_complete": bool,  # True iff marker exists AND missing_items is empty
+            "missing_items": [str, ...]
+        }
+    """
+    missing_items = []
+
+    autodev_root = os.path.expanduser(config.get("autodev_repo_path", "~/.openclaw"))
+    openclaw_json_path = os.path.join(autodev_root, "openclaw.json")
+    exec_approvals_path = os.path.join(autodev_root, "exec-approvals.json")
+
+    # 1. OpenClaw root directory
+    if not os.path.isdir(autodev_root):
+        missing_items.append("openclaw_root")
+
+    # 2. openclaw.json existence
+    if not os.path.isfile(openclaw_json_path):
+        missing_items.append("openclaw_json")
+        agents_list = []
+    else:
+        # 3. roadmap-converter agent registration
+        try:
+            with open(openclaw_json_path, "r", encoding="utf-8") as f:
+                oc_data = json.load(f)
+            agents_list = oc_data.get("agents", {}).get("list", [])
+            ids = {a.get("id") for a in agents_list}
+            if "roadmap-converter" not in ids:
+                missing_items.append("roadmap_converter_agent")
+        except Exception:
+            missing_items.append("roadmap_converter_agent")
+            agents_list = []
+
+    # 4. Agent workspace directories (5 core Task-01 agents)
+    # workspace-roadmap-converter check is deferred to Task 02
+    for agent in ("planner", "executor", "reviewer", "escalation", "prd-creator"):
+        ws = os.path.join(autodev_root, f"workspace-{agent}")
+        if not os.path.isdir(ws):
+            missing_items.append(f"workspace-{agent}")
+
+    # 5. Conversion prompt file
+    conversion_prompt = config.get("conversion_prompt_path", "")
+    if conversion_prompt:
+        conversion_prompt = os.path.expanduser(conversion_prompt)
+    if not conversion_prompt or not os.path.isfile(conversion_prompt):
+        missing_items.append("conversion_prompt")
+
+    # 6. exec-approvals.json stale path detection (read-only, report only)
+    if os.path.isfile(exec_approvals_path):
+        try:
+            with open(exec_approvals_path, "r", encoding="utf-8") as f:
+                raw = f.read()
+            # Any gate_scripts path not under autodev_root is stale
+            import re as _re
+            gate_paths = _re.findall(r'"([^"]*gate_scripts[^"]*)"', raw)
+            stale = [p for p in gate_paths if not p.startswith(autodev_root)]
+            if stale:
+                missing_items.append("exec_approvals_stale_paths")
+        except Exception:
+            pass
+
+    setup_marker = os.path.expanduser("~/.autodev_setup_complete")
+    marker_exists = os.path.exists(setup_marker)
+    setup_complete = marker_exists and len(missing_items) == 0
+
+    return {"setup_complete": setup_complete, "missing_items": missing_items}
+
+
+@app.get("/api/setup/status")
+def get_setup_status():
+    """Read-only installer health check.
+
+    Returns:
+        {
+            "setup_complete": bool,
+            "missing_items": [str, ...]  — empty if all checks pass
+        }
+
+    missing_items values:
+        "openclaw_root"             — AUTODEV_ROOT directory not found
+        "openclaw_json"             — openclaw.json missing from AUTODEV_ROOT
+        "roadmap_converter_agent"   — roadmap-converter not in openclaw.json agents.list
+        "workspace-{agent}"         — agent workspace directory missing
+        "conversion_prompt"         — PRD-to-roadmap conversion prompt file missing
+        "exec_approvals_stale_paths" — exec-approvals.json has outdated gate script paths
+    """
+    config = load_config()
+    return _check_installer_status(config)
 
 
 @app.post("/api/setup/switch-project")
