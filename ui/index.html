@@ -571,11 +571,16 @@
                 setConfirmBusy(true);
                 setCommandError("");
                 try {
-                    const r = await fetch("/api/command", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ command: modalCommand }),
-                    });
+                    let r;
+                    if (modalCommand === "STOP") {
+                        r = await fetch("/api/stop", { method: "POST" });
+                    } else {
+                        r = await fetch("/api/command", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ command: modalCommand }),
+                        });
+                    }
                     const d = await r.json().catch(() => ({}));
                     if (!r.ok) {
                         const msg =
@@ -606,13 +611,14 @@
                 setModalCommand(null);
             };
 
-            // Commands shown in the main grid (non-destructive enough for direct layout)
+            // Commands shown in the main grid — left col: revert options, right col: flow control
             const GRID_COMMANDS = [
-                { command: "RESET_EXECUTION", label: "RESET EXECUTION", desc: "Keep the plan. Re-run executor from a clean working tree.", capped: true },
-                { command: "RESET_REVIEWER",  label: "RESET REVIEWER",  desc: "Keep executor output. Re-run reviewer from scratch.", capped: true },
-                { command: "RESET_PHASE",     label: "RESET PHASE",     desc: "Full reset: git rewind, new plan, re-run from the top.", capped: true },
-                { command: "SKIP",            label: "SKIP",            desc: "Mark this phase skipped and advance to the next.", capped: false },
-                { command: "PROCEED",         label: "PROCEED",         desc: "Accept current output as-is and advance (skips merge).", capped: false },
+                { command: "RESET_PHASE",     label: "Revert to Planner",  desc: "Full reset: git rewind, new plan, re-run from the top.",      capped: true  },
+                { command: "SKIP",            label: "Skip",               desc: "Mark this phase skipped and advance to the next.",            capped: false },
+                { command: "RESET_EXECUTION", label: "Revert to Executor", desc: "Keep the plan. Re-run executor from a clean working tree.",   capped: true  },
+                { command: "PROCEED",         label: "Proceed",            desc: "Accept current output as-is and advance (skips merge).",      capped: false },
+                { command: "RESET_REVIEWER",  label: "Revert to Reviewer", desc: "Keep executor output. Re-run reviewer from scratch.",         capped: true  },
+                { command: "STOP",            label: "Stop",               desc: "Halt the pipeline. No further phases will run.",              capped: false },
             ];
 
             const renderGridButton = ({ command, label, desc, capped }) => {
@@ -676,17 +682,8 @@
                             ) : null}
                         </div>
                     ) : (
-                        <div className="space-y-2">
-                            <div className="grid grid-cols-2 gap-2">
-                                {GRID_COMMANDS.map(renderGridButton)}
-                            </div>
-                            <button
-                                className="w-full flex flex-col items-start text-left px-3 py-2 rounded bg-red-950/60 hover:bg-red-900/60 transition-colors border border-red-800/40"
-                                onClick={() => handleCommand("STOP")}
-                            >
-                                <span className="header-text text-sm font-medium text-red-400">STOP</span>
-                                <span className="text-slate-400 text-xs mt-0.5 leading-snug">Halt the pipeline entirely. No further phases will run.</span>
-                            </button>
+                        <div className="grid grid-cols-2 gap-2">
+                            {GRID_COMMANDS.map(renderGridButton)}
                         </div>
                     )}
                     {showConfirmModal && (
@@ -1780,6 +1777,9 @@
             const messagesEndRef = useRef(null);
             const readinessPollRef = useRef(null);
             const docPaneRef = useRef(null);
+            const [splitPct, setSplitPct] = useState(45);
+            const dragRef = useRef({ dragging: false });
+            const containerRef = useRef(null);
 
             const stopReadinessPoll = () => {
                 if (readinessPollRef.current) {
@@ -1845,6 +1845,31 @@
             }, [ideasList, currentIdeaId]);
 
             useEffect(() => () => stopReadinessPoll(), []);
+
+            useEffect(() => {
+                let rafId = null;
+                const onMouseMove = (e) => {
+                    if (!dragRef.current.dragging || !containerRef.current) return;
+                    if (rafId) return;
+                    rafId = requestAnimationFrame(() => {
+                        rafId = null;
+                        const rect = containerRef.current.getBoundingClientRect();
+                        const totalW = rect.width;
+                        const minPct = (480 / totalW) * 100;
+                        const maxPct = ((totalW - 520) / totalW) * 100;
+                        const pct = Math.min(Math.max(((e.clientX - rect.left) / totalW) * 100, minPct), maxPct);
+                        setSplitPct(pct);
+                    });
+                };
+                const onMouseUp = () => { dragRef.current.dragging = false; };
+                window.addEventListener("mousemove", onMouseMove);
+                window.addEventListener("mouseup", onMouseUp);
+                return () => {
+                    window.removeEventListener("mousemove", onMouseMove);
+                    window.removeEventListener("mouseup", onMouseUp);
+                    if (rafId) cancelAnimationFrame(rafId);
+                };
+            }, []);
 
             const refreshAnnotations = (ideaId) => {
                 if (!ideaId) return;
@@ -2331,7 +2356,8 @@
                         </button>
                     </div>
 
-                    <div className="flex-1 flex flex-col min-w-0 bg-[#141618] overflow-hidden border-r border-[#1a1d21]">
+                    <div ref={containerRef} className="flex flex-1 min-w-0">
+                    <div style={{ width: splitPct + "%" }} className="flex-shrink-0 flex flex-col min-w-0 bg-[#141618] overflow-hidden">
                         <div className="flex-shrink-0 border-b border-[#1a1d21] px-3 py-2 flex items-center justify-between gap-2">
                             <span className="header-text text-xs text-slate-500 truncate">{currentIdeaName}</span>
                             {currentIdeaId && readinessStatus === "updating" && (
@@ -2471,6 +2497,10 @@
                             </div>
                         </div>
                     </div>
+                    <div
+                        onMouseDown={(e) => { e.preventDefault(); dragRef.current.dragging = true; }}
+                        className="w-1 flex-shrink-0 cursor-col-resize bg-[#1a1d21] hover:bg-[#00b4d8]/30 transition-colors"
+                    />
                     <div className="flex-1 flex flex-col min-w-0 bg-[#141618] overflow-hidden">
                         {draftingIndicator && (
                             <div className="flex-shrink-0 border-b border-[#1a1d21] px-4 py-1.5 bg-[#0d0f11]">
@@ -2772,6 +2802,7 @@
                                 </div>
                             </div>
                         )}
+                    </div>
                     </div>
                 </div>
             );
