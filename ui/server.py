@@ -9,6 +9,7 @@ import uuid
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import mkstemp
 
 import asyncio
 
@@ -20,6 +21,7 @@ from ui.roadmap_parser import parse_roadmap
 
 ORCHESTRATOR_FILENAME = "orchestrator.py"
 WEBHOOK_AGENT_ID = "prd-creator"
+ROADMAP_CONVERTER_AGENT_ID = "roadmap-converter"
 # POLL_TIMEOUT is defined later in this file (line ~1494); ORCHESTRATOR_POLL_TIMEOUT aliases it.
 ORCHESTRATOR_POLL_TIMEOUT = 120
 
@@ -372,6 +374,7 @@ DEFAULTS = {
     "hooks_token": "pipeline-secret-token",
     "conversion_prompt_path": "~/.openclaw/deployment-package/Updates/PRD to Roadmap (sonnet 4.5 ideal).txt",
     "autodev_repo_path": os.environ.get("AUTODEV_REPO_PATH", os.path.expanduser("~/.openclaw")),
+    "roadmap_converter_workspace": "~/.openclaw/workspace-roadmap-converter",
 }
 
 
@@ -470,6 +473,44 @@ def _atomic_write_json_file(path: Path, data: dict) -> None:
     with open(tmp_path, "w") as f:
         json.dump(data, f)
     os.replace(tmp_path, str(path))
+
+
+def _inject_converter_skill(skill_name: str, config: dict) -> None:
+    """Copy a roadmap-converter skill into the agent workspace atomically.
+
+    Source: {autodev_repo_path}/autodev/skill-library/roadmap-converter/{skill_name}/SKILL.md
+    Dest:   {roadmap_converter_workspace}/skills/{skill_name}/SKILL.md
+
+    Raises RuntimeError if the source skill file is not found.
+    Creates the destination directory if it does not exist.
+    Uses mkstemp + os.replace for atomic write.
+    """
+    source = (
+        Path(config["autodev_repo_path"])
+        / "autodev"
+        / "skill-library"
+        / "roadmap-converter"
+        / skill_name
+        / "SKILL.md"
+    )
+    if not source.exists():
+        raise RuntimeError(
+            f"Skill source not found: {source}. "
+            f"Expected skill '{skill_name}' in autodev/skill-library/roadmap-converter/."
+        )
+    dest = Path(config["roadmap_converter_workspace"]) / "skills" / skill_name / "SKILL.md"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = mkstemp(dir=str(dest.parent))
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(source.read_text())
+        os.replace(tmp, str(dest))
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _resolve_display_name_for_listing(idea_dir: Path, session_data: dict) -> tuple:
@@ -1516,7 +1557,7 @@ def get_metrics_summary():
     }
 
 
-POLL_TIMEOUT = 120  # seconds; patchable in tests
+POLL_TIMEOUT = 180  # seconds; patchable in tests
 POLL_INTERVAL = 2   # seconds between sentinel checks
 
 
@@ -1781,17 +1822,70 @@ async def post_ideas_message(idea_id: str, request: Request):
         fcontent = attachment.get("content", "")
         message_content = f"[ATTACHMENT: {fname}]\n{fcontent}\n[/ATTACHMENT]\n\n{content}"
 
-    # Inject unsubmitted annotations into message context
+    # Load existing session data early — used for annotations and conversation history
     idea_dir = Path(ideas_dir) / idea_id
     session_path_pre = idea_dir / "session.json"
-    pending_annotation_ids: list[str] = []
+    pre_session: dict = {}
     if session_path_pre.exists():
         pre_session = _read_json_file(str(session_path_pre)) or {}
-        unsubmitted = [a for a in pre_session.get("annotations", []) if not a.get("submitted")]
-        if unsubmitted:
-            ann_lines = "\n".join(f'Section "{a["section"]}": "{a["comment"]}"' for a in unsubmitted)
-            message_content = f"[USER ANNOTATIONS]\n{ann_lines}\n[/USER ANNOTATIONS]\n\n{message_content}"
-            pending_annotation_ids = [a["id"] for a in unsubmitted]
+
+    # Inject unsubmitted annotations into message context
+    pending_annotation_ids: list[str] = []
+    unsubmitted = [a for a in pre_session.get("annotations", []) if not a.get("submitted")]
+    if unsubmitted:
+        ann_lines = "\n".join(f'Section "{a["section"]}": "{a["comment"]}"' for a in unsubmitted)
+        message_content = f"[USER ANNOTATIONS]\n{ann_lines}\n[/USER ANNOTATIONS]\n\n{message_content}"
+        pending_annotation_ids = [a["id"] for a in unsubmitted]
+
+    # Build conversation history block so the agent has full thread context.
+    # Each new turn gets a fresh OpenClaw session, so history must be injected
+    # explicitly — the agent cannot access prior sessions natively.
+    # Format uses explicit [Turn N] delimiters so multi-line content doesn't
+    # create ambiguity about which message a line belongs to.
+    # Only COMPLETE pairs (user + assistant) are included — orphaned user messages
+    # (from previous 408-timed-out turns) are skipped to keep history clean.
+    history_block = ""
+    prior_messages = pre_session.get("messages", [])
+    if prior_messages:
+        # Walk messages building complete (user, assistant) pairs.
+        # Orphaned user messages (no following assistant) are skipped.
+        complete_pairs: list[tuple] = []
+        j = 0
+        while j < len(prior_messages):
+            msg = prior_messages[j]
+            if msg.get("role") == "user":
+                # Check for error flag — skip turns that errored out
+                if msg.get("error"):
+                    j += 1
+                    continue
+                nxt = prior_messages[j + 1] if j + 1 < len(prior_messages) else None
+                if nxt and nxt.get("role") == "assistant" and not nxt.get("error"):
+                    complete_pairs.append((msg, nxt))
+                    j += 2
+                else:
+                    # Orphaned user message — skip
+                    j += 1
+            else:
+                j += 1
+        if complete_pairs:
+            lines = ["[CONVERSATION HISTORY]"]
+            for turn_idx, (u, a) in enumerate(complete_pairs, start=1):
+                lines.append(f"\n[Turn {turn_idx}]")
+                lines.append(f"User:\n{(u.get('content') or '').strip()}")
+                lines.append(f"\nAssistant:\n{(a.get('content') or '').strip()}")
+            lines.append("\n[/CONVERSATION HISTORY]")
+            history_block = "\n".join(lines) + "\n\n"
+
+    # Consume any pending system events (alignment/adversarial check results)
+    # stored by previous check endpoints. Injected here so the PRD agent sees
+    # them in context without requiring a competing session-1 webhook.
+    pending_events = pre_session.get("pending_system_events", [])
+    system_events_block = ""
+    if pending_events:
+        lines = ["[SYSTEM EVENTS]"]
+        lines.extend(pending_events)
+        lines.append("[/SYSTEM EVENTS]")
+        system_events_block = "\n".join(lines) + "\n\n"
 
     # Build session key: ideas:{id}:session-{n}
     session_key = f"ideas:{idea_id}:session-{turn_n}"
@@ -1801,8 +1895,25 @@ async def post_ideas_message(idea_id: str, request: Request):
         "agentId": WEBHOOK_AGENT_ID,
         "sessionKey": session_key,
         "wakeMode": "now",
-        "message": f"[SESSION] ideas:{idea_id}:session-{turn_n}\n\n{message_content}",
+        "message": f"[SESSION] ideas:{idea_id}:session-{turn_n}\n\n{history_block}{system_events_block}{message_content}",
     }
+
+    # Pre-save user message to session.json BEFORE sending webhook.
+    # This ensures the user's message survives even if the poll times out (408).
+    # On refresh, the UI will show the user's message with an error placeholder
+    # instead of losing it entirely.
+    session_path = idea_dir / "session.json"
+    _pre_save_ts = datetime.utcnow().isoformat() + "Z"
+    _pre_save_data = dict(pre_session)
+    _pre_save_data.setdefault("messages", [])
+    _pre_save_data["messages"] = list(_pre_save_data["messages"]) + [
+        {"role": "user", "content": content, "ts": _pre_save_ts},
+        {"role": "assistant", "content": "Working on your request...", "ts": _pre_save_ts, "pending": True},
+    ]
+    _pre_save_data["updated"] = _pre_save_ts
+    if _pre_save_data.get("created") is None:
+        _pre_save_data["created"] = _pre_save_ts
+    _atomic_write_json_file(str(session_path), _pre_save_data)
 
     # Send webhook POST via a per-request aiohttp session
     headers = {"Authorization": f"Bearer {hooks_token}"}
@@ -1820,7 +1931,18 @@ async def post_ideas_message(idea_id: str, request: Request):
             break
         await asyncio.sleep(POLL_INTERVAL)
     else:
-        # Timed out
+        # Timed out — update the pre-saved pending placeholder to an error state
+        # so the user sees a clear error on refresh instead of a "working…" spinner
+        _timeout_data = _read_json_file(str(session_path)) or _pre_save_data
+        _timeout_msgs = _timeout_data.get("messages", [])
+        for _m in reversed(_timeout_msgs):
+            if _m.get("pending"):
+                _m["pending"] = False
+                _m["error"] = True
+                _m["content"] = "Agent response timed out. You can retry."
+                break
+        _timeout_data["messages"] = _timeout_msgs
+        _atomic_write_json_file(str(session_path), _timeout_data)
         raise HTTPException(
             status_code=408,
             detail=f"No agent response after {POLL_TIMEOUT}s — the model may be slow or the agent session may be stalled.",
@@ -1836,28 +1958,43 @@ async def post_ideas_message(idea_id: str, request: Request):
     if prd_draft_path.exists():
         prd_content = prd_draft_path.read_text()
 
-    # Load existing session.json
-    session_path = idea_dir / "session.json"
+    # Re-read session.json (may have been updated by readiness job between pre-save and now).
+    # The pre-saved messages already include the user message and a pending assistant placeholder.
+    # Replace the pending placeholder with the real agent response.
     if session_path.exists():
-        session_data = _read_json_file(str(session_path)) or {
-            "messages": [], "prd_content": "", "created": None, "updated": None
-        }
+        session_data = _read_json_file(str(session_path)) or dict(_pre_save_data)
     else:
-        session_data = {"messages": [], "prd_content": "", "created": None, "updated": None}
+        session_data = dict(_pre_save_data)
 
     parsed = _parse_agent_response(agent_response)
 
-    # Append user and assistant messages (assistant carries parsed for QuestionFlow on reload)
+    # Replace the pending assistant placeholder with the real response.
+    # If no placeholder found (unexpected), append a new assistant entry.
     now = datetime.utcnow().isoformat() + "Z"
     session_data.setdefault("messages", [])
-    session_data["messages"].append({"role": "user", "content": content, "ts": now})
-    session_data["messages"].append(
-        {"role": "assistant", "content": agent_response, "ts": now, "parsed": parsed}
-    )
+    replaced = False
+    for _m in reversed(session_data["messages"]):
+        if _m.get("pending") and _m.get("role") == "assistant":
+            _m["pending"] = False
+            _m["content"] = agent_response
+            _m["ts"] = now
+            _m["parsed"] = parsed
+            replaced = True
+            break
+    if not replaced:
+        # Fallback: append both messages (handles case where pre-save was skipped/lost)
+        session_data["messages"].append({"role": "user", "content": content, "ts": now})
+        session_data["messages"].append(
+            {"role": "assistant", "content": agent_response, "ts": now, "parsed": parsed}
+        )
+
     session_data["prd_content"] = prd_content
     session_data["updated"] = now
     if session_data.get("created") is None:
         session_data["created"] = now
+
+    # Clear consumed system events so they aren't re-injected on subsequent turns
+    session_data.pop("pending_system_events", None)
 
     # Mark submitted annotations
     if pending_annotation_ids:
@@ -1880,11 +2017,7 @@ async def post_ideas_message(idea_id: str, request: Request):
             if first_user.strip():
                 session_data["name"] = first_user.strip()[:40].title()
 
-    # Atomic write via .tmp + os.replace
-    tmp_path = str(session_path) + ".tmp"
-    with open(tmp_path, "w") as f:
-        json.dump(session_data, f)
-    os.replace(tmp_path, session_path)
+    _atomic_write_json_file(str(session_path), session_data)
 
     _readiness_job_started_at[idea_id] = datetime.utcnow().timestamp()
     asyncio.create_task(_trigger_readiness_assessment(idea_id, config))
@@ -2152,16 +2285,19 @@ def download_ideas(idea_id: str):
         stripped = line.strip()
         if stripped.startswith("# "):
             heading = stripped[2:].strip()
-            # Sanitize: replace spaces with hyphens, keep alphanum/dash/underscore
+            # Sanitize: replace spaces with hyphens, strip non-ASCII/non-safe characters
+            # HTTP header values must be latin-1 encodable
+            import re as _re
             filename = heading.replace(" ", "-")
+            filename = _re.sub(r"[^\w\-.]", "", filename)
             break
 
-    filename = filename + "-prd.md"
+    filename = (filename or idea_id) + "-prd.md"
 
     from fastapi.responses import Response
     return Response(
-        content=prd_content,
-        media_type="text/markdown",
+        content=prd_content.encode("utf-8"),
+        media_type="text/markdown; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
@@ -2400,8 +2536,8 @@ def poll_readiness_done(idea_id: str):
 async def post_ideas_convert(idea_id: str):
     """Trigger PRD-to-roadmap conversion.
 
-    Reads conversion prompt from config.conversion_prompt_path, sends a webhook
-    to the prd-creator agent, polls for roadmap_draft.done (2s interval, 180s
+    Injects the roadmap-generation skill, then sends a webhook to the
+    roadmap-converter agent, polls for roadmap_draft.done (2s interval, 180s
     timeout), then atomically stores the resulting roadmap_content in
     session.json and returns it.
 
@@ -2439,11 +2575,14 @@ async def post_ideas_convert(idea_id: str):
 
     conversion_prompt = Path(conversion_prompt_path).read_text()
 
+    # Inject roadmap-generation skill before webhook POST
+    _inject_converter_skill("roadmap-generation", config)
+
     # Build webhook payload
     timestamp_ms = int(datetime.utcnow().timestamp() * 1000)
     session_key = f"ideas:{idea_id}:convert-{timestamp_ms}"
     webhook_payload = {
-        "agentId": WEBHOOK_AGENT_ID,
+        "agentId": ROADMAP_CONVERTER_AGENT_ID,
         "sessionKey": session_key,
         "wakeMode": "now",
         "message": (
@@ -2492,6 +2631,331 @@ async def post_ideas_convert(idea_id: str):
     return {"roadmap_content": roadmap_content}
 
 
+async def _notify_prd_agent(idea_id: str, config: dict, message_body: str) -> None:
+    """Fire-and-forget notification to the prd-creator agent's latest session.
+
+    Finds the highest assistant turn number in session.json and POSTs the
+    message_body to that session. Logs a warning on failure; never raises.
+    """
+    try:
+        ideas_dir = Path(os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas")))
+        session_path = ideas_dir / idea_id / "session.json"
+        session_data = _read_json_file(str(session_path)) or {}
+        messages = session_data.get("messages", [])
+        turn_numbers = [
+            m.get("turn", 1)
+            for m in messages
+            if m.get("role") == "assistant"
+        ]
+        latest_turn = max(turn_numbers) if turn_numbers else 1
+        session_key = f"ideas:{idea_id}:session-{latest_turn}"
+
+        hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
+        hooks_token = config.get("hooks_token", "")
+        payload = {
+            "agentId": WEBHOOK_AGENT_ID,
+            "sessionKey": session_key,
+            "wakeMode": "now",
+            "message": message_body,
+        }
+        async with aiohttp.ClientSession() as session:
+            await session.post(
+                hooks_url,
+                json=payload,
+                headers={"Authorization": f"Bearer {hooks_token}"},
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+    except Exception as exc:
+        logger.warning(f"[CONVERTER] PRD agent notification failed for {idea_id}: {exc}")
+
+
+ALIGNMENT_CHECK_TIMEOUT = 180
+ALIGNMENT_CHECK_POLL_INTERVAL = 2
+ADVERSARIAL_CHECK_TIMEOUT = 180
+ADVERSARIAL_CHECK_POLL_INTERVAL = 2
+
+
+@app.post("/api/ideas/{idea_id}/alignment-check")
+async def post_ideas_alignment_check(idea_id: str):
+    """Audit roadmap coverage of the PRD; fix material gaps.
+
+    Injects roadmap-generation and alignment-check skills, sends a webhook to
+    the roadmap-converter agent, polls for alignment_report.done (2s interval,
+    180s timeout), reads the report and updated roadmap, stores both in
+    session.json, and fires a notification to the prd-creator agent.
+
+    Returns 404 if the idea is not found or session.json is missing.
+    Returns 400 if roadmap_draft.md does not exist.
+    Returns 408 if polling times out.
+    Returns 200 with {"alignment_report": str, "roadmap_updated": bool,
+    "roadmap_content": str | None} on success.
+    """
+    config = load_config()
+    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
+    hooks_token = config.get("hooks_token", "")
+
+    idea_dir = Path(ideas_dir) / idea_id
+    if not idea_dir.exists():
+        raise HTTPException(status_code=404, detail="Idea not found")
+
+    session_path = idea_dir / "session.json"
+    session_data = _read_json_file(str(session_path))
+    if session_data is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    roadmap_draft_path = idea_dir / "roadmap_draft.md"
+    if not roadmap_draft_path.exists():
+        raise HTTPException(
+            status_code=400,
+            detail="No roadmap_draft.md found. Generate a roadmap before running alignment check.",
+        )
+
+    # Record roadmap mtime before the check — used to detect whether the agent updated it
+    roadmap_mtime_before = roadmap_draft_path.stat().st_mtime
+
+    # Inject both skills before webhook POST
+    _inject_converter_skill("roadmap-generation", config)
+    _inject_converter_skill("alignment-check", config)
+
+    # Build webhook payload
+    timestamp_ms = int(datetime.utcnow().timestamp() * 1000)
+    session_key = f"ideas:{idea_id}:alignment-{timestamp_ms}"
+    webhook_payload = {
+        "agentId": ROADMAP_CONVERTER_AGENT_ID,
+        "sessionKey": session_key,
+        "wakeMode": "now",
+        "message": (
+            f"[SESSION] {session_key}\n\n"
+            f"Perform an alignment check on the roadmap for idea {idea_id}.\n\n"
+            f"Read ~/.openclaw/ideas/{idea_id}/prd_draft.md and "
+            f"~/.openclaw/ideas/{idea_id}/roadmap_draft.md.\n\n"
+            f"Apply the roadmap-generation and alignment-check skills from your workspace.\n\n"
+            f"Write your analysis to ~/.openclaw/ideas/{idea_id}/alignment_report.md.\n"
+            f"If you found and fixed material gaps, write the updated roadmap to "
+            f"~/.openclaw/ideas/{idea_id}/roadmap_draft.md.\n"
+            f"Write ~/.openclaw/ideas/{idea_id}/alignment_report.done last."
+        ),
+    }
+
+    # Send webhook POST
+    headers = {"Authorization": f"Bearer {hooks_token}"}
+    async with aiohttp.ClientSession() as session:
+        await session.post(hooks_url, json=webhook_payload, headers=headers)
+
+    # Poll for alignment_report.done
+    done_path = idea_dir / "alignment_report.done"
+    deadline = datetime.utcnow().timestamp() + ALIGNMENT_CHECK_TIMEOUT
+
+    while datetime.utcnow().timestamp() < deadline:
+        if done_path.exists():
+            break
+        await asyncio.sleep(ALIGNMENT_CHECK_POLL_INTERVAL)
+    else:
+        raise HTTPException(
+            status_code=408,
+            detail=f"Alignment check timed out after {ALIGNMENT_CHECK_TIMEOUT}s",
+        )
+
+    # Read alignment report
+    alignment_report_path = idea_dir / "alignment_report.md"
+    alignment_report = ""
+    if alignment_report_path.exists():
+        alignment_report = alignment_report_path.read_text()
+
+    # Detect whether the agent updated the roadmap (mtime change)
+    roadmap_updated = roadmap_draft_path.stat().st_mtime != roadmap_mtime_before
+    roadmap_content_new = None
+    if roadmap_updated:
+        roadmap_content_new = roadmap_draft_path.read_text()
+
+    # Build notification message
+    gap_count = _count_alignment_gaps(alignment_report)
+    if gap_count > 0:
+        notification = (
+            f"[SYSTEM] Alignment check complete. {gap_count} gap(s) found. "
+            f"Roadmap has been updated."
+        )
+    else:
+        notification = "[SYSTEM] Alignment check complete. No gaps found."
+
+    # Store in session.json — include notification as pending system event so
+    # it is injected into the conversation history on the next PRD agent turn
+    # (avoids spawning a competing session-1 webhook that clobbers turn files).
+    updated_session = dict(session_data)
+    updated_session["alignment_report"] = alignment_report
+    updated_session["updated"] = datetime.utcnow().isoformat() + "Z"
+    if roadmap_updated and roadmap_content_new is not None:
+        updated_session["roadmap_content"] = roadmap_content_new
+    updated_session.setdefault("pending_system_events", []).append(notification)
+    _atomic_write_json_file(session_path, updated_session)
+
+    return {
+        "alignment_report": alignment_report,
+        "roadmap_updated": roadmap_updated,
+        "roadmap_content": roadmap_content_new,
+    }
+
+
+def _count_alignment_gaps(report: str) -> int:
+    """Count bullet items under '## Material Gaps Addressed' in an alignment report."""
+    lines = report.split("\n")
+    in_gaps_section = False
+    count = 0
+    for line in lines:
+        if line.strip() == "## Material Gaps Addressed":
+            in_gaps_section = True
+            continue
+        if in_gaps_section:
+            if line.startswith("##"):
+                break
+            stripped = line.strip()
+            if stripped.startswith("-") and not stripped.startswith("- None"):
+                count += 1
+    return count
+
+
+def _extract_adversarial_confidence(report: str) -> str:
+    """Extract 'score/100' from the Overall Pipeline Confidence section."""
+    lines = report.split("\n")
+    in_confidence = False
+    for line in lines:
+        if "## Overall Pipeline Confidence" in line:
+            in_confidence = True
+            continue
+        if in_confidence:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                import re as _re
+                m = _re.search(r"(\d+)/100", stripped)
+                if m:
+                    return f"{m.group(1)}/100"
+    return "unknown/100"
+
+
+def _extract_adversarial_top_risk(report: str) -> str:
+    """Extract the first high-risk phase description from the risk table."""
+    lines = report.split("\n")
+    in_table = False
+    for line in lines:
+        if "## Phase Risk Assessment" in line:
+            in_table = True
+            continue
+        if in_table:
+            if line.startswith("##"):
+                break
+            # Table rows look like: | PHASE | score | hypothesis | mitigation |
+            if line.startswith("|") and not line.startswith("| Phase") and "---" not in line:
+                parts = [p.strip() for p in line.strip("|").split("|")]
+                if len(parts) >= 3:
+                    phase_id = parts[0]
+                    hypothesis = parts[2] if len(parts) > 2 else ""
+                    if phase_id and hypothesis:
+                        return f"{phase_id}: {hypothesis}"
+    return "See full report for details"
+
+
+@app.post("/api/ideas/{idea_id}/adversarial-check")
+async def post_ideas_adversarial_check(idea_id: str):
+    """Stress-test the roadmap with failure hypotheses for each phase.
+
+    Injects the adversarial-review skill, sends a webhook to the
+    roadmap-converter agent, polls for adversarial_report.done (2s interval,
+    180s timeout), reads the report, stores it in session.json, and fires a
+    notification to the prd-creator agent.
+
+    Returns 404 if the idea is not found or session.json is missing.
+    Returns 400 if roadmap_draft.md does not exist.
+    Returns 408 if polling times out.
+    Returns 200 with {"adversarial_report": str} on success.
+    """
+    config = load_config()
+    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
+    hooks_token = config.get("hooks_token", "")
+
+    idea_dir = Path(ideas_dir) / idea_id
+    if not idea_dir.exists():
+        raise HTTPException(status_code=404, detail="Idea not found")
+
+    session_path = idea_dir / "session.json"
+    session_data = _read_json_file(str(session_path))
+    if session_data is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    roadmap_draft_path = idea_dir / "roadmap_draft.md"
+    if not roadmap_draft_path.exists():
+        raise HTTPException(
+            status_code=400,
+            detail="No roadmap_draft.md found. Generate a roadmap before running adversarial review.",
+        )
+
+    # Inject adversarial-review skill only
+    _inject_converter_skill("adversarial-review", config)
+
+    # Build webhook payload
+    timestamp_ms = int(datetime.utcnow().timestamp() * 1000)
+    session_key = f"ideas:{idea_id}:adversarial-{timestamp_ms}"
+    webhook_payload = {
+        "agentId": ROADMAP_CONVERTER_AGENT_ID,
+        "sessionKey": session_key,
+        "wakeMode": "now",
+        "message": (
+            f"[SESSION] {session_key}\n\n"
+            f"Perform an adversarial review of the roadmap for idea {idea_id}.\n\n"
+            f"Read ~/.openclaw/ideas/{idea_id}/prd_draft.md and "
+            f"~/.openclaw/ideas/{idea_id}/roadmap_draft.md.\n\n"
+            f"Apply the adversarial-review skill from your workspace.\n\n"
+            f"Write your risk assessment to ~/.openclaw/ideas/{idea_id}/adversarial_report.md.\n"
+            f"Do not modify roadmap_draft.md — this is an analysis-only pass.\n"
+            f"Write ~/.openclaw/ideas/{idea_id}/adversarial_report.done last."
+        ),
+    }
+
+    # Send webhook POST
+    headers = {"Authorization": f"Bearer {hooks_token}"}
+    async with aiohttp.ClientSession() as session:
+        await session.post(hooks_url, json=webhook_payload, headers=headers)
+
+    # Poll for adversarial_report.done
+    done_path = idea_dir / "adversarial_report.done"
+    deadline = datetime.utcnow().timestamp() + ADVERSARIAL_CHECK_TIMEOUT
+
+    while datetime.utcnow().timestamp() < deadline:
+        if done_path.exists():
+            break
+        await asyncio.sleep(ADVERSARIAL_CHECK_POLL_INTERVAL)
+    else:
+        raise HTTPException(
+            status_code=408,
+            detail=f"Adversarial review timed out after {ADVERSARIAL_CHECK_TIMEOUT}s",
+        )
+
+    # Read adversarial report
+    adversarial_report_path = idea_dir / "adversarial_report.md"
+    adversarial_report = ""
+    if adversarial_report_path.exists():
+        adversarial_report = adversarial_report_path.read_text()
+
+    # Build notification message
+    confidence = _extract_adversarial_confidence(adversarial_report)
+    top_risk = _extract_adversarial_top_risk(adversarial_report)
+    notification = (
+        f"[SYSTEM] Adversarial review complete. Pipeline confidence: {confidence}. "
+        f"{top_risk}."
+    )
+
+    # Store in session.json — include notification as pending system event so
+    # it is injected into the conversation history on the next PRD agent turn.
+    updated_session = dict(session_data)
+    updated_session["adversarial_report"] = adversarial_report
+    updated_session["updated"] = datetime.utcnow().isoformat() + "Z"
+    updated_session.setdefault("pending_system_events", []).append(notification)
+    _atomic_write_json_file(session_path, updated_session)
+
+    return {"adversarial_report": adversarial_report}
+
+
 @app.get("/api/ideas/{idea_id}/download-roadmap")
 def get_ideas_download_roadmap(idea_id: str):
     """Download the roadmap_content from session.json as a markdown file.
@@ -2514,6 +2978,7 @@ def get_ideas_download_roadmap(idea_id: str):
         raise HTTPException(status_code=404, detail="No roadmap content available")
 
     # Derive filename from first # heading in prd_content, or fall back to id
+    import re as _re
     prd_content = session_data.get("prd_content", "") or ""
     filename = idea_id
     for line in prd_content.split("\n"):
@@ -2521,14 +2986,15 @@ def get_ideas_download_roadmap(idea_id: str):
         if stripped.startswith("# "):
             heading = stripped[2:].strip()
             filename = heading.replace(" ", "-")
+            filename = _re.sub(r"[^\w\-.]", "", filename)
             break
 
-    filename = filename + "-roadmap.md"
+    filename = (filename or idea_id) + "-roadmap.md"
 
     from fastapi.responses import Response
     return Response(
-        content=roadmap_content,
-        media_type="text/markdown",
+        content=roadmap_content.encode("utf-8"),
+        media_type="text/markdown; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 

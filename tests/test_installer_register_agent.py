@@ -38,16 +38,26 @@ _ROADMAP_CONVERTER_ENTRY = {
 }
 
 
-def _base_openclaw_json(agents_list=None):
-    """Return a minimal but realistic openclaw.json dict."""
+def _base_openclaw_json(agents_list=None, allowed_agent_ids=None):
+    """Return a minimal but realistic openclaw.json dict.
+
+    allowed_agent_ids: if provided, sets hooks.allowedAgentIds explicitly.
+    Defaults to a list that mirrors which agent IDs are present in agents_list.
+    """
     if agents_list is None:
         agents_list = [_PRD_CREATOR_ENTRY]
+    if allowed_agent_ids is None:
+        # Derive allowed IDs from the agents_list so tests stay in sync
+        allowed_agent_ids = [e["id"] for e in agents_list if "id" in e]
     return {
         "version": "1.2.0",
         "auth": {"profile": "anthropic:default"},
         "agents": {
             "defaults": {"model": "openrouter/minimax/minimax-m2.7"},
             "list": agents_list,
+        },
+        "hooks": {
+            "allowedAgentIds": allowed_agent_ids,
         },
         "tools": {"profile": "coding"},
     }

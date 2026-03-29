@@ -295,7 +295,7 @@ TOTAL_DEPLOYED=0
 declare -A AGENT_COUNTS
 MISSING_FILES=()
 
-for agent in planner executor reviewer escalation prd-creator; do
+for agent in planner executor reviewer escalation prd-creator roadmap-converter; do
     src_dir="$AUTODEV_REPO_PATH/autodev/agents/$agent"
     dst_dir="$AUTODEV_ROOT/workspace-$agent"
 
@@ -337,7 +337,7 @@ if [ "${#MISSING_FILES[@]}" -gt 0 ]; then
         info "$f"
     done
     if prompt_yn "Deploy agent files? [Y/n]" "Y"; then
-        for agent in planner executor reviewer escalation prd-creator; do
+        for agent in planner executor reviewer escalation prd-creator roadmap-converter; do
             src_dir="$AUTODEV_REPO_PATH/autodev/agents/$agent"
             dst_dir="$AUTODEV_ROOT/workspace-$agent"
             [ -d "$src_dir" ] && [ -d "$dst_dir" ] || continue
@@ -363,13 +363,13 @@ if [ "${#MISSING_FILES[@]}" -gt 0 ]; then
         info "Total agent files deployed: $TOTAL_DEPLOYED"
     else
         warn "Agent workspace provisioning skipped"
-        for agent in planner executor reviewer escalation prd-creator; do
+        for agent in planner executor reviewer escalation prd-creator roadmap-converter; do
             AGENT_COUNTS[$agent]="skipped"
         done
     fi
 else
     ok "All agent workspace files are current — nothing to deploy"
-    for agent in planner executor reviewer escalation prd-creator; do
+    for agent in planner executor reviewer escalation prd-creator roadmap-converter; do
         AGENT_COUNTS[$agent]="current"
     done
 fi
@@ -620,7 +620,7 @@ printf "  %-32s %s\n" "Exec-approvals:"           "$APPROVALS_STATUS"
 printf "  %-32s %s\n" "Cron path:"                "$CRON_STATUS"
 printf "  %-32s %s\n" "Roadmap-converter agent:"  "$REGISTER_STATUS_STEP"
 echo   "  Agent files deployed:"
-for agent in planner executor reviewer escalation prd-creator; do
+for agent in planner executor reviewer escalation prd-creator roadmap-converter; do
     printf "    %-24s %s\n" "$agent:" "${AGENT_COUNTS[$agent]:-0}"
 done
 

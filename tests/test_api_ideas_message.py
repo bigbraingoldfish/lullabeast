@@ -271,3 +271,119 @@ class TestApiIdeasMessage:
         # Sentinel path should use turn 10
         turn_done_path = self.ideas_dir / "3" / "turns" / "10.done"
         assert turn_done_path.exists(), f"Expected 10.done at {turn_done_path}"
+
+    def _capture_conversation_post(self):
+        """Return (all_payloads list, mock_session) for capturing all webhook POST calls.
+
+        The readiness background job fires a second POST after each turn (session key
+        contains ':readiness'). Callers must filter to the conversation POST by checking
+        that the session key contains ':session-'.
+        """
+        all_payloads = []
+
+        def capture_post(url, **kwargs):
+            all_payloads.append(kwargs.get("json", {}))
+            mock_resp = MagicMock()
+            mock_resp.status = 200
+            mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+            mock_resp.__aexit__ = AsyncMock(return_value=None)
+            return mock_resp
+
+        mock_session = MagicMock()
+        mock_session.post = AsyncMock(side_effect=capture_post)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+        return all_payloads, mock_session
+
+    def _conv_message(self, all_payloads):
+        """Extract the message body from the conversation turn POST (not the readiness POST)."""
+        for payload in all_payloads:
+            session_key = payload.get("sessionKey", "")
+            if ":session-" in session_key:
+                return payload.get("message", "")
+        return ""
+
+    def test_conversation_history_injected_when_prior_messages_exist(self):
+        """Webhook message includes [CONVERSATION HISTORY] block when prior turns exist."""
+        client = load_server()
+        all_payloads, mock_session = self._capture_conversation_post()
+
+        self._write_session("hist_yes", {
+            "messages": [
+                {"role": "user", "content": "What should I build?", "ts": "2026-01-01T00:00:00Z"},
+                {"role": "assistant", "content": "Tell me more about your idea.", "ts": "2026-01-01T00:01:00Z"},
+            ],
+            "prd_content": "",
+            "created": "2026-01-01T00:00:00Z",
+            "updated": "2026-01-01T00:01:00Z",
+        })
+        self._write_turn_files("hist_yes", 2, "Turn 2 agent response", "")
+
+        with patch("ui.server.load_config", return_value=self._mock_config()):
+            with patch("ui.server.aiohttp.ClientSession", return_value=mock_session):
+                client.post(
+                    "/api/ideas/hist_yes/message",
+                    json={"content": "Let's continue", "turn": 2},
+                )
+
+        msg = self._conv_message(all_payloads)
+        assert "[CONVERSATION HISTORY]" in msg, "Missing CONVERSATION HISTORY block"
+        assert "What should I build?" in msg, "Missing prior user message"
+        assert "Tell me more about your idea." in msg, "Missing prior assistant message"
+        assert "[/CONVERSATION HISTORY]" in msg, "Missing closing tag"
+        assert "Let's continue" in msg, "Missing current user message"
+
+    def test_no_history_block_on_first_turn(self):
+        """Webhook message has no [CONVERSATION HISTORY] block when no prior messages exist."""
+        client = load_server()
+        all_payloads, mock_session = self._capture_conversation_post()
+
+        self._write_session("hist_no", {
+            "messages": [],
+            "prd_content": "",
+            "created": "2026-01-01T00:00:00Z",
+            "updated": "2026-01-01T00:00:00Z",
+        })
+        self._write_turn_files("hist_no", 1, "First turn response", "")
+
+        with patch("ui.server.load_config", return_value=self._mock_config()):
+            with patch("ui.server.aiohttp.ClientSession", return_value=mock_session):
+                client.post(
+                    "/api/ideas/hist_no/message",
+                    json={"content": "First message", "turn": 1},
+                )
+
+        msg = self._conv_message(all_payloads)
+        assert "[CONVERSATION HISTORY]" not in msg, "Should not have history block on first turn"
+        assert "First message" in msg, "Current message should be present"
+
+    def test_history_block_precedes_current_message(self):
+        """[CONVERSATION HISTORY] block appears before the current user message in payload."""
+        client = load_server()
+        all_payloads, mock_session = self._capture_conversation_post()
+
+        self._write_session("hist_order", {
+            "messages": [
+                {"role": "user", "content": "Earlier turn", "ts": "2026-01-01T00:00:00Z"},
+                {"role": "assistant", "content": "Earlier response", "ts": "2026-01-01T00:01:00Z"},
+            ],
+            "prd_content": "",
+            "created": "2026-01-01T00:00:00Z",
+            "updated": "2026-01-01T00:01:00Z",
+        })
+        self._write_turn_files("hist_order", 2, "Response", "")
+
+        with patch("ui.server.load_config", return_value=self._mock_config()):
+            with patch("ui.server.aiohttp.ClientSession", return_value=mock_session):
+                client.post(
+                    "/api/ideas/hist_order/message",
+                    json={"content": "Current message", "turn": 2},
+                )
+
+        msg = self._conv_message(all_payloads)
+        history_pos = msg.find("[CONVERSATION HISTORY]")
+        current_pos = msg.find("Current message")
+        assert history_pos != -1, "CONVERSATION HISTORY block not found in message"
+        assert history_pos < current_pos, (
+            "CONVERSATION HISTORY block should appear before the current message"
+        )
