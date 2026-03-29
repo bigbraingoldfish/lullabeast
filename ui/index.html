@@ -1749,7 +1749,7 @@
             const [readinessData, setReadinessData] = useState(null);
             const [hadReadyReadiness, setHadReadyReadiness] = useState(false);
             const [readinessTimedOut, setReadinessTimedOut] = useState(false);
-            const [showContinueWarning, setShowContinueWarning] = useState(false);
+            const [showContinueWarning] = useState(false); // legacy — kept for test compat, not rendered
             const [continueNavPending, setContinueNavPending] = useState(false);
             const [chatsRailCollapsed, setChatsRailCollapsed] = useState(false);
             const [deleteConfirmId, setDeleteConfirmId] = useState(null);
@@ -1785,6 +1785,14 @@
             const [adversarialLoading, setAdversarialLoading] = useState(false);
             const [checkResultModal, setCheckResultModal] = useState(null);
             const [showRegenerateConfirm, setShowRegenerateConfirm] = useState(false);
+            const [alignmentReport, setAlignmentReport] = useState(null);
+            const [adversarialReport, setAdversarialReport] = useState(null);
+            const [copiedCheckReport, setCopiedCheckReport] = useState(false);
+            const [showReportRegenConfirm, setShowReportRegenConfirm] = useState(false);
+            const [showFormatInvalidModal, setShowFormatInvalidModal] = useState(false);
+            const [formatInvalidDetail, setFormatInvalidDetail] = useState("");
+            const [fixFormatLoading, setFixFormatLoading] = useState(false);
+            const [operationMetrics, setOperationMetrics] = useState({});
 
             const stopReadinessPoll = () => {
                 if (readinessPollRef.current) {
@@ -1841,6 +1849,10 @@
 
             useEffect(() => {
                 refreshIdeas({ showLoading: true });
+                fetch("/api/ideas/operation-metrics")
+                    .then((r) => r.json())
+                    .then((d) => setOperationMetrics(d || {}))
+                    .catch(() => {});
             }, []);
 
             useEffect(() => {
@@ -1905,6 +1917,8 @@
                         );
                         setPrdContent(d.prd_content || "");
                         setRoadmapContent(d.roadmap_content || "");
+                        setAlignmentReport(d.alignment_report || null);
+                        setAdversarialReport(d.adversarial_report || null);
                     })
                     .catch(() => {});
                 refreshAnnotations(currentIdeaId);
@@ -2090,6 +2104,13 @@
                 });
             };
 
+            const _opEstimate = (opKey) => {
+                const m = operationMetrics[opKey];
+                if (!m || !m.sample_count) return "first run, no estimate";
+                const n = m.sample_count;
+                return `~${Math.round(m.avg_seconds)}s based on your last ${n} run${n > 1 ? "s" : ""}`;
+            };
+
             const _runConvert = () => {
                 setConvertLoading(true);
                 setConvertError("");
@@ -2132,15 +2153,18 @@
                         if (d.roadmap_updated && d.roadmap_content) {
                             setRoadmapContent(d.roadmap_content);
                         }
+                        setAlignmentReport(d.alignment_report || null);
+                        const n = d.gap_count || 0;
                         setCheckResultModal({
                             title: "Alignment Check",
                             content: d.alignment_report || "",
-                            badge: d.roadmap_updated ? "Roadmap updated" : null,
+                            badge: d.roadmap_updated ? `Roadmap updated — ${n} phase(s) added` : null,
+                            checkType: "alignment",
                         });
                     })
                     .catch((e) => {
                         setAlignmentLoading(false);
-                        setCheckResultModal({ title: "Alignment Check Error", content: String(e.message || e), badge: null });
+                        setCheckResultModal({ title: "Alignment Check Error", content: String(e.message || e), badge: null, checkType: "alignment" });
                     });
             };
 
@@ -2155,22 +2179,25 @@
                     })
                     .then((d) => {
                         setAdversarialLoading(false);
+                        setAdversarialReport(d.adversarial_report || null);
                         setCheckResultModal({
                             title: "Adversarial Review",
                             content: d.adversarial_report || "",
                             badge: null,
+                            checkType: "adversarial",
                         });
                     })
                     .catch((e) => {
                         setAdversarialLoading(false);
-                        setCheckResultModal({ title: "Adversarial Review Error", content: String(e.message || e), badge: null });
+                        setCheckResultModal({ title: "Adversarial Review Error", content: String(e.message || e), badge: null, checkType: "adversarial" });
                     });
             };
 
             const continueSetup = () => {
                 const rm = roadmapContent || "";
                 if (rm.includes("Transformation Aborted")) {
-                    setShowContinueWarning(true);
+                    setFormatInvalidDetail("The roadmap contains a 'Transformation Aborted' phase and cannot be used for setup. Generate a valid roadmap first.");
+                    setShowFormatInvalidModal(true);
                     return;
                 }
                 setContinueNavPending(true);
@@ -2183,7 +2210,9 @@
                         const d = await r.json().catch(() => ({}));
                         setContinueNavPending(false);
                         if (!r.ok || !d.valid) {
-                            setShowContinueWarning(true);
+                            const errMsgs = (d.errors || []).map((e) => e.message || String(e)).join("; ");
+                            setFormatInvalidDetail(errMsgs || "Roadmap did not pass validation.");
+                            setShowFormatInvalidModal(true);
                             return;
                         }
                         if (ctx && ctx.navigateToPreflightWithSeed) {
@@ -2192,16 +2221,37 @@
                     })
                     .catch(() => {
                         setContinueNavPending(false);
-                        setShowContinueWarning(true);
+                        setFormatInvalidDetail("Could not validate roadmap.");
+                        setShowFormatInvalidModal(true);
                     });
             };
 
-            const proceedContinueAnyway = () => {
-                setShowContinueWarning(false);
-                if (ctx && ctx.navigateToPreflightWithSeed) {
-                    ctx.navigateToPreflightWithSeed(roadmapContent || "", prdContent || "");
-                }
+            const doFixRoadmapFormat = () => {
+                if (!currentIdeaId) return;
+                setFixFormatLoading(true);
+                fetch(`/api/ideas/${currentIdeaId}/fix-roadmap-format`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ roadmap_content: roadmapContent }),
+                })
+                    .then((r) => {
+                        if (!r.ok) return r.text().then((t) => { throw new Error(t); });
+                        return r.json();
+                    })
+                    .then((d) => {
+                        setFixFormatLoading(false);
+                        setShowFormatInvalidModal(false);
+                        if (d.roadmap_content) {
+                            setRoadmapContent(d.roadmap_content);
+                            continueSetup();
+                        }
+                    })
+                    .catch((e) => {
+                        setFixFormatLoading(false);
+                        setFormatInvalidDetail(`Fix Format failed: ${e.message || e}`);
+                    });
             };
+
 
             const listedIds = new Set((ideasList || []).map((it) => it.id));
             const showUnlistedSession = currentIdeaId && !listedIds.has(currentIdeaId);
@@ -2722,29 +2772,6 @@
                                     <pre className="text-xs text-slate-400 whitespace-pre-wrap">{roadmapContent}</pre>
                                 </div>
                             ) : null}
-                            {showContinueWarning && (
-                                <div className="mb-4 rounded border border-amber-600/80 bg-amber-950/40 px-3 py-2 text-xs text-amber-100">
-                                    <p className="mb-2">
-                                        This roadmap did not pass validation or may be unsuitable for the pipeline. You can edit it above or continue with awareness of risk.
-                                    </p>
-                                    <div className="flex flex-wrap gap-2">
-                                        <button
-                                            type="button"
-                                            onClick={() => setShowContinueWarning(false)}
-                                            className="header-text px-2 py-1 rounded bg-[#1a1d21] border border-[#1a1d21] text-slate-200"
-                                        >
-                                            Review Roadmap
-                                        </button>
-                                        <button
-                                            type="button"
-                                            onClick={proceedContinueAnyway}
-                                            className="header-text px-2 py-1 rounded bg-amber-900/50 border border-amber-700 text-amber-100"
-                                        >
-                                            Proceed Anyway
-                                        </button>
-                                    </div>
-                                </div>
-                            )}
                         </div>
                         {/* ── Sticky action bar ─────────────────────────────────────────── */}
                         {prdContent.trim().length > 0 && (
@@ -2826,7 +2853,7 @@
                                         onClick={doConvert}
                                         className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-[#0d0f11] border border-[#00b4d8]/60 font-semibold disabled:opacity-40"
                                     >
-                                        {convertLoading ? "Generating..." : "Generate Roadmap"}
+                                        {convertLoading ? `Generating... (${_opEstimate("roadmap_generation")})` : roadmapContent ? "Regenerate Roadmap" : "Generate Roadmap"}
                                     </button>
                                     <div className="relative">
                                         <button
@@ -2851,20 +2878,34 @@
                                                 )}
                                                 {roadmapContent && currentIdeaId && (
                                                     <button
-                                                        onClick={() => { setShowActionMenu(false); doAlignmentCheck(); }}
+                                                        onClick={() => {
+                                                            setShowActionMenu(false);
+                                                            if (alignmentReport) {
+                                                                setCheckResultModal({ title: "Alignment Check", content: alignmentReport, badge: null, checkType: "alignment" });
+                                                            } else {
+                                                                doAlignmentCheck();
+                                                            }
+                                                        }}
                                                         disabled={alignmentLoading}
                                                         className="block px-3 py-2 text-xs text-slate-200 hover:bg-[#1a1d21] w-full text-left disabled:opacity-40"
                                                     >
-                                                        {alignmentLoading ? "Running..." : "Run Alignment Check"}
+                                                        {alignmentLoading ? `Running... (${_opEstimate("alignment_check")})` : alignmentReport ? "Review Alignment" : "Run Alignment Check"}
                                                     </button>
                                                 )}
                                                 {roadmapContent && currentIdeaId && (
                                                     <button
-                                                        onClick={() => { setShowActionMenu(false); doAdversarialCheck(); }}
+                                                        onClick={() => {
+                                                            setShowActionMenu(false);
+                                                            if (adversarialReport) {
+                                                                setCheckResultModal({ title: "Adversarial Review", content: adversarialReport, badge: null, checkType: "adversarial" });
+                                                            } else {
+                                                                doAdversarialCheck();
+                                                            }
+                                                        }}
                                                         disabled={adversarialLoading}
                                                         className="block px-3 py-2 text-xs text-slate-200 hover:bg-[#1a1d21] w-full text-left disabled:opacity-40"
                                                     >
-                                                        {adversarialLoading ? "Running..." : "Run Adversarial Review"}
+                                                        {adversarialLoading ? `Running... (${_opEstimate("adversarial_check")})` : adversarialReport ? "Review Adversarial" : "Run Adversarial Review"}
                                                     </button>
                                                 )}
                                             </div>
@@ -2912,6 +2953,31 @@
                         </div>
                     )}
 
+                    {/* Roadmap Format Invalid modal */}
+                    {showFormatInvalidModal && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setShowFormatInvalidModal(false)}>
+                            <div className="bg-[#141618] border border-[#2a2d31] rounded p-6 max-w-sm w-full space-y-4" onClick={(e) => e.stopPropagation()}>
+                                <div className="header-text text-sm text-slate-300">Roadmap Format Invalid</div>
+                                <div className="text-xs text-slate-400">{formatInvalidDetail}</div>
+                                <div className="flex gap-2 justify-end">
+                                    <button
+                                        onClick={() => setShowFormatInvalidModal(false)}
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-400 border border-[#2a2d31] hover:text-slate-200"
+                                    >
+                                        Cancel
+                                    </button>
+                                    <button
+                                        onClick={doFixRoadmapFormat}
+                                        disabled={fixFormatLoading}
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8]/20 text-[#00b4d8] border border-[#00b4d8]/40 disabled:opacity-40"
+                                    >
+                                        {fixFormatLoading ? `Fixing... (${_opEstimate("format_correction")})` : "Fix Format"}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
                     {/* Post-roadmap quality check modal */}
                     {showQualityCheckModal && (
                         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setShowQualityCheckModal(false)}>
@@ -2927,14 +2993,14 @@
                                         disabled={alignmentLoading}
                                         className="header-text text-xs px-3 py-2 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500 disabled:opacity-40 text-left"
                                     >
-                                        {alignmentLoading ? "Running alignment check..." : "Run Alignment Check"}
+                                        {alignmentLoading ? `Running alignment check... (${_opEstimate("alignment_check")})` : "Run Alignment Check"}
                                     </button>
                                     <button
                                         onClick={doAdversarialCheck}
                                         disabled={adversarialLoading}
                                         className="header-text text-xs px-3 py-2 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500 disabled:opacity-40 text-left"
                                     >
-                                        {adversarialLoading ? "Running adversarial review..." : "Run Adversarial Review"}
+                                        {adversarialLoading ? `Running adversarial review... (${_opEstimate("adversarial_check")})` : "Run Adversarial Review"}
                                     </button>
                                     <button
                                         onClick={() => setShowQualityCheckModal(false)}
@@ -2949,25 +3015,85 @@
 
                     {/* Check result modal */}
                     {checkResultModal && (
-                        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setCheckResultModal(null)}>
+                        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => { setCheckResultModal(null); setShowReportRegenConfirm(false); setCopiedCheckReport(false); }}>
                             <div className="bg-[#141618] border border-[#2a2d31] rounded p-6 max-w-2xl w-full max-h-[80vh] flex flex-col gap-4" onClick={(e) => e.stopPropagation()}>
                                 <div className="flex items-center justify-between gap-3">
                                     <div className="header-text text-sm text-slate-300">{checkResultModal.title}</div>
-                                    {checkResultModal.badge && (
-                                        <span className="text-xs px-2 py-0.5 rounded bg-green-900/40 text-green-400 border border-green-700/40 shrink-0">
-                                            {checkResultModal.badge}
-                                        </span>
-                                    )}
+                                    <div className="flex items-center gap-2 shrink-0">
+                                        {checkResultModal.badge && (
+                                            <span className="text-xs px-2 py-0.5 rounded bg-green-900/40 text-green-400 border border-green-700/40">
+                                                {checkResultModal.badge}
+                                            </span>
+                                        )}
+                                        <button
+                                            title="Copy report"
+                                            onClick={() => {
+                                                const text = checkResultModal.content || "";
+                                                if (navigator.clipboard) {
+                                                    navigator.clipboard.writeText(text).then(() => { setCopiedCheckReport(true); setTimeout(() => setCopiedCheckReport(false), 2000); }).catch(() => {});
+                                                } else {
+                                                    const ta = document.createElement("textarea");
+                                                    ta.value = text;
+                                                    ta.style.position = "fixed";
+                                                    ta.style.opacity = "0";
+                                                    document.body.appendChild(ta);
+                                                    ta.select();
+                                                    document.execCommand("copy");
+                                                    document.body.removeChild(ta);
+                                                    setCopiedCheckReport(true);
+                                                    setTimeout(() => setCopiedCheckReport(false), 2000);
+                                                }
+                                            }}
+                                            className="text-xs px-1.5 py-0.5 rounded text-slate-400 hover:text-slate-200 border border-transparent hover:border-[#2a2d31]"
+                                        >
+                                            {copiedCheckReport ? "Copied" : "⎘"}
+                                        </button>
+                                    </div>
                                 </div>
                                 <div className="overflow-y-auto flex-1 text-xs text-slate-300 font-mono whitespace-pre-wrap">
                                     {checkResultModal.content}
                                 </div>
-                                <button
-                                    onClick={() => setCheckResultModal(null)}
-                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-300 border border-[#2a2d31] self-end hover:border-slate-500"
-                                >
-                                    Close
-                                </button>
+                                {showReportRegenConfirm ? (
+                                    <div className="flex items-center justify-between gap-2">
+                                        <span className="text-xs text-slate-400">This will overwrite the previous report.</span>
+                                        <div className="flex gap-2">
+                                            <button
+                                                onClick={() => setShowReportRegenConfirm(false)}
+                                                className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-400 border border-[#2a2d31] hover:text-slate-200"
+                                            >
+                                                Cancel
+                                            </button>
+                                            <button
+                                                onClick={() => {
+                                                    const ct = checkResultModal.checkType;
+                                                    setCheckResultModal(null);
+                                                    setShowReportRegenConfirm(false);
+                                                    setCopiedCheckReport(false);
+                                                    if (ct === "alignment") doAlignmentCheck();
+                                                    else doAdversarialCheck();
+                                                }}
+                                                className="header-text text-xs px-3 py-1.5 rounded bg-red-900/40 text-red-300 border border-red-700/40 hover:bg-red-900/70"
+                                            >
+                                                Regenerate
+                                            </button>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className="flex items-center justify-between">
+                                        <button
+                                            onClick={() => setShowReportRegenConfirm(true)}
+                                            className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-400 border border-[#2a2d31] hover:text-slate-200"
+                                        >
+                                            Regenerate
+                                        </button>
+                                        <button
+                                            onClick={() => { setCheckResultModal(null); setShowReportRegenConfirm(false); setCopiedCheckReport(false); }}
+                                            className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-300 border border-[#2a2d31] hover:border-slate-500"
+                                        >
+                                            Close
+                                        </button>
+                                    </div>
+                                )}
                             </div>
                         </div>
                     )}
@@ -2991,6 +3117,8 @@
                 roadmapSeedError,
                 onRepoPathConfirm,
                 onRoadmapSeedConfirm,
+                onFixRoadmapSeedFormat,
+                preflightFixFormatLoading,
                 onRunPreflight,
                 onConfirmRoadmapArchive,
                 preflightRoadmapAmbiguous,
@@ -3174,11 +3302,23 @@
                                 </div>
                             )}
                             {roadmapSeedError && roadmapSeedError.length > 0 && (
-                                <ul className="text-red-400 text-xs space-y-1">
-                                    {roadmapSeedError.map((er, i) => (
-                                        <li key={i}>Line {er.line}: {er.message}</li>
-                                    ))}
-                                </ul>
+                                <div className="space-y-2">
+                                    <ul className="text-red-400 text-xs space-y-1">
+                                        {roadmapSeedError.map((er, i) => (
+                                            <li key={i}>Line {er.line}: {er.message}</li>
+                                        ))}
+                                    </ul>
+                                    {onFixRoadmapSeedFormat && (
+                                        <button
+                                            type="button"
+                                            onClick={onFixRoadmapSeedFormat}
+                                            disabled={preflightFixFormatLoading}
+                                            className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8]/20 text-[#00b4d8] border border-[#00b4d8]/40 disabled:opacity-40"
+                                        >
+                                            {preflightFixFormatLoading ? "Fixing..." : "Fix Format"}
+                                        </button>
+                                    )}
+                                </div>
                             )}
                             <div className="flex gap-2 items-center">
                                 {!roadmapSeedLocked ? (
@@ -4274,6 +4414,45 @@
                     .catch(() => setRoadmapSeedError([{ line: 0, message: "Request failed" }]));
             };
 
+            const [preflightFixFormatLoading, setPreflightFixFormatLoading] = useState(false);
+            const onFixRoadmapSeedFormat = () => {
+                if (!roadmapSeed || !roadmapSeed.trim()) return;
+                setPreflightFixFormatLoading(true);
+                setRoadmapSeedError([]);
+                // Create a temporary idea session, fix the roadmap, then discard the session
+                fetch("/api/ideas", { method: "POST" })
+                    .then((r) => r.json())
+                    .then((d) => {
+                        const tmpId = d.id;
+                        return fetch(`/api/ideas/${tmpId}/fix-roadmap-format`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ roadmap_content: roadmapSeed }),
+                        })
+                            .then((r2) => {
+                                if (!r2.ok) return r2.text().then((t) => { throw new Error(t); });
+                                return r2.json();
+                            })
+                            .then((d2) => {
+                                setPreflightFixFormatLoading(false);
+                                if (d2.roadmap_content) {
+                                    setRoadmapSeed(d2.roadmap_content);
+                                }
+                                // Clean up temporary idea
+                                fetch(`/api/ideas/${tmpId}`, { method: "DELETE" }).catch(() => {});
+                            })
+                            .catch((e) => {
+                                setPreflightFixFormatLoading(false);
+                                setRoadmapSeedError([{ line: 0, message: `Fix Format failed: ${e.message || e}` }]);
+                                fetch(`/api/ideas/${tmpId}`, { method: "DELETE" }).catch(() => {});
+                            });
+                    })
+                    .catch((e) => {
+                        setPreflightFixFormatLoading(false);
+                        setRoadmapSeedError([{ line: 0, message: `Could not create session for fix: ${e.message || e}` }]);
+                    });
+            };
+
             const onRunPreflight = (confirmRoadmapArchive) => {
                 const archiveMeta = confirmRoadmapArchive ? preflightRoadmapAmbiguous : null;
                 if (!confirmRoadmapArchive) {
@@ -4414,6 +4593,8 @@
                                     roadmapSeedError={roadmapSeedError}
                                     onRepoPathConfirm={onRepoPathConfirm}
                                     onRoadmapSeedConfirm={onRoadmapSeedConfirm}
+                                    onFixRoadmapSeedFormat={onFixRoadmapSeedFormat}
+                                    preflightFixFormatLoading={preflightFixFormatLoading}
                                     onRunPreflight={() => onRunPreflight(false)}
                                     onConfirmRoadmapArchive={() => onRunPreflight(true)}
                                     preflightRoadmapAmbiguous={preflightRoadmapAmbiguous}
