@@ -13,8 +13,11 @@ from tempfile import mkstemp
 
 import asyncio
 
+from typing import Optional
+
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel
 from contextlib import asynccontextmanager
 
 from ui.roadmap_parser import parse_roadmap
@@ -473,6 +476,57 @@ def _atomic_write_json_file(path: Path, data: dict) -> None:
     with open(tmp_path, "w") as f:
         json.dump(data, f)
     os.replace(tmp_path, str(path))
+
+
+_METRICS_MAX_ENTRIES = 10
+
+
+def _record_operation_metric(op_name: str, duration_seconds: float, config: dict) -> None:
+    """Append a timing entry for op_name; trim to last _METRICS_MAX_ENTRIES; atomic write."""
+    try:
+        ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+        metrics_path = Path(ideas_dir) / "operation_metrics.json"
+        metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            existing = json.loads(metrics_path.read_text()) if metrics_path.exists() else {}
+        except Exception:
+            existing = {}
+        operations = existing.get("operations", {})
+        entries = operations.get(op_name, [])
+        entries.append({
+            "duration_seconds": round(duration_seconds, 2),
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        })
+        # Trim to last N entries
+        if len(entries) > _METRICS_MAX_ENTRIES:
+            entries = entries[-_METRICS_MAX_ENTRIES:]
+        operations[op_name] = entries
+        existing["operations"] = operations
+        _atomic_write_json_file(metrics_path, existing)
+    except Exception as exc:
+        logger.warning(f"[METRICS] Failed to record metric for {op_name}: {exc}")
+
+
+def _get_operation_metrics(config: dict) -> dict:
+    """Return per-operation avg_seconds and sample_count from the metrics file."""
+    try:
+        ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+        metrics_path = Path(ideas_dir) / "operation_metrics.json"
+        if not metrics_path.exists():
+            return {}
+        raw = json.loads(metrics_path.read_text())
+        operations = raw.get("operations", {})
+        result = {}
+        for op_name, entries in operations.items():
+            if entries:
+                avg = sum(e.get("duration_seconds", 0) for e in entries) / len(entries)
+                result[op_name] = {
+                    "avg_seconds": round(avg, 1),
+                    "sample_count": len(entries),
+                }
+        return result
+    except Exception:
+        return {}
 
 
 def _inject_converter_skill(skill_name: str, config: dict) -> None:
@@ -2153,6 +2207,17 @@ def get_idea_annotations(idea_id: str):
     return session_data.get("annotations", [])
 
 
+@app.get("/api/ideas/operation-metrics")
+def get_ideas_operation_metrics():
+    """Return average duration and sample count per operation type.
+
+    Returns a dict of operation_name -> {"avg_seconds": float, "sample_count": int}.
+    Operations with no history are absent from the response.
+    """
+    config = load_config()
+    return _get_operation_metrics(config)
+
+
 @app.get("/api/ideas")
 def get_ideas():
     """List all idea documents.
@@ -2476,6 +2541,8 @@ async def post_ideas_clarity_check(idea_id: str):
 
 CONVERT_TIMEOUT = 180   # seconds; patchable in tests
 CONVERT_POLL_INTERVAL = 2  # seconds between sentinel checks
+FORMAT_CORRECTION_TIMEOUT = 120  # seconds; patchable in tests
+FORMAT_CORRECTION_POLL_INTERVAL = 2  # seconds between sentinel checks
 
 
 @app.get("/api/ideas/{idea_id}/readiness")
@@ -2596,6 +2663,7 @@ async def post_ideas_convert(idea_id: str):
     }
 
     # Send webhook POST
+    op_start = datetime.utcnow().timestamp()
     headers = {"Authorization": f"Bearer {hooks_token}"}
     async with aiohttp.ClientSession() as session:
         await session.post(hooks_url, json=webhook_payload, headers=headers)
@@ -2614,6 +2682,8 @@ async def post_ideas_convert(idea_id: str):
             detail=f"Conversion timed out after {CONVERT_TIMEOUT}s"
         )
 
+    _record_operation_metric("roadmap_generation", datetime.utcnow().timestamp() - op_start, config)
+
     # Read roadmap content
     roadmap_draft_path = idea_dir / "roadmap_draft.md"
     roadmap_content = ""
@@ -2631,24 +2701,37 @@ async def post_ideas_convert(idea_id: str):
     return {"roadmap_content": roadmap_content}
 
 
-async def _notify_prd_agent(idea_id: str, config: dict, message_body: str) -> None:
-    """Fire-and-forget notification to the prd-creator agent's latest session.
+async def _notify_prd_agent(idea_id: str, config: dict, report_content: str, check_type: str) -> None:
+    """Send the full check report to the PRD agent and poll for its response.
 
-    Finds the highest assistant turn number in session.json and POSTs the
-    message_body to that session. Logs a warning on failure; never raises.
+    Determines the next turn number (max existing assistant turn + 1), POSTs the
+    full report to that session, polls for the agent's response, then stores it
+    as a new assistant message in session.json.
+
+    Designed to be called via asyncio.create_task — never raises, logs on failure.
     """
     try:
         ideas_dir = Path(os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas")))
-        session_path = ideas_dir / idea_id / "session.json"
+        idea_dir = ideas_dir / idea_id
+        session_path = idea_dir / "session.json"
         session_data = _read_json_file(str(session_path)) or {}
         messages = session_data.get("messages", [])
         turn_numbers = [
-            m.get("turn", 1)
-            for m in messages
+            m.get("turn", i + 1)
+            for i, m in enumerate(messages)
             if m.get("role") == "assistant"
         ]
-        latest_turn = max(turn_numbers) if turn_numbers else 1
-        session_key = f"ideas:{idea_id}:session-{latest_turn}"
+        next_turn = (max(turn_numbers) + 1) if turn_numbers else 2
+
+        session_key = f"ideas:{idea_id}:session-{next_turn}"
+        prompt = (
+            f"{report_content}\n\n"
+            f"A secondary {check_type} check has been completed on your roadmap. "
+            f"Please review the full report findings above and respond with your guidance: "
+            f"determine whether additional clarifying questions are needed with the user, "
+            f"whether any PRD updates are warranted, and whether any roadmap changes are "
+            f"needed beyond what the check already applied. Respond directly in this conversation."
+        )
 
         hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
         hooks_token = config.get("hooks_token", "")
@@ -2656,15 +2739,54 @@ async def _notify_prd_agent(idea_id: str, config: dict, message_body: str) -> No
             "agentId": WEBHOOK_AGENT_ID,
             "sessionKey": session_key,
             "wakeMode": "now",
-            "message": message_body,
+            "message": prompt,
         }
-        async with aiohttp.ClientSession() as session:
-            await session.post(
+        async with aiohttp.ClientSession() as http_session:
+            await http_session.post(
                 hooks_url,
                 json=payload,
                 headers={"Authorization": f"Bearer {hooks_token}"},
                 timeout=aiohttp.ClientTimeout(total=10),
             )
+
+        # Poll for turns/{next_turn}.done
+        done_path = idea_dir / "turns" / f"{next_turn}.done"
+        response_path = idea_dir / "turns" / f"{next_turn}.md"
+        deadline = datetime.utcnow().timestamp() + POLL_TIMEOUT
+        while datetime.utcnow().timestamp() < deadline:
+            if done_path.exists():
+                break
+            await asyncio.sleep(POLL_INTERVAL)
+        else:
+            logger.warning(
+                f"[CONVERTER] PRD agent notification timed out for {idea_id} turn {next_turn}"
+            )
+            return
+
+        # Read and store the agent response
+        if not response_path.exists():
+            logger.warning(
+                f"[CONVERTER] PRD agent response file missing for {idea_id} turn {next_turn}"
+            )
+            return
+
+        response_text = response_path.read_text()
+        parsed = _parse_agent_response(response_text)
+
+        # Re-read session to avoid overwriting concurrent changes
+        current_session = _read_json_file(str(session_path)) or {}
+        current_messages = current_session.get("messages", [])
+        current_messages.append({
+            "role": "assistant",
+            "content": response_text,
+            "ts": datetime.utcnow().isoformat() + "Z",
+            "turn": next_turn,
+            "parsed": parsed,
+        })
+        current_session["messages"] = current_messages
+        current_session["updated"] = datetime.utcnow().isoformat() + "Z"
+        _atomic_write_json_file(session_path, current_session)
+
     except Exception as exc:
         logger.warning(f"[CONVERTER] PRD agent notification failed for {idea_id}: {exc}")
 
@@ -2739,6 +2861,7 @@ async def post_ideas_alignment_check(idea_id: str):
     }
 
     # Send webhook POST
+    op_start = datetime.utcnow().timestamp()
     headers = {"Authorization": f"Bearer {hooks_token}"}
     async with aiohttp.ClientSession() as session:
         await session.post(hooks_url, json=webhook_payload, headers=headers)
@@ -2756,6 +2879,8 @@ async def post_ideas_alignment_check(idea_id: str):
             status_code=408,
             detail=f"Alignment check timed out after {ALIGNMENT_CHECK_TIMEOUT}s",
         )
+
+    _record_operation_metric("alignment_check", datetime.utcnow().timestamp() - op_start, config)
 
     # Read alignment report
     alignment_report_path = idea_dir / "alignment_report.md"
@@ -2779,21 +2904,22 @@ async def post_ideas_alignment_check(idea_id: str):
     else:
         notification = "[SYSTEM] Alignment check complete. No gaps found."
 
-    # Store in session.json — include notification as pending system event so
-    # it is injected into the conversation history on the next PRD agent turn
-    # (avoids spawning a competing session-1 webhook that clobbers turn files).
+    # Store in session.json
     updated_session = dict(session_data)
     updated_session["alignment_report"] = alignment_report
     updated_session["updated"] = datetime.utcnow().isoformat() + "Z"
     if roadmap_updated and roadmap_content_new is not None:
         updated_session["roadmap_content"] = roadmap_content_new
-    updated_session.setdefault("pending_system_events", []).append(notification)
     _atomic_write_json_file(session_path, updated_session)
+
+    # Notify PRD agent with full report (fire-and-forget)
+    asyncio.create_task(_notify_prd_agent(idea_id, config, alignment_report, "alignment"))
 
     return {
         "alignment_report": alignment_report,
         "roadmap_updated": roadmap_updated,
         "roadmap_content": roadmap_content_new,
+        "gap_count": gap_count,
     }
 
 
@@ -2913,6 +3039,7 @@ async def post_ideas_adversarial_check(idea_id: str):
     }
 
     # Send webhook POST
+    op_start = datetime.utcnow().timestamp()
     headers = {"Authorization": f"Bearer {hooks_token}"}
     async with aiohttp.ClientSession() as session:
         await session.post(hooks_url, json=webhook_payload, headers=headers)
@@ -2931,6 +3058,8 @@ async def post_ideas_adversarial_check(idea_id: str):
             detail=f"Adversarial review timed out after {ADVERSARIAL_CHECK_TIMEOUT}s",
         )
 
+    _record_operation_metric("adversarial_check", datetime.utcnow().timestamp() - op_start, config)
+
     # Read adversarial report
     adversarial_report_path = idea_dir / "adversarial_report.md"
     adversarial_report = ""
@@ -2945,15 +3074,126 @@ async def post_ideas_adversarial_check(idea_id: str):
         f"{top_risk}."
     )
 
-    # Store in session.json — include notification as pending system event so
-    # it is injected into the conversation history on the next PRD agent turn.
+    # Store in session.json
     updated_session = dict(session_data)
     updated_session["adversarial_report"] = adversarial_report
     updated_session["updated"] = datetime.utcnow().isoformat() + "Z"
-    updated_session.setdefault("pending_system_events", []).append(notification)
     _atomic_write_json_file(session_path, updated_session)
 
+    # Notify PRD agent with full report (fire-and-forget)
+    asyncio.create_task(_notify_prd_agent(idea_id, config, adversarial_report, "adversarial"))
+
     return {"adversarial_report": adversarial_report}
+
+
+class FixRoadmapFormatRequest(BaseModel):
+    roadmap_content: Optional[str] = None
+
+
+@app.post("/api/ideas/{idea_id}/fix-roadmap-format")
+async def post_ideas_fix_roadmap_format(idea_id: str, body: FixRoadmapFormatRequest = None):
+    """Correct the structural format of a roadmap using the format-correction skill.
+
+    Accepts an optional roadmap_content in the request body (for the preflight case
+    where content is passed directly). Falls back to session.json roadmap_content.
+
+    Injects the format-correction skill, sends a webhook to the roadmap-converter
+    agent, polls for roadmap_draft.done (2s interval, 120s timeout), reads the
+    corrected content, stores it in session.json, and returns it.
+
+    Returns 404 if the idea is not found or session.json is missing.
+    Returns 422 if no roadmap content is available to correct.
+    Returns 408 if polling times out.
+    Returns 200 with {"roadmap_content": str} on success.
+    """
+    config = load_config()
+    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
+    hooks_token = config.get("hooks_token", "")
+
+    idea_dir = Path(ideas_dir) / idea_id
+    if not idea_dir.exists():
+        raise HTTPException(status_code=404, detail="Idea not found")
+
+    session_path = idea_dir / "session.json"
+    session_data = _read_json_file(str(session_path))
+    if session_data is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Determine roadmap content: prefer request body, fall back to session
+    roadmap_content = None
+    if body and body.roadmap_content:
+        roadmap_content = body.roadmap_content
+    else:
+        roadmap_content = session_data.get("roadmap_content") or ""
+
+    if not roadmap_content.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="No roadmap content available to correct. Provide roadmap_content in the request body or generate a roadmap first.",
+        )
+
+    # Write the malformed roadmap as input for the agent
+    roadmap_draft_path = idea_dir / "roadmap_draft.md"
+    roadmap_draft_path.write_text(roadmap_content)
+
+    # Remove stale sentinel so polling loop doesn't find an old one
+    done_path = idea_dir / "roadmap_draft.done"
+    if done_path.exists():
+        done_path.unlink()
+
+    # Inject format-correction skill before webhook POST
+    _inject_converter_skill("format-correction", config)
+
+    # Build webhook payload
+    timestamp_ms = int(datetime.utcnow().timestamp() * 1000)
+    session_key = f"ideas:{idea_id}:format-correction-{timestamp_ms}"
+    webhook_payload = {
+        "agentId": ROADMAP_CONVERTER_AGENT_ID,
+        "sessionKey": session_key,
+        "wakeMode": "now",
+        "message": (
+            f"[SESSION] {session_key}\n\n"
+            f"Format-correct the following roadmap for idea {idea_id}.\n\n"
+            f"Apply the format-correction skill from your workspace.\n\n"
+            f"The roadmap content to correct:\n\n"
+            f"{roadmap_content}\n\n"
+            f"Write the corrected roadmap to ~/.openclaw/ideas/{idea_id}/roadmap_draft.md.\n"
+            f"Write ~/.openclaw/ideas/{idea_id}/roadmap_draft.done last."
+        ),
+    }
+
+    # Send webhook POST
+    op_start = datetime.utcnow().timestamp()
+    headers = {"Authorization": f"Bearer {hooks_token}"}
+    async with aiohttp.ClientSession() as session:
+        await session.post(hooks_url, json=webhook_payload, headers=headers)
+
+    # Poll for roadmap_draft.done
+    deadline = datetime.utcnow().timestamp() + FORMAT_CORRECTION_TIMEOUT
+
+    while datetime.utcnow().timestamp() < deadline:
+        if done_path.exists():
+            break
+        await asyncio.sleep(FORMAT_CORRECTION_POLL_INTERVAL)
+    else:
+        raise HTTPException(
+            status_code=408,
+            detail=f"Format correction timed out after {FORMAT_CORRECTION_TIMEOUT}s",
+        )
+
+    _record_operation_metric("format_correction", datetime.utcnow().timestamp() - op_start, config)
+
+    # Read corrected roadmap
+    corrected_content = roadmap_draft_path.read_text() if roadmap_draft_path.exists() else roadmap_content
+
+    # Store in session.json
+    updated_session = dict(session_data)
+    updated_session["roadmap_content"] = corrected_content
+    updated_session["updated"] = datetime.utcnow().isoformat() + "Z"
+    _atomic_write_json_file(session_path, updated_session)
+
+    return {"roadmap_content": corrected_content}
 
 
 @app.get("/api/ideas/{idea_id}/download-roadmap")

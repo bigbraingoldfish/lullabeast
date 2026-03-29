@@ -158,6 +158,8 @@ class TestApiIdeasAlignmentCheck:
         assert report_text in body["alignment_report"]
         assert "roadmap_updated" in body
         assert "roadmap_content" in body
+        assert "gap_count" in body
+        assert isinstance(body["gap_count"], int)
 
     def test_roadmap_updated_true_when_mtime_changes(self):
         """roadmap_updated=True when roadmap_draft.md mtime changes during check."""
@@ -234,8 +236,8 @@ class TestApiIdeasAlignmentCheck:
         session = json.loads((idea_dir / "session.json").read_text())
         assert session.get("alignment_report") == report_text
 
-    def test_notification_stored_as_pending_system_event(self):
-        """Alignment result is stored in session.json pending_system_events (not webhook)."""
+    def test_prd_agent_notified_via_create_task(self):
+        """Alignment completion fires asyncio.create_task with _notify_prd_agent (not pending_system_events)."""
         client = load_server()
         idea_dir = self._write_session("9", with_roadmap=True)
         mock_cls, _ = self._make_mock_aiohttp()
@@ -245,9 +247,11 @@ class TestApiIdeasAlignmentCheck:
             (idea_dir / "alignment_report.md").write_text(report_text)
             (idea_dir / "alignment_report.done").write_text("")
 
+        mock_create_task = MagicMock()
         with patch("ui.server.load_config", return_value=self._mock_config()), \
              patch("ui.server.aiohttp.ClientSession", mock_cls), \
              patch("ui.server._inject_converter_skill"), \
+             patch("ui.server.asyncio.create_task", mock_create_task), \
              patch("ui.server.ALIGNMENT_CHECK_POLL_INTERVAL", 0.05), \
              patch("ui.server.asyncio.sleep", side_effect=write_sentinel):
             r = client.post("/api/ideas/9/alignment-check")
@@ -255,7 +259,7 @@ class TestApiIdeasAlignmentCheck:
         assert r.status_code == 200
         import json
         session = json.loads((idea_dir / "session.json").read_text())
-        events = session.get("pending_system_events", [])
-        assert len(events) == 1, f"Expected 1 pending system event, got {events}"
-        assert "[SYSTEM]" in events[0]
-        assert "Alignment check complete" in events[0]
+        # pending_system_events no longer used — notification is fire-and-forget via create_task
+        assert session.get("pending_system_events", []) == []
+        # create_task was called once (the PRD agent notification)
+        assert mock_create_task.call_count == 1
