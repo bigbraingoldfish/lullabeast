@@ -81,6 +81,7 @@ class TestApiIdeasConvert:
 
         with patch("ui.server.load_config", return_value=self._mock_config()), \
              patch("ui.server.aiohttp.ClientSession", mock_cls), \
+             patch("ui.server._inject_converter_skill"), \
              patch("ui.server.CONVERT_TIMEOUT", 1), \
              patch("ui.server.CONVERT_POLL_INTERVAL", 0.1):
             r = client.post("/api/ideas/3/convert")
@@ -99,6 +100,7 @@ class TestApiIdeasConvert:
 
         with patch("ui.server.load_config", return_value=self._mock_config()), \
              patch("ui.server.aiohttp.ClientSession", mock_cls), \
+             patch("ui.server._inject_converter_skill"), \
              patch("ui.server.CONVERT_POLL_INTERVAL", 0.05), \
              patch("ui.server.asyncio.sleep", side_effect=write_sentinel):
             r = client.post("/api/ideas/4/convert")
@@ -121,6 +123,7 @@ class TestApiIdeasConvert:
 
         with patch("ui.server.load_config", return_value=self._mock_config()), \
              patch("ui.server.aiohttp.ClientSession", mock_cls), \
+             patch("ui.server._inject_converter_skill"), \
              patch("ui.server.CONVERT_POLL_INTERVAL", 0.05), \
              patch("ui.server.asyncio.sleep", side_effect=write_sentinel):
             r = client.post("/api/ideas/5/convert")

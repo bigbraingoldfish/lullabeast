@@ -1780,6 +1780,11 @@
             const [splitPct, setSplitPct] = useState(45);
             const dragRef = useRef({ dragging: false });
             const containerRef = useRef(null);
+            const [showQualityCheckModal, setShowQualityCheckModal] = useState(false);
+            const [alignmentLoading, setAlignmentLoading] = useState(false);
+            const [adversarialLoading, setAdversarialLoading] = useState(false);
+            const [checkResultModal, setCheckResultModal] = useState(null);
+            const [showRegenerateConfirm, setShowRegenerateConfirm] = useState(false);
 
             const stopReadinessPoll = () => {
                 if (readinessPollRef.current) {
@@ -2085,8 +2090,7 @@
                 });
             };
 
-            const doConvert = () => {
-                if (!currentIdeaId || !prdContent.trim()) return;
+            const _runConvert = () => {
                 setConvertLoading(true);
                 setConvertError("");
                 fetch(`/api/ideas/${currentIdeaId}/convert`, { method: "POST" })
@@ -2097,10 +2101,69 @@
                     .then((d) => {
                         setRoadmapContent(d.roadmap_content || "");
                         setConvertLoading(false);
+                        setShowQualityCheckModal(true);
                     })
                     .catch((e) => {
                         setConvertError(String(e.message || e));
                         setConvertLoading(false);
+                    });
+            };
+
+            const doConvert = () => {
+                if (!currentIdeaId || !prdContent.trim()) return;
+                if (roadmapContent) {
+                    setShowRegenerateConfirm(true);
+                    return;
+                }
+                _runConvert();
+            };
+
+            const doAlignmentCheck = () => {
+                if (!currentIdeaId) return;
+                setShowQualityCheckModal(false);
+                setAlignmentLoading(true);
+                fetch(`/api/ideas/${currentIdeaId}/alignment-check`, { method: "POST" })
+                    .then((r) => {
+                        if (!r.ok) return r.text().then((t) => { throw new Error(t); });
+                        return r.json();
+                    })
+                    .then((d) => {
+                        setAlignmentLoading(false);
+                        if (d.roadmap_updated && d.roadmap_content) {
+                            setRoadmapContent(d.roadmap_content);
+                        }
+                        setCheckResultModal({
+                            title: "Alignment Check",
+                            content: d.alignment_report || "",
+                            badge: d.roadmap_updated ? "Roadmap updated" : null,
+                        });
+                    })
+                    .catch((e) => {
+                        setAlignmentLoading(false);
+                        setCheckResultModal({ title: "Alignment Check Error", content: String(e.message || e), badge: null });
+                    });
+            };
+
+            const doAdversarialCheck = () => {
+                if (!currentIdeaId) return;
+                setShowQualityCheckModal(false);
+                setAdversarialLoading(true);
+                fetch(`/api/ideas/${currentIdeaId}/adversarial-check`, { method: "POST" })
+                    .then((r) => {
+                        if (!r.ok) return r.text().then((t) => { throw new Error(t); });
+                        return r.json();
+                    })
+                    .then((d) => {
+                        setAdversarialLoading(false);
+                        setCheckResultModal({
+                            title: "Adversarial Review",
+                            content: d.adversarial_report || "",
+                            badge: null,
+                        });
+                    })
+                    .catch((e) => {
+                        setAdversarialLoading(false);
+                        setCheckResultModal({ title: "Adversarial Review Error", content: String(e.message || e), badge: null });
                     });
             };
 
@@ -2786,6 +2849,24 @@
                                                         Download Roadmap
                                                     </a>
                                                 )}
+                                                {roadmapContent && currentIdeaId && (
+                                                    <button
+                                                        onClick={() => { setShowActionMenu(false); doAlignmentCheck(); }}
+                                                        disabled={alignmentLoading}
+                                                        className="block px-3 py-2 text-xs text-slate-200 hover:bg-[#1a1d21] w-full text-left disabled:opacity-40"
+                                                    >
+                                                        {alignmentLoading ? "Running..." : "Run Alignment Check"}
+                                                    </button>
+                                                )}
+                                                {roadmapContent && currentIdeaId && (
+                                                    <button
+                                                        onClick={() => { setShowActionMenu(false); doAdversarialCheck(); }}
+                                                        disabled={adversarialLoading}
+                                                        className="block px-3 py-2 text-xs text-slate-200 hover:bg-[#1a1d21] w-full text-left disabled:opacity-40"
+                                                    >
+                                                        {adversarialLoading ? "Running..." : "Run Adversarial Review"}
+                                                    </button>
+                                                )}
                                             </div>
                                         )}
                                     </div>
@@ -2804,6 +2885,92 @@
                         )}
                     </div>
                     </div>
+
+                    {/* Regenerate roadmap confirmation */}
+                    {showRegenerateConfirm && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setShowRegenerateConfirm(false)}>
+                            <div className="bg-[#141618] border border-[#2a2d31] rounded p-6 max-w-sm w-full space-y-4" onClick={(e) => e.stopPropagation()}>
+                                <div className="header-text text-sm text-slate-300">Regenerate Roadmap?</div>
+                                <div className="text-xs text-slate-400">
+                                    This will overwrite the existing roadmap. Any alignment or adversarial reports will remain but the roadmap content will be permanently replaced.
+                                </div>
+                                <div className="flex gap-2 justify-end">
+                                    <button
+                                        onClick={() => setShowRegenerateConfirm(false)}
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-400 border border-[#2a2d31] hover:text-slate-200"
+                                    >
+                                        Cancel
+                                    </button>
+                                    <button
+                                        onClick={() => { setShowRegenerateConfirm(false); _runConvert(); }}
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-red-900/40 text-red-300 border border-red-700/40 hover:bg-red-900/70"
+                                    >
+                                        Regenerate
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Post-roadmap quality check modal */}
+                    {showQualityCheckModal && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setShowQualityCheckModal(false)}>
+                            <div className="bg-[#141618] border border-[#2a2d31] rounded p-6 max-w-sm w-full space-y-4" onClick={(e) => e.stopPropagation()}>
+                                <div className="header-text text-sm text-slate-300">Roadmap generated</div>
+                                <div className="text-xs text-slate-400">
+                                    Would you like to run optional quality checks before setup?
+                                    These passes are experimental and will update your roadmap if issues are found.
+                                </div>
+                                <div className="flex flex-col gap-2">
+                                    <button
+                                        onClick={doAlignmentCheck}
+                                        disabled={alignmentLoading}
+                                        className="header-text text-xs px-3 py-2 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500 disabled:opacity-40 text-left"
+                                    >
+                                        {alignmentLoading ? "Running alignment check..." : "Run Alignment Check"}
+                                    </button>
+                                    <button
+                                        onClick={doAdversarialCheck}
+                                        disabled={adversarialLoading}
+                                        className="header-text text-xs px-3 py-2 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500 disabled:opacity-40 text-left"
+                                    >
+                                        {adversarialLoading ? "Running adversarial review..." : "Run Adversarial Review"}
+                                    </button>
+                                    <button
+                                        onClick={() => setShowQualityCheckModal(false)}
+                                        className="header-text text-xs px-3 py-2 rounded text-slate-500 hover:text-slate-300 text-left"
+                                    >
+                                        Skip — Continue to Setup
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Check result modal */}
+                    {checkResultModal && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setCheckResultModal(null)}>
+                            <div className="bg-[#141618] border border-[#2a2d31] rounded p-6 max-w-2xl w-full max-h-[80vh] flex flex-col gap-4" onClick={(e) => e.stopPropagation()}>
+                                <div className="flex items-center justify-between gap-3">
+                                    <div className="header-text text-sm text-slate-300">{checkResultModal.title}</div>
+                                    {checkResultModal.badge && (
+                                        <span className="text-xs px-2 py-0.5 rounded bg-green-900/40 text-green-400 border border-green-700/40 shrink-0">
+                                            {checkResultModal.badge}
+                                        </span>
+                                    )}
+                                </div>
+                                <div className="overflow-y-auto flex-1 text-xs text-slate-300 font-mono whitespace-pre-wrap">
+                                    {checkResultModal.content}
+                                </div>
+                                <button
+                                    onClick={() => setCheckResultModal(null)}
+                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-300 border border-[#2a2d31] self-end hover:border-slate-500"
+                                >
+                                    Close
+                                </button>
+                            </div>
+                        </div>
+                    )}
                 </div>
             );
         }

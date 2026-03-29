@@ -66,10 +66,15 @@ def register_roadmap_converter(
     except (KeyError, TypeError) as e:
         return f"error:unexpected openclaw.json structure — missing agents.list: {e}"
 
-    # Check if already registered
-    for entry in agents_list:
-        if entry.get("id") == "roadmap-converter":
-            return "already_registered"
+    # Check if already registered in agents.list
+    agent_registered = any(e.get("id") == "roadmap-converter" for e in agents_list)
+
+    # Check if already in hooks.allowedAgentIds
+    allowed_ids = data.get("hooks", {}).get("allowedAgentIds", [])
+    hook_registered = "roadmap-converter" in allowed_ids
+
+    if agent_registered and hook_registered:
+        return "already_registered"
 
     # Find prd-creator to copy model/tools config
     prd_creator = None
@@ -81,23 +86,31 @@ def register_roadmap_converter(
     if prd_creator is None:
         return "missing_prd_creator"
 
-    # Build new entry
-    new_entry = {
-        "id": "roadmap-converter",
-        "workspace": os.path.join(autodev_root, "workspace-roadmap-converter"),
-    }
-    if "model" in prd_creator:
-        new_entry["model"] = prd_creator["model"]
-    if "tools" in prd_creator:
-        new_entry["tools"] = prd_creator["tools"]
+    # Build new agents.list entry (only if not already present)
+    new_entry = None
+    if not agent_registered:
+        new_entry = {
+            "id": "roadmap-converter",
+            "workspace": os.path.join(autodev_root, "workspace-roadmap-converter"),
+        }
+        if "model" in prd_creator:
+            new_entry["model"] = prd_creator["model"]
+        if "tools" in prd_creator:
+            new_entry["tools"] = prd_creator["tools"]
 
     if dry_run:
-        print("  Would add to agents.list in openclaw.json:")
-        print(json.dumps(new_entry, indent=4))
+        if new_entry:
+            print("  Would add to agents.list in openclaw.json:")
+            print(json.dumps(new_entry, indent=4))
+        if not hook_registered:
+            print("  Would add 'roadmap-converter' to hooks.allowedAgentIds")
         return "dry_run"
 
-    # Atomic write: append to agents list, preserve all other keys
-    data["agents"]["list"] = agents_list + [new_entry]
+    # Atomic write: update agents.list and hooks.allowedAgentIds, preserve all other keys
+    if new_entry:
+        data["agents"]["list"] = agents_list + [new_entry]
+    if not hook_registered:
+        data.setdefault("hooks", {}).setdefault("allowedAgentIds", []).append("roadmap-converter")
     json_dir = os.path.dirname(os.path.abspath(openclaw_json_path))
     fd, tmp_path = tempfile.mkstemp(dir=json_dir, prefix="openclaw_", suffix=".json")
     try:
