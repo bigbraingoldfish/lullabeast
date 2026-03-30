@@ -1783,13 +1783,13 @@
             const [showQualityCheckModal, setShowQualityCheckModal] = useState(false);
             const [alignmentLoading, setAlignmentLoading] = useState(false);
             const [adversarialLoading, setAdversarialLoading] = useState(false);
-            const [checkResultModal, setCheckResultModal] = useState(null);
             const [showRegenerateConfirm, setShowRegenerateConfirm] = useState(false);
             const [alignmentReport, setAlignmentReport] = useState(null);
             const [adversarialReport, setAdversarialReport] = useState(null);
-            const [copiedCheckReport, setCopiedCheckReport] = useState(false);
-            const [showReportRegenConfirm, setShowReportRegenConfirm] = useState(false);
             const [showFormatInvalidModal, setShowFormatInvalidModal] = useState(false);
+            const [activeDocTab, setActiveDocTab] = useState("prd");
+            const [showAlignmentRegenConfirm, setShowAlignmentRegenConfirm] = useState(false);
+            const [showAdversarialRegenConfirm, setShowAdversarialRegenConfirm] = useState(false);
             const [formatInvalidDetail, setFormatInvalidDetail] = useState("");
             const [fixFormatLoading, setFixFormatLoading] = useState(false);
             const [operationMetrics, setOperationMetrics] = useState({});
@@ -2620,7 +2620,39 @@
                                 <p className="text-xs text-[#00b4d8] header-text animate-pulse">✏ Drafting {draftingIndicator}…</p>
                             </div>
                         )}
-                        <div ref={docPaneRef} className={`flex-1 overflow-y-auto px-6 py-4 bg-[#141618] min-h-0 ${isLoading && !prdContent.trim() ? "flex flex-col" : ""}`}>
+                        {/* Tab header */}
+                        <div style={{display:'flex', borderBottom:'1px solid #1a1d21', background:'#0d0f11', flexShrink:0}}>
+                            {[
+                                {id:'prd', label:'PRD'},
+                                {id:'roadmap', label:'Roadmap'},
+                                {id:'alignment', label:'Alignment', badge: !!alignmentReport},
+                                {id:'adversarial', label:'Adversarial', badge: !!adversarialReport},
+                            ].map(tab => {
+                                const disabled = (tab.id === 'alignment' || tab.id === 'adversarial') && !roadmapContent;
+                                return (
+                                    <button
+                                        key={tab.id}
+                                        onClick={() => !disabled && setActiveDocTab(tab.id)}
+                                        style={{
+                                            padding:'8px 16px', fontSize:'13px',
+                                            fontWeight: activeDocTab === tab.id ? 600 : 400,
+                                            color: disabled ? '#4b5563' : activeDocTab === tab.id ? '#fff' : '#94a3b8',
+                                            borderBottom: activeDocTab === tab.id ? '2px solid #00b4d8' : '2px solid transparent',
+                                            background:'transparent', border:'none',
+                                            cursor: disabled ? 'not-allowed' : 'pointer',
+                                            display:'flex', alignItems:'center', gap:'6px',
+                                        }}
+                                        disabled={disabled}
+                                    >
+                                        {tab.label}
+                                        {tab.badge && (
+                                            <span style={{width:7, height:7, borderRadius:'50%', background:'#00b4d8', display:'inline-block'}}/>
+                                        )}
+                                    </button>
+                                );
+                            })}
+                        </div>
+                        {activeDocTab === 'prd' && <div ref={docPaneRef} className={`flex-1 overflow-y-auto px-6 py-4 bg-[#141618] min-h-0 ${isLoading && !prdContent.trim() ? "flex flex-col" : ""}`}>
                             {isLoading && !prdContent.trim() ? (
                                 <div className="flex-1 flex items-center justify-center rounded border border-[#2a2d31] bg-[#16191c] min-h-[240px] mb-4">
                                     <p className="text-xs text-slate-500 header-text">Updating PRD draft…</p>
@@ -2772,7 +2804,10 @@
                                     <pre className="text-xs text-slate-400 whitespace-pre-wrap">{roadmapContent}</pre>
                                 </div>
                             ) : null}
-                        </div>
+                        </div>}
+                        {activeDocTab === 'roadmap' && <div className="flex-1 min-h-0"/>}
+                        {activeDocTab === 'alignment' && <div className="flex-1 min-h-0"/>}
+                        {activeDocTab === 'adversarial' && <div className="flex-1 min-h-0"/>}
                         {/* ── Sticky action bar ─────────────────────────────────────────── */}
                         {prdContent.trim().length > 0 && (
                             <div className="flex-shrink-0 border-t border-[#1a1d21] px-4 py-2 bg-[#0d0f11] space-y-2">
