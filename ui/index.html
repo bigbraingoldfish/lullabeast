@@ -3043,62 +3043,6 @@
                                     >
                                         {convertLoading ? `Generating... (${_opEstimate("roadmap_generation")})` : roadmapContent ? "Regenerate Roadmap" : "Generate Roadmap"}
                                     </button>
-                                    <div className="relative">
-                                        <button
-                                            type="button"
-                                            onClick={() => setShowActionMenu((o) => !o)}
-                                            className="header-text text-sm px-2 py-1 rounded bg-[#1a1d21] text-slate-300 border border-[#1a1d21] hover:border-slate-500"
-                                            aria-label="Open action menu"
-                                        >
-                                            ⋮
-                                        </button>
-                                        {showActionMenu && (
-                                            <div className="absolute right-0 bottom-8 z-30 min-w-[165px] rounded border border-[#2a2d31] bg-[#141618]">
-                                                {currentIdeaId && (
-                                                    <a href={`/api/ideas/${currentIdeaId}/download`} className="block px-3 py-2 text-xs text-slate-200 hover:bg-[#1a1d21]">
-                                                        Download PRD
-                                                    </a>
-                                                )}
-                                                {roadmapContent && currentIdeaId && (
-                                                    <a href={`/api/ideas/${currentIdeaId}/download-roadmap`} className="block px-3 py-2 text-xs text-slate-200 hover:bg-[#1a1d21]">
-                                                        Download Roadmap
-                                                    </a>
-                                                )}
-                                                {roadmapContent && currentIdeaId && (
-                                                    <button
-                                                        onClick={() => {
-                                                            setShowActionMenu(false);
-                                                            if (alignmentReport) {
-                                                                setCheckResultModal({ title: "Alignment Check", content: alignmentReport, badge: null, checkType: "alignment" });
-                                                            } else {
-                                                                doAlignmentCheck();
-                                                            }
-                                                        }}
-                                                        disabled={alignmentLoading}
-                                                        className="block px-3 py-2 text-xs text-slate-200 hover:bg-[#1a1d21] w-full text-left disabled:opacity-40"
-                                                    >
-                                                        {alignmentLoading ? `Running... (${_opEstimate("alignment_check")})` : alignmentReport ? "Review Alignment" : "Run Alignment Check"}
-                                                    </button>
-                                                )}
-                                                {roadmapContent && currentIdeaId && (
-                                                    <button
-                                                        onClick={() => {
-                                                            setShowActionMenu(false);
-                                                            if (adversarialReport) {
-                                                                setCheckResultModal({ title: "Adversarial Review", content: adversarialReport, badge: null, checkType: "adversarial" });
-                                                            } else {
-                                                                doAdversarialCheck();
-                                                            }
-                                                        }}
-                                                        disabled={adversarialLoading}
-                                                        className="block px-3 py-2 text-xs text-slate-200 hover:bg-[#1a1d21] w-full text-left disabled:opacity-40"
-                                                    >
-                                                        {adversarialLoading ? `Running... (${_opEstimate("adversarial_check")})` : adversarialReport ? "Review Adversarial" : "Run Adversarial Review"}
-                                                    </button>
-                                                )}
-                                            </div>
-                                        )}
-                                    </div>
                                     {roadmapContent && (
                                         <button
                                             type="button"
@@ -3172,29 +3116,14 @@
                             <div className="bg-[#141618] border border-[#2a2d31] rounded p-6 max-w-sm w-full space-y-4" onClick={(e) => e.stopPropagation()}>
                                 <div className="header-text text-sm text-slate-300">Roadmap generated</div>
                                 <div className="text-xs text-slate-400">
-                                    Would you like to run optional quality checks before setup?
-                                    These passes are experimental and will update your roadmap if issues are found.
+                                    Your roadmap is ready. Run optional quality checks from the Alignment and Adversarial tabs, or continue to setup.
                                 </div>
-                                <div className="flex flex-col gap-2">
-                                    <button
-                                        onClick={doAlignmentCheck}
-                                        disabled={alignmentLoading}
-                                        className="header-text text-xs px-3 py-2 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500 disabled:opacity-40 text-left"
-                                    >
-                                        {alignmentLoading ? `Running alignment check... (${_opEstimate("alignment_check")})` : "Run Alignment Check"}
-                                    </button>
-                                    <button
-                                        onClick={doAdversarialCheck}
-                                        disabled={adversarialLoading}
-                                        className="header-text text-xs px-3 py-2 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500 disabled:opacity-40 text-left"
-                                    >
-                                        {adversarialLoading ? `Running adversarial review... (${_opEstimate("adversarial_check")})` : "Run Adversarial Review"}
-                                    </button>
+                                <div className="flex justify-end">
                                     <button
                                         onClick={() => setShowQualityCheckModal(false)}
-                                        className="header-text text-xs px-3 py-2 rounded text-slate-500 hover:text-slate-300 text-left"
+                                        className="header-text text-xs px-3 py-2 rounded bg-[#00b4d8] text-[#0d0f11] font-semibold"
                                     >
-                                        Skip — Continue to Setup
+                                        Got it
                                     </button>
                                 </div>
                             </div>
