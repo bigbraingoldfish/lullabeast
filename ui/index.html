@@ -3338,13 +3338,8 @@
                                     )}
                                 </div>
                             )}
-                            {roadmapSeedError && roadmapSeedError.length > 0 && (
+                            {(roadmapSeedError && roadmapSeedError.length > 0 || preflightFixFormatLoading) && (
                                 <div className="space-y-2">
-                                    <ul className="text-red-400 text-xs space-y-1">
-                                        {roadmapSeedError.map((er, i) => (
-                                            <li key={i}>Line {er.line}: {er.message}</li>
-                                        ))}
-                                    </ul>
                                     {onFixRoadmapSeedFormat && (
                                         <button
                                             type="button"
@@ -3352,8 +3347,15 @@
                                             disabled={preflightFixFormatLoading}
                                             className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8]/20 text-[#00b4d8] border border-[#00b4d8]/40 disabled:opacity-40"
                                         >
-                                            {preflightFixFormatLoading ? "Fixing..." : "Fix Format"}
+                                            {preflightFixFormatLoading ? `Fixing... (${_opEstimate("format_correction")})` : "Fix Format"}
                                         </button>
+                                    )}
+                                    {roadmapSeedError && roadmapSeedError.length > 0 && (
+                                        <ul className="text-red-400 text-xs space-y-1">
+                                            {roadmapSeedError.map((er, i) => (
+                                                <li key={i}>Line {er.line}: {er.message}</li>
+                                            ))}
+                                        </ul>
                                     )}
                                 </div>
                             )}
@@ -4455,7 +4457,6 @@
             const onFixRoadmapSeedFormat = () => {
                 if (!roadmapSeed || !roadmapSeed.trim()) return;
                 setPreflightFixFormatLoading(true);
-                setRoadmapSeedError([]);
                 // Create a temporary idea session, fix the roadmap, then discard the session
                 fetch("/api/ideas", { method: "POST" })
                     .then((r) => r.json())
