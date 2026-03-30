@@ -128,6 +128,9 @@ Each phase entry must include all of the following. Do not omit any field.
   - [ ] {Specific verifiable condition 2}
   - [ ] All tests in TDD Requirements pass
   - [ ] Reviewer agent has approved the phase output
+
+  > Test: {One-sentence description of how to manually verify this phase works
+  end-to-end. Must be specific enough to execute without ambiguity.}
 ```
 
 ---

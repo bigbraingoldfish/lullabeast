@@ -3347,7 +3347,7 @@ async def post_setup_roadmap_seed(request: Request):
 # ─── Roadmap validation ───────────────────────────────────────────────────────
 
 _PHASE_LINE_RE = re.compile(
-    r"^- \[.\] `([A-Z]+-[A-Z]\d+)` \| (?:LOW|HIGH) \| .+",
+    r"^- \[.\] `([A-Z]+-[A-Z]\d+)` \| (?:LOW|MEDIUM|HIGH|CRITICAL) \| .+",
     re.MULTILINE,
 )
 
