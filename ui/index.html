@@ -2155,17 +2155,10 @@
                             setRoadmapContent(d.roadmap_content);
                         }
                         setAlignmentReport(d.alignment_report || null);
-                        const n = d.gap_count || 0;
-                        setCheckResultModal({
-                            title: "Alignment Check",
-                            content: d.alignment_report || "",
-                            badge: d.roadmap_updated ? `Roadmap updated — ${n} phase(s) added` : null,
-                            checkType: "alignment",
-                        });
+                        setActiveDocTab("alignment");
                     })
                     .catch((e) => {
                         setAlignmentLoading(false);
-                        setCheckResultModal({ title: "Alignment Check Error", content: String(e.message || e), badge: null, checkType: "alignment" });
                     });
             };
 
@@ -2181,16 +2174,10 @@
                     .then((d) => {
                         setAdversarialLoading(false);
                         setAdversarialReport(d.adversarial_report || null);
-                        setCheckResultModal({
-                            title: "Adversarial Review",
-                            content: d.adversarial_report || "",
-                            badge: null,
-                            checkType: "adversarial",
-                        });
+                        setActiveDocTab("adversarial");
                     })
                     .catch((e) => {
                         setAdversarialLoading(false);
-                        setCheckResultModal({ title: "Adversarial Review Error", content: String(e.message || e), badge: null, checkType: "adversarial" });
                     });
             };
 
@@ -2866,8 +2853,114 @@
                                 )}
                             </div>
                         )}
-                        {activeDocTab === 'alignment' && <div className="flex-1 min-h-0"/>}
-                        {activeDocTab === 'adversarial' && <div className="flex-1 min-h-0"/>}
+                        {activeDocTab === 'alignment' && (
+                            <div style={{flex:1, display:'flex', flexDirection:'column', overflow:'hidden'}}>
+                                <div style={{flex:1, overflowY:'auto', padding:'24px'}}>
+                                    {!alignmentReport ? (
+                                        <div style={{display:'flex', justifyContent:'center', alignItems:'center', height:'100%'}}>
+                                            <button
+                                                className="header-text text-xs px-3 py-2 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500 disabled:opacity-40"
+                                                onClick={doAlignmentCheck}
+                                                disabled={alignmentLoading}
+                                            >
+                                                {alignmentLoading ? `Running alignment check... (${_opEstimate("alignment_check")})` : "Run Alignment Check"}
+                                            </button>
+                                        </div>
+                                    ) : (
+                                        <div className="msg-md" dangerouslySetInnerHTML={{__html: marked.parse(alignmentReport)}}/>
+                                    )}
+                                </div>
+                                {alignmentReport && (
+                                    <div className="flex-shrink-0 border-t border-[#1a1d21] px-4 py-2 flex justify-between items-center">
+                                        {!showAlignmentRegenConfirm ? (
+                                            <button
+                                                className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500 disabled:opacity-40"
+                                                onClick={() => setShowAlignmentRegenConfirm(true)}
+                                                disabled={alignmentLoading}
+                                            >
+                                                Regenerate
+                                            </button>
+                                        ) : (
+                                            <div className="flex items-center gap-2">
+                                                <span className="header-text text-xs text-slate-400">This will overwrite the previous alignment report.</span>
+                                                <button
+                                                    className="header-text text-xs px-2 py-1 rounded bg-[#00b4d8] text-[#0d0f11] font-semibold"
+                                                    onClick={() => { setShowAlignmentRegenConfirm(false); doAlignmentCheck(); }}
+                                                >
+                                                    Confirm
+                                                </button>
+                                                <button
+                                                    className="header-text text-xs px-2 py-1 rounded text-slate-400 hover:text-slate-200"
+                                                    onClick={() => setShowAlignmentRegenConfirm(false)}
+                                                >
+                                                    Cancel
+                                                </button>
+                                            </div>
+                                        )}
+                                        <button
+                                            className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500"
+                                            onClick={() => navigator.clipboard.writeText(alignmentReport)}
+                                        >
+                                            Copy
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                        {activeDocTab === 'adversarial' && (
+                            <div style={{flex:1, display:'flex', flexDirection:'column', overflow:'hidden'}}>
+                                <div style={{flex:1, overflowY:'auto', padding:'24px'}}>
+                                    {!adversarialReport ? (
+                                        <div style={{display:'flex', justifyContent:'center', alignItems:'center', height:'100%'}}>
+                                            <button
+                                                className="header-text text-xs px-3 py-2 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500 disabled:opacity-40"
+                                                onClick={doAdversarialCheck}
+                                                disabled={adversarialLoading}
+                                            >
+                                                {adversarialLoading ? `Running adversarial review... (${_opEstimate("adversarial_check")})` : "Run Adversarial Review"}
+                                            </button>
+                                        </div>
+                                    ) : (
+                                        <div className="msg-md" dangerouslySetInnerHTML={{__html: marked.parse(adversarialReport)}}/>
+                                    )}
+                                </div>
+                                {adversarialReport && (
+                                    <div className="flex-shrink-0 border-t border-[#1a1d21] px-4 py-2 flex justify-between items-center">
+                                        {!showAdversarialRegenConfirm ? (
+                                            <button
+                                                className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500 disabled:opacity-40"
+                                                onClick={() => setShowAdversarialRegenConfirm(true)}
+                                                disabled={adversarialLoading}
+                                            >
+                                                Regenerate
+                                            </button>
+                                        ) : (
+                                            <div className="flex items-center gap-2">
+                                                <span className="header-text text-xs text-slate-400">This will overwrite the previous adversarial report.</span>
+                                                <button
+                                                    className="header-text text-xs px-2 py-1 rounded bg-[#00b4d8] text-[#0d0f11] font-semibold"
+                                                    onClick={() => { setShowAdversarialRegenConfirm(false); doAdversarialCheck(); }}
+                                                >
+                                                    Confirm
+                                                </button>
+                                                <button
+                                                    className="header-text text-xs px-2 py-1 rounded text-slate-400 hover:text-slate-200"
+                                                    onClick={() => setShowAdversarialRegenConfirm(false)}
+                                                >
+                                                    Cancel
+                                                </button>
+                                            </div>
+                                        )}
+                                        <button
+                                            className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500"
+                                            onClick={() => navigator.clipboard.writeText(adversarialReport)}
+                                        >
+                                            Copy
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        )}
                         {/* ── Sticky action bar ─────────────────────────────────────────── */}
                         {prdContent.trim().length > 0 && (
                             <div className="flex-shrink-0 border-t border-[#1a1d21] px-4 py-2 bg-[#0d0f11] space-y-2">
@@ -3108,90 +3201,6 @@
                         </div>
                     )}
 
-                    {/* Check result modal */}
-                    {checkResultModal && (
-                        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => { setCheckResultModal(null); setShowReportRegenConfirm(false); setCopiedCheckReport(false); }}>
-                            <div className="bg-[#141618] border border-[#2a2d31] rounded p-6 max-w-2xl w-full max-h-[80vh] flex flex-col gap-4" onClick={(e) => e.stopPropagation()}>
-                                <div className="flex items-center justify-between gap-3">
-                                    <div className="header-text text-sm text-slate-300">{checkResultModal.title}</div>
-                                    <div className="flex items-center gap-2 shrink-0">
-                                        {checkResultModal.badge && (
-                                            <span className="text-xs px-2 py-0.5 rounded bg-green-900/40 text-green-400 border border-green-700/40">
-                                                {checkResultModal.badge}
-                                            </span>
-                                        )}
-                                        <button
-                                            title="Copy report"
-                                            onClick={() => {
-                                                const text = checkResultModal.content || "";
-                                                if (navigator.clipboard) {
-                                                    navigator.clipboard.writeText(text).then(() => { setCopiedCheckReport(true); setTimeout(() => setCopiedCheckReport(false), 2000); }).catch(() => {});
-                                                } else {
-                                                    const ta = document.createElement("textarea");
-                                                    ta.value = text;
-                                                    ta.style.position = "fixed";
-                                                    ta.style.opacity = "0";
-                                                    document.body.appendChild(ta);
-                                                    ta.select();
-                                                    document.execCommand("copy");
-                                                    document.body.removeChild(ta);
-                                                    setCopiedCheckReport(true);
-                                                    setTimeout(() => setCopiedCheckReport(false), 2000);
-                                                }
-                                            }}
-                                            className="text-xs px-1.5 py-0.5 rounded text-slate-400 hover:text-slate-200 border border-transparent hover:border-[#2a2d31]"
-                                        >
-                                            {copiedCheckReport ? "Copied" : "⎘"}
-                                        </button>
-                                    </div>
-                                </div>
-                                <div className="overflow-y-auto flex-1 text-xs text-slate-300 font-mono whitespace-pre-wrap">
-                                    {checkResultModal.content}
-                                </div>
-                                {showReportRegenConfirm ? (
-                                    <div className="flex items-center justify-between gap-2">
-                                        <span className="text-xs text-slate-400">This will overwrite the previous report.</span>
-                                        <div className="flex gap-2">
-                                            <button
-                                                onClick={() => setShowReportRegenConfirm(false)}
-                                                className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-400 border border-[#2a2d31] hover:text-slate-200"
-                                            >
-                                                Cancel
-                                            </button>
-                                            <button
-                                                onClick={() => {
-                                                    const ct = checkResultModal.checkType;
-                                                    setCheckResultModal(null);
-                                                    setShowReportRegenConfirm(false);
-                                                    setCopiedCheckReport(false);
-                                                    if (ct === "alignment") doAlignmentCheck();
-                                                    else doAdversarialCheck();
-                                                }}
-                                                className="header-text text-xs px-3 py-1.5 rounded bg-red-900/40 text-red-300 border border-red-700/40 hover:bg-red-900/70"
-                                            >
-                                                Regenerate
-                                            </button>
-                                        </div>
-                                    </div>
-                                ) : (
-                                    <div className="flex items-center justify-between">
-                                        <button
-                                            onClick={() => setShowReportRegenConfirm(true)}
-                                            className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-400 border border-[#2a2d31] hover:text-slate-200"
-                                        >
-                                            Regenerate
-                                        </button>
-                                        <button
-                                            onClick={() => { setCheckResultModal(null); setShowReportRegenConfirm(false); setCopiedCheckReport(false); }}
-                                            className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-300 border border-[#2a2d31] hover:border-slate-500"
-                                        >
-                                            Close
-                                        </button>
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-                    )}
                 </div>
             );
         }
