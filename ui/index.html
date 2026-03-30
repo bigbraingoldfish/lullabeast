@@ -2122,6 +2122,7 @@
                     .then((d) => {
                         setRoadmapContent(d.roadmap_content || "");
                         setConvertLoading(false);
+                        setActiveDocTab("roadmap");
                         setShowQualityCheckModal(true);
                     })
                     .catch((e) => {
@@ -2818,7 +2819,53 @@
                                 )}
                             </div>
                         )}
-                        {activeDocTab === 'roadmap' && <div className="flex-1 min-h-0"/>}
+                        {activeDocTab === 'roadmap' && (
+                            <div style={{flex:1, display:'flex', flexDirection:'column', overflow:'hidden'}}>
+                                <div style={{flex:1, overflowY:'auto', padding:'24px'}}>
+                                    {!roadmapContent ? (
+                                        <div style={{display:'flex', justifyContent:'center', alignItems:'center', height:'100%'}}>
+                                            <button
+                                                className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-[#0d0f11] border border-[#00b4d8]/60 font-semibold disabled:opacity-40"
+                                                onClick={doConvert}
+                                                disabled={convertLoading}
+                                            >
+                                                {convertLoading ? `Generating... (${_opEstimate("roadmap_generation")})` : "Generate Roadmap"}
+                                            </button>
+                                        </div>
+                                    ) : (
+                                        <div className="msg-md" dangerouslySetInnerHTML={{__html: marked.parse(roadmapContent)}}/>
+                                    )}
+                                </div>
+                                {roadmapContent && (
+                                    <div className="flex-shrink-0 border-t border-[#1a1d21] px-4 py-2 flex justify-between items-center">
+                                        <button
+                                            className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500 disabled:opacity-40"
+                                            onClick={doConvert}
+                                            disabled={convertLoading}
+                                        >
+                                            Regenerate Roadmap
+                                        </button>
+                                        <div className="flex gap-2">
+                                            <button
+                                                className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500"
+                                                onClick={() => navigator.clipboard.writeText(roadmapContent)}
+                                            >
+                                                Copy
+                                            </button>
+                                            {currentIdeaId && (
+                                                <a
+                                                    href={`/api/ideas/${currentIdeaId}/download-roadmap`}
+                                                    download
+                                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500"
+                                                >
+                                                    Download Roadmap
+                                                </a>
+                                            )}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
                         {activeDocTab === 'alignment' && <div className="flex-1 min-h-0"/>}
                         {activeDocTab === 'adversarial' && <div className="flex-1 min-h-0"/>}
                         {/* ── Sticky action bar ─────────────────────────────────────────── */}
