@@ -2798,13 +2798,26 @@
                                     )}
                                 </div>
                             ) : null}
-                            {roadmapContent ? (
-                                <div className="border-b border-[#1a1d21] pb-4 mb-4">
-                                    <h3 className="header-text text-slate-400 text-sm mb-2">Roadmap draft</h3>
-                                    <pre className="text-xs text-slate-400 whitespace-pre-wrap">{roadmapContent}</pre>
-                                </div>
-                            ) : null}
                         </div>}
+                        {activeDocTab === 'prd' && (
+                            <div className="flex-shrink-0 border-t border-[#1a1d21] px-4 py-2 flex justify-end gap-2">
+                                <button
+                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500"
+                                    onClick={() => navigator.clipboard.writeText(prdContent)}
+                                >
+                                    Copy All
+                                </button>
+                                {currentIdeaId && (
+                                    <a
+                                        href={`/api/ideas/${currentIdeaId}/download`}
+                                        download
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500"
+                                    >
+                                        Download PRD
+                                    </a>
+                                )}
+                            </div>
+                        )}
                         {activeDocTab === 'roadmap' && <div className="flex-1 min-h-0"/>}
                         {activeDocTab === 'alignment' && <div className="flex-1 min-h-0"/>}
                         {activeDocTab === 'adversarial' && <div className="flex-1 min-h-0"/>}
