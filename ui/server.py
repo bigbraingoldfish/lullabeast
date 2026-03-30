@@ -2703,11 +2703,12 @@ async def post_ideas_convert(idea_id: str):
 
 
 async def _notify_prd_agent(idea_id: str, config: dict, report_content: str, check_type: str) -> None:
-    """Send the full check report to the PRD agent and poll for its response.
+    """Send a check report to the PRD agent as an attachment on the active session.
 
-    Determines the next turn number (max existing assistant turn + 1), POSTs the
-    full report to that session, polls for the agent's response, then stores it
-    as a new assistant message in session.json.
+    Posts to the highest existing ideas:{id}:session-{n} session so the agent has
+    full conversation history. Saves the user message (with attachment_label) and
+    a pending assistant placeholder to session.json before the webhook fires, then
+    replaces the placeholder with the real response on success.
 
     Designed to be called via asyncio.create_task — never raises, logs on failure.
     """
@@ -2717,30 +2718,83 @@ async def _notify_prd_agent(idea_id: str, config: dict, report_content: str, che
         session_path = idea_dir / "session.json"
         session_data = _read_json_file(str(session_path)) or {}
         messages = session_data.get("messages", [])
+
+        # Determine next turn number from existing assistant turns
         turn_numbers = [
             m.get("turn", i + 1)
             for i, m in enumerate(messages)
-            if m.get("role") == "assistant"
+            if m.get("role") == "assistant" and not m.get("pending") and not m.get("error")
         ]
         next_turn = (max(turn_numbers) + 1) if turn_numbers else 2
 
+        # Build conversation history block (same pattern as post_ideas_message)
+        history_block = ""
+        complete_pairs: list = []
+        j = 0
+        while j < len(messages):
+            msg = messages[j]
+            if msg.get("role") == "user" and not msg.get("error"):
+                nxt = messages[j + 1] if j + 1 < len(messages) else None
+                if nxt and nxt.get("role") == "assistant" and not nxt.get("pending") and not nxt.get("error"):
+                    complete_pairs.append((msg, nxt))
+                    j += 2
+                    continue
+            j += 1
+        if complete_pairs:
+            lines = ["[CONVERSATION HISTORY]"]
+            for turn_i, (u, a) in enumerate(complete_pairs, start=1):
+                lines.append(f"\n[Turn {turn_i}]")
+                lines.append(f"User:\n{(u.get('content') or '').strip()}")
+                lines.append(f"\nAssistant:\n{(a.get('content') or '').strip()}")
+            lines.append("\n[/CONVERSATION HISTORY]")
+            history_block = "\n".join(lines) + "\n\n"
+
+        # Fixed message text and attachment block
+        check_label = check_type.title()
+        fixed_message = (
+            f"Please review the attached {check_type} report. "
+            f"If you have clarifying questions for the user, ask them now in your normal format. "
+            f"If the report identifies updates needed to the PRD or roadmap, briefly summarize "
+            f"what you would change and proceed with the updates."
+        )
+        attachment_block = f"[ATTACHMENT: {check_label} Report]\n{report_content}\n[/ATTACHMENT]"
+
         session_key = f"ideas:{idea_id}:session-{next_turn}"
-        prompt = (
-            f"{report_content}\n\n"
-            f"A secondary {check_type} check has been completed on your roadmap. "
-            f"Please review the full report findings above and respond with your guidance: "
-            f"determine whether additional clarifying questions are needed with the user, "
-            f"whether any PRD updates are warranted, and whether any roadmap changes are "
-            f"needed beyond what the check already applied. Respond directly in this conversation."
+        full_message = (
+            f"[SESSION] ideas:{idea_id}:session-{next_turn}\n\n"
+            f"{history_block}{attachment_block}\n\n{fixed_message}"
         )
 
+        # Pre-save user message + pending assistant placeholder BEFORE webhook
+        now = datetime.utcnow().isoformat() + "Z"
+        pre_save = _read_json_file(str(session_path)) or {}
+        pre_save.setdefault("messages", [])
+        pre_save["messages"] = list(pre_save["messages"]) + [
+            {
+                "role": "user",
+                "content": fixed_message,
+                "attachment_label": f"{check_label} Report",
+                "ts": now,
+            },
+            {
+                "role": "assistant",
+                "content": "Working on your request...",
+                "pending": True,
+                "turn": next_turn,
+                "ts": now,
+            },
+        ]
+        pre_save["updated"] = now
+        _atomic_write_json_file(session_path, pre_save)
+
+        # Send webhook POST
         hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
         hooks_token = config.get("hooks_token", "")
         payload = {
             "agentId": WEBHOOK_AGENT_ID,
             "sessionKey": session_key,
             "wakeMode": "now",
-            "message": prompt,
+            "message": full_message,
         }
         async with aiohttp.ClientSession() as http_session:
             await http_session.post(
@@ -2759,12 +2813,22 @@ async def _notify_prd_agent(idea_id: str, config: dict, report_content: str, che
                 break
             await asyncio.sleep(POLL_INTERVAL)
         else:
+            # Timed out — mark the pending placeholder as an error
             logger.warning(
                 f"[CONVERTER] PRD agent notification timed out for {idea_id} turn {next_turn}"
             )
+            timeout_session = _read_json_file(str(session_path)) or {}
+            for _m in reversed(timeout_session.get("messages", [])):
+                if _m.get("pending") and _m.get("role") == "assistant":
+                    _m["pending"] = False
+                    _m["error"] = True
+                    _m["content"] = "Agent response timed out."
+                    break
+            timeout_session["updated"] = datetime.utcnow().isoformat() + "Z"
+            _atomic_write_json_file(session_path, timeout_session)
             return
 
-        # Read and store the agent response
+        # Read agent response and replace pending placeholder
         if not response_path.exists():
             logger.warning(
                 f"[CONVERTER] PRD agent response file missing for {idea_id} turn {next_turn}"
@@ -2774,17 +2838,24 @@ async def _notify_prd_agent(idea_id: str, config: dict, report_content: str, che
         response_text = response_path.read_text()
         parsed = _parse_agent_response(response_text)
 
-        # Re-read session to avoid overwriting concurrent changes
         current_session = _read_json_file(str(session_path)) or {}
-        current_messages = current_session.get("messages", [])
-        current_messages.append({
-            "role": "assistant",
-            "content": response_text,
-            "ts": datetime.utcnow().isoformat() + "Z",
-            "turn": next_turn,
-            "parsed": parsed,
-        })
-        current_session["messages"] = current_messages
+        replaced = False
+        for _m in reversed(current_session.get("messages", [])):
+            if _m.get("pending") and _m.get("role") == "assistant":
+                _m["pending"] = False
+                _m["content"] = response_text
+                _m["ts"] = datetime.utcnow().isoformat() + "Z"
+                _m["parsed"] = parsed
+                replaced = True
+                break
+        if not replaced:
+            current_session.setdefault("messages", []).append({
+                "role": "assistant",
+                "content": response_text,
+                "ts": datetime.utcnow().isoformat() + "Z",
+                "turn": next_turn,
+                "parsed": parsed,
+            })
         current_session["updated"] = datetime.utcnow().isoformat() + "Z"
         _atomic_write_json_file(session_path, current_session)
 
