@@ -1776,6 +1776,7 @@
             const attachFileRef = useRef(null);
             const messagesEndRef = useRef(null);
             const readinessPollRef = useRef(null);
+            const notificationPollRef = useRef(null);
             const docPaneRef = useRef(null);
             const [splitPct, setSplitPct] = useState(45);
             const dragRef = useRef({ dragging: false });
@@ -1799,6 +1800,39 @@
                     clearInterval(readinessPollRef.current);
                     readinessPollRef.current = null;
                 }
+            };
+
+            const refreshMessages = (ideaId) => {
+                if (!ideaId) return;
+                fetch(`/api/ideas/${ideaId}/session`)
+                    .then((r) => r.json())
+                    .then((d) => {
+                        const rawMsgs = d.messages || [];
+                        setMessages(rawMsgs.map((m, idx) => ({
+                            ...m,
+                            id: m.id || `${m.role}-${idx}-${(m.ts || "").slice(0, 19) || idx}`,
+                        })));
+                    })
+                    .catch(() => {});
+            };
+
+            const stopNotificationPoll = () => {
+                if (notificationPollRef.current) {
+                    clearInterval(notificationPollRef.current);
+                    notificationPollRef.current = null;
+                }
+            };
+
+            const startNotificationPoll = (ideaId) => {
+                stopNotificationPoll();
+                if (!ideaId) return;
+                let pollCount = 0;
+                const maxPolls = 24; // 24 × 5s = 120s (matching POLL_TIMEOUT)
+                notificationPollRef.current = setInterval(() => {
+                    pollCount += 1;
+                    refreshMessages(ideaId);
+                    if (pollCount >= maxPolls) stopNotificationPoll();
+                }, 5000);
             };
 
             const startReadinessPoll = (ideaId) => {
@@ -1898,6 +1932,7 @@
 
             useEffect(() => {
                 if (!currentIdeaId) return;
+                stopNotificationPoll();
                 setReadinessTimedOut(false);
                 setHadReadyReadiness(false);
                 setAnnotations([]);
@@ -2156,6 +2191,7 @@
                         }
                         setAlignmentReport(d.alignment_report || null);
                         setActiveDocTab("alignment");
+                        startNotificationPoll(currentIdeaId);
                     })
                     .catch((e) => {
                         setAlignmentLoading(false);
@@ -2175,6 +2211,7 @@
                         setAdversarialLoading(false);
                         setAdversarialReport(d.adversarial_report || null);
                         setActiveDocTab("adversarial");
+                        startNotificationPoll(currentIdeaId);
                     })
                     .catch((e) => {
                         setAdversarialLoading(false);
@@ -2486,8 +2523,16 @@
                             {messages.map((msg, i) => (
                                 <div key={msg.id || i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
                                     {msg.role === "user" ? (
-                                        <div className="max-w-[95%] rounded px-3 py-2 text-sm bg-[#00b4d8]/20 text-slate-100">
-                                            {msg.content}
+                                        <div className="max-w-[95%] flex flex-col items-end gap-1">
+                                            <div className="rounded px-3 py-2 text-sm bg-[#00b4d8]/20 text-slate-100">
+                                                {msg.content}
+                                            </div>
+                                            {msg.attachment_label && (
+                                                <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-[#1a1d21] border border-[#2a2d31] text-xs text-slate-400">
+                                                    <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
+                                                    <span>{msg.attachment_label}</span>
+                                                </div>
+                                            )}
                                         </div>
                                     ) : (
                                         <div className="max-w-[95%] w-full flex flex-col gap-1">
