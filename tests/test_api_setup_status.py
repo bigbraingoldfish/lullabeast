@@ -72,6 +72,7 @@ def _make_config(openclaw: Path, tmp_path: Path, prompt_path: str = None) -> dic
     if prompt_path is None:
         prompt_path = str(openclaw / "deployment-package" / "Updates" / "PRD to Roadmap (sonnet 4.5 ideal).txt")
     return {
+        "openclaw_root": str(openclaw),
         "autodev_repo_path": str(openclaw),
         "pipeline_state_path": str(openclaw / "pipeline_state.json"),
         "phase_state_path": str(openclaw / "pipeline-project" / "phase_state.json"),
@@ -296,3 +297,33 @@ class TestExecApprovals:
 
         # Missing exec-approvals.json is not itself a blocking missing_item
         assert "exec_approvals_stale_paths" not in r.json()["missing_items"]
+
+
+class TestOpenclawRootVsRepo:
+    def test_openclaw_layout_not_required_under_repo_path(self, tmp_path):
+        """Agent workspaces and openclaw.json live under openclaw_root, not the git repo."""
+        openclaw = _make_openclaw_dir(tmp_path)
+        _make_workspaces(openclaw)
+        _make_conversion_prompt(openclaw)
+        repo_only = tmp_path / "git_repo"
+        repo_only.mkdir()
+        cfg = {
+            "openclaw_root": str(openclaw),
+            "autodev_repo_path": str(repo_only),
+            "conversion_prompt_path": str(
+                openclaw / "deployment-package" / "Updates" / "PRD to Roadmap (sonnet 4.5 ideal).txt"
+            ),
+        }
+        real_exists = os.path.exists
+
+        def exists_side_effect(p):
+            if ".autodev_setup_complete" in str(p):
+                return True
+            return real_exists(p)
+
+        with patch("ui.server.load_config", return_value=cfg), \
+             patch("ui.server.os.path.exists", side_effect=exists_side_effect):
+            r = client.get("/api/setup/status")
+
+        assert r.json()["missing_items"] == []
+        assert r.json()["setup_complete"] is True

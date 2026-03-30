@@ -376,6 +376,7 @@ DEFAULTS = {
     "hooks_url": "http://localhost:18789/hooks/agent",
     "hooks_token": "pipeline-secret-token",
     "conversion_prompt_path": "~/.openclaw/deployment-package/Updates/PRD to Roadmap (sonnet 4.5 ideal).txt",
+    "openclaw_root": os.environ.get("AUTODEV_ROOT") or "~/.openclaw",
     "autodev_repo_path": os.environ.get("AUTODEV_REPO_PATH", os.path.expanduser("~/.openclaw")),
     "roadmap_converter_workspace": "~/.openclaw/workspace-roadmap-converter",
 }
@@ -3953,12 +3954,14 @@ def _check_installer_status(config: dict) -> dict:
     """
     missing_items = []
 
-    autodev_root = os.path.expanduser(config.get("autodev_repo_path", "~/.openclaw"))
-    openclaw_json_path = os.path.join(autodev_root, "openclaw.json")
-    exec_approvals_path = os.path.join(autodev_root, "exec-approvals.json")
+    # OpenClaw install lives under ~/.openclaw (AUTODEV_ROOT), not the git repo path.
+    openclaw_root = config.get("openclaw_root") or os.path.expanduser("~/.openclaw")
+    repo_path = config.get("autodev_repo_path") or os.path.expanduser("~/.openclaw")
+    openclaw_json_path = os.path.join(openclaw_root, "openclaw.json")
+    exec_approvals_path = os.path.join(openclaw_root, "exec-approvals.json")
 
     # 1. OpenClaw root directory
-    if not os.path.isdir(autodev_root):
+    if not os.path.isdir(openclaw_root):
         missing_items.append("openclaw_root")
 
     # 2. openclaw.json existence
@@ -3981,7 +3984,7 @@ def _check_installer_status(config: dict) -> dict:
     # 4. Agent workspace directories (5 core Task-01 agents)
     # workspace-roadmap-converter check is deferred to Task 02
     for agent in ("planner", "executor", "reviewer", "escalation", "prd-creator"):
-        ws = os.path.join(autodev_root, f"workspace-{agent}")
+        ws = os.path.join(openclaw_root, f"workspace-{agent}")
         if not os.path.isdir(ws):
             missing_items.append(f"workspace-{agent}")
 
@@ -3997,10 +4000,10 @@ def _check_installer_status(config: dict) -> dict:
         try:
             with open(exec_approvals_path, "r", encoding="utf-8") as f:
                 raw = f.read()
-            # Any gate_scripts path not under autodev_root is stale
+            # Any gate_scripts path not under autodev_repo_path (repo root) is stale
             import re as _re
             gate_paths = _re.findall(r'"([^"]*gate_scripts[^"]*)"', raw)
-            stale = [p for p in gate_paths if not p.startswith(autodev_root)]
+            stale = [p for p in gate_paths if not p.startswith(repo_path)]
             if stale:
                 missing_items.append("exec_approvals_stale_paths")
         except Exception:
