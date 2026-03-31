@@ -177,12 +177,12 @@ AUTODEV_REPO_PATH=$(pwd) pytest tests/ -q
 
 ## State Machine Rules
 
-### The 7 valid pipeline states
+### The 8 valid pipeline states
 
-Defined as a set in `orchestrator.py` lines 32–38:
+Defined as a list in `orchestrator.py` (`VALID_STATES`):
 
 ```python
-PIPELINE_STATES = {
+VALID_STATES = [
     "RUNNING",
     "WAITING_FOR_SENTINEL",
     "WAITING_FOR_HUMAN",
@@ -190,8 +190,11 @@ PIPELINE_STATES = {
     "BLOCKED",
     "PIPELINE_COMPLETE",
     "STOPPED",
-}
+    "QUEUE_HALTED",
+]
 ```
+
+`QUEUE_HALTED` is written when the project queue is active but all remaining entries are blocked, in dependency hold, or fail preflight. The `pipeline_state.json` will additionally contain `queue_halted_reason: "all_blocked" | "all_dependency_hold" | "mixed"`. The Pipeline Monitor surfaces this state with an amber "Queue: halted" pill. The orchestrator exits cleanly; the queue screen shows which projects are blocked and why.
 
 `pipeline_state.json` has **two** status fields: `status` and `pipeline_status`. Both must be updated together on any state transition — `transition_state()` writes both. Never update one without the other.
 
@@ -478,6 +481,16 @@ uvicorn ui.server:app --host 0.0.0.0 --port 18790
 ```
 
 Agent identity docs (`IDENTITY.md`, `SOUL.md`, etc.) are deployed by `install.sh` step 5 from `autodev/agents/{agent}/` into `~/.openclaw/workspace-{agent}/` using `cp -u` (no overwrite if dest is newer). The source of truth for these files is now this repo, not `~/.openclaw/workspace-*`.
+
+---
+
+## Queue System
+
+`~/.openclaw/pipeline_queue.json` holds the project queue. All writes are atomic (`mkstemp + os.replace`). The queue is managed by `ui/server.py` endpoints (`/api/queue/*`) and by `orchestrator.py` methods (`_read_queue`, `_write_queue`, `_select_next_queue_project`, `_queue_update_active_entry`).
+
+### Orchestrator lightweight preflight (`_queue_preflight`)
+
+The orchestrator's `_queue_preflight()` checks: directory exists, `.git` present, `roadmap*.md` present. This is intentionally lighter than the server's `_run_preflight_checks()`, which also validates symlink, `.gitignore`, agent workspace files, etc. **Known MVP limitation:** a project that passes `_queue_preflight` may still fail mid-pipeline if the full server-side preconditions are not met. The server's `_run_preflight_checks` is used at queue-add time and at `trigger-next` time; the orchestrator's check runs only on auto-advance between queue entries.
 
 ---
 
