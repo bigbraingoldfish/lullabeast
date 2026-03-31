@@ -3234,6 +3234,11 @@
                 onLaunch,
                 launchError,
                 launchDisabled,
+                launchLoading,
+                onAddToQueue,
+                addToQueueBusy,
+                addToQueueError,
+                hasActiveProject,
                 repoPathFsStatus,
                 showCreateFolderPrompt,
                 createFolderError,
@@ -3486,13 +3491,22 @@
                                     </span>
                                 ) : null}
                             </div>
-                            <button type="button" onClick={onLaunch} disabled={launchDisabled} className="header-text text-sm px-4 py-2 rounded bg-[#00b4d8] text-[#0d0f12] font-medium disabled:bg-[#2a2d31] disabled:text-slate-600 disabled:cursor-not-allowed">
-                                Launch
+                            <button type="button" onClick={onAddToQueue} disabled={launchDisabled || addToQueueBusy}
+                                className="header-text text-sm px-4 py-2 rounded bg-[#1a1d21] text-[#00b4d8] border border-[#00b4d8]/40 font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:border-[#00b4d8]/70">
+                                {addToQueueBusy ? 'Adding…' : 'Add to Queue'}
+                            </button>
+                            <button type="button" onClick={onLaunch} disabled={launchDisabled || launchLoading}
+                                className="header-text text-sm px-4 py-2 rounded bg-[#00b4d8] text-[#0d0f12] font-medium disabled:bg-[#2a2d31] disabled:text-slate-600 disabled:cursor-not-allowed">
+                                {launchLoading ? 'Launching…' : 'Launch Now'}
                             </button>
                             <button type="button" onClick={onBack} className="header-text text-sm px-4 py-2 rounded border border-[#1a1d21] text-slate-400">
                                 Back
                             </button>
                         </div>
+                        {addToQueueError && <p className="text-red-400 text-sm whitespace-pre-wrap">{addToQueueError}</p>}
+                        {hasActiveProject && (
+                            <p className="text-amber-400 text-xs mt-1">A project is currently running. Launching now will insert your project at the top of the queue to run next.</p>
+                        )}
                         {launchError && <p className="text-red-400 text-sm whitespace-pre-wrap">{launchError}</p>}
                         {preflightChecks && preflightChecks.length > 0 && (
                             <ul className="space-y-2 text-sm">
@@ -5012,6 +5026,9 @@
             const [preflightLastRun, setPreflightLastRun] = useState(null);
             const [launchError, setLaunchError] = useState("");
             const [launchLoading, setLaunchLoading] = useState(false);
+            const [addToQueueBusy, setAddToQueueBusy] = useState(false);
+            const [addToQueueError, setAddToQueueError] = useState("");
+            const [preflightQueueActive, setPreflightQueueActive] = useState(false);
             /** null | "exists" | "parent" | "bad" — from filesystem check on server (debounced). */
             const [repoPathFsStatus, setRepoPathFsStatus] = useState(null);
             const [showCreateFolderPrompt, setShowCreateFolderPrompt] = useState(false);
@@ -5311,32 +5328,102 @@
                 !!preflightRoadmapAmbiguous ||
                 launchLoading;
 
-            const onLaunch = () => {
+            // Check for active queue entry when preflight screen is open
+            useEffect(() => {
+                if (currentScreen !== 'preflight') return;
+                fetch('/api/queue')
+                    .then(r => r.json())
+                    .then(d => setPreflightQueueActive((d.queue || []).some(e => e.state === 'ACTIVE')))
+                    .catch(() => {});
+            }, [currentScreen]);
+
+            const onLaunch = async () => {
                 setLaunchError("");
                 setLaunchLoading(true);
-                const launchBody = { repo_path: repoPath, roadmap_seed: roadmapSeed };
-                if ((launchPrdContent || "").trim()) {
-                    launchBody.prd_content = launchPrdContent;
-                }
-                fetch("/api/setup/launch", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(launchBody),
-                })
-                    .then(async (r) => {
-                        const d = await r.json().catch(() => ({}));
-                        setLaunchLoading(false);
-                        if (r.status === 409 && d.code === "orchestrator_running") {
-                            setLaunchError(d.error || "An orchestrator is already running. Stop it or wait before launching.");
+                try {
+                    // Check if there is an active queue entry
+                    const qr = await fetch('/api/queue').then(r => r.json()).catch(() => ({queue: []}));
+                    const qActive = (qr.queue || []).find(e => e.state === 'ACTIVE');
+                    setPreflightQueueActive(!!qActive);
+
+                    if (qActive) {
+                        // Insert at top of queue — add then move to position 1
+                        const addR = await fetch('/api/queue/add', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({project_path: repoPath}),
+                        });
+                        const addD = await addR.json().catch(() => ({}));
+                        if (!addR.ok) {
+                            setLaunchError(
+                                addD.validation_errors ? addD.validation_errors.map(e => e.message || e.check).join('; ')
+                                : addD.detail || 'Failed to add to queue'
+                            );
                             return;
                         }
-                        if (d.ok) setCurrentScreen("pipeline");
-                        else setLaunchError(d.error || "Launch failed");
-                    })
-                    .catch((e) => {
-                        setLaunchLoading(false);
-                        setLaunchError(String(e));
+                        // Move to position 1 so it runs next
+                        await fetch(`/api/queue/${addD.id}/position`, {
+                            method: 'PATCH',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({position: 1}),
+                        }).catch(() => {});
+                        setCurrentScreen('queue');
+                        return;
+                    }
+
+                    const launchBody = { repo_path: repoPath, roadmap_seed: roadmapSeed };
+                    if ((launchPrdContent || "").trim()) {
+                        launchBody.prd_content = launchPrdContent;
+                    }
+                    const r = await fetch("/api/setup/launch", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(launchBody),
                     });
+                    const d = await r.json().catch(() => ({}));
+                    if (r.status === 409 && d.code === "orchestrator_running") {
+                        setLaunchError(d.error || "An orchestrator is already running. Stop it or wait before launching.");
+                        return;
+                    }
+                    if (d.ok) setCurrentScreen("pipeline");
+                    else setLaunchError(d.error || "Launch failed");
+                } catch (e) {
+                    setLaunchError(String(e));
+                } finally {
+                    setLaunchLoading(false);
+                }
+            };
+
+            const onAddToQueue = async () => {
+                setAddToQueueError('');
+                setAddToQueueBusy(true);
+                try {
+                    const r = await fetch('/api/queue/add', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({project_path: repoPath}),
+                    });
+                    const d = await r.json().catch(() => ({}));
+                    if (!r.ok) {
+                        setAddToQueueError(
+                            d.validation_errors ? d.validation_errors.map(e => e.message || e.check).join('; ')
+                            : d.detail || 'Failed to add to queue'
+                        );
+                        return;
+                    }
+                    // Auto-trigger if queue is in auto mode and this is the only ready entry
+                    const qr = await fetch('/api/queue').then(r => r.json()).catch(() => ({}));
+                    const entries = qr.queue || [];
+                    const isAuto = qr.queue_mode === 'auto';
+                    const hasActive = entries.some(e => e.state === 'ACTIVE');
+                    const readyCount = entries.filter(e => ['READY','SKIPPED_PENDING'].includes(e.state)).length;
+                    if (isAuto && !hasActive && readyCount === 1) {
+                        await fetch('/api/queue/trigger-next', {method: 'POST'}).catch(() => {});
+                    }
+                    setCurrentScreen('queue');
+                } finally {
+                    setAddToQueueBusy(false);
+                }
             };
 
             const appCtxValue = {
@@ -5401,6 +5488,11 @@
                                     onLaunch={onLaunch}
                                     launchError={launchError}
                                     launchDisabled={launchDisabled}
+                                    launchLoading={launchLoading}
+                                    onAddToQueue={onAddToQueue}
+                                    addToQueueBusy={addToQueueBusy}
+                                    addToQueueError={addToQueueError}
+                                    hasActiveProject={preflightQueueActive}
                                     repoPathFsStatus={repoPathFsStatus}
                                     showCreateFolderPrompt={showCreateFolderPrompt}
                                     createFolderError={createFolderError}
