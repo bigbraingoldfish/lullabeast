@@ -1,5 +1,13 @@
 [
   {
+    "path": "/tmp/pytest-of-pi/pytest-15/test_switch_ready_after_single0/proj",
+    "last_used": "2026-03-31T01:00:49.223127Z"
+  },
+  {
+    "path": "/tmp/pytest-of-pi/pytest-15/test_switch_allowed_when_waiti0/proj",
+    "last_used": "2026-03-31T01:00:49.208990Z"
+  },
+  {
     "path": "/tmp/pytest-of-pi/pytest-14/test_switch_ready_after_single0/proj",
     "last_used": "2026-03-31T00:22:33.510803Z"
   },
@@ -70,13 +78,5 @@
   {
     "path": "/tmp/pytest-of-pi/pytest-4/test_switch_allowed_when_waiti0/proj",
     "last_used": "2026-03-30T18:54:16.719775Z"
-  },
-  {
-    "path": "/tmp/pytest-of-pi/pytest-3/test_switch_ready_after_single0/proj",
-    "last_used": "2026-03-30T18:51:31.959245Z"
-  },
-  {
-    "path": "/tmp/pytest-of-pi/pytest-3/test_switch_allowed_when_waiti0/proj",
-    "last_used": "2026-03-30T18:51:31.944272Z"
   }
 ]
