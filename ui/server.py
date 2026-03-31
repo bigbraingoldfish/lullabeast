@@ -4192,6 +4192,12 @@ async def post_queue_trigger_next():
         if any(c.get("status") == "fail" for c in checks):
             entry["state"] = "SKIPPED_PENDING"
             entry["skip_count"] = entry.get("skip_count", 0) + 1
+            # Cascade SKIPPED_PENDING to all descendants
+            for desc_id in _get_all_descendants(entries, entry["id"]):
+                desc = next((e for e in entries if e["id"] == desc_id), None)
+                if desc and desc["state"] not in ("ACTIVE", "COMPLETED"):
+                    desc["state"] = "SKIPPED_PENDING"
+                    desc["skip_count"] = desc.get("skip_count", 0) + 1
             _write_queue_file(q_path, q)
             continue
         # Start this project

@@ -329,7 +329,11 @@ class TestOrchestratorGroupSkip:
         assert by_id[other["id"]]["skip_count"] == 1
 
     def test_group_moves_together_after_parent_skip(self, orch):
-        """After parent skips, the group (parent+child) moves past next independent entry."""
+        """After parent skips, the group (parent+child) moves past next independent entry.
+
+        Only the parent fails preflight; the independent entry passes and starts (ACTIVE).
+        We verify positions at the moment the orchestrator writes the skip (before Indep starts).
+        """
         inst, queue_file, _ = orch
 
         parent = _make_entry("Parent", state="READY", position=1,
@@ -337,7 +341,7 @@ class TestOrchestratorGroupSkip:
         child = _make_entry("Child", state="READY", position=2,
                              parent_id=parent["id"])
         independent = _make_entry("Indep", state="READY", position=3,
-                                   project_path="/nonexistent/indep")
+                                   project_path="/tmp/indep")
 
         data = {
             "queue": [parent, child, independent],
@@ -347,18 +351,29 @@ class TestOrchestratorGroupSkip:
         with open(queue_file, "w") as f:
             json.dump(data, f)
 
-        inst._queue_preflight = lambda path: (False, "missing")
+        # Only parent fails; independent passes (but we capture the write after parent's skip)
+        written_states = []
+        original_write = inst._write_queue
+
+        def capturing_write(queue_data):
+            original_write(queue_data)
+            written_states.append(json.loads(json.dumps(queue_data)))  # deep copy
+
+        inst._write_queue = capturing_write
+        inst._queue_preflight = lambda path: (False, "missing") if "parent" in path.lower() else (False, "no git")
+
         inst._select_next_queue_project()
 
-        with open(queue_file) as f:
-            q = json.load(f)
-        by_id = {e["id"]: e for e in q["queue"]}
+        # The first write captures the state right after the group was moved
+        assert len(written_states) >= 1
+        first_write = written_states[0]
+        by_id = {e["id"]: e for e in first_write["queue"]}
 
         parent_pos = by_id[parent["id"]]["position"]
         child_pos = by_id[child["id"]]["position"]
         indep_pos = by_id[independent["id"]]["position"]
 
-        # Independent should be ahead of the group (group moved after it)
+        # After group moves past independent: Indep(1) → Parent(2) → Child(3)
         assert indep_pos < parent_pos
         # Parent and child stay together (child immediately after parent)
         assert child_pos == parent_pos + 1
