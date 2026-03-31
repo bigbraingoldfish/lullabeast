@@ -4361,6 +4361,167 @@ async def patch_queue_parent(entry_id: str, request: Request):
     return target
 
 
+@app.get("/api/queue/{entry_id}/snapshot")
+def get_queue_entry_snapshot(entry_id: str):
+    """Return project snapshot for a queue entry.
+
+    Reads the global pipeline_state.json (matches by project_path) and the
+    project's roadmap.md to build a combined progress snapshot. All fields
+    are optional — returns partial data gracefully when files are missing.
+    """
+    config = load_config()
+    q = _read_queue_file(config)
+    entry = next((e for e in q.get("queue", []) if e["id"] == entry_id), None)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Queue entry not found")
+
+    project_path = entry.get("project_path", "")
+
+    # Run metrics from global pipeline_state.json (only if project_path matches)
+    pipeline_status = None
+    current_phase = None
+    current_phase_raw_id = None
+    current_agent = None
+    planner_retries = None
+    executor_retries = None
+    reviewer_retries = None
+    last_action_timestamp = None
+    is_active_project = False
+
+    ps_path = os.path.expanduser(config.get("pipeline_state_path", "~/.openclaw/pipeline_state.json"))
+    ps = _read_json_file(ps_path) if os.path.exists(ps_path) else None
+    if ps and os.path.realpath(ps.get("project_path", "")) == os.path.realpath(project_path):
+        is_active_project = True
+        pipeline_status = ps.get("pipeline_status")
+        current_phase = ps.get("current_phase")
+        current_phase_raw_id = ps.get("current_phase_raw_id")
+        current_agent = ps.get("current_agent")
+        planner_retries = ps.get("planner_retries", 0)
+        executor_retries = ps.get("executor_retries", 0)
+        reviewer_retries = ps.get("reviewer_retries", 0)
+        last_action_timestamp = ps.get("last_action_timestamp")
+
+    # Orchestrator liveness
+    lock_path = _expand_lock_path(config)
+    orchestrator_alive = False
+    if lock_path:
+        try:
+            orchestrator_alive = _check_orchestrator_liveness(lock_path)
+        except Exception:
+            orchestrator_alive = False
+
+    # Roadmap phase counts
+    phases_total = 0
+    phases_complete = 0
+    current_phase_desc = None
+
+    import glob as glob_mod
+    roadmap_candidates = glob_mod.glob(os.path.join(project_path, "*oadmap*.md"))
+    if roadmap_candidates:
+        try:
+            with open(roadmap_candidates[0], "r", errors="replace") as f:
+                roadmap_content = f.read()
+            all_phases = _PHASE_LINE_RE.findall(roadmap_content)
+            phases_total = len(all_phases)
+            completed_re = re.compile(r"^- \[[xX]\] ", re.MULTILINE)
+            phases_complete = len(completed_re.findall(roadmap_content))
+            # Extract description for current phase
+            if current_phase_raw_id:
+                for line in roadmap_content.splitlines():
+                    if f"`{current_phase_raw_id}`" in line:
+                        parts = line.split(" | ")
+                        if len(parts) >= 3:
+                            desc = parts[-1].strip()
+                            current_phase_desc = desc[:60] + ("…" if len(desc) > 60 else "")
+                        break
+        except Exception:
+            pass
+
+    return {
+        "id": entry["id"],
+        "name": entry.get("name"),
+        "project_path": project_path,
+        "state": entry.get("state"),
+        "preflight_validated_at": entry.get("preflight_validated_at"),
+        "phases_total": phases_total,
+        "phases_complete": phases_complete,
+        "current_phase_raw_id": current_phase_raw_id,
+        "current_phase_desc": current_phase_desc,
+        "current_phase": current_phase,
+        "current_agent": current_agent,
+        "planner_retries": planner_retries,
+        "executor_retries": executor_retries,
+        "reviewer_retries": reviewer_retries,
+        "last_action_timestamp": last_action_timestamp,
+        "pipeline_status": pipeline_status,
+        "orchestrator_alive": orchestrator_alive,
+        "is_active_project": is_active_project,
+    }
+
+
+@app.post("/api/queue/{entry_id}/relaunch")
+def post_queue_entry_relaunch(entry_id: str):
+    """Spawn orchestrator for an existing queue entry without resetting pipeline state.
+
+    Used when the orchestrator process has died and needs to be restarted.
+    Does NOT call _run_init_project or reset pipeline_state.json.
+    Returns 409 if orchestrator is already alive.
+    """
+    config = load_config()
+    q = _read_queue_file(config)
+    entry = next((e for e in q.get("queue", []) if e["id"] == entry_id), None)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Queue entry not found")
+
+    lock_path = _expand_lock_path(config)
+    if lock_path:
+        try:
+            if _check_orchestrator_liveness(lock_path):
+                raise HTTPException(status_code=409, detail="Orchestrator is already running")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
+    result = _spawn_orchestrator(entry["project_path"], config)
+    if not result.get("ok"):
+        raise HTTPException(status_code=500, detail=result.get("error", "Failed to spawn orchestrator"))
+    return {"ok": True}
+
+
+@app.post("/api/queue/{entry_id}/revalidate")
+async def post_queue_entry_revalidate(entry_id: str):
+    """Re-run preflight checks for a queue entry and update its state.
+
+    Updates preflight_validated_at always. Transitions SKIPPED_PENDING → READY
+    if all checks pass, or READY → SKIPPED_PENDING if any check fails.
+    Returns {"ok": bool, "checks": [...], "entry": {...}}.
+    """
+    from datetime import datetime, timezone as tz
+
+    config = load_config()
+    q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
+    q = _read_queue_file(config)
+    entries = q.get("queue", [])
+    target = next((e for e in entries if e["id"] == entry_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Queue entry not found")
+
+    checks = _run_preflight_checks(target["project_path"])
+    now = datetime.now(tz.utc).isoformat()
+    target["preflight_validated_at"] = now
+
+    has_fail = any(c.get("status") == "fail" for c in checks)
+    if has_fail and target.get("state") == "READY":
+        target["state"] = "SKIPPED_PENDING"
+    elif not has_fail and target.get("state") == "SKIPPED_PENDING":
+        target["state"] = "READY"
+
+    q["queue"] = entries
+    _write_queue_file(q_path, q)
+    return {"ok": True, "checks": checks, "entry": target}
+
+
 def _check_installer_status(config: dict) -> dict:
     """Run read-only installer health checks and return status dict.
 
