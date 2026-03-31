@@ -3588,13 +3588,20 @@
             const [queue, setQueue] = useState([]);
             const [queueMode, setQueueMode] = useState('auto');
             const [selectedId, setSelectedId] = useState(null);
-            const [depTree, setDepTree] = useState([]);
             const [nextEligible, setNextEligible] = useState(null);
             const [showAddModal, setShowAddModal] = useState(false);
             const [error, setError] = useState('');
             const [triggerBusy, setTriggerBusy] = useState(false);
             const [triggerMsg, setTriggerMsg] = useState('');
             const [loading, setLoading] = useState(true);
+            const [snapshot, setSnapshot] = useState(null);
+            const [snapshotLoading, setSnapshotLoading] = useState(false);
+            const [snapshotVersion, setSnapshotVersion] = useState(0);
+            const [hubBusy, setHubBusy] = useState(false);
+            const [hubError, setHubError] = useState('');
+            const [pendingCommand, setPendingCommand] = useState(null);
+            const [revalidateChecks, setRevalidateChecks] = useState(null);
+            const [escalationMsg, setEscalationMsg] = useState('');
             const dragItem = useRef(null);
             const preDragOrder = useRef(null);
 
@@ -3604,14 +3611,37 @@
                     .then(d => {
                         setQueue(d.queue || []);
                         setQueueMode(d.queue_mode || 'auto');
-                        setDepTree(d.dependency_tree || []);
                         setNextEligible(d.next_eligible || null);
                         setLoading(false);
+                        setSnapshotVersion(v => v + 1);
                     })
                     .catch(() => { setLoading(false); });
             };
 
             useEffect(() => { fetchQueue(); }, []);
+
+            // Fetch snapshot when selected entry or version changes
+            useEffect(() => {
+                if (!selectedId) { setSnapshot(null); return; }
+                setSnapshotLoading(true);
+                fetch(`/api/queue/${selectedId}/snapshot`)
+                    .then(r => r.json())
+                    .then(d => setSnapshot(d))
+                    .catch(() => setSnapshot(null))
+                    .finally(() => setSnapshotLoading(false));
+            }, [selectedId, snapshotVersion]);
+
+            // Fetch escalation message for BLOCKED active project
+            useEffect(() => {
+                if (!snapshot || !snapshot.is_active_project || snapshot.pipeline_status !== 'BLOCKED') {
+                    setEscalationMsg('');
+                    return;
+                }
+                fetch('/api/state')
+                    .then(r => r.json())
+                    .then(d => setEscalationMsg(d.escalation_message || d.escalation_trigger_reason || ''))
+                    .catch(() => {});
+            }, [snapshot]);
 
             const selected = queue.find(e => e.id === selectedId) || null;
             const activeEntry = queue.find(e => e.state === 'ACTIVE');
@@ -3641,6 +3671,7 @@
             };
 
             const handleRemove = (id) => {
+                if (!window.confirm('Remove this project from the queue?')) return;
                 fetch(`/api/queue/${id}`, {method: 'DELETE'})
                     .then(async r => {
                         if (!r.ok) { const d = await r.json().catch(() => ({})); setError(d.detail || 'Cannot remove'); return; }
@@ -3651,16 +3682,70 @@
             };
 
             const handleSetParent = (id, parentId) => {
+                setHubError('');
                 fetch(`/api/queue/${id}/parent`, {
                     method: 'PATCH',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({parent_id: parentId || null}),
                 })
                 .then(async r => {
-                    if (!r.ok) { const d = await r.json().catch(() => ({})); setError(d.detail || 'Cannot set parent'); return; }
+                    if (!r.ok) { const d = await r.json().catch(() => ({})); setHubError(d.detail || 'Cannot set parent'); return; }
                     fetchQueue();
                 })
-                .catch(() => setError('Request failed'));
+                .catch(() => setHubError('Request failed'));
+            };
+
+            const handleRevalidate = (id) => {
+                setHubBusy(true);
+                setHubError('');
+                setRevalidateChecks(null);
+                fetch(`/api/queue/${id}/revalidate`, {method: 'POST'})
+                    .then(async r => {
+                        const d = await r.json().catch(() => ({}));
+                        if (!r.ok) { setHubError(d.detail || 'Revalidation failed'); return; }
+                        setRevalidateChecks(d.checks || []);
+                        fetchQueue();
+                    })
+                    .catch(() => setHubError('Request failed'))
+                    .finally(() => setHubBusy(false));
+            };
+
+            const handleRelaunch = (id) => {
+                setHubBusy(true);
+                setHubError('');
+                fetch(`/api/queue/${id}/relaunch`, {method: 'POST'})
+                    .then(async r => {
+                        const d = await r.json().catch(() => ({}));
+                        if (!r.ok) { setHubError(d.detail || 'Relaunch failed'); return; }
+                        fetchQueue();
+                    })
+                    .catch(() => setHubError('Request failed'))
+                    .finally(() => setHubBusy(false));
+            };
+
+            const handleCommand = (cmd) => {
+                if (['RESET_PHASE', 'RESET_REVIEWER', 'SKIP', 'STOP'].includes(cmd)) {
+                    if (pendingCommand === cmd) {
+                        // confirmed — send it
+                        setPendingCommand(null);
+                    } else {
+                        setPendingCommand(cmd);
+                        return;
+                    }
+                }
+                setHubBusy(true);
+                setHubError('');
+                fetch('/api/command', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({command: cmd}),
+                })
+                .then(async r => {
+                    if (!r.ok) { const d = await r.json().catch(() => ({})); setHubError(d.detail || 'Command failed'); return; }
+                    fetchQueue();
+                })
+                .catch(() => setHubError('Request failed'))
+                .finally(() => setHubBusy(false));
             };
 
             // Drag-to-reorder handlers
@@ -3674,7 +3759,6 @@
                 e.preventDefault();
                 if (!dragItem.current || dragItem.current.id === targetEntry.id) return;
                 if (['ACTIVE', 'COMPLETED'].includes(dragItem.current.state)) return;
-                // Optimistic reorder for visual feedback
                 const newQueue = [...queue];
                 const fromIdx = newQueue.findIndex(e => e.id === dragItem.current.id);
                 const toIdx = newQueue.findIndex(e => e.id === targetEntry.id);
@@ -3715,20 +3799,274 @@
                 return `${Math.floor(diff/3600)}h ago`;
             }
 
-            // Recursive dependency tree renderer
-            function DepNode({ node, depth }) {
-                const stateClass = QUEUE_STATE_CLASSES[node.state] || 'bg-slate-700 text-white';
+            // ── Column 2: Project Snapshot ──────────────────────────────────────────
+            function QueueProjectSnapshot() {
+                if (!selected) return (
+                    <p className="header-text text-xs text-slate-500 text-center mt-8">Select a project to view details</p>
+                );
+                if (snapshotLoading) return (
+                    <p className="header-text text-xs text-slate-500 text-center mt-8">Loading…</p>
+                );
+                const snap = snapshot;
+                const hasRunData = snap && snap.is_active_project;
+                const agentRetries = snap && snap.current_agent ? {
+                    planner: snap.planner_retries || 0,
+                    executor: snap.executor_retries || 0,
+                    reviewer: snap.reviewer_retries || 0,
+                }[snap.current_agent] : null;
+
                 return (
-                    <div style={{marginLeft: depth * 16 + 'px'}} className="mb-1">
-                        {depth > 0 && <span className="text-slate-600 mr-1">└</span>}
-                        <span className="text-slate-300 text-xs">{node.name}</span>
-                        <span className={`header-text ml-2 px-1.5 py-0.5 rounded text-xs font-medium ${stateClass}`}>{node.state}</span>
-                        {(node.children || []).map(c => <DepNode key={c.id} node={c} depth={depth + 1}/>)}
+                    <div className="space-y-3">
+                        <div>
+                            <p className="header-text text-base text-slate-200 font-semibold leading-tight">{selected.name}</p>
+                            <p className="header-text text-xs text-slate-500 font-mono mt-0.5 break-all">{selected.project_path}</p>
+                        </div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                            <span className={`header-text px-2 py-0.5 rounded text-xs font-medium ${QUEUE_STATE_CLASSES[selected.state] || 'bg-slate-700 text-white'}`}>{selected.state}</span>
+                            {selected.blocked_at && <span className="header-text text-xs text-slate-500">Blocked {relTime(selected.blocked_at)}</span>}
+                            {selected.started_at && <span className="header-text text-xs text-slate-500">Started {relTime(selected.started_at)}</span>}
+                            {selected.completed_at && <span className="header-text text-xs text-slate-500">Done {relTime(selected.completed_at)}</span>}
+                        </div>
+                        {selected.skip_count > 0 && (
+                            <p className="header-text text-xs text-orange-400">↩ Skipped {selected.skip_count} time{selected.skip_count !== 1 ? 's' : ''}</p>
+                        )}
+
+                        {/* Phase progress */}
+                        {snap && snap.phases_total > 0 ? (
+                            <div>
+                                <div className="flex items-center justify-between mb-1">
+                                    <span className="header-text text-xs text-slate-400">Phases</span>
+                                    <span className="header-text text-xs text-slate-300">{snap.phases_complete} / {snap.phases_total} complete</span>
+                                </div>
+                                <div className="h-1.5 rounded-full bg-[#1a1d21] overflow-hidden">
+                                    <div className="h-full rounded-full bg-emerald-600 transition-all"
+                                        style={{width: `${Math.round((snap.phases_complete / snap.phases_total) * 100)}%`}}/>
+                                </div>
+                            </div>
+                        ) : null}
+
+                        {/* Run metrics */}
+                        {hasRunData ? (
+                            <div className="space-y-1.5">
+                                {snap.current_phase_raw_id && (
+                                    <div>
+                                        <span className="header-text text-xs text-slate-500">Current phase: </span>
+                                        <span className="header-text text-xs text-slate-300 font-mono">{snap.current_phase_raw_id}</span>
+                                        {snap.current_phase_desc && (
+                                            <span className="header-text text-xs text-slate-500"> — {snap.current_phase_desc}</span>
+                                        )}
+                                    </div>
+                                )}
+                                {snap.current_agent && (
+                                    <p className="header-text text-xs text-slate-400">
+                                        {snap.current_agent.charAt(0).toUpperCase() + snap.current_agent.slice(1)}
+                                        {agentRetries !== null && agentRetries > 0 && ` — attempt ${agentRetries + 1}`}
+                                    </p>
+                                )}
+                                {snap.last_action_timestamp && (
+                                    <p className="header-text text-xs text-slate-500">Last action: {relTime(snap.last_action_timestamp)}</p>
+                                )}
+                            </div>
+                        ) : (
+                            <p className="header-text text-xs text-slate-600 italic">Not the active project — run metrics unavailable</p>
+                        )}
+
+                        {selected.preflight_validated_at && (
+                            <p className="header-text text-xs text-slate-500">Validated {relTime(selected.preflight_validated_at)}</p>
+                        )}
                     </div>
                 );
             }
 
-            const hasDeps = queue.some(e => e.parent_id);
+            // ── Column 3: Action Hub ────────────────────────────────────────────────
+            function QueueActionHub() {
+                if (!selected) return (
+                    <p className="header-text text-xs text-slate-500 text-center mt-8">Select a project to see actions</p>
+                );
+
+                const state = selected.state;
+
+                // ACTIVE
+                if (state === 'ACTIVE') return (
+                    <div className="space-y-3">
+                        <p className="header-text text-xs text-slate-400">This project is currently running.</p>
+                        <button onClick={() => setCurrentScreen('pipeline')}
+                            className="header-text text-xs px-3 py-1.5 rounded bg-teal-900/40 text-teal-300 hover:bg-teal-900/70 w-full">
+                            View in Pipeline Monitor
+                        </button>
+                    </div>
+                );
+
+                // BLOCKED
+                if (state === 'BLOCKED') {
+                    const isEscalation = snapshot && snapshot.is_active_project && snapshot.pipeline_status === 'BLOCKED';
+                    const isOrchestratorDown = snapshot && snapshot.is_active_project && !snapshot.orchestrator_alive;
+
+                    if (isEscalation) {
+                        const ESCALATION_CMDS = [
+                            { command: 'RESET_PHASE',     label: 'Revert to Planner',  needsConfirm: true  },
+                            { command: 'RESET_EXECUTION', label: 'Revert to Executor', needsConfirm: false },
+                            { command: 'RESET_REVIEWER',  label: 'Revert to Reviewer', needsConfirm: true  },
+                            { command: 'SKIP',            label: 'Skip Phase',          needsConfirm: true  },
+                            { command: 'PROCEED',         label: 'Accept & Advance',    needsConfirm: false },
+                            { command: 'STOP',            label: 'Halt Pipeline',       needsConfirm: true  },
+                        ];
+                        return (
+                            <div className="space-y-3">
+                                <div>
+                                    <p className="header-text text-xs text-slate-400 font-semibold mb-1">Awaiting escalation command</p>
+                                    {escalationMsg && (
+                                        <p className="header-text text-xs text-amber-300 bg-amber-950/30 border border-amber-700/40 rounded p-2 leading-relaxed">{escalationMsg}</p>
+                                    )}
+                                </div>
+                                <div className="grid grid-cols-2 gap-1.5">
+                                    {ESCALATION_CMDS.map(({command, label, needsConfirm}) => {
+                                        const confirming = pendingCommand === command;
+                                        return (
+                                            <div key={command}>
+                                                <button
+                                                    disabled={hubBusy}
+                                                    onClick={() => handleCommand(command)}
+                                                    className={`header-text text-xs px-2 py-1.5 rounded w-full text-left disabled:opacity-50 ${
+                                                        confirming ? 'bg-amber-700/60 text-amber-100' : 'bg-[#1a1d21] text-slate-300 hover:bg-[#22252a]'
+                                                    }`}>
+                                                    {confirming ? `Confirm ${label}?` : label}
+                                                </button>
+                                                {confirming && (
+                                                    <button onClick={() => setPendingCommand(null)}
+                                                        className="header-text text-xs text-slate-500 hover:text-slate-300 mt-0.5 pl-1">cancel</button>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                                {hubError && <p className="header-text text-xs text-red-400">{hubError}</p>}
+                            </div>
+                        );
+                    }
+
+                    if (isOrchestratorDown) return (
+                        <div className="space-y-3">
+                            <p className="header-text text-xs text-slate-400">Orchestrator process has stopped.</p>
+                            <button onClick={() => handleRelaunch(selected.id)} disabled={hubBusy}
+                                className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-slate-900 font-semibold hover:bg-[#00c8f0] disabled:opacity-50 w-full">
+                                {hubBusy ? 'Relaunching…' : 'Relaunch Orchestrator'}
+                            </button>
+                            {hubError && <p className="header-text text-xs text-red-400">{hubError}</p>}
+                        </div>
+                    );
+
+                    return (
+                        <div className="space-y-3">
+                            <p className="header-text text-xs text-slate-400">This project was blocked. Check Pipeline Monitor for details.</p>
+                            <button onClick={() => setCurrentScreen('pipeline')}
+                                className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-[#00b4d8] hover:bg-[#22252a] w-full">
+                                View in Pipeline Monitor
+                            </button>
+                        </div>
+                    );
+                }
+
+                // DEPENDENCY_HOLD
+                if (state === 'DEPENDENCY_HOLD') {
+                    const parent = queue.find(e => e.id === selected.parent_id);
+                    return (
+                        <div className="space-y-3">
+                            <div>
+                                <p className="header-text text-xs text-slate-400 mb-1">Waiting for:</p>
+                                {parent ? (
+                                    <div className="flex items-center gap-2">
+                                        <button onClick={() => setSelectedId(parent.id)}
+                                            className="header-text text-xs text-[#00b4d8] hover:underline">{parent.name}</button>
+                                        <span className={`header-text px-1.5 py-0.5 rounded text-xs font-medium ${QUEUE_STATE_CLASSES[parent.state] || 'bg-slate-700 text-white'}`}>{parent.state}</span>
+                                    </div>
+                                ) : (
+                                    <span className="header-text text-xs text-slate-500">Unknown parent</span>
+                                )}
+                            </div>
+                            <button onClick={() => { if (window.confirm('Clear this dependency?')) handleSetParent(selected.id, null); }}
+                                disabled={hubBusy}
+                                className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-300 hover:bg-[#22252a] disabled:opacity-50 w-full">
+                                Clear Dependency
+                            </button>
+                            {hubError && <p className="header-text text-xs text-red-400">{hubError}</p>}
+                        </div>
+                    );
+                }
+
+                // COMPLETED
+                if (state === 'COMPLETED') return (
+                    <div className="space-y-3">
+                        <p className="header-text text-xs text-slate-500">Pipeline complete.</p>
+                        <button onClick={() => handleRemove(selected.id)}
+                            className="header-text text-xs px-3 py-1.5 rounded bg-red-900/40 text-red-300 hover:bg-red-900/70 w-full">
+                            Remove from Queue
+                        </button>
+                    </div>
+                );
+
+                // FAILED
+                if (state === 'FAILED') return (
+                    <div className="space-y-3">
+                        {snapshot && snapshot.pipeline_status && (
+                            <p className="header-text text-xs text-red-400">Status: {snapshot.pipeline_status}</p>
+                        )}
+                        <button onClick={() => handleRemove(selected.id)}
+                            className="header-text text-xs px-3 py-1.5 rounded bg-red-900/40 text-red-300 hover:bg-red-900/70 w-full">
+                            Remove from Queue
+                        </button>
+                    </div>
+                );
+
+                // READY / SKIPPED_PENDING (default)
+                const getDescendants = (id) => queue.filter(x => x.parent_id === id).flatMap(x => [x.id, ...getDescendants(x.id)]);
+                const descendants = getDescendants(selected.id);
+
+                return (
+                    <div className="space-y-4">
+                        {/* Dependency selector */}
+                        <div>
+                            <label className="header-text text-xs text-slate-400 mb-1 block">Depends on</label>
+                            <select
+                                value={selected.parent_id || ''}
+                                onChange={e => handleSetParent(selected.id, e.target.value || null)}
+                                className="header-text text-xs bg-[#1a1d21] text-slate-200 border border-[#2a2d32] rounded px-2 py-1 w-full">
+                                <option value="">None</option>
+                                {queue.filter(e => e.id !== selected.id && !descendants.includes(e.id)).map(e => (
+                                    <option key={e.id} value={e.id}>{e.name} [{e.state}]</option>
+                                ))}
+                            </select>
+                        </div>
+
+                        {/* Revalidate */}
+                        <div>
+                            <button onClick={() => { setRevalidateChecks(null); handleRevalidate(selected.id); }}
+                                disabled={hubBusy}
+                                className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-300 hover:bg-[#22252a] disabled:opacity-50 w-full">
+                                {hubBusy ? 'Validating…' : 'Re-validate'}
+                            </button>
+                            {revalidateChecks && (
+                                <ul className="mt-2 space-y-1">
+                                    {revalidateChecks.map((c, i) => (
+                                        <li key={i} className={`header-text text-xs flex gap-1.5 ${c.status === 'fail' ? 'text-red-400' : c.status === 'warn' ? 'text-amber-400' : c.status === 'fixed' ? 'text-[#00b4d8]' : 'text-emerald-400'}`}>
+                                            <span className="font-mono">[{c.status}]</span>
+                                            <span>{c.check}: {c.message}</span>
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
+                        </div>
+
+                        {/* Remove */}
+                        <button onClick={() => handleRemove(selected.id)}
+                            className="header-text text-xs px-3 py-1.5 rounded bg-red-900/40 text-red-300 hover:bg-red-900/70 w-full">
+                            Remove from Queue
+                        </button>
+
+                        {hubError && <p className="header-text text-xs text-red-400">{hubError}</p>}
+                    </div>
+                );
+            }
 
             return (
                 <div className="flex flex-col h-full overflow-hidden">
@@ -3762,7 +4100,7 @@
 
                     {/* Three-column body */}
                     <div className="flex-1 grid grid-cols-[30%_35%_35%] gap-0 overflow-hidden">
-                        {/* Left: Queue list */}
+                        {/* Column 1: Queue list */}
                         <div className="bg-[#0d0f12] border-r border-[#1a1d21] overflow-y-auto p-3">
                             {loading ? (
                                 <p className="header-text text-xs text-slate-500 text-center mt-8">Loading queue…</p>
@@ -3785,8 +4123,8 @@
                                             onDragOver={e => handleDragOver(e, entry)}
                                             onDrop={e => handleDrop(e, entry)}
                                             onDragEnd={handleDragEnd}
-                                            onClick={() => setSelectedId(entry.id)}
-                                            onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelectedId(entry.id); } }}
+                                            onClick={() => { setSelectedId(entry.id); setHubError(''); setRevalidateChecks(null); setPendingCommand(null); }}
+                                            onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelectedId(entry.id); setHubError(''); setRevalidateChecks(null); setPendingCommand(null); } }}
                                             className={`flex items-center gap-2 p-2.5 rounded mb-1 cursor-pointer border transition-colors ${
                                                 isActive ? 'border-[#00b4d8]/60 bg-[#0d1f26]' : 'border-transparent hover:bg-[#141618]'
                                             }`}
@@ -3795,8 +4133,8 @@
                                             {!canDrag && <span className="w-3"/>}
                                             <span className="header-text text-xs text-slate-500 w-5 text-right flex-shrink-0">{entry.position}</span>
                                             <span className="flex-1 header-text text-xs text-slate-200 truncate">{entry.name}</span>
-                                            {entry.parent_id && <span className="text-indigo-400 text-xs" title="Has dependency">⊂</span>}
-                                            {entry.skip_count > 0 && <span className="header-text text-xs text-orange-400">×{entry.skip_count}</span>}
+                                            {entry.parent_id && <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 flex-shrink-0 inline-block" title="Has dependency"/>}
+                                            {entry.skip_count > 0 && <span className="header-text text-xs text-orange-400">↩{entry.skip_count}</span>}
                                             <span className={`header-text px-1.5 py-0.5 rounded text-xs font-medium flex-shrink-0 ${stateClass}`}>{entry.state}</span>
                                         </div>
                                     );
@@ -3804,100 +4142,17 @@
                             )}
                         </div>
 
-                        {/* Center: Entry detail */}
+                        {/* Column 2: Project snapshot */}
                         <div className="bg-[#0d0f12] border-r border-[#1a1d21] p-4 overflow-y-auto">
-                            {!selected ? (
-                                <p className="header-text text-xs text-slate-500 text-center mt-8">Select a project to view details</p>
-                            ) : (
-                                <div className="space-y-3">
-                                    <div>
-                                        <p className="header-text text-base text-slate-200 font-semibold">{selected.name}</p>
-                                        <p className="header-text text-xs text-slate-500 font-mono mt-0.5 break-all">{selected.project_path}</p>
-                                    </div>
-                                    <div className="flex items-center gap-2">
-                                        <span className={`header-text px-2 py-0.5 rounded text-xs font-medium ${QUEUE_STATE_CLASSES[selected.state] || 'bg-slate-700 text-white'}`}>{selected.state}</span>
-                                        {selected.blocked_at && <span className="header-text text-xs text-slate-500">Blocked {relTime(selected.blocked_at)}</span>}
-                                        {selected.started_at && <span className="header-text text-xs text-slate-500">Started {relTime(selected.started_at)}</span>}
-                                        {selected.completed_at && <span className="header-text text-xs text-slate-500">Done {relTime(selected.completed_at)}</span>}
-                                    </div>
-                                    {selected.skip_count > 0 && (
-                                        <p className="header-text text-xs text-orange-400">Skipped {selected.skip_count} time{selected.skip_count !== 1 ? 's' : ''}</p>
-                                    )}
-                                    {/* Parent dependency — editable select for non-locked states */}
-                                    {['ACTIVE', 'COMPLETED'].includes(selected.state) ? (
-                                        selected.parent_id && (
-                                            <div>
-                                                <p className="header-text text-xs text-slate-400 mb-1">Depends on:</p>
-                                                {(() => { const p = queue.find(e => e.id === selected.parent_id); return p ? (
-                                                    <button onClick={() => setSelectedId(p.id)} className="header-text text-xs text-[#00b4d8] hover:underline">{p.name}</button>
-                                                ) : <span className="header-text text-xs text-slate-500">Unknown parent</span>; })()}
-                                            </div>
-                                        )
-                                    ) : (
-                                        <div>
-                                            <label className="header-text text-xs text-slate-400 mb-1 block">Depends on:</label>
-                                            <select
-                                                value={selected.parent_id || ''}
-                                                onChange={e => handleSetParent(selected.id, e.target.value || null)}
-                                                className="header-text text-xs bg-[#1a1d21] text-slate-200 border border-[#2a2d32] rounded px-2 py-1 w-full">
-                                                <option value="">None</option>
-                                                {queue.filter(e => {
-                                                    if (e.id === selected.id) return false;
-                                                    // exclude descendants to prevent cycles
-                                                    const getDesc = (id) => queue.filter(x => x.parent_id === id).flatMap(x => [x.id, ...getDesc(x.id)]);
-                                                    return !getDesc(selected.id).includes(e.id);
-                                                }).map(e => (
-                                                    <option key={e.id} value={e.id}>{e.name}</option>
-                                                ))}
-                                            </select>
-                                        </div>
-                                    )}
-                                    {queue.filter(e => e.parent_id === selected.id).length > 0 && (
-                                        <div>
-                                            <p className="header-text text-xs text-slate-400 mb-1">Dependents:</p>
-                                            {queue.filter(e => e.parent_id === selected.id).map(c => (
-                                                <button key={c.id} onClick={() => setSelectedId(c.id)} className="header-text text-xs text-[#00b4d8] hover:underline block">{c.name}</button>
-                                            ))}
-                                        </div>
-                                    )}
-                                    {selected.preflight_validated_at && (
-                                        <p className="header-text text-xs text-slate-500">Validated {relTime(selected.preflight_validated_at)}</p>
-                                    )}
-                                    {/* Contextual action buttons */}
-                                    <div className="flex flex-wrap gap-2 pt-2">
-                                        {['READY', 'SKIPPED_PENDING', 'DEPENDENCY_HOLD', 'FAILED', 'COMPLETED'].includes(selected.state) && (
-                                            <button onClick={() => handleRemove(selected.id)}
-                                                className="header-text text-xs px-2 py-1 rounded bg-red-900/40 text-red-300 hover:bg-red-900/70">
-                                                Remove
-                                            </button>
-                                        )}
-                                        {selected.state === 'BLOCKED' && (
-                                            <button onClick={() => setCurrentScreen('pipeline')}
-                                                className="header-text text-xs px-2 py-1 rounded bg-[#1a1d21] text-[#00b4d8] hover:bg-[#22252a]">
-                                                View in Monitor
-                                            </button>
-                                        )}
-                                        {selected.state === 'ACTIVE' && (
-                                            <button onClick={() => setCurrentScreen('pipeline')}
-                                                className="header-text text-xs px-2 py-1 rounded bg-teal-900/40 text-teal-300 hover:bg-teal-900/70">
-                                                View in Monitor
-                                            </button>
-                                        )}
-                                    </div>
-                                </div>
-                            )}
+                            <QueueProjectSnapshot/>
                         </div>
 
-                        {/* Right: Dependency tree */}
+                        {/* Column 3: Action hub */}
                         <div className="bg-[#0d0f12] p-4 overflow-y-auto">
-                            <p className="header-text text-xs text-slate-400 mb-3 font-semibold">Dependencies</p>
-                            {!hasDeps ? (
-                                <p className="header-text text-xs text-slate-500">No dependencies set — use the "Depends on" selector in the detail panel or the Depends on field when adding a project.</p>
-                            ) : (
-                                <div>
-                                    {depTree.map(node => <DepNode key={node.id} node={node} depth={0}/>)}
-                                </div>
+                            {selected && (
+                                <p className="header-text text-xs text-slate-500 font-semibold mb-3 uppercase tracking-wide">Actions</p>
                             )}
+                            <QueueActionHub/>
                         </div>
                     </div>
 
