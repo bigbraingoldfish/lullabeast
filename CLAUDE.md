@@ -492,6 +492,18 @@ Agent identity docs (`IDENTITY.md`, `SOUL.md`, etc.) are deployed by `install.sh
 
 The orchestrator's `_queue_preflight()` checks: directory exists, `.git` present, `roadmap*.md` present. This is intentionally lighter than the server's `_run_preflight_checks()`, which also validates symlink, `.gitignore`, agent workspace files, etc. **Known MVP limitation:** a project that passes `_queue_preflight` may still fail mid-pipeline if the full server-side preconditions are not met. The server's `_run_preflight_checks` is used at queue-add time and at `trigger-next` time; the orchestrator's check runs only on auto-advance between queue entries.
 
+### DEPENDENCY_HOLD state
+
+`DEPENDENCY_HOLD` is a valid entry state. It is applied:
+- **Server-side**: when a parent is assigned via `PATCH /api/queue/{entry_id}/parent` (if parent is not COMPLETED), and when a project is added via `POST /api/queue/add` with a non-COMPLETED parent.
+- **Orchestrator-side**: enforced in `_select_next_queue_project` before activating a queued project.
+
+Clearing a parent (`parent_id: null`) via the API restores a `DEPENDENCY_HOLD` child to `READY`.
+
+### `QUEUE_HALTED` pipeline status
+
+`QUEUE_HALTED` is one of the 8 valid `pipeline_status` values (see State Machine Rules). It is set by the orchestrator when all remaining queue entries are blocked, in dependency hold, or fail preflight. The `pipeline_state.json` also contains `queue_halted_reason: "all_blocked" | "all_dependency_hold" | "mixed"`. The Pipeline Monitor surfaces this as an amber "Queue: halted" pill.
+
 ---
 
 ## Unresolved Items

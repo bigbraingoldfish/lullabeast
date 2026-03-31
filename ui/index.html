@@ -3619,7 +3619,7 @@
         // ─── Queue Screen ─────────────────────────────────────────────────────────
 
         function QueueScreen() {
-            const { setCurrentScreen } = useContext(AppCtx);
+            const { setCurrentScreen, pipelineStatus } = useContext(AppCtx);
             const [queue, setQueue] = useState([]);
             const [queueMode, setQueueMode] = useState('auto');
             const [selectedId, setSelectedId] = useState(null);
@@ -3629,6 +3629,7 @@
             const [error, setError] = useState('');
             const [triggerBusy, setTriggerBusy] = useState(false);
             const [triggerMsg, setTriggerMsg] = useState('');
+            const [loading, setLoading] = useState(true);
             const dragItem = useRef(null);
             const preDragOrder = useRef(null);
 
@@ -3640,8 +3641,9 @@
                         setQueueMode(d.queue_mode || 'auto');
                         setDepTree(d.dependency_tree || []);
                         setNextEligible(d.next_eligible || null);
+                        setLoading(false);
                     })
-                    .catch(() => {});
+                    .catch(() => { setLoading(false); });
             };
 
             useEffect(() => { fetchQueue(); }, []);
@@ -3781,7 +3783,7 @@
                             ))}
                         </div>
                         {queueMode === 'manual' && (
-                            <button onClick={handleTriggerNext} disabled={triggerBusy || !!activeEntry}
+                            <button onClick={handleTriggerNext} disabled={triggerBusy || !!activeEntry || ['RUNNING','WAITING_FOR_SENTINEL','WAITING_FOR_HUMAN'].includes(pipelineStatus)}
                                 className="header-text text-xs px-3 py-1.5 rounded bg-emerald-700 text-white hover:bg-emerald-600 disabled:opacity-50">
                                 {triggerBusy ? 'Starting…' : 'Trigger Next'}
                             </button>
@@ -3797,7 +3799,9 @@
                     <div className="flex-1 grid grid-cols-[30%_35%_35%] gap-0 overflow-hidden">
                         {/* Left: Queue list */}
                         <div className="bg-[#0d0f12] border-r border-[#1a1d21] overflow-y-auto p-3">
-                            {queue.length === 0 ? (
+                            {loading ? (
+                                <p className="header-text text-xs text-slate-500 text-center mt-8">Loading queue…</p>
+                            ) : queue.length === 0 ? (
                                 <p className="header-text text-xs text-slate-500 text-center mt-8">No projects in queue.<br/>Click "+ Add Project" to get started.</p>
                             ) : (
                                 queue.map(entry => {
@@ -3944,7 +3948,7 @@
         }
 
         function PipelineScreen() {
-            const { setCurrentScreen } = useContext(AppCtx);
+            const { setCurrentScreen, setPipelineStatus } = useContext(AppCtx);
             const [pState, setPState] = useState({
                 pipeline_status: 'Loading...',
                 orchestrator_alive: true,
@@ -4123,6 +4127,7 @@
                     .then(res => res.json())
                     .then(data => {
                         setPState(prev => ({ ...prev, ...data }));
+                        setPipelineStatus(data.pipeline_status || '');
                         setLastUpdate(new Date().toLocaleTimeString());
                     })
                     .catch(() => {});
@@ -4317,7 +4322,7 @@
                                         >
                                             {pState.queue_halted
                                                 ? 'Queue: halted'
-                                                : `Queue: ${((pState.ready_count || 0) + (pState.blocked_count || 0))} waiting`}
+                                                : `Queue: ${((pState.queue_length || 0) - (pState.completed_count || 0))} waiting`}
                                         </button>
                                     )}
                                 </div>
@@ -4772,6 +4777,7 @@
             }, [setupComplete]);
 
             const [currentScreen, setCurrentScreen] = useState("pipeline");
+            const [pipelineStatus, setPipelineStatus] = useState('');
             const [seedRoadmap, setSeedRoadmap] = useState("");
             const [repoPath, setRepoPath] = useState("");
             const [repoPathLocked, setRepoPathLocked] = useState(false);
@@ -5119,6 +5125,8 @@
                 setSeedRoadmap,
                 setRoadmapSeedLocked,
                 setCurrentScreen,
+                pipelineStatus,
+                setPipelineStatus,
             };
 
             if (setupComplete === null) {

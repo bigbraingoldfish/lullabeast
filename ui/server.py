@@ -4234,13 +4234,20 @@ async def post_queue_add(request: Request):
     if parent_id and _detect_circular_dependency(entries, None, parent_id):
         raise HTTPException(status_code=400, detail="Circular dependency detected")
 
+    # Determine initial state — DEPENDENCY_HOLD if parent exists and is not COMPLETED
+    initial_state = "READY"
+    if parent_id:
+        parent_entry = next((e for e in entries if e["id"] == parent_id), None)
+        if parent_entry and parent_entry.get("state") != "COMPLETED":
+            initial_state = "DEPENDENCY_HOLD"
+
     now = datetime.now(tz.utc).isoformat()
     entry = {
         "id": str(_uuid.uuid4()),
         "project_path": os.path.realpath(project_path),
         "idea_id": idea_id,
         "name": os.path.basename(project_path.rstrip("/")) or project_path,
-        "state": "READY",
+        "state": initial_state,
         "position": len(entries) + 1,
         "parent_id": parent_id,
         "added_at": now,
@@ -4338,9 +4345,20 @@ async def patch_queue_parent(entry_id: str, request: Request):
         raise HTTPException(status_code=400, detail="Circular dependency detected")
 
     target["parent_id"] = parent_id
+
+    if parent_id is None:
+        # Clearing parent: restore to READY if currently in DEPENDENCY_HOLD
+        if target.get("state") == "DEPENDENCY_HOLD":
+            target["state"] = "READY"
+    else:
+        # Setting parent: apply DEPENDENCY_HOLD if parent not COMPLETED
+        parent_entry = next((e for e in entries if e["id"] == parent_id), None)
+        if parent_entry and parent_entry.get("state") != "COMPLETED":
+            target["state"] = "DEPENDENCY_HOLD"
+
     q["queue"] = entries
     _write_queue_file(q_path, q)
-    return {"ok": True}
+    return target
 
 
 def _check_installer_status(config: dict) -> dict:
