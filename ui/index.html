@@ -3511,17 +3511,10 @@
 
         // ─── Add Project Modal ────────────────────────────────────────────────────
 
-        function AddProjectModal({ onClose, onAdded, existingEntries }) {
+        function AddProjectModal({ onClose, onAdded }) {
             const [projectPath, setProjectPath] = useState('');
-            const [parentId, setParentId] = useState('');
-            const [ideaId, setIdeaId] = useState('');
             const [validating, setValidating] = useState(false);
             const [errors, setErrors] = useState([]);
-            const [ideas, setIdeas] = useState([]);
-
-            useEffect(() => {
-                fetch('/api/ideas').then(r => r.json()).then(setIdeas).catch(() => {});
-            }, []);
 
             const handleAdd = () => {
                 if (!projectPath.trim()) { setErrors([{message: 'Project path is required'}]); return; }
@@ -3532,8 +3525,6 @@
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({
                         project_path: projectPath.trim(),
-                        idea_id: ideaId || null,
-                        parent_id: parentId || null,
                     }),
                 })
                 .then(async r => {
@@ -3563,32 +3554,6 @@
                                     placeholder="/home/pi/projects/my-app"
                                     className="w-full bg-[#1a1d21] border border-[#2a2d31] rounded px-3 py-2 text-sm text-slate-200 font-mono focus:outline-none focus:border-[#00b4d8]"/>
                             </div>
-
-                            {existingEntries && existingEntries.length > 0 && (
-                                <div>
-                                    <label className="header-text text-xs text-slate-400 mb-1 block">Depends on (optional)</label>
-                                    <select value={parentId} onChange={e => setParentId(e.target.value)}
-                                        className="w-full bg-[#1a1d21] border border-[#2a2d31] rounded px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-[#00b4d8]">
-                                        <option value="">None</option>
-                                        {existingEntries.map(e => (
-                                            <option key={e.id} value={e.id}>{e.name} [{e.state}]</option>
-                                        ))}
-                                    </select>
-                                </div>
-                            )}
-
-                            {ideas.length > 0 && (
-                                <div>
-                                    <label className="header-text text-xs text-slate-400 mb-1 block">Link idea (optional)</label>
-                                    <select value={ideaId} onChange={e => setIdeaId(e.target.value)}
-                                        className="w-full bg-[#1a1d21] border border-[#2a2d31] rounded px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-[#00b4d8]">
-                                        <option value="">None</option>
-                                        {ideas.map(i => (
-                                            <option key={i.id} value={i.id}>{i.name || i.id}</option>
-                                        ))}
-                                    </select>
-                                </div>
-                            )}
 
                             {errors.length > 0 && (
                                 <div className="rounded border border-red-700/60 bg-red-950/20 p-3 space-y-1">
@@ -3940,7 +3905,6 @@
                         <AddProjectModal
                             onClose={() => setShowAddModal(false)}
                             onAdded={() => { fetchQueue(); setShowAddModal(false); }}
-                            existingEntries={queue}
                         />
                     )}
                 </div>
