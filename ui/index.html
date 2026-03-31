@@ -4122,11 +4122,20 @@
                                 <p className="header-text text-xs text-slate-500 text-center mt-8">Loading queue…</p>
                             ) : queue.length === 0 ? (
                                 <p className="header-text text-xs text-slate-500 text-center mt-8">No projects in queue.<br/>Click "+ Add Project" to get started.</p>
-                            ) : (
-                                queue.map(entry => {
+                            ) : (() => {
+                                // Compute depth per entry (0=root, 1=child, 2=grandchild…)
+                                const byId = Object.fromEntries(queue.map(e => [e.id, e]));
+                                const depthOf = {};
+                                queue.forEach(e => {
+                                    let d = 0, cur = e;
+                                    while (cur.parent_id && byId[cur.parent_id]) { d++; cur = byId[cur.parent_id]; }
+                                    depthOf[e.id] = d;
+                                });
+                                return queue.map(entry => {
                                     const stateClass = QUEUE_STATE_CLASSES[entry.state] || 'bg-slate-700 text-white';
                                     const isActive = selectedId === entry.id;
-                                    const canDrag = !['ACTIVE','COMPLETED'].includes(entry.state);
+                                    const depth = depthOf[entry.id] || 0;
+                                    const canDrag = !['ACTIVE','COMPLETED'].includes(entry.state) && !entry.parent_id;
                                     return (
                                         <div
                                             key={entry.id}
@@ -4141,6 +4150,8 @@
                                             onDragEnd={handleDragEnd}
                                             onClick={() => { setSelectedId(entry.id); setHubError(''); setRevalidateChecks(null); setPendingCommand(null); }}
                                             onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelectedId(entry.id); setHubError(''); setRevalidateChecks(null); setPendingCommand(null); } }}
+                                            title={entry.parent_id ? 'Move the parent project to reorder this group' : undefined}
+                                            style={{paddingLeft: depth * 16 + 'px', borderLeft: depth > 0 ? '2px solid #312e81' : 'none'}}
                                             className={`flex items-center gap-2 p-2.5 rounded mb-1 cursor-pointer border transition-colors ${
                                                 isActive ? 'border-[#00b4d8]/60 bg-[#0d1f26]' : 'border-transparent hover:bg-[#141618]'
                                             }`}
@@ -4155,8 +4166,8 @@
                                             <span className={`header-text px-1.5 py-0.5 rounded text-xs font-medium flex-shrink-0 ${stateClass}`}>{entry.state}</span>
                                         </div>
                                     );
-                                })
-                            )}
+                                });
+                            })()}
                         </div>
 
                         {/* Column 2: Project snapshot */}
