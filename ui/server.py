@@ -764,7 +764,7 @@ def _spawn_orchestrator(project_path: str, config: dict | None = None) -> dict:
     if config is None:
         config = load_config()
     autodev_repo_path = config.get("autodev_repo_path", os.environ.get("AUTODEV_REPO_PATH", os.path.expanduser("~/.openclaw")))
-    orchestrator_script = os.path.join(autodev_repo_path, ORCHESTRATOR_FILENAME)
+    orchestrator_script = os.path.join(autodev_repo_path, "autodev", "pipeline", ORCHESTRATOR_FILENAME)
     if not os.path.exists(orchestrator_script):
         return {"ok": False, "error": f"{ORCHESTRATOR_FILENAME} not found at {orchestrator_script}"}
     log_file = open("/tmp/orchestrator.log", "a")
