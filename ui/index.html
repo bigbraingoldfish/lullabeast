@@ -3616,6 +3616,7 @@
             const [pendingCommand, setPendingCommand] = useState(null);
             const [revalidateChecks, setRevalidateChecks] = useState(null);
             const [escalationMsg, setEscalationMsg] = useState('');
+            const [displayRanks, setDisplayRanks] = useState({});
             const dragItem = useRef(null);
             const preDragOrder = useRef(null);
 
@@ -3626,6 +3627,7 @@
                         setQueue(d.queue || []);
                         setQueueMode(d.queue_mode || 'auto');
                         setNextEligible(d.next_eligible || null);
+                        setDisplayRanks(d.display_ranks || {});
                         setLoading(false);
                         setSnapshotVersion(v => v + 1);
                     })
@@ -4145,9 +4147,10 @@
                                         >
                                             {canDrag && <span className="text-slate-600 cursor-grab text-xs select-none">⠿</span>}
                                             {!canDrag && <span className="w-3"/>}
-                                            <span className="header-text text-xs text-slate-500 w-5 text-right flex-shrink-0">{entry.position}</span>
+                                            {displayRanks[entry.id] != null
+                                                ? <span className="header-text text-xs text-slate-500 w-5 text-right flex-shrink-0">{displayRanks[entry.id]}</span>
+                                                : <span className="header-text text-xs text-indigo-400 w-5 text-right flex-shrink-0">↳</span>}
                                             <span className="flex-1 header-text text-xs text-slate-200 truncate">{entry.name}</span>
-                                            {entry.parent_id && <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 flex-shrink-0 inline-block" title="Has dependency"/>}
                                             {entry.skip_count > 0 && <span className="header-text text-xs text-orange-400">↩{entry.skip_count}</span>}
                                             <span className={`header-text px-1.5 py-0.5 rounded text-xs font-medium flex-shrink-0 ${stateClass}`}>{entry.state}</span>
                                         </div>

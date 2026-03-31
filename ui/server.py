@@ -757,6 +757,47 @@ def _resequence_positions(entries):
     return entries
 
 
+def _compute_display_ranks(entries):
+    """Return {entry_id: int|None} — roots get sequential rank (1,2,3…), children get None."""
+    sorted_entries = sorted(entries, key=lambda e: e["position"])
+    ranks = {}
+    rank = 0
+    for e in sorted_entries:
+        if not e.get("parent_id"):
+            rank += 1
+            ranks[e["id"]] = rank
+        else:
+            ranks[e["id"]] = None
+    return ranks
+
+
+def _get_all_descendants(entries, entry_id):
+    """Return set of all descendant IDs (recursive). Does not include entry_id itself."""
+    children = {e["id"] for e in entries if e.get("parent_id") == entry_id}
+    result = set(children)
+    for cid in list(children):
+        result |= _get_all_descendants(entries, cid)
+    return result
+
+
+def _move_group_atomically(entries, parent_id, new_pos):
+    """Move parent + all descendants as a unit to new_pos (1-based position for parent).
+
+    Strips the group from the sorted list, inserts the group block at the target position
+    among the remaining entries, then resequences all positions.
+    """
+    desc = _get_all_descendants(entries, parent_id)
+    group_ids = {parent_id} | desc
+    sorted_all = sorted(entries, key=lambda e: e["position"])
+    group_block = [e for e in sorted_all if e["id"] in group_ids]
+    non_group = [e for e in sorted_all if e["id"] not in group_ids]
+    insert_idx = max(0, min(new_pos - 1, len(non_group)))
+    final = non_group[:insert_idx] + group_block + non_group[insert_idx:]
+    for i, e in enumerate(final, 1):
+        e["position"] = i
+    return entries
+
+
 def _spawn_orchestrator(project_path: str, config: dict | None = None) -> dict:
     """Start orchestrator.py with --project-path. Returns {"ok": bool, "error": str|None}."""
     import subprocess
@@ -4194,6 +4235,7 @@ def get_queue():
         "last_updated": q.get("last_updated", ""),
         "dependency_tree": _compute_dependency_tree(entries),
         "next_eligible": _find_next_eligible(entries),
+        "display_ranks": _compute_display_ranks(entries),
     }
 
 
