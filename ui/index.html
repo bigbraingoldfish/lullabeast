@@ -4518,11 +4518,24 @@
                             })
                             .then((d2) => {
                                 setPreflightFixFormatLoading(false);
+                                fetch(`/api/ideas/${tmpId}`, { method: "DELETE" }).catch(() => {});
                                 if (d2.roadmap_content) {
                                     setRoadmapSeed(d2.roadmap_content);
+                                    // Auto-run confirm on the corrected content so the user
+                                    // sees pass/fail immediately without a manual Confirm click.
+                                    setRoadmapSeedError([]);
+                                    fetch("/api/setup/validate-roadmap", {
+                                        method: "POST",
+                                        headers: { "Content-Type": "application/json" },
+                                        body: JSON.stringify({ content: d2.roadmap_content }),
+                                    })
+                                        .then((rv) => rv.json().catch(() => ({})))
+                                        .then((vd) => {
+                                            if (vd.valid) setRoadmapSeedLocked(true);
+                                            else setRoadmapSeedError(vd.errors || []);
+                                        })
+                                        .catch(() => setRoadmapSeedError([{ line: 0, message: "Validation failed after fix" }]));
                                 }
-                                // Clean up temporary idea
-                                fetch(`/api/ideas/${tmpId}`, { method: "DELETE" }).catch(() => {});
                             })
                             .catch((e) => {
                                 setPreflightFixFormatLoading(false);

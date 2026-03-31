@@ -3466,10 +3466,11 @@ def _validate_roadmap_content(content: str) -> dict:
                 "message": f"Phase {phase_id} (line {line_num}) is missing a '> Test:' line",
             })
 
-    # Check for duplicate phase IDs
-    all_ids = re.findall(r"`([A-Z]+-[A-Z]\d+)`", content)
+    # Check for duplicate phase IDs — only examine phase header lines, not body text.
+    # Using re.findall() on the full document would false-positive on phase IDs that
+    # appear in Entry/Exit Criteria references (e.g. "`CORE-E1` complete").
     seen: dict = {}
-    for pid in all_ids:
+    for _, pid, _ in phase_matches:
         seen[pid] = seen.get(pid, 0) + 1
     for pid, count in seen.items():
         if count > 1:
