@@ -4408,6 +4408,15 @@ async def patch_queue_parent(entry_id: str, request: Request):
         if parent_entry and parent_entry.get("state") != "COMPLETED":
             target["state"] = "DEPENDENCY_HOLD"
 
+        # Auto-reposition: place child immediately after parent's last existing sibling
+        parent_pos = next((e["position"] for e in entries if e["id"] == parent_id), None)
+        if parent_pos is not None:
+            siblings = [e for e in entries if e.get("parent_id") == parent_id and e["id"] != entry_id]
+            max_sibling_pos = max((e["position"] for e in siblings), default=parent_pos)
+            new_child_pos = max_sibling_pos + 1
+            _move_group_atomically(entries, entry_id, new_child_pos)
+            _resequence_positions(entries)
+
     q["queue"] = entries
     _write_queue_file(q_path, q)
     return target

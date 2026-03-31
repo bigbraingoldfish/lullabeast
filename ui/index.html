@@ -3986,25 +3986,33 @@
                 // DEPENDENCY_HOLD
                 if (state === 'DEPENDENCY_HOLD') {
                     const parent = queue.find(e => e.id === selected.parent_id);
+                    const getDescendantsHold = (id) => queue.filter(x => x.parent_id === id).flatMap(x => [x.id, ...getDescendantsHold(x.id)]);
+                    const descendantsHold = getDescendantsHold(selected.id);
                     return (
                         <div className="space-y-3">
-                            <div>
-                                <p className="header-text text-xs text-slate-400 mb-1">Waiting for:</p>
-                                {parent ? (
+                            {parent && (
+                                <div>
+                                    <p className="header-text text-xs text-slate-400 mb-1">Waiting for:</p>
                                     <div className="flex items-center gap-2">
                                         <button onClick={() => setSelectedId(parent.id)}
                                             className="header-text text-xs text-[#00b4d8] hover:underline">{parent.name}</button>
                                         <span className={`header-text px-1.5 py-0.5 rounded text-xs font-medium ${QUEUE_STATE_CLASSES[parent.state] || 'bg-slate-700 text-white'}`}>{parent.state}</span>
                                     </div>
-                                ) : (
-                                    <span className="header-text text-xs text-slate-500">Unknown parent</span>
-                                )}
+                                </div>
+                            )}
+                            <div>
+                                <label className="header-text text-xs text-slate-400 mb-1 block">Depends on</label>
+                                <select
+                                    value={selected.parent_id || ''}
+                                    onChange={e => handleSetParent(selected.id, e.target.value || null)}
+                                    disabled={hubBusy}
+                                    className="header-text text-xs bg-[#1a1d21] text-slate-200 border border-[#2a2d32] rounded px-2 py-1 w-full">
+                                    <option value="">None (remove dependency)</option>
+                                    {queue.filter(e => e.id !== selected.id && !descendantsHold.includes(e.id)).map(e => (
+                                        <option key={e.id} value={e.id}>{e.name} [{e.state}]</option>
+                                    ))}
+                                </select>
                             </div>
-                            <button onClick={() => { if (window.confirm('Clear this dependency?')) handleSetParent(selected.id, null); }}
-                                disabled={hubBusy}
-                                className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-300 hover:bg-[#22252a] disabled:opacity-50 w-full">
-                                Clear Dependency
-                            </button>
                             {hubError && <p className="header-text text-xs text-red-400">{hubError}</p>}
                         </div>
                     );
