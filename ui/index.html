@@ -2498,10 +2498,10 @@
                     <div style={{ width: splitPct + "%" }} className="flex-shrink-0 flex flex-col min-w-0 bg-[#141618] overflow-hidden">
                         <div className="flex-shrink-0 border-b border-[#1a1d21] px-3 py-2 flex items-center justify-between gap-2">
                             <span className="header-text text-xs text-slate-500 truncate">{currentIdeaName}</span>
-                            {currentIdeaId && readinessStatus === "updating" && (
+                            {activeDocTab === "prd" && currentIdeaId && readinessStatus === "updating" && (
                                 <span className="text-[10px] shrink-0 text-slate-500 animate-pulse header-text">Assessing…</span>
                             )}
-                            {currentIdeaId && readinessStatus === "ready" && readinessData && (
+                            {activeDocTab === "prd" && currentIdeaId && readinessStatus === "ready" && readinessData && (
                                 <span className={`text-[10px] shrink-0 header-text font-semibold ${readinessData.overall_status === "ready" ? "text-emerald-400" : readinessData.overall_status === "approaching_ready" ? "text-amber-400" : "text-red-400"}`}>
                                     {typeof readinessData.score === "number" ? readinessData.score : "—"}/10{readinessData.conversion_confidence ? ` · ${readinessData.conversion_confidence}` : ""}
                                 </span>
