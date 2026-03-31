@@ -304,6 +304,27 @@ class Orchestrator:
                     pass
         return None, None
 
+    def _get_all_descendants(self, entries, entry_id):
+        """Return set of all descendant IDs (recursive). Does not include entry_id itself."""
+        children = {e["id"] for e in entries if e.get("parent_id") == entry_id}
+        result = set(children)
+        for cid in list(children):
+            result |= self._get_all_descendants(entries, cid)
+        return result
+
+    def _move_group_atomically(self, entries, parent_id, new_pos):
+        """Move parent + all descendants as a unit to new_pos (1-based position for parent)."""
+        desc = self._get_all_descendants(entries, parent_id)
+        group_ids = {parent_id} | desc
+        sorted_all = sorted(entries, key=lambda e: e["position"])
+        group_block = [e for e in sorted_all if e["id"] in group_ids]
+        non_group = [e for e in sorted_all if e["id"] not in group_ids]
+        insert_idx = max(0, min(new_pos - 1, len(non_group)))
+        final = non_group[:insert_idx] + group_block + non_group[insert_idx:]
+        for i, e in enumerate(final, 1):
+            e["position"] = i
+        return entries
+
     def _select_next_queue_project(self):
         """Walk queue, find next eligible project, run preflight, start it.
 
@@ -342,18 +363,19 @@ class Orchestrator:
             ok, reason = self._queue_preflight(entry["project_path"])
             if not ok:
                 print(f"[QUEUE] Preflight failed for '{entry['name']}': {reason} — skip-and-requeue")
-                # Skip-and-requeue: move to position+1 (not end of queue)
-                old_pos = entry["position"]
-                new_pos = min(old_pos + 1, len(entries))
+                # Cascade SKIPPED_PENDING to all descendants before moving
+                desc_ids = self._get_all_descendants(entries, entry["id"])
                 for e in entries:
-                    if old_pos < e["position"] <= new_pos:
-                        e["position"] -= 1
-                entry["position"] = new_pos
+                    if e["id"] in desc_ids and e["state"] not in ("ACTIVE", "COMPLETED"):
+                        e["state"] = "SKIPPED_PENDING"
+                        e["skip_count"] = e.get("skip_count", 0) + 1
+                        visited_ids.add(e["id"])  # prevent re-processing descendants
                 entry["state"] = "SKIPPED_PENDING"
                 entry["skip_count"] = entry.get("skip_count", 0) + 1
-                entries.sort(key=lambda e: e["position"])
-                for idx, e in enumerate(entries, 1):
-                    e["position"] = idx
+                # Skip-and-requeue: move entire group past next independent entry
+                group_size = 1 + len(desc_ids)
+                new_pos = min(entry["position"] + group_size, len(entries))
+                self._move_group_atomically(entries, entry["id"], new_pos)
                 self._write_queue(queue_data)
                 # Do NOT increment i — entry at this position shifted; visited_ids prevents re-trying
                 continue
