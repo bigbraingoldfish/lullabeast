@@ -496,22 +496,15 @@ The orchestrator's `_queue_preflight()` checks: directory exists, `.git` present
 
 ## Unresolved Items
 
-### 1. `_spawn_orchestrator` path construction in `ui/server.py`
+### 1. ~~`_spawn_orchestrator` path construction in `ui/server.py`~~ — **RESOLVED**
 
-`_spawn_orchestrator` (called by `POST /api/setup/launch`) builds the orchestrator path as:
-
-```python
-orchestrator_script = os.path.join(autodev_repo_path, ORCHESTRATOR_FILENAME)
-# = os.path.join(autodev_repo_path, "orchestrator.py")
-```
-
-After migration, `orchestrator.py` lives at `autodev/pipeline/orchestrator.py` — not at repo root. If `autodev_repo_path` is set to the repo root, this constructs the wrong path. The correct path would be:
+`_spawn_orchestrator` now correctly constructs:
 
 ```python
-os.path.join(autodev_repo_path, "autodev", "pipeline", "orchestrator.py")
+orchestrator_script = os.path.join(autodev_repo_path, "autodev", "pipeline", ORCHESTRATOR_FILENAME)
 ```
 
-This has not been fixed. The current workaround is to set `autodev_repo_path` in `ui/config.json` to `{repo_root}/autodev/pipeline` (so the join produces the correct path), but this breaks the `_AUTODEV_REPO_PATH` intent. **Needs a deliberate fix and test update.**
+`autodev_repo_path` should be set to the repo root (written by `install.sh` into `.env`). The workaround of pointing `autodev_repo_path` at `{repo_root}/autodev/pipeline` is no longer necessary or correct.
 
 ### 2. Multi-project switcher (`/api/setup/switch-project`)
 

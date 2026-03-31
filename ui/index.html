@@ -3807,12 +3807,17 @@
                                     return (
                                         <div
                                             key={entry.id}
+                                            role="button"
+                                            tabIndex={0}
+                                            aria-label={`${entry.name} — ${entry.state}`}
+                                            aria-pressed={isActive}
                                             draggable={canDrag}
                                             onDragStart={e => handleDragStart(e, entry)}
                                             onDragOver={e => handleDragOver(e, entry)}
                                             onDrop={e => handleDrop(e, entry)}
                                             onDragEnd={handleDragEnd}
                                             onClick={() => setSelectedId(entry.id)}
+                                            onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelectedId(entry.id); } }}
                                             className={`flex items-center gap-2 p-2.5 rounded mb-1 cursor-pointer border transition-colors ${
                                                 isActive ? 'border-[#00b4d8]/60 bg-[#0d1f26]' : 'border-transparent hover:bg-[#141618]'
                                             }`}
@@ -3849,12 +3854,33 @@
                                     {selected.skip_count > 0 && (
                                         <p className="header-text text-xs text-orange-400">Skipped {selected.skip_count} time{selected.skip_count !== 1 ? 's' : ''}</p>
                                     )}
-                                    {selected.parent_id && (
+                                    {/* Parent dependency — editable select for non-locked states */}
+                                    {['ACTIVE', 'COMPLETED'].includes(selected.state) ? (
+                                        selected.parent_id && (
+                                            <div>
+                                                <p className="header-text text-xs text-slate-400 mb-1">Depends on:</p>
+                                                {(() => { const p = queue.find(e => e.id === selected.parent_id); return p ? (
+                                                    <button onClick={() => setSelectedId(p.id)} className="header-text text-xs text-[#00b4d8] hover:underline">{p.name}</button>
+                                                ) : <span className="header-text text-xs text-slate-500">Unknown parent</span>; })()}
+                                            </div>
+                                        )
+                                    ) : (
                                         <div>
-                                            <p className="header-text text-xs text-slate-400 mb-1">Depends on:</p>
-                                            {(() => { const p = queue.find(e => e.id === selected.parent_id); return p ? (
-                                                <button onClick={() => setSelectedId(p.id)} className="header-text text-xs text-[#00b4d8] hover:underline">{p.name}</button>
-                                            ) : <span className="header-text text-xs text-slate-500">Unknown parent</span>; })()}
+                                            <label className="header-text text-xs text-slate-400 mb-1 block">Depends on:</label>
+                                            <select
+                                                value={selected.parent_id || ''}
+                                                onChange={e => handleSetParent(selected.id, e.target.value || null)}
+                                                className="header-text text-xs bg-[#1a1d21] text-slate-200 border border-[#2a2d32] rounded px-2 py-1 w-full">
+                                                <option value="">None</option>
+                                                {queue.filter(e => {
+                                                    if (e.id === selected.id) return false;
+                                                    // exclude descendants to prevent cycles
+                                                    const getDesc = (id) => queue.filter(x => x.parent_id === id).flatMap(x => [x.id, ...getDesc(x.id)]);
+                                                    return !getDesc(selected.id).includes(e.id);
+                                                }).map(e => (
+                                                    <option key={e.id} value={e.id}>{e.name}</option>
+                                                ))}
+                                            </select>
                                         </div>
                                     )}
                                     {queue.filter(e => e.parent_id === selected.id).length > 0 && (
@@ -3888,12 +3914,6 @@
                                                 View in Monitor
                                             </button>
                                         )}
-                                        {selected.parent_id && (
-                                            <button onClick={() => handleSetParent(selected.id, null)}
-                                                className="header-text text-xs px-2 py-1 rounded bg-[#1a1d21] text-slate-300 hover:bg-[#22252a]">
-                                                Clear dependency
-                                            </button>
-                                        )}
                                     </div>
                                 </div>
                             )}
@@ -3903,7 +3923,7 @@
                         <div className="bg-[#0d0f12] p-4 overflow-y-auto">
                             <p className="header-text text-xs text-slate-400 mb-3 font-semibold">Dependencies</p>
                             {!hasDeps ? (
-                                <p className="header-text text-xs text-slate-500">No dependencies set — use the detail panel to assign parent relationships.</p>
+                                <p className="header-text text-xs text-slate-500">No dependencies set — use the "Depends on" selector in the detail panel or the Depends on field when adding a project.</p>
                             ) : (
                                 <div>
                                     {depTree.map(node => <DepNode key={node.id} node={node} depth={0}/>)}
