@@ -4345,6 +4345,11 @@ async def patch_queue_position(entry_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Queue entry not found")
     if target["state"] in ("ACTIVE", "COMPLETED"):
         raise HTTPException(status_code=409, detail=f"Cannot reorder a {target['state']} entry")
+    if target.get("parent_id"):
+        raise HTTPException(
+            status_code=409,
+            detail="Child projects cannot be repositioned independently. Move the parent project instead.",
+        )
 
     # Clamp position to valid range
     new_pos = max(1, min(int(new_pos), len(entries)))
@@ -4352,17 +4357,22 @@ async def patch_queue_position(entry_id: str, request: Request):
     if new_pos == old_pos:
         return {"ok": True}
 
-    # Shift entries between old and new positions
-    if new_pos < old_pos:
-        for e in entries:
-            if new_pos <= e["position"] < old_pos and e["id"] != entry_id:
-                e["position"] += 1
+    # If this entry has dependents, move the entire group atomically
+    if _get_all_descendants(entries, entry_id):
+        _move_group_atomically(entries, entry_id, new_pos)
     else:
-        for e in entries:
-            if old_pos < e["position"] <= new_pos and e["id"] != entry_id:
-                e["position"] -= 1
-    target["position"] = new_pos
-    _resequence_positions(entries)
+        # Shift entries between old and new positions (single-entry move)
+        if new_pos < old_pos:
+            for e in entries:
+                if new_pos <= e["position"] < old_pos and e["id"] != entry_id:
+                    e["position"] += 1
+        else:
+            for e in entries:
+                if old_pos < e["position"] <= new_pos and e["id"] != entry_id:
+                    e["position"] -= 1
+        target["position"] = new_pos
+        _resequence_positions(entries)
+
     q["queue"] = entries
     _write_queue_file(q_path, q)
     return {"ok": True}
