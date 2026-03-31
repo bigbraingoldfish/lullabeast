@@ -379,6 +379,7 @@ DEFAULTS = {
     "openclaw_root": os.environ.get("AUTODEV_ROOT") or "~/.openclaw",
     "autodev_repo_path": os.environ.get("AUTODEV_REPO_PATH", os.path.expanduser("~/.openclaw")),
     "roadmap_converter_workspace": "~/.openclaw/workspace-roadmap-converter",
+    "pipeline_queue_path": "~/.openclaw/pipeline_queue.json",
 }
 
 
@@ -681,6 +682,79 @@ def _write_json_atomic(path: str, obj: dict) -> None:
     with open(tmp, "w") as f:
         json.dump(obj, f, indent=2)
     os.replace(tmp, path)
+
+
+# ---------------------------------------------------------------------------
+# Queue helpers
+# ---------------------------------------------------------------------------
+
+def _read_queue_file(config=None):
+    """Read pipeline_queue.json; returns empty structure if absent."""
+    if config is None:
+        config = load_config()
+    path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
+    if not os.path.exists(path):
+        return {"queue": [], "queue_mode": "auto", "last_updated": ""}
+    return _read_json_file(path) or {"queue": [], "queue_mode": "auto", "last_updated": ""}
+
+
+def _write_queue_file(path: str, data: dict) -> None:
+    """Atomic write (reuses _write_json_atomic pattern)."""
+    from datetime import datetime, timezone as tz
+    data["last_updated"] = datetime.now(tz.utc).isoformat()
+    _write_json_atomic(path, data)
+
+
+def _compute_dependency_tree(entries):
+    """Build nested parent-child structure from flat queue list."""
+    by_id = {e["id"]: dict(e, children=[]) for e in entries}
+    roots = []
+    for e in by_id.values():
+        pid = e.get("parent_id")
+        if pid and pid in by_id:
+            by_id[pid]["children"].append(e)
+        else:
+            roots.append(e)
+    return roots
+
+
+def _find_next_eligible(entries):
+    """Return id of first READY/SKIPPED_PENDING entry with met dependency (or no parent)."""
+    state_by_id = {e["id"]: e["state"] for e in entries}
+    for e in sorted(entries, key=lambda x: x["position"]):
+        if e["state"] not in ("READY", "SKIPPED_PENDING"):
+            continue
+        if e.get("parent_id") and state_by_id.get(e["parent_id"]) != "COMPLETED":
+            continue
+        return e["id"]
+    return None
+
+
+def _detect_circular_dependency(entries, entry_id, proposed_parent_id):
+    """Walk parent chain from proposed_parent_id. Return True if entry_id is reached."""
+    if proposed_parent_id is None:
+        return False
+    if proposed_parent_id == entry_id:
+        return True
+    parent_by_id = {e["id"]: e.get("parent_id") for e in entries}
+    current = proposed_parent_id
+    visited = set()
+    while current:
+        if current == entry_id:
+            return True
+        if current in visited:
+            break
+        visited.add(current)
+        current = parent_by_id.get(current)
+    return False
+
+
+def _resequence_positions(entries):
+    """Sort by position and reassign 1..N with no gaps. Mutates in place, returns list."""
+    entries.sort(key=lambda e: e["position"])
+    for i, e in enumerate(entries, 1):
+        e["position"] = i
+    return entries
 
 
 def _spawn_orchestrator(project_path: str, config: dict | None = None) -> dict:
@@ -1261,6 +1335,23 @@ def get_state():
     # Setup completion marker
     _setup_marker = os.path.expanduser("~/.autodev_setup_complete")
     response["setup_complete"] = os.path.exists(_setup_marker)
+
+    # Queue summary — non-critical; silently skip if queue file absent or unreadable
+    try:
+        q_path = config.get("pipeline_queue_path")
+        if q_path:
+            q_path_exp = os.path.expanduser(q_path)
+            if os.path.exists(q_path_exp):
+                q = _read_json_file(q_path_exp) or {}
+                q_entries = q.get("queue", [])
+                response["queue_length"] = len(q_entries)
+                response["ready_count"] = sum(1 for e in q_entries if e["state"] == "READY")
+                response["blocked_count"] = sum(1 for e in q_entries if e["state"] == "BLOCKED")
+                response["completed_count"] = sum(1 for e in q_entries if e["state"] == "COMPLETED")
+                response["queue_mode"] = q.get("queue_mode", "auto")
+                response["queue_halted"] = response.get("pipeline_status") == "QUEUE_HALTED"
+    except Exception:
+        pass  # queue summary is non-critical
 
     return response
 
@@ -4005,6 +4096,251 @@ async def post_setup_preflight(request: Request):
 def get_setup_recent_projects():
     """Recent project directories (real paths) that passed preflight or switch validation."""
     return {"projects": _read_recent_projects()}
+
+
+# ---------------------------------------------------------------------------
+# Queue endpoints
+# IMPORTANT: Fixed-path routes (status, trigger-next, mode) MUST be registered
+# before parameterized routes ({entry_id}) to avoid FastAPI treating "status"
+# as an entry_id parameter.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/queue/status")
+def get_queue_status():
+    """Summary counts for the Pipeline Monitor header integration."""
+    config = load_config()
+    q = _read_queue_file(config)
+    entries = q.get("queue", [])
+    pipeline_state = _read_json_file(os.path.expanduser(config.get("pipeline_state_path", "~/.openclaw/pipeline_state.json"))) or {}
+    return {
+        "queue_length": len(entries),
+        "ready_count": sum(1 for e in entries if e["state"] == "READY"),
+        "blocked_count": sum(1 for e in entries if e["state"] == "BLOCKED"),
+        "completed_count": sum(1 for e in entries if e["state"] == "COMPLETED"),
+        "queue_mode": q.get("queue_mode", "auto"),
+        "queue_halted": pipeline_state.get("pipeline_status") == "QUEUE_HALTED",
+    }
+
+
+@app.post("/api/queue/trigger-next")
+async def post_queue_trigger_next():
+    """Manually trigger the next project in the queue (manual mode).
+
+    Returns 409 if a project is currently ACTIVE.
+    Calls _run_preflight_checks (which auto-repairs the symlink) then spawns orchestrator.
+    """
+    from datetime import datetime, timezone as tz
+    config = load_config()
+    q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
+    q = _read_queue_file(config)
+    entries = q.get("queue", [])
+
+    if any(e["state"] == "ACTIVE" for e in entries):
+        raise HTTPException(status_code=409, detail="A project is already ACTIVE in the queue")
+
+    state_by_id = {e["id"]: e["state"] for e in entries}
+    now = datetime.now(tz.utc).isoformat()
+
+    for entry in sorted(entries, key=lambda e: e["position"]):
+        if entry["state"] not in ("READY", "SKIPPED_PENDING"):
+            continue
+        if entry.get("parent_id") and state_by_id.get(entry["parent_id"]) != "COMPLETED":
+            continue
+        # Run full preflight (also auto-repairs symlink)
+        checks = _run_preflight_checks(entry["project_path"])
+        if any(c.get("status") == "fail" for c in checks):
+            entry["state"] = "SKIPPED_PENDING"
+            entry["skip_count"] = entry.get("skip_count", 0) + 1
+            _write_queue_file(q_path, q)
+            continue
+        # Start this project
+        entry["state"] = "ACTIVE"
+        entry["started_at"] = now
+        _write_queue_file(q_path, q)
+        result = _spawn_orchestrator(entry["project_path"], config)
+        if not result.get("ok"):
+            entry["state"] = "FAILED"
+            _write_queue_file(q_path, q)
+            raise HTTPException(status_code=500, detail=result.get("error", "Failed to spawn orchestrator"))
+        return {"ok": True, "started": entry["name"]}
+
+    return {"queue_halted": True, "error": "all projects blocked or in dependency hold"}
+
+
+@app.patch("/api/queue/mode")
+async def patch_queue_mode(request: Request):
+    """Toggle queue_mode between 'auto' and 'manual'."""
+    body = await request.json()
+    mode = body.get("queue_mode")
+    if mode not in ("auto", "manual"):
+        raise HTTPException(status_code=422, detail="queue_mode must be 'auto' or 'manual'")
+    config = load_config()
+    q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
+    q = _read_queue_file(config)
+    q["queue_mode"] = mode
+    _write_queue_file(q_path, q)
+    return {"ok": True, "queue_mode": mode}
+
+
+@app.get("/api/queue")
+def get_queue():
+    """Full queue with computed dependency_tree and next_eligible."""
+    config = load_config()
+    q = _read_queue_file(config)
+    entries = q.get("queue", [])
+    return {
+        "queue": entries,
+        "queue_mode": q.get("queue_mode", "auto"),
+        "last_updated": q.get("last_updated", ""),
+        "dependency_tree": _compute_dependency_tree(entries),
+        "next_eligible": _find_next_eligible(entries),
+    }
+
+
+@app.post("/api/queue/add")
+async def post_queue_add(request: Request):
+    """Add a project to the queue after running preflight validation.
+
+    Body: {"project_path": str, "idea_id": str|null, "parent_id": str|null}
+    Returns 400 with validation_errors if preflight fails.
+    Returns 422 if project_path is invalid.
+    """
+    import uuid as _uuid
+    from datetime import datetime, timezone as tz
+
+    body = await request.json()
+    project_path = body.get("project_path", "").strip()
+    idea_id = body.get("idea_id")
+    parent_id = body.get("parent_id")
+
+    if not project_path:
+        raise HTTPException(status_code=422, detail="project_path is required")
+    if not os.path.isabs(project_path):
+        raise HTTPException(status_code=422, detail="project_path must be absolute")
+    if not os.path.isdir(project_path):
+        raise HTTPException(status_code=422, detail="project_path does not exist or is not a directory")
+
+    # Run full preflight (read-only checks only — do NOT call _preflight_materialize)
+    checks = _run_preflight_checks(project_path)
+    if any(c.get("status") == "fail" for c in checks):
+        return JSONResponse(status_code=400, content={"validation_errors": checks})
+
+    config = load_config()
+    q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
+    q = _read_queue_file(config)
+    entries = q.get("queue", [])
+
+    # Circular dependency check
+    if parent_id and _detect_circular_dependency(entries, None, parent_id):
+        raise HTTPException(status_code=400, detail="Circular dependency detected")
+
+    now = datetime.now(tz.utc).isoformat()
+    entry = {
+        "id": str(_uuid.uuid4()),
+        "project_path": os.path.realpath(project_path),
+        "idea_id": idea_id,
+        "name": os.path.basename(project_path.rstrip("/")) or project_path,
+        "state": "READY",
+        "position": len(entries) + 1,
+        "parent_id": parent_id,
+        "added_at": now,
+        "started_at": None,
+        "completed_at": None,
+        "blocked_at": None,
+        "skip_count": 0,
+        "preflight_validated_at": now,
+        "notes": "",
+    }
+    entries.append(entry)
+    q["queue"] = entries
+    _write_queue_file(q_path, q)
+    return entry
+
+
+@app.delete("/api/queue/{entry_id}")
+def delete_queue_entry(entry_id: str):
+    """Remove an entry from the queue. Returns 409 if ACTIVE."""
+    config = load_config()
+    q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
+    q = _read_queue_file(config)
+    entries = q.get("queue", [])
+
+    target = next((e for e in entries if e["id"] == entry_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Queue entry not found")
+    if target["state"] == "ACTIVE":
+        raise HTTPException(status_code=409, detail="Cannot remove an ACTIVE queue entry")
+
+    entries = [e for e in entries if e["id"] != entry_id]
+    _resequence_positions(entries)
+    q["queue"] = entries
+    _write_queue_file(q_path, q)
+    return {"ok": True}
+
+
+@app.patch("/api/queue/{entry_id}/position")
+async def patch_queue_position(entry_id: str, request: Request):
+    """Reorder a queue entry to the specified position."""
+    body = await request.json()
+    new_pos = body.get("position")
+    if new_pos is None:
+        raise HTTPException(status_code=422, detail="position is required")
+
+    config = load_config()
+    q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
+    q = _read_queue_file(config)
+    entries = q.get("queue", [])
+
+    target = next((e for e in entries if e["id"] == entry_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Queue entry not found")
+    if target["state"] in ("ACTIVE", "COMPLETED"):
+        raise HTTPException(status_code=409, detail=f"Cannot reorder a {target['state']} entry")
+
+    # Clamp position to valid range
+    new_pos = max(1, min(int(new_pos), len(entries)))
+    old_pos = target["position"]
+    if new_pos == old_pos:
+        return {"ok": True}
+
+    # Shift entries between old and new positions
+    if new_pos < old_pos:
+        for e in entries:
+            if new_pos <= e["position"] < old_pos and e["id"] != entry_id:
+                e["position"] += 1
+    else:
+        for e in entries:
+            if old_pos < e["position"] <= new_pos and e["id"] != entry_id:
+                e["position"] -= 1
+    target["position"] = new_pos
+    _resequence_positions(entries)
+    q["queue"] = entries
+    _write_queue_file(q_path, q)
+    return {"ok": True}
+
+
+@app.patch("/api/queue/{entry_id}/parent")
+async def patch_queue_parent(entry_id: str, request: Request):
+    """Set or clear parent dependency for a queue entry."""
+    body = await request.json()
+    parent_id = body.get("parent_id")  # None to clear
+
+    config = load_config()
+    q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
+    q = _read_queue_file(config)
+    entries = q.get("queue", [])
+
+    target = next((e for e in entries if e["id"] == entry_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Queue entry not found")
+
+    if _detect_circular_dependency(entries, entry_id, parent_id):
+        raise HTTPException(status_code=400, detail="Circular dependency detected")
+
+    target["parent_id"] = parent_id
+    q["queue"] = entries
+    _write_queue_file(q_path, q)
+    return {"ok": True}
 
 
 def _check_installer_status(config: dict) -> dict:

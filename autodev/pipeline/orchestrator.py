@@ -36,7 +36,10 @@ VALID_STATES = [
     "BLOCKED",
     "PIPELINE_COMPLETE",
     "STOPPED",
+    "QUEUE_HALTED",
 ]
+
+QUEUE_FILE = os.path.join(AUTODEV_ROOT, "pipeline_queue.json")
 
 # Glob patterns for mkstemp atomic-write temp files that may be stranded if the
 # orchestrator was killed mid-write.  Pattern matches the 8-character random hex
@@ -223,6 +226,191 @@ class Orchestrator:
         self.state["pipeline_status"] = new_status
         self.state["last_action"] = action_description
         self.write_state()
+
+    # ------------------------------------------------------------------
+    # Queue helpers
+    # ------------------------------------------------------------------
+
+    def _read_queue(self):
+        """Read pipeline_queue.json; returns empty structure if absent."""
+        if not os.path.exists(QUEUE_FILE):
+            return {"queue": [], "queue_mode": "auto", "last_updated": ""}
+        try:
+            with open(QUEUE_FILE, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[QUEUE] Failed to read queue file: {e}")
+            return {"queue": [], "queue_mode": "auto", "last_updated": ""}
+
+    def _write_queue(self, data):
+        """Atomically write pipeline_queue.json (mkstemp + os.replace)."""
+        data["last_updated"] = datetime.now(timezone.utc).isoformat()
+        fd, tmp = tempfile.mkstemp(dir=AUTODEV_ROOT, prefix="queue_")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, QUEUE_FILE)
+        except Exception as e:
+            print(f"[QUEUE] Failed to write queue file: {e}")
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            raise
+
+    def _queue_preflight(self, project_path):
+        """Lightweight queue preflight: dir exists, is git repo, has roadmap*.md.
+
+        NOTE: Less comprehensive than server _run_preflight_checks. A project
+        passing this check may still fail the full server preflight. Known limitation.
+        """
+        if not os.path.isdir(project_path):
+            return False, "directory does not exist"
+        if not os.path.exists(os.path.join(project_path, ".git")):
+            return False, "not a git repository"
+        roadmap = next(
+            (n for n in os.listdir(project_path)
+             if n.lower().startswith("roadmap") and n.endswith(".md")),
+            None
+        )
+        if not roadmap:
+            return False, "no roadmap*.md found"
+        return True, "ok"
+
+    def _find_active_queue_entry(self, queue_data):
+        """Find the ACTIVE queue entry matching the current project.
+
+        Primary: match via SYMLINK_TARGET realpath.
+        Fallback: match via pipeline_state.json["project_path"].
+        Returns (index, entry) or (None, None).
+        """
+        proj_path = None
+        if os.path.exists(SYMLINK_TARGET):
+            try:
+                proj_path = os.path.realpath(SYMLINK_TARGET)
+            except OSError:
+                pass
+        if not proj_path and self.state.get("project_path"):
+            try:
+                proj_path = os.path.realpath(self.state["project_path"])
+            except OSError:
+                pass
+        if not proj_path:
+            return None, None
+        for i, entry in enumerate(queue_data["queue"]):
+            if entry.get("state") == "ACTIVE":
+                try:
+                    if os.path.realpath(entry["project_path"]) == proj_path:
+                        return i, entry
+                except OSError:
+                    pass
+        return None, None
+
+    def _select_next_queue_project(self):
+        """Walk queue, find next eligible project, run preflight, start it.
+
+        Returns True if a project was started, False if QUEUE_HALTED.
+        """
+        queue_data = self._read_queue()
+        entries = queue_data["queue"]
+        now = datetime.now(timezone.utc).isoformat()
+
+        # Build parent state lookup
+        state_by_id = {e["id"]: e["state"] for e in entries}
+
+        visited_ids = set()  # prevent infinite loop if all entries keep failing
+        i = 0
+        while i < len(entries):
+            entry = entries[i]
+            if entry["id"] in visited_ids:
+                i += 1
+                continue
+            visited_ids.add(entry["id"])
+
+            if entry["state"] not in ("READY", "SKIPPED_PENDING"):
+                i += 1
+                continue
+
+            # Check dependency
+            if entry.get("parent_id"):
+                parent_state = state_by_id.get(entry["parent_id"])
+                if parent_state != "COMPLETED":
+                    entry["state"] = "DEPENDENCY_HOLD"
+                    self._write_queue(queue_data)
+                    i += 1
+                    continue
+
+            # Run lightweight preflight
+            ok, reason = self._queue_preflight(entry["project_path"])
+            if not ok:
+                print(f"[QUEUE] Preflight failed for '{entry['name']}': {reason} — skip-and-requeue")
+                # Skip-and-requeue: move to position+1 (not end of queue)
+                old_pos = entry["position"]
+                new_pos = min(old_pos + 1, len(entries))
+                for e in entries:
+                    if old_pos < e["position"] <= new_pos:
+                        e["position"] -= 1
+                entry["position"] = new_pos
+                entry["state"] = "SKIPPED_PENDING"
+                entry["skip_count"] = entry.get("skip_count", 0) + 1
+                entries.sort(key=lambda e: e["position"])
+                for idx, e in enumerate(entries, 1):
+                    e["position"] = idx
+                self._write_queue(queue_data)
+                # Do NOT increment i — entry at this position shifted; visited_ids prevents re-trying
+                continue
+
+            # Pass: mark ACTIVE, update symlink, reset state, start
+            print(f"[QUEUE] Starting project '{entry['name']}' at {entry['project_path']}")
+            entry["state"] = "ACTIVE"
+            entry["started_at"] = now
+            self._write_queue(queue_data)
+
+            project_path = os.path.realpath(os.path.expanduser(entry["project_path"]))
+            self.update_symlink(project_path)
+            self.state = {
+                "current_phase": 0,
+                "current_phase_raw_id": "",
+                "current_agent": "planner",
+                "planner_retries": 0,
+                "executor_retries": 0,
+                "reviewer_retries": 0,
+                "last_action": f"queue auto-advance to {entry['name']}",
+                "last_action_timestamp": now,
+                "pipeline_status": "RUNNING",
+                "project_path": project_path,
+            }
+            self.write_state()
+            return True
+
+        # No eligible project found — determine halted reason
+        non_terminal = [e["state"] for e in entries if e["state"] not in ("COMPLETED", "FAILED")]
+        if not non_terminal:
+            reason = "all_completed"
+        elif all(s == "BLOCKED" for s in non_terminal):
+            reason = "all_blocked"
+        elif all(s == "DEPENDENCY_HOLD" for s in non_terminal):
+            reason = "all_dependency_hold"
+        else:
+            reason = "mixed"
+        print(f"[QUEUE] Queue exhausted — halting with reason: {reason}")
+        self.state["queue_halted_reason"] = reason
+        self.transition_state("QUEUE_HALTED", f"Queue halted: {reason}")
+        return False
+
+    def _queue_update_active_entry(self, new_state, extra_fields=None):
+        """Find the ACTIVE queue entry for this project and update its state."""
+        try:
+            queue_data = self._read_queue()
+            if not queue_data["queue"]:
+                return
+            idx, entry = self._find_active_queue_entry(queue_data)
+            if idx is None:
+                return
+            queue_data["queue"][idx]["state"] = new_state
+            if extra_fields:
+                queue_data["queue"][idx].update(extra_fields)
+            self._write_queue(queue_data)
+        except Exception as e:
+            print(f"[QUEUE] Failed to update active entry to {new_state}: {e}")
 
     def _check_stop_requested(self) -> bool:
         """Check for the stop sentinel file written by the UI server.
@@ -1181,6 +1369,7 @@ class Orchestrator:
                     except Exception as write_err:
                         print(f"[ERROR] Could not write escalation_failed.json: {write_err}")
                     self.transition_state("HALTED_SILENT", "Escalation delivery failed after repo init failure")
+                    self._queue_update_active_entry("FAILED")
                 return  # Do not enter phase loop; finally block will release lock
 
             # --- Startup Phase Identification (Gap fix: run roadmap_parser before first planner
@@ -1208,10 +1397,18 @@ class Orchestrator:
                         elif result.returncode == 0 and "PIPELINE_COMPLETE" in output:
                                 print("[INFO] All roadmap phases already complete. Nothing to do.")
                                 self.transition_state("PIPELINE_COMPLETE", "Pipeline fully complete on startup")
+                                self._queue_update_active_entry(
+                                    "COMPLETED",
+                                    {"completed_at": datetime.now(timezone.utc).isoformat()}
+                                )
                                 return
                         elif result.returncode == 2 and "BLOCKED" in output:
                             print(f"[INFO] First pending phase is blocked. Escalating.")
                             self.transition_state("BLOCKED", "Roadmap blocked at startup")
+                            self._queue_update_active_entry(
+                                "BLOCKED",
+                                {"blocked_at": datetime.now(timezone.utc).isoformat()}
+                            )
                             return
                     except Exception as startup_err:
                         print(f"[WARN] Startup phase identification failed: {startup_err}. Proceeding; planner must self-orient.")
@@ -1820,10 +2017,24 @@ class Orchestrator:
                             elif result.returncode == 0 and "PIPELINE_COMPLETE" in output:
                                 print("[INFO] Pipeline fully complete!")
                                 self.transition_state("PIPELINE_COMPLETE", "Pipeline fully complete")
+                                # Queue integration: mark entry COMPLETED and auto-advance
+                                self._queue_update_active_entry(
+                                    "COMPLETED",
+                                    {"completed_at": datetime.now(timezone.utc).isoformat()}
+                                )
+                                queue_data = self._read_queue()
+                                if queue_data["queue"] and queue_data.get("queue_mode", "auto") == "auto":
+                                    advanced = self._select_next_queue_project()
+                                    if advanced:
+                                        continue  # restart loop for the new project
                                 break
                             elif result.returncode == 2 and "BLOCKED" in output:
                                 print(f"[INFO] Roadmap blocked. Halting.")
                                 self.transition_state("BLOCKED", "Roadmap blocked")
+                                self._queue_update_active_entry(
+                                    "BLOCKED",
+                                    {"blocked_at": datetime.now(timezone.utc).isoformat()}
+                                )
                                 break
                         except subprocess.CalledProcessError as e:
                             print(f"[ERROR] Roadmap parser failed: {e}")
@@ -2070,6 +2281,7 @@ class Orchestrator:
                                 with open(os.path.join(SYMLINK_TARGET, "escalation_failed.json"), "w") as f:
                                     json.dump(error_data, f)
                                 self.transition_state("HALTED_SILENT", "Escalation delivery failed")
+                                self._queue_update_active_entry("FAILED")
                                 break
                     else:
                         sentinel_path = os.path.join(SYMLINK_TARGET, "escalation_output.done")
@@ -2160,6 +2372,7 @@ class Orchestrator:
                                 break
                             else:
                                 self.transition_state("HALTED_SILENT", f"Unrecognised escalation command: {command}")
+                                self._queue_update_active_entry("FAILED")
                                 break
                         else:
                             time.sleep(5)

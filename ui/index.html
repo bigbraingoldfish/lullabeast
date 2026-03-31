@@ -265,8 +265,9 @@
             'COMPLETE': 'COMPLETE',
             'PIPELINE_COMPLETE': 'COMPLETE',
             'STOPPED': 'STOPPED',
+            'QUEUE_HALTED': 'QUEUE HALTED',
         };
-        
+
         const STATE_CLASSES = {
             'RUNNING': 'bg-amber-500 text-slate-900 status-pulse',
             'WAITING_FOR_SENTINEL': 'bg-amber-500 text-slate-900 status-pulse',
@@ -276,6 +277,17 @@
             'COMPLETE': 'bg-green-600 text-white',
             'PIPELINE_COMPLETE': 'bg-emerald-700 text-white',
             'STOPPED': 'bg-red-600 text-white',
+            'QUEUE_HALTED': 'bg-amber-600 text-slate-900',
+        };
+
+        const QUEUE_STATE_CLASSES = {
+            'READY': 'bg-slate-600 text-slate-200',
+            'ACTIVE': 'bg-teal-600 text-white status-pulse',
+            'BLOCKED': 'bg-amber-600 text-slate-900',
+            'SKIPPED_PENDING': 'bg-orange-600 text-white',
+            'DEPENDENCY_HOLD': 'bg-indigo-800 text-indigo-200',
+            'COMPLETED': 'bg-emerald-800 text-emerald-200',
+            'FAILED': 'bg-red-700 text-white',
         };
         
         const AGENT_COLORS = {
@@ -1388,6 +1400,20 @@
                             <rect x="14" y="3" width="7" height="7" rx="1"/>
                             <rect x="3" y="14" width="7" height="7" rx="1"/>
                             <rect x="14" y="14" width="7" height="7" rx="1"/>
+                        </svg>
+                    )
+                },
+                {
+                    key: 'queue',
+                    label: 'Project Queue',
+                    icon: (
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4 flex-shrink-0">
+                            <line x1="8" y1="6" x2="21" y2="6"/>
+                            <line x1="8" y1="12" x2="21" y2="12"/>
+                            <line x1="8" y1="18" x2="21" y2="18"/>
+                            <line x1="3" y1="6" x2="3.01" y2="6"/>
+                            <line x1="3" y1="12" x2="3.01" y2="12"/>
+                            <line x1="3" y1="18" x2="3.01" y2="18"/>
                         </svg>
                     )
                 },
@@ -3483,7 +3509,422 @@
             );
         }
 
+        // ─── Add Project Modal ────────────────────────────────────────────────────
+
+        function AddProjectModal({ onClose, onAdded, existingEntries }) {
+            const [projectPath, setProjectPath] = useState('');
+            const [parentId, setParentId] = useState('');
+            const [ideaId, setIdeaId] = useState('');
+            const [validating, setValidating] = useState(false);
+            const [errors, setErrors] = useState([]);
+            const [ideas, setIdeas] = useState([]);
+
+            useEffect(() => {
+                fetch('/api/ideas').then(r => r.json()).then(setIdeas).catch(() => {});
+            }, []);
+
+            const handleAdd = () => {
+                if (!projectPath.trim()) { setErrors([{message: 'Project path is required'}]); return; }
+                setValidating(true);
+                setErrors([]);
+                fetch('/api/queue/add', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        project_path: projectPath.trim(),
+                        idea_id: ideaId || null,
+                        parent_id: parentId || null,
+                    }),
+                })
+                .then(async r => {
+                    const d = await r.json().catch(() => ({}));
+                    if (!r.ok) {
+                        setErrors(d.validation_errors || [{message: d.detail || 'Request failed'}]);
+                        return;
+                    }
+                    onAdded(d);
+                    onClose();
+                })
+                .catch(e => setErrors([{message: String(e.message || e)}]))
+                .finally(() => setValidating(false));
+            };
+
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+                    <div className="relative w-full max-w-md mx-4 rounded-xl border border-[#2a2d31] bg-[#141618] p-6">
+                        <button onClick={onClose} disabled={validating}
+                            className="absolute top-4 right-4 text-slate-500 hover:text-slate-300 text-lg">✕</button>
+                        <h2 className="header-text text-base text-slate-200 mb-4">Add Project to Queue</h2>
+
+                        <div className="space-y-3">
+                            <div>
+                                <label className="header-text text-xs text-slate-400 mb-1 block">Project path (absolute)</label>
+                                <input type="text" value={projectPath} onChange={e => setProjectPath(e.target.value)}
+                                    placeholder="/home/pi/projects/my-app"
+                                    className="w-full bg-[#1a1d21] border border-[#2a2d31] rounded px-3 py-2 text-sm text-slate-200 font-mono focus:outline-none focus:border-[#00b4d8]"/>
+                            </div>
+
+                            {existingEntries && existingEntries.length > 0 && (
+                                <div>
+                                    <label className="header-text text-xs text-slate-400 mb-1 block">Depends on (optional)</label>
+                                    <select value={parentId} onChange={e => setParentId(e.target.value)}
+                                        className="w-full bg-[#1a1d21] border border-[#2a2d31] rounded px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-[#00b4d8]">
+                                        <option value="">None</option>
+                                        {existingEntries.map(e => (
+                                            <option key={e.id} value={e.id}>{e.name} [{e.state}]</option>
+                                        ))}
+                                    </select>
+                                </div>
+                            )}
+
+                            {ideas.length > 0 && (
+                                <div>
+                                    <label className="header-text text-xs text-slate-400 mb-1 block">Link idea (optional)</label>
+                                    <select value={ideaId} onChange={e => setIdeaId(e.target.value)}
+                                        className="w-full bg-[#1a1d21] border border-[#2a2d31] rounded px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-[#00b4d8]">
+                                        <option value="">None</option>
+                                        {ideas.map(i => (
+                                            <option key={i.id} value={i.id}>{i.name || i.id}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                            )}
+
+                            {errors.length > 0 && (
+                                <div className="rounded border border-red-700/60 bg-red-950/20 p-3 space-y-1">
+                                    {errors.map((e, i) => (
+                                        <p key={i} className="header-text text-xs text-red-300">
+                                            {e.message || e.check && `${e.check}: ${e.message}` || JSON.stringify(e)}
+                                        </p>
+                                    ))}
+                                </div>
+                            )}
+
+                            <div className="flex gap-3 justify-end pt-2">
+                                <button onClick={onClose} disabled={validating}
+                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-300 hover:bg-[#22252a]">
+                                    Cancel
+                                </button>
+                                <button onClick={handleAdd} disabled={validating}
+                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-slate-900 font-semibold hover:bg-[#00c8f0] disabled:opacity-50">
+                                    {validating ? 'Validating…' : 'Validate & Add'}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // ─── Queue Screen ─────────────────────────────────────────────────────────
+
+        function QueueScreen() {
+            const { setCurrentScreen } = useContext(AppCtx);
+            const [queue, setQueue] = useState([]);
+            const [queueMode, setQueueMode] = useState('auto');
+            const [selectedId, setSelectedId] = useState(null);
+            const [depTree, setDepTree] = useState([]);
+            const [nextEligible, setNextEligible] = useState(null);
+            const [showAddModal, setShowAddModal] = useState(false);
+            const [error, setError] = useState('');
+            const [triggerBusy, setTriggerBusy] = useState(false);
+            const [triggerMsg, setTriggerMsg] = useState('');
+            const dragItem = useRef(null);
+            const preDragOrder = useRef(null);
+
+            const fetchQueue = () => {
+                fetch('/api/queue')
+                    .then(r => r.json())
+                    .then(d => {
+                        setQueue(d.queue || []);
+                        setQueueMode(d.queue_mode || 'auto');
+                        setDepTree(d.dependency_tree || []);
+                        setNextEligible(d.next_eligible || null);
+                    })
+                    .catch(() => {});
+            };
+
+            useEffect(() => { fetchQueue(); }, []);
+
+            const selected = queue.find(e => e.id === selectedId) || null;
+            const activeEntry = queue.find(e => e.state === 'ACTIVE');
+
+            const handleModeToggle = () => {
+                const newMode = queueMode === 'auto' ? 'manual' : 'auto';
+                fetch('/api/queue/mode', {
+                    method: 'PATCH',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({queue_mode: newMode}),
+                }).then(() => setQueueMode(newMode)).catch(() => {});
+            };
+
+            const handleTriggerNext = () => {
+                setTriggerBusy(true);
+                setTriggerMsg('');
+                fetch('/api/queue/trigger-next', {method: 'POST'})
+                    .then(async r => {
+                        const d = await r.json().catch(() => ({}));
+                        if (r.status === 409) { setTriggerMsg('A project is already active.'); return; }
+                        if (d.queue_halted) { setTriggerMsg('Queue halted — all projects blocked.'); }
+                        else { setTriggerMsg(`Started: ${d.started || 'next project'}`); }
+                        fetchQueue();
+                    })
+                    .catch(() => setTriggerMsg('Request failed'))
+                    .finally(() => setTriggerBusy(false));
+            };
+
+            const handleRemove = (id) => {
+                fetch(`/api/queue/${id}`, {method: 'DELETE'})
+                    .then(async r => {
+                        if (!r.ok) { const d = await r.json().catch(() => ({})); setError(d.detail || 'Cannot remove'); return; }
+                        setSelectedId(null);
+                        fetchQueue();
+                    })
+                    .catch(() => setError('Request failed'));
+            };
+
+            const handleSetParent = (id, parentId) => {
+                fetch(`/api/queue/${id}/parent`, {
+                    method: 'PATCH',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({parent_id: parentId || null}),
+                })
+                .then(async r => {
+                    if (!r.ok) { const d = await r.json().catch(() => ({})); setError(d.detail || 'Cannot set parent'); return; }
+                    fetchQueue();
+                })
+                .catch(() => setError('Request failed'));
+            };
+
+            // Drag-to-reorder handlers
+            const handleDragStart = (e, entry) => {
+                dragItem.current = entry;
+                preDragOrder.current = queue.map(e => e.id);
+                e.dataTransfer.effectAllowed = 'move';
+            };
+
+            const handleDragOver = (e, targetEntry) => {
+                e.preventDefault();
+                if (!dragItem.current || dragItem.current.id === targetEntry.id) return;
+                if (['ACTIVE', 'COMPLETED'].includes(dragItem.current.state)) return;
+                // Optimistic reorder for visual feedback
+                const newQueue = [...queue];
+                const fromIdx = newQueue.findIndex(e => e.id === dragItem.current.id);
+                const toIdx = newQueue.findIndex(e => e.id === targetEntry.id);
+                if (fromIdx === -1 || toIdx === -1) return;
+                const [moved] = newQueue.splice(fromIdx, 1);
+                newQueue.splice(toIdx, 0, moved);
+                setQueue(newQueue);
+            };
+
+            const handleDrop = (e, targetEntry) => {
+                e.preventDefault();
+                if (!dragItem.current || dragItem.current.id === targetEntry.id) return;
+                if (['ACTIVE', 'COMPLETED'].includes(dragItem.current.state)) return;
+                const newPos = queue.findIndex(e => e.id === targetEntry.id) + 1;
+                fetch(`/api/queue/${dragItem.current.id}/position`, {
+                    method: 'PATCH',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({position: newPos}),
+                })
+                .then(r => { if (!r.ok) { setQueue(preDragOrder.current.map(id => queue.find(e => e.id === id)).filter(Boolean)); } })
+                .then(() => fetchQueue())
+                .catch(() => { setQueue(preDragOrder.current.map(id => queue.find(e => e.id === id)).filter(Boolean)); });
+                dragItem.current = null;
+            };
+
+            const handleDragEnd = () => { dragItem.current = null; };
+
+            const readyCt = queue.filter(e => e.state === 'READY').length;
+            const blockedCt = queue.filter(e => e.state === 'BLOCKED').length;
+            const completedCt = queue.filter(e => e.state === 'COMPLETED').length;
+
+            function relTime(iso) {
+                if (!iso) return null;
+                const d = new Date(iso);
+                const diff = Math.floor((Date.now() - d) / 1000);
+                if (diff < 60) return `${diff}s ago`;
+                if (diff < 3600) return `${Math.floor(diff/60)}m ago`;
+                return `${Math.floor(diff/3600)}h ago`;
+            }
+
+            // Recursive dependency tree renderer
+            function DepNode({ node, depth }) {
+                const stateClass = QUEUE_STATE_CLASSES[node.state] || 'bg-slate-700 text-white';
+                return (
+                    <div style={{marginLeft: depth * 16 + 'px'}} className="mb-1">
+                        {depth > 0 && <span className="text-slate-600 mr-1">└</span>}
+                        <span className="text-slate-300 text-xs">{node.name}</span>
+                        <span className={`header-text ml-2 px-1.5 py-0.5 rounded text-xs font-medium ${stateClass}`}>{node.state}</span>
+                        {(node.children || []).map(c => <DepNode key={c.id} node={c} depth={depth + 1}/>)}
+                    </div>
+                );
+            }
+
+            const hasDeps = queue.some(e => e.parent_id);
+
+            return (
+                <div className="flex flex-col h-full overflow-hidden">
+                    {/* Top bar */}
+                    <div className="bg-[#141618] border-b border-[#1a1d21] px-6 py-3 flex items-center gap-4 flex-shrink-0">
+                        <h1 className="header-text text-base font-semibold text-slate-200">Project Queue</h1>
+                        <button onClick={() => setShowAddModal(true)}
+                            className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-slate-900 font-semibold hover:bg-[#00c8f0]">
+                            + Add Project
+                        </button>
+                        <div className="flex items-center gap-1 rounded-full bg-[#1a1d21] p-0.5 border border-[#2a2d31]">
+                            {['auto', 'manual'].map(m => (
+                                <button key={m} onClick={handleModeToggle}
+                                    className={`header-text text-xs px-3 py-1 rounded-full transition-colors ${
+                                        queueMode === m ? 'bg-[#00b4d8] text-slate-900 font-semibold' : 'text-slate-400 hover:text-slate-200'
+                                    }`}>{m === 'auto' ? 'Auto' : 'Manual'}</button>
+                            ))}
+                        </div>
+                        {queueMode === 'manual' && (
+                            <button onClick={handleTriggerNext} disabled={triggerBusy || !!activeEntry}
+                                className="header-text text-xs px-3 py-1.5 rounded bg-emerald-700 text-white hover:bg-emerald-600 disabled:opacity-50">
+                                {triggerBusy ? 'Starting…' : 'Trigger Next'}
+                            </button>
+                        )}
+                        {triggerMsg && <span className="header-text text-xs text-amber-400">{triggerMsg}</span>}
+                        {error && <span className="header-text text-xs text-red-400">{error}</span>}
+                        <span className="header-text text-xs text-slate-500 ml-auto">
+                            {queue.length} project{queue.length !== 1 ? 's' : ''} — {readyCt} ready, {blockedCt} blocked, {completedCt} complete
+                        </span>
+                    </div>
+
+                    {/* Three-column body */}
+                    <div className="flex-1 grid grid-cols-[30%_35%_35%] gap-0 overflow-hidden">
+                        {/* Left: Queue list */}
+                        <div className="bg-[#0d0f12] border-r border-[#1a1d21] overflow-y-auto p-3">
+                            {queue.length === 0 ? (
+                                <p className="header-text text-xs text-slate-500 text-center mt-8">No projects in queue.<br/>Click "+ Add Project" to get started.</p>
+                            ) : (
+                                queue.map(entry => {
+                                    const stateClass = QUEUE_STATE_CLASSES[entry.state] || 'bg-slate-700 text-white';
+                                    const isActive = selectedId === entry.id;
+                                    const canDrag = !['ACTIVE','COMPLETED'].includes(entry.state);
+                                    return (
+                                        <div
+                                            key={entry.id}
+                                            draggable={canDrag}
+                                            onDragStart={e => handleDragStart(e, entry)}
+                                            onDragOver={e => handleDragOver(e, entry)}
+                                            onDrop={e => handleDrop(e, entry)}
+                                            onDragEnd={handleDragEnd}
+                                            onClick={() => setSelectedId(entry.id)}
+                                            className={`flex items-center gap-2 p-2.5 rounded mb-1 cursor-pointer border transition-colors ${
+                                                isActive ? 'border-[#00b4d8]/60 bg-[#0d1f26]' : 'border-transparent hover:bg-[#141618]'
+                                            }`}
+                                        >
+                                            {canDrag && <span className="text-slate-600 cursor-grab text-xs select-none">⠿</span>}
+                                            {!canDrag && <span className="w-3"/>}
+                                            <span className="header-text text-xs text-slate-500 w-5 text-right flex-shrink-0">{entry.position}</span>
+                                            <span className="flex-1 header-text text-xs text-slate-200 truncate">{entry.name}</span>
+                                            {entry.parent_id && <span className="text-indigo-400 text-xs" title="Has dependency">⊂</span>}
+                                            {entry.skip_count > 0 && <span className="header-text text-xs text-orange-400">×{entry.skip_count}</span>}
+                                            <span className={`header-text px-1.5 py-0.5 rounded text-xs font-medium flex-shrink-0 ${stateClass}`}>{entry.state}</span>
+                                        </div>
+                                    );
+                                })
+                            )}
+                        </div>
+
+                        {/* Center: Entry detail */}
+                        <div className="bg-[#0d0f12] border-r border-[#1a1d21] p-4 overflow-y-auto">
+                            {!selected ? (
+                                <p className="header-text text-xs text-slate-500 text-center mt-8">Select a project to view details</p>
+                            ) : (
+                                <div className="space-y-3">
+                                    <div>
+                                        <p className="header-text text-base text-slate-200 font-semibold">{selected.name}</p>
+                                        <p className="header-text text-xs text-slate-500 font-mono mt-0.5 break-all">{selected.project_path}</p>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <span className={`header-text px-2 py-0.5 rounded text-xs font-medium ${QUEUE_STATE_CLASSES[selected.state] || 'bg-slate-700 text-white'}`}>{selected.state}</span>
+                                        {selected.blocked_at && <span className="header-text text-xs text-slate-500">Blocked {relTime(selected.blocked_at)}</span>}
+                                        {selected.started_at && <span className="header-text text-xs text-slate-500">Started {relTime(selected.started_at)}</span>}
+                                        {selected.completed_at && <span className="header-text text-xs text-slate-500">Done {relTime(selected.completed_at)}</span>}
+                                    </div>
+                                    {selected.skip_count > 0 && (
+                                        <p className="header-text text-xs text-orange-400">Skipped {selected.skip_count} time{selected.skip_count !== 1 ? 's' : ''}</p>
+                                    )}
+                                    {selected.parent_id && (
+                                        <div>
+                                            <p className="header-text text-xs text-slate-400 mb-1">Depends on:</p>
+                                            {(() => { const p = queue.find(e => e.id === selected.parent_id); return p ? (
+                                                <button onClick={() => setSelectedId(p.id)} className="header-text text-xs text-[#00b4d8] hover:underline">{p.name}</button>
+                                            ) : <span className="header-text text-xs text-slate-500">Unknown parent</span>; })()}
+                                        </div>
+                                    )}
+                                    {queue.filter(e => e.parent_id === selected.id).length > 0 && (
+                                        <div>
+                                            <p className="header-text text-xs text-slate-400 mb-1">Dependents:</p>
+                                            {queue.filter(e => e.parent_id === selected.id).map(c => (
+                                                <button key={c.id} onClick={() => setSelectedId(c.id)} className="header-text text-xs text-[#00b4d8] hover:underline block">{c.name}</button>
+                                            ))}
+                                        </div>
+                                    )}
+                                    {selected.preflight_validated_at && (
+                                        <p className="header-text text-xs text-slate-500">Validated {relTime(selected.preflight_validated_at)}</p>
+                                    )}
+                                    {/* Contextual action buttons */}
+                                    <div className="flex flex-wrap gap-2 pt-2">
+                                        {['READY', 'SKIPPED_PENDING', 'DEPENDENCY_HOLD', 'FAILED', 'COMPLETED'].includes(selected.state) && (
+                                            <button onClick={() => handleRemove(selected.id)}
+                                                className="header-text text-xs px-2 py-1 rounded bg-red-900/40 text-red-300 hover:bg-red-900/70">
+                                                Remove
+                                            </button>
+                                        )}
+                                        {selected.state === 'BLOCKED' && (
+                                            <button onClick={() => setCurrentScreen('pipeline')}
+                                                className="header-text text-xs px-2 py-1 rounded bg-[#1a1d21] text-[#00b4d8] hover:bg-[#22252a]">
+                                                View in Monitor
+                                            </button>
+                                        )}
+                                        {selected.state === 'ACTIVE' && (
+                                            <button onClick={() => setCurrentScreen('pipeline')}
+                                                className="header-text text-xs px-2 py-1 rounded bg-teal-900/40 text-teal-300 hover:bg-teal-900/70">
+                                                View in Monitor
+                                            </button>
+                                        )}
+                                        {selected.parent_id && (
+                                            <button onClick={() => handleSetParent(selected.id, null)}
+                                                className="header-text text-xs px-2 py-1 rounded bg-[#1a1d21] text-slate-300 hover:bg-[#22252a]">
+                                                Clear dependency
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Right: Dependency tree */}
+                        <div className="bg-[#0d0f12] p-4 overflow-y-auto">
+                            <p className="header-text text-xs text-slate-400 mb-3 font-semibold">Dependencies</p>
+                            {!hasDeps ? (
+                                <p className="header-text text-xs text-slate-500">No dependencies set — use the detail panel to assign parent relationships.</p>
+                            ) : (
+                                <div>
+                                    {depTree.map(node => <DepNode key={node.id} node={node} depth={0}/>)}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+
+                    {showAddModal && (
+                        <AddProjectModal
+                            onClose={() => setShowAddModal(false)}
+                            onAdded={() => { fetchQueue(); setShowAddModal(false); }}
+                            existingEntries={queue}
+                        />
+                    )}
+                </div>
+            );
+        }
+
         function PipelineScreen() {
+            const { setCurrentScreen } = useContext(AppCtx);
             const [pState, setPState] = useState({
                 pipeline_status: 'Loading...',
                 orchestrator_alive: true,
@@ -3845,6 +4286,20 @@
                                     >
                                         {statusLabel}
                                     </span>
+                                    {(pState.queue_length > 0) && (
+                                        <button
+                                            className={`header-text px-2 py-1 rounded text-xs ml-1 ${
+                                                pState.queue_halted
+                                                    ? 'bg-amber-600/20 text-amber-400 border border-amber-600/40'
+                                                    : 'bg-[#1a1d21] text-slate-400 border border-[#2a2d31]'
+                                            }`}
+                                            onClick={() => setCurrentScreen('queue')}
+                                        >
+                                            {pState.queue_halted
+                                                ? 'Queue: halted'
+                                                : `Queue: ${((pState.ready_count || 0) + (pState.blocked_count || 0))} waiting`}
+                                        </button>
+                                    )}
                                 </div>
                                 {resumeError ? (
                                     <span className="header-text text-xs text-red-400 max-w-md text-right">
@@ -4670,6 +5125,7 @@
                         <Sidebar currentScreen={currentScreen} onNavigate={handleNavigate} />
                         <div className="flex-1 flex flex-col overflow-hidden">
                             {currentScreen === "pipeline" && <PipelineScreen />}
+                            {currentScreen === "queue" && <QueueScreen />}
                             {currentScreen === "preflight" && (
                                 <PreflightScreen
                                     seedRoadmap={seedRoadmap}
