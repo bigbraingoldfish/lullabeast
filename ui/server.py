@@ -795,7 +795,42 @@ def _move_group_atomically(entries, parent_id, new_pos):
     final = non_group[:insert_idx] + group_block + non_group[insert_idx:]
     for i, e in enumerate(final, 1):
         e["position"] = i
+    entries[:] = final
     return entries
+
+
+def _validate_queue_entry_ids_order(entries, entry_ids):
+    """Return None if entry_ids is a valid permutation with valid dependency layout; else an error string."""
+    by_id = {e["id"]: e for e in entries}
+    expected = set(by_id.keys())
+    if not entry_ids:
+        return "entry_ids is required"
+    if len(entry_ids) != len(entries):
+        return "entry_ids must include each queue entry exactly once"
+    if len(set(entry_ids)) != len(entry_ids):
+        return "duplicate entry id in entry_ids"
+    if set(entry_ids) != expected:
+        return "entry_ids must match the current queue entries"
+    index_of = {uid: i for i, uid in enumerate(entry_ids)}
+    for e in entries:
+        pid = e.get("parent_id")
+        if pid:
+            if pid not in index_of:
+                return "invalid parent reference in queue data"
+            if index_of[pid] >= index_of[e["id"]]:
+                return "parent must appear before child in the requested order"
+    for eid in by_id:
+        desc = _get_all_descendants(entries, eid)
+        group = {eid} | desc
+        indices = sorted(index_of[uid] for uid in group)
+        if not indices:
+            continue
+        lo, hi = indices[0], indices[-1]
+        if hi - lo + 1 != len(group):
+            return "each subtree must appear as a contiguous block in the requested order"
+        if entry_ids[lo] != eid:
+            return "subtree root must lead its contiguous block in the requested order"
+    return None
 
 
 def _spawn_orchestrator(project_path: str, config: dict | None = None) -> dict:
@@ -4231,18 +4266,80 @@ async def patch_queue_mode(request: Request):
 
 @app.get("/api/queue")
 def get_queue():
-    """Full queue with computed dependency_tree and next_eligible."""
+    """Full queue with computed dependency_tree and next_eligible.
+
+    Each entry may include ``live_pipeline_status`` when its ``project_path``
+    (realpath) matches the global ``pipeline_state.json`` ``project_path`` —
+    same rule as ``GET /api/queue/{entry_id}/snapshot``. Other entries set
+    ``live_pipeline_status`` to null.
+    """
     config = load_config()
     q = _read_queue_file(config)
     entries = q.get("queue", [])
+    ordered = sorted(entries, key=lambda e: e["position"])
+
+    ps_path = os.path.expanduser(config.get("pipeline_state_path", "~/.openclaw/pipeline_state.json"))
+    ps = _read_json_file(ps_path) if os.path.exists(ps_path) else None
+    ps_project = ps.get("project_path", "") if ps else ""
+    try:
+        ps_real = os.path.realpath(ps_project) if ps_project else ""
+    except OSError:
+        ps_real = ""
+
+    enriched = []
+    for e in ordered:
+        entry = dict(e)
+        if ps and ps_real:
+            ep = e.get("project_path", "")
+            try:
+                er = os.path.realpath(ep) if ep else ""
+            except OSError:
+                er = ""
+            if er and er == ps_real:
+                entry["live_pipeline_status"] = ps.get("pipeline_status")
+            else:
+                entry["live_pipeline_status"] = None
+        else:
+            entry["live_pipeline_status"] = None
+        enriched.append(entry)
+
     return {
-        "queue": entries,
+        "queue": enriched,
         "queue_mode": q.get("queue_mode", "auto"),
         "last_updated": q.get("last_updated", ""),
-        "dependency_tree": _compute_dependency_tree(entries),
-        "next_eligible": _find_next_eligible(entries),
-        "display_ranks": _compute_display_ranks(entries),
+        "dependency_tree": _compute_dependency_tree(ordered),
+        "next_eligible": _find_next_eligible(ordered),
+        "display_ranks": _compute_display_ranks(ordered),
     }
+
+
+@app.put("/api/queue/order")
+async def put_queue_order(request: Request):
+    """Replace queue order atomically. Body: {"entry_ids": [uuid, ...]} — full permutation of current entries."""
+    from datetime import datetime, timezone as tz
+
+    body = await request.json()
+    entry_ids = body.get("entry_ids")
+    if not isinstance(entry_ids, list):
+        raise HTTPException(status_code=422, detail="entry_ids must be an array")
+
+    config = load_config()
+    q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
+    q = _read_queue_file(config)
+    entries = q.get("queue", [])
+
+    err = _validate_queue_entry_ids_order(entries, entry_ids)
+    if err:
+        raise HTTPException(status_code=400, detail=err)
+
+    by_id = {e["id"]: e for e in entries}
+    new_queue = [by_id[uid] for uid in entry_ids]
+    for i, e in enumerate(new_queue, 1):
+        e["position"] = i
+    q["queue"] = new_queue
+    q["last_updated"] = datetime.now(tz.utc).isoformat()
+    _write_queue_file(q_path, q)
+    return {"ok": True}
 
 
 @app.post("/api/queue/add")
