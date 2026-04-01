@@ -451,3 +451,27 @@ class TestQueueStateTransitions:
         q = inst._read_queue()
         assert q["queue"][0]["state"] == "BLOCKED"
         assert q["queue"][0]["blocked_at"] is not None
+
+
+# ---------------------------------------------------------------------------
+# _queue_update_active_entry (HALTED_SILENT → FAILED parity)
+# ---------------------------------------------------------------------------
+
+
+class TestQueueUpdateActiveEntry:
+    def test_failed_includes_failed_at(self, orch, tmp_path, monkeypatch):
+        inst, queue_file, _, _ = orch
+        proj = tmp_path / "active_for_fail"
+        proj.mkdir()
+        entry = {**_make_entry("active_for_fail"), "state": "ACTIVE", "project_path": str(proj)}
+        _write_queue(queue_file, [entry])
+
+        import orchestrator as orch_mod
+
+        monkeypatch.setattr(orch_mod, "SYMLINK_TARGET", str(proj))
+        ts = datetime.now(timezone.utc).isoformat()
+        inst._queue_update_active_entry("FAILED", {"failed_at": ts})
+
+        q = inst._read_queue()
+        assert q["queue"][0]["state"] == "FAILED"
+        assert q["queue"][0]["failed_at"] == ts

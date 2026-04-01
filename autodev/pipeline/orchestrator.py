@@ -1393,7 +1393,10 @@ class Orchestrator:
                     except Exception as write_err:
                         print(f"[ERROR] Could not write escalation_failed.json: {write_err}")
                     self.transition_state("HALTED_SILENT", "Escalation delivery failed after repo init failure")
-                    self._queue_update_active_entry("FAILED")
+                    self._queue_update_active_entry(
+                        "FAILED",
+                        {"failed_at": datetime.now(timezone.utc).isoformat()},
+                    )
                 return  # Do not enter phase loop; finally block will release lock
 
             # --- Startup Phase Identification (Gap fix: run roadmap_parser before first planner
@@ -2305,7 +2308,10 @@ class Orchestrator:
                                 with open(os.path.join(SYMLINK_TARGET, "escalation_failed.json"), "w") as f:
                                     json.dump(error_data, f)
                                 self.transition_state("HALTED_SILENT", "Escalation delivery failed")
-                                self._queue_update_active_entry("FAILED")
+                                self._queue_update_active_entry(
+                                    "FAILED",
+                                    {"failed_at": datetime.now(timezone.utc).isoformat()},
+                                )
                                 break
                     else:
                         sentinel_path = os.path.join(SYMLINK_TARGET, "escalation_output.done")
@@ -2396,7 +2402,10 @@ class Orchestrator:
                                 break
                             else:
                                 self.transition_state("HALTED_SILENT", f"Unrecognised escalation command: {command}")
-                                self._queue_update_active_entry("FAILED")
+                                self._queue_update_active_entry(
+                                    "FAILED",
+                                    {"failed_at": datetime.now(timezone.utc).isoformat()},
+                                )
                                 break
                         else:
                             time.sleep(5)
@@ -2443,6 +2452,10 @@ class Orchestrator:
                 self.transition_state(
                     "HALTED_SILENT",
                     f"HALTED after unhandled exception and escalation failure: {exc_description}",
+                )
+                self._queue_update_active_entry(
+                    "FAILED",
+                    {"failed_at": datetime.now(timezone.utc).isoformat()},
                 )
         finally:
             self.release_lock()
