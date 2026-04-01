@@ -323,6 +323,7 @@ class Orchestrator:
         final = non_group[:insert_idx] + group_block + non_group[insert_idx:]
         for i, e in enumerate(final, 1):
             e["position"] = i
+        entries[:] = final
         return entries
 
     def _select_next_queue_project(self):
@@ -332,6 +333,7 @@ class Orchestrator:
         """
         queue_data = self._read_queue()
         entries = queue_data["queue"]
+        entries.sort(key=lambda e: e["position"])
         now = datetime.now(timezone.utc).isoformat()
 
         # Build parent state lookup

@@ -217,3 +217,34 @@ class TestGroupMoveAtomically:
         resp = c.patch(f"/api/queue/{parent['id']}/position", json={"position": 3})
         assert resp.status_code == 200
         assert len(write_calls) == 1
+
+    def test_queue_file_array_matches_position_order_after_group_move(self, client):
+        """Persisted queue list order matches execution order (sorted by position)."""
+        c, queue_file, _ = client
+        parent = _make_entry("Parent", position=1)
+        child = _make_entry("Child", position=2, parent_id=parent["id"])
+        d = _make_entry("D", position=3)
+        e = _make_entry("E", position=4)
+        _write_queue(queue_file, [parent, child, d, e])
+
+        c.patch(f"/api/queue/{parent['id']}/position", json={"position": 3})
+
+        q = _read_queue(queue_file)
+        assert q["queue"] == sorted(q["queue"], key=lambda x: x["position"])
+        # Parent row immediately precedes child in stored array
+        ids = [x["id"] for x in q["queue"]]
+        pi, ci = ids.index(parent["id"]), ids.index(child["id"])
+        assert ci == pi + 1
+
+    def test_get_queue_returns_entries_sorted_by_position(self, client):
+        """GET /api/queue lists entries by position even if file array order is wrong."""
+        c, queue_file, _ = client
+        a = _make_entry("A", position=1)
+        b = _make_entry("B", position=2)
+        c_entry = _make_entry("C", position=3)
+        _write_queue(queue_file, [c_entry, a, b])
+
+        resp = c.get("/api/queue")
+        assert resp.status_code == 200
+        names = [e["name"] for e in resp.json()["queue"]]
+        assert names == ["A", "B", "C"]

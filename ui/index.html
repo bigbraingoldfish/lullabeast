@@ -224,7 +224,7 @@
     <div id="app-root"></div>
 
     <script type="text/babel">
-        const { useState, useEffect, useRef, createContext, useContext } = React;
+        const { useState, useEffect, useRef, useCallback, createContext, useContext } = React;
         const AppCtx = createContext(null);
 
         /** Relative time for idea list (from API `updated` ISO string). */
@@ -289,6 +289,25 @@
             'COMPLETED': 'bg-emerald-800 text-emerald-200',
             'FAILED': 'bg-red-700 text-white',
         };
+
+        /** Derive list/detail status pill from live_pipeline_status + queue state (GET /api/queue). */
+        function queueRowDisplay(entry) {
+            if (!entry) return { label: '', className: 'bg-slate-700 text-white' };
+            const live = entry.live_pipeline_status;
+            if (live === 'RUNNING' || live === 'WAITING_FOR_SENTINEL') {
+                return { label: 'ACTIVE', className: 'bg-teal-600 text-white' };
+            }
+            if (live === 'WAITING_FOR_HUMAN') {
+                return { label: 'ESCALATION', className: 'bg-amber-500 text-slate-900' };
+            }
+            if (entry.state === 'READY') {
+                return { label: 'READY', className: QUEUE_STATE_CLASSES.READY };
+            }
+            return {
+                label: entry.state,
+                className: QUEUE_STATE_CLASSES[entry.state] || 'bg-slate-700 text-white',
+            };
+        }
         
         const AGENT_COLORS = {
             'PLANNER': 'bg-[#1a1d21] text-white',
@@ -1358,12 +1377,12 @@
             );
             
             return (
-                <div>
-                    <div className="flex gap-2 mb-3">
+                <div className="flex flex-col h-full min-h-0">
+                    <div className="flex gap-2 mb-3 flex-shrink-0">
                         <TabButton tab="activity" label="Activity" />
                         <TabButton tab="escalation" label="Escalation" />
                     </div>
-                    <div className="overflow-y-auto max-h-36">
+                    <div className="flex-1 min-h-0 overflow-y-auto">
                         {activityTab === 'escalation' ? (
                             <EscalationLogPanel events={escalationEvents} />
                         ) : events.length === 0 ? (
@@ -2662,9 +2681,11 @@
                                     type="button"
                                     onClick={() => submitMessage()}
                                     disabled={!currentIdeaId || !inputText.trim() || isLoading}
+                                    aria-busy={isLoading}
+                                    aria-disabled={!currentIdeaId || !inputText.trim() || isLoading}
                                     className="header-text px-3 rounded border border-[#00b4d8]/50 bg-[#00b4d8] text-[#0d0f11] text-xs font-semibold hover:brightness-110 disabled:bg-[#2a2d31] disabled:text-slate-600 disabled:border-[#2a2d31] disabled:cursor-not-allowed"
                                 >
-                                    {isLoading ? "..." : "Send"}
+                                    {isLoading ? "Sending…" : "Send"}
                                 </button>
                             </div>
                         </div>
@@ -3315,7 +3336,7 @@
                             <div className="flex gap-2 items-center">
                                 {!repoPathLocked ? (
                                     <button type="button" onClick={onRepoPathConfirm} className="header-text text-sm px-3 py-1 rounded bg-[#00b4d8] text-[#0d0f12] font-medium">
-                                        Confirm
+                                        Confirm path
                                     </button>
                                 ) : (
                                     <>
@@ -3438,7 +3459,7 @@
                             <div className="flex gap-2 items-center">
                                 {!roadmapSeedLocked ? (
                                     <button type="button" onClick={onRoadmapSeedConfirm} className="header-text text-sm px-3 py-1 rounded bg-[#00b4d8] text-[#0d0f12] font-medium">
-                                        Confirm
+                                        Validate roadmap
                                     </button>
                                 ) : (
                                     <>
@@ -3598,7 +3619,7 @@
         // ─── Queue Screen ─────────────────────────────────────────────────────────
 
         function QueueScreen() {
-            const { setCurrentScreen, pipelineStatus } = useContext(AppCtx);
+            const { pipelineStatus, setUnsavedQueueOrder, safeNavigate } = useContext(AppCtx);
             const [queue, setQueue] = useState([]);
             const [queueMode, setQueueMode] = useState('auto');
             const [selectedId, setSelectedId] = useState(null);
@@ -3617,24 +3638,142 @@
             const [revalidateChecks, setRevalidateChecks] = useState(null);
             const [escalationMsg, setEscalationMsg] = useState('');
             const [displayRanks, setDisplayRanks] = useState({});
+            const [reorderMode, setReorderMode] = useState(false);
+            const [reorderSaveBusy, setReorderSaveBusy] = useState(false);
+            const [reorderError, setReorderError] = useState("");
+            const reorderSnapshotRef = useRef(null);
+            const reorderModeRef = useRef(false);
+            const reorderDirtyRef = useRef(false);
             const dragItem = useRef(null);
             const preDragOrder = useRef(null);
 
-            const fetchQueue = () => {
+            const computeLocalRanks = (q) => {
+                const ranks = {};
+                let rank = 0;
+                q.forEach((e) => {
+                    if (!e.parent_id) {
+                        rank += 1;
+                        ranks[e.id] = rank;
+                    } else {
+                        ranks[e.id] = null;
+                    }
+                });
+                return ranks;
+            };
+
+            const reorderDirty =
+                reorderMode &&
+                reorderSnapshotRef.current !== null &&
+                queue.map((e) => e.id).join("\0") !== reorderSnapshotRef.current;
+
+            useEffect(() => {
+                reorderModeRef.current = reorderMode;
+            }, [reorderMode]);
+
+            useEffect(() => {
+                reorderDirtyRef.current = reorderDirty;
+            }, [reorderDirty]);
+
+            useEffect(() => {
+                setUnsavedQueueOrder(!!reorderDirty);
+            }, [reorderDirty, setUnsavedQueueOrder]);
+
+            useEffect(() => {
+                if (!reorderDirty) return;
+                const onBeforeUnload = (e) => {
+                    e.preventDefault();
+                    e.returnValue = "";
+                };
+                window.addEventListener("beforeunload", onBeforeUnload);
+                return () => window.removeEventListener("beforeunload", onBeforeUnload);
+            }, [reorderDirty]);
+
+            const effectiveRanks = reorderMode ? computeLocalRanks(queue) : displayRanks;
+
+            const fetchQueue = (options = {}) => {
+                const force = options.force === true;
+                if (!force && reorderModeRef.current && reorderDirtyRef.current) {
+                    setError("Save or cancel reorder first.");
+                    return;
+                }
                 fetch('/api/queue')
-                    .then(r => r.json())
-                    .then(d => {
-                        setQueue(d.queue || []);
+                    .then(async (r) => {
+                        const d = await r.json().catch(() => ({}));
+                        if (!r.ok) {
+                            const detail = d.detail;
+                            const msg = Array.isArray(detail)
+                                ? detail.map((x) => x.msg || JSON.stringify(x)).join("; ")
+                                : detail || d.message || `Request failed (${r.status})`;
+                            throw new Error(String(msg || "Could not load queue"));
+                        }
+                        return d;
+                    })
+                    .then((d) => {
+                        const q = d.queue || [];
+                        setQueue(q);
                         setQueueMode(d.queue_mode || 'auto');
                         setNextEligible(d.next_eligible || null);
                         setDisplayRanks(d.display_ranks || {});
                         setLoading(false);
+                        setError("");
                         setSnapshotVersion(v => v + 1);
+                        if (
+                            reorderModeRef.current &&
+                            !reorderDirtyRef.current &&
+                            reorderSnapshotRef.current !== null
+                        ) {
+                            reorderSnapshotRef.current = q.map((e) => e.id).join("\0");
+                        }
                     })
-                    .catch(() => { setLoading(false); });
+                    .catch((err) => {
+                        setLoading(false);
+                        setError(err.message || "Could not load queue");
+                    });
             };
 
-            useEffect(() => { fetchQueue(); }, []);
+            const beginReorder = () => {
+                setReorderError("");
+                setError("");
+                reorderSnapshotRef.current = queue.map((e) => e.id).join("\0");
+                setReorderMode(true);
+                setUnsavedQueueOrder(false);
+            };
+
+            const cancelReorder = () => {
+                setReorderMode(false);
+                reorderSnapshotRef.current = null;
+                setReorderError("");
+                setUnsavedQueueOrder(false);
+                fetchQueue({ force: true });
+            };
+
+            const saveReorder = () => {
+                setReorderSaveBusy(true);
+                setReorderError("");
+                fetch("/api/queue/order", {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ entry_ids: queue.map((e) => e.id) }),
+                })
+                    .then(async (r) => {
+                        const d = await r.json().catch(() => ({}));
+                        if (!r.ok) {
+                            const msg = typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail || r.statusText);
+                            throw new Error(msg || "Save failed");
+                        }
+                        return d;
+                    })
+                    .then(() => {
+                        setReorderMode(false);
+                        reorderSnapshotRef.current = null;
+                        setUnsavedQueueOrder(false);
+                        fetchQueue({ force: true });
+                    })
+                    .catch((err) => setReorderError(err.message || String(err)))
+                    .finally(() => setReorderSaveBusy(false));
+            };
+
+            useEffect(() => { fetchQueue({ force: true }); }, []);
 
             // Fetch snapshot when selected entry or version changes
             useEffect(() => {
@@ -3647,9 +3786,9 @@
                     .finally(() => setSnapshotLoading(false));
             }, [selectedId, snapshotVersion]);
 
-            // Fetch escalation message for BLOCKED active project
+            // Fetch escalation message when pipeline is waiting for human (escalation)
             useEffect(() => {
-                if (!snapshot || !snapshot.is_active_project || snapshot.pipeline_status !== 'BLOCKED') {
+                if (!snapshot || !snapshot.is_active_project || snapshot.pipeline_status !== 'WAITING_FOR_HUMAN') {
                     setEscalationMsg('');
                     return;
                 }
@@ -3663,6 +3802,7 @@
             const activeEntry = queue.find(e => e.state === 'ACTIVE');
 
             const handleModeToggle = () => {
+                if (reorderDirty) return;
                 const newMode = queueMode === 'auto' ? 'manual' : 'auto';
                 fetch('/api/queue/mode', {
                     method: 'PATCH',
@@ -3672,6 +3812,7 @@
             };
 
             const handleTriggerNext = () => {
+                if (reorderDirty) return;
                 setTriggerBusy(true);
                 setTriggerMsg('');
                 fetch('/api/queue/trigger-next', {method: 'POST'})
@@ -3764,8 +3905,24 @@
                 .finally(() => setHubBusy(false));
             };
 
+            // Drag-to-reorder: recursive descendants of a root (by parent_id), matching server group move
+            const getAllDescendantIds = (q, rootId) => {
+                const out = [];
+                const walk = (pid) => {
+                    q.forEach((e) => {
+                        if (e.parent_id === pid) {
+                            out.push(e.id);
+                            walk(e.id);
+                        }
+                    });
+                };
+                walk(rootId);
+                return out;
+            };
+
             // Drag-to-reorder handlers
             const handleDragStart = (e, entry) => {
+                if (!reorderMode) return;
                 dragItem.current = entry;
                 preDragOrder.current = queue.map(e => e.id);
                 e.dataTransfer.effectAllowed = 'move';
@@ -3773,30 +3930,35 @@
 
             const handleDragOver = (e, targetEntry) => {
                 e.preventDefault();
-                if (!dragItem.current || dragItem.current.id === targetEntry.id) return;
-                if (['ACTIVE', 'COMPLETED'].includes(dragItem.current.state)) return;
+                if (!reorderMode || !dragItem.current) return;
+                const root = dragItem.current;
+                if (root.id === targetEntry.id) return;
+                if (['ACTIVE', 'COMPLETED'].includes(root.state)) return;
+                if (root.parent_id) return;
+                const descIds = getAllDescendantIds(queue, root.id);
+                const groupIds = new Set([root.id, ...descIds]);
+                if (groupIds.has(targetEntry.id)) return;
                 const newQueue = [...queue];
-                const fromIdx = newQueue.findIndex(e => e.id === dragItem.current.id);
-                const toIdx = newQueue.findIndex(e => e.id === targetEntry.id);
-                if (fromIdx === -1 || toIdx === -1) return;
-                const [moved] = newQueue.splice(fromIdx, 1);
-                newQueue.splice(toIdx, 0, moved);
+                const toIdxOrig = newQueue.findIndex(e => e.id === targetEntry.id);
+                if (toIdxOrig === -1) return;
+                const idxs = newQueue.map((e, i) => (groupIds.has(e.id) ? i : -1)).filter((i) => i >= 0).sort((a, b) => a - b);
+                if (idxs.length === 0) return;
+                const block = idxs.map((i) => newQueue[i]);
+                idxs.sort((a, b) => b - a).forEach((i) => newQueue.splice(i, 1));
+                newQueue.splice(toIdxOrig, 0, ...block);
+                const newIds = newQueue.map((e) => e.id).join("\0");
                 setQueue(newQueue);
+                if (
+                    reorderSnapshotRef.current !== null &&
+                    newIds !== reorderSnapshotRef.current
+                ) {
+                    setUnsavedQueueOrder(true);
+                }
             };
 
             const handleDrop = (e, targetEntry) => {
                 e.preventDefault();
-                if (!dragItem.current || dragItem.current.id === targetEntry.id) return;
-                if (['ACTIVE', 'COMPLETED'].includes(dragItem.current.state)) return;
-                const newPos = queue.findIndex(e => e.id === targetEntry.id) + 1;
-                fetch(`/api/queue/${dragItem.current.id}/position`, {
-                    method: 'PATCH',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({position: newPos}),
-                })
-                .then(r => { if (!r.ok) { setQueue(preDragOrder.current.map(id => queue.find(e => e.id === id)).filter(Boolean)); } })
-                .then(() => fetchQueue())
-                .catch(() => { setQueue(preDragOrder.current.map(id => queue.find(e => e.id === id)).filter(Boolean)); });
+                if (!reorderMode) return;
                 dragItem.current = null;
             };
 
@@ -3804,6 +3966,7 @@
 
             const readyCt = queue.filter(e => e.state === 'READY').length;
             const blockedCt = queue.filter(e => e.state === 'BLOCKED').length;
+            const holdCt = queue.filter(e => e.state === 'DEPENDENCY_HOLD').length;
             const completedCt = queue.filter(e => e.state === 'COMPLETED').length;
 
             function relTime(iso) {
@@ -3831,6 +3994,8 @@
                     reviewer: snap.reviewer_retries || 0,
                 }[snap.current_agent] : null;
 
+                const selDisp = queueRowDisplay(selected);
+                const parentEntry = selected.parent_id ? queue.find((e) => e.id === selected.parent_id) : null;
                 return (
                     <div className="space-y-3">
                         <div>
@@ -3838,7 +4003,15 @@
                             <p className="header-text text-xs text-slate-500 font-mono mt-0.5 break-all">{selected.project_path}</p>
                         </div>
                         <div className="flex items-center gap-2 flex-wrap">
-                            <span className={`header-text px-2 py-0.5 rounded text-xs font-medium ${QUEUE_STATE_CLASSES[selected.state] || 'bg-slate-700 text-white'}`}>{selected.state}</span>
+                            {selected.parent_id && (
+                                <span
+                                    className="header-text px-1.5 py-0.5 rounded text-xs font-medium bg-indigo-900/50 text-indigo-300 border border-indigo-700/40"
+                                    title={parentEntry ? `Depends on: ${parentEntry.name}` : 'Child project'}
+                                >
+                                    DEP
+                                </span>
+                            )}
+                            <span className={`header-text px-2 py-0.5 rounded text-xs font-medium ${selDisp.className}`}>{selDisp.label}</span>
                             {selected.blocked_at && <span className="header-text text-xs text-slate-500">Blocked {relTime(selected.blocked_at)}</span>}
                             {selected.started_at && <span className="header-text text-xs text-slate-500">Started {relTime(selected.started_at)}</span>}
                             {selected.completed_at && <span className="header-text text-xs text-slate-500">Done {relTime(selected.completed_at)}</span>}
@@ -3901,12 +4074,60 @@
                 );
 
                 const state = selected.state;
+                const isEscalationWaiting =
+                    snapshot &&
+                    snapshot.is_active_project &&
+                    snapshot.pipeline_status === 'WAITING_FOR_HUMAN';
+                const ESCALATION_CMDS = [
+                    { command: 'RESET_PHASE',     label: 'Revert to Planner',  needsConfirm: true  },
+                    { command: 'RESET_EXECUTION', label: 'Revert to Executor', needsConfirm: false },
+                    { command: 'RESET_REVIEWER',  label: 'Revert to Reviewer', needsConfirm: true  },
+                    { command: 'SKIP',            label: 'Skip Phase',          needsConfirm: true  },
+                    { command: 'PROCEED',         label: 'Accept & Advance',    needsConfirm: false },
+                    { command: 'STOP',            label: 'Halt Pipeline',       needsConfirm: true  },
+                ];
+
+                if (isEscalationWaiting) {
+                    return (
+                        <div className="space-y-3">
+                            <div>
+                                <p className="header-text text-xs text-slate-400 font-semibold mb-1">Awaiting escalation command</p>
+                                {escalationMsg && (
+                                    <p className="header-text text-xs text-amber-300 bg-amber-950/30 border border-amber-700/40 rounded p-2 leading-relaxed">{escalationMsg}</p>
+                                )}
+                            </div>
+                            <div className="grid grid-cols-2 gap-1.5">
+                                {ESCALATION_CMDS.map(({command, label, needsConfirm}) => {
+                                    const confirming = pendingCommand === command;
+                                    return (
+                                        <div key={command}>
+                                            <button
+                                                disabled={hubBusy || reorderDirty}
+                                                title={reorderDirty ? "Save or cancel reorder first" : undefined}
+                                                onClick={() => handleCommand(command)}
+                                                className={`header-text text-xs px-2 py-1.5 rounded w-full text-left disabled:opacity-50 ${
+                                                    confirming ? 'bg-amber-700/60 text-amber-100' : 'bg-[#1a1d21] text-slate-300 hover:bg-[#22252a]'
+                                                }`}>
+                                                {confirming ? `Confirm ${label}?` : label}
+                                            </button>
+                                            {confirming && (
+                                                <button type="button" onClick={() => setPendingCommand(null)}
+                                                    className="header-text text-xs text-slate-500 hover:text-slate-300 mt-0.5 pl-1">cancel</button>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                            {hubError && <p className="header-text text-xs text-red-400">{hubError}</p>}
+                        </div>
+                    );
+                }
 
                 // ACTIVE
                 if (state === 'ACTIVE') return (
                     <div className="space-y-3">
                         <p className="header-text text-xs text-slate-400">This project is currently running.</p>
-                        <button onClick={() => setCurrentScreen('pipeline')}
+                        <button onClick={() => safeNavigate('pipeline')}
                             className="header-text text-xs px-3 py-1.5 rounded bg-teal-900/40 text-teal-300 hover:bg-teal-900/70 w-full">
                             View in Pipeline Monitor
                         </button>
@@ -3915,56 +4136,13 @@
 
                 // BLOCKED
                 if (state === 'BLOCKED') {
-                    const isEscalation = snapshot && snapshot.is_active_project && snapshot.pipeline_status === 'BLOCKED';
                     const isOrchestratorDown = snapshot && snapshot.is_active_project && !snapshot.orchestrator_alive;
-
-                    if (isEscalation) {
-                        const ESCALATION_CMDS = [
-                            { command: 'RESET_PHASE',     label: 'Revert to Planner',  needsConfirm: true  },
-                            { command: 'RESET_EXECUTION', label: 'Revert to Executor', needsConfirm: false },
-                            { command: 'RESET_REVIEWER',  label: 'Revert to Reviewer', needsConfirm: true  },
-                            { command: 'SKIP',            label: 'Skip Phase',          needsConfirm: true  },
-                            { command: 'PROCEED',         label: 'Accept & Advance',    needsConfirm: false },
-                            { command: 'STOP',            label: 'Halt Pipeline',       needsConfirm: true  },
-                        ];
-                        return (
-                            <div className="space-y-3">
-                                <div>
-                                    <p className="header-text text-xs text-slate-400 font-semibold mb-1">Awaiting escalation command</p>
-                                    {escalationMsg && (
-                                        <p className="header-text text-xs text-amber-300 bg-amber-950/30 border border-amber-700/40 rounded p-2 leading-relaxed">{escalationMsg}</p>
-                                    )}
-                                </div>
-                                <div className="grid grid-cols-2 gap-1.5">
-                                    {ESCALATION_CMDS.map(({command, label, needsConfirm}) => {
-                                        const confirming = pendingCommand === command;
-                                        return (
-                                            <div key={command}>
-                                                <button
-                                                    disabled={hubBusy}
-                                                    onClick={() => handleCommand(command)}
-                                                    className={`header-text text-xs px-2 py-1.5 rounded w-full text-left disabled:opacity-50 ${
-                                                        confirming ? 'bg-amber-700/60 text-amber-100' : 'bg-[#1a1d21] text-slate-300 hover:bg-[#22252a]'
-                                                    }`}>
-                                                    {confirming ? `Confirm ${label}?` : label}
-                                                </button>
-                                                {confirming && (
-                                                    <button onClick={() => setPendingCommand(null)}
-                                                        className="header-text text-xs text-slate-500 hover:text-slate-300 mt-0.5 pl-1">cancel</button>
-                                                )}
-                                            </div>
-                                        );
-                                    })}
-                                </div>
-                                {hubError && <p className="header-text text-xs text-red-400">{hubError}</p>}
-                            </div>
-                        );
-                    }
 
                     if (isOrchestratorDown) return (
                         <div className="space-y-3">
                             <p className="header-text text-xs text-slate-400">Orchestrator process has stopped.</p>
-                            <button onClick={() => handleRelaunch(selected.id)} disabled={hubBusy}
+                            <button onClick={() => handleRelaunch(selected.id)} disabled={hubBusy || reorderDirty}
+                                title={reorderDirty ? "Save or cancel reorder first" : undefined}
                                 className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-slate-900 font-semibold hover:bg-[#00c8f0] disabled:opacity-50 w-full">
                                 {hubBusy ? 'Relaunching…' : 'Relaunch Orchestrator'}
                             </button>
@@ -3975,7 +4153,7 @@
                     return (
                         <div className="space-y-3">
                             <p className="header-text text-xs text-slate-400">This project was blocked. Check Pipeline Monitor for details.</p>
-                            <button onClick={() => setCurrentScreen('pipeline')}
+                            <button onClick={() => safeNavigate('pipeline')}
                                 className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-[#00b4d8] hover:bg-[#22252a] w-full">
                                 View in Pipeline Monitor
                             </button>
@@ -4005,7 +4183,8 @@
                                 <select
                                     value={selected.parent_id || ''}
                                     onChange={e => handleSetParent(selected.id, e.target.value || null)}
-                                    disabled={hubBusy}
+                                    disabled={hubBusy || reorderDirty}
+                                    title={reorderDirty ? "Save or cancel reorder first" : undefined}
                                     className="header-text text-xs bg-[#1a1d21] text-slate-200 border border-[#2a2d32] rounded px-2 py-1 w-full">
                                     <option value="">None (remove dependency)</option>
                                     {queue.filter(e => e.id !== selected.id && !descendantsHold.includes(e.id)).map(e => (
@@ -4023,7 +4202,9 @@
                     <div className="space-y-3">
                         <p className="header-text text-xs text-slate-500">Pipeline complete.</p>
                         <button onClick={() => handleRemove(selected.id)}
-                            className="header-text text-xs px-3 py-1.5 rounded bg-red-900/40 text-red-300 hover:bg-red-900/70 w-full">
+                            disabled={reorderDirty}
+                            title={reorderDirty ? "Save or cancel reorder first" : undefined}
+                            className="header-text text-xs px-3 py-1.5 rounded bg-red-900/40 text-red-300 hover:bg-red-900/70 w-full disabled:opacity-40">
                             Remove from Queue
                         </button>
                     </div>
@@ -4036,7 +4217,9 @@
                             <p className="header-text text-xs text-red-400">Status: {snapshot.pipeline_status}</p>
                         )}
                         <button onClick={() => handleRemove(selected.id)}
-                            className="header-text text-xs px-3 py-1.5 rounded bg-red-900/40 text-red-300 hover:bg-red-900/70 w-full">
+                            disabled={reorderDirty}
+                            title={reorderDirty ? "Save or cancel reorder first" : undefined}
+                            className="header-text text-xs px-3 py-1.5 rounded bg-red-900/40 text-red-300 hover:bg-red-900/70 w-full disabled:opacity-40">
                             Remove from Queue
                         </button>
                     </div>
@@ -4054,7 +4237,9 @@
                             <select
                                 value={selected.parent_id || ''}
                                 onChange={e => handleSetParent(selected.id, e.target.value || null)}
-                                className="header-text text-xs bg-[#1a1d21] text-slate-200 border border-[#2a2d32] rounded px-2 py-1 w-full">
+                                disabled={reorderDirty}
+                                title={reorderDirty ? "Save or cancel reorder first" : undefined}
+                                className="header-text text-xs bg-[#1a1d21] text-slate-200 border border-[#2a2d32] rounded px-2 py-1 w-full disabled:opacity-40">
                                 <option value="">None</option>
                                 {queue.filter(e => e.id !== selected.id && !descendants.includes(e.id)).map(e => (
                                     <option key={e.id} value={e.id}>{e.name} [{e.state}]</option>
@@ -4065,7 +4250,8 @@
                         {/* Revalidate */}
                         <div>
                             <button onClick={() => { setRevalidateChecks(null); handleRevalidate(selected.id); }}
-                                disabled={hubBusy}
+                                disabled={hubBusy || reorderDirty}
+                                title={reorderDirty ? "Save or cancel reorder first" : undefined}
                                 className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-300 hover:bg-[#22252a] disabled:opacity-50 w-full">
                                 {hubBusy ? 'Validating…' : 'Re-validate'}
                             </button>
@@ -4083,7 +4269,9 @@
 
                         {/* Remove */}
                         <button onClick={() => handleRemove(selected.id)}
-                            className="header-text text-xs px-3 py-1.5 rounded bg-red-900/40 text-red-300 hover:bg-red-900/70 w-full">
+                            disabled={reorderDirty}
+                            title={reorderDirty ? "Save or cancel reorder first" : undefined}
+                            className="header-text text-xs px-3 py-1.5 rounded bg-red-900/40 text-red-300 hover:bg-red-900/70 w-full disabled:opacity-40">
                             Remove from Queue
                         </button>
 
@@ -4098,19 +4286,47 @@
                     <div className="bg-[#141618] border-b border-[#1a1d21] px-6 py-3 flex items-center gap-4 flex-shrink-0">
                         <h1 className="header-text text-base font-semibold text-slate-200">Project Queue</h1>
                         <button onClick={() => setShowAddModal(true)}
-                            className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-slate-900 font-semibold hover:bg-[#00c8f0]">
+                            disabled={reorderDirty}
+                            title={reorderDirty ? "Save or cancel reorder first" : undefined}
+                            className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-slate-900 font-semibold hover:bg-[#00c8f0] disabled:opacity-40">
                             + Add Project
                         </button>
+                        {!reorderMode ? (
+                            <button type="button" onClick={beginReorder} disabled={loading || queue.length < 2}
+                                title="Drag root rows to change order, then Save order"
+                                className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:bg-[#22252a] disabled:opacity-40">
+                                Reorder
+                            </button>
+                        ) : (
+                            <>
+                                <button type="button" onClick={saveReorder} disabled={reorderSaveBusy || !reorderDirty}
+                                    title={reorderDirty ? "Write this order to the server" : "Change the order first"}
+                                    className="header-text text-xs px-3 py-1.5 rounded bg-emerald-800 text-white hover:bg-emerald-700 disabled:opacity-40">
+                                    {reorderSaveBusy ? "Saving…" : "Save order"}
+                                </button>
+                                <button type="button" onClick={cancelReorder} disabled={reorderSaveBusy}
+                                    title="Discard changes and reload queue from server"
+                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-300 border border-[#2a2d31] hover:bg-[#22252a] disabled:opacity-40">
+                                    Cancel
+                                </button>
+                                {reorderDirty && (
+                                    <span className="header-text text-[10px] uppercase tracking-wide text-slate-500">Unsaved</span>
+                                )}
+                            </>
+                        )}
+                        {reorderError && <span className="header-text text-xs text-red-400 max-w-xs">{reorderError}</span>}
                         <div className="flex items-center gap-1 rounded-full bg-[#1a1d21] p-0.5 border border-[#2a2d31]">
                             {['auto', 'manual'].map(m => (
                                 <button key={m} onClick={handleModeToggle}
-                                    className={`header-text text-xs px-3 py-1 rounded-full transition-colors ${
+                                    disabled={reorderDirty}
+                                    title={reorderDirty ? "Save or cancel reorder first" : undefined}
+                                    className={`header-text text-xs px-3 py-1 rounded-full transition-colors disabled:opacity-40 ${
                                         queueMode === m ? 'bg-[#00b4d8] text-slate-900 font-semibold' : 'text-slate-400 hover:text-slate-200'
                                     }`}>{m === 'auto' ? 'Auto' : 'Manual'}</button>
                             ))}
                         </div>
                         {queueMode === 'manual' && (
-                            <button onClick={handleTriggerNext} disabled={triggerBusy || !!activeEntry || ['RUNNING','WAITING_FOR_SENTINEL','WAITING_FOR_HUMAN'].includes(pipelineStatus)}
+                            <button onClick={handleTriggerNext} disabled={triggerBusy || !!activeEntry || reorderDirty || ['RUNNING','WAITING_FOR_SENTINEL','WAITING_FOR_HUMAN'].includes(pipelineStatus)}
                                 className="header-text text-xs px-3 py-1.5 rounded bg-emerald-700 text-white hover:bg-emerald-600 disabled:opacity-50">
                                 {triggerBusy ? 'Starting…' : 'Trigger Next'}
                             </button>
@@ -4118,7 +4334,7 @@
                         {triggerMsg && <span className="header-text text-xs text-amber-400">{triggerMsg}</span>}
                         {error && <span className="header-text text-xs text-red-400">{error}</span>}
                         <span className="header-text text-xs text-slate-500 ml-auto">
-                            {queue.length} project{queue.length !== 1 ? 's' : ''} — {readyCt} ready, {blockedCt} blocked, {completedCt} complete
+                            {queue.length} project{queue.length !== 1 ? 's' : ''} — {readyCt} ready, {blockedCt} blocked, {holdCt} on hold, {completedCt} complete
                         </span>
                     </div>
 
@@ -4140,16 +4356,17 @@
                                     depthOf[e.id] = d;
                                 });
                                 return queue.map(entry => {
-                                    const stateClass = QUEUE_STATE_CLASSES[entry.state] || 'bg-slate-700 text-white';
+                                    const rowDisp = queueRowDisplay(entry);
+                                    const parentEntry = entry.parent_id ? byId[entry.parent_id] : null;
                                     const isActive = selectedId === entry.id;
                                     const depth = depthOf[entry.id] || 0;
-                                    const canDrag = !['ACTIVE','COMPLETED'].includes(entry.state) && !entry.parent_id;
+                                    const canDrag = reorderMode && !['ACTIVE','COMPLETED'].includes(entry.state) && !entry.parent_id;
                                     return (
                                         <div
                                             key={entry.id}
                                             role="button"
                                             tabIndex={0}
-                                            aria-label={`${entry.name} — ${entry.state}`}
+                                            aria-label={`${entry.name} — ${rowDisp.label}`}
                                             aria-pressed={isActive}
                                             draggable={canDrag}
                                             onDragStart={e => handleDragStart(e, entry)}
@@ -4166,12 +4383,20 @@
                                         >
                                             {canDrag && <span className="text-slate-600 cursor-grab text-xs select-none">⠿</span>}
                                             {!canDrag && <span className="w-3"/>}
-                                            {displayRanks[entry.id] != null
-                                                ? <span className="header-text text-xs text-slate-500 w-5 text-right flex-shrink-0">{displayRanks[entry.id]}</span>
+                                            {effectiveRanks[entry.id] != null
+                                                ? <span className="header-text text-xs text-slate-500 w-5 text-right flex-shrink-0">{effectiveRanks[entry.id]}</span>
                                                 : <span className="header-text text-xs text-indigo-400 w-5 text-right flex-shrink-0">↳</span>}
                                             <span className="flex-1 header-text text-xs text-slate-200 truncate">{entry.name}</span>
                                             {entry.skip_count > 0 && <span className="header-text text-xs text-orange-400">↩{entry.skip_count}</span>}
-                                            <span className={`header-text px-1.5 py-0.5 rounded text-xs font-medium flex-shrink-0 ${stateClass}`}>{entry.state}</span>
+                                            {entry.parent_id && (
+                                                <span
+                                                    className="header-text px-1.5 py-0.5 rounded text-xs font-medium flex-shrink-0 bg-indigo-900/50 text-indigo-300 border border-indigo-700/40"
+                                                    title={parentEntry ? `Depends on: ${parentEntry.name}` : 'Child project'}
+                                                >
+                                                    DEP
+                                                </span>
+                                            )}
+                                            <span className={`header-text px-1.5 py-0.5 rounded text-xs font-medium flex-shrink-0 ${rowDisp.className}`}>{rowDisp.label}</span>
                                         </div>
                                     );
                                 });
@@ -4225,7 +4450,6 @@
             });
             const [roadmap, setRoadmap] = useState(null);
             const [metricsSummary, setMetricsSummary] = useState(null);
-            const [lastUpdate, setLastUpdate] = useState(null);
             const [showStopModal, setShowStopModal] = useState(false);
             const [stopRequested, setStopRequested] = useState(false);
             const [stopError, setStopError] = useState("");
@@ -4383,7 +4607,6 @@
                     .then(data => {
                         setPState(prev => ({ ...prev, ...data }));
                         setPipelineStatus(data.pipeline_status || '');
-                        setLastUpdate(new Date().toLocaleTimeString());
                     })
                     .catch(() => {});
             }
@@ -4446,12 +4669,6 @@
                 }
             };
 
-            const handleRefresh = () => {
-                fetchState();
-                fetchRoadmap();
-                fetchMetricsSummary();
-            };
-
             const status = pState.pipeline_status;
             const alive = pState.orchestrator_alive;
             const showStopButton = ["RUNNING", "WAITING_FOR_SENTINEL", "WAITING_FOR_HUMAN"].includes(
@@ -4499,9 +4716,9 @@
             }
 
             return (
-                <div className="grid grid-rows-[auto_1fr_auto_auto] h-full overflow-hidden">
+                <div className="grid grid-rows-[auto_minmax(0,1fr)_minmax(0,1fr)] h-full overflow-hidden">
                     {/* Header bar */}
-                    <header className="bg-[#141618] border-b border-[#1a1d21] px-6 py-4">
+                    <header className="bg-[#141618] border-b border-[#1a1d21] px-6 py-4 flex-shrink-0">
                         <div className="flex items-center justify-between">
                             <div className="flex items-center gap-2">
                                 {status !== "Loading..." && (
@@ -4611,7 +4828,7 @@
                     </header>
 
                     {/* Middle section: two-panel grid (Phase 2a: 32/68 split) */}
-                    <main className="grid grid-cols-1 md:grid-cols-[32%_68%] gap-4 p-4 overflow-hidden">
+                    <main className="grid grid-cols-1 md:grid-cols-[32%_68%] gap-4 p-4 overflow-hidden min-h-0">
                         {/* Left: Current Phase */}
                         <div className="bg-[#141618] rounded-lg border border-[#1a1d21] p-4 overflow-auto">
                             <h2 className="header-text text-lg font-semibold text-slate-300 mb-4">Current Phase</h2>
@@ -4648,28 +4865,12 @@
                     </main>
 
                     {/* Activity Feed */}
-                    <div className="bg-[#141618] border-t border-[#1a1d21] px-4 pt-3 pb-2 overflow-hidden">
-                        <h2 className="header-text text-sm font-semibold text-slate-400 mb-2">Activity Feed</h2>
-                        <ActivityFeedPanel />
-                    </div>
-
-                    {/* Footer */}
-                    <footer className="bg-[#141618] border-t border-[#1a1d21] px-6 py-3">
-                        <div className="flex items-center justify-between">
-                            <span className="header-text text-sm text-slate-500">Pipeline Executor v1.0</span>
-                            <div className="flex gap-4 items-center">
-                                <button
-                                    onClick={handleRefresh}
-                                    className="header-text px-3 py-1 text-sm bg-[#1a1d21] hover:bg-[#252830] rounded transition-colors"
-                                >
-                                    Refresh
-                                </button>
-                                <span className="header-text text-sm text-slate-500">
-                                    Last update: {lastUpdate || '--'}
-                                </span>
-                            </div>
+                    <div className="bg-[#141618] border-t border-[#1a1d21] px-4 pt-3 pb-2 flex flex-col min-h-0 overflow-hidden">
+                        <h2 className="header-text text-sm font-semibold text-slate-400 mb-2 flex-shrink-0">Activity Feed</h2>
+                        <div className="flex-1 min-h-0 flex flex-col">
+                            <ActivityFeedPanel />
                         </div>
-                    </footer>
+                    </div>
 
                     {/* Stop confirmation modal */}
                     {showStopModal && (
@@ -5032,6 +5233,14 @@
             }, [setupComplete]);
 
             const [currentScreen, setCurrentScreen] = useState("pipeline");
+            const [, setUnsavedQueueOrderState] = useState(false);
+            /** Synced on every setter call so safeNavigate can read latest without waiting for re-render. */
+            const unsavedQueueOrderRef = useRef(false);
+            const setUnsavedQueueOrder = useCallback((value) => {
+                const next = !!value;
+                unsavedQueueOrderRef.current = next;
+                setUnsavedQueueOrderState(next);
+            }, []);
             const [pipelineStatus, setPipelineStatus] = useState('');
             const [seedRoadmap, setSeedRoadmap] = useState("");
             const [repoPath, setRepoPath] = useState("");
@@ -5083,6 +5292,16 @@
                     setCreateFolderError("");
                 }
                 setCurrentScreen(screen);
+            };
+
+            const safeNavigate = (screen) => {
+                if (currentScreen === "queue" && unsavedQueueOrderRef.current && screen !== "queue") {
+                    if (!window.confirm("You have unsaved queue order changes. Leave without saving?")) {
+                        return;
+                    }
+                    setUnsavedQueueOrder(false);
+                }
+                handleNavigate(screen);
             };
 
             const handleRepoPathChange = (value) => {
@@ -5453,6 +5672,8 @@
                 setSeedRoadmap,
                 setRoadmapSeedLocked,
                 setCurrentScreen,
+                safeNavigate,
+                setUnsavedQueueOrder,
                 pipelineStatus,
                 setPipelineStatus,
             };
@@ -5478,7 +5699,7 @@
             return (
                 <AppCtx.Provider value={appCtxValue}>
                     <div className="flex h-screen overflow-hidden bg-[#0d0f12]">
-                        <Sidebar currentScreen={currentScreen} onNavigate={handleNavigate} />
+                        <Sidebar currentScreen={currentScreen} onNavigate={safeNavigate} />
                         <div className="flex-1 flex flex-col overflow-hidden">
                             {currentScreen === "pipeline" && <PipelineScreen />}
                             {currentScreen === "queue" && <QueueScreen />}
