@@ -3,6 +3,7 @@ import json
 import os
 import uuid
 from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -574,3 +575,112 @@ class TestGetStateQueueSummary:
         data = resp.json()
         # queue fields absent or zero — no error
         assert data.get("queue_length", 0) == 0
+
+
+# ---------------------------------------------------------------------------
+# POST /api/setup/launch — queue sync
+# ---------------------------------------------------------------------------
+
+VALID_LAUNCH_ROADMAP_SEED = (
+    "- [ ] `TEST-E1` | LOW | Do the thing\n"
+    "  > Test: It works.\n"
+)
+
+
+def _make_subprocess_pass_launch():
+    def _inner(cmd, **kwargs):
+        mock = MagicMock()
+        mock.returncode = 0
+        mock.stdout = ""
+        mock.stderr = b""
+        return mock
+
+    return _inner
+
+
+class TestSetupLaunchQueueSync:
+    def test_launch_updates_queue_entry_to_active(self, client, monkeypatch):
+        c, queue_file, base = client
+        repo_path = base / "launch_proj"
+        ad_root = base / "autodev_repo"
+        (ad_root / "autodev" / "pipeline").mkdir(parents=True)
+        (ad_root / "autodev" / "pipeline" / "orchestrator.py").write_text("# mock\n", encoding="utf-8")
+
+        def mock_load_config(_config_path=None):
+            return {
+                "pipeline_queue_path": str(queue_file),
+                "pipeline_state_path": str(base / "pipeline_state.json"),
+                "phase_state_path": str(base / "phase_state.json"),
+                "project_dir_path": str(base / "pipeline-project"),
+                "lock_path": str(base / "pipeline.lock"),
+                "events_path": str(base / "pipeline_events.jsonl"),
+                "ideas_dir": str(base / "ideas"),
+                "port": 18790,
+                "autodev_repo_path": str(ad_root),
+            }
+
+        monkeypatch.setattr("ui.server.load_config", mock_load_config)
+
+        entry = _make_entry("queued_proj", state="READY", position=1)
+        entry["project_path"] = str(repo_path)
+        _write_queue(str(queue_file), [entry])
+
+        with patch("subprocess.run", side_effect=_make_subprocess_pass_launch()), \
+             patch("ui.server.os.symlink"), \
+             patch("ui.server.os.path.lexists", return_value=False), \
+             patch("ui.server.os.remove"), \
+             patch("ui.server._check_orchestrator_liveness", return_value=False), \
+             patch("ui.server._spawn_orchestrator", return_value={"ok": True, "error": None}):
+            resp = c.post(
+                "/api/setup/launch",
+                json={"repo_path": str(repo_path), "roadmap_seed": VALID_LAUNCH_ROADMAP_SEED},
+            )
+
+        assert resp.status_code == 200
+        assert resp.json().get("ok") is True
+
+        with open(str(queue_file)) as f:
+            q = json.load(f)
+        assert len(q["queue"]) == 1
+        assert q["queue"][0]["state"] == "ACTIVE"
+        assert q["queue"][0]["started_at"] is not None
+
+    def test_resume_updates_queue_entry_to_active(self, client, monkeypatch):
+        c, queue_file, base = client
+        repo_path = base / "resume_proj"
+        repo_path.mkdir()
+        ad_root = base / "autodev_repo_resume"
+        (ad_root / "autodev" / "pipeline").mkdir(parents=True)
+        (ad_root / "autodev" / "pipeline" / "orchestrator.py").write_text("# mock\n", encoding="utf-8")
+        state_path = base / "pipeline_state.json"
+
+        def mock_load_config(_config_path=None):
+            return {
+                "pipeline_queue_path": str(queue_file),
+                "pipeline_state_path": str(state_path),
+                "phase_state_path": str(base / "phase_state.json"),
+                # Omit project_dir_path so resume uses pipeline_state project_path (matches queue entry).
+                "lock_path": str(base / "pipeline.lock"),
+                "events_path": str(base / "pipeline_events.jsonl"),
+                "ideas_dir": str(base / "ideas"),
+                "port": 18790,
+                "autodev_repo_path": str(ad_root),
+            }
+
+        monkeypatch.setattr("ui.server.load_config", mock_load_config)
+
+        with open(str(state_path), "w") as f:
+            json.dump({"project_path": str(repo_path), "pipeline_status": "STOPPED"}, f)
+
+        entry = _make_entry("resume_q", state="READY", position=1)
+        entry["project_path"] = str(repo_path)
+        _write_queue(str(queue_file), [entry])
+
+        with patch("ui.server._spawn_orchestrator", return_value={"ok": True, "error": None}):
+            resp = c.post("/api/resume-orchestrator")
+
+        assert resp.status_code == 200
+        with open(str(queue_file)) as f:
+            q = json.load(f)
+        assert q["queue"][0]["state"] == "ACTIVE"
+        assert q["queue"][0]["started_at"] is not None
