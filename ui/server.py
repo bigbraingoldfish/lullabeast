@@ -705,6 +705,33 @@ def _write_queue_file(path: str, data: dict) -> None:
     _write_json_atomic(path, data)
 
 
+def _sync_queue_active_for_project(project_path: str, config: dict) -> None:
+    """If project_path matches a queue entry, set state ACTIVE and started_at."""
+    q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
+    if not os.path.exists(q_path):
+        return
+    try:
+        project_real = os.path.realpath(os.path.expanduser(project_path))
+        q_data = _read_queue_file(config)
+        entries = q_data.get("queue", [])
+        now = datetime.now(timezone.utc).isoformat()
+        for entry in entries:
+            try:
+                ep = entry.get("project_path")
+                if ep is None:
+                    continue
+                entry_real = os.path.realpath(os.path.expanduser(str(ep)))
+            except OSError:
+                continue
+            if entry_real == project_real:
+                entry["state"] = "ACTIVE"
+                entry["started_at"] = now
+                break
+        _write_queue_file(q_path, q_data)
+    except Exception as e:
+        logger.warning("Queue update on orchestrator spawn failed: %s", e)
+
+
 def _compute_dependency_tree(entries):
     """Build nested parent-child structure from flat queue list."""
     by_id = {e["id"]: dict(e, children=[]) for e in entries}
@@ -1643,6 +1670,8 @@ def post_resume_orchestrator():
     spawned = _spawn_orchestrator(project_path, config)
     if not spawned.get("ok"):
         raise HTTPException(status_code=503, detail=spawned.get("error") or "Failed to spawn orchestrator")
+
+    _sync_queue_active_for_project(project_path, config)
 
     return {"ok": True}
 
@@ -5152,5 +5181,7 @@ async def post_setup_launch(request: Request):
     spawned = _spawn_orchestrator(project_real, config)
     if not spawned.get("ok"):
         return {"ok": False, "error": spawned.get("error") or "Failed to spawn orchestrator"}
+
+    _sync_queue_active_for_project(project_real, config)
 
     return {"ok": True, "error": None}
