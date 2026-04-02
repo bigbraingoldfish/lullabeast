@@ -153,6 +153,47 @@ class TestGetQueue:
         assert len(tree[0]["children"]) == 1
         assert tree[0]["children"][0]["id"] == child["id"]
 
+    def test_ingest_synthetic_when_pipeline_project_not_in_queue(self, client):
+        """TASK-03: active project_path not in queue appears as stable ingest-* row."""
+        c, queue_file, tmp_path = client
+        orphan = tmp_path / "orphan_proj"
+        orphan.mkdir()
+        pipeline_state_file = tmp_path / "pipeline_state.json"
+        with open(pipeline_state_file, "w") as f:
+            json.dump({"project_path": str(orphan), "pipeline_status": "RUNNING"}, f)
+        e1 = _make_entry("listed", position=1)
+        _write_queue(str(queue_file), [e1])
+
+        resp = c.get("/api/queue")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["queue"]) == 2
+        assert any(e.get("id", "").startswith("ingest-") for e in data["queue"])
+        ingest = next(e for e in data["queue"] if e.get("id", "").startswith("ingest-"))
+        assert ingest.get("ingested") is True
+        assert ingest["state"] == "ACTIVE"
+
+    def test_live_pipeline_status_falls_back_to_parked_pipeline_status(self, client):
+        c, queue_file, tmp_path = client
+        proj_a = str(tmp_path / "pa")
+        proj_b = str(tmp_path / "pb")
+        os.makedirs(proj_a)
+        os.makedirs(proj_b)
+        e1 = _make_entry("a", position=1)
+        e1["project_path"] = proj_a
+        e1["parked_pipeline_status"] = "WAITING_FOR_HUMAN"
+        e2 = _make_entry("b", position=2)
+        e2["project_path"] = proj_b
+        _write_queue(str(queue_file), [e1, e2])
+        pipeline_state_file = tmp_path / "pipeline_state.json"
+        with open(pipeline_state_file, "w") as f:
+            json.dump({"project_path": proj_b, "pipeline_status": "RUNNING"}, f)
+
+        resp = c.get("/api/queue")
+        q = resp.json()["queue"]
+        by_path = {e["project_path"]: e for e in q}
+        assert by_path[proj_a]["live_pipeline_status"] == "WAITING_FOR_HUMAN"
+
 
 # ---------------------------------------------------------------------------
 # GET /api/queue/status
@@ -178,6 +219,17 @@ class TestGetQueueStatus:
         assert data["completed_count"] == 1
         assert data["queue_mode"] == "manual"
         assert data["queue_halted"] is False
+
+    def test_blocked_count_includes_escalation(self, client):
+        c, queue_file, _ = client
+        entries = [
+            _make_entry("a", state="BLOCKED", position=1),
+            _make_entry("b", state="ESCALATION", position=2),
+        ]
+        _write_queue(str(queue_file), entries)
+
+        resp = c.get("/api/queue/status")
+        assert resp.json()["blocked_count"] == 2
 
     def test_returns_zeros_when_file_absent(self, client):
         c, queue_file, _ = client
@@ -232,6 +284,35 @@ class TestPostQueueAdd:
             q = json.load(f)
         assert len(q["queue"]) == 1
         assert q["queue"][0]["state"] == "READY"
+
+    def test_add_child_with_active_parent_stays_ready(self, client, monkeypatch, tmp_path):
+        """Organizational dependency: parent ACTIVE → child is READY (not DEPENDENCY_HOLD)."""
+        c, queue_file, _ = client
+        parent_id = str(uuid.uuid4())
+        entries = [{**_make_entry("parent", state="ACTIVE", position=1), "id": parent_id}]
+        _write_queue(str(queue_file), entries)
+        proj = tmp_path / "childproj"
+        proj.mkdir()
+        monkeypatch.setattr("ui.server._run_preflight_checks", lambda p: [
+            {"check": "ok", "status": "pass", "message": "ok"},
+        ])
+        resp = c.post("/api/queue/add", json={"project_path": str(proj), "parent_id": parent_id})
+        assert resp.status_code == 200
+        assert resp.json()["state"] == "READY"
+
+    def test_add_child_with_blocked_parent_is_dependency_hold(self, client, monkeypatch, tmp_path):
+        c, queue_file, _ = client
+        parent_id = str(uuid.uuid4())
+        entries = [{**_make_entry("parent", state="BLOCKED", position=1), "id": parent_id}]
+        _write_queue(str(queue_file), entries)
+        proj = tmp_path / "childproj"
+        proj.mkdir()
+        monkeypatch.setattr("ui.server._run_preflight_checks", lambda p: [
+            {"check": "ok", "status": "pass", "message": "ok"},
+        ])
+        resp = c.post("/api/queue/add", json={"project_path": str(proj), "parent_id": parent_id})
+        assert resp.status_code == 200
+        assert resp.json()["state"] == "DEPENDENCY_HOLD"
 
     def test_assigns_sequential_position(self, client, monkeypatch, tmp_path):
         c, queue_file, _ = client
@@ -295,6 +376,53 @@ class TestPostQueueAdd:
         })
         # b_id is in queue and has no parent, so adding C with parent=b is fine
         assert resp.status_code == 200
+
+    def test_rejects_unknown_parent_id(self, client, monkeypatch, tmp_path):
+        c, queue_file, _ = client
+        proj = tmp_path / "solo"
+        proj.mkdir()
+        monkeypatch.setattr("ui.server._run_preflight_checks", lambda p: [
+            {"check": "ok", "status": "pass", "message": "ok"},
+        ])
+        bad_parent = str(uuid.uuid4())
+        resp = c.post(
+            "/api/queue/add",
+            json={"project_path": str(proj), "parent_id": bad_parent},
+        )
+        assert resp.status_code == 400
+        assert "parent_id" in resp.json()["detail"].lower()
+
+
+# ---------------------------------------------------------------------------
+# POST /api/command deferred (parked project)
+# ---------------------------------------------------------------------------
+
+
+class TestPostCommandDeferred:
+    def test_deferred_writes_pending_escalation_files(self, client):
+        c, queue_file, base = client
+        proj_a = base / "parked_a"
+        proj_a.mkdir()
+        proj_b = base / "active_b"
+        proj_b.mkdir()
+        symlink = base / "pipeline-project"
+        symlink.symlink_to(proj_b)
+        aid = str(uuid.uuid4())
+        bid = str(uuid.uuid4())
+        entries = [
+            {**_make_entry("a"), "id": aid, "project_path": str(proj_a), "state": "ESCALATION", "position": 1},
+            {**_make_entry("b"), "id": bid, "project_path": str(proj_b), "state": "ACTIVE", "position": 2},
+        ]
+        _write_queue(str(queue_file), entries)
+        state_file = base / "pipeline_state.json"
+        with open(state_file, "w") as f:
+            json.dump({"project_path": str(proj_b), "pipeline_status": "RUNNING"}, f)
+
+        resp = c.post("/api/command", json={"command": "RETRY", "target_project_path": str(proj_a)})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data.get("deferred") is True
+        assert (proj_a / "pending_escalation_command.json").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -526,6 +654,159 @@ class TestPatchQueueMode:
             q = json.load(f)
         assert q["queue_mode"] == "auto"
 
+    def test_manual_to_auto_kicks_next_like_trigger_next(self, client, monkeypatch, tmp_path):
+        """PATCH manual→auto runs same start-next path as POST trigger-next when idle."""
+        c, queue_file, tmp = client
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        entry = {**_make_entry("alpha", state="READY", position=1), "project_path": str(proj)}
+        _write_queue(str(queue_file), [entry], queue_mode="manual")
+        state_file = tmp / "pipeline_state.json"
+        with open(str(state_file), "w") as f:
+            json.dump({"pipeline_status": "PIPELINE_COMPLETE", "project_path": str(proj)}, f)
+
+        monkeypatch.setattr("ui.server._run_preflight_checks", lambda p: [
+            {"check": "ok", "status": "pass", "message": "ok"},
+        ])
+        monkeypatch.setattr("ui.server._spawn_orchestrator", lambda path, cfg=None: {"ok": True, "error": None})
+
+        resp = c.patch("/api/queue/mode", json={"queue_mode": "auto"})
+        assert resp.status_code == 200
+        data = resp.json()
+        adv = data.get("auto_advance") or {}
+        assert adv.get("attempted") is True
+        assert adv.get("ok") is True
+        assert adv.get("started") == "alpha"
+
+        with open(str(queue_file)) as f:
+            q = json.load(f)
+        assert q["queue_mode"] == "auto"
+        assert q["queue"][0]["state"] == "ACTIVE"
+
+    def test_manual_to_auto_skips_when_pipeline_running(self, client, monkeypatch, tmp_path):
+        c, queue_file, tmp = client
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        entry = {**_make_entry("alpha", state="READY", position=1), "project_path": str(proj)}
+        _write_queue(str(queue_file), [entry], queue_mode="manual")
+        state_file = tmp / "pipeline_state.json"
+        with open(str(state_file), "w") as f:
+            json.dump({"pipeline_status": "RUNNING"}, f)
+
+        resp = c.patch("/api/queue/mode", json={"queue_mode": "auto"})
+        assert resp.status_code == 200
+        adv = resp.json().get("auto_advance") or {}
+        assert adv.get("attempted") is False
+        assert adv.get("reason") == "pipeline_status_busy"
+
+        with open(str(queue_file)) as f:
+            q = json.load(f)
+        assert q["queue"][0]["state"] == "READY"
+
+    def test_manual_to_auto_skips_when_queue_has_active(self, client, tmp_path):
+        c, queue_file, tmp = client
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        active = {**_make_entry("busy", state="ACTIVE", position=1), "project_path": str(proj)}
+        ready = {**_make_entry("next", state="READY", position=2), "project_path": str(proj)}
+        _write_queue(str(queue_file), [active, ready], queue_mode="manual")
+        state_file = tmp / "pipeline_state.json"
+        with open(str(state_file), "w") as f:
+            json.dump({"pipeline_status": "STOPPED"}, f)
+
+        resp = c.patch("/api/queue/mode", json={"queue_mode": "auto"})
+        assert resp.status_code == 200
+        adv = resp.json().get("auto_advance") or {}
+        assert adv.get("attempted") is False
+        assert adv.get("reason") == "queue_has_active"
+
+    def test_manual_to_auto_skips_when_orchestrator_lock_held(self, client, monkeypatch, tmp_path):
+        c, queue_file, tmp = client
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        entry = {**_make_entry("alpha", state="READY", position=1), "project_path": str(proj)}
+        _write_queue(str(queue_file), [entry], queue_mode="manual")
+        state_file = tmp / "pipeline_state.json"
+        with open(str(state_file), "w") as f:
+            json.dump({"pipeline_status": "STOPPED"}, f)
+
+        monkeypatch.setattr("ui.server._check_orchestrator_liveness", lambda _lp: True)
+
+        resp = c.patch("/api/queue/mode", json={"queue_mode": "auto"})
+        assert resp.status_code == 200
+        adv = resp.json().get("auto_advance") or {}
+        assert adv.get("attempted") is False
+        assert adv.get("reason") == "orchestrator_lock_held"
+
+        with open(str(queue_file)) as f:
+            q = json.load(f)
+        assert q["queue"][0]["state"] == "READY"
+
+    def test_auto_to_auto_does_not_double_kick(self, client, monkeypatch, tmp_path):
+        c, queue_file, tmp = client
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        entry = {**_make_entry("alpha", state="READY", position=1), "project_path": str(proj)}
+        _write_queue(str(queue_file), [entry], queue_mode="auto")
+        state_file = tmp / "pipeline_state.json"
+        with open(str(state_file), "w") as f:
+            json.dump({"pipeline_status": "STOPPED"}, f)
+
+        calls = []
+
+        def _spawn(path, cfg=None):
+            calls.append(path)
+            return {"ok": True, "error": None}
+
+        monkeypatch.setattr("ui.server._run_preflight_checks", lambda p: [
+            {"check": "ok", "status": "pass", "message": "ok"},
+        ])
+        monkeypatch.setattr("ui.server._spawn_orchestrator", _spawn)
+
+        resp = c.patch("/api/queue/mode", json={"queue_mode": "auto"})
+        assert resp.status_code == 200
+        assert "auto_advance" not in resp.json()
+        assert calls == []
+
+    def test_patch_auto_equivalent_to_trigger_next_same_queue_state(self, client, monkeypatch, tmp_path):
+        """Same frozen queue: manual→PATCH auto vs manual+POST trigger-next → same row ACTIVE."""
+        c, queue_file, tmp = client
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        entry = {**_make_entry("alpha", state="READY", position=1), "project_path": str(proj)}
+        base_queue = {
+            "queue": [dict(entry)],
+            "queue_mode": "manual",
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+        }
+        state_blob = {"pipeline_status": "PIPELINE_COMPLETE", "project_path": str(proj)}
+
+        monkeypatch.setattr("ui.server._run_preflight_checks", lambda p: [
+            {"check": "ok", "status": "pass", "message": "ok"},
+        ])
+        monkeypatch.setattr("ui.server._spawn_orchestrator", lambda path, cfg=None: {"ok": True, "error": None})
+
+        with open(str(queue_file), "w") as f:
+            json.dump(dict(base_queue), f)
+        state_file = tmp / "pipeline_state.json"
+        with open(str(state_file), "w") as f:
+            json.dump(state_blob, f)
+
+        r1 = c.patch("/api/queue/mode", json={"queue_mode": "auto"})
+        assert r1.status_code == 200
+        patch_started = (r1.json().get("auto_advance") or {}).get("started")
+
+        with open(str(queue_file), "w") as f:
+            json.dump(dict(base_queue), f)
+        with open(str(state_file), "w") as f:
+            json.dump(state_blob, f)
+
+        r2 = c.post("/api/queue/trigger-next")
+        assert r2.status_code == 200
+        trigger_started = r2.json().get("started")
+
+        assert patch_started == trigger_started == "alpha"
+
     def test_rejects_invalid_mode(self, client):
         c, queue_file, _ = client
         _write_queue(str(queue_file), [], queue_mode="auto")
@@ -574,3 +855,20 @@ class TestGetStateQueueSummary:
         data = resp.json()
         # queue fields absent or zero — no error
         assert data.get("queue_length", 0) == 0
+
+    def test_includes_queue_halted_reason_when_set(self, client):
+        c, queue_file, tmp = client
+        state_file = tmp / "pipeline_state.json"
+        with open(str(state_file), "w") as f:
+            json.dump({
+                "pipeline_status": "QUEUE_HALTED",
+                "queue_halted_reason": "all_blocked",
+                "current_phase": 0,
+                "current_agent": "planner",
+                "last_action": "test",
+            }, f)
+        _write_queue(str(queue_file), [])
+
+        resp = c.get("/api/state")
+        assert resp.status_code == 200
+        assert resp.json().get("queue_halted_reason") == "all_blocked"

@@ -40,7 +40,7 @@ one the orchestrator is driving for non-parked work).
 | `ESCALATION` | **Parked:** pipeline is in `WAITING_FOR_HUMAN` for this project; all resume artifacts under the project directory remain intact (phase branch, `phase_state.json`, failure context, etc.). The entry is **not** `ACTIVE` while another project may run. UI shows an **ESCALATION** tag; escalation actions remain available. |
 | `BLOCKED` | **Parked:** roadmap gate returned **roadmap blocked** (`[!]` phase / gate exit indicating blocked). Same **park-and-advance** queue semantics as `ESCALATION` for advancing the queue in **auto** mode; distinct from preflight skip. UI may show a **BLOCKED** (roadmap) badge. |
 | `SKIPPED_PENDING` | **Preflight skip only:** orchestrator preflight failed at start; entry moved to next-in-line position per skip-and-requeue rules — **not** used for escalation or roadmap blocked (those use `ESCALATION` / `BLOCKED`). |
-| `DEPENDENCY_HOLD` | A parent project in the queue has not reached `COMPLETED` (parent may be `READY`, `ACTIVE`, `ESCALATION`, `BLOCKED`, `SKIPPED_PENDING`, etc.) |
+| `DEPENDENCY_HOLD` | Child is **blocked on the parent’s queue state**: parent is **`BLOCKED`** or **`ESCALATION`** (not merely “parent not done”). While parent is `READY` / `ACTIVE` / `SKIPPED_PENDING` but not `COMPLETED`, the child stays **`READY`** (organizational dependency only). Eligibility to run still requires parent **`COMPLETED`** (`_find_next_eligible`, `_select_next_queue_project`). |
 | `COMPLETED` | Pipeline finished successfully |
 | `FAILED` | Pipeline halted with a terminal error; requires manual intervention |
 
@@ -52,11 +52,15 @@ advances to another project). Persisted fields are required so parked rows do no
 
 ### Dependency model
 Projects in the queue can have a parent-child relationship. A child project
-cannot become `ACTIVE` until its parent reaches `COMPLETED`. If a parent is
-not `COMPLETED` (including `ESCALATION`, `BLOCKED`, `SKIPPED_PENDING`, or
-`DEPENDENCY_HOLD` upstream), the child is `DEPENDENCY_HOLD` and is skipped when
-its position is reached. The queue continues to the next dependency-clear
-project.
+cannot become `ACTIVE` until its parent reaches `COMPLETED` (scheduling rule).
+The child row is set to **`DEPENDENCY_HOLD` only when the parent is in a
+blocking queue state** (`BLOCKED` or `ESCALATION`), via shared
+`parent_blocks_child()` in [`autodev/pipeline/queue_semantics.py`](../../autodev/pipeline/queue_semantics.py).
+If the parent is still in progress (`READY`, `ACTIVE`, `SKIPPED_PENDING`) but
+not blocking, the child remains **`READY`** and is skipped until the parent
+completes, without being demoted to hold. When the parent reaches **`COMPLETED`**, children that were on **`DEPENDENCY_HOLD`** are promoted back to **`READY`**.
+The UI shows a **DEP** badge for any child with a `parent_id`; tooltips distinguish
+“waiting on parent to complete” vs “on hold (blocked parent)”.
 
 ### Skip-and-requeue behavior (preflight only)
 When **preflight** fails at the time the orchestrator would start a project:
@@ -82,11 +86,16 @@ When the pipeline **escalates** (`WAITING_FOR_HUMAN`) or hits **roadmap blocked*
    in the project tree if used, `phase_state.json`, phase branch, failure context,
    etc.). Do not destructive-clean artifacts needed for resume or for the
    escalation agent / UI commands.
-3. **Advance** (only if `queue_mode` is **`auto`**): select the next eligible
-   project (`READY` / `SKIPPED_PENDING`, dependency-clear, preflight passes) via
-   the same ordering and `_select_next_queue_project()` rules as after
-   `PIPELINE_COMPLETE`. **Manual** mode: do **not** auto-start the next project;
-   the user uses **Trigger next** or provides the configured manual feedback.
+3. **Invoke escalation webhook** for the parked project **before** advancing the
+   symlink to the next project (main loop escalation path). Then **advance** (only
+   if `queue_mode` is **`auto`**): select the next eligible project (`READY` /
+   `SKIPPED_PENDING`, parent `COMPLETED`, preflight passes) via the same ordering
+   and `_select_next_queue_project()` rules as after `PIPELINE_COMPLETE`. While
+   **`WAITING_FOR_HUMAN`**, poll for `escalation_output.done` under the **active
+   symlink** and under each **ESCALATION** queue row’s **`project_path`** so
+   replies land on the correct directory after auto-advance. **Manual** mode: do
+   **not** auto-start the next project; the user uses **Trigger next** or provides
+   the configured manual feedback.
 4. **Deferred escalation commands:** If the human issues a resume command
    (e.g. via `POST /api/command`) while the **symlink** points at **another**
    project, the command must be **recorded** for the parked project — either on
@@ -446,8 +455,8 @@ Mock all filesystem writes and orchestrator subprocess calls.
   `_select_next_queue_project()` runs when appropriate
 - `_select_next_queue_project()` only selects `READY` / `SKIPPED_PENDING`;
   parked entries do not start until eligibility rules say so
-- DEPENDENCY_HOLD correctly prevents child from becoming ACTIVE when
-  parent is not COMPLETED
+- Dependency: child does not become `ACTIVE` until parent is `COMPLETED`;
+  `DEPENDENCY_HOLD` applies only when parent is `BLOCKED` or `ESCALATION`
 - QUEUE_HALTED state written when no runnable entry remains
 - **Skip-and-requeue (preflight):** `SKIPPED_PENDING` moves position+1, not end
 - Second preflight validation runs before each project starts
@@ -528,3 +537,11 @@ git add -A
 git commit -m "project-queue: queue screen, auto-advance, dependency model, orchestrator integration"
 git push origin main
 ```
+
+---
+
+## Implementation notes (park-and-advance closure)
+
+- **Orchestrator** ([`autodev/pipeline/orchestrator.py`](../../autodev/pipeline/orchestrator.py)): On `WAITING_FOR_HUMAN` (main escalation path) and roadmap `BLOCKED`, the active queue row is parked with `ESCALATION` or `BLOCKED` plus `parked_at` / `parked_reason` / `parked_pipeline_status`. The escalation **webhook is invoked before** `_queue_after_park_maybe_advance()` in the main loop. In `queue_mode` **auto**, `_select_next_queue_project()` runs after parking (same idea as after `PIPELINE_COMPLETE`). **Startup:** if phase_resolver returns `PIPELINE_COMPLETE` on entry, the active row is marked `COMPLETED` and auto mode runs `_select_next_queue_project()`; the startup phase-zero block may loop (max 20) for the new symlink without repeating the repo init check. `QUEUE_HALTED` treats all parked rows (`ESCALATION` and `BLOCKED`) as **all_blocked**. Deferred UI commands: `pending_escalation_command.json` under the project dir is applied when that project becomes active again (writes `escalation_output` + sets `WAITING_FOR_HUMAN`). Repo-init escalation still parks the row but does **not** auto-advance (next project must pass repo init on a fresh run). **Dependency:** `parent_blocks_child()` from [`queue_semantics.py`](../../autodev/pipeline/queue_semantics.py); children promoted from `DEPENDENCY_HOLD` to `READY` when parent row hits `COMPLETED`.
+- **Server** ([`ui/server.py`](../../ui/server.py)): `GET /api/queue` merges a synthetic **ingest-** row when `pipeline_state.json`’s `project_path` is absent from the file-backed queue; enriches `live_pipeline_status` from `parked_pipeline_status` when the symlink targets another project; `POST /api/command` accepts optional `target_project_path` for deferred writes to the parked project; `POST /api/queue/add` rejects unknown `parent_id`; dependency hold on add/patch parent aligns with `parent_blocks_child()`; `GET /api/queue/status` and `GET /api/state` count **ESCALATION** + **BLOCKED** in `blocked_count`; `GET /api/state` exposes `queue_halted_reason` when present in `pipeline_state.json`; **preflight** allows repos with commits on `phase/*` only (no `main`/`master`) with **warn**, not **fail**; `POST /api/queue/trigger-next` uses the same skip-and-requeue group move as the orchestrator on preflight failure.
+- **UI** ([`ui/index.html`](../../ui/index.html)): Queue row display treats global `BLOCKED` live status; `ESCALATION` queue state styling added.
