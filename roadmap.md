@@ -107,7 +107,7 @@ INFRA-B1 and INFRA-E1 are complete — confirmed infrastructure.
 ### Milestone 0 — Pre-flight Bug Fix
 
 - [x] `INFRA-B1` | HIGH | Fix --project-path CLI argument mismatch in server.py, add prd-creator to OpenClaw config, and add all new config keys to server.py
-  > Test: `POST /api/resume-orchestrator` spawns orchestrator with `--project-path`. `openclaw.json` has `"prd-creator"` in `allowedAgentIds` and `"ideas:"` in `allowedSessionKeyPrefixes`. `server.py` DEFAULTS and `ui/config.json` contain `ideas_dir`, `hooks_url`, `hooks_token`, `conversion_prompt_path`.
+  > Test: `POST /api/resume-orchestrator` spawns orchestrator with `--project-path`. `openclaw.json` has `"prd-creator"` in `allowedAgentIds` and `"ideas:"` in `allowedSessionKeyPrefixes`. `server.py` DEFAULTS and `ui/config.example.json` (local `ui/config.json` when present) define `ideas_dir`, `hooks_url`, `hooks_token`, `conversion_prompt_path`; optional env `AUTODEV_HOOKS_TOKEN` overrides the webhook token.
 
 ---
 

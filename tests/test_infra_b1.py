@@ -10,7 +10,7 @@ import pytest
 # Paths resolved relative to project root
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER_PY = os.path.join(PROJECT_ROOT, "ui", "server.py")
-CONFIG_JSON = os.path.join(PROJECT_ROOT, "ui", "config.json")
+CONFIG_EXAMPLE_JSON = os.path.join(PROJECT_ROOT, "ui", "config.example.json")
 OPENCLAW_JSON = os.path.expanduser("~/.openclaw/openclaw.json")
 
 
@@ -72,10 +72,10 @@ class TestServerDefaults:
 
 
 class TestConfigJson:
-    """Pass criterion 5: ui/config.json contains the four new keys."""
+    """Pass criterion 5: ui/config.example.json documents the four new keys."""
 
-    def test_config_json_has_all_four_new_keys(self):
-        with open(CONFIG_JSON, "r") as f:
+    def test_config_example_json_has_all_four_new_keys(self):
+        with open(CONFIG_EXAMPLE_JSON, "r") as f:
             cfg = json.load(f)
         required_keys = [
             "ideas_dir",
@@ -84,4 +84,4 @@ class TestConfigJson:
             "conversion_prompt_path",
         ]
         for key in required_keys:
-            assert key in cfg, f"config.json missing key: {key}"
+            assert key in cfg, f"config.example.json missing key: {key}"

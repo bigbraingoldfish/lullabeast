@@ -2,6 +2,28 @@ __pycache__/
 *.pyc
 *.pyo
 .env
+# Local UI overrides (paths, hooks token) — copy from ui/config.example.json
+ui/config.json
+metrics.jsonl
+
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+.DS_Store
+Thumbs.db
+ui/index.html.bak
+*.bak
+
+# Accidental literal `~` directory (must never hold real OpenClaw data)
+/~/
+
+# IDE — do not commit local plans
+.cursor/
+
+# Local / internal planning (not for the public tree)
+/plans/
+
 *.egg-info/
 dist/
 build/

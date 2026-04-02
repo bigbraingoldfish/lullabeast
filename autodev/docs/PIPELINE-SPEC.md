@@ -752,7 +752,7 @@ IF gate_result == "INFRA_FAILURE":
             ELSE              → wait_for_model_stable() → re-invoke reviewer
         ELSE (outside cooldown — first time):
             write timestamp to phase_state.json (atomic, before SSH)
-            invoke SSH recovery: ssh -i <key> Z@<host> recovery
+            invoke SSH recovery: ssh -i <key> <user>@<host> recovery
             exit 0 → recovery succeeded → wait_for_model_stable() → re-invoke reviewer
             exit 2 → already healthy → wait_for_model_stable() → re-invoke reviewer
             exit 1 or timeout → escalation
@@ -764,9 +764,9 @@ INFRA_FAILURE does NOT increment `reviewer_retries` — that counter is reserved
 
 | Field | Value |
 |---|---|
-| User | `Z` |
-| Host | `<llama-server-host>` |
-| Key | `/home/pi/.ssh/autodev_recovery_key` |
+| User | (from `recovery.user` in `openclaw.json`) |
+| Host | (from `recovery.host`) |
+| Key | (from `recovery.key_path` — use mode `600`) |
 | Command | `recovery` (server-side script; `command=` restriction ignores arg, runs `restart_llama.sh`) |
 | Exit 0 | Recovery succeeded |
 | Exit 1 | Recovery failed |
@@ -1192,7 +1192,7 @@ Runs on Pi, once daily.
 ### Audit Archive
 
 ```
-/home/pi/pipeline-audit/{project-name}/phase-N/
+$AUTODEV_ROOT/pipeline-audit/{project-name}/phase-N/
 ```
 
 Archive written **before** clearing working files. Project name in path prevents cross-project conflicts. Archive failure is a non-blocking informational escalation only (logs a warning to stdout/log file, does NOT trigger the Signal webhook).

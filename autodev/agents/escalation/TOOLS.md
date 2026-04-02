@@ -4,7 +4,7 @@
 
 - **File read** — Read workspace files, pipeline state JSONs, agent output JSONs, project source code, logs, and any file needed for diagnosis. You have broad read access across the system.
 - **Shell (read-only)** — Run diagnostic commands only:
-  - `curl http://<llama-server-host>:9000/health` — check traffic cop / local model availability
+  - `curl http://<traffic-cop-host>:9000/health` — check traffic cop / local model availability
   - `ps aux | grep llama` — check if llama-server is running
   - `ls`, `find`, `cat` — inspect file existence and content
 - **File write (sandboxed)** — Write access is restricted to your workspace directory by OpenClaw's sandbox. The `pipeline-project/` symlink inside your workspace is your only write path to shared pipeline files. You write exactly two files:

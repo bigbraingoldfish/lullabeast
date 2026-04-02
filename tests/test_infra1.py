@@ -62,6 +62,27 @@ def test_load_config_partial_override():
         os.unlink(temp_path)
 
 
+def test_load_config_autodev_hooks_token_env_overrides_file():
+    """AUTODEV_HOOKS_TOKEN overrides hooks_token from JSON (secrets not only in file)."""
+    from ui.server import load_config
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump({"hooks_token": "from-file"}, f)
+        temp_path = f.name
+
+    old = os.environ.get("AUTODEV_HOOKS_TOKEN")
+    try:
+        os.environ["AUTODEV_HOOKS_TOKEN"] = "from-env"
+        result = load_config(config_path=temp_path)
+        assert result["hooks_token"] == "from-env"
+    finally:
+        os.unlink(temp_path)
+        if old is None:
+            os.environ.pop("AUTODEV_HOOKS_TOKEN", None)
+        else:
+            os.environ["AUTODEV_HOOKS_TOKEN"] = old
+
+
 def test_requirements_contains_fastapi_and_uvicorn():
     """Test that ui/requirements.txt contains fastapi and uvicorn."""
     req_path = Path(__file__).parent.parent / "ui" / "requirements.txt"

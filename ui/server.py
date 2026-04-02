@@ -382,7 +382,7 @@ DEFAULTS = {
     "project_dir_path": "~/.openclaw/pipeline-project",
     "ideas_dir": "~/.openclaw/ideas",
     "hooks_url": "http://localhost:18789/hooks/agent",
-    "hooks_token": "pipeline-secret-token",
+    "hooks_token": "",
     "conversion_prompt_path": "~/.openclaw/deployment-package/Updates/PRD to Roadmap (sonnet 4.5 ideal).txt",
     "openclaw_root": os.environ.get("AUTODEV_ROOT") or "~/.openclaw",
     "autodev_repo_path": os.environ.get("AUTODEV_REPO_PATH", os.path.expanduser("~/.openclaw")),
@@ -411,7 +411,12 @@ def load_config(config_path=None):
         with open(config_path, 'r') as f:
             user_config = json.load(f)
             config.update(user_config)
-    
+
+    # Webhook Bearer token: env wins over file (avoid committing secrets)
+    _hooks_env = os.environ.get("AUTODEV_HOOKS_TOKEN", "").strip()
+    if _hooks_env:
+        config["hooks_token"] = _hooks_env
+
     # Expand ~ on all string values (skip port which is int)
     for key, value in config.items():
         if isinstance(value, str):
@@ -713,31 +718,89 @@ def _write_queue_file(path: str, data: dict) -> None:
     _write_json_atomic(path, data)
 
 
-def _sync_queue_active_for_project(project_path: str, config: dict) -> None:
-    """If project_path matches a queue entry, set state ACTIVE and started_at."""
-    q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
-    if not os.path.exists(q_path):
-        return
+def _queue_mark_matching_entry_active(config: dict, project_real: str) -> None:
+    """If a queue row's project_path realpath matches *project_real*, set state ACTIVE and started_at."""
+    from datetime import datetime, timezone as tz
+
     try:
-        project_real = os.path.realpath(os.path.expanduser(project_path))
-        q_data = _read_queue_file(config)
-        entries = q_data.get("queue", [])
-        now = datetime.now(timezone.utc).isoformat()
-        for entry in entries:
-            try:
-                ep = entry.get("project_path")
-                if ep is None:
-                    continue
-                entry_real = os.path.realpath(os.path.expanduser(str(ep)))
-            except OSError:
-                continue
-            if entry_real == project_real:
-                entry["state"] = "ACTIVE"
-                entry["started_at"] = now
-                break
-        _write_queue_file(q_path, q_data)
-    except Exception as e:
-        logger.warning("Queue update on orchestrator spawn failed: %s", e)
+        target = os.path.realpath(os.path.expanduser(str(project_real)))
+    except OSError:
+        return
+    q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
+    q = _read_queue_file(config)
+    entries = q.get("queue", [])
+    if not entries:
+        return
+    now = datetime.now(tz.utc).isoformat()
+    changed = False
+    for e in entries:
+        ep = (e.get("project_path") or "").strip()
+        if not ep:
+            continue
+        try:
+            er = os.path.realpath(os.path.expanduser(ep))
+        except OSError:
+            continue
+        if er != target:
+            continue
+        if e.get("state") != "ACTIVE":
+            e["state"] = "ACTIVE"
+            changed = True
+        if not e.get("started_at"):
+            e["started_at"] = now
+            changed = True
+    if changed:
+        _write_queue_file(q_path, q)
+
+
+def _merge_ingested_active_project(ordered, ps):
+    """If ``pipeline_state.json`` references a project not in the queue, append a synthetic row.
+
+    The synthetic entry is for display only (``ingested: true``, stable ``ingest-*`` id). Returns
+    ``(merged_entries, did_append)``.
+    """
+    if not ps or not isinstance(ordered, list):
+        return list(ordered or []), False
+    ps_project = (ps.get("project_path") or "").strip()
+    if not ps_project:
+        return list(ordered), False
+    try:
+        ps_real = os.path.realpath(os.path.expanduser(ps_project))
+    except OSError:
+        return list(ordered), False
+    for e in ordered:
+        ep = (e.get("project_path") or "").strip()
+        if not ep:
+            continue
+        try:
+            if os.path.realpath(os.path.expanduser(ep)) == ps_real:
+                return list(ordered), False
+        except OSError:
+            continue
+    from datetime import datetime, timezone as tz
+    import uuid as _uuid
+
+    now = datetime.now(tz.utc).isoformat()
+    ingest_id = f"ingest-{_uuid.uuid5(_uuid.NAMESPACE_URL, ps_real)}"
+    max_pos = max((e.get("position") or 0) for e in ordered) if ordered else 0
+    synth = {
+        "id": ingest_id,
+        "project_path": ps_project,
+        "idea_id": None,
+        "name": os.path.basename(ps_project.rstrip("/")) or ps_project,
+        "state": "ACTIVE",
+        "position": max_pos + 1,
+        "parent_id": None,
+        "added_at": now,
+        "started_at": None,
+        "completed_at": None,
+        "blocked_at": None,
+        "skip_count": 0,
+        "preflight_validated_at": now,
+        "notes": "",
+        "ingested": True,
+    }
+    return list(ordered) + [synth], True
 
 
 def _compute_dependency_tree(entries):
@@ -832,65 +895,6 @@ def _move_group_atomically(entries, parent_id, new_pos):
         e["position"] = i
     entries[:] = final
     return entries
-
-
-def _merge_ingested_active_project(entries, pipeline_state):
-    """If pipeline_state references a project not in the queue, prepend a synthetic row (TASK-03 ingest).
-
-    Idempotent: same project_path always yields the same synthetic ``id`` (ingest-<md5>).
-    Does not persist to pipeline_queue.json (display/API merge only).
-    """
-    if not pipeline_state:
-        return list(entries), False
-    pp = pipeline_state.get("project_path") or ""
-    if not pp:
-        return list(entries), False
-    try:
-        ps_real = os.path.realpath(os.path.expanduser(str(pp)))
-    except OSError:
-        return list(entries), False
-    for e in entries:
-        try:
-            er = os.path.realpath(os.path.expanduser(e.get("project_path", "")))
-            if er == ps_real:
-                return list(entries), False
-        except OSError:
-            continue
-    digest = hashlib.md5(ps_real.encode()).hexdigest()[:12]
-    st = pipeline_state.get("pipeline_status") or ""
-    if st == "WAITING_FOR_HUMAN":
-        qstate = "ESCALATION"
-    elif st == "BLOCKED":
-        qstate = "BLOCKED"
-    elif st == "PIPELINE_COMPLETE":
-        qstate = "COMPLETED"
-    elif st == "QUEUE_HALTED":
-        qstate = "READY"
-    else:
-        qstate = "ACTIVE"
-    base = os.path.basename(ps_real.rstrip(os.sep)) or ps_real
-    now = datetime.now(timezone.utc).isoformat()
-    synthetic = {
-        "id": f"ingest-{digest}",
-        "project_path": ps_real,
-        "idea_id": None,
-        "name": base,
-        "state": qstate,
-        "position": 1,
-        "parent_id": None,
-        "added_at": now,
-        "started_at": None,
-        "completed_at": None,
-        "blocked_at": None,
-        "skip_count": 0,
-        "preflight_validated_at": None,
-        "notes": "",
-        "ingested": True,
-    }
-    merged = [synthetic] + [dict(e) for e in entries]
-    for i, e in enumerate(merged, 1):
-        e["position"] = i
-    return merged, True
 
 
 def _validate_queue_entry_ids_order(entries, entry_ids):
@@ -1815,7 +1819,10 @@ def post_resume_orchestrator():
     if not spawned.get("ok"):
         raise HTTPException(status_code=503, detail=spawned.get("error") or "Failed to spawn orchestrator")
 
-    _sync_queue_active_for_project(project_path, config)
+    try:
+        _queue_mark_matching_entry_active(config, project_path)
+    except Exception:
+        pass
 
     return {"ok": True}
 
@@ -5405,6 +5412,9 @@ async def post_setup_launch(request: Request):
     if not spawned.get("ok"):
         return {"ok": False, "error": spawned.get("error") or "Failed to spawn orchestrator"}
 
-    _sync_queue_active_for_project(project_real, config)
+    try:
+        _queue_mark_matching_entry_active(config, project_real)
+    except Exception:
+        pass
 
     return {"ok": True, "error": None}
