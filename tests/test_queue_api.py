@@ -530,13 +530,82 @@ class TestPostCommandDeferred:
 # ---------------------------------------------------------------------------
 
 class TestDeleteQueueEntry:
-    def test_returns_409_when_active(self, client):
-        c, queue_file, _ = client
+    def test_returns_409_when_active_and_mid_flight_same_project(self, client):
+        c, queue_file, tmp_path = client
         entry = _make_entry("active", state="ACTIVE", position=1)
+        # Align pipeline_state project_path with queue entry (realpath match)
+        entry["project_path"] = str(tmp_path / "active_proj")
+        state_file = tmp_path / "pipeline_state.json"
+        with open(state_file, "w") as f:
+            json.dump(
+                {"project_path": entry["project_path"], "pipeline_status": "RUNNING"},
+                f,
+            )
         _write_queue(str(queue_file), [entry])
 
         resp = c.delete(f"/api/queue/{entry['id']}")
         assert resp.status_code == 409
+
+    def test_returns_409_when_active_wait_sentinel_same_project(self, client):
+        c, queue_file, tmp_path = client
+        entry = _make_entry("active", state="ACTIVE", position=1)
+        entry["project_path"] = str(tmp_path / "wait_proj")
+        state_file = tmp_path / "pipeline_state.json"
+        with open(state_file, "w") as f:
+            json.dump(
+                {"project_path": entry["project_path"], "pipeline_status": "WAITING_FOR_SENTINEL"},
+                f,
+            )
+        _write_queue(str(queue_file), [entry])
+
+        resp = c.delete(f"/api/queue/{entry['id']}")
+        assert resp.status_code == 409
+
+    def test_allows_delete_when_active_stopped_same_project(self, client):
+        c, queue_file, tmp_path = client
+        entry = _make_entry("active", state="ACTIVE", position=1)
+        entry["project_path"] = str(tmp_path / "stopped_proj")
+        state_file = tmp_path / "pipeline_state.json"
+        with open(state_file, "w") as f:
+            json.dump(
+                {"project_path": entry["project_path"], "pipeline_status": "STOPPED"},
+                f,
+            )
+        _write_queue(str(queue_file), [entry])
+
+        resp = c.delete(f"/api/queue/{entry['id']}")
+        assert resp.status_code == 200
+
+    def test_allows_delete_when_active_waiting_human_same_project(self, client):
+        c, queue_file, tmp_path = client
+        entry = _make_entry("active", state="ACTIVE", position=1)
+        entry["project_path"] = str(tmp_path / "esc_proj")
+        state_file = tmp_path / "pipeline_state.json"
+        with open(state_file, "w") as f:
+            json.dump(
+                {"project_path": entry["project_path"], "pipeline_status": "WAITING_FOR_HUMAN"},
+                f,
+            )
+        _write_queue(str(queue_file), [entry])
+
+        resp = c.delete(f"/api/queue/{entry['id']}")
+        assert resp.status_code == 200
+
+    def test_allows_delete_active_when_pipeline_targets_other_project(self, client):
+        """Stuck ACTIVE row while global pipeline_state points elsewhere — allow remove."""
+        c, queue_file, tmp_path = client
+        entry = _make_entry("active", state="ACTIVE", position=1)
+        entry["project_path"] = str(tmp_path / "queued_only")
+        state_file = tmp_path / "pipeline_state.json"
+        with open(state_file, "w") as f:
+            json.dump(
+                {"project_path": str(tmp_path / "other_project"), "pipeline_status": "RUNNING"},
+                f,
+            )
+        _write_queue(str(queue_file), [entry])
+
+        resp = c.delete(f"/api/queue/{entry['id']}")
+        assert resp.status_code == 200
 
     def test_removes_entry_and_resequences(self, client):
         c, queue_file, _ = client

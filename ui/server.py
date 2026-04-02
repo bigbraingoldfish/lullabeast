@@ -4689,7 +4689,11 @@ async def post_queue_add(request: Request):
 
 @app.delete("/api/queue/{entry_id}")
 def delete_queue_entry(entry_id: str):
-    """Remove an entry from the queue. Returns 409 if ACTIVE."""
+    """Remove an entry from the queue.
+
+    ACTIVE rows are rejected only when global pipeline_state targets this entry's
+    project (realpath) and pipeline_status is mid-flight (RUNNING or WAITING_FOR_SENTINEL).
+    """
     config = load_config()
     q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
     q = _read_queue_file(config)
@@ -4699,7 +4703,21 @@ def delete_queue_entry(entry_id: str):
     if target is None:
         raise HTTPException(status_code=404, detail="Queue entry not found")
     if target["state"] == "ACTIVE":
-        raise HTTPException(status_code=409, detail="Cannot remove an ACTIVE queue entry")
+        ps_path = os.path.expanduser(config.get("pipeline_state_path", "~/.openclaw/pipeline_state.json"))
+        ps = _read_json_file(ps_path) if os.path.exists(ps_path) else None
+        if ps:
+            try:
+                ps_real = os.path.realpath(ps.get("project_path", "") or "")
+                ep_real = os.path.realpath((target.get("project_path") or "").strip() or "")
+            except OSError:
+                ps_real, ep_real = "", ""
+            if ps_real and ep_real and ps_real == ep_real:
+                pst = ps.get("pipeline_status")
+                if pst in ("RUNNING", "WAITING_FOR_SENTINEL"):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Cannot remove: pipeline is mid-flight for this project",
+                    )
 
     entries = [e for e in entries if e["id"] != entry_id]
     _resequence_positions(entries)
@@ -4915,6 +4933,13 @@ def get_queue_entry_snapshot(entry_id: str):
         except Exception:
             pass
 
+    escalation_resets = None
+    if is_active_project and project_path:
+        psp = os.path.join(project_path, "phase_state.json")
+        ph = _read_json_file(psp) if os.path.exists(psp) else {}
+        if isinstance(ph, dict):
+            escalation_resets = ph.get("escalation_resets", 0)
+
     return {
         "id": entry["id"],
         "name": entry.get("name"),
@@ -4934,6 +4959,7 @@ def get_queue_entry_snapshot(entry_id: str):
         "pipeline_status": pipeline_status,
         "orchestrator_alive": orchestrator_alive,
         "is_active_project": is_active_project,
+        "escalation_resets": escalation_resets,
     }
 
 

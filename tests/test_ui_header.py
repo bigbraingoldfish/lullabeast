@@ -19,23 +19,21 @@ def test_autodev_wordmark_exists():
 
 
 def test_status_pill_with_running_state():
-    """Status pill renders with correct label for RUNNING state (amber pulse)."""
+    """Status pill uses RUNNING label with teal + run-pulse (active compute)."""
     with open('ui/index.html', 'r') as f:
         content = f.read()
-    
-    # Check for amber pulse CSS class
-    assert 'animate-pulse' in content or 'amber' in content.lower(), \
-        "Should have amber pulse effect for RUNNING state"
+    assert re.search(r"RUNNING:\s*\{[^}]*run-pulse", content), "RUNNING should use run-pulse"
+    assert re.search(r"RUNNING:\s*\{[^}]*bg-teal", content), "RUNNING should use teal background"
 
 
 def test_status_pill_waiting_for_sentinel():
-    """Status pill renders with correct label for WAITING_FOR_SENTINEL state (amber pulse, shows 'WAITING — {agent}')."""
+    """WAITING_FOR_SENTINEL uses static amber (no pulse); header may append agent to WAITING label."""
     with open('ui/index.html', 'r') as f:
         content = f.read()
-    
-    # Check for WAITING label pattern
     assert 'WAITING' in content, "Should show WAITING label"
-    assert 'agent' in content.lower(), "Should reference agent in waiting state"
+    assert 'current_agent' in content, "Should reference current_agent for waiting header"
+    assert not re.search(r"WAITING_FOR_SENTINEL:\s*\{[^}]*run-pulse", content), \
+        "Sentinel wait must not use run-pulse in pipeline pill map"
 
 
 def test_status_pill_waiting_for_human():
@@ -128,14 +126,8 @@ def test_state_polls_every_3_seconds():
 
 
 def test_amber_pulse_animation():
-    """Amber pulse CSS animation is applied only to RUNNING and WAITING_FOR_SENTINEL states."""
+    """Teal run-pulse is used for RUNNING; amber keyframes may remain for legacy non-pipeline UI."""
     with open('ui/index.html', 'r') as f:
         content = f.read()
-    
-    # Check for amber pulse animation
-    assert 'amber' in content.lower() or '#f59e0b' in content, \
-        "Should have amber color for pulse animation"
-    
-    # Check for animation definition
-    assert 'animation' in content.lower() or '@keyframes' in content or 'animate' in content, \
-        "Should have CSS animation for pulse effect"
+    assert '@keyframes' in content and 'teal-pulse' in content, "teal-pulse keyframes expected"
+    assert '.run-pulse' in content, "run-pulse class expected"
