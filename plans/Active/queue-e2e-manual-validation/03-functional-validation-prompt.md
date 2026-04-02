@@ -1,103 +1,123 @@
 # FUNCTIONAL VALIDATION — Role prompt (after prerequisites)
 
-**Prerequisite:** `02-prerequisite-setup.md` is complete: queue was cleared, `queue-e2e-*` dirs exist with minimal single-phase roadmaps, `GET /api/state` works.
+**Prerequisite:** `02-prerequisite-setup.md` is complete (clean queue, valid test repos, **`GET /api/state`** works).  
+**You may use these pre-existing project paths for testing** (ensure each passes preflight: git + `roadmap*.md`, etc.):
 
-**Source of truth for “correct” behavior:** Start with **`00-source-of-truth.md`**. For escalation parking, BLOCKED handling, staged commands, and **PATCH** `/api/queue/{id}/command`, the **Escalation Park-and-Advance** plan (`escalation_park_and_advance_87788e9d.plan.md` — path in `00-source-of-truth.md`) is authoritative. **`TASK-03-PROJECT-QUEUE.md`** is supporting material only; do **not** reject implementation solely because older TASK-03 text omitted park-and-advance.
+- `/home/pi/projects/queue-test1`
+- `/home/pi/projects/queue-test2`
+- `/home/pi/projects/queue-test3`
+- `/home/pi/projects/queue-test4-child`
+- `/home/pi/projects/queue-test5-esc`
+
+**Source of truth for “correct” behavior:** **`00-source-of-truth.md`** → **[`TASK-03-PROJECT-QUEUE.md`](../TASK-03-PROJECT-QUEUE.md)** (including **Implementation notes** at the bottom). Do **not** rely on superseded one-off plan filenames.
 
 ---
 
-## Role: Queue & progression validation lead (manual + UI + API)
+## Role: Queue & progression validation lead (manual + UI + API + visual)
 
-**Mission:** Systematically validate behaviors against **`01-logic-gate-edge-cases.md`**, judged using the **escalation plan** + code for G5–G7 and scenarios S3–S5. Also cover auto progression (G2), manual trigger-next (G3–G4), dependency hold (G8–G9), QUEUE_HALTED (G11), open gap G12.
+**Mission:** Validate behaviors in **`01-logic-gate-edge-cases.md`** (G1–G14), using **TASK-03 + code** for park-and-advance, **`ESCALATION`** / **`BLOCKED`** rows, **`POST /api/command`** deferred paths, and **ingest**.
+
+**This is not pytest-only.** Automated tests (`pytest tests/ …`, `autodev/tests/ …`) validate API/orchestrator contracts; **this** pass must also prove **real UI behavior** (see below).
 
 **Rules:**
 
-- **Do not change application code** in this pass—only observe, record evidence, and list gaps for a follow-up implementation round.
-- Before claiming a bug, read **`00-source-of-truth.md`**, the **escalation plan** (or its summary there), and **References** below—not TASK-03 alone.
+- **Do not change application code** in this pass—observe, record evidence, file follow-up tickets for gaps.
+- Before calling something a bug, confirm against **`00-source-of-truth.md`**, TASK-03 **Implementation notes**, and the referenced **Python/HTML** files.
+
+### Browser-first E2E + wait (mandatory methodology)
+
+- Use **integrated browser tools** to exercise the live dashboard: open **Project Queue** and **Pipeline Monitor**, click **Add Project**, **Trigger next**, mode toggle, row selection—**end-to-end through the UI** wherever the scenario allows, not only **`curl`**.
+- **Wait for real outputs.** After a click or pipeline start, the system may need **tens of seconds to many minutes**. Use **`browser_wait_for`** (text or condition) and/or **sleep in short chunks** (e.g. 2–5s) with **browser_snapshot** between chunks until the expected label/state appears—or until you hit a **documented timeout** (e.g. 10–15 minutes for a full phase—adjust to your environment). **Do not skip a step because it is slow**; **sleep/wait is the correct tool** so validation completes without skipping.
+- **Visual validation:** Record **badges**, pill text (**Queue:** …, **ESCALATION**, **BLOCKED**, **QUEUE_HALTED**), colors, disabled **Trigger next**, drag handles, parent/child indicators—**screenshots or snapshot quotes** in the report.
+- **`curl` / JSON** is **supplementary** evidence (parity with UI), not a replacement for “does it look right in the app?”
+
+**Skip policy:** Mark **Skipped** only when **unsafe** or **impossible** (e.g. cannot force escalation without production risk)—**not** because waiting was tedious.
 
 ---
 
 ## Before each scenario
 
-- Note **queue_mode** (auto vs manual).
-- Snapshot: **GET /api/queue** (or queue screen): order, states, `parent_id`, `pending_command`, `blocked_at`, positions.
+- Note **`queue_mode`** (**auto** vs **manual**).
+- **UI:** Open **Project Queue**; note order and badges on screen.
+- **API (optional parity):** **`GET /api/queue`**, **`GET /api/queue/status`**, **`GET /api/state`**: order, **`state`**, **`parent_id`**, **`parked_*`**, **`live_pipeline_status`**, positions.
 
 ---
 
-## Scenarios (S1–S8)
+## Scenarios (S1–S9)
 
-Execute in order; **skip** any step that is unsafe or impossible in your live OpenClaw / GPU environment.
+Execute in order. Prefer **browser** for user-visible steps; use **Skipped** only for **safety/environment** limits—not for **timeout impatience** (use wait/sleep instead).
 
 ### S1 — Auto progression (G2)
 
-- Set queue **auto**. Order queue: solo-alpha → solo-beta → solo-gamma (all READY, no deps).
-- Start pipeline for the first entry (launch/resume per your setup).
-- **Expect:** When the first project reaches COMPLETED (or your chosen stop point), the system advances so the **next READY** is picked up per product behavior.
-- **Record:** Did the second become ACTIVE without manual **Trigger next**?
+- Set queue **auto**. Order e.g. **queue-test1 → queue-test2 → queue-test3** (all **READY**, no deps).
+- Launch pipeline for the first entry (per your normal Setup / resume flow).
+- **Expect:** On **PIPELINE_COMPLETE** for the first, the next **READY** becomes **ACTIVE** without **Trigger next**.
+- **Record:** Second project **ACTIVE**? **`pipeline_state.json`** **`project_path`** matches symlink?
 
 ### S2 — Manual + Trigger next (G3–G4)
 
-- Clear queue; set **manual**. Add two READY projects.
-- **Expect:** The second project does **not** start until **Trigger next** (or equivalent).
+- Set **manual**. Two **READY** entries (e.g. **queue-test1**, **queue-test2**).
+- **Expect:** Second does **not** start until **Trigger next**.
 - Click **Trigger next**.
-- **Expect:** Next project becomes ACTIVE; orchestrator spawn succeeds (no 500).
+- **Expect:** Next **ACTIVE**, orchestrator spawn OK (no **500**); **409** only if some row is **ACTIVE** (parked **ESCALATION**/**BLOCKED** alone must **not** cause **409**).
 
-### S3 — Escalation + park-and-advance (G5) — **per escalation plan**
+### S3 — Escalation park-and-advance (G5)
 
-- Queue **auto**; ensure another **eligible** non-ACTIVE entry exists (READY / SKIPPED_PENDING / BLOCKED with `pending_command`—see orchestrator `_has_ready` logic).
-- Force escalation on the **active** project; escalation agent **webhook** must **succeed** (park logic runs only after success—see plan §2b).
-- **Expect:** Active → **BLOCKED** + `blocked_at` + **`escalation_context`**; orchestrator calls **`_select_next_queue_project()`**; **next** project starts (**RUNNING** planner path) **or** if next has staged command, **WAITING_FOR_HUMAN** replay per plan.
-- **Contrast:** Set queue to **manual** (or no other eligible entry) → **no** park; pipeline stays **WAITING_FOR_HUMAN** on current project (plan: branch D → L).
-- **Record:** `pipeline_queue.json` + `pipeline_state.json` + UI.
+- **Auto**; queue at least two eligible projects (e.g. **queue-test5-esc** then **queue-test2**).
+- Force **WAITING_FOR_HUMAN** on the active project (escalation path per your pipeline).
+- **Expect:** Active row → **`ESCALATION`** + **`parked_*`**; if **auto** and another entry can run, symlink advances and global state targets the **next** project (**RUNNING**).
+- **Contrast — manual:** Same setup, **manual** → **no** symlink advance; parked row remains **ESCALATION** with metadata.
 
-### S4 — BLOCKED skip / order (G6) — **per plan “BLOCKED + no pending_command”**
+### S4 — Roadmap blocked park-and-advance (G6)
 
-- Queue with **BLOCKED** (no `pending_command`) and another eligible entry.
-- **Expect:** **`_select_next_queue_project`** **skip-and-requeues** the BLOCKED group; another entry runs; **QUEUE_HALTED** only when nothing can proceed (plan + orchestrator).
-- **Record:** Positions before/after (`pipeline_queue.json` or screenshot).
+- Provoke roadmap **BLOCKED** (e.g. **`[!]`** phase / gate exit **2** with **BLOCKED** in output) on an **ACTIVE** queued project.
+- **Expect:** Row **ACTIVE → BLOCKED**, **`parked_reason: roadmap_blocked`**, **`blocked_at`**; **auto** may advance to next eligible.
 
-### S5 — Staged command (G7) — **plan Step 3 + 2c**
+### S5 — Deferred escalation command (G7)
 
-- **BLOCKED** entry; stage via **PATCH `/api/queue/{id}/command`** (VALID_COMMANDS) **or** queue UI.
-- **Expect:** **`pending_command`**, **`pending_command_set_at`**, state **BLOCKED → READY**; UI shows staged (**CMD STAGED** / copy). When orchestrator **selects** that entry: cleanup, **`_write_escalation_command_files`**, **WAITING_FOR_HUMAN** with restored **`escalation_context`** when present.
+- With **queue-test5-esc** parked (**ESCALATION**) and **another** project **ACTIVE** (symlink points elsewhere): **`POST /api/command`** with **`{"command":"RETRY","target_project_path":"/home/pi/projects/queue-test5-esc"}`** (adjust path to realpath).
+- **Expect:** **200**, **`deferred": true`**; **`pending_escalation_command.json`** under **queue-test5-esc** (not under active symlink). Sending the same command **without** **`target_project_path`** while global status is not **WAITING_FOR_HUMAN** on symlink → expect **409** (normal rule).
+- When that project becomes **ACTIVE** again, orchestrator should consume pending and enter escalation handling (**WAITING_FOR_HUMAN** / sentinel path as designed).
 
-### S6 — Dependency hold (G8–G9)
+### S6 — Preflight skip-and-requeue (G10)
 
-- Add **parent**, then **child**, and set **parent** dependency in UI while parent is not COMPLETED.
-- **Expect:** Child **DEPENDENCY_HOLD**; it does not run until parent is COMPLETED (then eligibility updates).
+- Arrange a **READY** entry that fails **full** preflight (or use trigger-next with a bad path per test design).
+- **Expect:** **SKIPPED_PENDING**, **skip_count** increments, group moves forward per **TASK-03**; not confused with **ESCALATION**/**BLOCKED** parking.
 
-### S7 — QUEUE_HALTED (G11)
+### S7 — Dependency hold (G8–G9)
 
-- Arrange queue so no project can start (all BLOCKED / DEPENDENCY_HOLD / preflight failure as appropriate).
-- **Expect:** `QUEUE_HALTED` in `pipeline_state.json` with `queue_halted_reason`; Pipeline Monitor shows the amber queue-halted pill.
+- Use **queue-test4-child** as child; set parent to e.g. **queue-test1** while parent is not **COMPLETED**.
+- **Expect:** Child **DEPENDENCY_HOLD**; not started until parent completes.
 
-### S8 — Open gap: path not in queue (G12)
+### S8 — QUEUE_HALTED (G11)
 
-- From Setup / switch-project flow (if present), point at a **valid repo path that is not** in `pipeline_queue.json`.
-- **Ideal (often unimplemented):** auto-add to top of queue, preserve relative order of existing entries.
-- **Record:** Actual behavior only; tag as **product gap** for engineering if behavior differs from ideal.
+- Arrange no runnable entry (all **DEPENDENCY_HOLD**, all parked, or repeated preflight failure as appropriate).
+- **Expect:** **`QUEUE_HALTED`** in **`pipeline_state.json`**, **`queue_halted_reason`** set; Monitor + queue pills reflect halted state.
+
+### S9 — Ingest row (G12)
+
+- Run pipeline with **`project_path`** **not** listed in **`pipeline_queue.json`** (or temporarily remove matching entry while pipeline runs—careful).
+- **Expect:** **`GET /api/queue`** includes **`ingest-*`** synthetic row for that path; repeated **GET** does not duplicate; **`live_pipeline_status`** consistent with global state when paths match; parked rows show **`parked_pipeline_status`** when symlink targets another project.
 
 ---
 
 ## Required output format
 
-Deliver these sections in your review notes (markdown or ticket):
+Deliver in review notes (markdown or ticket):
 
-1. **Scenario table:** S1–S8, columns: **Pass / Fail / Skipped**, **evidence** (screenshot path, API JSON snippet, log line).
-2. **Misalignments:** bullets — **intent** vs **observed**.
-3. **Open gaps:** especially **G12**; any crash or inconsistent queue file write.
-4. **Next implementation tickets:** **3–7** prioritized bullets for a follow-up sprint.
+1. **Scenario table:** S1–S9 — **Pass / Fail / Skipped**, **evidence** (**screenshot** or browser snapshot excerpt **and** where useful **`curl`** / JSON / log line). Visual proof is required for UI-facing scenarios (S1–S5, S7–S9 especially).
+2. **Misalignments:** intent vs observed.
+3. **Open gaps:** crashes, non-atomic queue writes, UX confusion.
+4. **Next tickets:** **3–7** prioritized follow-ups.
 
 ---
 
-## References (read before calling “bug”) — **order matters**
+## References (read before “bug”) — order matters
 
-| Order | Artifact | Why |
-|-------|------------|-----|
-| 1 | **`00-source-of-truth.md`** (this folder) | Declares escalation plan as primary over raw TASK-03 |
-| 2 | **`escalation_park_and_advance_87788e9d.plan.md`** (path in `00-source-of-truth.md`) | Park-and-advance, BLOCKED rules, PATCH, UI |
-| 3 | `autodev/pipeline/orchestrator.py` | `_select_next_queue_project`, escalation webhook branch, `_write_escalation_command_files` |
-| 4 | `ui/server.py` | `PATCH /api/queue/{entry_id}/command`, `VALID_COMMANDS`, `POST /api/queue/trigger-next` |
-| 5 | `plans/Active/TASK-03-PROJECT-QUEUE.md` | **Secondary** — general queue; do not override the escalation plan for G5–G7 |
-| 6 | `CLAUDE.md` | Path constants, operational notes |
-| 7 | `01-logic-gate-edge-cases.md` | Edge-case IDs G1–G14 |
+| Order | Artifact |
+|-------|----------|
+| 1 | **`00-source-of-truth.md`** |
+| 2 | **`../TASK-03-PROJECT-QUEUE.md`** + EOF implementation notes |
+| 3 | **`autodev/pipeline/orchestrator.py`**, **`ui/server.py`**, **`ui/index.html`** |
+| 4 | **`01-logic-gate-edge-cases.md`** (G1–G14) |
+| 5 | **`CLAUDE.md`** |

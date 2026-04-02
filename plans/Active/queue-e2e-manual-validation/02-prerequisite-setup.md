@@ -25,7 +25,7 @@
 
 Base path: `/home/pi/projects` (adjust if your Pi uses another root).
 
-Each repo: `mkdir -p <path>/.git`, one `roadmap.md`, **one** phase `CORE-E1` only—minimal text for fastest pipeline progress.
+Each repo: **do not** use a hollow `mkdir -p <path>/.git` without `git init`—the orchestrator runs **`git checkout main`** and will fail. Use a **real** repository: `git init`, `git branch -M main`, one `roadmap.md`, **one** phase `CORE-E1` only, then **`git add -A && git commit -m init`**. Faster reset: [`scripts/queue-e2e-reset-test-projects.sh`](../../scripts/queue-e2e-reset-test-projects.sh) from the **autodev-ui** repo root (see **`00-source-of-truth.md`** — Symlink and git invariants).
 
 ### Project 1 — `queue-e2e-solo-alpha` (no dependency)
 
