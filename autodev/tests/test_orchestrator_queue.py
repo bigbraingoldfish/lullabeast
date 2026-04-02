@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import uuid
+from pathlib import Path
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch, call
 
@@ -333,6 +334,118 @@ class TestSelectNextQueueProject:
         by_id = {e["id"]: e for e in q["queue"]}
         assert by_id[child["id"]]["state"] == "DEPENDENCY_HOLD"
 
+    def test_child_stays_ready_when_parent_active_not_hold(self, orch, tmp_path, monkeypatch):
+        inst, queue_file, state_file, _ = orch
+        parent_id = str(uuid.uuid4())
+        proj = tmp_path / "goodproj"
+        proj.mkdir()
+        parent = {**_make_entry("parent", state="ACTIVE", position=1, project_path=str(proj)), "id": parent_id}
+        child = _make_entry("child", state="READY", position=2, parent_id=parent_id)
+        _write_queue(queue_file, [parent, child])
+
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "update_symlink", lambda p: True)
+        monkeypatch.setattr(inst, "write_state", lambda: None)
+
+        inst._select_next_queue_project()
+        q = inst._read_queue()
+        by_id = {e["id"]: e for e in q["queue"]}
+        assert by_id[child["id"]]["state"] == "READY"
+
+    def test_dependency_hold_when_parent_escalation(self, orch, tmp_path, monkeypatch):
+        inst, queue_file, state_file, _ = orch
+        parent_id = str(uuid.uuid4())
+        parent = {**_make_entry("parent", state="ESCALATION", position=1), "id": parent_id}
+        child = _make_entry("child", state="READY", position=2, parent_id=parent_id)
+        _write_queue(queue_file, [parent, child])
+
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "update_symlink", lambda p: True)
+        monkeypatch.setattr(inst, "write_state", lambda: None)
+
+        inst._select_next_queue_project()
+        q = inst._read_queue()
+        by_id = {e["id"]: e for e in q["queue"]}
+        assert by_id[child["id"]]["state"] == "DEPENDENCY_HOLD"
+
+    def test_promote_children_when_active_entry_completed(self, orch, tmp_path, monkeypatch):
+        import orchestrator as orch_mod
+
+        inst, queue_file, state_file, base = orch
+        proj_parent = tmp_path / "p1"
+        proj_parent.mkdir()
+        (proj_parent / ".git").mkdir()
+        (proj_parent / "roadmap.md").write_text("# x")
+        proj_child = tmp_path / "p2"
+        proj_child.mkdir()
+        (proj_child / ".git").mkdir()
+        (proj_child / "roadmap.md").write_text("# x")
+
+        link = Path(orch_mod.SYMLINK_TARGET)
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(proj_parent, target_is_directory=True)
+
+        parent_id = str(uuid.uuid4())
+        child_id = str(uuid.uuid4())
+        parent = {
+            **_make_entry("p", state="ACTIVE", position=1, project_path=str(proj_parent)),
+            "id": parent_id,
+        }
+        child = {
+            **_make_entry("c", state="DEPENDENCY_HOLD", position=2, parent_id=parent_id, project_path=str(proj_child)),
+            "id": child_id,
+        }
+        _write_queue(queue_file, [parent, child])
+        inst.state["project_path"] = str(proj_parent)
+
+        inst._queue_update_active_entry(
+            "COMPLETED",
+            {"completed_at": datetime.now(timezone.utc).isoformat()},
+        )
+        q = inst._read_queue()
+        by_id = {e["id"]: e for e in q["queue"]}
+        assert by_id[child_id]["state"] == "READY"
+
+    def test_startup_pipeline_complete_auto_retries_startup(self, orch, tmp_path, monkeypatch):
+        import orchestrator as orch_mod
+
+        inst, queue_file, state_file, _ = orch
+        nselect = {"n": 0}
+
+        def sel():
+            nselect["n"] += 1
+            return True
+
+        monkeypatch.setattr(inst, "_select_next_queue_project", sel)
+        monkeypatch.setattr(inst, "_queue_update_active_entry", lambda *a, **k: None)
+        monkeypatch.setattr(inst, "transition_state", lambda *a, **k: None)
+        monkeypatch.setattr(inst, "write_state", lambda: None)
+        monkeypatch.setattr(
+            inst,
+            "_read_queue",
+            lambda: {"queue": [{"id": "1"}], "queue_mode": "auto"},
+        )
+
+        def fake_run(cmd, **kwargs):
+            m = MagicMock()
+            m.stderr = ""
+            exe = cmd[0] if cmd else ""
+            if exe == sys.executable and cmd and "phase_resolver.py" in str(cmd[-1]):
+                m.returncode = 0
+                m.stdout = "PIPELINE_COMPLETE"
+                return m
+            m.returncode = 0
+            m.stdout = ""
+            return m
+
+        monkeypatch.setattr(orch_mod.subprocess, "run", fake_run)
+        inst.state["current_agent"] = "planner"
+        inst.state["current_phase"] = 0
+        rv = inst._run_startup_planner_phase_zero_and_branch()
+        assert rv == "retry_startup"
+        assert nselect["n"] == 1
+
     def test_queue_halted_written_when_all_exhausted(self, orch, tmp_path, monkeypatch):
         inst, queue_file, state_file, _ = orch
         entries = [
@@ -364,6 +477,50 @@ class TestSelectNextQueueProject:
 
         inst._select_next_queue_project()
         assert inst.state["queue_halted_reason"] == "all_blocked"
+
+    def test_queue_halted_reason_all_blocked_includes_escalation(self, orch, tmp_path, monkeypatch):
+        """Parked ESCALATION rows count as all_blocked per TASK-03."""
+        inst, queue_file, state_file, _ = orch
+        entries = [
+            {**_make_entry("a", state="ESCALATION", position=1)},
+            {**_make_entry("b", state="BLOCKED", position=2)},
+        ]
+        _write_queue(queue_file, entries)
+
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "update_symlink", lambda p: True)
+        monkeypatch.setattr(inst, "write_state", lambda: None)
+
+        inst._select_next_queue_project()
+        assert inst.state["queue_halted_reason"] == "all_blocked"
+
+    def test_apply_pending_escalation_sets_waiting_for_human(self, orch, tmp_path, monkeypatch):
+        inst, queue_file, state_file, _ = orch
+        proj = tmp_path / "goodproj"
+        proj.mkdir()
+        (proj / ".git").mkdir()
+        (proj / "roadmap.md").write_text("# x")
+        pending = proj / "pending_escalation_command.json"
+        pending.write_text(json.dumps({"command": "RETRY"}))
+
+        entry = {**_make_entry("goodproj", state="READY", position=1), "project_path": str(proj)}
+        _write_queue(queue_file, [entry])
+
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "update_symlink", lambda p: True)
+        ws_calls = []
+
+        def capture_write():
+            ws_calls.append(dict(inst.state))
+
+        monkeypatch.setattr(inst, "write_state", capture_write)
+
+        assert inst._select_next_queue_project() is True
+        assert not pending.exists()
+        esc_done = proj / "escalation_output.done"
+        assert esc_done.exists()
+        assert inst.state.get("pipeline_status") == "WAITING_FOR_HUMAN"
+        assert inst.state.get("current_agent") == "escalation"
 
     def test_visited_ids_prevents_infinite_loop(self, orch, tmp_path, monkeypatch):
         """All entries fail preflight — visited_ids ensures termination."""
@@ -475,3 +632,87 @@ class TestQueueUpdateActiveEntry:
         q = inst._read_queue()
         assert q["queue"][0]["state"] == "FAILED"
         assert q["queue"][0]["failed_at"] == ts
+
+
+# ---------------------------------------------------------------------------
+# Main loop: stale PIPELINE_COMPLETE vs queue ACTIVE
+# ---------------------------------------------------------------------------
+
+
+class TestMainLoopStaleCompleteSyncsQueue:
+    def test_pipeline_complete_at_loop_entrance_marks_active_completed(
+        self, tmp_path, monkeypatch
+    ):
+        """When global state is already COMPLETE but the queue row is ACTIVE (UI spawn),
+        startup may skip the phase_resolver PIPELINE_COMPLETE branch; the main loop
+        must still sync the queue row before exiting.
+        """
+        import importlib
+
+        monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
+        import orchestrator as orch_mod
+
+        importlib.reload(orch_mod)
+
+        queue_file = tmp_path / "pipeline_queue.json"
+        state_file = tmp_path / "pipeline_state.json"
+        (tmp_path / "openclaw.json").write_text("{}")
+
+        proj = tmp_path / "active_proj"
+        proj.mkdir()
+        (proj / ".git").mkdir()
+        (proj / "roadmap.md").write_text("# r\n- [ ] `X-E1` | LOW | t\n")
+
+        link = Path(orch_mod.SYMLINK_TARGET)
+        if link.exists() or link.is_symlink():
+            link.unlink()
+        link.symlink_to(proj, target_is_directory=True)
+
+        eid = str(uuid.uuid4())
+        _write_queue(
+            str(queue_file),
+            [
+                {
+                    **_make_entry(
+                        "active",
+                        state="ACTIVE",
+                        position=1,
+                        project_path=str(proj),
+                        entry_id=eid,
+                    )
+                }
+            ],
+        )
+
+        state_file.write_text(
+            json.dumps(
+                {
+                    "current_phase": 0,
+                    "current_phase_raw_id": "X-E1",
+                    "current_agent": "planner",
+                    "pipeline_status": "PIPELINE_COMPLETE",
+                    "project_path": str(proj),
+                    "last_action": "prior complete",
+                }
+            )
+        )
+
+        monkeypatch.setattr(orch_mod, "SkillManager", lambda _ad: MagicMock())
+
+        inst = orch_mod.Orchestrator()
+
+        monkeypatch.setattr(inst, "acquire_lock", lambda: setattr(inst, "lock_fd", None))
+        monkeypatch.setattr(inst, "release_lock", lambda: None)
+        monkeypatch.setattr(orch_mod, "cleanup_stranded_temp_files", lambda _root: None)
+        monkeypatch.setattr(inst, "run_repo_init_check", lambda: (True, ""))
+        monkeypatch.setattr(
+            inst,
+            "_run_startup_planner_phase_zero_and_branch",
+            lambda: "enter_main_loop",
+        )
+
+        inst.run()
+
+        q = json.loads(queue_file.read_text())
+        assert q["queue"][0]["state"] == "COMPLETED"
+        assert q["queue"][0].get("completed_at")

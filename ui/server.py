@@ -1,6 +1,7 @@
 """UI server module."""
 import aiohttp
 import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -21,6 +22,13 @@ from pydantic import BaseModel
 from contextlib import asynccontextmanager
 
 from ui.roadmap_parser import parse_roadmap
+
+# Queue dependency rules (shared with orchestrator — keep in sync)
+import sys as _sys
+_AUTODEV_UI_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _AUTODEV_UI_ROOT not in _sys.path:
+    _sys.path.insert(0, _AUTODEV_UI_ROOT)
+from autodev.pipeline.queue_semantics import parent_blocks_child
 
 ORCHESTRATOR_FILENAME = "orchestrator.py"
 WEBHOOK_AGENT_ID = "prd-creator"
@@ -826,6 +834,65 @@ def _move_group_atomically(entries, parent_id, new_pos):
     return entries
 
 
+def _merge_ingested_active_project(entries, pipeline_state):
+    """If pipeline_state references a project not in the queue, prepend a synthetic row (TASK-03 ingest).
+
+    Idempotent: same project_path always yields the same synthetic ``id`` (ingest-<md5>).
+    Does not persist to pipeline_queue.json (display/API merge only).
+    """
+    if not pipeline_state:
+        return list(entries), False
+    pp = pipeline_state.get("project_path") or ""
+    if not pp:
+        return list(entries), False
+    try:
+        ps_real = os.path.realpath(os.path.expanduser(str(pp)))
+    except OSError:
+        return list(entries), False
+    for e in entries:
+        try:
+            er = os.path.realpath(os.path.expanduser(e.get("project_path", "")))
+            if er == ps_real:
+                return list(entries), False
+        except OSError:
+            continue
+    digest = hashlib.md5(ps_real.encode()).hexdigest()[:12]
+    st = pipeline_state.get("pipeline_status") or ""
+    if st == "WAITING_FOR_HUMAN":
+        qstate = "ESCALATION"
+    elif st == "BLOCKED":
+        qstate = "BLOCKED"
+    elif st == "PIPELINE_COMPLETE":
+        qstate = "COMPLETED"
+    elif st == "QUEUE_HALTED":
+        qstate = "READY"
+    else:
+        qstate = "ACTIVE"
+    base = os.path.basename(ps_real.rstrip(os.sep)) or ps_real
+    now = datetime.now(timezone.utc).isoformat()
+    synthetic = {
+        "id": f"ingest-{digest}",
+        "project_path": ps_real,
+        "idea_id": None,
+        "name": base,
+        "state": qstate,
+        "position": 1,
+        "parent_id": None,
+        "added_at": now,
+        "started_at": None,
+        "completed_at": None,
+        "blocked_at": None,
+        "skip_count": 0,
+        "preflight_validated_at": None,
+        "notes": "",
+        "ingested": True,
+    }
+    merged = [synthetic] + [dict(e) for e in entries]
+    for i, e in enumerate(merged, 1):
+        e["position"] = i
+    return merged, True
+
+
 def _validate_queue_entry_ids_order(entries, entry_ids):
     """Return None if entry_ids is a valid permutation with valid dependency layout; else an error string."""
     by_id = {e["id"]: e for e in entries}
@@ -1369,6 +1436,7 @@ def get_state():
             "current_agent": pipeline_state.get("current_agent", ""),
             "project_path": pipeline_state.get("project_path", ""),
             "last_action_timestamp": pipeline_state.get("last_action_timestamp"),
+            "queue_halted_reason": pipeline_state.get("queue_halted_reason"),
             "counters": counters,
             # Retry counters are top-level fields in pipeline_state.json written by orchestrator.py
             "planner_retries": pipeline_state.get("planner_retries", 0),
@@ -1379,6 +1447,7 @@ def get_state():
         response = {
             "pipeline_status": "UNKNOWN",
             "current_phase": None,
+            "queue_halted_reason": None,
             "counters": {"success": 0, "failure": 0, "retry": 0},
             "planner_retries": 0,
             "executor_retries": 0,
@@ -1449,7 +1518,7 @@ def get_state():
                 q_entries = q.get("queue", [])
                 response["queue_length"] = len(q_entries)
                 response["ready_count"] = sum(1 for e in q_entries if e["state"] == "READY")
-                response["blocked_count"] = sum(1 for e in q_entries if e["state"] == "BLOCKED")
+                response["blocked_count"] = sum(1 for e in q_entries if e["state"] in ("BLOCKED", "ESCALATION"))
                 response["completed_count"] = sum(1 for e in q_entries if e["state"] == "COMPLETED")
                 response["queue_mode"] = q.get("queue_mode", "auto")
                 response["queue_halted"] = response.get("pipeline_status") == "QUEUE_HALTED"
@@ -1535,6 +1604,33 @@ def _write_escalation_files(project_dir_path, command):
     return True
 
 
+def _write_pending_escalation_files(project_dir_path, command):
+    """Defer a command for a parked project (symlink points elsewhere). Write-then-done ordering."""
+    root = os.path.realpath(os.path.expanduser(str(project_dir_path)))
+    project_path = Path(root)
+    if not project_path.is_dir():
+        raise HTTPException(status_code=503, detail=f"Target project directory not found: {root}")
+    json_path = project_path / "pending_escalation_command.json"
+    done_path = project_path / "pending_escalation_command.done"
+    data = {
+        "command": command,
+        "source": "ui",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    fd, tmp = mkstemp(dir=str(project_path), prefix="pec_")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, str(json_path))
+    except Exception:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+    with open(done_path, "w") as f:
+        f.write("")
+    return True
+
+
 @app.post("/api/command")
 def post_command(request: dict):
     """Handle escalation commands from the UI.
@@ -1558,13 +1654,61 @@ def post_command(request: dict):
     project_dir_path = config.get("project_dir_path")
     pipeline_state_path = config.get("pipeline_state_path")
     phase_state_path = config.get("phase_state_path")
+    target_project_path = request.get("target_project_path")
     
     # Expand paths
     project_dir_path = os.path.expanduser(project_dir_path) if project_dir_path else None
     pipeline_state_path = os.path.expanduser(pipeline_state_path) if pipeline_state_path else None
     phase_state_path = os.path.expanduser(phase_state_path) if phase_state_path else None
-    
-    # Read pipeline and phase state
+
+    active_real = None
+    if project_dir_path:
+        try:
+            active_real = os.path.realpath(project_dir_path)
+        except OSError:
+            active_real = None
+
+    deferred_target = None
+    if target_project_path:
+        if not isinstance(target_project_path, str) or not target_project_path.strip():
+            raise HTTPException(status_code=422, detail="target_project_path must be a non-empty string")
+        try:
+            tgt_real = os.path.realpath(os.path.expanduser(target_project_path.strip()))
+        except OSError as e:
+            raise HTTPException(status_code=422, detail=f"Invalid target_project_path: {e}") from e
+        if active_real and tgt_real == active_real:
+            target_project_path = None
+        else:
+            deferred_target = tgt_real
+
+    if deferred_target:
+        q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
+        q = _read_json_file(q_path) if q_path and os.path.exists(q_path) else {}
+        match = None
+        for e in q.get("queue", []):
+            try:
+                if os.path.realpath(os.path.expanduser(e.get("project_path", ""))) == deferred_target:
+                    match = e
+                    break
+            except OSError:
+                continue
+        if not match or match.get("state") != "ESCALATION":
+            raise HTTPException(
+                status_code=409,
+                detail="Deferred command requires a parked queue entry (ESCALATION) for target_project_path.",
+            )
+        tgt_phase = os.path.join(deferred_target, "phase_state.json")
+        phase_state = _read_json_file(tgt_phase) if os.path.exists(tgt_phase) else {}
+        escalation_resets = phase_state.get("escalation_resets", 0) if phase_state else 0
+        is_valid, error_msg, error_code = _validate_command_request(
+            deferred_target, "WAITING_FOR_HUMAN", escalation_resets, command
+        )
+        if not is_valid:
+            raise HTTPException(status_code=error_code, detail=error_msg)
+        _write_pending_escalation_files(deferred_target, command)
+        return {"status": "ok", "command": command, "deferred": True}
+
+    # Read pipeline and phase state (active symlink project)
     pipeline_state = _read_json_file(pipeline_state_path) if pipeline_state_path else {}
     phase_state = _read_json_file(phase_state_path) if phase_state_path else {}
     
@@ -4071,24 +4215,48 @@ def _run_preflight_checks(repo_path: str) -> list:
             checks.append({"check": "git repo", "status": "pass",
                             "message": "Git repo present with main/master branch"})
         else:
-            sym = subprocess.run(
-                ["git", "-C", repo_path, "symbolic-ref", "--short", "HEAD"],
+            # No branch named main/master — mid-pipeline repos often use phase/* only.
+            head_rev = subprocess.run(
+                ["git", "-C", repo_path, "rev-parse", "--verify", "HEAD"],
                 capture_output=True, text=True,
             )
-            current_branch = (sym.stdout or "").strip()
-            if current_branch in ("main", "master"):
-                checks.append({"check": "git repo", "status": "warn",
-                                "message": (
-                                    f"Git repo is on '{current_branch}' but has no commits yet. "
-                                    f"Make an initial commit before launching the pipeline. "
-                                    f"Run: git -C {repo_path} add -A && git -C {repo_path} commit -m 'init'"
-                                )})
+            if head_rev.returncode == 0 and (head_rev.stdout or "").strip():
+                abbr = subprocess.run(
+                    ["git", "-C", repo_path, "rev-parse", "--abbrev-ref", "HEAD"],
+                    capture_output=True, text=True,
+                )
+                branch_label = (abbr.stdout or "").strip() or "unknown"
+                if branch_label == "HEAD":
+                    short_sha = (head_rev.stdout or "").strip()[:7]
+                    branch_label = f"detached ({short_sha})" if short_sha else "detached"
+                checks.append({
+                    "check": "git repo",
+                    "status": "warn",
+                    "message": (
+                        f"No main or master branch; current HEAD on '{branch_label}'. "
+                        "Pipeline will use phase branches; consider creating main for integration."
+                    ),
+                })
             else:
-                checks.append({"check": "git repo", "status": "fail",
-                                "message": (
-                                    "No main or master branch found. Run: "
-                                    f"git -C {repo_path} checkout -b main"
-                                )})
+                sym = subprocess.run(
+                    ["git", "-C", repo_path, "symbolic-ref", "--short", "HEAD"],
+                    capture_output=True, text=True,
+                )
+                current_branch = (sym.stdout or "").strip()
+                if current_branch in ("main", "master"):
+                    checks.append({"check": "git repo", "status": "warn",
+                                    "message": (
+                                        f"Git repo is on '{current_branch}' but has no commits yet. "
+                                        f"Make an initial commit before launching the pipeline. "
+                                        f"Run: git -C {repo_path} add -A && git -C {repo_path} commit -m 'init'"
+                                    )})
+                else:
+                    checks.append({"check": "git repo", "status": "fail",
+                                    "message": (
+                                        "No main or master branch and no commits on HEAD. "
+                                        f"Run: git -C {repo_path} add -A && git -C {repo_path} commit -m 'init' "
+                                        "or create main/master."
+                                    )})
 
     # 5. Workspace directories and docs
     for agent in _WORKSPACE_AGENTS:
@@ -4220,22 +4388,23 @@ def get_queue_status():
     return {
         "queue_length": len(entries),
         "ready_count": sum(1 for e in entries if e["state"] == "READY"),
-        "blocked_count": sum(1 for e in entries if e["state"] == "BLOCKED"),
+        "blocked_count": sum(1 for e in entries if e["state"] in ("BLOCKED", "ESCALATION")),
         "completed_count": sum(1 for e in entries if e["state"] == "COMPLETED"),
         "queue_mode": q.get("queue_mode", "auto"),
         "queue_halted": pipeline_state.get("pipeline_status") == "QUEUE_HALTED",
     }
 
 
-@app.post("/api/queue/trigger-next")
-async def post_queue_trigger_next():
-    """Manually trigger the next project in the queue (manual mode).
+def _queue_run_trigger_next_logic(config: dict) -> dict:
+    """Pick next READY/SKIPPED_PENDING row, preflight, set ACTIVE, spawn orchestrator.
 
-    Returns 409 if a project is currently ACTIVE.
-    Calls _run_preflight_checks (which auto-repairs the symlink) then spawns orchestrator.
+    Same behavior as POST /api/queue/trigger-next body.
+
+    Raises:
+        HTTPException: 409 if any file-backed row is ACTIVE; 500 if spawn fails.
+    Returns:
+        {"ok": True, "started": name} or {"queue_halted": True, "error": str}.
     """
-    from datetime import datetime, timezone as tz
-    config = load_config()
     q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
     q = _read_queue_file(config)
     entries = q.get("queue", [])
@@ -4244,27 +4413,28 @@ async def post_queue_trigger_next():
         raise HTTPException(status_code=409, detail="A project is already ACTIVE in the queue")
 
     state_by_id = {e["id"]: e["state"] for e in entries}
-    now = datetime.now(tz.utc).isoformat()
+    now = datetime.now(timezone.utc).isoformat()
 
     for entry in sorted(entries, key=lambda e: e["position"]):
         if entry["state"] not in ("READY", "SKIPPED_PENDING"):
             continue
         if entry.get("parent_id") and state_by_id.get(entry["parent_id"]) != "COMPLETED":
             continue
-        # Run full preflight (also auto-repairs symlink)
         checks = _run_preflight_checks(entry["project_path"])
         if any(c.get("status") == "fail" for c in checks):
             entry["state"] = "SKIPPED_PENDING"
             entry["skip_count"] = entry.get("skip_count", 0) + 1
-            # Cascade SKIPPED_PENDING to all descendants
-            for desc_id in _get_all_descendants(entries, entry["id"]):
+            desc_ids = _get_all_descendants(entries, entry["id"])
+            for desc_id in desc_ids:
                 desc = next((e for e in entries if e["id"] == desc_id), None)
                 if desc and desc["state"] not in ("ACTIVE", "COMPLETED"):
                     desc["state"] = "SKIPPED_PENDING"
                     desc["skip_count"] = desc.get("skip_count", 0) + 1
+            group_size = 1 + len(desc_ids)
+            new_pos = min(entry["position"] + group_size, len(entries))
+            _move_group_atomically(entries, entry["id"], new_pos)
             _write_queue_file(q_path, q)
             continue
-        # Start this project
         entry["state"] = "ACTIVE"
         entry["started_at"] = now
         _write_queue_file(q_path, q)
@@ -4278,9 +4448,45 @@ async def post_queue_trigger_next():
     return {"queue_halted": True, "error": "all projects blocked or in dependency hold"}
 
 
+def _maybe_auto_kick_queue_after_manual_to_auto(config: dict) -> dict:
+    """When switching manual→auto: one Trigger-next-equivalent start if safe (TASK-03 UX).
+
+    Skips if orchestrator holds pipeline.lock, pipeline is mid-run, or queue already has ACTIVE.
+    """
+    lp = _expand_lock_path(config)
+    if lp and _check_orchestrator_liveness(lp):
+        return {"attempted": False, "reason": "orchestrator_lock_held"}
+    ps_path = os.path.expanduser(config.get("pipeline_state_path", "~/.openclaw/pipeline_state.json"))
+    ps = _read_json_file(ps_path) if os.path.exists(ps_path) else {}
+    st = (ps.get("pipeline_status") or "").strip()
+    if st in ("RUNNING", "WAITING_FOR_SENTINEL"):
+        return {"attempted": False, "reason": "pipeline_status_busy"}
+    q = _read_queue_file(config)
+    if any(e["state"] == "ACTIVE" for e in q.get("queue", [])):
+        return {"attempted": False, "reason": "queue_has_active"}
+    out = _queue_run_trigger_next_logic(config)
+    return {"attempted": True, **out}
+
+
+@app.post("/api/queue/trigger-next")
+async def post_queue_trigger_next():
+    """Manually trigger the next project in the queue (manual mode).
+
+    Returns 409 if a project is currently ACTIVE.
+    Calls _run_preflight_checks (which auto-repairs the symlink) then spawns orchestrator.
+    """
+    config = load_config()
+    return _queue_run_trigger_next_logic(config)
+
+
 @app.patch("/api/queue/mode")
 async def patch_queue_mode(request: Request):
-    """Toggle queue_mode between 'auto' and 'manual'."""
+    """Toggle queue_mode between 'auto' and 'manual'.
+
+    When switching **manual → auto**, if the orchestrator is not holding the lock and the
+    pipeline is not mid-agent, runs the same start-next logic as **Trigger next** once
+    (eligible READY row, preflight, symlink repair, spawn).
+    """
     body = await request.json()
     mode = body.get("queue_mode")
     if mode not in ("auto", "manual"):
@@ -4288,9 +4494,13 @@ async def patch_queue_mode(request: Request):
     config = load_config()
     q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
     q = _read_queue_file(config)
+    prev_mode = q.get("queue_mode", "auto")
     q["queue_mode"] = mode
     _write_queue_file(q_path, q)
-    return {"ok": True, "queue_mode": mode}
+    response: dict = {"ok": True, "queue_mode": mode}
+    if mode == "auto" and prev_mode == "manual":
+        response["auto_advance"] = _maybe_auto_kick_queue_after_manual_to_auto(config)
+    return response
 
 
 @app.get("/api/queue")
@@ -4315,8 +4525,10 @@ def get_queue():
     except OSError:
         ps_real = ""
 
+    merged, _ingested = _merge_ingested_active_project(ordered, ps)
+
     enriched = []
-    for e in ordered:
+    for e in merged:
         entry = dict(e)
         if ps and ps_real:
             ep = e.get("project_path", "")
@@ -4326,19 +4538,24 @@ def get_queue():
                 er = ""
             if er and er == ps_real:
                 entry["live_pipeline_status"] = ps.get("pipeline_status")
+            elif entry.get("parked_pipeline_status"):
+                entry["live_pipeline_status"] = entry["parked_pipeline_status"]
             else:
                 entry["live_pipeline_status"] = None
         else:
-            entry["live_pipeline_status"] = None
+            if entry.get("parked_pipeline_status"):
+                entry["live_pipeline_status"] = entry["parked_pipeline_status"]
+            else:
+                entry["live_pipeline_status"] = None
         enriched.append(entry)
 
     return {
         "queue": enriched,
         "queue_mode": q.get("queue_mode", "auto"),
         "last_updated": q.get("last_updated", ""),
-        "dependency_tree": _compute_dependency_tree(ordered),
-        "next_eligible": _find_next_eligible(ordered),
-        "display_ranks": _compute_display_ranks(ordered),
+        "dependency_tree": _compute_dependency_tree(merged),
+        "next_eligible": _find_next_eligible(merged),
+        "display_ranks": _compute_display_ranks(merged),
     }
 
 
@@ -4408,11 +4625,13 @@ async def post_queue_add(request: Request):
     if parent_id and _detect_circular_dependency(entries, None, parent_id):
         raise HTTPException(status_code=400, detail="Circular dependency detected")
 
-    # Determine initial state — DEPENDENCY_HOLD if parent exists and is not COMPLETED
+    # Initial state: DEPENDENCY_HOLD only when parent is in a blocking queue state
     initial_state = "READY"
     if parent_id:
         parent_entry = next((e for e in entries if e["id"] == parent_id), None)
-        if parent_entry and parent_entry.get("state") != "COMPLETED":
+        if parent_entry is None:
+            raise HTTPException(status_code=400, detail="parent_id does not reference an existing queue entry")
+        if parent_entry.get("state") != "COMPLETED" and parent_blocks_child(parent_entry.get("state")):
             initial_state = "DEPENDENCY_HOLD"
 
     now = datetime.now(tz.utc).isoformat()
@@ -4535,10 +4754,14 @@ async def patch_queue_parent(entry_id: str, request: Request):
         if target.get("state") == "DEPENDENCY_HOLD":
             target["state"] = "READY"
     else:
-        # Setting parent: apply DEPENDENCY_HOLD if parent not COMPLETED
+        # Setting parent: hold only if parent is in a blocking state
         parent_entry = next((e for e in entries if e["id"] == parent_id), None)
         if parent_entry and parent_entry.get("state") != "COMPLETED":
-            target["state"] = "DEPENDENCY_HOLD"
+            target["state"] = (
+                "DEPENDENCY_HOLD"
+                if parent_blocks_child(parent_entry.get("state"))
+                else "READY"
+            )
 
         # Auto-reposition: place child immediately after parent's last existing sibling
         parent_pos = next((e["position"] for e in entries if e["id"] == parent_id), None)

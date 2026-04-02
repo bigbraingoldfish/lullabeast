@@ -69,10 +69,24 @@ def client(tmp_path, monkeypatch):
 
 
 class TestPatchParent:
-    def test_set_valid_parent_transitions_to_dependency_hold(self, client):
-        """PATCH parent to a non-COMPLETED entry → 200, child state = DEPENDENCY_HOLD."""
+    def test_set_parent_ready_parent_keeps_child_ready(self, client):
+        """PATCH parent to READY (in-progress org dependency) → child stays READY, not hold."""
         c, queue_file, _ = client
         parent = _make_entry("Parent", state="READY", position=1)
+        child = _make_entry("Child", state="READY", position=2)
+        _write_queue(queue_file, [parent, child])
+
+        resp = c.patch(f"/api/queue/{child['id']}/parent",
+                       json={"parent_id": parent["id"]})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["state"] == "READY"
+        assert data["parent_id"] == parent["id"]
+
+    def test_set_parent_blocked_transitions_to_dependency_hold(self, client):
+        """PATCH parent to BLOCKED → child state = DEPENDENCY_HOLD."""
+        c, queue_file, _ = client
+        parent = _make_entry("Parent", state="BLOCKED", position=1)
         child = _make_entry("Child", state="READY", position=2)
         _write_queue(queue_file, [parent, child])
 
@@ -142,7 +156,7 @@ class TestPatchParent:
     def test_set_parent_child_placed_immediately_after_existing_siblings(self, client):
         """New child is placed after all existing siblings of the same parent."""
         c, queue_file, _ = client
-        parent = _make_entry("Parent", state="READY", position=1)
+        parent = _make_entry("Parent", state="BLOCKED", position=1)
         existing_child = _make_entry("ExistingChild", state="DEPENDENCY_HOLD",
                                      position=2, parent_id=parent["id"])
         new_child = _make_entry("NewChild", state="READY", position=3)

@@ -283,6 +283,14 @@ class TestGitRepoCheck:
                 mock.returncode = 0
                 mock.stdout = ""  # empty = no main/master
                 return mock
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                mock.returncode = 1
+                mock.stdout = ""
+                return mock
+            if isinstance(cmd, list) and "symbolic-ref" in cmd:
+                mock.returncode = 0
+                mock.stdout = "phase/foo\n"
+                return mock
             mock.returncode = 0
             mock.stdout = ""
             return mock
@@ -293,6 +301,7 @@ class TestGitRepoCheck:
 
         git = next(c for c in results if c["check"] == "git repo")
         assert git["status"] == "fail"
+        assert "no commits" in git["message"].lower() or "main" in git["message"].lower()
 
     def test_git_repo_unborn_main_branch_warns_not_fails(self, tmp_path):
         """Unborn main/master branch should warn with initial commit guidance."""
@@ -312,12 +321,17 @@ class TestGitRepoCheck:
             if "branch" in cmd and "--list" in cmd:
                 mock.returncode = 0
                 mock.stdout = ""  # no listed main/master branch (unborn case)
-            elif "symbolic-ref" in cmd:
+                return mock
+            if isinstance(cmd, list) and "rev-parse" in cmd:
+                mock.returncode = 1
+                mock.stdout = ""
+                return mock
+            if "symbolic-ref" in cmd:
                 mock.returncode = 0
                 mock.stdout = "main\n"
-            else:
-                mock.returncode = 0
-                mock.stdout = ""
+                return mock
+            mock.returncode = 0
+            mock.stdout = ""
             return mock
 
         with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
@@ -328,6 +342,45 @@ class TestGitRepoCheck:
         assert git["status"] == "warn"
         assert "no commits yet" in git["message"].lower()
         assert "commit -m 'init'" in git["message"]
+
+    def test_git_repo_phase_only_branch_warns_when_head_has_commits(self, tmp_path):
+        """Repo with commits on phase/* (no main/master) → warn, not fail."""
+        repo_path = tmp_path / "myproject"
+        repo_path.mkdir()
+        openclaw = _make_openclaw_dir(tmp_path, repo_path)
+        _make_gitignore(repo_path, _full_gitignore_content())
+        _make_git_repo(repo_path)
+
+        def phase_only(cmd, **kwargs):
+            mock = MagicMock()
+            mock.stderr = ""
+            if isinstance(cmd, list) and len(cmd) >= 2 and cmd[0] == "git" and cmd[1] == "--version":
+                mock.returncode = 0
+                mock.stdout = "git version 2.40\n"
+                return mock
+            if "branch" in cmd and "--list" in cmd:
+                mock.returncode = 0
+                mock.stdout = ""
+                return mock
+            if isinstance(cmd, list) and "rev-parse" in cmd and "--verify" in cmd:
+                mock.returncode = 0
+                mock.stdout = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n"
+                return mock
+            if isinstance(cmd, list) and "rev-parse" in cmd and "--abbrev-ref" in cmd:
+                mock.returncode = 0
+                mock.stdout = "phase/foo\n"
+                return mock
+            mock.returncode = 0
+            mock.stdout = ""
+            return mock
+
+        with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
+             patch("subprocess.run", side_effect=phase_only):
+            results = _run_preflight_checks(str(repo_path))
+
+        git = next(c for c in results if c["check"] == "git repo")
+        assert git["status"] == "warn"
+        assert "phase branches" in git["message"].lower() or "main" in git["message"].lower()
 
 
 class TestGitExecutableCheck:
