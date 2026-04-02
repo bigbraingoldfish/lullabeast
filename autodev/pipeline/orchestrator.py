@@ -42,6 +42,9 @@ VALID_STATES = [
 
 QUEUE_FILE = os.path.join(AUTODEV_ROOT, "pipeline_queue.json")
 
+# llama-server HTTP origin (scheme + host + port, no path). Set AUTODEV_LLAMA_BASE if not localhost.
+_LLAMA_ORIGIN = os.environ.get("AUTODEV_LLAMA_BASE", "http://127.0.0.1:11434").rstrip("/")
+
 # Glob patterns for mkstemp atomic-write temp files that may be stranded if the
 # orchestrator was killed mid-write.  Pattern matches the 8-character random hex
 # suffix produced by tempfile.mkstemp (e.g. pipeline_state_a3f7c219).
@@ -633,7 +636,7 @@ class Orchestrator:
 
     def check_traffic_cop_health(self):
         try:
-            response = requests.get("http://<llama-server-host>:11434/health", timeout=5)
+            response = requests.get(f"{_LLAMA_ORIGIN}/health", timeout=5)
             return response.status_code == 200
         except requests.exceptions.RequestException:
             return False
@@ -650,7 +653,7 @@ class Orchestrator:
             .get("models", {})
             .get("providers", {})
             .get("llama-local", {})
-            .get("baseUrl", "http://<llama-server-host>:11434/v1")
+            .get("baseUrl", f"{_LLAMA_ORIGIN}/v1")
         )
         parsed = urllib.parse.urlparse(base_url)
         models_url = f"{parsed.scheme}://{parsed.netloc}/v1/models"
@@ -1197,9 +1200,17 @@ class Orchestrator:
                 ],
                 "response_format": {"type": "json_object"},
             }
+            _llama_chat_base = (
+                self.openclaw_config.get("models", {})
+                .get("providers", {})
+                .get("llama-local", {})
+                .get("baseUrl", f"{_LLAMA_ORIGIN}/v1")
+                .rstrip("/")
+            )
+            _chat_url = f"{_llama_chat_base}/chat/completions"
             try:
                 _resp = requests.post(
-                    "http://<llama-server-host>:11434/v1/chat/completions",
+                    _chat_url,
                     json=_payload, timeout=60
                 )
                 _resp.raise_for_status()
@@ -2151,25 +2162,43 @@ class Orchestrator:
                         import shutil
                         archive_project_name = os.path.basename(os.path.realpath(SYMLINK_TARGET)) if os.path.exists(SYMLINK_TARGET) else "unknown-project"
                         _audit_id = self.state.get("current_phase_raw_id", "") or f"phase-{phase}"
-                        archive_dir = f"/home/pi/pipeline-audit/{archive_project_name}/{_audit_id.lower()}"
-                        try:
-                            os.makedirs(archive_dir, exist_ok=True)
-                            files_to_archive = [
-                                "current_phase.json", 
-                                "phase_state.json", 
-                                "planner_output.json", 
-                                "executor_output.json", 
-                                "reviewer_output.json"
-                            ]
-                            for filename in files_to_archive:
-                                src = os.path.join(SYMLINK_TARGET, filename)
-                                if os.path.exists(src):
-                                    shutil.copy2(src, os.path.join(archive_dir, filename))
-                            print(f"[INFO] Audit archive written to {archive_dir}")
-                        except Exception as e:
-                            # Non-blocking failure
-                            error_msg = f"[WARNING] INFORMATIONAL: Audit archive failed for phase {phase}: {e}"
-                            print(error_msg)
+                        _audit_flag = os.environ.get("AUTODEV_AUDIT_ARCHIVE_DIR")
+                        if _audit_flag is None:
+                            _audit_base = os.path.join(AUTODEV_ROOT, "pipeline-audit")
+                        elif _audit_flag.strip() == "":
+                            _audit_base = None
+                        else:
+                            _audit_base = os.path.expanduser(_audit_flag.strip())
+                        archive_dir = (
+                            os.path.join(_audit_base, archive_project_name, _audit_id.lower())
+                            if _audit_base
+                            else None
+                        )
+                        if archive_dir:
+                            try:
+                                os.makedirs(archive_dir, exist_ok=True)
+                                files_to_archive = [
+                                    "current_phase.json",
+                                    "phase_state.json",
+                                    "planner_output.json",
+                                    "executor_output.json",
+                                    "reviewer_output.json",
+                                ]
+                                for filename in files_to_archive:
+                                    src = os.path.join(SYMLINK_TARGET, filename)
+                                    if os.path.exists(src):
+                                        shutil.copy2(src, os.path.join(archive_dir, filename))
+                                print(f"[INFO] Audit archive written to {archive_dir}")
+                            except Exception as e:
+                                error_msg = (
+                                    f"[WARNING] INFORMATIONAL: Audit archive failed for phase {phase}: {e}"
+                                )
+                                print(error_msg)
+                        else:
+                            print(
+                                "[INFO] Audit archive skipped "
+                                "(AUTODEV_AUDIT_ARCHIVE_DIR is set to empty string)"
+                            )
                             
                         # 4. Working File Cleanup and Loop Back
                         targets = [

@@ -83,7 +83,7 @@ source .env
 ls "$AUTODEV_REPO_PATH/autodev/pipeline/orchestrator.py"
 ```
 
-If `ui/config.json` exists and contains an `autodev_repo_path` key, that value takes precedence over the environment variable. Make sure it points to the repo root, not to `~/.openclaw`.
+If `ui/config.json` exists and contains an `autodev_repo_path` key, that value takes precedence over the environment variable. Make sure it points to the repo root, not to `~/.openclaw`. The repository ships **`ui/config.example.json`** only; copy it to **`ui/config.json`** (gitignored) or let **`install.sh`** create `ui/config.json` on first run. For the OpenClaw webhook Bearer token, prefer **`AUTODEV_HOOKS_TOKEN`** in the environment so the secret is not committed in JSON.
 
 ### 3. Missing conversion prompt file
 
@@ -95,12 +95,29 @@ If `ui/config.json` exists and contains an `autodev_repo_path` key, that value t
 
 ---
 
+## Security and network exposure
+
+The FastAPI app exposes **`/api/*` without authentication**. Anyone who can reach the bound TCP port can invoke setup, queue, launch/stop, and file-oriented endpoints — treat this as **operator tooling for a trusted machine**, not a multi-tenant service.
+
+- **Default (recommended):** bind to loopback only so only local users and SSH tunnels can connect:
+
+  ```bash
+  source .env
+  uvicorn ui.server:app --host 127.0.0.1 --port 18790
+  ```
+
+- **LAN access:** `--host 0.0.0.0` makes every route reachable from your network. Use only on a trusted LAN, behind a firewall, or put a reverse proxy with TLS and authentication in front. Do not expose the raw port to the public internet.
+
+---
+
 ## Starting AutoDev
 
 ```bash
 source .env
-uvicorn ui.server:app --host 0.0.0.0 --port 18790
+uvicorn ui.server:app --host 127.0.0.1 --port 18790
 ```
+
+For access from other machines on a **trusted** LAN only, you may use `--host 0.0.0.0` (see **Security and network exposure** above).
 
 The UI is then available at `http://<host>:18790`.
 

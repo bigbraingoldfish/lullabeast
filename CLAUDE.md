@@ -59,7 +59,8 @@ autodev-ui/
 │   ├── server.py                   # FastAPI server (3562 lines) — all API endpoints
 │   ├── roadmap_parser.py           # Display roadmap parser (all phases → list)
 │   ├── index.html                  # Single-file React frontend (CDN React, no build step)
-│   ├── config.json                 # Runtime config overrides (not committed if sensitive)
+│   ├── config.example.json         # Template for local ui/config.json (committed)
+│   ├── config.json                 # Local overrides — gitignored; copy from config.example.json
 │   ├── requirements.txt            # fastapi, uvicorn, python-multipart, aiohttp
 │   └── autodev-ui.service          # systemd unit file
 ├── tests/                          # UI server tests (~50 pytest files)
@@ -126,7 +127,7 @@ ORCHESTRATOR_POLL_TIMEOUT = 120
 The UI server's configuration is a two-layer merge:
 
 1. **`DEFAULTS` dict** (lines 362–375 of `ui/server.py`) — hardcoded fallbacks including all `~/.openclaw/…` path defaults.
-2. **`ui/config.json`** — optional runtime overrides adjacent to `server.py`. If this file exists, any key it contains overwrites the corresponding DEFAULTS value.
+2. **`ui/config.json`** — optional local overrides adjacent to `server.py` (not committed; copy from `ui/config.example.json`). If this file exists, any key it contains overwrites the corresponding DEFAULTS value. **`AUTODEV_HOOKS_TOKEN`** (environment) overrides `hooks_token` when set, so the webhook Bearer secret need not live in the file.
 
 `load_config()` applies this merge and expands `~` in all path values. Every endpoint that reads a file path calls `load_config()` (or receives the result) rather than referencing DEFAULTS directly.
 
@@ -447,6 +448,9 @@ These values appear throughout the codebase. Do not change them without understa
 | UI server port | 18790 | `DEFAULTS["port"]`; OpenClaw gateway is on 18789 |
 | Webhook endpoint | `http://localhost:18789/hooks/agent` | `DEFAULTS["hooks_url"]`; requires Bearer token |
 | `prd-creator` agent ID | `"prd-creator"` | `WEBHOOK_AGENT_ID` in `ui/server.py` — used in all idea-to-PRD webhook calls |
+| `AUTODEV_LLAMA_BASE` | default `http://127.0.0.1:11434` | Orchestrator `check_traffic_cop_health`, `wait_for_model_stable`, blame L1, and `heartbeat_cron.py` — HTTP origin when `openclaw.json` has no `llama-local` `baseUrl` |
+| `AUTODEV_AUDIT_ARCHIVE_DIR` | unset → `$AUTODEV_ROOT/pipeline-audit`; empty string → disabled | Phase-complete snapshot copies in `orchestrator.py` |
+| `AUTODEV_HOOKS_TOKEN` | optional | Overrides `hooks_token` from `ui/config.json` / `DEFAULTS` for UI → OpenClaw webhook calls |
 
 ### `pipeline.lock` locking mechanism
 
@@ -477,8 +481,10 @@ The script writes `.env` with `AUTODEV_ROOT` and `AUTODEV_REPO_PATH`. Source it 
 
 ```bash
 source .env
-uvicorn ui.server:app --host 0.0.0.0 --port 18790
+uvicorn ui.server:app --host 127.0.0.1 --port 18790
 ```
+
+The UI API has **no authentication**; prefer loopback binding. See **Security and network exposure** in [SETUP.md](SETUP.md) before using `--host 0.0.0.0`.
 
 Agent identity docs (`IDENTITY.md`, `SOUL.md`, etc.) are deployed by `install.sh` step 5 from `autodev/agents/{agent}/` into `~/.openclaw/workspace-{agent}/` using `cp -u` (no overwrite if dest is newer). The source of truth for these files is now this repo, not `~/.openclaw/workspace-*`.
 

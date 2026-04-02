@@ -25,7 +25,7 @@
 
 ### Local Model Roster (updated 2026-03-10)
 
-All local models are served by the `llama-local` provider (`http://<llama-server-host>:11434/v1`). All are registered at `contextWindow: 65536` (64K) in OpenClaw config.
+All local models are served by the `llama-local` provider (e.g. `http://<llama-server-host>:11434/v1` — set `models.providers.llama-local.baseUrl` in `openclaw.json`, or set env `AUTODEV_LLAMA_BASE` for orchestrator/heartbeat fallbacks). All are registered at `contextWindow: 65536` (64K) in OpenClaw config.
 
 All GGUFs redownloaded 2026-03-09 from Unsloth Dynamic 2.0 (March 5 update). Includes improved quantization algorithm, new imatrix calibration data, tool calling chat template fix, and MXFP4 layer retirement from K_XL quants.
 
@@ -221,7 +221,7 @@ The single `reviewer_retries` counter was split into three distinct counters to 
 
 ### Heartbeat Model Decision (B7, 2026-03-03) — Requires Main Machine Endpoint
 
-- The heartbeat cron now queries local llama-server at `http://<llama-server-host>:11434` for a RESUME/WAIT/NOTIFY decision when the orchestrator lock is free. **This requires Main Machine Plan A Phase 4 (llama-server endpoint) to be complete and running.** Until the endpoint is confirmed, the heartbeat will send a Signal notification ("local model unreachable") rather than silently failing or restarting blindly. The conservative fallback ensures the cron never makes an unguided restart decision.
+- The heartbeat cron now queries local llama-server at `http://<llama-server-host>:11434` (configurable via `AUTODEV_LLAMA_BASE`) for a RESUME/WAIT/NOTIFY decision when the orchestrator lock is free. **This requires Main Machine Plan A Phase 4 (llama-server endpoint) to be complete and running.** Until the endpoint is confirmed, the heartbeat will send a Signal notification ("local model unreachable") rather than silently failing or restarting blindly. The conservative fallback ensures the cron never makes an unguided restart decision.
 - The model's system prompt is deliberately narrow: output exactly one token (RESUME / WAIT / NOTIFY). Unexpected output is treated as NOTIFY. The model is not asked to diagnose the pipeline — only to classify the state.
 
 ### ~~Stale Model Alias Cleanup~~ ✓ Resolved 2026-02-25
@@ -293,7 +293,7 @@ Decisions made explicitly — not defaults to drift from. Preserved for human re
 
 ### Archive Failure Policy
 
-- Archive failure (`/home/pi/pipeline-audit/`) is non-blocking.
+- Archive failure (phase snapshot copies under `$AUTODEV_ROOT/pipeline-audit/` or `AUTODEV_AUDIT_ARCHIVE_DIR`) is non-blocking.
 - Rationale: losing audit data is preferable to halting a working pipeline. Archive is informational, not structural.
 
 ### JSON Parse = Structural Validation Failure
@@ -466,7 +466,7 @@ This fix is **model-agnostic**: it applies to any current or future executor mod
 
 **Root cause:** A single `time.sleep(5)` between executor gate pass and reviewer webhook was insufficient. GPU model swap can exceed 10s under load. No mechanism existed to detect when the swap had settled before proceeding.
 
-**Fix (2026-03-10):** Replaced fixed sleep with `wait_for_model_stable()` method on the Orchestrator class (`orchestrator.py`, line ~188). Polls `GET http://<llama-server-host>:11434/v1/models` every 5s. Stable state = no model in a transitioning status (all entries `loaded` or `unloaded`). Timeout: 300s (proceeds anyway on expiry — no pipeline stall). URL derived from `openclaw_config["models"]["providers"]["llama-local"]["baseUrl"]`; fallback hardcoded. Replaces the fixed sleep entirely — proceeds as fast as the GPU allows rather than waiting a fixed 60s.
+**Fix (2026-03-10):** Replaced fixed sleep with `wait_for_model_stable()` method on the Orchestrator class (`orchestrator.py`, line ~188). Polls `GET {llama-base}/v1/models` every 5s (URL from `openclaw_config["models"]["providers"]["llama-local"]["baseUrl"]`, with fallback from env `AUTODEV_LLAMA_BASE`). Stable state = no model in a transitioning status (all entries `loaded` or `unloaded`). Timeout: 300s (proceeds anyway on expiry — no pipeline stall). Replaces the fixed sleep entirely — proceeds as fast as the GPU allows rather than waiting a fixed 60s.
 
 ---
 
@@ -501,9 +501,9 @@ Parameters are read from `openclaw.json` under the `recovery` section:
 
 ```json
 "recovery": {
-  "user": "Z",
-  "host": "<llama-server-host>",
-  "key_path": "/home/pi/.ssh/autodev_recovery_key"
+  "user": "deploy",
+  "host": "gpu-host.example.com",
+  "key_path": "/path/to/ssh_recovery_key"
 }
 ```
 
@@ -518,7 +518,7 @@ Parameters are read from `openclaw.json` under the `recovery` section:
 
 **Cooldown enforcement:** The orchestrator writes `reviewer_infra_recovery_attempted=True` and `reviewer_infra_recovery_timestamp` to `phase_state.json` atomically BEFORE invoking SSH. A 10-minute cooldown (600s) prevents repeated recovery attempts if the restart keeps failing. Within cooldown: increment `reviewer_infra_recovery_attempts` (cap 2); at cap → escalation.
 
-**Key path requirement:** `/home/pi/.ssh/autodev_recovery_key` must have `600` permissions and authorize access to `Z@<llama-server-host>`. The `command=` restriction in `authorized_keys` ensures the recovery key cannot be used for general shell access.
+**Key path requirement:** The file at `recovery.key_path` must have `600` permissions and authorize SSH access only to `recovery.user@recovery.host` for the forced command that runs the restart script. The `command=` restriction in `authorized_keys` ensures the recovery key cannot be used for general shell access.
 
 ---
 

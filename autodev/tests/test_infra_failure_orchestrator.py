@@ -48,9 +48,9 @@ def _make_infra_orch(tmp_dir, initial_phase_state=None):
             {
                 "hooks": {"token": "test-tok"},
                 "recovery": {
-                    "user": "Z",
-                    "host": "<llama-server-host>",
-                    "key_path": "/home/pi/.ssh/autodev_recovery_key",
+                    "user": "op",
+                    "host": "192.0.2.1",
+                    "key_path": "/tmp/test-recovery-key",
                 },
             },
             f,
@@ -74,9 +74,9 @@ def _make_infra_orch(tmp_dir, initial_phase_state=None):
         orch.openclaw_config = {
             "hooks": {"token": "test-tok"},
             "recovery": {
-                "user": "Z",
-                "host": "<llama-server-host>",
-                "key_path": "/home/pi/.ssh/autodev_recovery_key",
+                "user": "op",
+                "host": "192.0.2.1",
+                "key_path": "/tmp/test-recovery-key",
             },
         }
         orch.state = {
@@ -229,10 +229,10 @@ class TestInfraFailureOrchestratorHandling:
         assert len(ssh_calls) == 1, "SSH must be invoked exactly once"
         ssh_args = ssh_calls[0]
         assert "ssh" in ssh_args[0], "First element must be 'ssh'"
-        assert "/home/pi/.ssh/autodev_recovery_key" in ssh_args, (
+        assert "/tmp/test-recovery-key" in ssh_args, (
             "SSH call must use recovery key_path from openclaw.json"
         )
-        assert "Z@<llama-server-host>" in ssh_args, (
+        assert "op@192.0.2.1" in ssh_args, (
             "SSH call must use user@host from openclaw.json"
         )
         assert "recovery" in ssh_args, "SSH call must include 'recovery' command argument"

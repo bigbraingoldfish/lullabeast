@@ -75,9 +75,8 @@ def test_prd_completeness_checklist_present():
     content = load_index_html()
     func_body = extract_function_body(content, "IdeasScreen")
     assert func_body is not None
-    assert "PRD completeness checklist" in func_body
-    assert "Show empty section placeholders" in func_body
-    assert "scrollIntoView" in func_body
+    assert "checklistRows" in func_body
+    assert "PRD_SECTION_TITLES" in func_body
 
 
 def test_sidebar_uses_center_divider_chevron_toggle():

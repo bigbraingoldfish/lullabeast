@@ -6,9 +6,9 @@
   "events_path": "~/.openclaw/pipeline_events.jsonl",
   "roadmap_path": "~/.openclaw/pipeline-project/roadmap.md",
   "project_dir_path": "~/.openclaw/pipeline-project",
-  "autodev_repo_path": "/home/pi/projects/autodev-ui",
+  "autodev_repo_path": "/path/to/your/autodev-ui-clone",
   "ideas_dir": "~/.openclaw/ideas",
   "hooks_url": "http://localhost:18789/hooks/agent",
-  "hooks_token": "pipeline-secret-token",
+  "hooks_token": "",
   "conversion_prompt_path": "~/.openclaw/deployment-package/Updates/PRD to Roadmap (sonnet 4.5 ideal).txt"
 }

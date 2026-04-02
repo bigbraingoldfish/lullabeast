@@ -18,8 +18,9 @@ CONFIG_FILE = os.path.join(AUTODEV_ROOT, "openclaw.json")
 ORCHESTRATOR_SCRIPT = os.path.join(AUTODEV_REPO_PATH, "autodev", "pipeline", "orchestrator.py")
 LOG_FILE = os.path.join(AUTODEV_ROOT, "orchestrator.log")
 
-# Local llama-server endpoint (B7). Requires Main Machine Plan A Phase 4 complete.
-HEARTBEAT_MODEL_URL = "http://<llama-server-host>:11434/v1/chat/completions"
+# Local llama-server chat endpoint. Override origin with AUTODEV_LLAMA_BASE (scheme+host+port, no path).
+_LLAMA_ORIGIN = os.environ.get("AUTODEV_LLAMA_BASE", "http://127.0.0.1:11434").rstrip("/")
+HEARTBEAT_MODEL_URL = f"{_LLAMA_ORIGIN}/v1/chat/completions"
 HEARTBEAT_MODEL_NAME = "qwen3.5-27b"
 
 HEARTBEAT_SYSTEM_PROMPT = """

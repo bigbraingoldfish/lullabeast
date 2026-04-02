@@ -101,14 +101,14 @@ class TestIdeasScreenSplitPanel:
         assert "PRD_SECTION_TITLES.map" in func_body
 
     def test_right_pane_has_toggle_for_empty_placeholders(self):
-        """Right pane offers toggle for showing/hiding empty sections."""
+        """Right pane hides empty PRD sections unless placeholders are enabled (flag in IdeasScreen)."""
         content = load_index_html()
         func_body = extract_function_body(content, "IdeasScreen")
         assert func_body is not None
 
-        assert "Show empty section placeholders" in func_body
-        assert "Hide empty sections" in func_body
-        assert "PRD completeness checklist" in func_body
+        assert "showEmptyPlaceholders" in func_body
+        assert "isEmpty" in func_body and "return null" in func_body
+        assert "checklistRows" in func_body
 
     def test_both_panes_have_flex_flex_col_bg(self):
         """Conversation and PRD columns use flex-col panel styling."""

@@ -1,5 +1,4 @@
 """Tests for POST /api/ideas/{idea_id}/upload"""
-import asyncio
 import json
 import os
 import sys
@@ -54,12 +53,12 @@ class TestUploadMdFileSynthesis:
             "2. Feature B\n"
         )
 
-        def sleep_then_sentinel(delay):
+        async def sleep_then_sentinel(delay):
             turns = ideas_dir / existing_idea / "turns"
             turns.mkdir(parents=True, exist_ok=True)
-            (turns / "1.done").write_text("done")
+            for n in range(1, 6):
+                (turns / f"{n}.done").write_text("done")
             (ideas_dir / existing_idea / "prd_draft.md").write_text("# Synth\n\n## Problem Statement\nOK.")
-            return asyncio.sleep(0)
 
         mock_resp = MagicMock()
         mock_resp.status = 200
@@ -77,7 +76,7 @@ class TestUploadMdFileSynthesis:
                 "hooks_token": "t",
             }
             with patch("ui.server.aiohttp.ClientSession", return_value=mock_session):
-                with patch("ui.server.asyncio.sleep", side_effect=sleep_then_sentinel):
+                with patch("ui.server.asyncio.sleep", AsyncMock(side_effect=sleep_then_sentinel)):
                     response = client.post(
                         f"/api/ideas/{existing_idea}/upload",
                         files={"file": ("myidea.md", content.encode(), "text/markdown")},
@@ -98,12 +97,12 @@ class TestUploadMdFileSynthesis:
             "1. Feature A\n"
         )
 
-        def sleep_then_sentinel(delay):
+        async def sleep_then_sentinel(delay):
             turns = ideas_dir / existing_idea / "turns"
             turns.mkdir(parents=True, exist_ok=True)
-            (turns / "1.done").write_text("done")
+            for n in range(1, 6):
+                (turns / f"{n}.done").write_text("done")
             (ideas_dir / existing_idea / "prd_draft.md").write_text(content)
-            return asyncio.sleep(0)
 
         mock_resp = MagicMock()
         mock_resp.status = 200
@@ -121,7 +120,7 @@ class TestUploadMdFileSynthesis:
                 "hooks_token": "t",
             }
             with patch("ui.server.aiohttp.ClientSession", return_value=mock_session):
-                with patch("ui.server.asyncio.sleep", side_effect=sleep_then_sentinel):
+                with patch("ui.server.asyncio.sleep", AsyncMock(side_effect=sleep_then_sentinel)):
                     response = client.post(
                         f"/api/ideas/{existing_idea}/upload",
                         files={"file": ("myidea.md", content.encode(), "text/markdown")},
@@ -139,12 +138,12 @@ class TestUploadArbitraryMarkdown:
     def test_missing_headers_still_returns_200_with_mock_agent(self, ideas_dir, existing_idea):
         content = "# My Idea\n\nSome freeform text without template sections.\n"
 
-        def sleep_then_sentinel(delay):
+        async def sleep_then_sentinel(delay):
             turns = ideas_dir / existing_idea / "turns"
             turns.mkdir(parents=True, exist_ok=True)
-            (turns / "1.done").write_text("done")
+            for n in range(1, 6):
+                (turns / f"{n}.done").write_text("done")
             (ideas_dir / existing_idea / "prd_draft.md").write_text("# Out\n")
-            return asyncio.sleep(0)
 
         mock_resp = MagicMock()
         mock_resp.status = 200
@@ -162,7 +161,9 @@ class TestUploadArbitraryMarkdown:
                 "hooks_token": "t",
             }
             with patch("ui.server.aiohttp.ClientSession", return_value=mock_session):
-                with patch("ui.server.asyncio.sleep", side_effect=sleep_then_sentinel):
+                with patch("ui.server.POLL_INTERVAL", 0.05), patch(
+                    "ui.server.asyncio.sleep", AsyncMock(side_effect=sleep_then_sentinel)
+                ):
                     response = client.post(
                         f"/api/ideas/{existing_idea}/upload",
                         files={"file": ("incomplete.md", content.encode(), "text/markdown")},
@@ -212,12 +213,12 @@ class TestUploadNonMdFile:
             "1. A\n"
         )
 
-        def sleep_then_sentinel(delay):
+        async def sleep_then_sentinel(delay):
             turns = ideas_dir / existing_idea / "turns"
             turns.mkdir(parents=True, exist_ok=True)
-            (turns / "1.done").write_text("done")
+            for n in range(1, 6):
+                (turns / f"{n}.done").write_text("done")
             (ideas_dir / existing_idea / "prd_draft.md").write_text(content)
-            return asyncio.sleep(0)
 
         mock_resp = MagicMock()
         mock_resp.status = 200
@@ -235,7 +236,7 @@ class TestUploadNonMdFile:
                 "hooks_token": "t",
             }
             with patch("ui.server.aiohttp.ClientSession", return_value=mock_session):
-                with patch("ui.server.asyncio.sleep", side_effect=sleep_then_sentinel):
+                with patch("ui.server.asyncio.sleep", AsyncMock(side_effect=sleep_then_sentinel)):
                     response = client.post(
                         f"/api/ideas/{existing_idea}/upload",
                         files={"file": ("myidea.MD", content.encode(), "text/markdown")},

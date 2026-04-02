@@ -221,10 +221,13 @@ export AUTODEV_ROOT AUTODEV_REPO_PATH
 ok "AUTODEV_REPO_PATH = $AUTODEV_REPO_PATH"
 ok "AUTODEV_ROOT      = $AUTODEV_ROOT"
 
-# Write detected path to ui/config.json as autodev_repo_path (atomic)
+# Write detected path to ui/config.json as autodev_repo_path (atomic).
+# Seeds from ui/config.example.json when config.json is missing.
 "$PYTHON" -c "
 import json, os, tempfile
-p = '$AUTODEV_REPO_PATH/ui/config.json'
+repo = '$AUTODEV_REPO_PATH'
+p = os.path.join(repo, 'ui', 'config.json')
+example = os.path.join(repo, 'ui', 'config.example.json')
 cfg = {}
 if os.path.exists(p):
     try:
@@ -232,15 +235,18 @@ if os.path.exists(p):
             cfg = json.load(f)
     except Exception:
         pass
-cfg['autodev_repo_path'] = '$AUTODEV_ROOT'
+elif os.path.exists(example):
+    with open(example) as f:
+        cfg = json.load(f)
+cfg['autodev_repo_path'] = repo
 d = os.path.dirname(p)
 fd, tmp = tempfile.mkstemp(dir=d, prefix='config_', suffix='.json')
 with os.fdopen(fd, 'w') as f:
     json.dump(cfg, f, indent=2)
 os.replace(tmp, p)
 print('ok')
-" > /dev/null && ok "ui/config.json updated with AUTODEV_ROOT" \
-  || warn "Could not update ui/config.json — set autodev_repo_path manually"
+" > /dev/null && ok "ui/config.json updated with AUTODEV_REPO_PATH" \
+  || warn "Could not update ui/config.json — copy ui/config.example.json and set autodev_repo_path"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 5/13  OPENCLAW VERSION CHECK

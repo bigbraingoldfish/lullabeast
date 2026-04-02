@@ -95,7 +95,7 @@ class TestApiIdeasAdversarialCheck:
              patch("ui.server._inject_converter_skill") as mock_inject, \
              patch("ui.server.asyncio.create_task"), \
              patch("ui.server.ADVERSARIAL_CHECK_POLL_INTERVAL", 0.05), \
-             patch("ui.server.asyncio.sleep", side_effect=write_sentinel):
+             patch("ui.server.asyncio.sleep", AsyncMock(side_effect=write_sentinel)):
             r = client.post("/api/ideas/2/adversarial-check")
 
         assert r.status_code == 200
@@ -124,7 +124,7 @@ class TestApiIdeasAdversarialCheck:
              patch("ui.server._inject_converter_skill"), \
              patch("ui.server.asyncio.create_task"), \
              patch("ui.server.ADVERSARIAL_CHECK_POLL_INTERVAL", 0.05), \
-             patch("ui.server.asyncio.sleep", side_effect=write_sentinel):
+             patch("ui.server.asyncio.sleep", AsyncMock(side_effect=write_sentinel)):
             r = client.post("/api/ideas/3/adversarial-check")
 
         assert r.status_code == 200
@@ -169,7 +169,7 @@ class TestApiIdeasAdversarialCheck:
              patch("ui.server._inject_converter_skill"), \
              patch("ui.server.asyncio.create_task"), \
              patch("ui.server.ADVERSARIAL_CHECK_POLL_INTERVAL", 0.05), \
-             patch("ui.server.asyncio.sleep", side_effect=write_sentinel):
+             patch("ui.server.asyncio.sleep", AsyncMock(side_effect=write_sentinel)):
             r = client.post("/api/ideas/5/adversarial-check")
 
         assert r.status_code == 200
@@ -198,7 +198,7 @@ class TestApiIdeasAdversarialCheck:
              patch("ui.server._inject_converter_skill"), \
              patch("ui.server.asyncio.create_task"), \
              patch("ui.server.ADVERSARIAL_CHECK_POLL_INTERVAL", 0.05), \
-             patch("ui.server.asyncio.sleep", side_effect=write_sentinel):
+             patch("ui.server.asyncio.sleep", AsyncMock(side_effect=write_sentinel)):
             r = client.post("/api/ideas/6/adversarial-check")
 
         assert r.status_code == 200
@@ -222,9 +222,8 @@ class TestApiIdeasAdversarialCheck:
         with patch("ui.server.load_config", return_value=self._mock_config()), \
              patch("ui.server.aiohttp.ClientSession", mock_cls), \
              patch("ui.server._inject_converter_skill"), \
-             patch("ui.server.asyncio.create_task"), \
              patch("ui.server.ADVERSARIAL_CHECK_POLL_INTERVAL", 0.05), \
-             patch("ui.server.asyncio.sleep", side_effect=write_sentinel):
+             patch("ui.server.asyncio.sleep", AsyncMock(side_effect=write_sentinel)):
             r = client.post("/api/ideas/7/adversarial-check")
 
         assert r.status_code == 200
@@ -252,7 +251,7 @@ class TestApiIdeasAdversarialCheck:
              patch("ui.server._inject_converter_skill"), \
              patch("ui.server.asyncio.create_task", mock_create_task), \
              patch("ui.server.ADVERSARIAL_CHECK_POLL_INTERVAL", 0.05), \
-             patch("ui.server.asyncio.sleep", side_effect=write_sentinel):
+             patch("ui.server.asyncio.sleep", AsyncMock(side_effect=write_sentinel)):
             r = client.post("/api/ideas/8/adversarial-check")
 
         assert r.status_code == 200
