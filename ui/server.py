@@ -4602,6 +4602,8 @@ async def post_queue_add(request: Request):
     Body: {"project_path": str, "idea_id": str|null, "parent_id": str|null}
     Returns 400 with validation_errors if preflight fails.
     Returns 422 if project_path is invalid.
+    Returns 409 if the same project path (realpath) is already queued in a non-terminal state
+    (terminal: COMPLETED, FAILED only).
     """
     import uuid as _uuid
     from datetime import datetime, timezone as tz
@@ -4627,6 +4629,27 @@ async def post_queue_add(request: Request):
     q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
     q = _read_queue_file(config)
     entries = q.get("queue", [])
+
+    new_real = os.path.realpath(project_path)
+    _terminal_queue_states = frozenset({"COMPLETED", "FAILED"})
+    for e in entries:
+        ep = (e.get("project_path") or "").strip()
+        if not ep:
+            continue
+        try:
+            existing_real = os.path.realpath(os.path.expanduser(ep))
+        except OSError:
+            continue
+        if existing_real != new_real:
+            continue
+        if e.get("state") not in _terminal_queue_states:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Project already in queue ({e.get('name', 'unknown')}, {e.get('state')}). "
+                    "Remove it or wait until COMPLETED/FAILED before adding again."
+                ),
+            )
 
     # Circular dependency check
     if parent_id and _detect_circular_dependency(entries, None, parent_id):
@@ -4683,6 +4706,38 @@ def delete_queue_entry(entry_id: str):
     q["queue"] = entries
     _write_queue_file(q_path, q)
     return {"ok": True}
+
+
+@app.post("/api/queue/clear")
+async def post_queue_clear(request: Request):
+    """Remove all queue entries. Preserves queue_mode.
+
+    Body (optional): ``{"force": true}`` to clear even when an entry is ACTIVE
+    (operator escape hatch for stuck rows).
+    """
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            body = {}
+    except Exception:
+        body = {}
+    force = bool(body.get("force"))
+
+    config = load_config()
+    q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
+    q = _read_queue_file(config)
+    entries = q.get("queue", [])
+    cleared = len(entries)
+
+    if any(e.get("state") == "ACTIVE" for e in entries) and not force:
+        raise HTTPException(
+            status_code=409,
+            detail='Queue has an ACTIVE entry; pass {"force": true} to clear anyway.',
+        )
+
+    q["queue"] = []
+    _write_queue_file(q_path, q)
+    return {"ok": True, "cleared": cleared}
 
 
 @app.patch("/api/queue/{entry_id}/position")

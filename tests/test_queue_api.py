@@ -393,6 +393,105 @@ class TestPostQueueAdd:
         assert resp.status_code == 400
         assert "parent_id" in resp.json()["detail"].lower()
 
+    def test_rejects_duplicate_project_same_realpath(self, client, monkeypatch, tmp_path):
+        c, queue_file, _ = client
+        proj = tmp_path / "dupproj"
+        proj.mkdir()
+        monkeypatch.setattr("ui.server._run_preflight_checks", lambda p: [
+            {"check": "ok", "status": "pass", "message": "ok"},
+        ])
+        eid = str(uuid.uuid4())
+        entries = [
+            {
+                **_make_entry("dupproj", position=1),
+                "id": eid,
+                "project_path": str(proj),
+                "state": "READY",
+            }
+        ]
+        _write_queue(str(queue_file), entries)
+
+        resp = c.post("/api/queue/add", json={"project_path": str(proj)})
+        assert resp.status_code == 409
+        assert "already in queue" in resp.json()["detail"].lower()
+
+    def test_allows_add_after_completed_same_path(self, client, monkeypatch, tmp_path):
+        c, queue_file, _ = client
+        proj = tmp_path / "again"
+        proj.mkdir()
+        monkeypatch.setattr("ui.server._run_preflight_checks", lambda p: [
+            {"check": "ok", "status": "pass", "message": "ok"},
+        ])
+        eid = str(uuid.uuid4())
+        entries = [
+            {
+                **_make_entry("again", position=1),
+                "id": eid,
+                "project_path": str(proj),
+                "state": "COMPLETED",
+            }
+        ]
+        _write_queue(str(queue_file), entries)
+
+        resp = c.post("/api/queue/add", json={"project_path": str(proj)})
+        assert resp.status_code == 200
+        assert resp.json()["state"] == "READY"
+        with open(str(queue_file)) as f:
+            q = json.load(f)
+        assert len(q["queue"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# POST /api/queue/clear
+# ---------------------------------------------------------------------------
+
+
+class TestPostQueueClear:
+    def test_clears_empty_queue(self, client):
+        c, queue_file, _ = client
+        resp = c.post("/api/queue/clear", json={})
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True, "cleared": 0}
+
+    def test_clears_ready_entries(self, client):
+        c, queue_file, _ = client
+        _write_queue(str(queue_file), [_make_entry("a", position=1)])
+        resp = c.post("/api/queue/clear", json={})
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True, "cleared": 1}
+        with open(str(queue_file)) as f:
+            q = json.load(f)
+        assert q["queue"] == []
+
+    def test_active_without_force_returns_409(self, client):
+        c, queue_file, _ = client
+        _write_queue(str(queue_file), [_make_entry("busy", state="ACTIVE", position=1)])
+        resp = c.post("/api/queue/clear", json={})
+        assert resp.status_code == 409
+        assert "ACTIVE" in resp.json()["detail"]
+        with open(str(queue_file)) as f:
+            q = json.load(f)
+        assert len(q["queue"]) == 1
+
+    def test_active_with_force_clears(self, client):
+        c, queue_file, _ = client
+        _write_queue(str(queue_file), [_make_entry("busy", state="ACTIVE", position=1)])
+        resp = c.post("/api/queue/clear", json={"force": True})
+        assert resp.status_code == 200
+        assert resp.json()["cleared"] == 1
+        with open(str(queue_file)) as f:
+            q = json.load(f)
+        assert q["queue"] == []
+
+    def test_preserves_queue_mode(self, client):
+        c, queue_file, _ = client
+        _write_queue(str(queue_file), [_make_entry("x", position=1)], queue_mode="manual")
+        resp = c.post("/api/queue/clear", json={})
+        assert resp.status_code == 200
+        with open(str(queue_file)) as f:
+            q = json.load(f)
+        assert q["queue_mode"] == "manual"
+
 
 # ---------------------------------------------------------------------------
 # POST /api/command deferred (parked project)
