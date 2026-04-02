@@ -283,6 +283,7 @@
         const QUEUE_STATE_CLASSES = {
             'READY': 'bg-slate-600 text-slate-200',
             'ACTIVE': 'bg-teal-600 text-white status-pulse',
+            'ESCALATION': 'bg-amber-500 text-slate-900',
             'BLOCKED': 'bg-amber-600 text-slate-900',
             'SKIPPED_PENDING': 'bg-orange-600 text-white',
             'DEPENDENCY_HOLD': 'bg-indigo-800 text-indigo-200',
@@ -293,12 +294,16 @@
         /** Derive list/detail status pill from live_pipeline_status + queue state (GET /api/queue). */
         function queueRowDisplay(entry) {
             if (!entry) return { label: '', className: 'bg-slate-700 text-white' };
+            // Backend merges parked_pipeline_status into live_pipeline_status when symlink targets another project
             const live = entry.live_pipeline_status;
             if (live === 'RUNNING' || live === 'WAITING_FOR_SENTINEL') {
                 return { label: 'ACTIVE', className: 'bg-teal-600 text-white' };
             }
             if (live === 'WAITING_FOR_HUMAN') {
                 return { label: 'ESCALATION', className: 'bg-amber-500 text-slate-900' };
+            }
+            if (live === 'BLOCKED') {
+                return { label: 'BLOCKED', className: QUEUE_STATE_CLASSES.BLOCKED };
             }
             if (entry.state === 'READY') {
                 return { label: 'READY', className: QUEUE_STATE_CLASSES.READY };
@@ -3964,10 +3969,27 @@
 
             const handleDragEnd = () => { dragItem.current = null; };
 
+            /** Tooltip for DEP badge: organizational dependent vs blocked-on-parent hold. */
+            const depBadgeTitle = (entry, parentEntry) => {
+                if (!parentEntry) return 'Child project';
+                if (entry.state === 'DEPENDENCY_HOLD') {
+                    return `On hold: parent "${parentEntry.name}" is ${parentEntry.state}. Clears when parent unblocks or completes.`;
+                }
+                if (parentEntry.state !== 'COMPLETED') {
+                    return `Dependent on "${parentEntry.name}" — starts after parent completes (parent is ${parentEntry.state}).`;
+                }
+                return `Depends on: ${parentEntry.name}`;
+            };
+
             const readyCt = queue.filter(e => e.state === 'READY').length;
             const blockedCt = queue.filter(e => e.state === 'BLOCKED').length;
             const holdCt = queue.filter(e => e.state === 'DEPENDENCY_HOLD').length;
             const completedCt = queue.filter(e => e.state === 'COMPLETED').length;
+            const dependentSoftCt = queue.filter(e => {
+                if (!e.parent_id || e.state === 'DEPENDENCY_HOLD') return false;
+                const p = queue.find(x => x.id === e.parent_id);
+                return p && p.state !== 'COMPLETED';
+            }).length;
 
             function relTime(iso) {
                 if (!iso) return null;
@@ -4006,7 +4028,7 @@
                             {selected.parent_id && (
                                 <span
                                     className="header-text px-1.5 py-0.5 rounded text-xs font-medium bg-indigo-900/50 text-indigo-300 border border-indigo-700/40"
-                                    title={parentEntry ? `Depends on: ${parentEntry.name}` : 'Child project'}
+                                    title={depBadgeTitle(selected, parentEntry)}
                                 >
                                     DEP
                                 </span>
@@ -4334,7 +4356,7 @@
                         {triggerMsg && <span className="header-text text-xs text-amber-400">{triggerMsg}</span>}
                         {error && <span className="header-text text-xs text-red-400">{error}</span>}
                         <span className="header-text text-xs text-slate-500 ml-auto">
-                            {queue.length} project{queue.length !== 1 ? 's' : ''} — {readyCt} ready, {blockedCt} blocked, {holdCt} on hold, {completedCt} complete
+                            {queue.length} project{queue.length !== 1 ? 's' : ''} — {readyCt} ready, {blockedCt} blocked, {holdCt} on hold (blocked parent){dependentSoftCt > 0 ? `, ${dependentSoftCt} dependent` : ''}, {completedCt} complete
                         </span>
                     </div>
 
@@ -4391,7 +4413,7 @@
                                             {entry.parent_id && (
                                                 <span
                                                     className="header-text px-1.5 py-0.5 rounded text-xs font-medium flex-shrink-0 bg-indigo-900/50 text-indigo-300 border border-indigo-700/40"
-                                                    title={parentEntry ? `Depends on: ${parentEntry.name}` : 'Child project'}
+                                                    title={depBadgeTitle(entry, parentEntry)}
                                                 >
                                                     DEP
                                                 </span>

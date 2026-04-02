@@ -13,6 +13,7 @@ import requests
 from webhook_client import invoke_agent_webhook
 from sentinel_poller import cleanup_output_files, poll_for_sentinel, poll_for_sentinel_with_idle_detect
 from skill_manager import SkillManager
+from queue_semantics import parent_blocks_child
 
 AUTODEV_ROOT = os.environ.get("AUTODEV_ROOT", os.path.expanduser("~/.openclaw"))
 AUTODEV_REPO_PATH = os.environ.get(
@@ -352,12 +353,13 @@ class Orchestrator:
                 i += 1
                 continue
 
-            # Check dependency
+            # Dependency: skip until parent COMPLETED; only use DEPENDENCY_HOLD when parent blocks.
             if entry.get("parent_id"):
                 parent_state = state_by_id.get(entry["parent_id"])
                 if parent_state != "COMPLETED":
-                    entry["state"] = "DEPENDENCY_HOLD"
-                    self._write_queue(queue_data)
+                    if parent_blocks_child(parent_state):
+                        entry["state"] = "DEPENDENCY_HOLD"
+                        self._write_queue(queue_data)
                     i += 1
                     continue
 
@@ -403,13 +405,15 @@ class Orchestrator:
                 "project_path": project_path,
             }
             self.write_state()
+            self._apply_pending_escalation_command(project_path)
             return True
 
         # No eligible project found — determine halted reason
         non_terminal = [e["state"] for e in entries if e["state"] not in ("COMPLETED", "FAILED")]
+        _parked_states = frozenset({"BLOCKED", "ESCALATION"})
         if not non_terminal:
             reason = "all_completed"
-        elif all(s == "BLOCKED" for s in non_terminal):
+        elif all(s in _parked_states for s in non_terminal):
             reason = "all_blocked"
         elif all(s == "DEPENDENCY_HOLD" for s in non_terminal):
             reason = "all_dependency_hold"
@@ -420,6 +424,20 @@ class Orchestrator:
         self.transition_state("QUEUE_HALTED", f"Queue halted: {reason}")
         return False
 
+    def _queue_promote_children_after_parent_completed(self, parent_entry_id):
+        """Set DEPENDENCY_HOLD children to READY when parent reaches COMPLETED."""
+        try:
+            queue_data = self._read_queue()
+            changed = False
+            for e in queue_data["queue"]:
+                if e.get("parent_id") == parent_entry_id and e.get("state") == "DEPENDENCY_HOLD":
+                    e["state"] = "READY"
+                    changed = True
+            if changed:
+                self._write_queue(queue_data)
+        except Exception as e:
+            print(f"[QUEUE] Failed to promote children after parent completed: {e}")
+
     def _queue_update_active_entry(self, new_state, extra_fields=None):
         """Find the ACTIVE queue entry for this project and update its state."""
         try:
@@ -429,12 +447,133 @@ class Orchestrator:
             idx, entry = self._find_active_queue_entry(queue_data)
             if idx is None:
                 return
+            parent_id_completed = entry.get("id") if new_state == "COMPLETED" else None
             queue_data["queue"][idx]["state"] = new_state
             if extra_fields:
                 queue_data["queue"][idx].update(extra_fields)
             self._write_queue(queue_data)
+            if parent_id_completed:
+                self._queue_promote_children_after_parent_completed(parent_id_completed)
         except Exception as e:
             print(f"[QUEUE] Failed to update active entry to {new_state}: {e}")
+
+    def _queue_park_active_entry(self, queue_state, parked_reason, extra_fields=None):
+        """Park the ACTIVE queue row (escalation or roadmap blocked) with metadata."""
+        try:
+            queue_data = self._read_queue()
+            if not queue_data.get("queue"):
+                return
+            idx, _entry = self._find_active_queue_entry(queue_data)
+            if idx is None:
+                return
+            now = datetime.now(timezone.utc).isoformat()
+            row = queue_data["queue"][idx]
+            row["state"] = queue_state
+            row["parked_at"] = now
+            row["parked_reason"] = parked_reason
+            row["parked_pipeline_status"] = self.state.get("pipeline_status")
+            if extra_fields:
+                row.update(extra_fields)
+            self._write_queue(queue_data)
+        except Exception as e:
+            print(f"[QUEUE] Failed to park active entry ({queue_state}): {e}")
+
+    def _queue_after_park_maybe_advance(self):
+        """After parking, auto-select the next project if queue_mode is auto."""
+        queue_data = self._read_queue()
+        if not queue_data.get("queue") or queue_data.get("queue_mode", "auto") != "auto":
+            return False
+        return self._select_next_queue_project()
+
+    def _escalation_poll_roots(self):
+        """Project dirs that may contain escalation_output (active symlink + parked ESCALATION rows)."""
+        roots = []
+        seen = set()
+        if os.path.exists(SYMLINK_TARGET):
+            try:
+                r0 = os.path.realpath(SYMLINK_TARGET)
+                if os.path.isdir(r0):
+                    seen.add(r0)
+                    roots.append(r0)
+            except OSError:
+                pass
+        try:
+            for e in self._read_queue().get("queue", []):
+                if e.get("state") != "ESCALATION":
+                    continue
+                pp = e.get("project_path")
+                if not pp:
+                    continue
+                try:
+                    rp = os.path.realpath(os.path.expanduser(pp))
+                except OSError:
+                    continue
+                if rp and os.path.isdir(rp) and rp not in seen:
+                    seen.add(rp)
+                    roots.append(rp)
+        except Exception:
+            pass
+        return roots
+
+    def _poll_escalation_output_json_path(self, timeout_seconds=10, interval=0.5):
+        """Wait for escalation_output.done under any poll root; return path to escalation_output.json."""
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            for root in self._escalation_poll_roots():
+                done_p = os.path.join(root, "escalation_output.done")
+                json_p = os.path.join(root, "escalation_output.json")
+                if os.path.exists(done_p):
+                    return json_p
+            time.sleep(interval)
+        return None
+
+    def _apply_pending_escalation_command(self, project_path):
+        """If UI deferred a command while another project was active, apply it now."""
+        root = os.path.realpath(os.path.expanduser(project_path))
+        pending_json = os.path.join(root, "pending_escalation_command.json")
+        if not os.path.exists(pending_json):
+            return
+        try:
+            with open(pending_json, "r") as f:
+                data = json.load(f)
+            command = str(data.get("command", "STOP")).upper()
+        except Exception:
+            command = "STOP"
+        try:
+            os.remove(pending_json)
+        except OSError:
+            pass
+        pending_done = os.path.join(root, "pending_escalation_command.done")
+        try:
+            if os.path.exists(pending_done):
+                os.remove(pending_done)
+        except OSError:
+            pass
+        esc_json = os.path.join(root, "escalation_output.json")
+        esc_done = os.path.join(root, "escalation_output.done")
+        payload = {
+            "command": command,
+            "source": "deferred",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            fd, tmp = tempfile.mkstemp(dir=root, prefix="esc_out_")
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(payload, f)
+                os.replace(tmp, esc_json)
+            except Exception:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+                raise
+            with open(esc_done, "w") as f:
+                f.write("")
+        except OSError as e:
+            print(f"[QUEUE] Failed to apply deferred escalation command: {e}")
+            return
+        self.state["pipeline_status"] = "WAITING_FOR_HUMAN"
+        self.state["current_agent"] = "escalation"
+        self.write_state()
 
     def _check_stop_requested(self) -> bool:
         """Check for the stop sentinel file written by the UI server.
@@ -1346,6 +1485,104 @@ class Orchestrator:
             print(f"[ERROR] {details}")
             return False, details
 
+    def _run_startup_planner_phase_zero_and_branch(self):
+        """Phase-0 phase_resolver, queue completion/advance, and feature-branch checkout.
+
+        Returns:
+            "exit_run" — leave run() entirely (orchestrator stops).
+            "retry_startup" — symlink/project may have changed; re-run this method.
+            "enter_main_loop" — proceed to the main while True loop.
+        """
+        if self.state.get("current_agent", "planner") != "planner":
+            return "enter_main_loop"
+
+        if self.state.get("current_phase", 0) == 0:
+            gate_script = os.path.join(
+                AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts", "phase_resolver.py"
+            )
+            try:
+                result = subprocess.run([sys.executable, gate_script], capture_output=True, text=True)
+                output = result.stdout.strip()
+                if result.returncode == 0 and "PENDING: Phase" in output:
+                    cp_path = os.path.join(SYMLINK_TARGET, "current_phase.json")
+                    if os.path.exists(cp_path):
+                        with open(cp_path) as f:
+                            first_phase = json.load(f)
+                        self.state["current_phase"] = first_phase.get("phase_number", 0)
+                        self.state["current_phase_raw_id"] = first_phase.get("raw_id", "")
+                        self.state["phase_start_time"] = datetime.now(timezone.utc).isoformat()
+                        self.write_state()
+                elif result.returncode == 0 and "PIPELINE_COMPLETE" in output:
+                    print("[INFO] All roadmap phases already complete. Nothing to do.")
+                    self.transition_state("PIPELINE_COMPLETE", "Pipeline fully complete on startup")
+                    self._queue_update_active_entry(
+                        "COMPLETED",
+                        {"completed_at": datetime.now(timezone.utc).isoformat()},
+                    )
+                    queue_data = self._read_queue()
+                    if queue_data["queue"] and queue_data.get("queue_mode", "auto") == "auto":
+                        if self._select_next_queue_project():
+                            self.read_state()
+                            return "retry_startup"
+                    return "exit_run"
+                elif result.returncode == 2 and "BLOCKED" in output:
+                    print("[INFO] First pending phase is blocked. Escalating.")
+                    _now = datetime.now(timezone.utc).isoformat()
+                    self.transition_state("BLOCKED", "Roadmap blocked at startup")
+                    self._queue_park_active_entry(
+                        "BLOCKED",
+                        "roadmap_blocked",
+                        {"blocked_at": _now},
+                    )
+                    if self._queue_after_park_maybe_advance():
+                        self.read_state()
+                        return "retry_startup"
+                    return "exit_run"
+            except Exception as startup_err:
+                print(f"[WARN] Startup phase identification failed: {startup_err}. Proceeding; planner must self-orient.")
+
+        _startup_raw = self.state.get("current_phase_raw_id", "")
+        _startup_num = self.state.get("current_phase", 0)
+        if _startup_raw or _startup_num:
+            branch = f"phase/{_startup_raw}" if _startup_raw else f"phase/{_startup_num}"
+            if not self.state.get("phase_base_commit"):
+                _base_result = subprocess.run(
+                    ["git", "rev-parse", "HEAD"], cwd=SYMLINK_TARGET, capture_output=True, text=True
+                )
+                if _base_result.returncode == 0:
+                    self.state["phase_base_commit"] = _base_result.stdout.strip()
+                    self.write_state()
+            subprocess.run(
+                f"git checkout {branch} 2>/dev/null || git checkout -b {branch}",
+                shell=True,
+                cwd=SYMLINK_TARGET,
+            )
+            print(f"[INFO] Startup: checked out branch {branch} for phase {_startup_raw or _startup_num}.")
+
+            import glob as _startup_glob
+
+            _startup_gate = os.path.join(
+                AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts", "phase_resolver.py"
+            )
+            _startup_roadmap = _startup_glob.glob(os.path.join(SYMLINK_TARGET, "*[Rr]oadmap*.md"))
+            if _startup_roadmap:
+                try:
+                    subprocess.run(
+                        [sys.executable, _startup_gate, _startup_roadmap[0]],
+                        cwd=AUTODEV_ROOT,
+                        check=True,
+                    )
+                    print("[INFO] Startup: roadmap_parser re-run, current_phase.json refreshed.")
+                except Exception as _startup_rp_err:
+                    print(
+                        f"[WARN] Startup: roadmap_parser re-run failed: {_startup_rp_err}. "
+                        "current_phase.json may be stale."
+                    )
+            else:
+                print("[WARN] Startup: no roadmap file found, current_phase.json not refreshed.")
+
+        return "enter_main_loop"
+
     def run(self):
         """Main event loop."""
         self.acquire_lock()
@@ -1377,6 +1614,9 @@ class Orchestrator:
                 _ps["escalation_trigger_reason"] = failure_context
                 self.write_phase_state_atomic(_ps)
                 self.transition_state("WAITING_FOR_HUMAN", "Invoking Escalation Agent: repo init check failed")
+                self._queue_park_active_entry("ESCALATION", "escalation")
+                # Note: park-and-advance is not applied here — the next queued project must pass
+                # repo init on a fresh orchestrator run; advancing without re-check would be unsafe.
                 webhook_status = invoke_agent_webhook("escalation", session_key, token)
                 if webhook_status != "SUCCESS":
                     print("[ERROR] Escalation webhook failed after repo init failure.")
@@ -1399,89 +1639,35 @@ class Orchestrator:
                     )
                 return  # Do not enter phase loop; finally block will release lock
 
-            # --- Startup Phase Identification (Gap fix: run roadmap_parser before first planner
-            #     invocation so current_phase.json exists and current_phase/raw_id are set) ---
-            # Startup: run roadmap_parser (only when current_phase == 0) and ALWAYS checkout
-            # the feature branch when current_agent == "planner". Separating these two concerns
-            # ensures the executor never commits directly to main when the pipeline is resumed
-            # with a manually pre-set current_phase (e.g. after an escalation reset).
-            if self.state.get("current_agent", "planner") == "planner":
-                if self.state.get("current_phase", 0) == 0:
-                    gate_script = os.path.join(AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts", "phase_resolver.py")
-                    try:
-                        result = subprocess.run([sys.executable, gate_script], capture_output=True, text=True)
-                        output = result.stdout.strip()
-                        if result.returncode == 0 and "PENDING: Phase" in output:
-                            cp_path = os.path.join(SYMLINK_TARGET, "current_phase.json")
-                            if os.path.exists(cp_path):
-                                with open(cp_path) as f:
-                                    first_phase = json.load(f)
-                                self.state["current_phase"] = first_phase.get("phase_number", 0)
-                                self.state["current_phase_raw_id"] = first_phase.get("raw_id", "")
-                                # Record phase start time so post-merge can compute duration_seconds.
-                                self.state["phase_start_time"] = datetime.now(timezone.utc).isoformat()
-                                self.write_state()
-                        elif result.returncode == 0 and "PIPELINE_COMPLETE" in output:
-                                print("[INFO] All roadmap phases already complete. Nothing to do.")
-                                self.transition_state("PIPELINE_COMPLETE", "Pipeline fully complete on startup")
-                                self._queue_update_active_entry(
-                                    "COMPLETED",
-                                    {"completed_at": datetime.now(timezone.utc).isoformat()}
-                                )
-                                return
-                        elif result.returncode == 2 and "BLOCKED" in output:
-                            print(f"[INFO] First pending phase is blocked. Escalating.")
-                            self.transition_state("BLOCKED", "Roadmap blocked at startup")
-                            self._queue_update_active_entry(
-                                "BLOCKED",
-                                {"blocked_at": datetime.now(timezone.utc).isoformat()}
-                            )
-                            return
-                    except Exception as startup_err:
-                        print(f"[WARN] Startup phase identification failed: {startup_err}. Proceeding; planner must self-orient.")
-
-                # Always checkout/create the feature branch at startup regardless of whether
-                # current_phase was freshly identified (== 0 path above) or pre-set by a
-                # manual escalation reset. This prevents executor from committing to main.
-                _startup_raw = self.state.get("current_phase_raw_id", "")
-                _startup_num = self.state.get("current_phase", 0)
-                if _startup_raw or _startup_num:
-                    branch = f"phase/{_startup_raw}" if _startup_raw else f"phase/{_startup_num}"
-                    # Store phase_base_commit only if not already set (preserve on resume).
-                    # On a fresh start this captures the pre-phase HEAD so reset_phase() can rewind.
-                    if not self.state.get("phase_base_commit"):
-                        _base_result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=SYMLINK_TARGET, capture_output=True, text=True)
-                        if _base_result.returncode == 0:
-                            self.state["phase_base_commit"] = _base_result.stdout.strip()
-                            self.write_state()
-                    subprocess.run(
-                        f"git checkout {branch} 2>/dev/null || git checkout -b {branch}",
-                        shell=True, cwd=SYMLINK_TARGET
-                    )
-                    print(f"[INFO] Startup: checked out branch {branch} for phase {_startup_raw or _startup_num}.")
-
-                    # §5.3 fix (startup path): git checkout may restore a stale committed
-                    # current_phase.json (e.g. from a prior completed phase). Re-run
-                    # roadmap_parser to refresh it so the planner sees the correct phase.
-                    import glob as _startup_glob
-                    _startup_gate = os.path.join(AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts", "phase_resolver.py")
-                    _startup_roadmap = _startup_glob.glob(os.path.join(SYMLINK_TARGET, "*[Rr]oadmap*.md"))
-                    if _startup_roadmap:
-                        try:
-                            subprocess.run(
-                                [sys.executable, _startup_gate, _startup_roadmap[0]],
-                                cwd=AUTODEV_ROOT, check=True
-                            )
-                            print("[INFO] Startup: roadmap_parser re-run, current_phase.json refreshed.")
-                        except Exception as _startup_rp_err:
-                            print(f"[WARN] Startup: roadmap_parser re-run failed: {_startup_rp_err}. current_phase.json may be stale.")
-                    else:
-                        print("[WARN] Startup: no roadmap file found, current_phase.json not refreshed.")
+            # --- Startup Phase Identification + branch checkout (may repeat after queue auto-advance) ---
+            _startup_pass = 0
+            while _startup_pass < 20:
+                _startup_pass += 1
+                _startup_rv = self._run_startup_planner_phase_zero_and_branch()
+                if _startup_rv == "exit_run":
+                    return
+                if _startup_rv == "retry_startup":
+                    continue
+                break
+            else:
+                print("[ERROR] Startup exceeded max iterations (queue advance loop); exiting.")
+                return
 
             print("[INFO] Starting orchestrator loop (Phase 5 Integration)")
             while True:
-                if self.state.get("pipeline_status") in ["HALTED_SILENT", "BLOCKED", "PIPELINE_COMPLETE"]:
-                    print(f"[INFO] Pipeline is halted/blocked/complete ({self.state.get('pipeline_status')}). Exiting.")
+                pst = self.state.get("pipeline_status")
+                if pst in ["HALTED_SILENT", "BLOCKED", "PIPELINE_COMPLETE"]:
+                    print(f"[INFO] Pipeline is halted/blocked/complete ({pst}). Exiting.")
+                    # If global state already says COMPLETE (e.g. prior run) but the queue row
+                    # was just set ACTIVE by the UI, phase_resolver may still return PENDING while
+                    # startup leaves pipeline_status unchanged — we never reach the gate path that
+                    # calls _queue_update_active_entry. Sync the queue row here so ACTIVE does not
+                    # diverge from the monitor.
+                    if pst == "PIPELINE_COMPLETE":
+                        self._queue_update_active_entry(
+                            "COMPLETED",
+                            {"completed_at": datetime.now(timezone.utc).isoformat()},
+                        )
                     break
 
                 if self._check_stop_requested():
@@ -2057,11 +2243,15 @@ class Orchestrator:
                                 break
                             elif result.returncode == 2 and "BLOCKED" in output:
                                 print(f"[INFO] Roadmap blocked. Halting.")
+                                _blk = datetime.now(timezone.utc).isoformat()
                                 self.transition_state("BLOCKED", "Roadmap blocked")
-                                self._queue_update_active_entry(
+                                self._queue_park_active_entry(
                                     "BLOCKED",
-                                    {"blocked_at": datetime.now(timezone.utc).isoformat()}
+                                    "roadmap_blocked",
+                                    {"blocked_at": _blk},
                                 )
+                                if self._queue_after_park_maybe_advance():
+                                    continue
                                 break
                         except subprocess.CalledProcessError as e:
                             print(f"[ERROR] Roadmap parser failed: {e}")
@@ -2284,9 +2474,9 @@ class Orchestrator:
                         _ps["escalation_trigger_reason"] = self.state.get("last_action", "escalation triggered")
                         self.write_phase_state_atomic(_ps)
                         self.transition_state("WAITING_FOR_HUMAN", "Invoking Escalation Agent")
-                        
+                        self._queue_park_active_entry("ESCALATION", "escalation")
                         webhook_status = invoke_agent_webhook("escalation", session_key, token)
-                        
+
                         if webhook_status != "SUCCESS":
                             print("[ERROR] Escalation agent webhook failed. Attempting raw signal.")
                             raw_payload = {
@@ -2313,19 +2503,21 @@ class Orchestrator:
                                     {"failed_at": datetime.now(timezone.utc).isoformat()},
                                 )
                                 break
+                        if self._queue_after_park_maybe_advance():
+                            continue
                     else:
-                        sentinel_path = os.path.join(SYMLINK_TARGET, "escalation_output.done")
-                        if poll_for_sentinel(sentinel_path, timeout_seconds=10):
-                            out_path = os.path.join(SYMLINK_TARGET, "escalation_output.json")
+                        out_path = self._poll_escalation_output_json_path(timeout_seconds=10)
+                        if out_path:
                             try:
-                                with open(out_path, 'r') as f:
+                                with open(out_path, "r") as f:
                                     cmd_data = json.load(f)
                                 command = cmd_data.get("command", "").upper()
                             except Exception:
                                 command = "STOP"
-                            
+
                             print(f"[INFO] Human command received: {command}")
-                            cleanup_output_files(SYMLINK_TARGET, "escalation")
+                            _esc_root = os.path.dirname(out_path)
+                            cleanup_output_files(_esc_root, "escalation")
                             
                             if command == "RETRY":
                                 # Used by StoppedRecoveryPanel resume flow (STOPPED → WAITING_FOR_HUMAN → RETRY).

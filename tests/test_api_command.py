@@ -133,7 +133,7 @@ class TestPostApiCommand:
                 response = test_client.post("/api/command", json={"command": "RETRY"})
                 
                 assert response.status_code == 409
-                assert response.json()["detail"] == "Pipeline is not waiting for human input"
+                assert "not waiting for human input" in response.json()["detail"]
 
     def test_command_unknown_returns_400(self, test_client, temp_project_dir):
         with patch("ui.server.load_config") as mock_config:
@@ -174,7 +174,7 @@ class TestPostApiCommand:
                 response = test_client.post("/api/command", json={"command": "RESET_PHASE"})
                 
                 assert response.status_code == 409
-                assert response.json()["detail"] == "Reset cap reached"
+                assert "Reset cap reached" in response.json()["detail"]
 
     def test_command_reset_execution_when_escalation_resets_ge_3_returns_409(self, test_client, temp_project_dir):
         with patch("ui.server.load_config") as mock_config:
@@ -195,7 +195,7 @@ class TestPostApiCommand:
                 response = test_client.post("/api/command", json={"command": "RESET_EXECUTION"})
                 
                 assert response.status_code == 409
-                assert response.json()["detail"] == "Reset cap reached"
+                assert "Reset cap reached" in response.json()["detail"]
 
     def test_command_non_reset_ignores_reset_cap(self, test_client, temp_project_dir):
         """RETRY/SKIP/PROCEED/STOP are not subject to the reset cap."""

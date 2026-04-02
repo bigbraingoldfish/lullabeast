@@ -2,8 +2,8 @@
 
 import json
 import os
+import re
 import sys
-import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -241,3 +241,37 @@ class TestErrorHandling:
 
         result = register_roadmap_converter(str(oc_json), str(tmp_path))
         assert result.startswith("error:")
+
+
+# ---------------------------------------------------------------------------
+# install.sh Step 6 — roadmap-converter workspace (contract + source files)
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_INSTALL_SH = _REPO_ROOT / "install.sh"
+
+
+def _install_sh_step6_section() -> str:
+    text = _INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("6/13  AGENT WORKSPACE PROVISIONING")
+    end = text.index("7/13  EXEC-APPROVALS VALIDATION")
+    return text[start:end]
+
+
+class TestStep6RoadmapConverterWorkspace:
+    def test_roadmap_converter_workspace_files_match_source(self):
+        rc = _REPO_ROOT / "autodev" / "agents" / "roadmap-converter"
+        for name in ("IDENTITY.md", "SOUL.md", "TOOLS.md", "AGENTS.md", "USER.md"):
+            assert (rc / name).is_file(), f"missing {name}"
+        assert not (rc / "HEARTBEAT.md").exists()
+
+    def test_step6_provisions_roadmap_converter(self):
+        step6 = _install_sh_step6_section()
+        loops = list(re.finditer(r"for agent in ([^;]+);\s*do", step6))
+        assert len(loops) == 4, f"expected 4 'for agent in' loops in step 6, got {len(loops)}"
+        for m in loops:
+            agents = " ".join(m.group(1).split())
+            assert "roadmap-converter" in agents, f"missing roadmap-converter in: {agents!r}"
+        assert "planner|executor|reviewer|roadmap-converter" not in step6
+        assert re.search(r'case "\$agent" in planner\|executor\|reviewer\)', step6)
+        assert step6.count('mkdir -p "$dst_dir/skills"') >= 1

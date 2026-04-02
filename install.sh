@@ -329,6 +329,11 @@ for agent in planner executor reviewer escalation prd-creator roadmap-converter;
         fi
         ;;
     esac
+
+    # Empty skills/ for runtime injection (roadmap-converter is not a pipeline agent)
+    if [ "$agent" = "roadmap-converter" ]; then
+        mkdir -p "$dst_dir/skills"
+    fi
 done
 
 if [ "${#MISSING_FILES[@]}" -gt 0 ]; then
@@ -356,6 +361,9 @@ if [ "${#MISSING_FILES[@]}" -gt 0 ]; then
                 fi
                 ;;
             esac
+            if [ "$agent" = "roadmap-converter" ]; then
+                mkdir -p "$dst_dir/skills"
+            fi
             AGENT_COUNTS[$agent]=$count
             TOTAL_DEPLOYED=$((TOTAL_DEPLOYED + count))
             ok "$agent: $count file(s) deployed → $dst_dir"
