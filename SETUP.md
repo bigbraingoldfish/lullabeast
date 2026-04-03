@@ -34,17 +34,21 @@ cd autodev-ui
 
 `install.sh` works through ten steps in order. You will see colored output for each step. Steps 1–4 exit on failure; steps 5–9 emit warnings and continue, collecting all issues for the final summary.
 
-What the script does:
+What the script does (summary):
 
 1. Checks Python 3.9+, pip, git, and Linux.
-2. Sets `AUTODEV_REPO_PATH` (the repo directory) and `AUTODEV_ROOT` (defaults to `~/.openclaw`). Both are exported for the session and written to `.env`.
-3. Validates your OpenClaw installation: checks that `~/.openclaw` exists, that `openclaw.json` is present, that no stale `pipeline.lock` is sitting around, and that the pre-migration `orchestrator.py` has been removed from `~/.openclaw` if it was previously there.
-4. Runs `pip install -r ui/requirements.txt`.
-5. Copies identity files from `autodev/agents/{agent}/` into `~/.openclaw/workspace-{agent}/` for each of the five agents. Uses `cp -u` so it only overwrites files older than the source.
-6. Checks that the PRD-to-roadmap conversion prompt file exists.
-7. Checks `exec-approvals.json` for stale gate script paths.
-8. Updates `cron/jobs.json` if the heartbeat watchdog path still points to the old `~/.openclaw/heartbeat_cron.py` location.
-9. Writes `.env` (skips if it already exists).
+2. Detects `AUTODEV_ROOT` (OpenClaw home, usually `~/.openclaw`) and `AUTODEV_REPO_PATH` (this repo).
+3. **Bootstraps** a minimal `openclaw.json` if it is missing (does not overwrite an existing file).
+4. Creates **`$AUTODEV_REPO_PATH/.autodev/`** (repo-local pipeline runtime: state, lock, queue, ideas, `pipeline-project` symlink target). See [docs/RUNTIME-MIGRATION.md](docs/RUNTIME-MIGRATION.md).
+5. Runs `pip install -r ui/requirements.txt` (interactive confirm unless non-interactive).
+6. **Creates** missing `workspace-{agent}/` directories under OpenClaw and copies agent identity files with `cp -u`.
+7. **Refreshes** stale `gate_scripts` paths inside `exec-approvals.json` when possible (atomic rewrite).
+8. OpenClaw version check (warning-only if below recommended).
+9. Registers **roadmap-converter** in `openclaw.json` when needed.
+10. Confirms bundled PRD→roadmap instructions at `autodev/prompts/prd-to-roadmap-conversion.txt`.
+11. **Merges** `.env` non-destructively (`AUTODEV_ROOT`, `AUTODEV_REPO_PATH`, `AUTODEV_RUNTIME_ROOT`).
+12. Updates `ui/config.json` with `autodev_repo_path` and `openclaw_root`.
+13. Heartbeat `cron/jobs.json` path update when applicable.
 
 If install.sh exits cleanly with no warnings, the system is ready. If it exits with warnings, read each warning — most require a one-line manual fix.
 

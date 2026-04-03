@@ -53,6 +53,25 @@ def _make_openclaw_dir(tmp_path: Path, repo_path: Path):
     return openclaw
 
 
+def _preflight_config(openclaw: Path, repo_path: Path) -> dict:
+    """Legacy-style symlink under openclaw (explicit config avoids real load_config())."""
+    pp = str(openclaw / "pipeline-project")
+    oc = str(openclaw)
+    return {
+        "openclaw_root": oc,
+        "project_dir_path": pp,
+        "autodev_repo_path": str(repo_path),
+        "use_legacy_openclaw_runtime": True,
+        "pipeline_state_path": os.path.join(oc, "pipeline_state.json"),
+        "lock_path": os.path.join(oc, "pipeline.lock"),
+        "pipeline_queue_path": os.path.join(oc, "pipeline_queue.json"),
+        "events_path": os.path.join(oc, "pipeline_events.jsonl"),
+        "ideas_dir": os.path.join(oc, "ideas"),
+        "phase_state_path": os.path.join(pp, "phase_state.json"),
+        "roadmap_path": os.path.join(pp, "roadmap.md"),
+    }
+
+
 def _make_git_repo(repo_path: Path, branch: str = "main"):
     """Create a minimal git repo structure (no actual git init, just dirs)."""
     (repo_path / ".git").mkdir(parents=True, exist_ok=True)
@@ -144,9 +163,10 @@ class TestSymlinkCheck:
         _make_git_repo(repo_path)
         (repo_path / "roadmap.md").write_text("# Roadmap\n")
 
-        with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
-            results = _run_preflight_checks(str(repo_path))
+        with patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
 
         sym = next(c for c in results if c["check"] == "symlink")
         assert sym["status"] == "pass"
@@ -166,9 +186,10 @@ class TestSymlinkCheck:
         _make_gitignore(repo_path, _full_gitignore_content())
         _make_git_repo(repo_path)
 
-        with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
-            results = _run_preflight_checks(str(repo_path))
+        with patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
 
         sym = next(c for c in results if c["check"] == "symlink")
         assert sym["status"] == "fixed"
@@ -185,9 +206,10 @@ class TestSymlinkCheck:
         _make_gitignore(repo_path, _full_gitignore_content())
         _make_git_repo(repo_path)
 
-        with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
-            results = _run_preflight_checks(str(repo_path))
+        with patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
 
         sym = next(c for c in results if c["check"] == "symlink")
         assert sym["status"] == "fixed"
@@ -203,9 +225,10 @@ class TestGitignoreCheck:
         _make_git_repo(repo_path)
         # No .gitignore
 
-        with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
-            results = _run_preflight_checks(str(repo_path))
+        with patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
 
         gi = next(c for c in results if c["check"] == ".gitignore")
         assert gi["status"] == "fixed"
@@ -220,9 +243,10 @@ class TestGitignoreCheck:
         _make_gitignore(repo_path, "*.done\n")
         (repo_path / "roadmap.md").write_text("# Roadmap\n")
 
-        with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
-            results = _run_preflight_checks(str(repo_path))
+        with patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
 
         entries_check = next(c for c in results if c["check"] == ".gitignore entries")
         assert entries_check["status"] == "fixed"
@@ -237,9 +261,10 @@ class TestGitignoreCheck:
         _make_gitignore(repo_path, _full_gitignore_content())
         (repo_path / "roadmap.md").write_text("# Roadmap\n")
 
-        with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
-            results = _run_preflight_checks(str(repo_path))
+        with patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
 
         entries_check = next(c for c in results if c["check"] == ".gitignore entries")
         assert entries_check["status"] == "pass"
@@ -256,9 +281,10 @@ class TestGitRepoCheck:
         _make_gitignore(repo_path, _full_gitignore_content())
         # No .git dir — use real git for init/branch
 
-        with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_delegate_git_subprocess_preflight):
-            results = _run_preflight_checks(str(repo_path))
+        with patch("subprocess.run", side_effect=_delegate_git_subprocess_preflight):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
 
         git = next(c for c in results if c["check"] == "git repo")
         assert git["status"] == "fixed"
@@ -295,9 +321,10 @@ class TestGitRepoCheck:
             mock.stdout = ""
             return mock
 
-        with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=no_branch):
-            results = _run_preflight_checks(str(repo_path))
+        with patch("subprocess.run", side_effect=no_branch):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
 
         git = next(c for c in results if c["check"] == "git repo")
         assert git["status"] == "fail"
@@ -334,9 +361,10 @@ class TestGitRepoCheck:
             mock.stdout = ""
             return mock
 
-        with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=unborn_main):
-            results = _run_preflight_checks(str(repo_path))
+        with patch("subprocess.run", side_effect=unborn_main):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
 
         git = next(c for c in results if c["check"] == "git repo")
         assert git["status"] == "warn"
@@ -374,9 +402,10 @@ class TestGitRepoCheck:
             mock.stdout = ""
             return mock
 
-        with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=phase_only):
-            results = _run_preflight_checks(str(repo_path))
+        with patch("subprocess.run", side_effect=phase_only):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
 
         git = next(c for c in results if c["check"] == "git repo")
         assert git["status"] == "warn"
@@ -393,9 +422,10 @@ class TestGitExecutableCheck:
         _make_gitignore(repo_path, _full_gitignore_content())
         _make_git_repo(repo_path)
 
-        with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
-            results = _run_preflight_checks(str(repo_path))
+        with patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
 
         git = next(c for c in results if c["check"] == "git")
         assert git["status"] == "pass"
@@ -412,9 +442,10 @@ class TestRoadmapFileCheck:
         _make_git_repo(repo_path)
         # No roadmap file
 
-        with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
-            results = _run_preflight_checks(str(repo_path))
+        with patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
 
         roadmap = next(c for c in results if c["check"] == "roadmap file")
         assert roadmap["status"] == "warn"
@@ -428,9 +459,10 @@ class TestRoadmapFileCheck:
         _make_git_repo(repo_path)
         (repo_path / "roadmap.md").write_text("# Roadmap\n")
 
-        with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
-            results = _run_preflight_checks(str(repo_path))
+        with patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
 
         roadmap = next(c for c in results if c["check"] == "roadmap file")
         assert roadmap["status"] == "pass"
@@ -447,9 +479,10 @@ class TestAllChecksInResponse:
         _make_git_repo(repo_path)
         (repo_path / "roadmap.md").write_text("# Roadmap\n")
 
-        with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
-            results = _run_preflight_checks(str(repo_path))
+        with patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
 
         check_names = [c["check"] for c in results]
         assert "symlink" in check_names
@@ -467,9 +500,10 @@ class TestAllChecksInResponse:
         _make_gitignore(repo_path, _full_gitignore_content())
         _make_git_repo(repo_path)
 
-        with patch("os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
-             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
-            results = _run_preflight_checks(str(repo_path))
+        with patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
 
         for item in results:
             assert "check" in item
@@ -494,7 +528,7 @@ class TestPreflightEndpoint:
 
         client = load_server()
 
-        with patch("ui.server.os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
+        with patch("ui.server.load_config", return_value=_preflight_config(openclaw, repo_path)), \
              patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
             response = client.post("/api/setup/preflight", json={"repo_path": str(repo_path)})
 
@@ -526,7 +560,7 @@ class TestPreflightEndpoint:
 
         client = load_server()
 
-        with patch("ui.server.os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
+        with patch("ui.server.load_config", return_value=_preflight_config(openclaw, repo_path)), \
              patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
             response = client.post("/api/setup/preflight", json={"repo_path": str(repo_path)})
 
@@ -545,7 +579,7 @@ class TestPreflightEndpoint:
 
         client = load_server()
 
-        with patch("ui.server.os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
+        with patch("ui.server.load_config", return_value=_preflight_config(openclaw, repo_path)), \
              patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
             response = client.post("/api/setup/preflight", json={"repo_path": str(repo_path)})
 
@@ -591,7 +625,7 @@ class TestPreflightEndpointWithSeed:
         _make_git_repo(repo_path)
 
         client = load_server()
-        with patch("ui.server.os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else str(repo_path)), \
+        with patch("ui.server.load_config", return_value=_preflight_config(openclaw, repo_path)), \
              patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
             response = client.post(
                 "/api/setup/preflight",

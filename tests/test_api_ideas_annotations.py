@@ -173,12 +173,13 @@ def test_annotations_injected_into_message_turn(idea_id, config_patch, ideas_dir
         captured_payload.update(kwargs.get("json", {}))
         mock_resp = MagicMock()
         mock_resp.status = 200
+        mock_resp.read = AsyncMock(return_value=b"")
         return mock_resp
 
     fake_session = MagicMock()
     fake_session.__aenter__ = AsyncMock(return_value=fake_session)
     fake_session.__aexit__ = AsyncMock(return_value=False)
-    fake_session.post = fake_post
+    fake_session.post = AsyncMock(side_effect=fake_post)
 
     # Write a turn sentinel so the poll resolves immediately
     turns_dir = Path(ideas_dir) / idea_id / "turns"
@@ -212,12 +213,13 @@ def test_annotations_marked_submitted_after_turn(idea_id, config_patch, ideas_di
     async def fake_post(url, **kwargs):
         mock_resp = MagicMock()
         mock_resp.status = 200
+        mock_resp.read = AsyncMock(return_value=b"")
         return mock_resp
 
     fake_session = MagicMock()
     fake_session.__aenter__ = AsyncMock(return_value=fake_session)
     fake_session.__aexit__ = AsyncMock(return_value=False)
-    fake_session.post = fake_post
+    fake_session.post = AsyncMock(side_effect=fake_post)
 
     turns_dir = Path(ideas_dir) / idea_id / "turns"
     (turns_dir / "2.md").write_text("Agent replied")

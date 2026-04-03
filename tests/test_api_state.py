@@ -265,3 +265,41 @@ class TestApiStateEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert data["pipeline_status"] == "UNKNOWN"
+
+    def test_keeps_project_path_from_pipeline_state_when_symlink_differs(self, temp_dir):
+        """Avoid mixing stale status with symlink-resolved project in one state payload."""
+        state_project = os.path.join(temp_dir, "state_project")
+        symlink_project = os.path.join(temp_dir, "symlink_project")
+        os.makedirs(state_project, exist_ok=True)
+        os.makedirs(symlink_project, exist_ok=True)
+
+        state_path = os.path.join(temp_dir, "pipeline_state.json")
+        with open(state_path, "w") as f:
+            json.dump(
+                {
+                    "pipeline_status": "PIPELINE_COMPLETE",
+                    "project_path": state_project,
+                    "current_agent": "planner",
+                },
+                f,
+            )
+
+        # project_dir_path resolves to a different project than pipeline_state.project_path
+        project_link = os.path.join(temp_dir, "pipeline-project")
+        os.symlink(symlink_project, project_link)
+
+        cfg = {
+            "pipeline_state_path": state_path,
+            "phase_state_path": os.path.join(temp_dir, "phase_state.json"),
+            "lock_path": os.path.join(temp_dir, "pipeline.lock"),
+            "events_path": os.path.join(temp_dir, "pipeline_events.jsonl"),
+            "project_dir_path": project_link,
+        }
+
+        with patch("ui.server.load_config", return_value=cfg):
+            response = client.get("/api/state")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert os.path.realpath(data["project_path"]) == os.path.realpath(state_project)
+        assert os.path.realpath(data["project_symlink_target"]) == os.path.realpath(symlink_project)

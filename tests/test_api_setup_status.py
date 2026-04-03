@@ -205,9 +205,17 @@ class TestMissingItems:
         _make_workspaces(openclaw)
         cfg = _make_config(openclaw, tmp_path,
                            prompt_path=str(tmp_path / "nonexistent_prompt.txt"))
+        real_isfile = os.path.isfile
+
+        def isfile_no_bundle(p):
+            s = os.path.abspath(str(p))
+            if s.endswith("prd-to-roadmap-conversion.txt"):
+                return False
+            return real_isfile(p)
 
         with patch("ui.server.load_config", return_value=cfg), \
-             patch("ui.server.os.path.exists", return_value=False):
+             patch("ui.server.os.path.exists", return_value=False), \
+             patch("ui.server.os.path.isfile", side_effect=isfile_no_bundle):
             r = client.get("/api/setup/status")
 
         assert "conversion_prompt" in r.json()["missing_items"]
