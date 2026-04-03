@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from collections import deque
 from datetime import datetime, timezone
@@ -33,7 +34,7 @@ from autodev.pipeline.queue_semantics import parent_blocks_child
 ORCHESTRATOR_FILENAME = "orchestrator.py"
 WEBHOOK_AGENT_ID = "prd-creator"
 ROADMAP_CONVERTER_AGENT_ID = "roadmap-converter"
-# POLL_TIMEOUT is defined later in this file (line ~1494); ORCHESTRATOR_POLL_TIMEOUT aliases it.
+# ORCHESTRATOR_POLL_TIMEOUT: spawn/orchestrator wait (separate from ideas POLL_TIMEOUT below).
 ORCHESTRATOR_POLL_TIMEOUT = 120
 
 
@@ -73,6 +74,7 @@ if not logger.handlers:
 logger.propagate = False
 _active_readiness_jobs: set[str] = set()  # idea IDs currently sending readiness webhook
 _readiness_job_started_at: dict[str, float] = {}  # idea ID -> epoch seconds
+# Ideas UI polls readiness for 60×3s (180s); keep this window aligned (ui/index.html startReadinessPoll).
 READINESS_ACTIVE_WINDOW_SECONDS = 180
 
 
@@ -388,6 +390,10 @@ DEFAULTS = {
     "autodev_repo_path": os.environ.get("AUTODEV_REPO_PATH", os.path.expanduser("~/.openclaw")),
     "roadmap_converter_workspace": "~/.openclaw/workspace-roadmap-converter",
     "pipeline_queue_path": "~/.openclaw/pipeline_queue.json",
+    "poll_timeout": 180,
+    "poll_interval": 2,
+    "ideas_idle_threshold": 120,  # seconds of JSONL silence before declaring agent idle
+    "ideas_startup_grace": 30,    # seconds to wait for OpenClaw to register the session
 }
 
 
@@ -1962,6 +1968,134 @@ def get_metrics_summary():
 POLL_TIMEOUT = 180  # seconds; patchable in tests
 POLL_INTERVAL = 2   # seconds between sentinel checks
 
+IDEAS_WEBHOOK_POST_TIMEOUT = aiohttp.ClientTimeout(total=10)
+
+
+def _mark_last_pending_assistant_error(session_path: os.PathLike | str, error_message: str) -> None:
+    """Mark the last pending assistant message in session.json as failed (atomic write)."""
+    sp = os.fspath(session_path)
+    data = _read_json_file(sp) or {}
+    msgs = data.get("messages", [])
+    for _m in reversed(msgs):
+        if _m.get("pending") and _m.get("role") == "assistant":
+            _m["pending"] = False
+            _m["error"] = True
+            _m["content"] = error_message
+            break
+    data["messages"] = msgs
+    _atomic_write_json_file(sp, data)
+
+
+async def _post_agent_webhook(hooks_url: str, hooks_token: str, webhook_payload: dict) -> None:
+    """POST to OpenClaw agent hook. Raises HTTPException 503 on connect/timeout, 502 on non-2xx."""
+    headers = {"Authorization": f"Bearer {hooks_token}"}
+    try:
+        async with aiohttp.ClientSession(timeout=IDEAS_WEBHOOK_POST_TIMEOUT) as session:
+            resp = await session.post(hooks_url, json=webhook_payload, headers=headers)
+            await resp.read()
+    except (aiohttp.ClientConnectionError, aiohttp.ServerTimeoutError, asyncio.TimeoutError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Webhook connection failed: {exc}",
+        ) from exc
+    if not (200 <= resp.status < 300):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Webhook returned {resp.status}",
+        )
+
+
+def _resolve_prd_creator_jsonl(session_key: str, openclaw_root: str) -> str | None:
+    """Resolve the JSONL file path for a prd-creator session.
+
+    Reads {openclaw_root}/agents/prd-creator/sessions/sessions.json, looks up
+    ``agent:prd-creator:{session_key}``, and returns the full path to the
+    corresponding .jsonl file.  Returns None on any error or missing entry.
+    """
+    sessions_json = os.path.join(
+        os.path.expanduser(openclaw_root),
+        "agents", "prd-creator", "sessions", "sessions.json",
+    )
+    try:
+        with open(sessions_json) as f:
+            sessions = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    full_key = f"agent:prd-creator:{session_key}"
+    entry = sessions.get(full_key)
+    if not entry:
+        return None
+
+    session_id = entry.get("sessionId")
+    if not session_id:
+        return None
+
+    return os.path.join(
+        os.path.expanduser(openclaw_root),
+        "agents", "prd-creator", "sessions", f"{session_id}.jsonl",
+    )
+
+
+async def _poll_sentinel_with_idle_detect(
+    done_path,
+    session_key: str,
+    openclaw_root: str,
+    poll_timeout: float,
+    poll_interval: float,
+    idle_threshold: float,
+    startup_grace: float,
+) -> bool:
+    """Poll for a sentinel file with JSONL-based idle detection.
+
+    Returns True when the sentinel appears.  Returns False when either:
+    - The JSONL mtime has not advanced for ``idle_threshold`` seconds (agent idle), or
+    - ``poll_timeout`` seconds have elapsed with no sentinel (hard timeout fallback).
+
+    During ``startup_grace`` seconds from start, we retry resolving the JSONL path
+    from sessions.json on every tick (OpenClaw may not register the session instantly).
+    After startup_grace expires without finding the JSONL, idle detection is disabled
+    and only the hard timeout applies.
+    """
+    start = time.monotonic()
+    deadline = start + poll_timeout
+
+    jsonl_path: str | None = None
+    last_mtime: float | None = None
+    last_activity = start  # reset whenever mtime advances
+
+    while True:
+        if Path(done_path).exists():
+            return True
+
+        now = time.monotonic()
+        if now >= deadline:
+            return False
+
+        # Try to resolve JSONL path during startup grace period
+        if jsonl_path is None:
+            jsonl_path = _resolve_prd_creator_jsonl(session_key, openclaw_root)
+            if jsonl_path is None and (now - start) > startup_grace:
+                # Grace expired with no session registered — agent never started; fail now
+                return False
+
+        # Check JSONL activity if path is resolved
+        if jsonl_path is not None:
+            try:
+                mtime = os.path.getmtime(jsonl_path)
+            except OSError:
+                mtime = None
+
+            if mtime is not None:
+                if last_mtime is None or mtime > last_mtime:
+                    last_mtime = mtime
+                    last_activity = now
+                elif (now - last_activity) >= idle_threshold:
+                    # No new writes for idle_threshold seconds — declare agent idle
+                    return False
+
+        await asyncio.sleep(poll_interval)
+
 
 def _parse_agent_response(content: str) -> dict:
     """Parse agent response content into structured components.
@@ -2317,23 +2451,40 @@ async def post_ideas_message(idea_id: str, request: Request):
         _pre_save_data["created"] = _pre_save_ts
     _atomic_write_json_file(str(session_path), _pre_save_data)
 
-    # Send webhook POST via a per-request aiohttp session
-    headers = {"Authorization": f"Bearer {hooks_token}"}
-    async with aiohttp.ClientSession() as session:
-        await session.post(hooks_url, json=webhook_payload, headers=headers)
+    poll_timeout = float(config.get("poll_timeout", POLL_TIMEOUT))
+    poll_interval = float(config.get("poll_interval", POLL_INTERVAL))
+    idle_threshold = float(config.get("ideas_idle_threshold", 120))
+    startup_grace = float(config.get("ideas_startup_grace", 30))
+    openclaw_root = os.path.expanduser(config.get("openclaw_root", "~/.openclaw"))
+
+    try:
+        await _post_agent_webhook(hooks_url, hooks_token, webhook_payload)
+    except HTTPException as exc:
+        if exc.status_code == 503:
+            _mark_last_pending_assistant_error(
+                session_path,
+                "Agent gateway unreachable — check OpenClaw is running.",
+            )
+        elif exc.status_code == 502:
+            _status_tail = (str(exc.detail).split()[-1]).rstrip(".")
+            _mark_last_pending_assistant_error(
+                session_path,
+                f"Agent gateway returned HTTP {_status_tail}.",
+            )
+        raise
+
     turns_dir = idea_dir / "turns"
     # Sentinel paths per ~/.openclaw/workspace-prd-creator/AGENTS.md: turns/{n}.md / turns/{n}.done
     done_path = turns_dir / f"{turn_n}.done"
     md_path = turns_dir / f"{turn_n}.md"
     prd_draft_path = idea_dir / "prd_draft.md"
 
-    deadline = datetime.utcnow().timestamp() + POLL_TIMEOUT
-    while datetime.utcnow().timestamp() < deadline:
-        if done_path.exists():
-            break
-        await asyncio.sleep(POLL_INTERVAL)
-    else:
-        # Timed out — update the pre-saved pending placeholder to an error state
+    sentinel_found = await _poll_sentinel_with_idle_detect(
+        done_path, session_key, openclaw_root,
+        poll_timeout, poll_interval, idle_threshold, startup_grace,
+    )
+    if not sentinel_found:
+        # Timed out / agent idle — update the pre-saved pending placeholder to an error state
         # so the user sees a clear error on refresh instead of a "working…" spinner
         _timeout_data = _read_json_file(str(session_path)) or _pre_save_data
         _timeout_msgs = _timeout_data.get("messages", [])
@@ -2341,13 +2492,13 @@ async def post_ideas_message(idea_id: str, request: Request):
             if _m.get("pending"):
                 _m["pending"] = False
                 _m["error"] = True
-                _m["content"] = "Agent response timed out. You can retry."
+                _m["content"] = "Agent timed out — the model may be slow. You can retry."
                 break
         _timeout_data["messages"] = _timeout_msgs
         _atomic_write_json_file(str(session_path), _timeout_data)
         raise HTTPException(
             status_code=408,
-            detail=f"No agent response after {POLL_TIMEOUT}s — the model may be slow or the agent session may be stalled.",
+            detail=f"No agent response after {int(poll_timeout)}s — the model may be slow or the agent session may be stalled.",
         )
 
     # Read agent response
@@ -2776,20 +2927,22 @@ async def post_ideas_upload(
         ),
     }
 
-    headers = {"Authorization": f"Bearer {hooks_token}"}
-    async with aiohttp.ClientSession() as session:
-        await session.post(hooks_url, json=webhook_payload, headers=headers)
+    poll_timeout = float(config.get("poll_timeout", POLL_TIMEOUT))
+    poll_interval = float(config.get("poll_interval", POLL_INTERVAL))
+    idle_threshold = float(config.get("ideas_idle_threshold", 120))
+    startup_grace = float(config.get("ideas_startup_grace", 30))
+    openclaw_root = os.path.expanduser(config.get("openclaw_root", "~/.openclaw"))
+    await _post_agent_webhook(hooks_url, hooks_token, webhook_payload)
 
     done_path = turns_dir / f"{upload_turn}.done"
-    deadline = datetime.utcnow().timestamp() + POLL_TIMEOUT
-    while datetime.utcnow().timestamp() < deadline:
-        if done_path.exists():
-            break
-        await asyncio.sleep(POLL_INTERVAL)
-    else:
+    sentinel_found = await _poll_sentinel_with_idle_detect(
+        done_path, session_key, openclaw_root,
+        poll_timeout, poll_interval, idle_threshold, startup_grace,
+    )
+    if not sentinel_found:
         raise HTTPException(
             status_code=408,
-            detail=f"PRD synthesis timed out after {POLL_TIMEOUT}s — the model may be slow or the agent session may be stalled.",
+            detail=f"PRD synthesis timed out after {int(poll_timeout)}s — the model may be slow or the agent session may be stalled.",
         )
 
     prd_draft_path = idea_dir / "prd_draft.md"
@@ -3143,24 +3296,36 @@ async def _notify_prd_agent(idea_id: str, config: dict, report_content: str, che
             "wakeMode": "now",
             "message": full_message,
         }
-        async with aiohttp.ClientSession() as http_session:
-            await http_session.post(
-                hooks_url,
-                json=payload,
-                headers={"Authorization": f"Bearer {hooks_token}"},
-                timeout=aiohttp.ClientTimeout(total=10),
-            )
+        poll_timeout = float(config.get("poll_timeout", POLL_TIMEOUT))
+        poll_interval = float(config.get("poll_interval", POLL_INTERVAL))
+        idle_threshold = float(config.get("ideas_idle_threshold", 120))
+        startup_grace = float(config.get("ideas_startup_grace", 30))
+        openclaw_root = os.path.expanduser(config.get("openclaw_root", "~/.openclaw"))
+        try:
+            await _post_agent_webhook(hooks_url, hooks_token, payload)
+        except HTTPException as exc:
+            if exc.status_code == 503:
+                _mark_last_pending_assistant_error(
+                    session_path,
+                    "Agent gateway unreachable — check OpenClaw is running.",
+                )
+            elif exc.status_code == 502:
+                _st = (str(exc.detail).split()[-1]).rstrip(".")
+                _mark_last_pending_assistant_error(
+                    session_path,
+                    f"Agent gateway returned HTTP {_st}.",
+                )
+            return
 
         # Poll for turns/{next_turn}.done
         done_path = idea_dir / "turns" / f"{next_turn}.done"
         response_path = idea_dir / "turns" / f"{next_turn}.md"
-        deadline = datetime.utcnow().timestamp() + POLL_TIMEOUT
-        while datetime.utcnow().timestamp() < deadline:
-            if done_path.exists():
-                break
-            await asyncio.sleep(POLL_INTERVAL)
-        else:
-            # Timed out — mark the pending placeholder as an error
+        sentinel_found = await _poll_sentinel_with_idle_detect(
+            done_path, session_key, openclaw_root,
+            poll_timeout, poll_interval, idle_threshold, startup_grace,
+        )
+        if not sentinel_found:
+            # Timed out / agent idle — mark the pending placeholder as an error
             logger.warning(
                 f"[CONVERTER] PRD agent notification timed out for {idea_id} turn {next_turn}"
             )

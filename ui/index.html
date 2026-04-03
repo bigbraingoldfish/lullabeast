@@ -1800,6 +1800,26 @@
             );
         }
 
+        function ChatElapsedSeconds({ startTs }) {
+            const [secs, setSecs] = useState(0);
+            useEffect(() => {
+                if (!startTs) return undefined;
+                const start = typeof startTs === "string" ? Date.parse(startTs) : startTs;
+                if (Number.isNaN(start)) return undefined;
+                const tick = () => {
+                    setSecs(Math.max(0, Math.floor((Date.now() - start) / 1000)));
+                };
+                tick();
+                const id = setInterval(tick, 1000);
+                return () => clearInterval(id);
+            }, [startTs]);
+            return (
+                <span className="text-slate-500 text-xs tabular-nums shrink-0 self-end pb-1">
+                    ({secs}s)
+                </span>
+            );
+        }
+
         function IdeasScreen() {
             const ctx = useContext(AppCtx);
             const [messages, setMessages] = useState([]);
@@ -1898,7 +1918,7 @@
                 stopNotificationPoll();
                 if (!ideaId) return;
                 let pollCount = 0;
-                const maxPolls = 24; // 24 × 5s = 120s (matching POLL_TIMEOUT)
+                const maxPolls = 24; // 24 × 5s = 120s (UI-side cap; server ideas poll_timeout default is 180s)
                 notificationPollRef.current = setInterval(() => {
                     pollCount += 1;
                     refreshMessages(ideaId);
@@ -1912,7 +1932,7 @@
                 let pollCount = 0;
                 readinessPollRef.current = setInterval(() => {
                     pollCount += 1;
-                    if (pollCount >= 40) {
+                    if (pollCount >= 60) {
                         stopReadinessPoll();
                         setReadinessStatus("unavailable");
                         setReadinessData(null);
@@ -2117,7 +2137,16 @@
                         refreshAnnotations(currentIdeaId);
                         refreshIdeas();
                     })
-                    .catch(() => {
+                    .catch((err) => {
+                        const status = parseInt(err?.message, 10);
+                        let errorMsg = "Message sent but agent response failed. You can retry.";
+                        if (status === 408) {
+                            errorMsg = "Agent timed out — the model may be slow. You can retry.";
+                        } else if (status === 502 || status === 503) {
+                            errorMsg = "Agent gateway is unreachable. Check that OpenClaw is running.";
+                        } else if (!Number.isFinite(status)) {
+                            errorMsg = "Network error — check your connection and retry.";
+                        }
                         setMessages((prev) =>
                             prev.map((m) =>
                                 m.id === assistantPendingId
@@ -2125,7 +2154,7 @@
                                           ...m,
                                           pending: false,
                                           error: true,
-                                          content: "Message sent but agent response failed or timed out. You can retry.",
+                                          content: errorMsg,
                                           ts: new Date().toISOString(),
                                       }
                                     : m
@@ -2614,25 +2643,28 @@
                                                     <span className="italic">{assumption}</span>
                                                 </div>
                                             ))}
-                                            {/* Prose bubble */}
+                                            {/* Prose bubble + elapsed timer while pending */}
                                             {(msg.content || "").trim().length > 0 && (
-                                                <div
-                                                    className={`msg-md rounded px-3 py-2 text-sm ${
-                                                        msg.error
-                                                            ? "bg-red-950/30 border border-red-900/60 text-red-200"
-                                                            : msg.pending
-                                                              ? "bg-[#1a1d21] text-slate-400 border border-slate-600/50 chat-pending-soft"
-                                                              : "bg-[#1a1d21] text-slate-200"
-                                                    }`}
-                                                    dangerouslySetInnerHTML={{
-                                                        __html:
-                                                            typeof marked !== "undefined" && marked.parse
-                                                                ? marked.parse(msg.content || "", { breaks: true })
-                                                                : String(msg.content || "")
-                                                                      .replace(/&/g, "&amp;")
-                                                                      .replace(/</g, "&lt;"),
-                                                    }}
-                                                />
+                                                <div className="flex flex-row items-stretch gap-1 w-full min-w-0">
+                                                    <div
+                                                        className={`msg-md rounded px-3 py-2 text-sm min-w-0 flex-1 ${
+                                                            msg.error
+                                                                ? "bg-red-950/30 border border-red-900/60 text-red-200"
+                                                                : msg.pending
+                                                                  ? "bg-[#1a1d21] text-slate-400 border border-slate-600/50 chat-pending-soft"
+                                                                  : "bg-[#1a1d21] text-slate-200"
+                                                        }`}
+                                                        dangerouslySetInnerHTML={{
+                                                            __html:
+                                                                typeof marked !== "undefined" && marked.parse
+                                                                    ? marked.parse(msg.content || "", { breaks: true })
+                                                                    : String(msg.content || "")
+                                                                          .replace(/&/g, "&amp;")
+                                                                          .replace(/</g, "&lt;"),
+                                                        }}
+                                                    />
+                                                    {msg.pending && <ChatElapsedSeconds startTs={msg.ts} />}
+                                                </div>
                                             )}
                                             {/* Question flow — shown for the last assistant message if questions present and not yet answered */}
                                             {msg.parsed && msg.parsed.questions && msg.parsed.questions.length > 0 && !answeredFlowIds.has(msg.id) && (
