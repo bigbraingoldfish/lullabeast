@@ -10,5 +10,9 @@
   "ideas_dir": "~/.openclaw/ideas",
   "hooks_url": "http://localhost:18789/hooks/agent",
   "hooks_token": "",
-  "conversion_prompt_path": "~/.openclaw/deployment-package/Updates/PRD to Roadmap (sonnet 4.5 ideal).txt"
+  "conversion_prompt_path": "~/.openclaw/deployment-package/Updates/PRD to Roadmap (sonnet 4.5 ideal).txt",
+  "poll_timeout": 180,
+  "poll_interval": 2,
+  "ideas_idle_threshold": 120,
+  "ideas_startup_grace": 30
 }

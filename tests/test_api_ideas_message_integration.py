@@ -57,6 +57,7 @@ class TestApiIdeasMessageIntegration:
     def _make_mock_response(self):
         mock_resp = MagicMock()
         mock_resp.status = 200
+        mock_resp.read = AsyncMock(return_value=b"")
         mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
         mock_resp.__aexit__ = AsyncMock(return_value=None)
         return mock_resp

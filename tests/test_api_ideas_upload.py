@@ -62,6 +62,7 @@ class TestUploadMdFileSynthesis:
 
         mock_resp = MagicMock()
         mock_resp.status = 200
+        mock_resp.read = AsyncMock(return_value=b"")
         mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
         mock_resp.__aexit__ = AsyncMock(return_value=None)
         mock_session = MagicMock()
@@ -106,6 +107,7 @@ class TestUploadMdFileSynthesis:
 
         mock_resp = MagicMock()
         mock_resp.status = 200
+        mock_resp.read = AsyncMock(return_value=b"")
         mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
         mock_resp.__aexit__ = AsyncMock(return_value=None)
         mock_session = MagicMock()
@@ -147,6 +149,7 @@ class TestUploadArbitraryMarkdown:
 
         mock_resp = MagicMock()
         mock_resp.status = 200
+        mock_resp.read = AsyncMock(return_value=b"")
         mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
         mock_resp.__aexit__ = AsyncMock(return_value=None)
         mock_session = MagicMock()
@@ -222,6 +225,7 @@ class TestUploadNonMdFile:
 
         mock_resp = MagicMock()
         mock_resp.status = 200
+        mock_resp.read = AsyncMock(return_value=b"")
         mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
         mock_resp.__aexit__ = AsyncMock(return_value=None)
         mock_session = MagicMock()

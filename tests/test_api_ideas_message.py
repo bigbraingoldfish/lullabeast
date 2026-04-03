@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import time
+import aiohttp
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime
@@ -60,6 +61,7 @@ class TestApiIdeasMessage:
         """Build a properly-async mock response for session.post()."""
         mock_resp = MagicMock()
         mock_resp.status = 200
+        mock_resp.read = AsyncMock(return_value=b"")
         mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
         mock_resp.__aexit__ = AsyncMock(return_value=None)
         return mock_resp
@@ -159,6 +161,71 @@ class TestApiIdeasMessage:
         # Should timeout and return 408
         assert response.status_code == 408, f"Expected 408, got {response.status_code}"
 
+    def test_returns_502_on_webhook_bad_status(self):
+        """Returns 502 when hook returns non-2xx; pending assistant marked error in session."""
+        client = load_server()
+        idea_id = "webhook_502"
+        self._write_session(idea_id, {
+            "messages": [],
+            "prd_content": "",
+            "created": "2026-03-19T10:00:00Z",
+            "updated": "2026-03-19T10:00:00Z",
+        })
+        # No turn files — would hang until poll timeout if webhook were treated as success
+
+        mock_resp = self._make_mock_response()
+        mock_resp.status = 503
+        mock_session = self._make_mock_session(mock_resp)
+
+        with patch("ui.server.load_config", return_value=self._mock_config()):
+            with patch("ui.server.aiohttp.ClientSession", return_value=mock_session):
+                response = client.post(
+                    f"/api/ideas/{idea_id}/message",
+                    json={"content": "Hi", "turn": 1},
+                )
+
+        assert response.status_code == 502, f"Expected 502, got {response.status_code}"
+        sess_path = self.ideas_dir / idea_id / "session.json"
+        with open(sess_path) as f:
+            data = json.load(f)
+        assistants = [m for m in data.get("messages", []) if m.get("role") == "assistant"]
+        assert assistants, "expected assistant message in session"
+        last_a = assistants[-1]
+        assert last_a.get("error") is True
+        assert last_a.get("pending") is False
+        assert "503" in (last_a.get("content") or "") or "gateway" in (last_a.get("content") or "").lower()
+
+    def test_returns_503_on_webhook_connection_error(self):
+        """Returns 503 when hook connection fails; pending assistant marked error."""
+        client = load_server()
+        idea_id = "webhook_503"
+        self._write_session(idea_id, {
+            "messages": [],
+            "prd_content": "",
+            "created": "2026-03-19T10:00:00Z",
+            "updated": "2026-03-19T10:00:00Z",
+        })
+
+        mock_session = MagicMock()
+        mock_session.post = AsyncMock(side_effect=aiohttp.ClientConnectionError("refused"))
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("ui.server.load_config", return_value=self._mock_config()):
+            with patch("ui.server.aiohttp.ClientSession", return_value=mock_session):
+                response = client.post(
+                    f"/api/ideas/{idea_id}/message",
+                    json={"content": "Hi", "turn": 1},
+                )
+
+        assert response.status_code == 503, f"Expected 503, got {response.status_code}"
+        sess_path = self.ideas_dir / idea_id / "session.json"
+        with open(sess_path) as f:
+            data = json.load(f)
+        last_a = [m for m in data.get("messages", []) if m.get("role") == "assistant"][-1]
+        assert last_a.get("error") is True
+        assert last_a.get("pending") is False
+
     def test_webhook_sent_with_correct_payload(self):
         """Webhook is POSTed to hooks_url with correct Bearer auth and body."""
         client = load_server()
@@ -178,6 +245,7 @@ class TestApiIdeasMessage:
             captured_payload["json"] = kwargs.get("json", {})
             mock_resp = MagicMock()
             mock_resp.status = 200
+            mock_resp.read = AsyncMock(return_value=b"")
             mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
             mock_resp.__aexit__ = AsyncMock(return_value=None)
             return mock_resp
@@ -251,6 +319,7 @@ class TestApiIdeasMessage:
             captured_payload["url"] = url
             mock_resp = MagicMock()
             mock_resp.status = 200
+            mock_resp.read = AsyncMock(return_value=b"")
             mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
             mock_resp.__aexit__ = AsyncMock(return_value=None)
             return mock_resp
@@ -285,6 +354,7 @@ class TestApiIdeasMessage:
             all_payloads.append(kwargs.get("json", {}))
             mock_resp = MagicMock()
             mock_resp.status = 200
+            mock_resp.read = AsyncMock(return_value=b"")
             mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
             mock_resp.__aexit__ = AsyncMock(return_value=None)
             return mock_resp
@@ -387,3 +457,110 @@ class TestApiIdeasMessage:
         assert history_pos < current_pos, (
             "CONVERSATION HISTORY block should appear before the current message"
         )
+
+    # ------------------------------------------------------------------
+    # Idle detection integration tests
+    # ------------------------------------------------------------------
+
+    def _mock_config_with_openclaw(self, openclaw_root):
+        """Config that includes openclaw_root for idle detection tests."""
+        cfg = self._mock_config()
+        cfg["openclaw_root"] = str(openclaw_root)
+        cfg["ideas_idle_threshold"] = 0.3   # very short for tests
+        cfg["ideas_startup_grace"] = 0.2    # very short for tests
+        return cfg
+
+    def _write_sessions_json(self, openclaw_root, idea_id, turn_n, session_id):
+        """Write a sessions.json entry mapping the session key to a sessionId."""
+        sessions_dir = Path(openclaw_root) / "agents" / "prd-creator" / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        key = f"agent:prd-creator:ideas:{idea_id}:session-{turn_n}"
+        data = {key: {"sessionId": session_id, "updatedAt": 1700000001000}}
+        (sessions_dir / "sessions.json").write_text(json.dumps(data))
+        return sessions_dir
+
+    def test_returns_408_when_agent_goes_idle(self):
+        """Returns 408 within idle_threshold + headroom when JSONL stops advancing.
+
+        With idle_threshold=0.3s and startup_grace=0.2s, idle detection should fire in
+        ~0.5s — well before the 30s hard poll_timeout. This distinguishes idle detection
+        from a plain deadline timeout.
+        """
+        import time as _time
+        client = load_server()
+        idea_id = "idle_test_idea"
+        session_id = "idle-0000-0000-0000-000000000099"
+
+        self._write_session(idea_id, {
+            "messages": [],
+            "prd_content": "",
+            "created": "2026-03-19T10:00:00Z",
+            "updated": "2026-03-19T10:00:00Z",
+        })
+        # Write JSONL once but do NOT update it further and do NOT write sentinel
+        sessions_dir = self._write_sessions_json(
+            self.ideas_dir.parent / "openclaw_root_idle",
+            idea_id, 1, session_id,
+        )
+        jsonl_path = sessions_dir / f"{session_id}.jsonl"
+        jsonl_path.write_text("line 1\n")
+
+        mock_resp = self._make_mock_response()
+        mock_session = self._make_mock_session(mock_resp)
+
+        cfg = self._mock_config_with_openclaw(self.ideas_dir.parent / "openclaw_root_idle")
+        cfg["poll_timeout"] = 30         # long hard deadline — idle detection must fire first
+        cfg["ideas_idle_threshold"] = 0.3
+        cfg["ideas_startup_grace"] = 0.2
+
+        start = _time.monotonic()
+        with patch("ui.server.load_config", return_value=cfg):
+            with patch("ui.server.aiohttp.ClientSession", return_value=mock_session):
+                response = client.post(
+                    f"/api/ideas/{idea_id}/message",
+                    json={"content": "test idle", "turn": 1},
+                )
+        elapsed = _time.monotonic() - start
+
+        assert response.status_code == 408, f"Expected 408 on agent idle, got {response.status_code}"
+        # Key assertion: idle detection fires well before the 30s hard timeout
+        assert elapsed < 5.0, (
+            f"Idle detection should fire within ~0.5s, but took {elapsed:.2f}s — "
+            "likely falling back to hard timeout rather than idle detection"
+        )
+
+    def test_does_not_408_while_jsonl_active(self):
+        """Does not time out when JSONL mtime keeps advancing and sentinel appears."""
+        client = load_server()
+        idea_id = "active_test_idea"
+        session_id = "active-0000-0000-0000-000000000088"
+
+        self._write_session(idea_id, {
+            "messages": [],
+            "prd_content": "",
+            "created": "2026-03-19T10:00:00Z",
+            "updated": "2026-03-19T10:00:00Z",
+        })
+        sessions_dir = self._write_sessions_json(
+            self.ideas_dir.parent / "openclaw_root_active",
+            idea_id, 1, session_id,
+        )
+        jsonl_path = sessions_dir / f"{session_id}.jsonl"
+        jsonl_path.write_text("line 1\n")
+
+        # Pre-write the sentinel so the poll succeeds immediately
+        self._write_turn_files(idea_id, 1, "Active agent reply", "# PRD\nDraft")
+
+        mock_resp = self._make_mock_response()
+        mock_session = self._make_mock_session(mock_resp)
+
+        with patch("ui.server.load_config", return_value=self._mock_config_with_openclaw(
+            self.ideas_dir.parent / "openclaw_root_active"
+        )):
+            with patch("ui.server.aiohttp.ClientSession", return_value=mock_session):
+                response = client.post(
+                    f"/api/ideas/{idea_id}/message",
+                    json={"content": "test active", "turn": 1},
+                )
+
+        assert response.status_code == 200, f"Expected 200 when sentinel present, got {response.status_code}"
