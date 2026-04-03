@@ -512,44 +512,88 @@ PYEOF
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 9/13  REGISTER ROADMAP-CONVERTER AGENT
+# 9/13  REGISTER AUTODEV AGENTS (OPENCLAW)
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "9/13  Register roadmap-converter agent"
+hdr "9/13  Register AutoDev agents in openclaw.json"
 
 REGISTER_STATUS_STEP="not attempted"
+TOOLS_PROFILE_STEP="skipped"
 REGISTER_AGENT="$AUTODEV_REPO_PATH/autodev/installer/register_agent.py"
 
 if [ ! -f "$REGISTER_AGENT" ]; then
     warn "register_agent.py not found at $REGISTER_AGENT — skipping"
     REGISTER_STATUS_STEP="script missing"
 elif [ ! -f "$AUTODEV_ROOT/openclaw.json" ]; then
-    warn "openclaw.json not found — cannot register roadmap-converter"
+    warn "openclaw.json not found — cannot register pipeline agents"
     REGISTER_STATUS_STEP="skipped (no openclaw.json)"
 else
-    # Run dry-run; it prints JSON block then status token on last line
+    TOOLS_PROFILE=$("$PYTHON" -c "
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as f:
+    d = json.load(f)
+t = d.get('tools') or {}
+print((t.get('profile') or '').strip())
+" "$AUTODEV_ROOT/openclaw.json" 2>/dev/null || echo "__invalid__")
+
+    case "$TOOLS_PROFILE" in
+        coding|full|"")
+            ok "tools.profile OK for pipeline coding agents (${TOOLS_PROFILE:-unset = gateway default})"
+            TOOLS_PROFILE_STEP="ok (${TOOLS_PROFILE:-default})"
+            ;;
+        *)
+            warn "openclaw.json tools.profile is '${TOOLS_PROFILE}' — not 'coding' or 'full'."
+            warn "  Planner/executor/reviewer need Coding-profile tools (fs, exec, web, sessions, memory)."
+            warn "  Reference: https://docs.openclaw.ai/tools"
+            TOOLS_PROFILE_STEP="warn ($TOOLS_PROFILE)"
+            if prompt_yn "Set global tools.profile to \"coding\" now? (atomic write; no other keys changed) [y/N]" "N"; then
+                TP_R=$(
+                    cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import set_openclaw_global_tools_profile
+import sys
+print(set_openclaw_global_tools_profile(sys.argv[1], 'coding'))
+" "$AUTODEV_ROOT/openclaw.json" 2>/dev/null || echo "error:helper"
+                )
+                case "$TP_R" in
+                    updated)
+                        ok "tools.profile set to coding in $AUTODEV_ROOT/openclaw.json"
+                        TOOLS_PROFILE_STEP="updated to coding"
+                        ;;
+                    unchanged)
+                        ok "tools.profile already coding"
+                        TOOLS_PROFILE_STEP="ok (coding)"
+                        ;;
+                    *)
+                        warn "Could not update tools.profile: $TP_R"
+                        ;;
+                esac
+            fi
+            ;;
+    esac
+
+    # Dry-run: status token is the last line of stdout (warnings go to stderr)
     REGISTER_DRY_OUTPUT=$("$PYTHON" "$REGISTER_AGENT" \
-        "$AUTODEV_ROOT/openclaw.json" "$AUTODEV_ROOT" --dry-run 2>&1)
+        "$AUTODEV_ROOT/openclaw.json" "$AUTODEV_ROOT" --dry-run)
     REGISTER_DRY_STATUS=$(echo "$REGISTER_DRY_OUTPUT" | tail -1)
 
     case "$REGISTER_DRY_STATUS" in
         already_registered)
-            ok "roadmap-converter already registered in openclaw.json"
+            ok "All AutoDev agents already registered in openclaw.json"
             REGISTER_STATUS_STEP="already registered"
             ;;
         dry_run)
-            # Print the JSON block (everything except the last line)
+            # Print the preview (everything except the last line)
             echo "$REGISTER_DRY_OUTPUT" | head -n -1
-            info "The above entry would be added to $AUTODEV_ROOT/openclaw.json"
-            if prompt_yn "Register roadmap-converter agent? [Y/n]" "Y"; then
+            info "The above changes would be applied to $AUTODEV_ROOT/openclaw.json"
+            if prompt_yn "Register missing AutoDev agents (planner, executor, reviewer, escalation, prd-creator, roadmap-converter)? [Y/n]" "Y"; then
                 APPLY_RESULT=$("$PYTHON" "$REGISTER_AGENT" \
-                    "$AUTODEV_ROOT/openclaw.json" "$AUTODEV_ROOT" --apply 2>&1)
+                    "$AUTODEV_ROOT/openclaw.json" "$AUTODEV_ROOT" --apply)
                 case "$APPLY_RESULT" in
                     registered)
-                        ok "roadmap-converter registered in openclaw.json"
+                        ok "AutoDev agents registered in openclaw.json"
                         REGISTER_STATUS_STEP="registered"
                         ;;
                     already_registered)
-                        ok "roadmap-converter already registered (concurrent write?)"
+                        ok "AutoDev agents already registered (concurrent write?)"
                         REGISTER_STATUS_STEP="already registered"
                         ;;
                     error:*)
@@ -562,16 +606,11 @@ else
                         ;;
                 esac
             else
-                warn "Skipped — roadmap-converter not registered"
-                warn "  Alignment check and adversarial review features will not function"
+                warn "Skipped — pipeline agents not registered in openclaw.json"
+                warn "  Webhook invocations for planner/executor/reviewer/escalation/prd-creator/roadmap-converter may be denied"
                 warn "  Re-run install.sh and accept the prompt to register later"
                 REGISTER_STATUS_STEP="skipped by user"
             fi
-            ;;
-        missing_prd_creator)
-            warn "prd-creator entry not found in openclaw.json — cannot copy model config"
-            warn "  Add a prd-creator agent to openclaw.json first, then re-run install.sh"
-            REGISTER_STATUS_STEP="missing prd-creator"
             ;;
         error:*)
             warn "Registration error: ${REGISTER_DRY_STATUS#error:}"
@@ -646,7 +685,8 @@ printf "  %-32s %s\n" "OpenClaw version:"         "$OC_VERSION_STATUS"
 printf "  %-32s %s\n" "Conversion prompt:"        "$PROMPT_FOUND"
 printf "  %-32s %s\n" "Exec-approvals:"           "$APPROVALS_STATUS"
 printf "  %-32s %s\n" "Cron path:"                "$CRON_STATUS"
-printf "  %-32s %s\n" "Roadmap-converter agent:"  "$REGISTER_STATUS_STEP"
+printf "  %-32s %s\n" "OpenClaw tools.profile:"   "$TOOLS_PROFILE_STEP"
+printf "  %-32s %s\n" "OpenClaw agents (register):" "$REGISTER_STATUS_STEP"
 echo   "  Agent files deployed:"
 for agent in planner executor reviewer escalation prd-creator roadmap-converter; do
     printf "    %-24s %s\n" "$agent:" "${AGENT_COUNTS[$agent]:-0}"

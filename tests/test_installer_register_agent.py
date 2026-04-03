@@ -1,4 +1,4 @@
-"""Tests for autodev/installer/register_agent.py — register_roadmap_converter function."""
+"""Tests for autodev/installer/register_agent.py — AutoDev agent registration."""
 
 import json
 import os
@@ -9,8 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "autodev", "installer"))
-from register_agent import register_roadmap_converter
+from autodev.installer.register_agent import AUTODEV_AGENT_IDS, register_roadmap_converter
 
 
 # ---------------------------------------------------------------------------
@@ -36,6 +35,48 @@ _ROADMAP_CONVERTER_ENTRY = {
         "deny": ["edit", "apply_patch", "exec", "process", "browser"],
     },
 }
+
+_ESCALATION_TOOLS = {
+    "allow": ["read", "write"],
+    "deny": ["edit", "apply_patch", "exec", "process", "browser"],
+}
+
+
+def _fully_registered_agents(autodev_root: str) -> list:
+    """Six pipeline agents as install would leave them (for idempotency tests)."""
+    m = {"primary": "openrouter/minimax/minimax-m2.7", "fallbacks": []}
+    root = autodev_root.rstrip("/")
+    return [
+        {"id": "planner", "workspace": f"{root}/workspace-planner", "model": m},
+        {"id": "executor", "workspace": f"{root}/workspace-executor", "model": m},
+        {"id": "reviewer", "workspace": f"{root}/workspace-reviewer", "model": m},
+        {
+            "id": "escalation",
+            "workspace": f"{root}/workspace-escalation",
+            "model": m,
+            "tools": dict(_ESCALATION_TOOLS),
+        },
+        {
+            "id": "prd-creator",
+            "workspace": f"{root}/workspace-prd-creator",
+            "model": m,
+            "tools": dict(_PRD_CREATOR_ENTRY["tools"]),
+        },
+        {
+            "id": "roadmap-converter",
+            "workspace": f"{root}/workspace-roadmap-converter",
+            "model": m,
+            "tools": dict(_PRD_CREATOR_ENTRY["tools"]),
+        },
+    ]
+
+
+def _fully_registered_openclaw(tmp_path: Path) -> dict:
+    root = str(tmp_path)
+    return _base_openclaw_json(
+        agents_list=_fully_registered_agents(root),
+        allowed_agent_ids=list(AUTODEV_AGENT_IDS),
+    )
 
 
 def _base_openclaw_json(agents_list=None, allowed_agent_ids=None):
@@ -75,7 +116,7 @@ def _write_openclaw_json(path: Path, data: dict) -> None:
 class TestAlreadyRegistered:
     def test_already_registered_returns_already_registered(self, tmp_path):
         oc_json = tmp_path / "openclaw.json"
-        data = _base_openclaw_json(agents_list=[_PRD_CREATOR_ENTRY, _ROADMAP_CONVERTER_ENTRY])
+        data = _fully_registered_openclaw(tmp_path)
         _write_openclaw_json(oc_json, data)
 
         result = register_roadmap_converter(str(oc_json), str(tmp_path))
@@ -83,7 +124,7 @@ class TestAlreadyRegistered:
 
     def test_already_registered_does_not_write(self, tmp_path):
         oc_json = tmp_path / "openclaw.json"
-        data = _base_openclaw_json(agents_list=[_PRD_CREATOR_ENTRY, _ROADMAP_CONVERTER_ENTRY])
+        data = _fully_registered_openclaw(tmp_path)
         _write_openclaw_json(oc_json, data)
         mtime_before = oc_json.stat().st_mtime
 
@@ -91,22 +132,38 @@ class TestAlreadyRegistered:
         assert oc_json.stat().st_mtime == mtime_before
 
 
-class TestMissingPrdCreator:
-    def test_missing_prd_creator_returns_error_code(self, tmp_path):
+class TestFallbackWhenNoPrdCreator:
+    def test_registers_with_minimax_when_openrouter_configured(self, tmp_path):
         oc_json = tmp_path / "openclaw.json"
-        data = _base_openclaw_json(agents_list=[])  # no prd-creator
+        data = _base_openclaw_json(agents_list=[])
+        data["models"] = {"providers": {"openrouter": {"apiKey": "x"}}}
         _write_openclaw_json(oc_json, data)
 
         result = register_roadmap_converter(str(oc_json), str(tmp_path))
-        assert result == "missing_prd_creator"
+        assert result == "registered"
+        updated = json.loads(oc_json.read_text())
+        ids = [a["id"] for a in updated["agents"]["list"]]
+        for aid in AUTODEV_AGENT_IDS:
+            assert aid in ids
+        rc = next(a for a in updated["agents"]["list"] if a["id"] == "roadmap-converter")
+        assert rc["model"]["primary"] == "openrouter/minimax/minimax-m2.7"
 
-    def test_missing_prd_creator_does_not_write(self, tmp_path):
+    def test_missing_top_level_agents_key_is_normalized(self, tmp_path):
         oc_json = tmp_path / "openclaw.json"
-        _write_openclaw_json(oc_json, _base_openclaw_json(agents_list=[]))
-        mtime_before = oc_json.stat().st_mtime
+        minimal = {
+            "version": "1.0",
+            "hooks": {"allowedAgentIds": []},
+            "models": {"providers": {"openrouter": {"apiKey": "x"}}},
+        }
+        _write_openclaw_json(oc_json, minimal)
 
-        register_roadmap_converter(str(oc_json), str(tmp_path))
-        assert oc_json.stat().st_mtime == mtime_before
+        result = register_roadmap_converter(str(oc_json), str(tmp_path))
+        assert result == "registered"
+        updated = json.loads(oc_json.read_text())
+        assert isinstance(updated.get("agents", {}).get("list"), list)
+        ids = [a.get("id") for a in updated["agents"]["list"]]
+        for aid in AUTODEV_AGENT_IDS:
+            assert aid in ids
 
 
 class TestSuccessfulRegistration:
@@ -116,6 +173,8 @@ class TestSuccessfulRegistration:
 
         result = register_roadmap_converter(str(oc_json), str(tmp_path))
         assert result == "registered"
+        updated = json.loads(oc_json.read_text())
+        assert len(updated["agents"]["list"]) == len(AUTODEV_AGENT_IDS)
 
     def test_registered_entry_has_correct_id(self, tmp_path):
         oc_json = tmp_path / "openclaw.json"
@@ -178,9 +237,12 @@ class TestSuccessfulRegistration:
         updated = json.loads(oc_json.read_text())
 
         ids = [a["id"] for a in updated["agents"]["list"]]
-        assert "prd-creator" in ids
-        assert "planner" in ids
-        assert "roadmap-converter" in ids
+        for aid in AUTODEV_AGENT_IDS:
+            assert aid in ids
+        # Original order preserved; new agents append in AUTODEV_AGENT_IDS order.
+        assert updated["agents"]["list"][0]["id"] == "prd-creator"
+        assert updated["agents"]["list"][1]["id"] == "planner"
+        assert updated["agents"]["list"][1]["workspace"] == "~/.openclaw/workspace-planner"
 
     def test_atomic_write_calls_os_replace(self, tmp_path):
         oc_json = tmp_path / "openclaw.json"
@@ -189,7 +251,7 @@ class TestSuccessfulRegistration:
         # Capture original BEFORE entering the patch context
         original_replace = os.replace
 
-        with patch("register_agent.os.replace") as mock_replace:
+        with patch("autodev.installer.register_agent.os.replace") as mock_replace:
             mock_replace.side_effect = original_replace
             register_roadmap_converter(str(oc_json), str(tmp_path))
 
@@ -216,7 +278,7 @@ class TestDryRun:
 
     def test_dry_run_already_registered_returns_already_registered(self, tmp_path):
         oc_json = tmp_path / "openclaw.json"
-        data = _base_openclaw_json(agents_list=[_PRD_CREATOR_ENTRY, _ROADMAP_CONVERTER_ENTRY])
+        data = _fully_registered_openclaw(tmp_path)
         _write_openclaw_json(oc_json, data)
 
         result = register_roadmap_converter(str(oc_json), str(tmp_path), dry_run=True)
@@ -235,9 +297,9 @@ class TestErrorHandling:
         result = register_roadmap_converter(str(oc_json), str(tmp_path))
         assert result.startswith("error:")
 
-    def test_missing_agents_key_returns_error(self, tmp_path):
+    def test_agents_not_object_returns_error(self, tmp_path):
         oc_json = tmp_path / "openclaw.json"
-        oc_json.write_text(json.dumps({"version": "1.0"}))
+        oc_json.write_text(json.dumps({"version": "1.0", "agents": "invalid"}))
 
         result = register_roadmap_converter(str(oc_json), str(tmp_path))
         assert result.startswith("error:")
