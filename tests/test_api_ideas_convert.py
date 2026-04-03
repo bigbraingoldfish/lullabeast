@@ -21,11 +21,13 @@ class TestApiIdeasConvert:
         self.prompt_file.write_text("Convert this PRD to a roadmap.")
 
     def _mock_config(self):
+        repo = Path(__file__).resolve().parents[1]
         return {
             "ideas_dir": str(self.ideas_dir),
             "hooks_url": "http://localhost:18789/hooks/agent",
             "hooks_token": "test-token",
             "conversion_prompt_path": str(self.prompt_file),
+            "autodev_repo_path": str(repo),
         }
 
     def _write_session(self, idea_id, prd_content="", roadmap_content=None):
@@ -64,14 +66,29 @@ class TestApiIdeasConvert:
             r = client.post("/api/ideas/1/convert")
         assert r.status_code == 422
 
-    def test_returns_503_when_conversion_prompt_missing(self):
+    def test_missing_prompt_file_uses_fallback_then_may_timeout(self):
+        """No 503: bundled/inline prompt; without sentinel, conversion times out (408)."""
         client = load_server()
         self._write_session("2", prd_content="## Problem Statement\nSome content.")
         config = self._mock_config()
         config["conversion_prompt_path"] = "/nonexistent/path.txt"
-        with patch("ui.server.load_config", return_value=config):
+        real_isfile = __import__("os").path.isfile
+
+        def no_bundle(p):
+            ps = str(p)
+            if ps.endswith("prd-to-roadmap-conversion.txt"):
+                return False
+            return real_isfile(p)
+
+        mock_cls, _ = self._make_mock_aiohttp()
+        with patch("ui.server.load_config", return_value=config), \
+             patch("ui.server.os.path.isfile", side_effect=no_bundle), \
+             patch("ui.server.aiohttp.ClientSession", mock_cls), \
+             patch("ui.server._inject_converter_skill"), \
+             patch("ui.server.CONVERT_TIMEOUT", 1), \
+             patch("ui.server.CONVERT_POLL_INTERVAL", 0.1):
             r = client.post("/api/ideas/2/convert")
-        assert r.status_code == 503
+        assert r.status_code == 408
 
     def test_returns_408_on_timeout(self):
         """Returns 408 when roadmap_draft.done is never written within timeout."""

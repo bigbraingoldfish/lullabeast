@@ -22,13 +22,14 @@ class TestApiIdeasConvertUpdated:
         self.prompt_file.write_text("Convert this PRD to a roadmap.")
 
     def _mock_config(self):
+        repo = Path(__file__).resolve().parents[1]
         return {
             "ideas_dir": str(self.ideas_dir),
             "hooks_url": "http://localhost:18789/hooks/agent",
             "hooks_token": "test-token",
             "conversion_prompt_path": str(self.prompt_file),
             "roadmap_converter_workspace": str(self.workspace),
-            "autodev_repo_path": "/tmp/repo",
+            "autodev_repo_path": str(repo),
         }
 
     def _write_session(self, idea_id, prd_content=""):
@@ -145,15 +146,27 @@ class TestApiIdeasConvertUpdated:
             r = client.post("/api/ideas/4/convert")
         assert r.status_code == 422
 
-    def test_returns_503_when_conversion_prompt_missing(self):
+    def test_missing_prompt_no_longer_returns_503(self):
         client = load_server()
         self._write_session("5", prd_content="## Problem\nContent.")
         config = self._mock_config()
         config["conversion_prompt_path"] = "/nonexistent/path.txt"
+        real_isfile = __import__("os").path.isfile
+
+        def no_bundle(p):
+            if str(p).endswith("prd-to-roadmap-conversion.txt"):
+                return False
+            return real_isfile(p)
+
+        mock_cls, _ = self._make_mock_aiohttp()
         with patch("ui.server.load_config", return_value=config), \
-             patch("ui.server._inject_converter_skill"):
+             patch("ui.server.os.path.isfile", side_effect=no_bundle), \
+             patch("ui.server.aiohttp.ClientSession", mock_cls), \
+             patch("ui.server._inject_converter_skill"), \
+             patch("ui.server.CONVERT_TIMEOUT", 1), \
+             patch("ui.server.CONVERT_POLL_INTERVAL", 0.1):
             r = client.post("/api/ideas/5/convert")
-        assert r.status_code == 503
+        assert r.status_code == 408
 
     def test_returns_408_on_timeout(self):
         client = load_server()

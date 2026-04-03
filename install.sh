@@ -198,9 +198,17 @@ if [ -z "$AUTODEV_ROOT" ]; then
     done
 fi
 
+# openclaw.json must already exist — we never create it.
+# Its absence means OpenClaw is not installed or is broken beyond what AutoDev
+# can repair (gateway process, auth-profiles, and agent session management all
+# depend on it).  Fail fast here rather than generating a stub.
 if [ ! -f "$AUTODEV_ROOT/openclaw.json" ]; then
-    warn "$AUTODEV_ROOT/openclaw.json not found — OpenClaw gateway configuration missing"
+    fail "openclaw.json not found at $AUTODEV_ROOT/openclaw.json. Install and start OpenClaw, then re-run install.sh."
 fi
+ok "openclaw.json present"
+
+mkdir -p "$AUTODEV_REPO_PATH/.autodev/ideas"
+ok "Repo-local runtime dir: $AUTODEV_REPO_PATH/.autodev"
 
 if [ -f "$AUTODEV_ROOT/orchestrator.py" ]; then
     warn "Pre-migration orchestrator still present: $AUTODEV_ROOT/orchestrator.py"
@@ -210,22 +218,27 @@ else
     ok "No stale orchestrator.py in \$AUTODEV_ROOT"
 fi
 
-if [ -f "$AUTODEV_ROOT/pipeline.lock" ]; then
-    warn "$AUTODEV_ROOT/pipeline.lock exists — a pipeline may already be running"
-    warn "  If no pipeline is active, remove it: rm $AUTODEV_ROOT/pipeline.lock"
+REPO_RT="$AUTODEV_REPO_PATH/.autodev"
+if [ -f "$REPO_RT/pipeline.lock" ]; then
+    warn "$REPO_RT/pipeline.lock exists — a pipeline may already be running"
+    warn "  If no pipeline is active, remove it: rm $REPO_RT/pipeline.lock"
+elif [ -f "$AUTODEV_ROOT/pipeline.lock" ]; then
+    warn "Legacy lock at $AUTODEV_ROOT/pipeline.lock (pre repo-local runtime)"
+    warn "  If unused, remove it; see docs/RUNTIME-MIGRATION.md"
 else
-    ok "No stale pipeline.lock"
+    ok "No stale pipeline.lock under .autodev or \$AUTODEV_ROOT"
 fi
 
 export AUTODEV_ROOT AUTODEV_REPO_PATH
 ok "AUTODEV_REPO_PATH = $AUTODEV_REPO_PATH"
 ok "AUTODEV_ROOT      = $AUTODEV_ROOT"
 
-# Write detected path to ui/config.json as autodev_repo_path (atomic).
-# Seeds from ui/config.example.json when config.json is missing.
+# Write detected paths to ui/config.json (atomic). Seeds from config.example.json when missing.
+export INSTALL_AUTODEV_ROOT="$AUTODEV_ROOT"
 "$PYTHON" -c "
 import json, os, tempfile
-repo = '$AUTODEV_REPO_PATH'
+repo = os.environ['AUTODEV_REPO_PATH']
+oc = os.environ.get('INSTALL_AUTODEV_ROOT', '')
 p = os.path.join(repo, 'ui', 'config.json')
 example = os.path.join(repo, 'ui', 'config.example.json')
 cfg = {}
@@ -239,14 +252,16 @@ elif os.path.exists(example):
     with open(example) as f:
         cfg = json.load(f)
 cfg['autodev_repo_path'] = repo
+if oc:
+    cfg['openclaw_root'] = oc
 d = os.path.dirname(p)
 fd, tmp = tempfile.mkstemp(dir=d, prefix='config_', suffix='.json')
 with os.fdopen(fd, 'w') as f:
     json.dump(cfg, f, indent=2)
 os.replace(tmp, p)
 print('ok')
-" > /dev/null && ok "ui/config.json updated with AUTODEV_REPO_PATH" \
-  || warn "Could not update ui/config.json — copy ui/config.example.json and set autodev_repo_path"
+" > /dev/null && ok "ui/config.json updated (autodev_repo_path, openclaw_root)" \
+  || warn "Could not update ui/config.json — copy ui/config.example.json and set paths"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 5/13  OPENCLAW VERSION CHECK
@@ -312,9 +327,8 @@ for agent in planner executor reviewer escalation prd-creator roadmap-converter;
     fi
 
     if [ ! -d "$dst_dir" ]; then
-        warn "Workspace not found: $dst_dir — skipping $agent (OpenClaw registers these)"
-        AGENT_COUNTS[$agent]="skip"
-        continue
+        mkdir -p "$dst_dir"
+        ok "Created workspace: $dst_dir"
     fi
 
     for doc in IDENTITY.md SOUL.md TOOLS.md AGENTS.md USER.md; do
@@ -351,7 +365,8 @@ if [ "${#MISSING_FILES[@]}" -gt 0 ]; then
         for agent in planner executor reviewer escalation prd-creator roadmap-converter; do
             src_dir="$AUTODEV_REPO_PATH/autodev/agents/$agent"
             dst_dir="$AUTODEV_ROOT/workspace-$agent"
-            [ -d "$src_dir" ] && [ -d "$dst_dir" ] || continue
+            [ -d "$src_dir" ] || continue
+            mkdir -p "$dst_dir"
             count=0
             for doc in IDENTITY.md SOUL.md TOOLS.md AGENTS.md USER.md; do
                 src="$src_dir/$doc"
@@ -570,27 +585,17 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 10/13  CONVERSION PROMPT VALIDATION
+# 10/13  CONVERSION PROMPT (repo-bundled)
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "10/13  Conversion prompt validation"
+hdr "10/13  Conversion prompt"
 
-PROMPT_DIR="$AUTODEV_ROOT/deployment-package/Updates"
-PROMPT_FOUND="no"
-
-if [ -d "$PROMPT_DIR" ]; then
-    PROMPT_FILE=$(find "$PROMPT_DIR" -maxdepth 1 \
-        -name "PRD to Roadmap*.txt" 2>/dev/null | head -1)
-    if [ -n "$PROMPT_FILE" ]; then
-        ok "Conversion prompt found: $(basename "$PROMPT_FILE")"
-        PROMPT_FOUND="yes"
-    else
-        warn "No 'PRD to Roadmap*.txt' found in $PROMPT_DIR"
-        warn "  /api/ideas/{id}/convert will return 500 until this file exists"
-        warn "  Expected pattern: $PROMPT_DIR/PRD to Roadmap*.txt"
-    fi
+BUNDLED_PROMPT="$AUTODEV_REPO_PATH/autodev/prompts/prd-to-roadmap-conversion.txt"
+if [ -f "$BUNDLED_PROMPT" ]; then
+    ok "PRD→roadmap conversion instructions: $BUNDLED_PROMPT"
+    PROMPT_FOUND="yes (bundled)"
 else
-    warn "Conversion prompt directory not found: $PROMPT_DIR"
-    warn "  /api/ideas/{id}/convert will return 500 until this file exists"
+    warn "Bundled conversion prompt missing: $BUNDLED_PROMPT"
+    PROMPT_FOUND="no"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -599,16 +604,25 @@ fi
 hdr "11/13  Writing .env"
 
 ENV_FILE="$AUTODEV_REPO_PATH/.env"
-if [ -f "$ENV_FILE" ]; then
-    info ".env already exists at $ENV_FILE — not overwriting"
-    info "  To regenerate, remove it and re-run install.sh"
-else
-    cat > "$ENV_FILE" <<EOF
-AUTODEV_ROOT=$AUTODEV_ROOT
-AUTODEV_REPO_PATH=$AUTODEV_REPO_PATH
-EOF
-    ok ".env written to $ENV_FILE"
-fi
+ENV_MERGE=$(
+    cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import merge_dotenv_missing_keys
+import os
+repo_path = os.environ['AUTODEV_REPO_PATH']
+rt = os.path.join(repo_path, '.autodev')
+pairs = {
+    'AUTODEV_ROOT': os.environ['AUTODEV_ROOT'],
+    'AUTODEV_REPO_PATH': repo_path,
+    'AUTODEV_RUNTIME_ROOT': rt,
+}
+print(merge_dotenv_missing_keys(os.path.join(repo_path, '.env'), pairs))
+" 2>/dev/null || echo "error:helper"
+)
+case "$ENV_MERGE" in
+    created|updated) ok ".env merged ($ENV_MERGE): $ENV_FILE" ;;
+    unchanged) info ".env unchanged (keys already present)" ;;
+    *) warn ".env merge: $ENV_MERGE" ;;
+esac
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 12/13  MARK SETUP COMPLETE

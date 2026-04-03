@@ -45,8 +45,9 @@ def orch(tmp_path, monkeypatch):
     state_file = tmp_path / "pipeline_state.json"
 
     monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
+    monkeypatch.setenv("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "1")
 
-    # Reload module to pick up patched AUTODEV_ROOT
+    # Reload module to pick up patched AUTODEV_ROOT (runtime files under tmp_path)
     import importlib
     import orchestrator as orch_mod
     importlib.reload(orch_mod)
@@ -635,6 +636,64 @@ class TestQueueUpdateActiveEntry:
 
 
 # ---------------------------------------------------------------------------
+# apply_cli_project_path (--project-path vs stale state / pre-set symlink)
+# ---------------------------------------------------------------------------
+
+
+class TestApplyCliProjectPath:
+    def test_resets_when_disk_state_project_differs_even_if_symlink_matches(
+        self, tmp_path, monkeypatch
+    ):
+        """Preflight may point pipeline-project at B while state still references A."""
+        import importlib
+
+        monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
+        monkeypatch.setenv("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "1")
+        import orchestrator as orch_mod
+
+        importlib.reload(orch_mod)
+        from orchestrator import Orchestrator as FreshOrch, apply_cli_project_path as apply_pp
+
+        proj_a = tmp_path / "proj_a"
+        proj_b = tmp_path / "proj_b"
+        proj_a.mkdir()
+        proj_b.mkdir()
+        (tmp_path / "openclaw.json").write_text("{}")
+
+        state_path = Path(orch_mod.STATE_FILE)
+        link = Path(orch_mod.SYMLINK_TARGET)
+        if link.exists() or link.is_symlink():
+            link.unlink()
+        link.symlink_to(proj_b, target_is_directory=True)
+
+        state_path.write_text(
+            json.dumps(
+                {
+                    "current_phase": 1,
+                    "current_phase_raw_id": "OLD-E1",
+                    "current_agent": "executor",
+                    "pipeline_status": "PIPELINE_COMPLETE",
+                    "project_path": str(proj_a),
+                    "last_action": "prior project done",
+                }
+            )
+        )
+
+        orch = FreshOrch()
+        apply_pp(orch, str(proj_b))
+
+        assert orch.state["pipeline_status"] == "RUNNING"
+        assert orch.state["current_agent"] == "planner"
+        assert orch.state["current_phase"] == 0
+        assert orch.state["current_phase_raw_id"] == ""
+        assert os.path.realpath(orch.state["project_path"]) == os.path.realpath(str(proj_b))
+
+        loaded = json.loads(state_path.read_text())
+        assert loaded["pipeline_status"] == "RUNNING"
+        assert os.path.realpath(loaded["project_path"]) == os.path.realpath(str(proj_b))
+
+
+# ---------------------------------------------------------------------------
 # Main loop: stale PIPELINE_COMPLETE vs queue ACTIVE
 # ---------------------------------------------------------------------------
 
@@ -645,11 +704,12 @@ class TestMainLoopStaleCompleteSyncsQueue:
     ):
         """When global state is already COMPLETE but the queue row is ACTIVE (UI spawn),
         startup may skip the phase_resolver PIPELINE_COMPLETE branch; the main loop
-        must still sync the queue row before exiting.
+        must still sync the queue row before exiting — only if phase_resolver agrees.
         """
         import importlib
 
         monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
+        monkeypatch.setenv("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "1")
         import orchestrator as orch_mod
 
         importlib.reload(orch_mod)
@@ -710,9 +770,87 @@ class TestMainLoopStaleCompleteSyncsQueue:
             "_run_startup_planner_phase_zero_and_branch",
             lambda: "enter_main_loop",
         )
+        monkeypatch.setattr(inst, "_phase_resolver_indicates_pipeline_complete", lambda: True)
 
         inst.run()
 
         q = json.loads(queue_file.read_text())
         assert q["queue"][0]["state"] == "COMPLETED"
         assert q["queue"][0].get("completed_at")
+
+    def test_stale_complete_with_pending_phases_does_not_mark_queue_completed(
+        self, tmp_path, monkeypatch
+    ):
+        """phase_resolver must confirm completion before ACTIVE→COMPLETED sync."""
+        import importlib
+
+        monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
+        monkeypatch.setenv("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "1")
+        import orchestrator as orch_mod
+
+        importlib.reload(orch_mod)
+
+        queue_file = tmp_path / "pipeline_queue.json"
+        state_file = tmp_path / "pipeline_state.json"
+        (tmp_path / "openclaw.json").write_text("{}")
+
+        proj = tmp_path / "active_proj"
+        proj.mkdir()
+        (proj / ".git").mkdir()
+        (proj / "roadmap.md").write_text("# r\n- [ ] `X-E1` | LOW | t\n")
+
+        link = Path(orch_mod.SYMLINK_TARGET)
+        if link.exists() or link.is_symlink():
+            link.unlink()
+        link.symlink_to(proj, target_is_directory=True)
+
+        eid = str(uuid.uuid4())
+        _write_queue(
+            str(queue_file),
+            [
+                {
+                    **_make_entry(
+                        "active",
+                        state="ACTIVE",
+                        position=1,
+                        project_path=str(proj),
+                        entry_id=eid,
+                    )
+                }
+            ],
+        )
+
+        state_file.write_text(
+            json.dumps(
+                {
+                    "current_phase": 0,
+                    "current_phase_raw_id": "X-E1",
+                    "current_agent": "planner",
+                    "pipeline_status": "PIPELINE_COMPLETE",
+                    "project_path": str(proj),
+                    "last_action": "stale complete",
+                }
+            )
+        )
+
+        monkeypatch.setattr(orch_mod, "SkillManager", lambda _ad: MagicMock())
+
+        inst = orch_mod.Orchestrator()
+
+        monkeypatch.setattr(inst, "acquire_lock", lambda: setattr(inst, "lock_fd", None))
+        monkeypatch.setattr(inst, "release_lock", lambda: None)
+        monkeypatch.setattr(orch_mod, "cleanup_stranded_temp_files", lambda _root: None)
+        monkeypatch.setattr(inst, "run_repo_init_check", lambda: (True, ""))
+        monkeypatch.setattr(
+            inst,
+            "_run_startup_planner_phase_zero_and_branch",
+            lambda: "enter_main_loop",
+        )
+        monkeypatch.setattr(inst, "_phase_resolver_indicates_pipeline_complete", lambda: False)
+        monkeypatch.setattr(inst, "_check_stop_requested", lambda: True)
+
+        inst.run()
+
+        q = json.loads(queue_file.read_text())
+        assert q["queue"][0]["state"] == "ACTIVE"
+        assert q["queue"][0].get("completed_at") is None

@@ -2,6 +2,8 @@ __pycache__/
 *.pyc
 *.pyo
 .env
+# Repo-local pipeline runtime (state, lock, queue, ideas, pipeline-project symlink)
+.autodev/
 # Local UI overrides (paths, hooks token) — copy from ui/config.example.json
 ui/config.json
 metrics.jsonl

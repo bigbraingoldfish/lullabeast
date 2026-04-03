@@ -19,9 +19,23 @@ AUTODEV_ROOT = os.environ.get("AUTODEV_ROOT", os.path.expanduser("~/.openclaw"))
 AUTODEV_REPO_PATH = os.environ.get(
     "AUTODEV_REPO_PATH",
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-LOCK_FILE = os.path.join(AUTODEV_ROOT, "pipeline.lock")
-STATE_FILE = os.path.join(AUTODEV_ROOT, "pipeline_state.json")
-SYMLINK_TARGET = os.path.join(AUTODEV_ROOT, "pipeline-project")
+
+
+def _env_truthy(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+_rt_env = (os.environ.get("AUTODEV_RUNTIME_ROOT") or "").strip()
+if _env_truthy("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME"):
+    AUTODEV_RUNTIME_ROOT = AUTODEV_ROOT
+elif _rt_env:
+    AUTODEV_RUNTIME_ROOT = os.path.expanduser(_rt_env)
+else:
+    AUTODEV_RUNTIME_ROOT = os.path.join(AUTODEV_REPO_PATH, ".autodev")
+
+LOCK_FILE = os.path.join(AUTODEV_RUNTIME_ROOT, "pipeline.lock")
+STATE_FILE = os.path.join(AUTODEV_RUNTIME_ROOT, "pipeline_state.json")
+SYMLINK_TARGET = os.path.join(AUTODEV_RUNTIME_ROOT, "pipeline-project")
 CONFIG_FILE = os.path.join(AUTODEV_ROOT, "openclaw.json")
 PHASE_STATE_FILE = os.path.join(SYMLINK_TARGET, "phase_state.json")
 
@@ -40,7 +54,7 @@ VALID_STATES = [
     "QUEUE_HALTED",
 ]
 
-QUEUE_FILE = os.path.join(AUTODEV_ROOT, "pipeline_queue.json")
+QUEUE_FILE = os.path.join(AUTODEV_RUNTIME_ROOT, "pipeline_queue.json")
 
 # llama-server HTTP origin (scheme + host + port, no path). Set AUTODEV_LLAMA_BASE if not localhost.
 _LLAMA_ORIGIN = os.environ.get("AUTODEV_LLAMA_BASE", "http://127.0.0.1:11434").rstrip("/")
@@ -149,6 +163,7 @@ class Orchestrator:
     def acquire_lock(self):
         """Acquires an exclusive, non-blocking lock using fcntl.flock."""
         try:
+            os.makedirs(AUTODEV_RUNTIME_ROOT, exist_ok=True)
             self.lock_fd = os.open(LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o666)
             fcntl.flock(self.lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             
@@ -176,15 +191,30 @@ class Orchestrator:
             print("[INFO] Released pipeline lock.")
 
     def update_symlink(self, target_project_dir: str):
-        """Atomically updates the shared workspace symlink."""
+        """Atomically updates the shared workspace symlink.
+
+        Two symlinks are kept in sync:
+        1. SYMLINK_TARGET (.autodev/pipeline-project) — used by the orchestrator and
+           gate scripts to locate project files.
+        2. AUTODEV_ROOT/pipeline-project (~/.openclaw/pipeline-project) — followed by
+           agent workspace symlinks (workspace-{agent}/pipeline-project →
+           ~/.openclaw/pipeline-project). Without this second update the agent reads
+           the previous project's files even though the orchestrator targets the new one.
+        """
         target_project_dir = os.path.abspath(os.path.expanduser(target_project_dir))
         if not os.path.exists(target_project_dir):
             print(f"[ERROR] Target project dir doesn't exist: {target_project_dir}")
             return False
-            
+
+        openclaw_symlink = os.path.join(AUTODEV_ROOT, "pipeline-project")
+
         try:
             subprocess.run(["ln", "-sfn", target_project_dir, SYMLINK_TARGET], check=True)
             print(f"[INFO] Updated symlink {SYMLINK_TARGET} -> {target_project_dir}")
+            # Keep the OpenClaw-side symlink in sync so agent workspaces resolve correctly.
+            if SYMLINK_TARGET != openclaw_symlink:
+                subprocess.run(["ln", "-sfn", target_project_dir, openclaw_symlink], check=True)
+                print(f"[INFO] Updated symlink {openclaw_symlink} -> {target_project_dir}")
             return True
         except subprocess.CalledProcessError as e:
             print(f"[ERROR] Failed to update symlink: {e}")
@@ -210,7 +240,8 @@ class Orchestrator:
         self.state["last_action_timestamp"] = datetime.now(timezone.utc).isoformat()
         
         # Write to temp file then atomic rename
-        fd, temp_path = tempfile.mkstemp(dir=AUTODEV_ROOT, prefix="pipeline_state_")
+        os.makedirs(AUTODEV_RUNTIME_ROOT, exist_ok=True)
+        fd, temp_path = tempfile.mkstemp(dir=AUTODEV_RUNTIME_ROOT, prefix="pipeline_state_")
         try:
             with os.fdopen(fd, 'w') as f:
                 json.dump(self.state, f, indent=2)
@@ -231,6 +262,26 @@ class Orchestrator:
         self.state["last_action"] = action_description
         self.write_state()
 
+    def _phase_resolver_indicates_pipeline_complete(self) -> bool:
+        """True iff phase_resolver reports no pending phases for the current symlink project."""
+        gate_script = os.path.join(
+            AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts", "phase_resolver.py"
+        )
+        if not os.path.isfile(gate_script):
+            return False
+        try:
+            result = subprocess.run(
+                [sys.executable, gate_script],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            output = (result.stdout or "").strip()
+            return result.returncode == 0 and "PIPELINE_COMPLETE" in output
+        except Exception as exc:
+            print(f"[WARN] phase_resolver completion check failed: {exc}")
+            return False
+
     # ------------------------------------------------------------------
     # Queue helpers
     # ------------------------------------------------------------------
@@ -249,7 +300,8 @@ class Orchestrator:
     def _write_queue(self, data):
         """Atomically write pipeline_queue.json (mkstemp + os.replace)."""
         data["last_updated"] = datetime.now(timezone.utc).isoformat()
-        fd, tmp = tempfile.mkstemp(dir=AUTODEV_ROOT, prefix="queue_")
+        os.makedirs(AUTODEV_RUNTIME_ROOT, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=AUTODEV_RUNTIME_ROOT, prefix="queue_")
         try:
             with os.fdopen(fd, "w") as f:
                 json.dump(data, f, indent=2)
@@ -1604,7 +1656,7 @@ class Orchestrator:
             # Remove any mkstemp files left behind by a previous crash before
             # running the repo init check, so stale files don't interfere with
             # state reads or git status output.
-            cleanup_stranded_temp_files(AUTODEV_ROOT)
+            cleanup_stranded_temp_files(AUTODEV_RUNTIME_ROOT)
 
             # --- Repo Init Check (PIPELINE-SPEC §13) ---
             # Runs on every startup/resume before the phase loop. Validates workspace
@@ -1669,16 +1721,24 @@ class Orchestrator:
                 pst = self.state.get("pipeline_status")
                 if pst in ["HALTED_SILENT", "BLOCKED", "PIPELINE_COMPLETE"]:
                     print(f"[INFO] Pipeline is halted/blocked/complete ({pst}). Exiting.")
-                    # If global state already says COMPLETE (e.g. prior run) but the queue row
-                    # was just set ACTIVE by the UI, phase_resolver may still return PENDING while
-                    # startup leaves pipeline_status unchanged — we never reach the gate path that
-                    # calls _queue_update_active_entry. Sync the queue row here so ACTIVE does not
-                    # diverge from the monitor.
+                    # Stale PIPELINE_COMPLETE (e.g. prior project's state) must not mark the
+                    # current queue row COMPLETED when the roadmap still has pending phases.
                     if pst == "PIPELINE_COMPLETE":
-                        self._queue_update_active_entry(
-                            "COMPLETED",
-                            {"completed_at": datetime.now(timezone.utc).isoformat()},
+                        if self._phase_resolver_indicates_pipeline_complete():
+                            self._queue_update_active_entry(
+                                "COMPLETED",
+                                {"completed_at": datetime.now(timezone.utc).isoformat()},
+                            )
+                            break
+                        print(
+                            "[INFO] Stale PIPELINE_COMPLETE — roadmap has pending work; "
+                            "recovering to RUNNING."
                         )
+                        self.transition_state(
+                            "RUNNING",
+                            "Recovered stale PIPELINE_COMPLETE; pending phases remain",
+                        )
+                        continue
                     break
 
                 if self._check_stop_requested():
@@ -2681,6 +2741,67 @@ class Orchestrator:
         finally:
             self.release_lock()
 
+
+def _realpath_safe(path: str) -> str:
+    if not path or not str(path).strip():
+        return ""
+    try:
+        return os.path.realpath(os.path.expanduser(str(path).strip()))
+    except OSError:
+        return os.path.abspath(os.path.expanduser(str(path).strip()))
+
+
+def apply_cli_project_path(orchestrator, new_target: str) -> None:
+    """Apply ``--project-path``: reset state when switching projects.
+
+    Symlink-only comparison is insufficient: preflight/UI may already point
+    ``pipeline-project`` at the new repo while ``pipeline_state.json`` still
+    holds the previous ``project_path`` and terminal ``pipeline_status`` (e.g.
+    PIPELINE_COMPLETE). Always compare requested path to on-disk
+    ``project_path`` after loading state.
+    """
+    new_target = os.path.abspath(os.path.expanduser(new_target))
+    new_target_real = _realpath_safe(new_target)
+
+    disk_state: dict = {}
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                disk_state = json.load(f)
+        except Exception:
+            disk_state = {}
+
+    state_pp = (disk_state.get("project_path") or "").strip()
+    state_project_real = _realpath_safe(state_pp)
+
+    # Only compare on-disk project_path to the CLI target. Symlink may be stale while
+    # state still matches — we fix the symlink below without wiping resume state.
+    project_switch = state_project_real != new_target_real
+
+    if project_switch:
+        print(f"[INFO] Project switch detected (state or symlink → {new_target}).")
+        print("[INFO] Resetting pipeline_state.json for new project.")
+        orchestrator.state = {
+            "current_phase": 0,
+            "current_phase_raw_id": "",
+            "current_agent": "planner",
+            "planner_retries": 0,
+            "executor_retries": 0,
+            "reviewer_retries": 0,
+            "last_action": "initialized for new project",
+            "last_action_timestamp": datetime.now(timezone.utc).isoformat(),
+            "pipeline_status": "RUNNING",
+            "project_path": new_target,
+        }
+    else:
+        if disk_state:
+            orchestrator.state = disk_state
+        orchestrator.state["project_path"] = new_target
+
+    orchestrator.write_state()
+    orchestrator.update_symlink(new_target)
+
+
 if __name__ == "__main__":
     # Configure logging before anything else so cleanup_stranded_temp_files()
     # and all startup INFO messages reach stdout (not silently discarded).
@@ -2704,37 +2825,6 @@ if __name__ == "__main__":
     orchestrator = Orchestrator()
 
     if args.project_path:
-        new_target = os.path.abspath(os.path.expanduser(args.project_path))
-        current_target = os.path.realpath(SYMLINK_TARGET) if os.path.exists(SYMLINK_TARGET) else None
-        if current_target != new_target:
-            print(f"[INFO] Project switch detected: {current_target} → {new_target}.")
-            print("[INFO] Resetting pipeline_state.json for new project.")
-            # Write a clean initial state so no previous project's phase/retries bleed through.
-            # project_path is included so heartbeat cron can re-pass it on restart (B4).
-            orchestrator.state = {
-                "current_phase": 0,
-                "current_phase_raw_id": "",
-                "current_agent": "planner",
-                "planner_retries": 0,
-                "executor_retries": 0,
-                "reviewer_retries": 0,
-                "last_action": "initialized for new project",
-                "last_action_timestamp": datetime.now(timezone.utc).isoformat(),
-                "pipeline_status": "RUNNING",
-                "project_path": new_target,
-            }
-        else:
-            # Same project resume: load existing state from disk to preserve phase/retry progress,
-            # then patch in project_path so heartbeat cron can re-pass it on restart (B4).
-            if os.path.exists(STATE_FILE):
-                try:
-                    with open(STATE_FILE, 'r') as f:
-                        orchestrator.state = json.load(f)
-                except Exception:
-                    pass
-            orchestrator.state["project_path"] = new_target
-        # Atomic write — project_path is in state before run() begins (write-then-act).
-        orchestrator.write_state()
-        orchestrator.update_symlink(args.project_path)
+        apply_cli_project_path(orchestrator, args.project_path)
 
     orchestrator.run()

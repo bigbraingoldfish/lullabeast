@@ -4,10 +4,25 @@ import json
 import subprocess
 import tempfile
 
+def _derive_pipeline_project() -> str:
+    explicit = os.environ.get("AUTODEV_RUNTIME_ROOT", "").strip()
+    if explicit:
+        return os.path.join(explicit, "pipeline-project")
+    legacy = os.environ.get("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "").strip().lower()
+    if legacy in ("1", "true", "yes"):
+        root = os.environ.get("AUTODEV_ROOT", os.path.expanduser("~/.openclaw"))
+        return os.path.join(root, "pipeline-project")
+    repo_path = os.environ.get(
+        "AUTODEV_REPO_PATH",
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    )
+    return os.path.join(repo_path, ".autodev", "pipeline-project")
+
+
 def init_phase():
-    workspace = os.path.expanduser("~/.openclaw/pipeline-project/")
+    workspace = _derive_pipeline_project() + os.sep
     if not os.path.exists(workspace):
-        workspace = "." # fallback for local testing
+        workspace = "." + os.sep  # fallback for local testing
         
     # 1. Initialize phase_state.json
     state_file = os.path.join(workspace, "phase_state.json")

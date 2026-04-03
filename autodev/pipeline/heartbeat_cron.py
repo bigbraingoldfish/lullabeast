@@ -12,11 +12,25 @@ AUTODEV_ROOT = os.environ.get("AUTODEV_ROOT", os.path.expanduser("~/.openclaw"))
 AUTODEV_REPO_PATH = os.environ.get(
     "AUTODEV_REPO_PATH",
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-LOCK_FILE = os.path.join(AUTODEV_ROOT, "pipeline.lock")
-STATE_FILE = os.path.join(AUTODEV_ROOT, "pipeline_state.json")
+
+
+def _env_truthy(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+_rt_env = (os.environ.get("AUTODEV_RUNTIME_ROOT") or "").strip()
+if _env_truthy("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME"):
+    AUTODEV_RUNTIME_ROOT = AUTODEV_ROOT
+elif _rt_env:
+    AUTODEV_RUNTIME_ROOT = os.path.expanduser(_rt_env)
+else:
+    AUTODEV_RUNTIME_ROOT = os.path.join(AUTODEV_REPO_PATH, ".autodev")
+
+LOCK_FILE = os.path.join(AUTODEV_RUNTIME_ROOT, "pipeline.lock")
+STATE_FILE = os.path.join(AUTODEV_RUNTIME_ROOT, "pipeline_state.json")
 CONFIG_FILE = os.path.join(AUTODEV_ROOT, "openclaw.json")
 ORCHESTRATOR_SCRIPT = os.path.join(AUTODEV_REPO_PATH, "autodev", "pipeline", "orchestrator.py")
-LOG_FILE = os.path.join(AUTODEV_ROOT, "orchestrator.log")
+LOG_FILE = os.path.join(AUTODEV_RUNTIME_ROOT, "orchestrator.log")
 
 # Local llama-server chat endpoint. Override origin with AUTODEV_LLAMA_BASE (scheme+host+port, no path).
 _LLAMA_ORIGIN = os.environ.get("AUTODEV_LLAMA_BASE", "http://127.0.0.1:11434").rstrip("/")
@@ -77,14 +91,22 @@ def query_heartbeat_model(state_json: str) -> str:
 
 def start_orchestrator(project_path):
     print("[INFO] Starting orchestrator process...")
+    os.makedirs(AUTODEV_RUNTIME_ROOT, exist_ok=True)
+    env = os.environ.copy()
+    env["AUTODEV_ROOT"] = AUTODEV_ROOT
+    env["AUTODEV_REPO_PATH"] = AUTODEV_REPO_PATH
+    env["AUTODEV_RUNTIME_ROOT"] = AUTODEV_RUNTIME_ROOT
+    if _env_truthy("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME"):
+        env["AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME"] = "1"
     # Use Popen to run it in background detached from cron so it keeps running
     with open(LOG_FILE, "a") as log:
         subprocess.Popen(
             [sys.executable, ORCHESTRATOR_SCRIPT, "--project-path", project_path],
-            cwd=AUTODEV_ROOT,
+            cwd=AUTODEV_REPO_PATH,
             stdout=log,
             stderr=subprocess.STDOUT,
-            start_new_session=True
+            start_new_session=True,
+            env=env,
         )
 
 

@@ -58,9 +58,26 @@ def parse_roadmap(filepath):
             
     return current_phase
 
+def _derive_pipeline_project() -> str:
+    """Resolve pipeline-project path using the same runtime-root logic as the orchestrator."""
+    explicit = os.environ.get("AUTODEV_RUNTIME_ROOT", "").strip()
+    if explicit:
+        return os.path.join(explicit, "pipeline-project")
+    legacy = os.environ.get("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "").strip().lower()
+    if legacy in ("1", "true", "yes"):
+        root = os.environ.get("AUTODEV_ROOT", os.path.expanduser("~/.openclaw"))
+        return os.path.join(root, "pipeline-project")
+    repo_path = os.environ.get(
+        "AUTODEV_REPO_PATH",
+        # gate_scripts/ → pipeline/ → autodev/ → repo root: 3 dirname calls
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    )
+    return os.path.join(repo_path, ".autodev", "pipeline-project")
+
+
 def validate_and_identify(roadmap_path=None):
     if not roadmap_path:
-        pipeline_project = os.path.expanduser("~/.openclaw/pipeline-project")
+        pipeline_project = _derive_pipeline_project()
         # Find roadmap file
         import glob
         for ext in ['*.md', '*.yaml', '*.json']:

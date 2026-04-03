@@ -631,6 +631,33 @@ class TestDeleteQueueEntry:
         resp = c.delete(f"/api/queue/{uuid.uuid4()}")
         assert resp.status_code == 404
 
+    def test_returns_422_for_synthetic_ingest_row(self, client):
+        """ingest-* rows are display-only merges from pipeline_state, not on disk."""
+        import uuid as _uuid
+
+        c, queue_file, tmp_path = client
+        proj_a = str(tmp_path / "only_in_queue")
+        proj_b = str(tmp_path / "only_in_state")
+        os.makedirs(proj_b, exist_ok=True)
+        e1 = _make_entry("a", position=1)
+        e1["project_path"] = proj_a
+        _write_queue(str(queue_file), [e1])
+        pipeline_state_file = tmp_path / "pipeline_state.json"
+        with open(pipeline_state_file, "w") as f:
+            json.dump({"project_path": proj_b, "pipeline_status": "PIPELINE_COMPLETE"}, f)
+
+        ps_real = os.path.realpath(os.path.expanduser(proj_b))
+        ingest_id = f"ingest-{_uuid.uuid5(_uuid.NAMESPACE_URL, ps_real)}"
+
+        get_resp = c.get("/api/queue")
+        assert get_resp.status_code == 200
+        ids = [e["id"] for e in get_resp.json()["queue"]]
+        assert ingest_id in ids
+
+        resp = c.delete(f"/api/queue/{ingest_id}")
+        assert resp.status_code == 422
+        assert "Synthetic" in resp.json().get("detail", "")
+
 
 # ---------------------------------------------------------------------------
 # PATCH /api/queue/{entry_id}/position

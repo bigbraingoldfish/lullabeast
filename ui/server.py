@@ -376,25 +376,81 @@ async def lifespan(app: FastAPI):
 # Canonical default values
 DEFAULTS = {
     "port": 18790,
-    "pipeline_state_path": "~/.openclaw/pipeline_state.json",
-    "phase_state_path": "~/.openclaw/pipeline-project/phase_state.json",
-    "lock_path": "~/.openclaw/pipeline.lock",
-    "events_path": "~/.openclaw/pipeline_events.jsonl",
-    "roadmap_path": "~/.openclaw/pipeline-project/roadmap.md",
-    "project_dir_path": "~/.openclaw/pipeline-project",
-    "ideas_dir": "~/.openclaw/ideas",
+    # Paths below are placeholders; _finalize_autodev_config_paths applies repo-local or legacy layout.
+    "pipeline_state_path": "",
+    "phase_state_path": "",
+    "lock_path": "",
+    "events_path": "",
+    "roadmap_path": "",
+    "project_dir_path": "",
+    "ideas_dir": "",
     "hooks_url": "http://localhost:18789/hooks/agent",
     "hooks_token": "",
-    "conversion_prompt_path": "~/.openclaw/deployment-package/Updates/PRD to Roadmap (sonnet 4.5 ideal).txt",
+    "conversion_prompt_path": "",
     "openclaw_root": os.environ.get("AUTODEV_ROOT") or "~/.openclaw",
-    "autodev_repo_path": os.environ.get("AUTODEV_REPO_PATH", os.path.expanduser("~/.openclaw")),
+    "autodev_repo_path": os.environ.get("AUTODEV_REPO_PATH") or _AUTODEV_UI_ROOT,
+    "use_legacy_openclaw_runtime": False,
+    "autodev_runtime_root": "",
     "roadmap_converter_workspace": "~/.openclaw/workspace-roadmap-converter",
-    "pipeline_queue_path": "~/.openclaw/pipeline_queue.json",
+    "pipeline_queue_path": "",
     "poll_timeout": 180,
     "poll_interval": 2,
     "ideas_idle_threshold": 120,  # seconds of JSONL silence before declaring agent idle
     "ideas_startup_grace": 30,    # seconds to wait for OpenClaw to register the session
 }
+
+
+def _truthy_env(v: str) -> bool:
+    return v.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _finalize_autodev_config_paths(config: dict, user_override_keys: set[str]) -> None:
+    """Fill runtime paths: repo-local ``<repo>/.autodev`` by default, or OpenClaw root if legacy.
+
+    Keys present in ``user_override_keys`` (from ui/config.json) are never overwritten.
+    """
+    legacy = bool(config.get("use_legacy_openclaw_runtime"))
+    if _truthy_env(os.environ.get("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "")):
+        legacy = True
+
+    repo = config.get("autodev_repo_path") or _AUTODEV_UI_ROOT
+    oc = config.get("openclaw_root") or os.path.expanduser("~/.openclaw")
+
+    if "autodev_runtime_root" in user_override_keys and config.get("autodev_runtime_root"):
+        runtime_base = os.path.expanduser(str(config["autodev_runtime_root"]))
+    elif legacy:
+        runtime_base = oc
+    else:
+        runtime_base = os.path.join(repo, ".autodev")
+
+    if "autodev_runtime_root" not in user_override_keys:
+        config["autodev_runtime_root"] = runtime_base
+
+    derived = {
+        "pipeline_state_path": os.path.join(runtime_base, "pipeline_state.json"),
+        "lock_path": os.path.join(runtime_base, "pipeline.lock"),
+        "pipeline_queue_path": os.path.join(runtime_base, "pipeline_queue.json"),
+        "events_path": os.path.join(runtime_base, "pipeline_events.jsonl"),
+        "ideas_dir": os.path.join(runtime_base, "ideas"),
+        "project_dir_path": os.path.join(runtime_base, "pipeline-project"),
+    }
+    for key, val in derived.items():
+        if key not in user_override_keys:
+            config[key] = val
+
+    pd = config.get("project_dir_path", "")
+    if "phase_state_path" not in user_override_keys:
+        config["phase_state_path"] = os.path.join(pd, "phase_state.json")
+    if "roadmap_path" not in user_override_keys:
+        config["roadmap_path"] = os.path.join(pd, "roadmap.md")
+
+    if "conversion_prompt_path" not in user_override_keys:
+        config["conversion_prompt_path"] = os.path.join(
+            repo, "autodev", "prompts", "prd-to-roadmap-conversion.txt"
+        )
+
+    if "roadmap_converter_workspace" not in user_override_keys:
+        config["roadmap_converter_workspace"] = os.path.join(oc, "workspace-roadmap-converter")
 
 
 def load_config(config_path=None):
@@ -411,11 +467,13 @@ def load_config(config_path=None):
     
     # Start with defaults
     config = DEFAULTS.copy()
-    
+    user_override_keys: set[str] = set()
+
     # Merge user config if exists
     if Path(config_path).exists():
         with open(config_path, 'r') as f:
             user_config = json.load(f)
+            user_override_keys = set(user_config.keys())
             config.update(user_config)
 
     # Webhook Bearer token: env wins over file (avoid committing secrets)
@@ -424,11 +482,46 @@ def load_config(config_path=None):
         config["hooks_token"] = _hooks_env
 
     # Expand ~ on all string values (skip port which is int)
-    for key, value in config.items():
+    for key, value in list(config.items()):
         if isinstance(value, str):
             config[key] = os.path.expanduser(value)
+
+    _finalize_autodev_config_paths(config, user_override_keys)
     
     return config
+
+
+def _idea_paths_for_messages(config: dict, idea_id: str) -> dict[str, str]:
+    """Absolute paths for idea-scoped files (agent webhook instructions)."""
+    root = Path(config.get("ideas_dir", ""))
+    d = root / idea_id
+    return {
+        "dir": str(d),
+        "prd_draft": str(d / "prd_draft.md"),
+        "roadmap_draft": str(d / "roadmap_draft.md"),
+        "roadmap_done": str(d / "roadmap_draft.done"),
+        "alignment_report": str(d / "alignment_report.md"),
+        "alignment_done": str(d / "alignment_report.done"),
+        "adversarial_report": str(d / "adversarial_report.md"),
+        "adversarial_done": str(d / "adversarial_report.done"),
+        "clarity_result": str(d / "clarity_result.json"),
+        "clarity_done": str(d / "clarity_result.done"),
+        "uploaded_seed": str(d / "uploaded_seed.md"),
+    }
+
+
+def _read_conversion_prompt_text(config: dict) -> str:
+    """Load conversion instructions from config path, repo default, or inline fallback."""
+    p = Path(config.get("conversion_prompt_path") or "")
+    if p.is_file():
+        return p.read_text(encoding="utf-8")
+    fb = Path(_AUTODEV_UI_ROOT) / "autodev" / "prompts" / "prd-to-roadmap-conversion.txt"
+    if fb.is_file():
+        return fb.read_text(encoding="utf-8")
+    return (
+        "Convert the PRD into a canonical AutoDev roadmap using the injected "
+        "roadmap-generation skill. Do not add conversational preamble."
+    )
 
 
 # FastAPI app
@@ -505,7 +598,7 @@ _METRICS_MAX_ENTRIES = 10
 def _record_operation_metric(op_name: str, duration_seconds: float, config: dict) -> None:
     """Append a timing entry for op_name; trim to last _METRICS_MAX_ENTRIES; atomic write."""
     try:
-        ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+        ideas_dir = Path(config.get("ideas_dir") or "")
         metrics_path = Path(ideas_dir) / "operation_metrics.json"
         metrics_path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -531,7 +624,7 @@ def _record_operation_metric(op_name: str, duration_seconds: float, config: dict
 def _get_operation_metrics(config: dict) -> dict:
     """Return per-operation avg_seconds and sample_count from the metrics file."""
     try:
-        ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+        ideas_dir = Path(config.get("ideas_dir") or "")
         metrics_path = Path(ideas_dir) / "operation_metrics.json"
         if not metrics_path.exists():
             return {}
@@ -711,7 +804,7 @@ def _read_queue_file(config=None):
     """Read pipeline_queue.json; returns empty structure if absent."""
     if config is None:
         config = load_config()
-    path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
+    path = os.path.expanduser(config.get("pipeline_queue_path") or "")
     if not os.path.exists(path):
         return {"queue": [], "queue_mode": "auto", "last_updated": ""}
     return _read_json_file(path) or {"queue": [], "queue_mode": "auto", "last_updated": ""}
@@ -732,7 +825,7 @@ def _queue_mark_matching_entry_active(config: dict, project_real: str) -> None:
         target = os.path.realpath(os.path.expanduser(str(project_real)))
     except OSError:
         return
-    q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
+    q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
     q = _read_queue_file(config)
     entries = q.get("queue", [])
     if not entries:
@@ -948,11 +1041,20 @@ def _spawn_orchestrator(project_path: str, config: dict | None = None) -> dict:
     if not os.path.exists(orchestrator_script):
         return {"ok": False, "error": f"{ORCHESTRATOR_FILENAME} not found at {orchestrator_script}"}
     log_file = open("/tmp/orchestrator.log", "a")
+    env = os.environ.copy()
+    env["AUTODEV_ROOT"] = str(config.get("openclaw_root") or os.path.expanduser("~/.openclaw"))
+    env["AUTODEV_REPO_PATH"] = str(autodev_repo_path)
+    env["AUTODEV_RUNTIME_ROOT"] = str(config.get("autodev_runtime_root") or "")
+    if config.get("use_legacy_openclaw_runtime") or _truthy_env(
+        os.environ.get("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "")
+    ):
+        env["AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME"] = "1"
     subprocess.Popen(
         ["python", orchestrator_script, "--project-path", project_path],
         cwd=autodev_repo_path,
         stdout=log_file,
         stderr=subprocess.STDOUT,
+        env=env,
     )
     return {"ok": True, "error": None}
 
@@ -1500,14 +1602,18 @@ def get_state():
     # Event source
     response["event_source"] = _determine_event_source(events_path) if events_path else "synthetic"
 
-    # Project path — resolve symlink for display (last two segments shown in header)
+    # Keep project_path sourced from pipeline_state to avoid mixing status from one
+    # project with symlink target from another in a single /api/state payload.
+    # Expose symlink target separately for UI diagnostics.
     _symlink_path = config.get("project_dir_path") or config.get("symlink_target") or config.get("project_dir")
     if _symlink_path:
         _symlink_path = os.path.expanduser(_symlink_path)
         try:
-            response["project_path"] = os.path.realpath(_symlink_path)
+            response["project_symlink_target"] = os.path.realpath(_symlink_path)
         except Exception:
-            response["project_path"] = _symlink_path
+            response["project_symlink_target"] = _symlink_path
+        if not response.get("project_path"):
+            response["project_path"] = response["project_symlink_target"]
 
     pdp_exp = _expand_project_dir_config(config)
     unhealthy = _project_dir_unhealthy(pdp_exp)
@@ -1692,7 +1798,7 @@ def post_command(request: dict):
             deferred_target = tgt_real
 
     if deferred_target:
-        q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
+        q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
         q = _read_json_file(q_path) if q_path and os.path.exists(q_path) else {}
         match = None
         for e in q.get("queue", []):
@@ -2278,7 +2384,7 @@ def _enrich_assistant_messages_with_parsed(session_data: dict) -> None:
 def get_ideas_session(idea_id: str):
     """Return the full session.json for an idea, or empty schema if not found."""
     config = load_config()
-    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    ideas_dir = Path(config.get("ideas_dir") or "")
     idea_dir = Path(ideas_dir) / idea_id
     session_path = idea_dir / "session.json"
 
@@ -2301,19 +2407,19 @@ async def _trigger_readiness_assessment(idea_id: str, config: dict) -> None:
     _readiness_job_started_at[idea_id] = datetime.utcnow().timestamp()
     logger.info(f"[READINESS] Triggering assessment for idea {idea_id}")
     try:
-        ideas_dir = Path(os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas")))
+        ideas_dir = Path(config.get("ideas_dir") or "")
         sentinel = ideas_dir / idea_id / "readiness.done"
         sentinel.unlink(missing_ok=True)
         hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
         hooks_token = config.get("hooks_token", "")
+        ip = _idea_paths_for_messages(config, idea_id)
         payload = {
             "agentId": WEBHOOK_AGENT_ID,
             "sessionKey": f"ideas:{idea_id}:readiness",
             "wakeMode": "now",
             "message": (
                 f"[SESSION] ideas:{idea_id}:readiness\n\n"
-                f"A new PRD draft is available. Read "
-                f"~/.openclaw/ideas/{idea_id}/prd_draft.md and produce an "
+                f"A new PRD draft is available. Read {ip['prd_draft']} and produce an "
                 f"updated readiness assessment. Apply the readiness-reviewer "
                 f"skill. Write readiness.json then readiness.done as specified."
             ),
@@ -2347,7 +2453,7 @@ async def post_ideas_message(idea_id: str, request: Request):
     if not content or turn_n is None:
         raise HTTPException(status_code=422, detail="Body must contain {content: str, turn: int}")
 
-    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    ideas_dir = Path(config.get("ideas_dir") or "")
     hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
     hooks_token = config.get("hooks_token", "")
 
@@ -2610,7 +2716,7 @@ async def post_idea_annotation(idea_id: str, request: Request):
     Returns: {"id": uuid}
     """
     config = load_config()
-    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    ideas_dir = Path(config.get("ideas_dir") or "")
     idea_dir = Path(ideas_dir) / idea_id
     if not idea_dir.exists():
         raise HTTPException(status_code=404, detail="Idea not found")
@@ -2645,7 +2751,7 @@ async def patch_idea_annotation(idea_id: str, annotation_id: str, request: Reque
     Returns 409 if annotation is already submitted.
     """
     config = load_config()
-    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    ideas_dir = Path(config.get("ideas_dir") or "")
     idea_dir = Path(ideas_dir) / idea_id
     if not idea_dir.exists():
         raise HTTPException(status_code=404, detail="Idea not found")
@@ -2674,7 +2780,7 @@ def delete_idea_annotation(idea_id: str, annotation_id: str):
     Returns 404 if annotation not found.
     """
     config = load_config()
-    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    ideas_dir = Path(config.get("ideas_dir") or "")
     idea_dir = Path(ideas_dir) / idea_id
     if not idea_dir.exists():
         raise HTTPException(status_code=404, detail="Idea not found")
@@ -2697,7 +2803,7 @@ def get_idea_annotations(idea_id: str):
     Returns [] if idea has no annotations.
     """
     config = load_config()
-    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    ideas_dir = Path(config.get("ideas_dir") or "")
     idea_dir = Path(ideas_dir) / idea_id
     if not idea_dir.exists():
         raise HTTPException(status_code=404, detail="Idea not found")
@@ -2727,7 +2833,7 @@ def get_ideas():
     """
     import shutil
     config = load_config()
-    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    ideas_dir = Path(config.get("ideas_dir") or "")
     ideas_path = Path(ideas_dir)
 
     if not ideas_path.exists():
@@ -2780,7 +2886,7 @@ def post_ideas():
     Returns {"id": <uuid>}.
     """
     config = load_config()
-    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    ideas_dir = Path(config.get("ideas_dir") or "")
     ideas_path = Path(ideas_dir)
     ideas_path.mkdir(parents=True, exist_ok=True)
 
@@ -2815,7 +2921,7 @@ def delete_ideas(idea_id: str):
     """
     import shutil
     config = load_config()
-    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    ideas_dir = Path(config.get("ideas_dir") or "")
     idea_path = Path(ideas_dir) / idea_id
 
     if not idea_path.exists():
@@ -2834,7 +2940,7 @@ def download_ideas(idea_id: str):
     Returns 404 if the idea is not found.
     """
     config = load_config()
-    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    ideas_dir = Path(config.get("ideas_dir") or "")
     session_path = Path(ideas_dir) / idea_id / "session.json"
 
     if not session_path.exists():
@@ -2892,7 +2998,7 @@ async def post_ideas_upload(
         raise HTTPException(status_code=400, detail="File must be non-empty")
 
     config = load_config()
-    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    ideas_dir = Path(config.get("ideas_dir") or "")
     hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
     hooks_token = config.get("hooks_token", "")
     idea_dir = Path(ideas_dir) / idea_id
@@ -2915,13 +3021,14 @@ async def post_ideas_upload(
         upload_turn += 1
 
     session_key = f"ideas:{idea_id}:upload-{upload_turn}"
+    ip = _idea_paths_for_messages(config, idea_id)
     webhook_payload = {
         "agentId": WEBHOOK_AGENT_ID,
         "sessionKey": session_key,
         "wakeMode": "now",
         "message": (
             f"[SESSION] ideas:{idea_id}:upload-{upload_turn}\n\n"
-            f"I uploaded a file. Please read ~/.openclaw/ideas/{idea_id}/uploaded_seed.md "
+            f"I uploaded a file. Please read {ip['uploaded_seed']} "
             f"and synthesize its content into the canonical PRD template (all sections), "
             f"preserving my intent. Explain briefly what you structured in your reply."
         ),
@@ -2978,7 +3085,7 @@ async def post_ideas_clarity_check(idea_id: str):
     Returns the contents of clarity_result.json on success, 504 on timeout.
     """
     config = load_config()
-    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    ideas_dir = Path(config.get("ideas_dir") or "")
     hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
     hooks_token = config.get("hooks_token", "")
 
@@ -2995,6 +3102,7 @@ async def post_ideas_clarity_check(idea_id: str):
     if not prd_content:
         raise HTTPException(status_code=422, detail="No prd_content to check")
 
+    ip = _idea_paths_for_messages(config, idea_id)
     # Build webhook payload
     timestamp_ms = int(datetime.utcnow().timestamp() * 1000)
     session_key = f"ideas:{idea_id}:clarity-{timestamp_ms}"
@@ -3006,9 +3114,9 @@ async def post_ideas_clarity_check(idea_id: str):
             "Review the following PRD for clarity and completeness. "
             "Do not write or modify any files other than clarity_result.json and clarity_result.done listed below. "
             "Analyze whether all essential sections are present and well-formed. "
-            f"Write a JSON object to ~/.openclaw/ideas/{idea_id}/clarity_result.json with schema "
+            f"Write a JSON object to {ip['clarity_result']} with schema "
             '{"pass": bool, "missing_sections": [str], "issues": [str]}, '
-            f"then create ~/.openclaw/ideas/{idea_id}/clarity_result.done.\n\n"
+            f"then create {ip['clarity_done']}.\n\n"
             f"PRD CONTENT:\n{prd_content}"
         ),
     }
@@ -3050,7 +3158,7 @@ FORMAT_CORRECTION_POLL_INTERVAL = 2  # seconds between sentinel checks
 def get_idea_readiness(idea_id: str):
     """Serve agent-written readiness.json; status reflects sentinel + JSON validity."""
     config = load_config()
-    ideas_dir = Path(os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas")))
+    ideas_dir = Path(config.get("ideas_dir") or "")
     idea_dir = ideas_dir / idea_id
     if not idea_dir.exists():
         raise HTTPException(status_code=404, detail="Idea not found")
@@ -3093,7 +3201,7 @@ def get_idea_readiness(idea_id: str):
 def poll_readiness_done(idea_id: str):
     """Lightweight poll for readiness.done sentinel."""
     config = load_config()
-    ideas_dir = Path(os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas")))
+    ideas_dir = Path(config.get("ideas_dir") or "")
     idea_dir = ideas_dir / idea_id
     if not idea_dir.exists():
         raise HTTPException(status_code=404, detail="Idea not found")
@@ -3111,19 +3219,15 @@ async def post_ideas_convert(idea_id: str):
 
     Returns 404 if the idea is not found.
     Returns 422 if prd_content is empty.
-    Returns 503 if the conversion prompt file is missing.
     Returns 408 if polling times out.
     Returns 200 with {"roadmap_content": str} on success.
     """
     config = load_config()
-    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    ideas_dir = Path(config.get("ideas_dir", ""))
     hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
     hooks_token = config.get("hooks_token", "")
-    conversion_prompt_path = os.path.expanduser(
-        config.get("conversion_prompt_path", "")
-    )
 
-    idea_dir = Path(ideas_dir) / idea_id
+    idea_dir = ideas_dir / idea_id
     if not idea_dir.exists():
         raise HTTPException(status_code=404, detail="Idea not found")
 
@@ -3134,18 +3238,12 @@ async def post_ideas_convert(idea_id: str):
     if not prd_content:
         raise HTTPException(status_code=422, detail="No prd_content to convert")
 
-    # Read conversion prompt — 503 if missing
-    if not Path(conversion_prompt_path).exists():
-        raise HTTPException(
-            status_code=503,
-            detail=f"Conversion prompt file not found at {conversion_prompt_path}. Set conversion_prompt_path in ui/config.json.",
-        )
-
-    conversion_prompt = Path(conversion_prompt_path).read_text()
+    conversion_prompt = _read_conversion_prompt_text(config)
 
     # Inject roadmap-generation skill before webhook POST
     _inject_converter_skill("roadmap-generation", config)
 
+    ip = _idea_paths_for_messages(config, idea_id)
     # Build webhook payload
     timestamp_ms = int(datetime.utcnow().timestamp() * 1000)
     session_key = f"ideas:{idea_id}:convert-{timestamp_ms}"
@@ -3157,9 +3255,8 @@ async def post_ideas_convert(idea_id: str):
             f"{conversion_prompt.strip()}\n\n"
             f"---\n\n"
             f"{prd_content}\n\n"
-            f"Write the resulting roadmap.md content to "
-            f"~/.openclaw/ideas/{idea_id}/roadmap_draft.md, then create "
-            f"~/.openclaw/ideas/{idea_id}/roadmap_draft.done."
+            f"Write the resulting roadmap.md content to {ip['roadmap_draft']}, "
+            f"then create {ip['roadmap_done']}."
         ),
     }
 
@@ -3213,7 +3310,7 @@ async def _notify_prd_agent(idea_id: str, config: dict, report_content: str, che
     Designed to be called via asyncio.create_task — never raises, logs on failure.
     """
     try:
-        ideas_dir = Path(os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas")))
+        ideas_dir = Path(config.get("ideas_dir") or "")
         idea_dir = ideas_dir / idea_id
         session_path = idea_dir / "session.json"
         session_data = _read_json_file(str(session_path)) or {}
@@ -3397,7 +3494,7 @@ async def post_ideas_alignment_check(idea_id: str):
     "roadmap_content": str | None} on success.
     """
     config = load_config()
-    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    ideas_dir = Path(config.get("ideas_dir") or "")
     hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
     hooks_token = config.get("hooks_token", "")
 
@@ -3424,6 +3521,7 @@ async def post_ideas_alignment_check(idea_id: str):
     _inject_converter_skill("roadmap-generation", config)
     _inject_converter_skill("alignment-check", config)
 
+    ip = _idea_paths_for_messages(config, idea_id)
     # Build webhook payload
     timestamp_ms = int(datetime.utcnow().timestamp() * 1000)
     session_key = f"ideas:{idea_id}:alignment-{timestamp_ms}"
@@ -3434,13 +3532,12 @@ async def post_ideas_alignment_check(idea_id: str):
         "message": (
             f"[SESSION] {session_key}\n\n"
             f"Perform an alignment check on the roadmap for idea {idea_id}.\n\n"
-            f"Read ~/.openclaw/ideas/{idea_id}/prd_draft.md and "
-            f"~/.openclaw/ideas/{idea_id}/roadmap_draft.md.\n\n"
+            f"Read {ip['prd_draft']} and {ip['roadmap_draft']}.\n\n"
             f"Apply the roadmap-generation and alignment-check skills from your workspace.\n\n"
-            f"Write your analysis to ~/.openclaw/ideas/{idea_id}/alignment_report.md.\n"
+            f"Write your analysis to {ip['alignment_report']}.\n"
             f"If you found and fixed material gaps, write the updated roadmap to "
-            f"~/.openclaw/ideas/{idea_id}/roadmap_draft.md.\n"
-            f"Write ~/.openclaw/ideas/{idea_id}/alignment_report.done last."
+            f"{ip['roadmap_draft']}.\n"
+            f"Write {ip['alignment_done']} last."
         ),
     }
 
@@ -3580,7 +3677,7 @@ async def post_ideas_adversarial_check(idea_id: str):
     Returns 200 with {"adversarial_report": str} on success.
     """
     config = load_config()
-    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    ideas_dir = Path(config.get("ideas_dir") or "")
     hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
     hooks_token = config.get("hooks_token", "")
 
@@ -3603,6 +3700,7 @@ async def post_ideas_adversarial_check(idea_id: str):
     # Inject adversarial-review skill only
     _inject_converter_skill("adversarial-review", config)
 
+    ip = _idea_paths_for_messages(config, idea_id)
     # Build webhook payload
     timestamp_ms = int(datetime.utcnow().timestamp() * 1000)
     session_key = f"ideas:{idea_id}:adversarial-{timestamp_ms}"
@@ -3613,12 +3711,11 @@ async def post_ideas_adversarial_check(idea_id: str):
         "message": (
             f"[SESSION] {session_key}\n\n"
             f"Perform an adversarial review of the roadmap for idea {idea_id}.\n\n"
-            f"Read ~/.openclaw/ideas/{idea_id}/prd_draft.md and "
-            f"~/.openclaw/ideas/{idea_id}/roadmap_draft.md.\n\n"
+            f"Read {ip['prd_draft']} and {ip['roadmap_draft']}.\n\n"
             f"Apply the adversarial-review skill from your workspace.\n\n"
-            f"Write your risk assessment to ~/.openclaw/ideas/{idea_id}/adversarial_report.md.\n"
+            f"Write your risk assessment to {ip['adversarial_report']}.\n"
             f"Do not modify roadmap_draft.md — this is an analysis-only pass.\n"
-            f"Write ~/.openclaw/ideas/{idea_id}/adversarial_report.done last."
+            f"Write {ip['adversarial_done']} last."
         ),
     }
 
@@ -3691,7 +3788,7 @@ async def post_ideas_fix_roadmap_format(idea_id: str, body: FixRoadmapFormatRequ
     Returns 200 with {"roadmap_content": str} on success.
     """
     config = load_config()
-    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    ideas_dir = Path(config.get("ideas_dir") or "")
     hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
     hooks_token = config.get("hooks_token", "")
 
@@ -3729,6 +3826,7 @@ async def post_ideas_fix_roadmap_format(idea_id: str, body: FixRoadmapFormatRequ
     # Inject format-correction skill before webhook POST
     _inject_converter_skill("format-correction", config)
 
+    ip = _idea_paths_for_messages(config, idea_id)
     # Build webhook payload
     timestamp_ms = int(datetime.utcnow().timestamp() * 1000)
     session_key = f"ideas:{idea_id}:format-correction-{timestamp_ms}"
@@ -3742,8 +3840,8 @@ async def post_ideas_fix_roadmap_format(idea_id: str, body: FixRoadmapFormatRequ
             f"Apply the format-correction skill from your workspace.\n\n"
             f"The roadmap content to correct:\n\n"
             f"{roadmap_content}\n\n"
-            f"Write the corrected roadmap to ~/.openclaw/ideas/{idea_id}/roadmap_draft.md.\n"
-            f"Write ~/.openclaw/ideas/{idea_id}/roadmap_draft.done last."
+            f"Write the corrected roadmap to {ip['roadmap_draft']}.\n"
+            f"Write {ip['roadmap_done']} last."
         ),
     }
 
@@ -3789,7 +3887,7 @@ def get_ideas_download_roadmap(idea_id: str):
     Returns 404 if the idea is not found or roadmap_content is empty.
     """
     config = load_config()
-    ideas_dir = os.path.expanduser(config.get("ideas_dir", "~/.openclaw/ideas"))
+    ideas_dir = Path(config.get("ideas_dir") or "")
     session_path = Path(ideas_dir) / idea_id / "session.json"
 
     if not session_path.exists():
@@ -4230,7 +4328,7 @@ def _preflight_materialize(repo_path: str, roadmap_seed, prd_content) -> list:
     return checks
 
 
-def _run_preflight_checks(repo_path: str) -> list:
+def _run_preflight_checks(repo_path: str, config: dict | None = None) -> list:
     """Run ordered preflight checks for a project directory.
 
     Auto-fixes symlink and .gitignore when possible. Returns list of
@@ -4240,12 +4338,19 @@ def _run_preflight_checks(repo_path: str) -> list:
     import glob as glob_mod
 
     repo_path = os.path.realpath(os.path.expanduser(repo_path))
-    openclaw_dir = os.path.expanduser("~/.openclaw")
+    if config is None:
+        config = load_config()
+    openclaw_dir = os.path.expanduser(config.get("openclaw_root") or "~/.openclaw")
+    symlink_path = os.path.expanduser(config.get("project_dir_path") or "")
+    if not symlink_path:
+        symlink_path = os.path.join(openclaw_dir, "pipeline-project")
     checks = []
 
-    # 1. Symlink — create or repair ~/.openclaw/pipeline-project → repo_path
-    symlink_path = os.path.join(openclaw_dir, "pipeline-project")
+    # 1. Symlink — create or repair pipeline-project (repo-local or legacy OpenClaw path) → repo_path
     try:
+        sym_parent = os.path.dirname(symlink_path)
+        if sym_parent:
+            os.makedirs(sym_parent, exist_ok=True)
         ok = os.path.lexists(symlink_path) and os.path.realpath(symlink_path) == repo_path
         if ok:
             checks.append({
@@ -4268,7 +4373,7 @@ def _run_preflight_checks(repo_path: str) -> list:
             "status": "fail",
             "message": (
                 f"Could not create symlink ({exc}). Run: "
-                f"ln -sfn {repo_path} ~/.openclaw/pipeline-project"
+                f"ln -sfn {repo_path} {symlink_path}"
             ),
         })
 
@@ -4556,7 +4661,7 @@ def get_queue_status():
     config = load_config()
     q = _read_queue_file(config)
     entries = q.get("queue", [])
-    pipeline_state = _read_json_file(os.path.expanduser(config.get("pipeline_state_path", "~/.openclaw/pipeline_state.json"))) or {}
+    pipeline_state = _read_json_file(os.path.expanduser(config.get("pipeline_state_path") or "")) or {}
     return {
         "queue_length": len(entries),
         "ready_count": sum(1 for e in entries if e["state"] == "READY"),
@@ -4577,7 +4682,7 @@ def _queue_run_trigger_next_logic(config: dict) -> dict:
     Returns:
         {"ok": True, "started": name} or {"queue_halted": True, "error": str}.
     """
-    q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
+    q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
     q = _read_queue_file(config)
     entries = q.get("queue", [])
 
@@ -4628,7 +4733,7 @@ def _maybe_auto_kick_queue_after_manual_to_auto(config: dict) -> dict:
     lp = _expand_lock_path(config)
     if lp and _check_orchestrator_liveness(lp):
         return {"attempted": False, "reason": "orchestrator_lock_held"}
-    ps_path = os.path.expanduser(config.get("pipeline_state_path", "~/.openclaw/pipeline_state.json"))
+    ps_path = os.path.expanduser(config.get("pipeline_state_path") or "")
     ps = _read_json_file(ps_path) if os.path.exists(ps_path) else {}
     st = (ps.get("pipeline_status") or "").strip()
     if st in ("RUNNING", "WAITING_FOR_SENTINEL"):
@@ -4664,7 +4769,7 @@ async def patch_queue_mode(request: Request):
     if mode not in ("auto", "manual"):
         raise HTTPException(status_code=422, detail="queue_mode must be 'auto' or 'manual'")
     config = load_config()
-    q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
+    q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
     q = _read_queue_file(config)
     prev_mode = q.get("queue_mode", "auto")
     q["queue_mode"] = mode
@@ -4689,7 +4794,7 @@ def get_queue():
     entries = q.get("queue", [])
     ordered = sorted(entries, key=lambda e: e["position"])
 
-    ps_path = os.path.expanduser(config.get("pipeline_state_path", "~/.openclaw/pipeline_state.json"))
+    ps_path = os.path.expanduser(config.get("pipeline_state_path") or "")
     ps = _read_json_file(ps_path) if os.path.exists(ps_path) else None
     ps_project = ps.get("project_path", "") if ps else ""
     try:
@@ -4742,7 +4847,7 @@ async def put_queue_order(request: Request):
         raise HTTPException(status_code=422, detail="entry_ids must be an array")
 
     config = load_config()
-    q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
+    q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
     q = _read_queue_file(config)
     entries = q.get("queue", [])
 
@@ -4791,7 +4896,7 @@ async def post_queue_add(request: Request):
         return JSONResponse(status_code=400, content={"validation_errors": checks})
 
     config = load_config()
-    q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
+    q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
     q = _read_queue_file(config)
     entries = q.get("queue", [])
 
@@ -4858,9 +4963,22 @@ def delete_queue_entry(entry_id: str):
 
     ACTIVE rows are rejected only when global pipeline_state targets this entry's
     project (realpath) and pipeline_status is mid-flight (RUNNING or WAITING_FOR_SENTINEL).
+
+    ``ingest-*`` ids are synthetic rows from ``GET /api/queue`` when ``pipeline_state``
+    references a project not present in the persisted queue file; they cannot be deleted
+    via this endpoint.
     """
+    if entry_id.startswith("ingest-"):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Synthetic queue row (from pipeline_state, not in pipeline_queue.json). "
+                "Align pipeline_state with the queue, reset pipeline state, or remove a "
+                "persisted entry instead."
+            ),
+        )
     config = load_config()
-    q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
+    q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
     q = _read_queue_file(config)
     entries = q.get("queue", [])
 
@@ -4868,7 +4986,7 @@ def delete_queue_entry(entry_id: str):
     if target is None:
         raise HTTPException(status_code=404, detail="Queue entry not found")
     if target["state"] == "ACTIVE":
-        ps_path = os.path.expanduser(config.get("pipeline_state_path", "~/.openclaw/pipeline_state.json"))
+        ps_path = os.path.expanduser(config.get("pipeline_state_path") or "")
         ps = _read_json_file(ps_path) if os.path.exists(ps_path) else None
         if ps:
             try:
@@ -4907,7 +5025,7 @@ async def post_queue_clear(request: Request):
     force = bool(body.get("force"))
 
     config = load_config()
-    q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
+    q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
     q = _read_queue_file(config)
     entries = q.get("queue", [])
     cleared = len(entries)
@@ -4932,7 +5050,7 @@ async def patch_queue_position(entry_id: str, request: Request):
         raise HTTPException(status_code=422, detail="position is required")
 
     config = load_config()
-    q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
+    q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
     q = _read_queue_file(config)
     entries = q.get("queue", [])
 
@@ -4981,7 +5099,7 @@ async def patch_queue_parent(entry_id: str, request: Request):
     parent_id = body.get("parent_id")  # None to clear
 
     config = load_config()
-    q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
+    q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
     q = _read_queue_file(config)
     entries = q.get("queue", [])
 
@@ -5049,7 +5167,7 @@ def get_queue_entry_snapshot(entry_id: str):
     last_action_timestamp = None
     is_active_project = False
 
-    ps_path = os.path.expanduser(config.get("pipeline_state_path", "~/.openclaw/pipeline_state.json"))
+    ps_path = os.path.expanduser(config.get("pipeline_state_path") or "")
     ps = _read_json_file(ps_path) if os.path.exists(ps_path) else None
     if ps and os.path.realpath(ps.get("project_path", "")) == os.path.realpath(project_path):
         is_active_project = True
@@ -5169,7 +5287,7 @@ async def post_queue_entry_revalidate(entry_id: str):
     from datetime import datetime, timezone as tz
 
     config = load_config()
-    q_path = os.path.expanduser(config.get("pipeline_queue_path", "~/.openclaw/pipeline_queue.json"))
+    q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
     q = _read_queue_file(config)
     entries = q.get("queue", [])
     target = next((e for e in entries if e["id"] == entry_id), None)
@@ -5244,11 +5362,16 @@ def _check_installer_status(config: dict) -> dict:
         if not os.path.isdir(ws):
             missing_items.append(f"workspace-{agent}")
 
-    # 5. Conversion prompt file
+    # 5. Conversion prompt file (config path or bundled repo default)
     conversion_prompt = config.get("conversion_prompt_path", "")
     if conversion_prompt:
         conversion_prompt = os.path.expanduser(conversion_prompt)
-    if not conversion_prompt or not os.path.isfile(conversion_prompt):
+    bundled_prompt = os.path.join(
+        _AUTODEV_UI_ROOT, "autodev", "prompts", "prd-to-roadmap-conversion.txt"
+    )
+    if (not conversion_prompt or not os.path.isfile(conversion_prompt)) and not os.path.isfile(
+        bundled_prompt
+    ):
         missing_items.append("conversion_prompt")
 
     # 6. exec-approvals.json stale path detection (read-only, report only)
@@ -5587,8 +5710,17 @@ def _run_init_project(repo_path: str, roadmap_seed: str, prd_content=None) -> di
                     check=True, capture_output=True,
                 )
 
-        # Step 8 (both modes): set symlink
-        symlink_path = os.path.expanduser("~/.openclaw/pipeline-project")
+        # Step 8 (both modes): set pipeline-project symlink (repo-local runtime by default)
+        _cfg = load_config()
+        symlink_path = os.path.expanduser(_cfg.get("project_dir_path") or "")
+        if not symlink_path:
+            symlink_path = os.path.join(
+                os.path.expanduser(_cfg.get("openclaw_root") or "~/.openclaw"),
+                "pipeline-project",
+            )
+        sym_parent = os.path.dirname(symlink_path)
+        if sym_parent:
+            os.makedirs(sym_parent, exist_ok=True)
         if os.path.lexists(symlink_path):
             os.remove(symlink_path)
         os.symlink(repo_path, symlink_path)

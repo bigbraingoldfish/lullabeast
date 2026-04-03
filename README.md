@@ -6,8 +6,9 @@ Autonomous multi-agent software development pipeline UI and orchestration: a **F
 
 1. **Prerequisites:** Linux, Python 3.9+, git, and a separate **OpenClaw** installation with its gateway on `localhost:18789`.
 2. **Install:** See [SETUP.md](SETUP.md) — run `./install.sh`, then `source .env`.
-3. **UI config:** Copy [ui/config.example.json](ui/config.example.json) to `ui/config.json` (gitignored) or rely on `install.sh` to create it. Set **`AUTODEV_HOOKS_TOKEN`** if you do not want the webhook token in JSON.
-4. **Run the server:**
+3. **Runtime layout:** Pipeline state, lock, queue, and ideas default under **`<repo>/.autodev/`**; OpenClaw config and workspaces stay under `~/.openclaw`. Legacy layout: [docs/RUNTIME-MIGRATION.md](docs/RUNTIME-MIGRATION.md).
+4. **UI config:** Copy [ui/config.example.json](ui/config.example.json) to `ui/config.json` (gitignored) or rely on `install.sh` to create it. Set **`AUTODEV_HOOKS_TOKEN`** if you do not want the webhook token in JSON.
+5. **Run the server:**
 
    ```bash
    source .env

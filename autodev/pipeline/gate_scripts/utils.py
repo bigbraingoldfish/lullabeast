@@ -2,7 +2,24 @@ import os
 import json
 import tempfile
 
-WORKSPACE_DIR = os.path.expanduser("~/.openclaw/pipeline-project/")
+
+def _derive_runtime_root() -> str:
+    """Return AUTODEV_RUNTIME_ROOT: env var → repo-local .autodev → ~/.openclaw fallback."""
+    explicit = os.environ.get("AUTODEV_RUNTIME_ROOT", "").strip()
+    if explicit:
+        return explicit
+    legacy = os.environ.get("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "").strip().lower()
+    if legacy in ("1", "true", "yes"):
+        return os.environ.get("AUTODEV_ROOT", os.path.expanduser("~/.openclaw"))
+    repo_path = os.environ.get(
+        "AUTODEV_REPO_PATH",
+        # gate_scripts/ → pipeline/ → autodev/ → repo root: 3 dirname calls
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    )
+    return os.path.join(repo_path, ".autodev")
+
+
+WORKSPACE_DIR = os.path.join(_derive_runtime_root(), "pipeline-project") + os.sep
 PHASE_STATE_FILE = os.path.join(WORKSPACE_DIR, "phase_state.json")
 
 
