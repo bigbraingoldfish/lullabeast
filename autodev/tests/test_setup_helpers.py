@@ -23,6 +23,20 @@ def test_refresh_exec_approvals_rewrites_stale_gate_path(tmp_path):
     assert str(g) in json.dumps(data)
 
 
+def test_set_openclaw_global_tools_profile_updates(tmp_path):
+    oc = tmp_path / "openclaw.json"
+    oc.write_text(json.dumps({"version": 1, "tools": {"profile": "minimal"}}))
+    assert setup_helpers.set_openclaw_global_tools_profile(str(oc), "coding") == "updated"
+    data = json.loads(oc.read_text())
+    assert data["tools"]["profile"] == "coding"
+
+
+def test_set_openclaw_global_tools_profile_unchanged(tmp_path):
+    oc = tmp_path / "openclaw.json"
+    oc.write_text(json.dumps({"tools": {"profile": "coding"}}))
+    assert setup_helpers.set_openclaw_global_tools_profile(str(oc), "coding") == "unchanged"
+
+
 def test_merge_dotenv_missing_keys_appends(tmp_path):
     envp = tmp_path / ".env"
     envp.write_text("AUTODEV_ROOT=/a\n")

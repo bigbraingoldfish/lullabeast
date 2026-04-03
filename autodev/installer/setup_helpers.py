@@ -134,3 +134,40 @@ def merge_dotenv_missing_keys(env_path: str, pairs: dict[str, str]) -> str:
         except Exception as e:
             return f"error:{e}"
     return "unchanged"
+
+
+def set_openclaw_global_tools_profile(openclaw_json_path: str, profile: str = "coding") -> str:
+    """Set top-level ``tools.profile`` in openclaw.json (atomic write).
+
+    Returns: updated | unchanged | error:<msg>
+    """
+    path = os.path.abspath(openclaw_json_path)
+    if not os.path.isfile(path):
+        return "error:file not found"
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        return f"error:{e}"
+    if not isinstance(data, dict):
+        return "error:root must be an object"
+    tools = data.setdefault("tools", {})
+    if not isinstance(tools, dict):
+        return "error:tools must be an object"
+    current = tools.get("profile")
+    if current == profile:
+        return "unchanged"
+    tools["profile"] = profile
+    parent = os.path.dirname(path)
+    try:
+        fd, tmp = tempfile.mkstemp(dir=parent, prefix="openclaw_tools_", suffix=".json")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+        return "updated"
+    except Exception as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return f"error:{e}"

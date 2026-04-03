@@ -17,7 +17,16 @@ client = TestClient(app)
 # Helpers
 # ---------------------------------------------------------------------------
 
-_AGENTS = ["planner", "executor", "reviewer", "escalation", "prd-creator"]
+_REQUIRED_OPENCLAW_AGENTS = (
+    "planner",
+    "executor",
+    "reviewer",
+    "escalation",
+    "prd-creator",
+    "roadmap-converter",
+)
+
+_AGENTS = list(_REQUIRED_OPENCLAW_AGENTS)
 
 _PRD_CREATOR_ENTRY = {
     "id": "prd-creator",
@@ -34,6 +43,31 @@ _ROADMAP_CONVERTER_ENTRY = {
 }
 
 
+def _full_agents_list(openclaw: Path) -> list:
+    """Six pipeline agents as install.sh step 9 would register (for default openclaw.json)."""
+    m = {"primary": "openrouter/minimax/minimax-m2.7", "fallbacks": []}
+    root = str(openclaw)
+    esc_tools = {"allow": ["read", "write"], "deny": ["edit", "apply_patch", "exec"]}
+    return [
+        {"id": "planner", "workspace": f"{root}/workspace-planner", "model": m},
+        {"id": "executor", "workspace": f"{root}/workspace-executor", "model": m},
+        {"id": "reviewer", "workspace": f"{root}/workspace-reviewer", "model": m},
+        {"id": "escalation", "workspace": f"{root}/workspace-escalation", "model": m, "tools": esc_tools},
+        {
+            "id": "prd-creator",
+            "workspace": f"{root}/workspace-prd-creator",
+            "model": m,
+            "tools": dict(_PRD_CREATOR_ENTRY["tools"]),
+        },
+        {
+            "id": "roadmap-converter",
+            "workspace": f"{root}/workspace-roadmap-converter",
+            "model": m,
+            "tools": dict(_ROADMAP_CONVERTER_ENTRY["tools"]),
+        },
+    ]
+
+
 def _make_openclaw_dir(tmp_path: Path, with_openclaw_json=True, agents_list=None) -> Path:
     """Build a fake ~/.openclaw directory structure."""
     openclaw = tmp_path / ".openclaw"
@@ -41,7 +75,7 @@ def _make_openclaw_dir(tmp_path: Path, with_openclaw_json=True, agents_list=None
 
     if with_openclaw_json:
         if agents_list is None:
-            agents_list = [_PRD_CREATOR_ENTRY, _ROADMAP_CONVERTER_ENTRY]
+            agents_list = _full_agents_list(openclaw)
         data = {
             "version": "1.2.0",
             "agents": {"defaults": {}, "list": agents_list},
@@ -163,10 +197,10 @@ class TestMissingItems:
              patch("ui.server.os.path.exists", return_value=False):
             r = client.get("/api/setup/status")
 
-        assert "roadmap_converter_agent" in r.json()["missing_items"]
+        assert "openclaw_agent_roadmap_converter" in r.json()["missing_items"]
 
     def test_roadmap_converter_registered_no_item(self, tmp_path):
-        openclaw = _make_openclaw_dir(tmp_path, agents_list=[_PRD_CREATOR_ENTRY, _ROADMAP_CONVERTER_ENTRY])
+        openclaw = _make_openclaw_dir(tmp_path)
         _make_workspaces(openclaw)
         _make_conversion_prompt(openclaw)
         cfg = _make_config(openclaw, tmp_path)
@@ -175,7 +209,9 @@ class TestMissingItems:
              patch("ui.server.os.path.exists", return_value=False):
             r = client.get("/api/setup/status")
 
-        assert "roadmap_converter_agent" not in r.json()["missing_items"]
+        assert not any(
+            x.startswith("openclaw_agent_") for x in r.json()["missing_items"]
+        )
 
     def test_missing_workspace_planner_adds_item(self, tmp_path):
         openclaw = _make_openclaw_dir(tmp_path)

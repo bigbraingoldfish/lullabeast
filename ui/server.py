@@ -5315,8 +5315,8 @@ def _check_installer_status(config: dict) -> dict:
     Checks (all read-only, no writes):
     - OpenClaw root directory exists
     - openclaw.json exists and is parseable
-    - roadmap-converter agent registered in openclaw.json
-    - Agent workspace directories for the 5 core agents
+    - All six pipeline agents registered in openclaw.json agents.list
+    - Agent workspace directories for planner, executor, reviewer, escalation, prd-creator, roadmap-converter
     - Conversion prompt file exists
     - exec-approvals.json stale path detection
 
@@ -5341,23 +5341,37 @@ def _check_installer_status(config: dict) -> dict:
     # 2. openclaw.json existence
     if not os.path.isfile(openclaw_json_path):
         missing_items.append("openclaw_json")
-        agents_list = []
     else:
-        # 3. roadmap-converter agent registration
+        # 3. Pipeline agents in openclaw.json (install.sh step 9 registers these)
+        _pipeline_agent_ids = (
+            "planner",
+            "executor",
+            "reviewer",
+            "escalation",
+            "prd-creator",
+            "roadmap-converter",
+        )
         try:
             with open(openclaw_json_path, "r", encoding="utf-8") as f:
                 oc_data = json.load(f)
             agents_list = oc_data.get("agents", {}).get("list", [])
-            ids = {a.get("id") for a in agents_list}
-            if "roadmap-converter" not in ids:
-                missing_items.append("roadmap_converter_agent")
+            ids = {a.get("id") for a in agents_list if isinstance(a, dict)}
+            for _aid in _pipeline_agent_ids:
+                if _aid not in ids:
+                    missing_items.append(f"openclaw_agent_{_aid.replace('-', '_')}")
         except Exception:
-            missing_items.append("roadmap_converter_agent")
-            agents_list = []
+            for _aid in _pipeline_agent_ids:
+                missing_items.append(f"openclaw_agent_{_aid.replace('-', '_')}")
 
-    # 4. Agent workspace directories (5 core Task-01 agents)
-    # workspace-roadmap-converter check is deferred to Task 02
-    for agent in ("planner", "executor", "reviewer", "escalation", "prd-creator"):
+    # 4. Agent workspace directories
+    for agent in (
+        "planner",
+        "executor",
+        "reviewer",
+        "escalation",
+        "prd-creator",
+        "roadmap-converter",
+    ):
         ws = os.path.join(openclaw_root, f"workspace-{agent}")
         if not os.path.isdir(ws):
             missing_items.append(f"workspace-{agent}")
@@ -5408,7 +5422,8 @@ def get_setup_status():
     missing_items values:
         "openclaw_root"             — AUTODEV_ROOT directory not found
         "openclaw_json"             — openclaw.json missing from AUTODEV_ROOT
-        "roadmap_converter_agent"   — roadmap-converter not in openclaw.json agents.list
+        "openclaw_agent_<id>"       — pipeline agent missing from openclaw.json agents.list
+                                    (id uses underscores, e.g. openclaw_agent_prd_creator)
         "workspace-{agent}"         — agent workspace directory missing
         "conversion_prompt"         — PRD-to-roadmap conversion prompt file missing
         "exec_approvals_stale_paths" — exec-approvals.json has outdated gate script paths

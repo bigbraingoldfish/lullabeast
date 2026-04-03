@@ -30,6 +30,7 @@ pytest tests/ -q
 
 ## Maintainer notes
 
+- **`install.sh` / OpenClaw:** Step 9 creates `agents.list` if missing, registers pipeline agents (`planner`, `executor`, `reviewer`, `escalation`, `prd-creator`, `roadmap-converter`) and `hooks.allowedAgentIds`, and warns when `tools.profile` is not `coding` or `full`. See [SETUP.md — openclaw.json](SETUP.md#openclawjson-requirements) and [OpenClaw tools docs](https://docs.openclaw.ai/tools).
 - Pin runtime deps in [ui/requirements.txt](ui/requirements.txt). Periodically run **`pip-audit -r ui/requirements.txt`** (or your org’s equivalent) and upgrade pins after review.
 - Before a public release, run a **secret scanner on full git history** (e.g. [gitleaks](https://github.com/gitleaks/gitleaks) or [trufflehog](https://github.com/trufflesecurity/trufflehog)). If anything real was ever committed, rotate credentials and consider `git filter-repo`.
 - Full orientation for contributors: [CLAUDE.md](CLAUDE.md).
