@@ -4867,7 +4867,11 @@ async def put_queue_order(request: Request):
 
 @app.post("/api/queue/add")
 async def post_queue_add(request: Request):
-    """Add a project to the queue after running preflight validation.
+    """Add a project to the queue after preflight materialize + checks.
+
+    Runs ``_preflight_materialize`` (no seed/PRD from this endpoint) then
+    ``_run_preflight_checks`` (symlink, gitignore, git init, workspaces, roadmap).
+    On success, appends the project to recent-projects.
 
     Body: {"project_path": str, "idea_id": str|null, "parent_id": str|null}
     Returns 400 with validation_errors if preflight fails.
@@ -4890,17 +4894,26 @@ async def post_queue_add(request: Request):
     if not os.path.isdir(project_path):
         raise HTTPException(status_code=422, detail="project_path does not exist or is not a directory")
 
-    # Run full preflight (read-only checks only — do NOT call _preflight_materialize)
-    checks = _run_preflight_checks(project_path)
+    repo_abs = os.path.realpath(os.path.expanduser(project_path))
+    mat = _preflight_materialize(repo_abs, None, None)
+    if any(c.get("status") == "fail" for c in mat):
+        return JSONResponse(status_code=400, content={"validation_errors": mat})
+
+    checks = _run_preflight_checks(repo_abs)
     if any(c.get("status") == "fail" for c in checks):
-        return JSONResponse(status_code=400, content={"validation_errors": checks})
+        return JSONResponse(
+            status_code=400,
+            content={"validation_errors": mat + checks},
+        )
+
+    append_recent_project(repo_abs)
 
     config = load_config()
     q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
     q = _read_queue_file(config)
     entries = q.get("queue", [])
 
-    new_real = os.path.realpath(project_path)
+    new_real = repo_abs
     _terminal_queue_states = frozenset({"COMPLETED", "FAILED"})
     for e in entries:
         ep = (e.get("project_path") or "").strip()
@@ -4937,7 +4950,7 @@ async def post_queue_add(request: Request):
     now = datetime.now(tz.utc).isoformat()
     entry = {
         "id": str(_uuid.uuid4()),
-        "project_path": os.path.realpath(project_path),
+        "project_path": repo_abs,
         "idea_id": idea_id,
         "name": os.path.basename(project_path.rstrip("/")) or project_path,
         "state": initial_state,

@@ -3325,7 +3325,17 @@
                 onCancelCreateFolder,
                 preflightLastRun,
                 hasFail,
+                recentProjects,
             } = props;
+
+            const repoPathInputFsStatus =
+                repoPathLocked || !repoPathFsStatus
+                    ? null
+                    : repoPathFsStatus === "parent"
+                      ? null
+                      : repoPathFsStatus === "exists" || repoPathFsStatus === "bad"
+                        ? repoPathFsStatus
+                        : null;
 
             const [roadmapInputMode, setRoadmapInputMode] = useState("paste");
             const [roadmapSeedFileName, setRoadmapSeedFileName] = useState("");
@@ -3340,31 +3350,22 @@
                         <div className="space-y-2">
                             <label className="text-xs text-slate-500 header-text">Repository path</label>
                             <div className="flex gap-2 items-stretch">
-                                <input
-                                    type="text"
-                                    disabled={repoPathLocked}
-                                    readOnly={repoPathLocked}
-                                    value={repoPath}
-                                    onChange={(e) => onRepoPathChange(e.target.value)}
-                                    placeholder="Enter the full path to your project directory (e.g. /home/pi/projects/my-project)"
-                                    className={`flex-1 min-w-0 rounded border border-[#1a1d21] px-3 py-2 text-sm ${repoPathLocked ? "bg-[#0d0f12] text-slate-300" : "bg-[#1a1d21] text-slate-200"}`}
-                                />
-                                {!repoPathLocked && repoPathFsStatus === "exists" && (
-                                    <span className="flex items-center text-emerald-500 shrink-0" title="Directory exists on the server">
-                                        ✓
-                                    </span>
-                                )}
+                                <div className="flex-1 min-w-0">
+                                    <ServerPathInput
+                                        id="preflight-repo-path"
+                                        value={repoPath}
+                                        onChange={onRepoPathChange}
+                                        disabled={repoPathLocked}
+                                        fsStatus={repoPathInputFsStatus}
+                                        recents={recentProjects || []}
+                                    />
+                                </div>
                                 {!repoPathLocked && repoPathFsStatus === "parent" && (
                                     <span
                                         className="flex items-center text-amber-400 shrink-0 text-lg leading-none"
                                         title="Path does not exist yet; parent exists — use Confirm to create or pick a path"
                                     >
                                         +
-                                    </span>
-                                )}
-                                {!repoPathLocked && repoPathFsStatus === "bad" && (
-                                    <span className="flex items-center text-red-400 shrink-0" title="Invalid path, or not reachable from the server">
-                                        ✗
                                     </span>
                                 )}
                             </div>
@@ -3602,12 +3603,114 @@
             );
         }
 
+        function ServerPathInput({ value, onChange, disabled, fsStatus, recents, id }) {
+            const listId = id ? id + "-recents" : undefined;
+            return (
+                <div className="relative">
+                    <div className="flex gap-2 items-stretch">
+                        <input
+                            id={id}
+                            type="text"
+                            list={listId}
+                            value={value}
+                            onChange={(e) => onChange(e.target.value)}
+                            disabled={disabled}
+                            readOnly={disabled}
+                            placeholder="/home/pi/projects/my-app"
+                            className={
+                                "flex-1 min-w-0 rounded border border-[#1a1d21] px-3 py-2 text-sm font-mono " +
+                                (disabled ? "bg-[#0d0f12] text-slate-300" : "bg-[#1a1d21] text-slate-200")
+                            }
+                        />
+                        {recents && recents.length > 0 && id ? (
+                            <datalist id={listId}>
+                                {recents.map((r, i) => (
+                                    <option key={i} value={typeof r === "object" && r.path ? r.path : r} />
+                                ))}
+                            </datalist>
+                        ) : null}
+                        {!disabled && fsStatus === "exists" && (
+                            <span
+                                className="flex items-center text-emerald-500 shrink-0"
+                                title="Directory exists on the server"
+                            >
+                                ✓
+                            </span>
+                        )}
+                        {!disabled && fsStatus === "bad" && (
+                            <span
+                                className="flex items-center text-red-400 shrink-0"
+                                title="Path does not exist or is not reachable"
+                            >
+                                ✗
+                            </span>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
         // ─── Add Project Modal ────────────────────────────────────────────────────
 
         function AddProjectModal({ onClose, onAdded }) {
             const [projectPath, setProjectPath] = useState('');
             const [validating, setValidating] = useState(false);
             const [errors, setErrors] = useState([]);
+            const [queueAddPathFsStatus, setQueueAddPathFsStatus] = useState(null);
+            const [pathRecents, setPathRecents] = useState([]);
+            const queueAddValidateTimerRef = useRef(null);
+
+            useEffect(() => {
+                fetch("/api/setup/recent-projects")
+                    .then((r) => r.json())
+                    .then((d) => setPathRecents(Array.isArray(d.projects) ? d.projects : []))
+                    .catch(() => setPathRecents([]));
+            }, []);
+
+            const handlePathChange = (value) => {
+                setProjectPath(value);
+                setErrors([]);
+                const trimmed = (value || "").trim();
+                if (queueAddValidateTimerRef.current) {
+                    clearTimeout(queueAddValidateTimerRef.current);
+                }
+                if (!trimmed) {
+                    setQueueAddPathFsStatus(null);
+                    return;
+                }
+                setQueueAddPathFsStatus(null);
+                queueAddValidateTimerRef.current = setTimeout(() => {
+                    fetch("/api/setup/validate-repo-path", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ path: trimmed }),
+                    })
+                        .then((r) => r.json())
+                        .then((d) => {
+                            if (!d.valid) {
+                                setQueueAddPathFsStatus("bad");
+                                return;
+                            }
+                            return fetch("/api/setup/check-repo-path", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ path: trimmed }),
+                            }).then(async (r2) => {
+                                const j = await r2.json().catch(() => ({}));
+                                if (!r2.ok) {
+                                    setQueueAddPathFsStatus("bad");
+                                    return;
+                                }
+                                if (j.exists) {
+                                    setQueueAddPathFsStatus("exists");
+                                } else {
+                                    setQueueAddPathFsStatus("bad");
+                                }
+                            });
+                        })
+                        .catch(() => setQueueAddPathFsStatus("bad"));
+                }, 500);
+            };
 
             const handleAdd = () => {
                 if (!projectPath.trim()) { setErrors([{message: 'Project path is required'}]); return; }
@@ -3643,9 +3746,14 @@
                         <div className="space-y-3">
                             <div>
                                 <label className="header-text text-xs text-slate-400 mb-1 block">Project path (absolute)</label>
-                                <input type="text" value={projectPath} onChange={e => setProjectPath(e.target.value)}
-                                    placeholder="/home/pi/projects/my-app"
-                                    className="w-full bg-[#1a1d21] border border-[#2a2d31] rounded px-3 py-2 text-sm text-slate-200 font-mono focus:outline-none focus:border-[#00b4d8]"/>
+                                <ServerPathInput
+                                    id="queue-add-path"
+                                    value={projectPath}
+                                    onChange={handlePathChange}
+                                    disabled={false}
+                                    fsStatus={queueAddPathFsStatus}
+                                    recents={pathRecents}
+                                />
                             </div>
 
                             {errors.length > 0 && (
@@ -4643,6 +4751,52 @@
             const [showPathStopModal, setShowPathStopModal] = useState(false);
             const [pathStopDone, setPathStopDone] = useState(false);
             const [pathStopErr, setPathStopErr] = useState("");
+            const [swFsStatus, setSwFsStatus] = useState(null);
+            const swValidateTimerRef = useRef(null);
+
+            const handleSwPathChange = (value) => {
+                setSwPath(value);
+                const trimmed = (value || "").trim();
+                if (swValidateTimerRef.current) {
+                    clearTimeout(swValidateTimerRef.current);
+                }
+                if (!trimmed) {
+                    setSwFsStatus(null);
+                    return;
+                }
+                setSwFsStatus(null);
+                swValidateTimerRef.current = setTimeout(() => {
+                    fetch("/api/setup/validate-repo-path", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ path: trimmed }),
+                    })
+                        .then((r) => r.json())
+                        .then((d) => {
+                            if (!d.valid) {
+                                setSwFsStatus("bad");
+                                return;
+                            }
+                            return fetch("/api/setup/check-repo-path", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ path: trimmed }),
+                            }).then(async (r2) => {
+                                const j = await r2.json().catch(() => ({}));
+                                if (!r2.ok) {
+                                    setSwFsStatus("bad");
+                                    return;
+                                }
+                                if (j.exists) {
+                                    setSwFsStatus("exists");
+                                } else {
+                                    setSwFsStatus("bad");
+                                }
+                            });
+                        })
+                        .catch(() => setSwFsStatus("bad"));
+                }, 500);
+            };
 
             useEffect(() => {
                 fetchState();
@@ -4681,6 +4835,7 @@
                 setSwRoadmapAmbiguous(null);
                 setSwDestructiveSelected([]);
                 setSwPath(pState.project_path || "");
+                setSwFsStatus(null);
                 setProjectSwitchOpen(true);
             }
 
@@ -5121,31 +5276,16 @@
                                     Run preflight checks and coherence validation, then start the pipeline for this directory.
                                 </p>
                                 <label className="text-xs text-slate-500 header-text block mb-1">Absolute project path</label>
-                                <input
-                                    type="text"
-                                    value={swPath}
-                                    onChange={(e) => setSwPath(e.target.value)}
-                                    className="w-full rounded border border-[#1a1d21] px-3 py-2 text-sm bg-[#1a1d21] text-slate-200 mb-2 font-mono"
-                                />
-                                {swRecents.length > 0 ? (
-                                    <div className="mb-3">
-                                        <label className="text-xs text-slate-500 header-text">Recent</label>
-                                        <select
-                                            className="mt-1 w-full rounded border border-[#1a1d21] px-2 py-1.5 text-xs bg-[#0d0f12] text-slate-300"
-                                            value=""
-                                            onChange={(e) => {
-                                                if (e.target.value) setSwPath(e.target.value);
-                                            }}
-                                        >
-                                            <option value="">Select a recent project…</option>
-                                            {swRecents.map((p, i) => (
-                                                <option key={i} value={p.path || ""}>
-                                                    {p.path || ""}
-                                                </option>
-                                            ))}
-                                        </select>
-                                    </div>
-                                ) : null}
+                                <div className="mb-2">
+                                    <ServerPathInput
+                                        id="switch-path"
+                                        value={swPath}
+                                        onChange={handleSwPathChange}
+                                        disabled={false}
+                                        fsStatus={swFsStatus}
+                                        recents={swRecents}
+                                    />
+                                </div>
                                 {swErr ? <p className="text-red-400 text-sm mb-2 whitespace-pre-wrap">{swErr}</p> : null}
                                 {swRoadmapAmbiguous ? (
                                     <div className="rounded border border-amber-700/60 bg-amber-950/30 p-3 mb-3 text-sm text-amber-100">
@@ -5442,6 +5582,15 @@
             const [showCreateFolderPrompt, setShowCreateFolderPrompt] = useState(false);
             const [createFolderError, setCreateFolderError] = useState("");
             const repoPathValidateTimerRef = useRef(null);
+            const [recentProjects, setRecentProjects] = useState([]);
+
+            useEffect(() => {
+                if (currentScreen !== "preflight") return;
+                fetch("/api/setup/recent-projects")
+                    .then((r) => r.json())
+                    .then((d) => setRecentProjects(Array.isArray(d.projects) ? d.projects : []))
+                    .catch(() => setRecentProjects([]));
+            }, [currentScreen]);
 
             const navigateToPreflightWithSeed = (content, prdText) => {
                 const text = content || "";
@@ -5913,6 +6062,7 @@
                                     addToQueueBusy={addToQueueBusy}
                                     addToQueueError={addToQueueError}
                                     hasActiveProject={preflightQueueActive}
+                                    recentProjects={recentProjects}
                                     repoPathFsStatus={repoPathFsStatus}
                                     showCreateFolderPrompt={showCreateFolderPrompt}
                                     createFolderError={createFolderError}
