@@ -41,16 +41,13 @@ class TestPreflightScreenRendering:
     file input in the DOM"""
 
     def test_has_repo_path_input(self):
-        """PreflightScreen contains a text input for repo path."""
+        """PreflightScreen contains ServerPathInput for repo path (text input lives in child)."""
         html = load_html()
         preflight = extract_function(html, "PreflightScreen")
         assert preflight is not None, "PreflightScreen function not found"
 
-        has_text_input = bool(re.search(
-            r'<input[^>]*type=["\']text["\'][^>]*>',
-            preflight
-        ))
-        assert has_text_input, "No <input type='text'> found in PreflightScreen for repo path"
+        assert "ServerPathInput" in preflight, "PreflightScreen should use ServerPathInput for repo path"
+        assert 'id="preflight-repo-path"' in preflight
 
     def test_has_roadmap_seed_file_input(self):
         """PreflightScreen contains a file input for roadmap seed upload."""
@@ -200,6 +197,7 @@ class TestPreflightScreenNoConsoleErrors:
             'onRoadmapSeedChange',
             'onRoadmapSeedLockToggle',
             'onBack',
+            'recentProjects',
         ]
 
         for prop in required_props:
@@ -237,3 +235,28 @@ class TestFileUploadReadsContent:
         ))
         assert has_filereader, \
             "PreflightScreen should use FileReader to read file content into roadmapSeed"
+
+
+class TestPreflightServerPathInput:
+    def test_preflight_path_input_uses_ServerPathInput(self):
+        html = load_html()
+        preflight = extract_function(html, "PreflightScreen")
+        assert preflight is not None, "PreflightScreen function not found"
+        assert "ServerPathInput" in preflight
+
+    def test_preflight_path_uses_preflight_repo_path_id(self):
+        html = load_html()
+        preflight = extract_function(html, "PreflightScreen")
+        assert preflight is not None
+        assert 'id="preflight-repo-path"' in preflight
+
+    def test_preflight_still_has_plus_indicator_for_parent(self):
+        html = load_html()
+        preflight = extract_function(html, "PreflightScreen")
+        assert preflight is not None
+        assert 'repoPathFsStatus === "parent"' in preflight
+
+    def test_preflight_fetches_recents_in_app(self):
+        html = load_html()
+        assert "/api/setup/recent-projects" in html
+        assert 'currentScreen !== "preflight"' in html

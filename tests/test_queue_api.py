@@ -43,6 +43,45 @@ def _write_queue(path, entries, queue_mode="auto"):
     return data
 
 
+WORKSPACE_AGENTS = ["planner", "executor", "reviewer", "escalation"]
+WORKSPACE_DOCS = ["AGENTS.md", "TOOLS.md", "SOUL.md", "USER.md", "IDENTITY.md"]
+
+
+def _make_workspace_for_queue(base_dir, agent):
+    ws = base_dir / f"workspace-{agent}"
+    ws.mkdir(parents=True, exist_ok=True)
+    for doc in WORKSPACE_DOCS:
+        (ws / doc).write_text(f"# {doc}\n")
+    return ws
+
+
+def _openclaw_like_for_queue(tmp_path, repo_path):
+    openclaw = tmp_path / ".openclaw"
+    openclaw.mkdir(parents=True, exist_ok=True)
+    pp = openclaw / "pipeline-project"
+    if pp.exists() or pp.is_symlink():
+        pp.unlink()
+    pp.symlink_to(repo_path)
+    for agent in WORKSPACE_AGENTS:
+        _make_workspace_for_queue(openclaw, agent)
+    return openclaw
+
+
+def _config_for_queue_preflight(tmp_path, queue_file, pipeline_state_file, openclaw):
+    oc = str(openclaw)
+    return {
+        "pipeline_queue_path": str(queue_file),
+        "pipeline_state_path": str(pipeline_state_file),
+        "phase_state_path": str(tmp_path / "phase_state.json"),
+        "project_dir_path": str(openclaw / "pipeline-project"),
+        "lock_path": str(tmp_path / "pipeline.lock"),
+        "events_path": str(tmp_path / "pipeline_events.jsonl"),
+        "ideas_dir": str(tmp_path / "ideas"),
+        "port": 18790,
+        "openclaw_root": oc,
+    }
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     """Test client with temporary queue file path."""
@@ -62,6 +101,8 @@ def client(tmp_path, monkeypatch):
         }
 
     monkeypatch.setattr("ui.server.load_config", mock_load_config)
+    # Queue add calls append_recent_project; avoid writing the real recent-projects file in tests.
+    monkeypatch.setattr("ui.server.append_recent_project", lambda _repo_abs: None)
     return TestClient(app), queue_file, tmp_path
 
 
@@ -263,6 +304,64 @@ class TestPostQueueAdd:
         data = resp.json()
         assert "validation_errors" in data
         assert len(data["validation_errors"]) > 0
+
+    def test_queue_add_calls_preflight_materialize(self, client, monkeypatch, tmp_path):
+        c, queue_file, _ = client
+        proj = tmp_path / "matproj"
+        proj.mkdir()
+        calls = []
+
+        def capture_mat(path, rs, prd):
+            calls.append((path, rs, prd))
+            return []
+
+        monkeypatch.setattr("ui.server._preflight_materialize", capture_mat)
+        monkeypatch.setattr(
+            "ui.server._run_preflight_checks",
+            lambda p: [{"check": "symlink", "status": "pass", "message": "ok"}],
+        )
+        resp = c.post("/api/queue/add", json={"project_path": str(proj)})
+        assert resp.status_code == 200
+        assert len(calls) == 1
+        assert calls[0][1] is None and calls[0][2] is None
+        assert os.path.samefile(calls[0][0], str(proj))
+
+    def test_queue_add_records_recent_project_on_success(self, client, monkeypatch, tmp_path):
+        c, queue_file, _ = client
+        proj = tmp_path / "recentproj"
+        proj.mkdir()
+        recorded = []
+        monkeypatch.setattr("ui.server._preflight_materialize", lambda *a: [])
+        monkeypatch.setattr(
+            "ui.server._run_preflight_checks",
+            lambda p: [{"check": "ok", "status": "pass", "message": "ok"}],
+        )
+        monkeypatch.setattr(
+            "ui.server.append_recent_project",
+            lambda p: recorded.append(p),
+        )
+        resp = c.post("/api/queue/add", json={"project_path": str(proj)})
+        assert resp.status_code == 200
+        assert recorded == [os.path.realpath(str(proj))]
+
+    def test_queue_add_autorepairs_missing_git_repo(self, client, monkeypatch, tmp_path):
+        c, queue_file, base = client
+        proj = tmp_path / "nogit"
+        proj.mkdir()
+        (proj / "roadmap.md").write_text(
+            "- [ ] `T-E1` | LOW | Task\n  > Test line.\n"
+        )
+        openclaw = _openclaw_like_for_queue(tmp_path, proj)
+        monkeypatch.setattr(
+            "ui.server.load_config",
+            lambda _config_path=None: _config_for_queue_preflight(
+                base, queue_file, base / "pipeline_state.json", openclaw
+            ),
+        )
+        assert not (proj / ".git").exists()
+        resp = c.post("/api/queue/add", json={"project_path": str(proj)})
+        assert resp.status_code == 200
+        assert (proj / ".git").is_dir()
 
     def test_adds_with_ready_state_when_preflight_passes(self, client, monkeypatch, tmp_path):
         c, queue_file, _ = client
