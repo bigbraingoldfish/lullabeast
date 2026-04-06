@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Installer helpers: refresh exec-approvals paths, merge .env keys.
+"""Installer helpers: refresh exec-approvals paths, merge .env keys, hooks baseline.
 
 Callable from install.sh and from tests (TDD).
 
@@ -16,6 +16,128 @@ import json
 import os
 import tempfile
 from typing import Any
+
+# Webhook session keys used by the pipeline and idea-to-PRD flows.
+_REQUIRED_SESSION_KEY_PREFIXES: tuple[str, ...] = ("pipeline:", "ideas:")
+
+
+def openclaw_hooks_issues(openclaw_json_path: str) -> list[str]:
+    """Return human-readable issue codes for AutoDev hook expectations (read-only).
+
+    Empty list means the hooks block matches the baseline this installer enforces.
+    """
+    path = os.path.abspath(openclaw_json_path)
+    if not os.path.isfile(path):
+        return ["no_file"]
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return ["invalid_json"]
+    if not isinstance(data, dict):
+        return ["invalid_root"]
+    hooks = data.get("hooks")
+    if hooks is None:
+        return ["no_hooks_object"]
+    if not isinstance(hooks, dict):
+        return ["hooks_not_object"]
+    issues: list[str] = []
+    if hooks.get("enabled") is not True:
+        issues.append("enabled")
+    tok = hooks.get("token")
+    if not isinstance(tok, str) or not tok.strip():
+        issues.append("token")
+    if hooks.get("allowRequestSessionKey") is not True:
+        issues.append("allowRequestSessionKey")
+    prefs = hooks.get("allowedSessionKeyPrefixes")
+    if not isinstance(prefs, list):
+        issues.append("allowedSessionKeyPrefixes")
+    else:
+        if "pipeline:" not in prefs:
+            issues.append("prefix_pipeline")
+        if "ideas:" not in prefs:
+            issues.append("prefix_ideas")
+    return issues
+
+
+def _normalize_hooks_object(data: dict[str, Any]) -> dict[str, Any]:
+    raw = data.get("hooks")
+    if not isinstance(raw, dict):
+        data["hooks"] = {}
+    return data["hooks"]
+
+
+def _merge_required_prefixes(prefs: Any) -> list[str]:
+    """Preserve order of string entries; append any missing required prefixes."""
+    base: list[str] = []
+    seen: set[str] = set()
+    if isinstance(prefs, list):
+        for p in prefs:
+            if isinstance(p, str) and p not in seen:
+                base.append(p)
+                seen.add(p)
+    for req in _REQUIRED_SESSION_KEY_PREFIXES:
+        if req not in seen:
+            base.append(req)
+            seen.add(req)
+    return base
+
+
+def patch_openclaw_hooks_baseline(
+    openclaw_json_path: str,
+    *,
+    token_if_missing: str | None = None,
+) -> str:
+    """Ensure AutoDev-compatible ``hooks`` keys in openclaw.json (atomic write).
+
+    Sets ``enabled`` and ``allowRequestSessionKey`` to True, merges required
+    session-key prefixes, and sets ``token`` only when it is missing/empty and
+    ``token_if_missing`` is a non-blank string.
+
+    Returns: updated | unchanged | error:<msg>
+    """
+    path = os.path.abspath(openclaw_json_path)
+    if not os.path.isfile(path):
+        return "error:file not found"
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        return f"error:{e}"
+    if not isinstance(data, dict):
+        return "error:root must be an object"
+    hooks = _normalize_hooks_object(data)
+    before = json.dumps(data, sort_keys=True)
+
+    if hooks.get("enabled") is not True:
+        hooks["enabled"] = True
+    if hooks.get("allowRequestSessionKey") is not True:
+        hooks["allowRequestSessionKey"] = True
+
+    new_prefs = _merge_required_prefixes(hooks.get("allowedSessionKeyPrefixes"))
+    hooks["allowedSessionKeyPrefixes"] = new_prefs
+
+    tok = hooks.get("token")
+    existing_ok = isinstance(tok, str) and bool(tok.strip())
+    if not existing_ok and token_if_missing is not None and str(token_if_missing).strip():
+        hooks["token"] = str(token_if_missing).strip()
+
+    after = json.dumps(data, sort_keys=True)
+    if before == after:
+        return "unchanged"
+    parent = os.path.dirname(path)
+    try:
+        fd, tmp = tempfile.mkstemp(dir=parent, prefix="openclaw_hooks_", suffix=".json")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+        return "updated"
+    except Exception as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return f"error:{e}"
 
 
 def _patch_gate_paths_in_obj(obj: Any, repo_path: str, gate_dir: str) -> int:

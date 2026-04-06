@@ -32,23 +32,23 @@ cd autodev-ui
 ./install.sh
 ```
 
-`install.sh` works through thirteen steps in order. You will see colored output for each step. Steps 1–4 exit on failure; steps 5–9 emit warnings and continue, collecting all issues for the final summary.
+`install.sh` works through thirteen steps in order. You will see colored output for each step. Early steps exit on failure when prerequisites are missing; later steps often warn and continue, collecting issues for the final summary.
 
 What the script does (summary):
 
-1. Checks Python 3.9+, pip, git, and Linux.
-2. Detects `AUTODEV_ROOT` (OpenClaw home, usually `~/.openclaw`) and `AUTODEV_REPO_PATH` (this repo).
-3. **Requires** an existing `openclaw.json` under `AUTODEV_ROOT` (OpenClaw must be installed first; AutoDev does not create this file).
-4. Creates **`$AUTODEV_REPO_PATH/.autodev/`** (repo-local pipeline runtime: state, lock, queue, ideas, `pipeline-project` symlink target). See [docs/RUNTIME-MIGRATION.md](docs/RUNTIME-MIGRATION.md).
-5. Runs `pip install -r ui/requirements.txt` (interactive confirm unless non-interactive).
-6. **Creates** missing `workspace-{agent}/` directories under OpenClaw and copies agent identity files with `cp -u`.
+1. OS check (Linux required for pipeline locking unless `--force`).
+2. Python 3.9+ and pip availability.
+3. `pip install -r ui/requirements.txt` (interactive confirm unless `--non-interactive`).
+4. OpenClaw detection: resolves `AUTODEV_ROOT`, **requires** `openclaw.json`, creates **`$AUTODEV_REPO_PATH/.autodev/`**, updates **`ui/config.json`** paths from `config.example.json` when needed.
+5. OpenClaw version check (warning-only if below recommended).
+6. **Creates** missing `workspace-{agent}/` directories under OpenClaw and stages agent identity file copies with `cp -u`.
 7. **Refreshes** stale `gate_scripts` paths inside `exec-approvals.json` when possible (atomic rewrite).
-8. OpenClaw version check (warning-only if below recommended).
-9. Updates `cron/jobs.json` heartbeat script path when applicable.
-10. Warns if `tools.profile` is not `coding` or `full` (optional prompt to set `coding`), then ensures **planner, executor, reviewer, escalation, prd-creator, and roadmap-converter** exist in `agents.list` and `hooks.allowedAgentIds` (creates `agents.list` if the file uses `agents.defaults` only).
-11. Confirms bundled PRD→roadmap instructions at `autodev/prompts/prd-to-roadmap-conversion.txt`.
-12. **Merges** `.env` non-destructively (`AUTODEV_ROOT`, `AUTODEV_REPO_PATH`, `AUTODEV_RUNTIME_ROOT`).
-13. Writes setup-complete marker and prints summary.
+8. Updates `cron/jobs.json` heartbeat script path when applicable.
+9. **Hooks preflight** — audits `hooks.enabled`, `hooks.token`, `hooks.allowRequestSessionKey`, and `hooks.allowedSessionKeyPrefixes` (`pipeline:`, `ideas:`). Optionally patches them atomically (preserves an existing `hooks.token`); if `hooks.token` is still empty, can generate one and append **`AUTODEV_HOOKS_TOKEN`** to `.env` when that key is not already set. Then warns if `tools.profile` is not `coding` or `full` (optional prompt to set `coding`), and registers **planner, executor, reviewer, escalation, prd-creator, and roadmap-converter** in `agents.list` / `hooks.allowedAgentIds`.
+10. Confirms bundled PRD→roadmap instructions at `autodev/prompts/prd-to-roadmap-conversion.txt`.
+11. **Merges** `.env` non-destructively (`AUTODEV_ROOT`, `AUTODEV_REPO_PATH`, `AUTODEV_RUNTIME_ROOT`, and any keys added in step 9).
+12. Writes setup-complete marker.
+13. Prints summary.
 
 If install.sh exits cleanly with no warnings, the system is ready. If it exits with warnings, read each warning — most require a one-line manual fix.
 
@@ -95,7 +95,7 @@ If `ui/config.json` exists and contains an `autodev_repo_path` key, that value t
 
 **What's happening.** When converting a PRD draft to a roadmap, the server reads a prompt template from `~/.openclaw/deployment-package/Updates/PRD to Roadmap*.txt`. If this file does not exist, the endpoint raises an unhandled exception.
 
-**Where to put it.** The file must be in `~/.openclaw/deployment-package/Updates/` and its filename must match `PRD to Roadmap*.txt`. The exact filename does not matter beyond the prefix — the server takes the first match. `install.sh` step 6 checks for this file and warns if it is missing.
+**Where to put it.** The file must be in `~/.openclaw/deployment-package/Updates/` and its filename must match `PRD to Roadmap*.txt`. The exact filename does not matter beyond the prefix — the server takes the first match. `install.sh` step 10 checks for this file and warns if it is missing.
 
 ---
 
@@ -147,7 +147,7 @@ The fields AutoDev reads from `pipeline_state.json` are: `pipeline_status`, `sta
 
 ## `openclaw.json` Requirements
 
-AutoDev reads the following keys from `~/.openclaw/openclaw.json`. The **orchestrator and UI** treat this file as read-only. **`install.sh` step 9** may update it in two narrow ways: set `tools.profile` to `coding` if you confirm at the prompt, and add any missing pipeline agent entries plus `hooks.allowedAgentIds` entries for those IDs (atomic rewrite; other keys preserved).
+AutoDev reads the following keys from `~/.openclaw/openclaw.json`. The **orchestrator and UI** treat this file as read-only. **`install.sh` step 9** may update it atomically when you confirm the prompts: normalize the **`hooks`** block for webhook calls (`enabled`, `token`, `allowRequestSessionKey`, `allowedSessionKeyPrefixes`), optionally set `tools.profile` to `coding`, and add any missing pipeline agent entries plus `hooks.allowedAgentIds` for those IDs. Other keys are preserved.
 
 ### `agents.list` and pipeline agents
 
@@ -157,15 +157,22 @@ Webhook routing uses `agents.list[]`. Some OpenClaw exports include `agents.defa
 
 OpenClaw applies a **global tool profile** (`tools.profile`: `minimal` | `coding` | `messaging` | `full`) as the baseline allowlist, then per-agent `tools` can further restrict or extend depending on version and UI presets. That is why the gateway can show **Coding** for planner/executor/reviewer even when those entries do not list every tool explicitly. For AutoDev’s pipeline, **`coding` or `full`** is appropriate; see [OpenClaw — Tools and Plugins](https://docs.openclaw.ai/tools).
 
-**`hooks.token`** — The bearer token used to authenticate webhook calls to the OpenClaw gateway. The orchestrator reads this on startup and sends it in the `Authorization` header of every `/hooks/agent` request. If the token is wrong or missing, all agent invocations will return 401 and the pipeline will stall.
+**`hooks.token` vs `gateway.auth.token`** — These are different secrets. **`hooks.token`** is the **Bearer** secret for **`POST /hooks/agent`**: the orchestrator and AutoDev UI send it in the `Authorization` header when invoking agents. If it is wrong or missing, invocations return **401** and the pipeline stalls. **`gateway.auth.token`** (or similar gateway Control UI / API auth in your OpenClaw version) protects **browser or REST access to the gateway itself** — it does **not** substitute for `hooks.token`. The installer can generate `hooks.token` and suggest storing the same value as **`AUTODEV_HOOKS_TOKEN`** (or `hooks_token` in `ui/config.json`) so the UI matches the gateway.
+
+Recommended **`hooks`** shape for AutoDev (installer converges toward this without clobbering unrelated keys):
 
 ```json
 {
   "hooks": {
-    "token": "your-token-here"
+    "enabled": true,
+    "token": "your-webhook-bearer-secret",
+    "allowRequestSessionKey": true,
+    "allowedSessionKeyPrefixes": ["pipeline:", "ideas:"]
   }
 }
 ```
+
+Session keys such as `pipeline:phase-1:...` and idea flows under `ideas:` must be allowed when the gateway enforces prefix rules.
 
 **`pipeline.skills`** — Controls whether skill injection is active. The orchestrator reads these flags before each agent invocation.
 
