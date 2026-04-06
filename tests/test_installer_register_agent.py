@@ -320,6 +320,13 @@ def _install_sh_step6_section() -> str:
     return text[start:end]
 
 
+def _install_sh_step9_section() -> str:
+    text = _INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("9/13  REGISTER AUTODEV AGENTS")
+    end = text.index("10/13  CONVERSION PROMPT")
+    return text[start:end]
+
+
 class TestStep6RoadmapConverterWorkspace:
     def test_roadmap_converter_workspace_files_match_source(self):
         rc = _REPO_ROOT / "autodev" / "agents" / "roadmap-converter"
@@ -337,3 +344,15 @@ class TestStep6RoadmapConverterWorkspace:
         assert "planner|executor|reviewer|roadmap-converter" not in step6
         assert re.search(r'case "\$agent" in planner\|executor\|reviewer\)', step6)
         assert step6.count('mkdir -p "$dst_dir/skills"') >= 1
+
+
+class TestStep9HooksPreflight:
+    def test_step9_audits_and_patches_hooks_before_tools_profile(self):
+        step9 = _install_sh_step9_section()
+        assert "openclaw_hooks_issues" in step9
+        assert "patch_openclaw_hooks_baseline" in step9
+        assert step9.index("openclaw_hooks_issues") < step9.index("TOOLS_PROFILE=")
+
+    def test_install_summary_includes_hooks_line(self):
+        text = _INSTALL_SH.read_text(encoding="utf-8")
+        assert "OpenClaw hooks (webhook):" in text

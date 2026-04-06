@@ -37,6 +37,101 @@ def test_set_openclaw_global_tools_profile_unchanged(tmp_path):
     assert setup_helpers.set_openclaw_global_tools_profile(str(oc), "coding") == "unchanged"
 
 
+def test_patch_openclaw_hooks_creates_hooks_with_token(tmp_path):
+    oc = tmp_path / "openclaw.json"
+    oc.write_text(json.dumps({"version": "1"}))
+    r = setup_helpers.patch_openclaw_hooks_baseline(
+        str(oc), token_if_missing="pipeline-secret-test"
+    )
+    assert r == "updated"
+    data = json.loads(oc.read_text())
+    h = data["hooks"]
+    assert h["enabled"] is True
+    assert h["token"] == "pipeline-secret-test"
+    assert h["allowRequestSessionKey"] is True
+    assert "pipeline:" in h["allowedSessionKeyPrefixes"]
+    assert "ideas:" in h["allowedSessionKeyPrefixes"]
+
+
+def test_patch_openclaw_hooks_preserves_existing_token(tmp_path):
+    oc = tmp_path / "openclaw.json"
+    oc.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "enabled": True,
+                    "token": "user-secret",
+                    "allowRequestSessionKey": True,
+                    "allowedSessionKeyPrefixes": ["pipeline:"],
+                }
+            }
+        )
+    )
+    r = setup_helpers.patch_openclaw_hooks_baseline(
+        str(oc), token_if_missing="would-not-use"
+    )
+    assert r in ("updated", "unchanged")
+    data = json.loads(oc.read_text())
+    assert data["hooks"]["token"] == "user-secret"
+    assert "ideas:" in data["hooks"]["allowedSessionKeyPrefixes"]
+
+
+def test_patch_openclaw_hooks_merges_prefixes_without_clobber(tmp_path):
+    oc = tmp_path / "openclaw.json"
+    oc.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "token": "t",
+                    "allowedSessionKeyPrefixes": ["custom:", "pipeline:"],
+                }
+            }
+        )
+    )
+    assert setup_helpers.patch_openclaw_hooks_baseline(str(oc)) == "updated"
+    prefs = json.loads(oc.read_text())["hooks"]["allowedSessionKeyPrefixes"]
+    assert prefs[0] == "custom:"
+    assert "pipeline:" in prefs
+    assert "ideas:" in prefs
+
+
+def test_patch_openclaw_hooks_without_token_skips_token_but_fixes_flags(tmp_path):
+    oc = tmp_path / "openclaw.json"
+    oc.write_text(json.dumps({"hooks": {}}))
+    r = setup_helpers.patch_openclaw_hooks_baseline(str(oc), token_if_missing=None)
+    assert r == "updated"
+    data = json.loads(oc.read_text())
+    assert "token" not in data["hooks"] or data["hooks"].get("token") in (None, "")
+    assert data["hooks"]["enabled"] is True
+    assert data["hooks"]["allowRequestSessionKey"] is True
+
+
+def test_patch_openclaw_hooks_missing_file(tmp_path):
+    missing = tmp_path / "nope.json"
+    assert setup_helpers.patch_openclaw_hooks_baseline(str(missing)).startswith("error:")
+
+
+def test_openclaw_hooks_issues_detects_gaps(tmp_path):
+    oc = tmp_path / "openclaw.json"
+    oc.write_text(json.dumps({"version": "1"}))
+    iss = setup_helpers.openclaw_hooks_issues(str(oc))
+    assert "no_hooks_object" in iss
+
+    oc.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "enabled": True,
+                    "token": "x",
+                    "allowRequestSessionKey": True,
+                    "allowedSessionKeyPrefixes": ["pipeline:", "ideas:"],
+                }
+            }
+        )
+    )
+    assert setup_helpers.openclaw_hooks_issues(str(oc)) == []
+
+
 def test_merge_dotenv_missing_keys_appends(tmp_path):
     envp = tmp_path / ".env"
     envp.write_text("AUTODEV_ROOT=/a\n")

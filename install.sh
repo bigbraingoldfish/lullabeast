@@ -518,6 +518,7 @@ hdr "9/13  Register AutoDev agents in openclaw.json"
 
 REGISTER_STATUS_STEP="not attempted"
 TOOLS_PROFILE_STEP="skipped"
+HOOKS_STEP="not attempted"
 REGISTER_AGENT="$AUTODEV_REPO_PATH/autodev/installer/register_agent.py"
 
 if [ ! -f "$REGISTER_AGENT" ]; then
@@ -527,6 +528,111 @@ elif [ ! -f "$AUTODEV_ROOT/openclaw.json" ]; then
     warn "openclaw.json not found — cannot register pipeline agents"
     REGISTER_STATUS_STEP="skipped (no openclaw.json)"
 else
+    # Webhook hooks baseline (orchestrator/UI → gateway) before agent registration
+    HOOK_ISSUES=$(
+        cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import openclaw_hooks_issues
+import sys
+print(','.join(openclaw_hooks_issues(sys.argv[1])))
+" "$AUTODEV_ROOT/openclaw.json" 2>/dev/null || echo "audit_error"
+    )
+    if [ "$HOOK_ISSUES" = "audit_error" ]; then
+        warn "Could not audit hooks block in openclaw.json — fix JSON syntax and re-run install.sh"
+        HOOKS_STEP="audit_error"
+    elif [ -z "$HOOK_ISSUES" ]; then
+        ok "openclaw.json hooks baseline OK (webhook Bearer + session-key prefixes for AutoDev)"
+        HOOKS_STEP="ok"
+    else
+        warn "openclaw.json hooks need changes for AutoDev webhook calls:"
+        case ",$HOOK_ISSUES," in
+            *,no_hooks_object,*|*,hooks_not_object,*) warn "  · hooks must be a JSON object" ;;
+        esac
+        case ",$HOOK_ISSUES," in *,enabled,*) warn "  · hooks.enabled should be true" ;; esac
+        case ",$HOOK_ISSUES," in *,token,*) warn "  · hooks.token is required (Bearer secret for POST /hooks/agent — not the Control UI token)" ;; esac
+        case ",$HOOK_ISSUES," in *,allowRequestSessionKey,*) warn "  · hooks.allowRequestSessionKey should be true" ;; esac
+        case ",$HOOK_ISSUES," in *,allowedSessionKeyPrefixes,*) warn "  · hooks.allowedSessionKeyPrefixes should be a list" ;; esac
+        case ",$HOOK_ISSUES," in *,prefix_pipeline,*) warn "  · allowedSessionKeyPrefixes must include pipeline:" ;; esac
+        case ",$HOOK_ISSUES," in *,prefix_ideas,*) warn "  · allowedSessionKeyPrefixes must include ideas:" ;; esac
+        case ",$HOOK_ISSUES," in *,invalid_json,*) warn "  · openclaw.json is not valid JSON" ;; esac
+        case ",$HOOK_ISSUES," in *,invalid_root,*) warn "  · openclaw.json root must be an object" ;; esac
+        case ",$HOOK_ISSUES," in *,no_file,*) warn "  · openclaw.json not found (unexpected)" ;; esac
+        HOOKS_STEP="issues: ${HOOK_ISSUES}"
+        if prompt_yn "Patch hooks now (atomic write; keeps your existing hooks.token if set)? [Y/n]" "Y"; then
+            HP=$(
+                cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import patch_openclaw_hooks_baseline
+import sys
+print(patch_openclaw_hooks_baseline(sys.argv[1]))
+" "$AUTODEV_ROOT/openclaw.json" 2>/dev/null || echo "error:patch"
+            )
+            case "$HP" in
+                updated) ok "openclaw.json hooks block updated (enabled, session-key flags, prefixes)" ;;
+                unchanged) ok "openclaw.json hooks block already matched baseline (no file change)" ;;
+                *) warn "hooks patch failed: $HP" ;;
+            esac
+        else
+            warn "hooks patch skipped — pipeline webhooks may be rejected until hooks are fixed"
+        fi
+        HOOK_ISSUES_AFTER=$(
+            cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import openclaw_hooks_issues
+import sys
+print(','.join(openclaw_hooks_issues(sys.argv[1])))
+" "$AUTODEV_ROOT/openclaw.json" 2>/dev/null || echo "audit_error"
+        )
+        if [ "$HOOK_ISSUES_AFTER" = "audit_error" ]; then
+            warn "Could not re-audit hooks after patch"
+        elif echo ",$HOOK_ISSUES_AFTER," | grep -q ",token,"; then
+            if prompt_yn "hooks.token is still empty. Generate a random token and set it (atomic)? [Y/n]" "Y"; then
+                GEN_TOKEN=$("$PYTHON" -c "import secrets; print(secrets.token_urlsafe(32))")
+                HT=$(
+                    cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import patch_openclaw_hooks_baseline
+import sys
+print(patch_openclaw_hooks_baseline(sys.argv[1], token_if_missing=sys.argv[2]))
+" "$AUTODEV_ROOT/openclaw.json" "$GEN_TOKEN" 2>/dev/null || echo "error:token"
+                )
+                case "$HT" in
+                    updated)
+                        ok "hooks.token generated and written to openclaw.json"
+                        info "Use the same value for AUTODEV_HOOKS_TOKEN (or ui/config.json hooks_token) so the UI can call the gateway"
+                        TE=$(
+                            cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import merge_dotenv_missing_keys
+import os, sys
+print(merge_dotenv_missing_keys(os.path.join(sys.argv[1], '.env'), {'AUTODEV_HOOKS_TOKEN': sys.argv[2]}))
+" "$AUTODEV_REPO_PATH" "$GEN_TOKEN" 2>/dev/null || echo "error:env"
+                        )
+                        case "$TE" in
+                            created|updated) ok "AUTODEV_HOOKS_TOKEN appended to .env (existing value preserved if already set)" ;;
+                            unchanged) info ".env already had AUTODEV_HOOKS_TOKEN — update it manually if it does not match hooks.token" ;;
+                            *) warn "Could not merge AUTODEV_HOOKS_TOKEN into .env: $TE" ;;
+                        esac
+                        ;;
+                    *)
+                        warn "Could not set hooks.token: $HT"
+                        ;;
+                esac
+            else
+                warn "Without hooks.token, POST /hooks/agent returns 401 — set it manually to match the UI/orchestrator Bearer secret"
+            fi
+        fi
+        HOOK_FINAL=$(
+            cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import openclaw_hooks_issues
+import sys
+print(','.join(openclaw_hooks_issues(sys.argv[1])))
+" "$AUTODEV_ROOT/openclaw.json" 2>/dev/null || echo "audit_error"
+        )
+        if [ "$HOOK_FINAL" = "audit_error" ]; then
+            HOOKS_STEP="audit_error (after patch attempt)"
+        elif [ -z "$HOOK_FINAL" ]; then
+            HOOKS_STEP="ok (patched)"
+        else
+            HOOKS_STEP="pending: ${HOOK_FINAL}"
+        fi
+    fi
+
     TOOLS_PROFILE=$("$PYTHON" -c "
 import json, sys
 with open(sys.argv[1], encoding='utf-8') as f:
@@ -685,6 +791,7 @@ printf "  %-32s %s\n" "OpenClaw version:"         "$OC_VERSION_STATUS"
 printf "  %-32s %s\n" "Conversion prompt:"        "$PROMPT_FOUND"
 printf "  %-32s %s\n" "Exec-approvals:"           "$APPROVALS_STATUS"
 printf "  %-32s %s\n" "Cron path:"                "$CRON_STATUS"
+printf "  %-32s %s\n" "OpenClaw hooks (webhook):"   "$HOOKS_STEP"
 printf "  %-32s %s\n" "OpenClaw tools.profile:"   "$TOOLS_PROFILE_STEP"
 printf "  %-32s %s\n" "OpenClaw agents (register):" "$REGISTER_STATUS_STEP"
 echo   "  Agent files deployed:"
