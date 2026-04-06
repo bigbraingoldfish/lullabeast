@@ -14,7 +14,11 @@ def _derive_pipeline_project() -> str:
         return os.path.join(root, "pipeline-project")
     repo_path = os.environ.get(
         "AUTODEV_REPO_PATH",
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        os.path.dirname(
+            os.path.dirname(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            )
+        ),
     )
     return os.path.join(repo_path, ".autodev", "pipeline-project")
 

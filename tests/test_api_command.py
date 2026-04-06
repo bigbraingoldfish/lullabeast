@@ -289,3 +289,47 @@ class TestPostApiCommand:
                 response = test_client.post("/api/command", json={"command": command})
                 
                 assert response.status_code == 200, f"Command {command} should return 200"
+
+    def test_command_uses_parked_escalation_fallback_when_queue_halted(self, test_client, temp_project_dir):
+        """When active status is QUEUE_HALTED but queue row is ESCALATION, defer command to parked files."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline_state_path = os.path.join(tmpdir, "pipeline_state.json")
+            phase_state_path = os.path.join(tmpdir, "phase_state.json")
+            queue_path = os.path.join(tmpdir, "pipeline_queue.json")
+
+            with open(pipeline_state_path, "w", encoding="utf-8") as f:
+                json.dump({"pipeline_status": "QUEUE_HALTED"}, f)
+            with open(phase_state_path, "w", encoding="utf-8") as f:
+                json.dump({"escalation_resets": 1}, f)
+            with open(queue_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "queue": [
+                            {
+                                "id": "q1",
+                                "project_path": temp_project_dir,
+                                "state": "ESCALATION",
+                                "parked_pipeline_status": "WAITING_FOR_HUMAN",
+                            }
+                        ]
+                    },
+                    f,
+                )
+
+            with patch("ui.server.load_config") as mock_config:
+                mock_config.return_value = {
+                    "pipeline_state_path": pipeline_state_path,
+                    "phase_state_path": phase_state_path,
+                    "pipeline_queue_path": queue_path,
+                    "project_dir_path": temp_project_dir,
+                    "lock_path": os.path.join(tmpdir, "pipeline.lock"),
+                    "events_path": os.path.join(tmpdir, "pipeline_events.jsonl"),
+                }
+
+                response = test_client.post("/api/command", json={"command": "RESET_PHASE"})
+
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload.get("deferred") is True
+            assert os.path.exists(os.path.join(temp_project_dir, "pending_escalation_command.json"))
+            assert os.path.exists(os.path.join(temp_project_dir, "pending_escalation_command.done"))

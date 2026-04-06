@@ -575,18 +575,30 @@
 
             useEffect(() => {
                 if (prevStatus === "WAITING_FOR_HUMAN" && pipeline_status !== "WAITING_FOR_HUMAN") {
-                    setCommandSent(false);
-                    setLastSubmittedCommand(null);
-                    setCommandError("");
+                    // Do not clear while the confirm modal is open — the 3s state poll can
+                    // briefly show a non-human status and would unmount the modal mid-confirm.
+                    if (!showConfirmModal) {
+                        setCommandSent(false);
+                        setLastSubmittedCommand(null);
+                        setCommandError("");
+                    }
                 }
                 setPrevStatus(pipeline_status);
-            }, [pipeline_status, prevStatus]);
+            }, [pipeline_status, prevStatus, showConfirmModal]);
 
-            if (pipeline_status !== "WAITING_FOR_HUMAN") return null;
+            const humanWait = pipeline_status === "WAITING_FOR_HUMAN";
+            const queueHaltedEscalation =
+                pipeline_status === "QUEUE_HALTED" &&
+                !!(escalation_trigger_reason || escalation_message);
+            const canIssueCommands = humanWait || queueHaltedEscalation;
+            const keepPanelMounted = canIssueCommands || showConfirmModal || commandSent;
+            if (!keepPanelMounted) return null;
 
             const headerText = commandSent
                 ? "Command submitted"
-                : escalation_trigger_reason || last_action || "Awaiting human command";
+                : !humanWait && showConfirmModal
+                    ? "Confirm command (pipeline status changed — server will still validate)"
+                    : escalation_trigger_reason || last_action || "Awaiting human command";
             const commandErrParts = commandError ? splitApiDetail(commandError) : null;
 
             const handleCommand = (command) => {
@@ -703,9 +715,14 @@
                     <h3 className="header-text text-sm font-semibold text-orange-400 mb-1">
                         {headerText}
                     </h3>
-                    {escalation_message && !commandSent ? (
+                    {escalation_message && !commandSent && humanWait ? (
                         <p className="text-slate-300 text-xs mb-3 leading-relaxed">
                             {escalation_message}
+                        </p>
+                    ) : null}
+                    {!humanWait && showConfirmModal && !commandSent ? (
+                        <p className="text-amber-400/90 text-xs mb-3 leading-relaxed">
+                            Status is no longer &quot;waiting for human&quot; on the last poll. You can still confirm — the server accepts the command only if the orchestrator is still in that state.
                         </p>
                     ) : null}
                     {isResetDisabled && !commandSent ? (
@@ -737,11 +754,13 @@
                                 </span>
                             ) : null}
                         </div>
-                    ) : (
+                    ) : canIssueCommands ? (
                         <div className="grid grid-cols-2 gap-2">
                             {GRID_COMMANDS.map(renderGridButton)}
                         </div>
-                    )}
+                    ) : showConfirmModal ? (
+                        <p className="text-slate-500 text-xs">Finish confirmation below, or cancel.</p>
+                    ) : null}
                     {showConfirmModal && (
                         <ConfirmationModal
                             command={modalCommand}
@@ -3952,21 +3971,43 @@
                     .finally(() => setSnapshotLoading(false));
             }, [selectedId, snapshotVersion]);
 
-            // Fetch escalation message when pipeline is waiting for human (escalation)
+            const selectedLiveForEscalationMsg = selectedId
+                ? (queue.find((e) => e.id === selectedId)?.live_pipeline_status ?? null)
+                : null;
+
+            // Fetch escalation context only when human-wait is true for the selection.
+            // Do not depend on `queue` by reference — every GET /api/queue creates a new array and
+            // was re-triggering this effect constantly (log spam) even when status strings were unchanged.
             useEffect(() => {
-                const sel = queue.find(e => e.id === selectedId);
-                const human =
-                    (snapshot && snapshot.is_active_project && snapshot.pipeline_status === 'WAITING_FOR_HUMAN') ||
-                    (sel && sel.live_pipeline_status === 'WAITING_FOR_HUMAN');
-                if (!human) {
-                    setEscalationMsg('');
+                const snapHuman =
+                    snapshot &&
+                    snapshot.is_active_project &&
+                    snapshot.pipeline_status === "WAITING_FOR_HUMAN";
+                const entryHuman = selectedLiveForEscalationMsg === "WAITING_FOR_HUMAN";
+                if (!snapHuman && !entryHuman) {
+                    setEscalationMsg("");
                     return;
                 }
-                fetch('/api/state')
-                    .then(r => r.json())
-                    .then(d => setEscalationMsg(d.escalation_message || d.escalation_trigger_reason || ''))
+                let cancelled = false;
+                fetch("/api/state")
+                    .then((r) => r.json())
+                    .then((d) => {
+                        if (!cancelled) {
+                            setEscalationMsg(
+                                d.escalation_message || d.escalation_trigger_reason || ""
+                            );
+                        }
+                    })
                     .catch(() => {});
-            }, [snapshot, selectedId, queue]);
+                return () => {
+                    cancelled = true;
+                };
+            }, [
+                selectedId,
+                selectedLiveForEscalationMsg,
+                snapshot && snapshot.is_active_project,
+                snapshot && snapshot.pipeline_status,
+            ]);
 
             const selected = queue.find(e => e.id === selectedId) || null;
             const activeEntry = queue.find(e => e.state === 'ACTIVE');
@@ -4062,10 +4103,14 @@
                 }
                 setHubBusy(true);
                 setHubError('');
+                const payload = { command: cmd };
+                if (selected && selected.state === 'ESCALATION' && selected.project_path) {
+                    payload.target_project_path = selected.project_path;
+                }
                 fetch('/api/command', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({command: cmd}),
+                    body: JSON.stringify(payload),
                 })
                 .then(async r => {
                     if (!r.ok) { const d = await r.json().catch(() => ({})); setHubError(d.detail || 'Command failed'); return; }

@@ -414,7 +414,7 @@ class TestSelectNextQueueProject:
         inst, queue_file, state_file, _ = orch
         nselect = {"n": 0}
 
-        def sel():
+        def sel(*args, **kwargs):
             nselect["n"] += 1
             return True
 
@@ -463,6 +463,22 @@ class TestSelectNextQueueProject:
         assert result is False
         assert inst.state.get("pipeline_status") == "QUEUE_HALTED"
         assert "queue_halted_reason" in inst.state
+
+    def test_select_next_halt_if_no_eligible_false_skips_queue_halted(self, orch, tmp_path, monkeypatch):
+        """After PIPELINE_COMPLETE, no next project is normal — do not flip to QUEUE_HALTED."""
+        inst, queue_file, state_file, _ = orch
+        entries = [_make_entry("a", state="COMPLETED", position=1)]
+        _write_queue(queue_file, entries)
+
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "update_symlink", lambda p: True)
+        monkeypatch.setattr(inst, "write_state", lambda: None)
+        inst.state["pipeline_status"] = "PIPELINE_COMPLETE"
+
+        result = inst._select_next_queue_project(halt_if_no_eligible=False)
+        assert result is False
+        assert inst.state.get("pipeline_status") == "PIPELINE_COMPLETE"
+        assert "queue_halted_reason" not in inst.state
 
     def test_queue_halted_reason_all_blocked(self, orch, tmp_path, monkeypatch):
         inst, queue_file, state_file, _ = orch
@@ -543,6 +559,19 @@ class TestSelectNextQueueProject:
         monkeypatch.setattr(inst, "write_state", lambda: None)
         result = inst._select_next_queue_project()
         assert result is False
+
+    def test_should_invoke_escalation_agent_treats_queue_halted_as_waiting(self, orch):
+        """Escalation loop must not re-invoke webhook while queue-halted waiting for human."""
+        inst, _queue_file, _state_file, _ = orch
+
+        inst.state["pipeline_status"] = "WAITING_FOR_HUMAN"
+        assert inst._should_invoke_escalation_agent() is False
+
+        inst.state["pipeline_status"] = "QUEUE_HALTED"
+        assert inst._should_invoke_escalation_agent() is False
+
+        inst.state["pipeline_status"] = "RUNNING"
+        assert inst._should_invoke_escalation_agent() is True
 
 
 # ---------------------------------------------------------------------------

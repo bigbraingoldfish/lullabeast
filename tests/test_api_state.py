@@ -303,3 +303,39 @@ class TestApiStateEndpoint:
         data = response.json()
         assert os.path.realpath(data["project_path"]) == os.path.realpath(state_project)
         assert os.path.realpath(data["project_symlink_target"]) == os.path.realpath(symlink_project)
+
+    def test_all_blocked_queue_halted_reason_gets_friendly_escalation_message(self, temp_dir):
+        """Queue-halted escalation reason should be surfaced in human-readable form."""
+        state_path = os.path.join(temp_dir, "pipeline_state.json")
+        phase_path = os.path.join(temp_dir, "phase_state.json")
+        project_root = os.path.join(temp_dir, "project")
+        os.makedirs(project_root, exist_ok=True)
+
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "pipeline_status": "WAITING_FOR_HUMAN",
+                    "queue_halted_reason": "all_blocked",
+                    "project_path": project_root,
+                },
+                f,
+            )
+        with open(phase_path, "w", encoding="utf-8") as f:
+            json.dump({"escalation_trigger_reason": "Queue halted: all_blocked"}, f)
+
+        cfg = {
+            "pipeline_state_path": state_path,
+            "phase_state_path": phase_path,
+            "lock_path": os.path.join(temp_dir, "pipeline.lock"),
+            "events_path": os.path.join(temp_dir, "pipeline_events.jsonl"),
+            "project_dir_path": project_root,
+        }
+
+        with patch("ui.server.load_config", return_value=cfg):
+            response = client.get("/api/state")
+
+        assert response.status_code == 200
+        data = response.json()
+        msg = data.get("escalation_message", "")
+        assert "Queue halted" in msg
+        assert "all queued projects are currently BLOCKED" in msg
