@@ -1588,6 +1588,29 @@ def get_state():
                 response["escalation_message"] = phase_state["escalation_message"]
             elif "escalation_trigger_reason" in phase_state:
                 response["escalation_message"] = phase_state["escalation_trigger_reason"]
+
+    # Humanize queue-halted escalation reasons in monitor text.
+    # Keep pipeline_state.queue_halted_reason as the machine token.
+    _qhr = response.get("queue_halted_reason")
+    _escalation_msg = response.get("escalation_message")
+    if isinstance(_escalation_msg, str) and isinstance(_qhr, str):
+        if _escalation_msg.strip().lower().startswith("queue halted:"):
+            _friendly = {
+                "all_blocked": (
+                    "Queue halted: all queued projects are currently BLOCKED. "
+                    "Unblock at least one project (or fix its blocker) to resume auto-advance."
+                ),
+                "all_dependency_hold": (
+                    "Queue halted: all queued projects are in DEPENDENCY_HOLD. "
+                    "Complete or clear parent dependencies to resume."
+                ),
+                "mixed": (
+                    "Queue halted: remaining projects are blocked and/or dependency-held. "
+                    "Resolve at least one hold/blocker to resume."
+                ),
+            }.get(_qhr)
+            if _friendly:
+                response["escalation_message"] = _friendly
     
     # Add server-derived fields
     # Orchestrator liveness
@@ -1831,6 +1854,31 @@ def post_command(request: dict):
     pipeline_status = pipeline_state.get("pipeline_status") if pipeline_state else None
     escalation_resets = phase_state.get("escalation_resets", 0) if phase_state else 0
     
+    # If status already moved off WAITING_FOR_HUMAN but the active queue row is parked
+    # in ESCALATION for this same project, treat command as deferred. This avoids
+    # monitor-screen race failures when queue-level status flips to QUEUE_HALTED.
+    if pipeline_status != "WAITING_FOR_HUMAN" and active_real:
+        q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
+        q = _read_json_file(q_path) if q_path and os.path.exists(q_path) else {}
+        for e in q.get("queue", []):
+            try:
+                ep = os.path.realpath(os.path.expanduser(e.get("project_path", "")))
+            except OSError:
+                continue
+            if ep != active_real:
+                continue
+            if e.get("state") != "ESCALATION":
+                continue
+            if e.get("parked_pipeline_status") not in (None, "WAITING_FOR_HUMAN"):
+                continue
+            is_valid, error_msg, error_code = _validate_command_request(
+                active_real, "WAITING_FOR_HUMAN", escalation_resets, command
+            )
+            if not is_valid:
+                raise HTTPException(status_code=error_code, detail=error_msg)
+            _write_pending_escalation_files(active_real, command)
+            return {"status": "ok", "command": command, "deferred": True}
+
     # Validate request
     is_valid, error_msg, error_code = _validate_command_request(
         project_dir_path, pipeline_status, escalation_resets, command

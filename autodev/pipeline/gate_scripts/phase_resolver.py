@@ -69,8 +69,12 @@ def _derive_pipeline_project() -> str:
         return os.path.join(root, "pipeline-project")
     repo_path = os.environ.get(
         "AUTODEV_REPO_PATH",
-        # gate_scripts/ → pipeline/ → autodev/ → repo root: 3 dirname calls
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        # gate_scripts/ → pipeline/ → autodev/ → repo root: 4 dirname calls
+        os.path.dirname(
+            os.path.dirname(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            )
+        ),
     )
     return os.path.join(repo_path, ".autodev", "pipeline-project")
 

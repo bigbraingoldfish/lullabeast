@@ -382,10 +382,17 @@ class Orchestrator:
         entries[:] = final
         return entries
 
-    def _select_next_queue_project(self):
+    def _select_next_queue_project(self, halt_if_no_eligible: bool = True):
         """Walk queue, find next eligible project, run preflight, start it.
 
-        Returns True if a project was started, False if QUEUE_HALTED.
+        Returns True if a project was started, False if no eligible entry was found.
+
+        When *halt_if_no_eligible* is True (default), also transitions to QUEUE_HALTED with a
+        reason — used when the queue still has work but nothing can run.
+
+        When False, returns False without changing pipeline status (used after
+        PIPELINE_COMPLETE: queue row is COMPLETED but there is no next project — that is
+        success, not a halt).
         """
         queue_data = self._read_queue()
         entries = queue_data["queue"]
@@ -475,8 +482,12 @@ class Orchestrator:
         else:
             reason = "mixed"
         print(f"[QUEUE] Queue exhausted — halting with reason: {reason}")
-        self.state["queue_halted_reason"] = reason
-        self.transition_state("QUEUE_HALTED", f"Queue halted: {reason}")
+        if halt_if_no_eligible:
+            self.state["queue_halted_reason"] = reason
+            self.transition_state("QUEUE_HALTED", f"Queue halted: {reason}")
+        else:
+            # Caller owns final status (e.g. PIPELINE_COMPLETE). Clear stale halt metadata.
+            self.state.pop("queue_halted_reason", None)
         return False
 
     def _queue_promote_children_after_parent_completed(self, parent_entry_id):
@@ -630,6 +641,15 @@ class Orchestrator:
         self.state["current_agent"] = "escalation"
         self.write_state()
 
+    def _should_invoke_escalation_agent(self) -> bool:
+        """True when escalation webhook should be invoked for current state.
+
+        QUEUE_HALTED can legitimately coexist with an escalation wait context
+        (parked queue row, awaiting human command). Treat it like WAITING_FOR_HUMAN
+        to avoid repeatedly re-invoking escalation and flipping status back/forth.
+        """
+        return self.state.get("pipeline_status") not in ("WAITING_FOR_HUMAN", "QUEUE_HALTED")
+
     def _check_stop_requested(self) -> bool:
         """Check for the stop sentinel file written by the UI server.
 
@@ -678,8 +698,14 @@ class Orchestrator:
         
     def run_planner_output_gate(self):
         gate_script = os.path.join(AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts", "planner_gate.py")
+        json_path = os.path.join(SYMLINK_TARGET, "planner_output.json")
         try:
-            result = subprocess.run([sys.executable, gate_script], capture_output=True, text=True, check=True)
+            result = subprocess.run(
+                [sys.executable, gate_script, json_path],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
             output = result.stdout.strip()
             return output == "PASS"
         except subprocess.CalledProcessError as e:
@@ -1577,6 +1603,8 @@ class Orchestrator:
                         self.write_state()
                 elif result.returncode == 0 and "PIPELINE_COMPLETE" in output:
                     print("[INFO] All roadmap phases already complete. Nothing to do.")
+                    self.state["current_phase_raw_id"] = ""
+                    self.state["current_agent"] = None
                     self.transition_state("PIPELINE_COMPLETE", "Pipeline fully complete on startup")
                     self._queue_update_active_entry(
                         "COMPLETED",
@@ -1584,7 +1612,7 @@ class Orchestrator:
                     )
                     queue_data = self._read_queue()
                     if queue_data["queue"] and queue_data.get("queue_mode", "auto") == "auto":
-                        if self._select_next_queue_project():
+                        if self._select_next_queue_project(halt_if_no_eligible=False):
                             self.read_state()
                             return "retry_startup"
                     return "exit_run"
@@ -1892,13 +1920,6 @@ class Orchestrator:
                     model = "openrouter/minimax/minimax-m2.7"
                     session_key = f"pipeline:phase-{phase}:{raw_id}:executor-attempt-{retries + 1}"
                     attempt_label = "Cloud"
-                        
-                    # Traffic cop health check before retry 2 (retries==1 means second attempt).
-                    if retries == 1 and not self.check_traffic_cop_health():
-                        self.state["current_agent"] = "escalation"
-                        self.transition_state("RUNNING", "Traffic cop unreachable before retry 2")
-                        time.sleep(5)
-                        continue
 
                     sentinel_path = os.path.join(SYMLINK_TARGET, "executor_output.done")
                     token = self.openclaw_config.get("hooks", {}).get("token", "")
@@ -2275,8 +2296,9 @@ class Orchestrator:
                                 pass
                                 
                         print(f"[INFO] Phase {phase} complete. Looping back to identify next phase.")
-                        self.state["current_agent"] = "planner" # reset to start
-                        self.state["current_phase"] = 0 # triggers re-identification logic in pipeline if needed, though this is currently a missing link in orchestrator
+                        self.state["current_agent"] = "planner"  # reset to start
+                        self.state["current_phase"] = 0
+                        self.state["current_phase_raw_id"] = ""
                         # Actually, phase identification is a pure script. Let's run it.
                         gate_script = os.path.join(AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts", "phase_resolver.py")
                         try:
@@ -2318,6 +2340,8 @@ class Orchestrator:
                                     continue
                             elif result.returncode == 0 and "PIPELINE_COMPLETE" in output:
                                 print("[INFO] Pipeline fully complete!")
+                                self.state["current_phase_raw_id"] = ""
+                                self.state["current_agent"] = None
                                 self.transition_state("PIPELINE_COMPLETE", "Pipeline fully complete")
                                 # Queue integration: mark entry COMPLETED and auto-advance
                                 self._queue_update_active_entry(
@@ -2326,7 +2350,7 @@ class Orchestrator:
                                 )
                                 queue_data = self._read_queue()
                                 if queue_data["queue"] and queue_data.get("queue_mode", "auto") == "auto":
-                                    advanced = self._select_next_queue_project()
+                                    advanced = self._select_next_queue_project(halt_if_no_eligible=False)
                                     if advanced:
                                         continue  # restart loop for the new project
                                 break
@@ -2552,7 +2576,7 @@ class Orchestrator:
                                 continue
 
                 elif current_agent == "escalation":
-                    if self.state.get("pipeline_status") != "WAITING_FOR_HUMAN":
+                    if self._should_invoke_escalation_agent():
                         phase = self.state.get("current_phase", 0)
                         raw_id = self.state.get("current_phase_raw_id", "unknown")
                         session_key = f"pipeline:phase-{phase}:{raw_id}:escalation"
