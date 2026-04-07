@@ -3664,6 +3664,7 @@
                 preflightLastRun,
                 hasFail,
                 recentProjects,
+                repoRoadmapHintMessage,
             } = props;
 
             const repoPathInputFsStatus =
@@ -3872,6 +3873,11 @@
                                 <span className="font-mono text-slate-400">roadmap.md</span> and{" "}
                                 <span className="font-mono text-slate-400">prd.md</span> (from Project Ideas) into the repository path and initialize git there. Launch adds pipeline scaffolding and sets the active project symlink.
                             </p>
+                            {repoRoadmapHintMessage ? (
+                                <p className="text-[11px] text-amber-400 leading-relaxed max-w-prose">
+                                    {repoRoadmapHintMessage}
+                                </p>
+                            ) : null}
                         </div>
                         {preflightRoadmapAmbiguous && (
                             <div className="rounded border border-amber-600/80 bg-amber-950/40 px-3 py-3 text-sm text-amber-100 space-y-2">
@@ -6028,6 +6034,7 @@
             const [addToQueueBusy, setAddToQueueBusy] = useState(false);
             const [addToQueueError, setAddToQueueError] = useState("");
             const [preflightQueueActive, setPreflightQueueActive] = useState(false);
+            const [repoRoadmapHintMessage, setRepoRoadmapHintMessage] = useState("");
             /** null | "exists" | "parent" | "bad" — from filesystem check on server (debounced). */
             const [repoPathFsStatus, setRepoPathFsStatus] = useState(null);
             const [showCreateFolderPrompt, setShowCreateFolderPrompt] = useState(false);
@@ -6059,6 +6066,7 @@
                     setRoadmapSeedLocked(false);
                     setLaunchPrdContent("");
                     setRepoPathError("");
+                    setRepoRoadmapHintMessage("");
                     setRoadmapSeedError([]);
                     setPreflightChecks(null);
                     setPreflightRoadmapAmbiguous(null);
@@ -6172,6 +6180,39 @@
                         if (check.exists) {
                             setRepoPathLocked(true);
                             setRepoPath(path);
+                            setRepoRoadmapHintMessage("");
+                            const seedEligible =
+                                !(seedRoadmap || "").trim() &&
+                                !(roadmapSeed || "").trim() &&
+                                !roadmapSeedLocked;
+                            if (seedEligible) {
+                                fetch("/api/setup/repo-roadmap-hint", {
+                                    method: "POST",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({ path }),
+                                })
+                                    .then((r3) => r3.json().catch(() => ({})))
+                                    .then((hint) => {
+                                        if (!hint || !hint.found) return;
+                                        if (hint.ambiguous) {
+                                            setRepoRoadmapHintMessage(
+                                                "Multiple roadmap files found; run preflight or remove extras before auto-load."
+                                            );
+                                            return;
+                                        }
+                                        if (hint.all_phases_complete) {
+                                            setRepoRoadmapHintMessage(
+                                                "Roadmap on disk is fully checked off; seed left empty."
+                                            );
+                                            return;
+                                        }
+                                        if (typeof hint.content === "string" && hint.content.trim()) {
+                                            setRoadmapSeed(hint.content);
+                                            setRoadmapSeedError([]);
+                                        }
+                                    })
+                                    .catch(() => {});
+                            }
                         } else if (check.parent_exists) {
                             setShowCreateFolderPrompt(true);
                         } else {
@@ -6491,8 +6532,12 @@
                                     onRepoPathLockToggle={() => {
                                         setRepoPathLocked(false);
                                         setRepoPathFsStatus(null);
+                                        setRepoRoadmapHintMessage("");
                                     }}
-                                    onRoadmapSeedChange={setRoadmapSeed}
+                                    onRoadmapSeedChange={(value) => {
+                                        setRoadmapSeed(value);
+                                        setRepoRoadmapHintMessage("");
+                                    }}
                                     onRoadmapSeedLockToggle={() => setRoadmapSeedLocked(false)}
                                     onBack={() => setCurrentScreen("ideas")}
                                     repoPathError={repoPathError}
@@ -6521,6 +6566,7 @@
                                     onCancelCreateFolder={onCancelCreateFolder}
                                     preflightLastRun={preflightLastRun}
                                     hasFail={hasFail}
+                                    repoRoadmapHintMessage={repoRoadmapHintMessage}
                                 />
                             )}
                             {currentScreen === "ideas" && <IdeasScreen />}

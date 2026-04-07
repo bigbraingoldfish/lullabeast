@@ -4382,6 +4382,14 @@ _PHASE_LINE_RE = re.compile(
 )
 
 
+def _roadmap_phase_checkbox_stats(content: str) -> tuple[int, int]:
+    """Return (total_phase_lines, completed_phase_lines) for roadmap markdown."""
+    all_phases = _PHASE_LINE_RE.findall(content or "")
+    completed_re = re.compile(r"^- \[[xX]\] ", re.MULTILINE)
+    completed = len(completed_re.findall(content or ""))
+    return len(all_phases), completed
+
+
 def _validate_roadmap_content(content: str) -> dict:
     """Validate roadmap content format.
 
@@ -4506,6 +4514,48 @@ async def post_setup_check_repo_path(request: Request):
         "exists": path.exists(),
         "parent_exists": path.parent.exists(),
         "is_git_repo": (path / ".git").exists(),
+    }
+
+
+@app.post("/api/setup/repo-roadmap-hint")
+async def post_setup_repo_roadmap_hint(request: Request):
+    """Inspect a repository path and return roadmap auto-fill hints for setup UI."""
+    body = await request.json()
+    raw = body.get("path", "")
+    try:
+        path = _normalize_setup_repo_path(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid path: {exc}") from exc
+
+    if not path.is_dir():
+        raise HTTPException(status_code=422, detail="path does not exist or is not a directory")
+
+    repo_abs = os.path.realpath(str(path))
+    roadmap_paths = _glob_project_roadmap_paths(repo_abs)
+    if not roadmap_paths:
+        return {"found": False}
+
+    if len(roadmap_paths) > 1:
+        return {
+            "found": True,
+            "ambiguous": True,
+            "roadmap_files": [os.path.basename(p) for p in roadmap_paths],
+        }
+
+    selected = roadmap_paths[0]
+    try:
+        with open(selected, "r", errors="replace") as f:
+            content = f.read()
+    except OSError as exc:
+        raise HTTPException(status_code=422, detail=f"Could not read roadmap file: {exc}") from exc
+
+    phases_total, phases_complete = _roadmap_phase_checkbox_stats(content)
+    return {
+        "found": True,
+        "ambiguous": False,
+        "filename": os.path.basename(selected),
+        "content": content,
+        "all_phases_complete": bool(phases_total > 0 and phases_complete >= phases_total),
     }
 
 
@@ -5562,10 +5612,7 @@ def get_queue_entry_snapshot(entry_id: str):
         try:
             with open(roadmap_candidates[0], "r", errors="replace") as f:
                 roadmap_content = f.read()
-            all_phases = _PHASE_LINE_RE.findall(roadmap_content)
-            phases_total = len(all_phases)
-            completed_re = re.compile(r"^- \[[xX]\] ", re.MULTILINE)
-            phases_complete = len(completed_re.findall(roadmap_content))
+            phases_total, phases_complete = _roadmap_phase_checkbox_stats(roadmap_content)
             # Extract description for current phase
             if current_phase_raw_id:
                 for line in roadmap_content.splitlines():
