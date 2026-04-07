@@ -143,3 +143,43 @@ def test_merge_dotenv_missing_keys_appends(tmp_path):
     text = envp.read_text()
     assert "AUTODEV_REPO_PATH=/r" in text
     assert "AUTODEV_RUNTIME_ROOT=" in text
+
+
+def test_read_openclaw_hooks_token_returns_value(tmp_path):
+    oc = tmp_path / "openclaw.json"
+    oc.write_text(json.dumps({"hooks": {"token": "abc123"}}))
+    assert setup_helpers.read_openclaw_hooks_token(str(oc)) == "abc123"
+
+
+def test_webhook_secret_sync_assess_detects_placeholder_mismatch(tmp_path):
+    oc = tmp_path / "openclaw.json"
+    ui_cfg = tmp_path / "config.json"
+    envp = tmp_path / ".env"
+    oc.write_text(json.dumps({"hooks": {"token": "real-token"}}))
+    ui_cfg.write_text(json.dumps({"hooks_token": "pipeline-secret-token"}))
+    envp.write_text("AUTODEV_HOOKS_TOKEN=real-token\n")
+
+    result = setup_helpers.webhook_secret_sync_assess(str(oc), str(ui_cfg), str(envp))
+    assert result.summary_code() == "mismatch_ui"
+    assert result.ui_needs_sync is True
+    assert result.env_wrong is False
+
+
+def test_set_ui_config_hooks_token_updates_atomically(tmp_path):
+    ui_cfg = tmp_path / "config.json"
+    ui_cfg.write_text(json.dumps({"port": 18790, "hooks_token": "old"}))
+    r = setup_helpers.set_ui_config_hooks_token(str(ui_cfg), "new-token")
+    assert r == "updated"
+    data = json.loads(ui_cfg.read_text())
+    assert data["hooks_token"] == "new-token"
+    assert data["port"] == 18790
+
+
+def test_set_dotenv_key_replaces_existing_value(tmp_path):
+    envp = tmp_path / ".env"
+    envp.write_text("AUTODEV_ROOT=/x\nAUTODEV_HOOKS_TOKEN=old\n")
+    r = setup_helpers.set_dotenv_key(str(envp), "AUTODEV_HOOKS_TOKEN", "new")
+    assert r == "updated"
+    text = envp.read_text()
+    assert "AUTODEV_HOOKS_TOKEN=new" in text
+    assert "AUTODEV_HOOKS_TOKEN=old" not in text
