@@ -129,7 +129,18 @@ ok "git available"
 # ─────────────────────────────────────────────────────────────────────────────
 hdr "3/13  Python dependencies"
 
-AUTODEV_REPO_PATH="$(cd "$(dirname "$0")" && pwd)"
+# Repo root: if AUTODEV_REPO_PATH is already set in the environment, keep it
+# (canonical path); otherwise use the directory containing this install.sh.
+_AUTODEV_INSTALL_ROOT="$(cd "$(dirname "$0")" && pwd)"
+if [ -n "${AUTODEV_REPO_PATH:-}" ]; then
+    if [ ! -d "$AUTODEV_REPO_PATH" ]; then
+        fail "AUTODEV_REPO_PATH is set but is not a directory: $AUTODEV_REPO_PATH"
+    fi
+    AUTODEV_REPO_PATH="$(cd "$AUTODEV_REPO_PATH" && pwd)"
+    ok "Using AUTODEV_REPO_PATH from environment: $AUTODEV_REPO_PATH"
+else
+    AUTODEV_REPO_PATH="$_AUTODEV_INSTALL_ROOT"
+fi
 REQUIREMENTS="$AUTODEV_REPO_PATH/ui/requirements.txt"
 [ -f "$REQUIREMENTS" ] || fail "ui/requirements.txt not found at $REQUIREMENTS"
 

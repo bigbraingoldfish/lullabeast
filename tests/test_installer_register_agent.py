@@ -346,6 +346,16 @@ class TestStep6RoadmapConverterWorkspace:
         assert step6.count('mkdir -p "$dst_dir/skills"') >= 1
 
 
+def test_step3_respects_autodev_repo_path_from_environment():
+    """install.sh must not overwrite AUTODEV_REPO_PATH when already exported."""
+    text = _INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("3/13  PYTHON DEPENDENCIES")
+    end = text.index("4/13  OPENCLAW DETECTION")
+    step3 = text[start:end]
+    assert "AUTODEV_REPO_PATH:-}" in step3
+    assert "Using AUTODEV_REPO_PATH from environment" in step3
+
+
 class TestStep9HooksPreflight:
     def test_step9_audits_and_patches_hooks_before_tools_profile(self):
         step9 = _install_sh_step9_section()
