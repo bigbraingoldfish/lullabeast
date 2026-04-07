@@ -260,3 +260,9 @@ class TestPreflightServerPathInput:
         html = load_html()
         assert "/api/setup/recent-projects" in html
         assert 'currentScreen !== "preflight"' in html
+
+    def test_preflight_confirm_path_fetches_repo_roadmap_hint(self):
+        html = load_html()
+        app_html = extract_function(html, "App")
+        assert app_html is not None, "App function not found"
+        assert "/api/setup/repo-roadmap-hint" in app_html
