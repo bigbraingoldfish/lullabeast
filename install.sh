@@ -361,9 +361,38 @@ for agent in planner executor reviewer escalation prd-creator roadmap-converter;
         ;;
     esac
 
-    # Empty skills/ for runtime injection (roadmap-converter is not a pipeline agent)
+    # Ensure expected skills directories exist for non-pipeline agents that
+    # consume static skills from workspace paths.
+    case "$agent" in
+        prd-creator|roadmap-converter)
+            mkdir -p "$dst_dir/skills"
+            ;;
+    esac
+
+    if [ "$agent" = "prd-creator" ]; then
+        src="$AUTODEV_REPO_PATH/autodev/skill-library/prd-creator/readiness-reviewer/SKILL.md"
+        dst="$dst_dir/skills/readiness-reviewer/SKILL.md"
+        if [ -f "$src" ]; then
+            if [ ! -f "$dst" ] || [ "$src" -nt "$dst" ]; then
+                MISSING_FILES+=("  $agent/skills/readiness-reviewer/SKILL.md")
+            fi
+        else
+            MISSING_FILES+=("  MISSING SOURCE: autodev/skill-library/prd-creator/readiness-reviewer/SKILL.md")
+        fi
+    fi
+
     if [ "$agent" = "roadmap-converter" ]; then
-        mkdir -p "$dst_dir/skills"
+        for skill in roadmap-generation alignment-check adversarial-review; do
+            src="$AUTODEV_REPO_PATH/autodev/skill-library/roadmap-converter/$skill/SKILL.md"
+            dst="$dst_dir/skills/$skill/SKILL.md"
+            if [ -f "$src" ]; then
+                if [ ! -f "$dst" ] || [ "$src" -nt "$dst" ]; then
+                    MISSING_FILES+=("  $agent/skills/$skill/SKILL.md")
+                fi
+            else
+                MISSING_FILES+=("  MISSING SOURCE: autodev/skill-library/roadmap-converter/$skill/SKILL.md")
+            fi
+        done
     fi
 done
 
@@ -393,8 +422,34 @@ if [ "${#MISSING_FILES[@]}" -gt 0 ]; then
                 fi
                 ;;
             esac
+            case "$agent" in
+                prd-creator|roadmap-converter)
+                    mkdir -p "$dst_dir/skills"
+                    ;;
+            esac
+
+            if [ "$agent" = "prd-creator" ]; then
+                src="$AUTODEV_REPO_PATH/autodev/skill-library/prd-creator/readiness-reviewer/SKILL.md"
+                if [ -f "$src" ]; then
+                    mkdir -p "$dst_dir/skills/readiness-reviewer"
+                    cp -u "$src" "$dst_dir/skills/readiness-reviewer/SKILL.md"
+                    count=$((count + 1))
+                else
+                    warn "Missing skill source for prd-creator: $src"
+                fi
+            fi
+
             if [ "$agent" = "roadmap-converter" ]; then
-                mkdir -p "$dst_dir/skills"
+                for skill in roadmap-generation alignment-check adversarial-review; do
+                    src="$AUTODEV_REPO_PATH/autodev/skill-library/roadmap-converter/$skill/SKILL.md"
+                    if [ -f "$src" ]; then
+                        mkdir -p "$dst_dir/skills/$skill"
+                        cp -u "$src" "$dst_dir/skills/$skill/SKILL.md"
+                        count=$((count + 1))
+                    else
+                        warn "Missing skill source for roadmap-converter ($skill): $src"
+                    fi
+                done
             fi
             AGENT_COUNTS[$agent]=$count
             TOTAL_DEPLOYED=$((TOTAL_DEPLOYED + count))
