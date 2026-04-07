@@ -1586,10 +1586,12 @@ class Orchestrator:
         Returns (passed: bool, details: str). Never retries on failure."""
         gate_script = os.path.join(AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts", "repo_init_check.py")
         try:
+            # Inherit env so repo_init_check.py sees AUTODEV_ROOT (Docker / custom OpenClaw roots).
             result = subprocess.run(
                 [sys.executable, gate_script],
                 capture_output=True,
-                text=True
+                text=True,
+                env=os.environ,
             )
             output = (result.stdout + result.stderr).strip()
             if result.returncode == 0:
