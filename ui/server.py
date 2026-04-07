@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import time
 import uuid
 from collections import deque
@@ -386,6 +387,7 @@ DEFAULTS = {
     "ideas_dir": "",
     "hooks_url": "http://localhost:18789/hooks/agent",
     "hooks_token": "",
+    "base_branch": "",
     "conversion_prompt_path": "",
     "openclaw_root": os.environ.get("AUTODEV_ROOT") or "~/.openclaw",
     "autodev_repo_path": os.environ.get("AUTODEV_REPO_PATH") or _AUTODEV_UI_ROOT,
@@ -1913,6 +1915,42 @@ def _write_pending_escalation_files(project_dir_path, command):
     return True
 
 
+def _detect_base_branch(project_dir: str, configured_base_branch: str = "") -> str:
+    """Resolve the best base branch for git recovery operations."""
+    candidate = (configured_base_branch or "").strip()
+    if candidate:
+        return candidate
+
+    for branch in ("main", "master", "develop", "trunk"):
+        if subprocess.run(
+            ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+            cwd=project_dir,
+        ).returncode == 0:
+            return branch
+
+    remote_head = subprocess.run(
+        ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+        cwd=project_dir,
+        capture_output=True,
+        text=True,
+    )
+    remote_ref = (remote_head.stdout or "").strip()
+    if remote_head.returncode == 0 and remote_ref.startswith("refs/remotes/origin/"):
+        return remote_ref[len("refs/remotes/origin/") :]
+
+    init_branch = subprocess.run(
+        ["git", "config", "--get", "init.defaultBranch"],
+        cwd=project_dir,
+        capture_output=True,
+        text=True,
+    )
+    configured = (init_branch.stdout or "").strip()
+    if init_branch.returncode == 0 and configured:
+        return configured
+
+    return "main"
+
+
 @app.post("/api/command")
 def post_command(request: dict):
     """Handle escalation commands from the UI.
@@ -2034,6 +2072,47 @@ def post_command(request: dict):
     _write_escalation_files(project_dir_path, command)
     
     return {"status": "ok", "command": command}
+
+
+@app.post("/api/pipeline/git-recover")
+def post_pipeline_git_recover(request: dict):
+    """Attempt safe git recovery after branch-checkout failures."""
+    config = load_config()
+    project_dir_path = config.get("project_dir_path")
+    pipeline_state_path = config.get("pipeline_state_path")
+
+    project_dir = os.path.realpath(os.path.expanduser(project_dir_path)) if project_dir_path else ""
+    if not project_dir or not os.path.isdir(project_dir):
+        raise HTTPException(status_code=503, detail="Active project directory is unavailable.")
+
+    base_branch_request = (request.get("base_branch") or "").strip()
+    config_base_branch = (config.get("base_branch") or "").strip()
+    base_branch = _detect_base_branch(project_dir, base_branch_request or config_base_branch)
+
+    subprocess.run(
+        ["git", "stash", "push", "--include-untracked"],
+        cwd=project_dir,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    try:
+        subprocess.run(["git", "checkout", base_branch], cwd=project_dir, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        detail = (e.stderr or e.stdout or str(e)).strip()
+        raise HTTPException(status_code=409, detail=f"Git recovery failed: {detail}") from e
+
+    if pipeline_state_path:
+        pipeline_state_file = os.path.expanduser(pipeline_state_path)
+        state = _read_json_file(pipeline_state_file) or {}
+        state["pipeline_status"] = "RUNNING"
+        state["status"] = "RUNNING"
+        state["current_agent"] = "planner"
+        state["last_action"] = f"Manual git recovery completed on branch {base_branch}"
+        state["last_action_timestamp"] = datetime.now(timezone.utc).isoformat()
+        _write_json_atomic(pipeline_state_file, state)
+
+    return {"ok": True, "base_branch": base_branch}
 
 
 @app.post("/api/resume-ready")
