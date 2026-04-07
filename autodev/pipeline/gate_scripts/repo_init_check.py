@@ -2,10 +2,24 @@ import os
 import sys
 import glob
 
+
+def _autodev_root() -> str:
+    """OpenClaw install root (workspaces, openclaw.json, pipeline-project symlink).
+
+    Must match orchestrator.py / skill_manager.py: same env var, same default.
+    Docker or bind-mounted installs set AUTODEV_ROOT to that path (e.g.
+    /home/user/project/.openclaw) instead of ~/.openclaw.
+    """
+    raw = (os.environ.get("AUTODEV_ROOT") or "").strip()
+    if not raw:
+        raw = os.path.expanduser("~/.openclaw")
+    return os.path.abspath(os.path.expanduser(raw))
+
+
 def check_repo_init():
-    home = os.path.expanduser("~")
-    pipeline_project = os.path.join(home, ".openclaw", "pipeline-project")
-    
+    oc_root = _autodev_root()
+    pipeline_project = os.path.join(oc_root, "pipeline-project")
+
     if not os.path.exists(pipeline_project):
         print(f"[ERROR] Shared workspace symlink not found: {pipeline_project}")
         sys.exit(1)
@@ -23,7 +37,7 @@ def check_repo_init():
     required_docs = ["AGENTS.md", "TOOLS.md", "SOUL.md", "USER.md", "IDENTITY.md"]
     
     for agent in agents:
-        agent_dir = os.path.join(home, ".openclaw", f"workspace-{agent}")
+        agent_dir = os.path.join(oc_root, f"workspace-{agent}")
         if not os.path.exists(agent_dir):
             print(f"[ERROR] Agent workspace not found: {agent_dir}")
             sys.exit(1)
