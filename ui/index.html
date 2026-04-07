@@ -1935,8 +1935,8 @@
             const [openAnnotationBubble, setOpenAnnotationBubble] = useState(null);
             const [copiedSection, setCopiedSection] = useState(null);
             const [prdSectionDiff, setPrdSectionDiff] = useState({});
-            const [acceptedSectionSlugs, setAcceptedSectionSlugs] = useState([]);
             const [expandedDiffSlugs, setExpandedDiffSlugs] = useState([]);
+            const [undoOfferSlugs, setUndoOfferSlugs] = useState([]);
             const [revertConfirmSlug, setRevertConfirmSlug] = useState(null);
             const [sectionRevertError, setSectionRevertError] = useState(null);
             const isLoadingRef = useRef(false);
@@ -2126,8 +2126,8 @@
                 setOpenAnnotationBubble(null);
                 setUserFirstTurnPending(false);
                 setPrdSectionDiff({});
-                setAcceptedSectionSlugs([]);
                 setExpandedDiffSlugs([]);
+                setUndoOfferSlugs([]);
                 setRevertConfirmSlug(null);
                 setSectionRevertError(null);
                 fetch(`/api/ideas/${currentIdeaId}/session`)
@@ -2182,7 +2182,7 @@
                 draftingTimerRef.current = setTimeout(() => setDraftingIndicator(null), 3000);
             };
 
-            const postSectionRevert = (slug) => {
+            const postSectionRevert = (slug, fromUndo = false) => {
                 if (!currentIdeaId || !slug) return;
                 setSectionRevertError(null);
                 fetch(`/api/ideas/${currentIdeaId}/prd-section-revert`, {
@@ -2205,8 +2205,12 @@
                     .then((r) => r.json())
                     .then((d) => {
                         setPrdContent(d.prd_content || "");
-                        setAcceptedSectionSlugs((p) => p.filter((x) => x !== slug));
                         setExpandedDiffSlugs((p) => p.filter((x) => x !== slug));
+                        if (fromUndo) {
+                            setUndoOfferSlugs((p) => p.filter((x) => x !== slug));
+                        } else {
+                            setUndoOfferSlugs((p) => (p.includes(slug) ? p : [...p, slug]));
+                        }
                         fetchPrdSectionDiff(currentIdeaId);
                     })
                     .catch((err) => {
@@ -3032,16 +3036,19 @@
                                             const sectionAnnotation = annotations.find((a) => a.section === title);
                                             const isEditing = editingAnnotationSection === title;
                                             const diffStatus = diffEntry ? diffEntry.status : null;
-                                            const acceptedHere = acceptedSectionSlugs.includes(slug);
-                                            const showDiffChrome = !isLoading && diffEntry && !acceptedHere;
+                                            const showDiffChrome = !isLoading && !!diffEntry;
                                             const showNewBadge = showDiffChrome && diffStatus === "added";
                                             const showChangedBadge = showDiffChrome && diffStatus === "modified";
                                             const showRemovedBadge = showDiffChrome && diffStatus === "removed";
-                                            const showRevertBtn =
-                                                showDiffChrome && (diffStatus === "modified" || diffStatus === "removed");
-                                            const showAcceptBtn = showDiffChrome && (diffStatus === "added" || diffStatus === "modified" || diffStatus === "removed");
                                             const diffExpanded = expandedDiffSlugs.includes(slug);
+                                            const hasUndoOffer = undoOfferSlugs.includes(slug);
+                                            const showShowDiffBtn = showDiffChrome && !hasUndoOffer;
+                                            const showUndoBtn = showDiffChrome && !diffExpanded && hasUndoOffer;
+                                            const showRevertInPanel =
+                                                diffExpanded && showDiffChrome && (diffStatus === "modified" || diffStatus === "removed");
                                             const copySource = displayRaw;
+                                            const diffPrev = diffEntry ? (diffEntry.previous || "") : "";
+                                            const diffCur = diffEntry ? (diffEntry.current || "") : "";
 
                                             return (
                                                 <div
@@ -3049,40 +3056,29 @@
                                                     id={`prd-sec-${slug}`}
                                                     className={`mb-5 group/section ${draftingIndicator === title ? "ring-1 ring-[#00b4d8]/20 rounded" : ""} ${isRemovedDiff ? "rounded border border-dashed border-slate-600/80 bg-[#0d0f11]/50 p-3 opacity-90" : ""}`}
                                                 >
-                                                    {/* Section header row: annotation controls */}
-                                                    <div className="flex flex-wrap items-center gap-2 mb-1">
-                                                        {showChangedBadge ? (
-                                                            <button
-                                                                type="button"
-                                                                className="flex-1 min-w-[120px] text-left header-text text-sm font-semibold text-[#00b4d8] hover:underline"
-                                                                onClick={() => {
-                                                                    setExpandedDiffSlugs((p) =>
-                                                                        p.includes(slug) ? p.filter((x) => x !== slug) : [...p, slug]
-                                                                    );
-                                                                }}
-                                                            >
-                                                                {title}
-                                                            </button>
-                                                        ) : (
-                                                            <span className="flex-1 min-w-[120px] header-text text-sm font-semibold text-[#00b4d8]">
+                                                    {/* Section header row: title/badge left, controls right */}
+                                                    <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+                                                        <div className="flex items-center gap-2 min-w-[180px]">
+                                                            <span className="header-text text-sm font-semibold text-[#00b4d8]">
                                                                 {title}
                                                             </span>
-                                                        )}
-                                                        {showNewBadge ? (
-                                                            <span className="text-[10px] px-1.5 py-0.5 rounded border border-cyan-800/60 text-cyan-300/90 shrink-0 header-text">
-                                                                New
-                                                            </span>
-                                                        ) : null}
-                                                        {showChangedBadge ? (
-                                                            <span className="text-[10px] px-1.5 py-0.5 rounded border border-amber-800/60 text-amber-200/90 shrink-0 header-text">
-                                                                Changed
-                                                            </span>
-                                                        ) : null}
-                                                        {showRemovedBadge ? (
-                                                            <span className="text-[10px] px-1.5 py-0.5 rounded border border-slate-600 text-slate-400 shrink-0 header-text">
-                                                                Removed
-                                                            </span>
-                                                        ) : null}
+                                                            {showNewBadge ? (
+                                                                <span className="text-[10px] px-1.5 py-0.5 rounded border border-cyan-800/60 text-cyan-300/90 shrink-0 header-text">
+                                                                    New
+                                                                </span>
+                                                            ) : null}
+                                                            {showChangedBadge ? (
+                                                                <span className="text-[10px] px-1.5 py-0.5 rounded border border-amber-800/60 text-amber-200/90 shrink-0 header-text">
+                                                                    Changed
+                                                                </span>
+                                                            ) : null}
+                                                            {showRemovedBadge ? (
+                                                                <span className="text-[10px] px-1.5 py-0.5 rounded border border-slate-600 text-slate-400 shrink-0 header-text">
+                                                                    Removed
+                                                                </span>
+                                                            ) : null}
+                                                        </div>
+                                                        <div className="flex flex-wrap items-center gap-2 ml-auto">
                                                         {sectionAnnotation ? (
                                                             <div className="relative">
                                                                 <button
@@ -3115,6 +3111,30 @@
                                                                 className="text-[11px] text-[#64748b] hover:text-slate-300 px-1.5 py-0.5 rounded border border-[#2a2d31] hover:border-slate-600 shrink-0 header-text"
                                                             >Note</button>
                                                         )}
+                                                        {showShowDiffBtn ? (
+                                                            <button
+                                                                type="button"
+                                                                className="text-[11px] text-[#64748b] hover:text-slate-300 px-1.5 py-0.5 rounded border border-[#2a2d31] hover:border-slate-600 shrink-0 header-text"
+                                                                onClick={() =>
+                                                                    setExpandedDiffSlugs((p) =>
+                                                                        p.includes(slug)
+                                                                            ? p.filter((x) => x !== slug)
+                                                                            : [...p, slug]
+                                                                    )
+                                                                }
+                                                            >
+                                                                Show diff
+                                                            </button>
+                                                        ) : null}
+                                                        {showUndoBtn ? (
+                                                            <button
+                                                                type="button"
+                                                                className="text-[11px] text-[#64748b] hover:text-[#00b4d8] px-1.5 py-0.5 shrink-0 header-text"
+                                                                onClick={() => postSectionRevert(slug, true)}
+                                                            >
+                                                                Undo
+                                                            </button>
+                                                        ) : null}
                                                         {copySource.length > 0 && (
                                                             <button
                                                                 type="button"
@@ -3134,44 +3154,7 @@
                                                                 className="text-[11px] text-[#64748b] hover:text-slate-300 px-1.5 py-0.5 rounded border border-[#2a2d31] hover:border-slate-600 shrink-0 header-text"
                                                             >{copiedSection === title ? "Copied" : "⎘"}</button>
                                                         )}
-                                                        {showAcceptBtn ? (
-                                                            <button
-                                                                type="button"
-                                                                className="text-[11px] text-slate-400 hover:text-slate-200 px-1.5 py-0.5 rounded border border-[#2a2d31] hover:border-slate-500 shrink-0 header-text"
-                                                                onClick={() =>
-                                                                    setAcceptedSectionSlugs((p) => (p.includes(slug) ? p : [...p, slug]))
-                                                                }
-                                                            >
-                                                                Accept
-                                                            </button>
-                                                        ) : null}
-                                                        {showRevertBtn ? (
-                                                            <button
-                                                                type="button"
-                                                                className="text-[11px] text-amber-600/90 hover:text-amber-400 px-1.5 py-0.5 rounded border border-amber-900/40 shrink-0 header-text"
-                                                                onClick={() => setRevertConfirmSlug(slug)}
-                                                            >
-                                                                {isRemovedDiff ? "Restore" : "Revert"}
-                                                            </button>
-                                                        ) : null}
-                                                        {showChangedBadge && !diffExpanded ? (
-                                                            <button
-                                                                type="button"
-                                                                className="text-[11px] text-[#64748b] hover:text-[#00b4d8] px-1.5 py-0.5 shrink-0 header-text"
-                                                                onClick={() => setExpandedDiffSlugs((p) => (p.includes(slug) ? p : [...p, slug]))}
-                                                            >
-                                                                Show diff
-                                                            </button>
-                                                        ) : null}
-                                                        {showChangedBadge && diffExpanded ? (
-                                                            <button
-                                                                type="button"
-                                                                className="text-[11px] text-[#64748b] hover:text-[#00b4d8] px-1.5 py-0.5 shrink-0 header-text"
-                                                                onClick={() => setExpandedDiffSlugs((p) => p.filter((x) => x !== slug))}
-                                                            >
-                                                                Hide diff
-                                                            </button>
-                                                        ) : null}
+                                                        </div>
                                                     </div>
                                                     {/* Inline comment input */}
                                                     {isEditing && (
@@ -3214,34 +3197,53 @@
                                                     {sectionRevertError && sectionRevertError.slug === slug ? (
                                                         <p className="text-[11px] text-red-400 mb-1">{sectionRevertError.message}</p>
                                                     ) : null}
-                                                    {diffExpanded && diffStatus === "modified" && diffEntry ? (
-                                                        <div className="mb-2 space-y-0.5 font-mono text-xs rounded border border-[#2a2d31] bg-[#0d0f11] p-2 max-h-72 overflow-y-auto">
-                                                            {prdCollapseDiffContext(
-                                                                prdFlattenDiffLines(
-                                                                    diffEntry.previous || "",
-                                                                    diffEntry.current || ""
-                                                                ),
-                                                                2
-                                                            ).map((row, ri) =>
-                                                                row.type === "fold" ? (
-                                                                    <div key={`df-${slug}-${ri}`} className="text-slate-500 px-1 py-0.5">
-                                                                        … {row.count} lines unchanged
-                                                                    </div>
-                                                                ) : (
-                                                                    <div
-                                                                        key={`df-${slug}-${ri}`}
-                                                                        className={
-                                                                            row.type === "add"
-                                                                                ? "bg-green-950/40 border-l-2 border-green-600 pl-2 py-0.5 whitespace-pre-wrap break-words"
-                                                                                : row.type === "del"
-                                                                                  ? "bg-red-950/40 border-l-2 border-red-600 pl-2 py-0.5 whitespace-pre-wrap break-words"
-                                                                                  : "text-slate-400 pl-2 py-0.5 whitespace-pre-wrap break-words"
-                                                                        }
+                                                    {diffExpanded && diffEntry ? (
+                                                        <div className="mb-2 rounded border border-[#2a2d31] bg-[#0d0f11]">
+                                                            <div className="flex items-center justify-between px-2 py-1 border-b border-[#2a2d31]">
+                                                                <button
+                                                                    type="button"
+                                                                    className="text-[11px] text-[#64748b] hover:text-[#00b4d8] header-text"
+                                                                    onClick={() => setExpandedDiffSlugs((p) => p.filter((x) => x !== slug))}
+                                                                >
+                                                                    Close
+                                                                </button>
+                                                                {showRevertInPanel ? (
+                                                                    <button
+                                                                        type="button"
+                                                                        className="text-[11px] text-amber-600/90 hover:text-amber-400 px-1.5 py-0.5 rounded border border-amber-900/40 shrink-0 header-text"
+                                                                        onClick={() => setRevertConfirmSlug(slug)}
                                                                     >
-                                                                        {row.text}
-                                                                    </div>
-                                                                )
-                                                            )}
+                                                                        {isRemovedDiff ? "Restore" : "Revert"}
+                                                                    </button>
+                                                                ) : (
+                                                                    <span />
+                                                                )}
+                                                            </div>
+                                                            <div className="space-y-0.5 font-mono text-xs p-2 max-h-72 overflow-y-auto">
+                                                                {prdCollapseDiffContext(
+                                                                    prdFlattenDiffLines(diffPrev, diffCur),
+                                                                    2
+                                                                ).map((row, ri) =>
+                                                                    row.type === "fold" ? (
+                                                                        <div key={`df-${slug}-${ri}`} className="text-slate-500 px-1 py-0.5">
+                                                                            … {row.count} lines unchanged
+                                                                        </div>
+                                                                    ) : (
+                                                                        <div
+                                                                            key={`df-${slug}-${ri}`}
+                                                                            className={
+                                                                                row.type === "add"
+                                                                                    ? "bg-green-950/40 border-l-2 border-green-600 pl-2 py-0.5 whitespace-pre-wrap break-words"
+                                                                                    : row.type === "del"
+                                                                                      ? "bg-red-950/40 border-l-2 border-red-600 pl-2 py-0.5 whitespace-pre-wrap break-words"
+                                                                                      : "text-slate-400 pl-2 py-0.5 whitespace-pre-wrap break-words"
+                                                                            }
+                                                                        >
+                                                                            {row.text}
+                                                                        </div>
+                                                                    )
+                                                                )}
+                                                            </div>
                                                         </div>
                                                     ) : (
                                                         <div
