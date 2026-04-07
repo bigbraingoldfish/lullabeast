@@ -17,6 +17,7 @@
     <!-- Babel for JSX transformation -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://unpkg.com/diff@8.0.4/dist/diff.min.js"></script>
     
     <!-- Tailwind CSS via Play CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -1561,7 +1562,17 @@
         }
 
 
-        function handleFileChange(event, ideaId, setUploadError, setUploadSpinner, triggerClarityCheck, setClarityPass, setClarityIssues, setClarityMissing) {
+        function handleFileChange(
+            event,
+            ideaId,
+            setUploadError,
+            setUploadSpinner,
+            triggerClarityCheck,
+            setClarityPass,
+            setClarityIssues,
+            setClarityMissing,
+            onUploadSuccess
+        ) {
             const f = event.target.files && event.target.files[0];
             if (!f) return;
             if (!f.name.toLowerCase().endsWith(".md")) {
@@ -1577,6 +1588,7 @@
                 .then(() => {
                     setUploadSpinner(false);
                     event.target.value = "";
+                    if (typeof onUploadSuccess === "function") onUploadSuccess(ideaId);
                     triggerClarityCheck(ideaId, setClarityPass, setClarityIssues, setClarityMissing, setUploadSpinner);
                 })
                 .catch(() => {
@@ -1606,6 +1618,50 @@
             "Edge Cases", "Non-Functional Requirements", "Dependencies & Integrations", "Milestones & Timeline",
             "Risks & Mitigations", "Open Questions", "Glossary & Domain Terms", "Revision History",
         ];
+
+        /** Flatten jsdiff diffLines output to per-line {type, text}; then collapse long unchanged runs. */
+        function prdFlattenDiffLines(prevText, curText) {
+            if (typeof Diff === "undefined" || !Diff.diffLines) return [];
+            const parts = Diff.diffLines(prevText || "", curText || "", { newlineIsToken: false });
+            const rows = [];
+            parts.forEach((part) => {
+                let v = part.value;
+                if (v.endsWith("\n")) v = v.slice(0, -1);
+                const lines = v.length ? v.split("\n") : [];
+                lines.forEach((text) => {
+                    rows.push({
+                        type: part.added ? "add" : part.removed ? "del" : "ctx",
+                        text,
+                    });
+                });
+            });
+            return rows;
+        }
+
+        function prdCollapseDiffContext(rows, contextEachSide) {
+            const n = contextEachSide || 2;
+            const out = [];
+            let i = 0;
+            while (i < rows.length) {
+                if (rows[i].type === "ctx") {
+                    let j = i;
+                    while (j < rows.length && rows[j].type === "ctx") j++;
+                    const runLen = j - i;
+                    if (runLen <= 2 * n + 1) {
+                        for (let k = i; k < j; k++) out.push(rows[k]);
+                    } else {
+                        for (let k = i; k < i + n; k++) out.push(rows[k]);
+                        out.push({ type: "fold", count: runLen - 2 * n });
+                        for (let k = j - n; k < j; k++) out.push(rows[k]);
+                    }
+                    i = j;
+                } else {
+                    out.push(rows[i]);
+                    i++;
+                }
+            }
+            return out;
+        }
 
         /** Client fallback if API parsed.questions is empty but raw response still has a QUESTIONS block */
         function parseAgentResponseClient(content) {
@@ -1878,6 +1934,12 @@
             const [annotationDraft, setAnnotationDraft] = useState("");
             const [openAnnotationBubble, setOpenAnnotationBubble] = useState(null);
             const [copiedSection, setCopiedSection] = useState(null);
+            const [prdSectionDiff, setPrdSectionDiff] = useState({});
+            const [acceptedSectionSlugs, setAcceptedSectionSlugs] = useState([]);
+            const [expandedDiffSlugs, setExpandedDiffSlugs] = useState([]);
+            const [revertConfirmSlug, setRevertConfirmSlug] = useState(null);
+            const [sectionRevertError, setSectionRevertError] = useState(null);
+            const isLoadingRef = useRef(false);
             const [readinessExpanded, setReadinessExpanded] = useState(false);
             const [userFirstTurnPending, setUserFirstTurnPending] = useState(false);
             const [sessionModalBusy, setSessionModalBusy] = useState(false);
@@ -2000,6 +2062,19 @@
             }, []);
 
             useEffect(() => {
+                isLoadingRef.current = isLoading;
+            }, [isLoading]);
+
+            const fetchPrdSectionDiff = React.useCallback((ideaId) => {
+                if (!ideaId) return;
+                if (isLoadingRef.current) return;
+                fetch(`/api/ideas/${ideaId}/prd-section-diff`)
+                    .then((r) => (r.ok ? r.json() : { sections: {} }))
+                    .then((data) => setPrdSectionDiff(data.sections || {}))
+                    .catch(() => setPrdSectionDiff({}));
+            }, []);
+
+            useEffect(() => {
                 if (currentIdeaId === null && ideasList.length > 0) {
                     setCurrentIdeaId(ideasList[0].id);
                 }
@@ -2050,6 +2125,11 @@
                 setAnnotationDraft("");
                 setOpenAnnotationBubble(null);
                 setUserFirstTurnPending(false);
+                setPrdSectionDiff({});
+                setAcceptedSectionSlugs([]);
+                setExpandedDiffSlugs([]);
+                setRevertConfirmSlug(null);
+                setSectionRevertError(null);
                 fetch(`/api/ideas/${currentIdeaId}/session`)
                     .then((r) => r.json())
                     .then((d) => {
@@ -2064,6 +2144,9 @@
                         setRoadmapContent(d.roadmap_content || "");
                         setAlignmentReport(d.alignment_report || null);
                         setAdversarialReport(d.adversarial_report || null);
+                        if (!isLoadingRef.current) {
+                            fetchPrdSectionDiff(currentIdeaId);
+                        }
                     })
                     .catch(() => {});
                 refreshAnnotations(currentIdeaId);
@@ -2099,6 +2182,38 @@
                 draftingTimerRef.current = setTimeout(() => setDraftingIndicator(null), 3000);
             };
 
+            const postSectionRevert = (slug) => {
+                if (!currentIdeaId || !slug) return;
+                setSectionRevertError(null);
+                fetch(`/api/ideas/${currentIdeaId}/prd-section-revert`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ section_key: slug }),
+                })
+                    .then(async (r) => {
+                        const data = await r.json().catch(() => ({}));
+                        if (!r.ok) {
+                            const det =
+                                typeof data.detail === "string"
+                                    ? data.detail
+                                    : (data.detail && JSON.stringify(data.detail)) || "";
+                            throw new Error(det || `HTTP ${r.status}`);
+                        }
+                        return data;
+                    })
+                    .then(() => fetch(`/api/ideas/${currentIdeaId}/session`))
+                    .then((r) => r.json())
+                    .then((d) => {
+                        setPrdContent(d.prd_content || "");
+                        setAcceptedSectionSlugs((p) => p.filter((x) => x !== slug));
+                        setExpandedDiffSlugs((p) => p.filter((x) => x !== slug));
+                        fetchPrdSectionDiff(currentIdeaId);
+                    })
+                    .catch((err) => {
+                        setSectionRevertError({ slug, message: err.message || String(err) });
+                    });
+            };
+
             const submitMessage = (overrideText) => {
                 const t = (overrideText !== undefined ? overrideText : inputText).trim();
                 if (!t || isLoading || !currentIdeaId) return;
@@ -2117,6 +2232,7 @@
                 setTimeout(() => adjustTa(), 0);
                 setStagedAttachment(null);
                 setIsLoading(true);
+                isLoadingRef.current = true;
                 const body = { content: t, turn };
                 if (attachment) body.attachment = attachment;
                 fetch(`/api/ideas/${currentIdeaId}/message`, {
@@ -2149,12 +2265,14 @@
                         );
                         setPrdContent(data.prd_content || "");
                         setIsLoading(false);
+                        isLoadingRef.current = false;
                         setReadinessStatus("updating");
                         setReadinessData(null);
                         setReadinessTimedOut(false);
                         startReadinessPoll(currentIdeaId);
                         refreshAnnotations(currentIdeaId);
                         refreshIdeas();
+                        fetchPrdSectionDiff(currentIdeaId);
                     })
                     .catch((err) => {
                         const status = parseInt(err?.message, 10);
@@ -2181,6 +2299,7 @@
                         );
                         setStagedAttachment(null);
                         setIsLoading(false);
+                        isLoadingRef.current = false;
                     });
             };
 
@@ -2464,8 +2583,53 @@
                 };
             });
 
+            const hasAnyPrdBody = PRD_SECTION_TITLES.some((t) => (prdSections[t] || "").trim().length > 0);
+            const hasRemovedInDiff = PRD_SECTION_TITLES.some((t) => {
+                const sl = slugifySectionName(t);
+                const e = prdSectionDiff[sl];
+                return e && e.status === "removed";
+            });
+
             return (
                 <div className="flex h-full min-w-0">
+                    {revertConfirmSlug && (
+                        <div
+                            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 px-4"
+                            role="dialog"
+                            aria-modal="true"
+                            aria-labelledby="prd-revert-confirm-title"
+                            onClick={() => setRevertConfirmSlug(null)}
+                        >
+                            <div
+                                className="max-w-md w-full rounded-lg border border-[#2a2d31] bg-[#141618] p-4 shadow-xl"
+                                onClick={(e) => e.stopPropagation()}
+                            >
+                                <p id="prd-revert-confirm-title" className="text-sm text-slate-200 mb-3">
+                                    Restore this section to its previous version? The current version will become the new previous.
+                                </p>
+                                <div className="flex justify-end gap-2">
+                                    <button
+                                        type="button"
+                                        className="text-xs px-3 py-1.5 rounded border border-[#2a2d31] text-slate-400"
+                                        onClick={() => setRevertConfirmSlug(null)}
+                                    >
+                                        Cancel
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="text-xs px-3 py-1.5 rounded bg-amber-900/40 border border-amber-700/50 text-amber-200"
+                                        onClick={() => {
+                                            const sk = revertConfirmSlug;
+                                            setRevertConfirmSlug(null);
+                                            postSectionRevert(sk);
+                                        }}
+                                    >
+                                        Revert
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
                     {showSessionModal && (
                         <SessionStartModal
                             busy={sessionModalBusy}
@@ -2703,7 +2867,30 @@
                         </div>
                         <div className="flex-shrink-0 border-t border-[#1a1d21] p-3 space-y-2 bg-[#141618]">
                             {/* Hidden file inputs */}
-                            <input ref={fileRef} type="file" accept=".md" className="hidden" onChange={(e) => handleFileChange(e, currentIdeaId, setUploadError, setUploadSpinner, triggerClarityCheck, setClarityPass, setClarityIssues, setClarityMissing)} />
+                            <input
+                                ref={fileRef}
+                                type="file"
+                                accept=".md"
+                                className="hidden"
+                                onChange={(e) =>
+                                    handleFileChange(
+                                        e,
+                                        currentIdeaId,
+                                        setUploadError,
+                                        setUploadSpinner,
+                                        triggerClarityCheck,
+                                        setClarityPass,
+                                        setClarityIssues,
+                                        setClarityMissing,
+                                        (id) => {
+                                            fetch(`/api/ideas/${id}/session`)
+                                                .then((r) => r.json())
+                                                .then((d) => setPrdContent(d.prd_content || ""));
+                                            fetchPrdSectionDiff(id);
+                                        }
+                                    )
+                                }
+                            />
                             <input ref={attachFileRef} type="file" accept=".md" className="hidden" onChange={(e) => {
                                 const f = e.target.files && e.target.files[0];
                                 if (!f) return;
@@ -2820,26 +3007,82 @@
                                     <p className="text-xs text-slate-500">Updating PRD draft…</p>
                                 </div>
                             ) : null}
-                            {prdContent.trim() ? (
+                            {(prdContent.trim() || hasRemovedInDiff) ? (
                                 <h1 className="text-slate-100 text-lg font-semibold mb-4 pb-2 border-b border-[#1a1d21]">{currentIdeaName}</h1>
                             ) : null}
-                            {prdContent.trim() ? (
+                            {(prdContent.trim() || hasRemovedInDiff) ? (
                                 <div className="mb-6 border-b border-[#1a1d21] pb-4">
-                                    {PRD_SECTION_TITLES.some((t) => (prdSections[t] || "").trim().length > 0) ? (
+                                    {hasAnyPrdBody || hasRemovedInDiff ? (
                                         PRD_SECTION_TITLES.map((title) => {
+                                            const slug = slugifySectionName(title);
+                                            const diffEntry = prdSectionDiff[slug];
+                                            const isRemovedDiff = diffEntry && diffEntry.status === "removed";
                                             const row = checklistRows.find((r) => r.title === title);
                                             const isEmpty = !row || row.status === "empty";
-                                            if (isEmpty && !showEmptyPlaceholders) return null;
+                                            if (isEmpty && !showEmptyPlaceholders && !isRemovedDiff) return null;
                                             const raw = (prdSections[title] || "").trim();
-                                            const sectionMarkdown = raw.length > 0 ? raw : `*Empty - start a conversation to populate this section.*`;
+                                            const ghostRaw = isRemovedDiff ? String(diffEntry.previous || "").trim() : "";
+                                            const displayRaw = isRemovedDiff ? ghostRaw : raw;
+                                            const sectionMarkdown =
+                                                displayRaw.length > 0
+                                                    ? displayRaw
+                                                    : isRemovedDiff
+                                                      ? "*Section removed from current draft.*"
+                                                      : `*Empty - start a conversation to populate this section.*`;
                                             const sectionAnnotation = annotations.find((a) => a.section === title);
                                             const isEditing = editingAnnotationSection === title;
+                                            const diffStatus = diffEntry ? diffEntry.status : null;
+                                            const acceptedHere = acceptedSectionSlugs.includes(slug);
+                                            const showDiffChrome = !isLoading && diffEntry && !acceptedHere;
+                                            const showNewBadge = showDiffChrome && diffStatus === "added";
+                                            const showChangedBadge = showDiffChrome && diffStatus === "modified";
+                                            const showRemovedBadge = showDiffChrome && diffStatus === "removed";
+                                            const showRevertBtn =
+                                                showDiffChrome && (diffStatus === "modified" || diffStatus === "removed");
+                                            const showAcceptBtn = showDiffChrome && (diffStatus === "added" || diffStatus === "modified" || diffStatus === "removed");
+                                            const diffExpanded = expandedDiffSlugs.includes(slug);
+                                            const copySource = displayRaw;
 
                                             return (
-                                                <div key={title} id={`prd-sec-${slugifySectionName(title)}`} className={`mb-5 group/section ${draftingIndicator === title ? "ring-1 ring-[#00b4d8]/20 rounded" : ""}`}>
+                                                <div
+                                                    key={title}
+                                                    id={`prd-sec-${slug}`}
+                                                    className={`mb-5 group/section ${draftingIndicator === title ? "ring-1 ring-[#00b4d8]/20 rounded" : ""} ${isRemovedDiff ? "rounded border border-dashed border-slate-600/80 bg-[#0d0f11]/50 p-3 opacity-90" : ""}`}
+                                                >
                                                     {/* Section header row: annotation controls */}
-                                                    <div className="flex items-center gap-2 mb-1">
-                                                        <span className="flex-1 header-text text-sm font-semibold text-[#00b4d8]">{title}</span>
+                                                    <div className="flex flex-wrap items-center gap-2 mb-1">
+                                                        {showChangedBadge ? (
+                                                            <button
+                                                                type="button"
+                                                                className="flex-1 min-w-[120px] text-left header-text text-sm font-semibold text-[#00b4d8] hover:underline"
+                                                                onClick={() => {
+                                                                    setExpandedDiffSlugs((p) =>
+                                                                        p.includes(slug) ? p.filter((x) => x !== slug) : [...p, slug]
+                                                                    );
+                                                                }}
+                                                            >
+                                                                {title}
+                                                            </button>
+                                                        ) : (
+                                                            <span className="flex-1 min-w-[120px] header-text text-sm font-semibold text-[#00b4d8]">
+                                                                {title}
+                                                            </span>
+                                                        )}
+                                                        {showNewBadge ? (
+                                                            <span className="text-[10px] px-1.5 py-0.5 rounded border border-cyan-800/60 text-cyan-300/90 shrink-0 header-text">
+                                                                New
+                                                            </span>
+                                                        ) : null}
+                                                        {showChangedBadge ? (
+                                                            <span className="text-[10px] px-1.5 py-0.5 rounded border border-amber-800/60 text-amber-200/90 shrink-0 header-text">
+                                                                Changed
+                                                            </span>
+                                                        ) : null}
+                                                        {showRemovedBadge ? (
+                                                            <span className="text-[10px] px-1.5 py-0.5 rounded border border-slate-600 text-slate-400 shrink-0 header-text">
+                                                                Removed
+                                                            </span>
+                                                        ) : null}
                                                         {sectionAnnotation ? (
                                                             <div className="relative">
                                                                 <button
@@ -2872,17 +3115,17 @@
                                                                 className="text-[11px] text-[#64748b] hover:text-slate-300 px-1.5 py-0.5 rounded border border-[#2a2d31] hover:border-slate-600 shrink-0 header-text"
                                                             >Note</button>
                                                         )}
-                                                        {raw.length > 0 && (
+                                                        {copySource.length > 0 && (
                                                             <button
                                                                 type="button"
                                                                 title="Copy section markdown"
                                                                 onClick={() => {
                                                                     const done = () => { setCopiedSection(title); setTimeout(() => setCopiedSection(null), 2000); };
                                                                     if (navigator.clipboard) {
-                                                                        navigator.clipboard.writeText(raw).then(done).catch(() => {});
+                                                                        navigator.clipboard.writeText(copySource).then(done).catch(() => {});
                                                                     } else {
                                                                         const ta = document.createElement("textarea");
-                                                                        ta.value = raw; ta.style.position = "fixed"; ta.style.opacity = "0";
+                                                                        ta.value = copySource; ta.style.position = "fixed"; ta.style.opacity = "0";
                                                                         document.body.appendChild(ta); ta.select();
                                                                         try { document.execCommand("copy"); done(); } catch(e) {}
                                                                         document.body.removeChild(ta);
@@ -2891,6 +3134,44 @@
                                                                 className="text-[11px] text-[#64748b] hover:text-slate-300 px-1.5 py-0.5 rounded border border-[#2a2d31] hover:border-slate-600 shrink-0 header-text"
                                                             >{copiedSection === title ? "Copied" : "⎘"}</button>
                                                         )}
+                                                        {showAcceptBtn ? (
+                                                            <button
+                                                                type="button"
+                                                                className="text-[11px] text-slate-400 hover:text-slate-200 px-1.5 py-0.5 rounded border border-[#2a2d31] hover:border-slate-500 shrink-0 header-text"
+                                                                onClick={() =>
+                                                                    setAcceptedSectionSlugs((p) => (p.includes(slug) ? p : [...p, slug]))
+                                                                }
+                                                            >
+                                                                Accept
+                                                            </button>
+                                                        ) : null}
+                                                        {showRevertBtn ? (
+                                                            <button
+                                                                type="button"
+                                                                className="text-[11px] text-amber-600/90 hover:text-amber-400 px-1.5 py-0.5 rounded border border-amber-900/40 shrink-0 header-text"
+                                                                onClick={() => setRevertConfirmSlug(slug)}
+                                                            >
+                                                                {isRemovedDiff ? "Restore" : "Revert"}
+                                                            </button>
+                                                        ) : null}
+                                                        {showChangedBadge && !diffExpanded ? (
+                                                            <button
+                                                                type="button"
+                                                                className="text-[11px] text-[#64748b] hover:text-[#00b4d8] px-1.5 py-0.5 shrink-0 header-text"
+                                                                onClick={() => setExpandedDiffSlugs((p) => (p.includes(slug) ? p : [...p, slug]))}
+                                                            >
+                                                                Show diff
+                                                            </button>
+                                                        ) : null}
+                                                        {showChangedBadge && diffExpanded ? (
+                                                            <button
+                                                                type="button"
+                                                                className="text-[11px] text-[#64748b] hover:text-[#00b4d8] px-1.5 py-0.5 shrink-0 header-text"
+                                                                onClick={() => setExpandedDiffSlugs((p) => p.filter((x) => x !== slug))}
+                                                            >
+                                                                Hide diff
+                                                            </button>
+                                                        ) : null}
                                                     </div>
                                                     {/* Inline comment input */}
                                                     {isEditing && (
@@ -2930,15 +3211,51 @@
                                                     {draftingIndicator === title && (
                                                         <p className="text-[11px] text-[#00b4d8] header-text animate-pulse mb-1">✏ Updating…</p>
                                                     )}
-                                                    <div
-                                                        className="msg-md text-sm"
-                                                        dangerouslySetInnerHTML={{
-                                                            __html:
-                                                                typeof marked !== "undefined" && marked.parse
-                                                                    ? marked.parse(sectionMarkdown, { breaks: true })
-                                                                    : String(sectionMarkdown).replace(/&/g, "&amp;").replace(/</g, "&lt;"),
-                                                        }}
-                                                    />
+                                                    {sectionRevertError && sectionRevertError.slug === slug ? (
+                                                        <p className="text-[11px] text-red-400 mb-1">{sectionRevertError.message}</p>
+                                                    ) : null}
+                                                    {diffExpanded && diffStatus === "modified" && diffEntry ? (
+                                                        <div className="mb-2 space-y-0.5 font-mono text-xs rounded border border-[#2a2d31] bg-[#0d0f11] p-2 max-h-72 overflow-y-auto">
+                                                            {prdCollapseDiffContext(
+                                                                prdFlattenDiffLines(
+                                                                    diffEntry.previous || "",
+                                                                    diffEntry.current || ""
+                                                                ),
+                                                                2
+                                                            ).map((row, ri) =>
+                                                                row.type === "fold" ? (
+                                                                    <div key={`df-${slug}-${ri}`} className="text-slate-500 px-1 py-0.5">
+                                                                        … {row.count} lines unchanged
+                                                                    </div>
+                                                                ) : (
+                                                                    <div
+                                                                        key={`df-${slug}-${ri}`}
+                                                                        className={
+                                                                            row.type === "add"
+                                                                                ? "bg-green-950/40 border-l-2 border-green-600 pl-2 py-0.5 whitespace-pre-wrap break-words"
+                                                                                : row.type === "del"
+                                                                                  ? "bg-red-950/40 border-l-2 border-red-600 pl-2 py-0.5 whitespace-pre-wrap break-words"
+                                                                                  : "text-slate-400 pl-2 py-0.5 whitespace-pre-wrap break-words"
+                                                                        }
+                                                                    >
+                                                                        {row.text}
+                                                                    </div>
+                                                                )
+                                                            )}
+                                                        </div>
+                                                    ) : (
+                                                        <div
+                                                            className={`msg-md text-sm ${isRemovedDiff ? "text-slate-400" : ""}`}
+                                                            dangerouslySetInnerHTML={{
+                                                                __html:
+                                                                    typeof marked !== "undefined" && marked.parse
+                                                                        ? marked.parse(sectionMarkdown, { breaks: true })
+                                                                        : String(sectionMarkdown)
+                                                                              .replace(/&/g, "&amp;")
+                                                                              .replace(/</g, "&lt;"),
+                                                            }}
+                                                        />
+                                                    )}
                                                 </div>
                                             );
                                         })

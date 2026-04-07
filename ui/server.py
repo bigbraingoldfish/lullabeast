@@ -510,6 +510,149 @@ def _idea_paths_for_messages(config: dict, idea_id: str) -> dict[str, str]:
     }
 
 
+# Canonical PRD section titles — must match ui/index.html PRD_SECTION_TITLES and parse logic.
+PRD_SECTION_TITLES: tuple[str, ...] = (
+    "Problem Statement",
+    "Goals & Success Metrics",
+    "User Stories",
+    "Functional Requirements",
+    "Edge Cases",
+    "Non-Functional Requirements",
+    "Dependencies & Integrations",
+    "Milestones & Timeline",
+    "Risks & Mitigations",
+    "Open Questions",
+    "Glossary & Domain Terms",
+    "Revision History",
+)
+
+
+def _slugify_section(title: str) -> str:
+    """Slug for API keys; matches frontend slugifySectionName()."""
+    s = title.lower().replace("&", "and")
+    return re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+
+
+_PRD_SLUG_TO_TITLE: dict[str, str] = {_slugify_section(t): t for t in PRD_SECTION_TITLES}
+
+
+def _match_prd_section_heading_line(line: str) -> Optional[str]:
+    """If line opens a canonical PRD section, return its title; else None."""
+    m = re.match(r"^#{1,3}\s+(.+)\s*$", line)
+    if m:
+        raw = m.group(1).strip().lower()
+        for t in PRD_SECTION_TITLES:
+            if t.lower() == raw:
+                return t
+    m = re.match(r"^\d+\.\s*(.+)\s*$", line)
+    if m:
+        raw = m.group(1).strip().lower()
+        for t in PRD_SECTION_TITLES:
+            if t.lower() == raw:
+                return t
+    return None
+
+
+def _parse_prd_sections(content: str) -> dict[str, str]:
+    """Split PRD markdown into canonical sections; mirrors frontend parsePrdSections()."""
+    out: dict[str, str] = {t: "" for t in PRD_SECTION_TITLES}
+    if not content or not content.strip():
+        return out
+    lines = content.split("\n")
+    current: Optional[str] = None
+    for line in lines:
+        matched = _match_prd_section_heading_line(line)
+        if matched is not None:
+            current = matched
+            continue
+        if current:
+            out[current] = f"{out[current]}\n{line}" if out[current] else line
+    return out
+
+
+def _snapshot_prd_draft_before_agent_write(idea_dir: Path) -> None:
+    """Copy prd_draft.md to prd_draft.previous.md before the agent overwrites the draft."""
+    prd_draft_path = idea_dir / "prd_draft.md"
+    prd_prev_path = idea_dir / "prd_draft.previous.md"
+    if prd_draft_path.exists():
+        _atomic_write_file(str(prd_prev_path), prd_draft_path.read_text(encoding="utf-8"))
+
+
+def _build_prd_section_diff_payload(
+    current_text: str,
+    previous_text: Optional[str],
+) -> dict:
+    """Compare parsed sections; return { sections: { slug: { title, status, previous, current } } }."""
+    sections_out: dict = {}
+    cur = _parse_prd_sections(current_text or "")
+    if previous_text is None:
+        # No previous file: every non-empty section is "added"
+        for title in PRD_SECTION_TITLES:
+            c = (cur.get(title) or "").strip()
+            if not c:
+                continue
+            sk = _slugify_section(title)
+            sections_out[sk] = {
+                "title": title,
+                "status": "added",
+                "previous": None,
+                "current": c,
+            }
+        return {"sections": sections_out}
+
+    prev = _parse_prd_sections(previous_text)
+    for title in PRD_SECTION_TITLES:
+        p = (prev.get(title) or "").strip()
+        c = (cur.get(title) or "").strip()
+        if p == c:
+            continue
+        sk = _slugify_section(title)
+        if not p and c:
+            st = "added"
+        elif p and not c:
+            st = "removed"
+        else:
+            st = "modified"
+        sections_out[sk] = {
+            "title": title,
+            "status": st,
+            "previous": p if p else None,
+            "current": c if c else None,
+        }
+    return {"sections": sections_out}
+
+
+def _replace_prd_section_body(full_md: str, target_title: str, new_body: str) -> str:
+    """Replace one canonical section's body; preserve original heading line. Append if section missing."""
+    lines = full_md.split("\n") if full_md else []
+    out: list[str] = []
+    i = 0
+    found = False
+    n = len(lines)
+    while i < n:
+        title_here = _match_prd_section_heading_line(lines[i])
+        if title_here == target_title:
+            found = True
+            out.append(lines[i])
+            body = (new_body or "").rstrip("\n")
+            if body.strip():
+                out.append(body)
+            i += 1
+            while i < n:
+                if _match_prd_section_heading_line(lines[i]) is not None:
+                    break
+                i += 1
+            continue
+        out.append(lines[i])
+        i += 1
+    if not found and (new_body or "").strip():
+        if out and out[-1].strip():
+            out.append("")
+        out.append(f"## {target_title}")
+        out.append((new_body or "").rstrip("\n"))
+    return "\n".join(out)
+
+
 def _read_conversion_prompt_text(config: dict) -> str:
     """Load conversion instructions from config path, repo default, or inline fallback."""
     p = Path(config.get("conversion_prompt_path") or "")
@@ -2605,6 +2748,8 @@ async def post_ideas_message(idea_id: str, request: Request):
         _pre_save_data["created"] = _pre_save_ts
     _atomic_write_json_file(str(session_path), _pre_save_data)
 
+    _snapshot_prd_draft_before_agent_write(idea_dir)
+
     poll_timeout = float(config.get("poll_timeout", POLL_TIMEOUT))
     poll_interval = float(config.get("poll_interval", POLL_INTERVAL))
     idle_threshold = float(config.get("ideas_idle_threshold", 120))
@@ -2860,6 +3005,80 @@ def get_idea_annotations(idea_id: str):
     return session_data.get("annotations", [])
 
 
+@app.get("/api/ideas/{idea_id}/prd-section-diff")
+def get_ideas_prd_section_diff(idea_id: str):
+    """Section-level diff between prd_draft.md and prd_draft.previous.md."""
+    config = load_config()
+    ideas_dir = Path(config.get("ideas_dir") or "")
+    idea_dir = Path(ideas_dir) / idea_id
+    if not idea_dir.exists():
+        raise HTTPException(status_code=404, detail="Idea not found")
+
+    cur_path = idea_dir / "prd_draft.md"
+    prev_path = idea_dir / "prd_draft.previous.md"
+    if not cur_path.exists() and not prev_path.exists():
+        return {"sections": {}}
+
+    cur_text = cur_path.read_text(encoding="utf-8") if cur_path.exists() else ""
+    prev_text: Optional[str]
+    if prev_path.exists():
+        prev_text = prev_path.read_text(encoding="utf-8")
+    else:
+        prev_text = None
+
+    return _build_prd_section_diff_payload(cur_text, prev_text)
+
+
+@app.post("/api/ideas/{idea_id}/prd-section-revert")
+async def post_ideas_prd_section_revert(idea_id: str, request: Request):
+    """Swap one section between prd_draft.md and prd_draft.previous.md (one-level revert)."""
+    config = load_config()
+    body = await request.json()
+    section_key = (body.get("section_key") or "").strip()
+    if not section_key:
+        raise HTTPException(status_code=422, detail="Body must contain {section_key: str}")
+
+    title = _PRD_SLUG_TO_TITLE.get(section_key)
+    if title is None:
+        raise HTTPException(status_code=422, detail="Unknown section_key")
+
+    ideas_dir = Path(config.get("ideas_dir") or "")
+    idea_dir = Path(ideas_dir) / idea_id
+    if not idea_dir.exists():
+        raise HTTPException(status_code=404, detail="Idea not found")
+
+    cur_path = idea_dir / "prd_draft.md"
+    prev_path = idea_dir / "prd_draft.previous.md"
+    if not cur_path.exists() or not prev_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="prd_draft.md and prd_draft.previous.md are both required for revert",
+        )
+
+    cur_doc = cur_path.read_text(encoding="utf-8")
+    prev_doc = prev_path.read_text(encoding="utf-8")
+    cur_parsed = _parse_prd_sections(cur_doc)
+    prev_parsed = _parse_prd_sections(prev_doc)
+    cur_body = cur_parsed.get(title) or ""
+    prev_body = prev_parsed.get(title) or ""
+
+    new_cur = _replace_prd_section_body(cur_doc, title, prev_body)
+    new_prev = _replace_prd_section_body(prev_doc, title, cur_body)
+
+    _atomic_write_file(str(cur_path), new_cur)
+    _atomic_write_file(str(prev_path), new_prev)
+
+    session_path = idea_dir / "session.json"
+    if session_path.exists():
+        session_data = _read_json_file(str(session_path)) or {}
+        session_data["prd_content"] = new_cur
+        session_data["updated"] = datetime.utcnow().isoformat() + "Z"
+        _atomic_write_json_file(str(session_path), session_data)
+
+    prev_trim = prev_body.strip()
+    return {"section_key": section_key, "content": prev_trim}
+
+
 @app.get("/api/ideas/operation-metrics")
 def get_ideas_operation_metrics():
     """Return average duration and sample count per operation type.
@@ -3087,6 +3306,9 @@ async def post_ideas_upload(
     idle_threshold = float(config.get("ideas_idle_threshold", 120))
     startup_grace = float(config.get("ideas_startup_grace", 30))
     openclaw_root = os.path.expanduser(config.get("openclaw_root", "~/.openclaw"))
+
+    _snapshot_prd_draft_before_agent_write(idea_dir)
+
     await _post_agent_webhook(hooks_url, hooks_token, webhook_payload)
 
     done_path = turns_dir / f"{upload_turn}.done"
