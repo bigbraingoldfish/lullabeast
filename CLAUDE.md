@@ -447,6 +447,7 @@ These values appear throughout the codebase. Do not change them without understa
 | Session TTL | 30 days | `session_cleanup.py`; escalation sessions are exempt |
 | UI server port | 18790 | `DEFAULTS["port"]`; OpenClaw gateway is on 18789 |
 | Webhook endpoint | `http://localhost:18789/hooks/agent` | `DEFAULTS["hooks_url"]`; requires Bearer token |
+| Base branch override | optional `base_branch` config key (empty = auto-detect) | Used by orchestrator git checkout/reset paths and `/api/pipeline/git-recover` |
 | `prd-creator` agent ID | `"prd-creator"` | `WEBHOOK_AGENT_ID` in `ui/server.py` — used in all idea-to-PRD webhook calls |
 | `AUTODEV_LLAMA_BASE` | default `http://127.0.0.1:11434` | Orchestrator `check_traffic_cop_health`, `wait_for_model_stable`, blame L1, and `heartbeat_cron.py` — HTTP origin when `openclaw.json` has no `llama-local` `baseUrl` |
 | `AUTODEV_AUDIT_ARCHIVE_DIR` | unset → `$AUTODEV_ROOT/pipeline-audit`; empty string → disabled | Phase-complete snapshot copies in `orchestrator.py` |

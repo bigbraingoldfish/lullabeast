@@ -5113,6 +5113,10 @@
             const [showPathStopModal, setShowPathStopModal] = useState(false);
             const [pathStopDone, setPathStopDone] = useState(false);
             const [pathStopErr, setPathStopErr] = useState("");
+            const [showGitRecoverModal, setShowGitRecoverModal] = useState(false);
+            const [gitRecoverBranch, setGitRecoverBranch] = useState("main");
+            const [gitRecoverBusy, setGitRecoverBusy] = useState(false);
+            const [gitRecoverError, setGitRecoverError] = useState("");
             const [swFsStatus, setSwFsStatus] = useState(null);
             const swValidateTimerRef = useRef(null);
 
@@ -5359,6 +5363,31 @@
                 }
             };
 
+            const handleGitRecover = async () => {
+                setGitRecoverError("");
+                setGitRecoverBusy(true);
+                try {
+                    const res = await fetch("/api/pipeline/git-recover", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ base_branch: gitRecoverBranch.trim() }),
+                    });
+                    const data = await res.json().catch(() => ({}));
+                    if (!res.ok) {
+                        const msg = typeof data.detail === "string" ? data.detail : `Recovery failed (${res.status})`;
+                        setGitRecoverError(msg);
+                        return;
+                    }
+                    setShowGitRecoverModal(false);
+                    fetchState();
+                    fetchRoadmap();
+                } catch (e) {
+                    setGitRecoverError(String(e?.message || e));
+                } finally {
+                    setGitRecoverBusy(false);
+                }
+            };
+
             const status = pState.pipeline_status;
             const alive = pState.orchestrator_alive;
             const showStopButton = ["RUNNING", "WAITING_FOR_SENTINEL", "WAITING_FOR_HUMAN"].includes(
@@ -5391,6 +5420,8 @@
                 "Project folder link is broken — click the path to choose your project folder and repair it.";
             const pathCanOfferStop =
                 status === "RUNNING" || status === "WAITING_FOR_SENTINEL" || status === "WAITING_FOR_HUMAN";
+            const hasGitOperationFailure =
+                typeof pState.last_action === "string" && pState.last_action.includes("Git operation failed");
 
             const swDestructiveOptions = [];
             const swSeen = new Set();
@@ -5515,6 +5546,24 @@
                                 <p className="header-text text-xs text-amber-200/90">{repairPathHintText}</p>
                             </div>
                         ) : null}
+                        {hasGitOperationFailure ? (
+                            <div className="border-t border-amber-800/50 bg-amber-950/20 px-6 py-2 flex items-center justify-between gap-3">
+                                <p className="header-text text-xs text-amber-200/90">
+                                    Git branch checkout failed. Recover by selecting the correct base branch.
+                                </p>
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setGitRecoverError("");
+                                        setGitRecoverBranch("main");
+                                        setShowGitRecoverModal(true);
+                                    }}
+                                    className="header-text text-xs px-2.5 py-1 rounded border border-amber-700/70 text-amber-200 hover:text-white hover:border-amber-500 transition-colors"
+                                >
+                                    Recover Git
+                                </button>
+                            </div>
+                        ) : null}
                     </header>
 
                     {/* Middle section: two-panel grid (Phase 2a: 32/68 split) */}
@@ -5618,6 +5667,44 @@
                                             Stop Pipeline
                                         </button>
                                     )}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {showGitRecoverModal && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" role="dialog" aria-modal="true">
+                            <div className="bg-[#141618] border border-[#1a1d21] rounded-lg max-w-sm w-full p-5 space-y-3">
+                                <h2 className="header-text text-base text-slate-200">Recover git checkout</h2>
+                                <p className="text-sm text-slate-400">
+                                    Enter the repository base branch to recover from checkout failures.
+                                </p>
+                                <label className="text-xs text-slate-500 header-text block">Base branch</label>
+                                <input
+                                    type="text"
+                                    value={gitRecoverBranch}
+                                    onChange={(e) => setGitRecoverBranch(e.target.value)}
+                                    className="w-full bg-[#0f1215] border border-[#2a2d31] rounded px-2 py-1.5 text-sm text-slate-200 outline-none focus:border-cyan-600"
+                                    placeholder="main"
+                                />
+                                {gitRecoverError ? <p className="text-xs text-red-400">{gitRecoverError}</p> : null}
+                                <div className="flex justify-end gap-2 pt-1">
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowGitRecoverModal(false)}
+                                        className="header-text text-xs px-3 py-1.5 rounded border border-[#2a2d31] text-slate-400 hover:text-slate-200 transition-colors"
+                                        disabled={gitRecoverBusy}
+                                    >
+                                        Cancel
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={handleGitRecover}
+                                        disabled={gitRecoverBusy}
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-amber-950 hover:bg-amber-900 text-amber-300 border border-amber-800 transition-colors disabled:opacity-60"
+                                    >
+                                        {gitRecoverBusy ? "Recovering..." : "Recover"}
+                                    </button>
                                 </div>
                             </div>
                         </div>

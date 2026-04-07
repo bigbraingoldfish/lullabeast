@@ -15,6 +15,7 @@
   "conversion_prompt_path": "",
   "hooks_url": "http://localhost:18789/hooks/agent",
   "hooks_token": "",
+  "base_branch": "",
   "poll_timeout": 180,
   "poll_interval": 2,
   "ideas_idle_threshold": 120,

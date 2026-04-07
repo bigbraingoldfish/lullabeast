@@ -132,6 +132,39 @@ def cleanup_stranded_temp_files(base_dir: str) -> None:
     )
 
 
+def _detect_base_branch(directory: str) -> str:
+    """Return the best candidate base branch for the target repository."""
+    for branch in ("main", "master", "develop", "trunk"):
+        result = subprocess.run(
+            ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+            cwd=directory,
+        )
+        if result.returncode == 0:
+            return branch
+
+    remote_head = subprocess.run(
+        ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+        cwd=directory,
+        capture_output=True,
+        text=True,
+    )
+    remote_ref = (remote_head.stdout or "").strip()
+    if remote_head.returncode == 0 and remote_ref.startswith("refs/remotes/origin/"):
+        return remote_ref[len("refs/remotes/origin/"):]
+
+    init_branch = subprocess.run(
+        ["git", "config", "--get", "init.defaultBranch"],
+        cwd=directory,
+        capture_output=True,
+        text=True,
+    )
+    configured_branch = (init_branch.stdout or "").strip()
+    if init_branch.returncode == 0 and configured_branch:
+        return configured_branch
+
+    return "main"
+
+
 class Orchestrator:
     def __init__(self):
         self.lock_fd = None
@@ -922,12 +955,8 @@ class Orchestrator:
         preserved_escalation_resets = current_phase_state.get("escalation_resets", 0)
 
         try:
-            if subprocess.run(["git", "show-ref", "--verify", "--quiet", "refs/heads/main"], cwd=SYMLINK_TARGET).returncode == 0:
-                base_branch = "main"
-            elif subprocess.run(["git", "show-ref", "--verify", "--quiet", "refs/heads/master"], cwd=SYMLINK_TARGET).returncode == 0:
-                base_branch = "master"
-            else:
-                base_branch = "main"
+            configured_base_branch = self.openclaw_config.get("pipeline", {}).get("base_branch", "").strip()
+            base_branch = configured_base_branch if configured_base_branch else _detect_base_branch(SYMLINK_TARGET)
             if phase_base:
                 subprocess.run(["git", "reset", "--hard", phase_base], cwd=SYMLINK_TARGET, check=True)
             subprocess.run(["git", "checkout", base_branch], cwd=SYMLINK_TARGET, check=True)
@@ -2058,13 +2087,8 @@ class Orchestrator:
                         _raw_id = self.state.get("current_phase_raw_id", "")
                         branch = f"phase/{_raw_id}" if _raw_id else f"phase/{phase}"
                         try:
-                            # Try main first, fallback to master
-                            if subprocess.run(["git", "show-ref", "--verify", "--quiet", "refs/heads/main"], cwd=SYMLINK_TARGET).returncode == 0:
-                                base_branch = "main"
-                            elif subprocess.run(["git", "show-ref", "--verify", "--quiet", "refs/heads/master"], cwd=SYMLINK_TARGET).returncode == 0:
-                                base_branch = "master"
-                            else:
-                                base_branch = "main" # default fallback
+                            configured_base_branch = self.openclaw_config.get("pipeline", {}).get("base_branch", "").strip()
+                            base_branch = configured_base_branch if configured_base_branch else _detect_base_branch(SYMLINK_TARGET)
 
                             subprocess.run(["git", "add", "."], cwd=SYMLINK_TARGET, check=True)
 
@@ -2081,7 +2105,16 @@ class Orchestrator:
                                     _goal = _raw_id
                                 subprocess.run(["git", "commit", "-m", f"phase({_raw_id}): {_goal}"], cwd=SYMLINK_TARGET, check=True)
 
-                            subprocess.run(["git", "checkout", base_branch], cwd=SYMLINK_TARGET, check=True)
+                            try:
+                                subprocess.run(["git", "checkout", base_branch], cwd=SYMLINK_TARGET, check=True)
+                            except subprocess.CalledProcessError:
+                                subprocess.run(
+                                    ["git", "stash", "push", "--include-untracked"],
+                                    cwd=SYMLINK_TARGET,
+                                    check=False,
+                                )
+                                subprocess.run(["git", "checkout", base_branch], cwd=SYMLINK_TARGET, check=True)
+                                subprocess.run(["git", "stash", "pop"], cwd=SYMLINK_TARGET, check=False)
 
                             merge_result = subprocess.run(
                                 ["git", "merge", branch, "--no-ff", "-m", f"Merge {branch}"],
