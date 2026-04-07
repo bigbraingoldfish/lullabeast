@@ -15,6 +15,8 @@ Autonomous multi-agent software development pipeline UI and orchestration: a **F
    uvicorn ui.server:app --host 127.0.0.1 --port 18790
    ```
 
+6. **Verify webhooks once:** Run the POST `/hooks/agent` smoke test from [SETUP.md — New User Webhook Checklist](SETUP.md#new-user-webhook-checklist). GET checks alone can miss token mismatches.
+
 ## Security
 
 - **`/api/*` has no authentication.** Bind to **`127.0.0.1`** unless you are on a trusted LAN and understand the risk. Do not expose the raw port to the internet without a reverse proxy, TLS, and access control. Details: [SETUP.md — Security and network exposure](SETUP.md#security-and-network-exposure).

@@ -22,6 +22,17 @@ ui/index.html.bak
 
 # IDE — do not commit local plans
 .cursor/
+/.vscode/
+
+# code-review-graph — local graph DB, MCP wiring, and editor snippets (not part of release)
+/.mcp.json
+/.opencode.json
+/.code-review-graph/
+/AGENTS.md
+/GEMINI.md
+/.cursorrules
+/.windsurfrules
+/.claude/skills/
 
 # Local / internal planning (not for the public tree)
 /plans/

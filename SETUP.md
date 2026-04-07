@@ -16,6 +16,36 @@ AutoDev is an autonomous development pipeline that runs on top of OpenClaw. It m
 
 ---
 
+## New User Webhook Checklist
+
+Run these checks once after install to avoid common first-run webhook failures.
+
+1. In `~/.openclaw/openclaw.json`, confirm `hooks.token` is set (this is the webhook Bearer secret; it is **not** `gateway.auth.token`).
+2. Ensure AutoDev uses the same secret:
+   - `<repo>/.env` → `AUTODEV_HOOKS_TOKEN=...`, and/or
+   - `ui/config.json` → `hooks_token`.
+3. Start AutoDev UI with `.env` loaded:
+
+```bash
+cd /path/to/autodev-ui
+source .env
+uvicorn ui.server:app --host 127.0.0.1 --port 18790
+```
+
+If using systemd for the UI service, configure an `EnvironmentFile=` entry that points at the repo `.env`.
+
+4. Verify webhook auth with a **POST** (GET checks alone are insufficient):
+
+```bash
+curl -sS -o /dev/null -w "HTTP %{http_code}\n" -X POST http://127.0.0.1:18789/hooks/agent \
+  -H "Authorization: Bearer <hooks.token>" -H "Content-Type: application/json" \
+  -d '{"agentId":"prd-creator","sessionKey":"ideas:install-check:0","wakeMode":"now","message":"ping"}'
+```
+
+Expect `HTTP 200`. `HTTP 401` means the Bearer token does not match `hooks.token`.
+
+---
+
 ## What Testers Bring
 
 You bring two things: a project directory (a git repository containing a `roadmap.md` in the format AutoDev expects) and a running OpenClaw instance configured with the four pipeline agents (planner, executor, reviewer, escalation) and the prd-creator agent.
@@ -70,7 +100,7 @@ These failures produce no obvious error at startup. Each one causes a specific s
 curl -s http://localhost:18789/v1/models | head -20
 ```
 
-A healthy gateway returns a JSON models list. A connection refused means the gateway is down. Start it with `openclaw gateway start` (or your configured start command) and confirm `openclaw.json` has the correct `hooks.token` value.
+A healthy gateway returns a JSON models list. A connection refused means the gateway is down. Start it with `openclaw gateway start` (or your configured start command), then run the POST check from **New User Webhook Checklist** to validate webhook auth.
 
 ### 2. `autodev_repo_path` misconfigured
 
@@ -132,6 +162,8 @@ curl http://localhost:18790/api/state
 ```
 
 A healthy response contains a JSON object with `pipeline_status`, `current_agent`, and `current_phase_raw_id` fields. If the response is an error or the server refuses the connection, check the uvicorn output for import errors — a missing Python dependency or an incorrect `AUTODEV_REPO_PATH` will surface there.
+
+Before opening Project Ideas for the first time, run the POST `/hooks/agent` check in **New User Webhook Checklist** so token mismatches are caught early.
 
 To run as a background service, see `ui/autodev-ui.service` for a systemd unit file.
 

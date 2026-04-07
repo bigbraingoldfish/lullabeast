@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
+from dataclasses import dataclass
 from typing import Any
 
 # Webhook session keys used by the pipeline and idea-to-PRD flows.
@@ -256,6 +258,248 @@ def merge_dotenv_missing_keys(env_path: str, pairs: dict[str, str]) -> str:
         except Exception as e:
             return f"error:{e}"
     return "unchanged"
+
+
+def read_openclaw_hooks_token(openclaw_json_path: str) -> str | None:
+    """Return ``hooks.token`` from openclaw.json, or None if missing/invalid/empty."""
+    path = os.path.abspath(openclaw_json_path)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return None
+    tok = hooks.get("token")
+    if not isinstance(tok, str):
+        return None
+    t = tok.strip()
+    return t if t else None
+
+
+def parse_dotenv_value(env_path: str, key: str) -> str | None:
+    """Return the last non-comment assignment for ``key``, or None if unset/empty."""
+    path = os.path.abspath(env_path)
+    if not os.path.isfile(path):
+        return None
+    last: str | None = None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+                if "=" not in s:
+                    continue
+                k, v = s.split("=", 1)
+                if k.strip() != key:
+                    continue
+                val = v.strip().strip("'").strip('"')
+                last = val if val else None
+    except OSError:
+        return None
+    return last
+
+
+@dataclass(frozen=True)
+class WebhookSecretSync:
+    """Compare ``hooks.token`` to AutoDev UI config and optional ``.env`` (no secrets logged)."""
+
+    expected_token: str | None
+    ui_config_path: str
+    ui_config_exists: bool
+    ui_hooks_token: str | None
+    env_path: str
+    env_hooks_token: str | None
+    ui_needs_sync: bool
+    env_key_missing_or_empty: bool
+    env_wrong: bool
+
+    def summary_code(self) -> str:
+        if not self.expected_token:
+            return "no_hooks_token"
+        if self.env_wrong and self.ui_needs_sync:
+            return "mismatch_both"
+        if self.env_wrong:
+            return "mismatch_env"
+        if self.ui_needs_sync:
+            return "mismatch_ui"
+        return "ok"
+
+
+def webhook_secret_sync_assess(
+    openclaw_json_path: str,
+    ui_config_path: str,
+    env_path: str,
+) -> WebhookSecretSync:
+    """Assess whether ``ui/config.json`` and ``.env`` match ``hooks.token``."""
+    oc = os.path.abspath(openclaw_json_path)
+    ui_p = os.path.abspath(ui_config_path)
+    env_p = os.path.abspath(env_path)
+    expected = read_openclaw_hooks_token(oc)
+
+    ui_exists = os.path.isfile(ui_p)
+    ui_tok: str | None = None
+    if ui_exists:
+        try:
+            with open(ui_p, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            if isinstance(cfg, dict):
+                ht = cfg.get("hooks_token")
+                if isinstance(ht, str) and ht.strip():
+                    ui_tok = ht.strip()
+        except (OSError, json.JSONDecodeError, TypeError):
+            ui_tok = None
+
+    env_val = parse_dotenv_value(env_p, "AUTODEV_HOOKS_TOKEN")
+    env_missing = env_val is None
+
+    if not expected:
+        return WebhookSecretSync(
+            expected_token=None,
+            ui_config_path=ui_p,
+            ui_config_exists=ui_exists,
+            ui_hooks_token=ui_tok,
+            env_path=env_p,
+            env_hooks_token=env_val,
+            ui_needs_sync=False,
+            env_key_missing_or_empty=env_missing,
+            env_wrong=False,
+        )
+
+    ui_needs = (not ui_exists) or (ui_tok != expected)
+    env_wrong = env_val is not None and env_val != expected
+
+    return WebhookSecretSync(
+        expected_token=expected,
+        ui_config_path=ui_p,
+        ui_config_exists=ui_exists,
+        env_path=env_p,
+        env_hooks_token=env_val,
+        ui_hooks_token=ui_tok,
+        ui_needs_sync=ui_needs,
+        env_key_missing_or_empty=env_missing,
+        env_wrong=env_wrong,
+    )
+
+
+def set_ui_config_hooks_token(ui_config_path: str, token: str) -> str:
+    """Set ``hooks_token`` in ui/config.json (atomic). Preserves other keys.
+
+    Returns: updated | unchanged | error:<msg>
+    """
+    path = os.path.abspath(ui_config_path)
+    if not os.path.isfile(path):
+        return "error:file not found"
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        return f"error:{e}"
+    if not isinstance(data, dict):
+        return "error:root must be an object"
+    t = str(token).strip()
+    if not t:
+        return "error:empty token"
+    if data.get("hooks_token") == t:
+        return "unchanged"
+    data["hooks_token"] = t
+    parent = os.path.dirname(path)
+    try:
+        fd, tmp = tempfile.mkstemp(dir=parent, prefix="ui_config_", suffix=".json")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, path)
+        return "updated"
+    except Exception as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return f"error:{e}"
+
+
+def set_dotenv_key(env_path: str, key: str, value: str) -> str:
+    """Set or replace ``KEY=value`` in ``.env`` (atomic write).
+
+    Returns: created | updated | unchanged | error:<msg>
+    """
+    path = os.path.abspath(env_path)
+    key = key.strip()
+    if not key:
+        return "error:empty key"
+    val = str(value)
+    assignment = f"{key}={val}\n"
+    existed = os.path.isfile(path)
+    lines: list[str] = []
+    if existed:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except OSError as e:
+            return f"error:{e}"
+    pattern = re.compile(rf"^\s*{re.escape(key)}\s*=")
+    replaced = False
+    out: list[str] = []
+    for line in lines:
+        if pattern.match(line) and not line.lstrip().startswith("#"):
+            if not replaced:
+                out.append(assignment)
+                replaced = True
+            continue
+        out.append(line)
+    if not replaced:
+        if out and not out[-1].endswith("\n"):
+            out[-1] += "\n"
+        if out:
+            out.append("\n# Webhook Bearer (synced by install.sh)\n")
+        out.append(assignment)
+    body = "".join(out)
+    if existed:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                before = f.read()
+        except OSError as e:
+            return f"error:{e}"
+        if before == body:
+            return "unchanged"
+    parent = os.path.dirname(path) or "."
+    try:
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=parent, prefix="env_", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(body)
+        os.replace(tmp, path)
+        return "created" if not existed else "updated"
+    except Exception as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return f"error:{e}"
+
+
+def webhook_secret_remediation_text() -> str:
+    """Human-readable steps when webhook secret sync could not be applied (no secrets)."""
+    return """\
+Pipeline / Project Ideas / agent webhooks will NOT work until this is fixed.
+
+  1. Open ~/.openclaw/openclaw.json → hooks.token (not gateway.auth).
+  2. Set the same value as AUTODEV_HOOKS_TOKEN in <repo>/.env and/or hooks_token in ui/config.json.
+  3. Always run:  source .env  before starting the UI (or use systemd EnvironmentFile= for .env).
+  4. Restart uvicorn.
+  5. Verify with POST (not GET only), from the same host as OpenClaw:
+       curl -sS -o /dev/null -w \"HTTP %{http_code}\\n\" -X POST http://127.0.0.1:18789/hooks/agent \\
+         -H \"Authorization: Bearer <hooks.token>\" -H \"Content-Type: application/json\" \\
+         -d '{\"agentId\":\"prd-creator\",\"sessionKey\":\"ideas:install-check:0\",\"wakeMode\":\"now\",\"message\":\"ping\"}'
+     Expect HTTP 200. 401 means the Bearer does not match hooks.token.
+"""
 
 
 def set_openclaw_global_tools_profile(openclaw_json_path: str, profile: str = "coding") -> str:

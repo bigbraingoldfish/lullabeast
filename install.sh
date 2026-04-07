@@ -530,7 +530,10 @@ hdr "9/13  Register AutoDev agents in openclaw.json"
 REGISTER_STATUS_STEP="not attempted"
 TOOLS_PROFILE_STEP="skipped"
 HOOKS_STEP="not attempted"
+WEBHOOK_SYNC_STEP="not checked"
 REGISTER_AGENT="$AUTODEV_REPO_PATH/autodev/installer/register_agent.py"
+UI_CONFIG_PATH="$AUTODEV_REPO_PATH/ui/config.json"
+ENV_FILE="$AUTODEV_REPO_PATH/.env"
 
 if [ ! -f "$REGISTER_AGENT" ]; then
     warn "register_agent.py not found at $REGISTER_AGENT — skipping"
@@ -642,6 +645,126 @@ print(','.join(openclaw_hooks_issues(sys.argv[1])))
         else
             HOOKS_STEP="pending: ${HOOK_FINAL}"
         fi
+    fi
+
+    # Webhook secret sync checks:
+    #   hooks.token  <->  ui/config.json hooks_token  <->  .env AUTODEV_HOOKS_TOKEN
+    read_sync_state() {
+        "$PYTHON" -c "
+from autodev.installer.setup_helpers import webhook_secret_sync_assess
+import sys
+r = webhook_secret_sync_assess(sys.argv[1], sys.argv[2], sys.argv[3])
+print('|'.join([
+  r.summary_code(),
+  '1' if r.expected_token else '0',
+  '1' if r.ui_needs_sync else '0',
+  '1' if r.env_key_missing_or_empty else '0',
+  '1' if r.env_wrong else '0',
+  '1' if r.ui_config_exists else '0',
+]))
+" "$AUTODEV_ROOT/openclaw.json" "$UI_CONFIG_PATH" "$ENV_FILE" 2>/dev/null || echo "error|0|0|0|0|0"
+    }
+
+    SYNC_STATE=$(read_sync_state)
+    IFS='|' read -r SYNC_CODE SYNC_HAS_TOKEN SYNC_UI_NEEDS SYNC_ENV_MISSING SYNC_ENV_WRONG SYNC_UI_EXISTS <<< "$SYNC_STATE"
+
+    if [ "$SYNC_HAS_TOKEN" = "1" ]; then
+        if [ "$SYNC_ENV_MISSING" = "1" ]; then
+            CURRENT_HOOK_TOKEN=$(
+                cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import read_openclaw_hooks_token
+import sys
+print(read_openclaw_hooks_token(sys.argv[1]) or '')
+" "$AUTODEV_ROOT/openclaw.json" 2>/dev/null || echo ""
+            )
+            if [ -n "$CURRENT_HOOK_TOKEN" ]; then
+                ADD_ENV_RESULT=$(
+                    cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import merge_dotenv_missing_keys
+import os, sys
+print(merge_dotenv_missing_keys(sys.argv[1], {'AUTODEV_HOOKS_TOKEN': sys.argv[2]}))
+" "$ENV_FILE" "$CURRENT_HOOK_TOKEN" 2>/dev/null || echo "error:env"
+                )
+                case "$ADD_ENV_RESULT" in
+                    created|updated|unchanged) ok ".env ensures AUTODEV_HOOKS_TOKEN is present ($ADD_ENV_RESULT)" ;;
+                    *) warn "Could not ensure AUTODEV_HOOKS_TOKEN in .env: $ADD_ENV_RESULT" ;;
+                esac
+            fi
+        fi
+
+        # Re-read status after adding any missing .env key.
+        SYNC_STATE=$(read_sync_state)
+        IFS='|' read -r SYNC_CODE SYNC_HAS_TOKEN SYNC_UI_NEEDS SYNC_ENV_MISSING SYNC_ENV_WRONG SYNC_UI_EXISTS <<< "$SYNC_STATE"
+
+        if [ "$SYNC_UI_NEEDS" = "1" ]; then
+            if [ "$NON_INTERACTIVE" -eq 1 ]; then
+                warn "ui/config.json hooks_token is empty or does not match hooks.token (non-interactive mode: no overwrite)"
+            elif [ "$SYNC_UI_EXISTS" = "1" ]; then
+                if prompt_yn "Sync ui/config.json hooks_token to match openclaw.json hooks.token? [Y/n]" "Y"; then
+                    UI_SYNC_RESULT=$(
+                        cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import read_openclaw_hooks_token, set_ui_config_hooks_token
+import sys
+tok = read_openclaw_hooks_token(sys.argv[1]) or ''
+print(set_ui_config_hooks_token(sys.argv[2], tok) if tok else 'error:empty token')
+" "$AUTODEV_ROOT/openclaw.json" "$UI_CONFIG_PATH" 2>/dev/null || echo "error:ui"
+                    )
+                    case "$UI_SYNC_RESULT" in
+                        updated|unchanged) ok "ui/config.json hooks_token synced to hooks.token ($UI_SYNC_RESULT)" ;;
+                        *) warn "Could not sync ui/config.json hooks_token: $UI_SYNC_RESULT" ;;
+                    esac
+                else
+                    warn "ui/config.json hooks_token sync skipped by user"
+                fi
+            else
+                warn "ui/config.json missing — cannot sync hooks_token automatically"
+            fi
+        fi
+
+        if [ "$SYNC_ENV_WRONG" = "1" ]; then
+            if [ "$NON_INTERACTIVE" -eq 1 ]; then
+                warn ".env AUTODEV_HOOKS_TOKEN does not match hooks.token (non-interactive mode: no overwrite)"
+            else
+                if prompt_yn "Update .env AUTODEV_HOOKS_TOKEN to match openclaw.json hooks.token? [Y/n]" "Y"; then
+                    ENV_SYNC_RESULT=$(
+                        cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import read_openclaw_hooks_token, set_dotenv_key
+import sys
+tok = read_openclaw_hooks_token(sys.argv[1]) or ''
+print(set_dotenv_key(sys.argv[2], 'AUTODEV_HOOKS_TOKEN', tok) if tok else 'error:empty token')
+" "$AUTODEV_ROOT/openclaw.json" "$ENV_FILE" 2>/dev/null || echo "error:env"
+                    )
+                    case "$ENV_SYNC_RESULT" in
+                        created|updated|unchanged) ok ".env AUTODEV_HOOKS_TOKEN synced ($ENV_SYNC_RESULT)" ;;
+                        *) warn "Could not sync .env AUTODEV_HOOKS_TOKEN: $ENV_SYNC_RESULT" ;;
+                    esac
+                else
+                    warn ".env AUTODEV_HOOKS_TOKEN sync skipped by user"
+                fi
+            fi
+        fi
+
+        SYNC_STATE=$(read_sync_state)
+        IFS='|' read -r SYNC_CODE SYNC_HAS_TOKEN SYNC_UI_NEEDS SYNC_ENV_MISSING SYNC_ENV_WRONG SYNC_UI_EXISTS <<< "$SYNC_STATE"
+        if [ "$SYNC_CODE" = "ok" ]; then
+            WEBHOOK_SYNC_STEP="ok"
+            ok "Webhook secret sync OK (hooks.token, ui/config.json, .env)"
+        else
+            WEBHOOK_SYNC_STEP="ACTION REQUIRED ($SYNC_CODE)"
+            warn "Webhook secret sync is incomplete: $SYNC_CODE"
+            REM_TEXT=$(
+                cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import webhook_secret_remediation_text
+print(webhook_secret_remediation_text())
+" 2>/dev/null || true
+            )
+            if [ -n "$REM_TEXT" ]; then
+                echo "$REM_TEXT"
+            fi
+        fi
+    else
+        WEBHOOK_SYNC_STEP="pending: hooks.token missing"
+        warn "hooks.token missing in openclaw.json — cannot sync UI/.env webhook secret"
     fi
 
     TOOLS_PROFILE=$("$PYTHON" -c "
@@ -803,6 +926,7 @@ printf "  %-32s %s\n" "Conversion prompt:"        "$PROMPT_FOUND"
 printf "  %-32s %s\n" "Exec-approvals:"           "$APPROVALS_STATUS"
 printf "  %-32s %s\n" "Cron path:"                "$CRON_STATUS"
 printf "  %-32s %s\n" "OpenClaw hooks (webhook):"   "$HOOKS_STEP"
+printf "  %-32s %s\n" "Webhook secret sync:"      "$WEBHOOK_SYNC_STEP"
 printf "  %-32s %s\n" "OpenClaw tools.profile:"   "$TOOLS_PROFILE_STEP"
 printf "  %-32s %s\n" "OpenClaw agents (register):" "$REGISTER_STATUS_STEP"
 echo   "  Agent files deployed:"
@@ -824,5 +948,9 @@ else
 fi
 
 echo
-echo "  Start with: uvicorn ui.server:app --host 0.0.0.0 --port 18790"
+echo "  Start with: cd \"$AUTODEV_REPO_PATH\" && source .env && uvicorn ui.server:app --host 0.0.0.0 --port 18790"
+echo "  Verify hooks with POST (expect HTTP 200):"
+echo "    curl -sS -o /dev/null -w \"HTTP %{http_code}\\n\" -X POST http://127.0.0.1:18789/hooks/agent \\"
+echo "      -H \"Authorization: Bearer <hooks.token>\" -H \"Content-Type: application/json\" \\"
+echo "      -d '{\"agentId\":\"prd-creator\",\"sessionKey\":\"ideas:install-check:0\",\"wakeMode\":\"now\",\"message\":\"ping\"}'"
 echo
