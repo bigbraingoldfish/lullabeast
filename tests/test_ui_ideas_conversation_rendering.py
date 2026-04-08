@@ -138,3 +138,14 @@ class TestIdeasConversationRendering:
         # Template section titles use font-semibold on h2
         assert re.search(r"font-semibold|split.*?\\n\\n|bold|<b>|<strong>", func_body, re.IGNORECASE), \
             "IdeasScreen should render section headings with emphasis"
+
+    def test_assistant_prose_bubble_uses_parsed_prose_when_present(self):
+        """Reload path: assistant markdown bubble should prefer msg.parsed.prose over raw msg.content."""
+        content = load_index_html()
+        func_body = extract_function_body(content, "IdeasScreen")
+        assert func_body is not None
+        assert "bubbleText" in func_body, "IdeasScreen should define bubbleText for assistant prose"
+        assert re.search(
+            r"marked\.parse\s*\(\s*bubbleText",
+            func_body,
+        ), "Assistant prose should render marked.parse(bubbleText) using parsed prose when available"

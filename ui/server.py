@@ -2476,8 +2476,9 @@ async def _poll_sentinel_with_idle_detect(
 def _parse_agent_response(content: str) -> dict:
     """Parse agent response content into structured components.
 
-    QUESTIONS block: accepts ``QUESTIONS`` or ``QUESTIONS:``; supports ``[SINGLE]``/``[MULTI]``,
-    numbered questions (``1. ...``), implicit question lines, and ``- `` / ``* `` options.
+    QUESTIONS block: accepts ``QUESTIONS`` / ``QUESTIONS:`` and common markdown variants
+    (``## QUESTIONS``, ``**QUESTIONS**``); supports ``[SINGLE]``/``[MULTI]``,
+    numbered questions (``1. ...`` or ``**1. ...``), implicit question lines, and ``- `` / ``* `` options.
     """
     lines = content.splitlines()
     drafting = None
@@ -2504,8 +2505,9 @@ def _parse_agent_response(content: str) -> dict:
         line = lines[i]
         stripped = line.strip()
         qhead = stripped.upper()
+        _qhead_core = re.sub(r"^[#*\s]+|[*:\s]+$", "", qhead)
 
-        if qhead == "QUESTIONS" or qhead.startswith("QUESTIONS:"):
+        if _qhead_core == "QUESTIONS":
             in_questions_block = True
             _flush_question()
             i += 1
@@ -2517,28 +2519,34 @@ def _parse_agent_response(content: str) -> dict:
                 qtype = "single" if stripped.startswith("[SINGLE]") else "multi"
                 rest = stripped[len("[SINGLE]") :].strip() if qtype == "single" else stripped[len("[MULTI]") :].strip()
                 current_question = {"type": qtype, "text": rest, "options": []}
-            elif re.match(r"^\d+[\.\)]\s+", stripped):
-                _flush_question()
-                qtext = re.sub(r"^\d+[\.\)]\s+", "", stripped).strip()
-                current_question = {"type": "single", "text": qtext, "options": []}
-            elif stripped.startswith("- ") and current_question is not None:
-                current_question["options"].append(stripped[2:].strip())
-            elif stripped.startswith("* ") and current_question is not None:
-                current_question["options"].append(stripped[2:].strip())
-            elif stripped == "":
-                pass
-            elif current_question is None and stripped and not stripped.startswith("["):
-                # Implicit first question (plain line after QUESTIONS:)
-                current_question = {"type": "single", "text": stripped, "options": []}
             else:
-                _flush_question()
-                in_questions_block = False
-                if line.startswith("ASSUMPTION:"):
-                    assumptions.append(line[len("ASSUMPTION:"):].strip())
+                _numbered = stripped.lstrip("*")
+                if re.match(r"^\d+[\.\)]\s+", _numbered):
+                    _flush_question()
+                    qtext = re.sub(r"^\d+[\.\)]\s+", "", _numbered).strip().strip("*")
+                    current_question = {"type": "single", "text": qtext, "options": []}
+                elif stripped.startswith("- ") and current_question is not None:
+                    current_question["options"].append(stripped[2:].strip())
+                elif stripped.startswith("* ") and current_question is not None:
+                    current_question["options"].append(stripped[2:].strip())
+                elif stripped == "":
+                    pass
+                elif current_question is None and stripped and not stripped.startswith("["):
+                    # Implicit first question (plain line after QUESTIONS:)
+                    current_question = {"type": "single", "text": stripped, "options": []}
                 else:
-                    prose_lines.append(line)
+                    _flush_question()
+                    in_questions_block = False
+                    if line.startswith("ASSUMPTION:"):
+                        assumptions.append(line[len("ASSUMPTION:"):].strip())
+                    else:
+                        prose_lines.append(line)
             i += 1
             continue
+
+        if not in_questions_block and drafting is None and stripped.startswith("DRAFTING:"):
+            drafting = stripped[len("DRAFTING:") :].strip()
+            break
 
         if line.startswith("ASSUMPTION:"):
             assumptions.append(line[len("ASSUMPTION:"):].strip())

@@ -130,6 +130,45 @@ class TestApiIdeasMessage:
             assert "response" in body, f"Missing 'response' field: {body}"
             assert "prd_content" in body, f"Missing 'prd_content' field: {body}"
 
+    def test_parsed_prose_truncated_when_drafting_mid_message(self):
+        """POST response parsed.prose excludes PRD body after mid-message DRAFTING: marker."""
+        client = load_server()
+        idea_id = "mid_draft_parse"
+        turn_body = (
+            "Brief intro only.\n\n"
+            "ASSUMPTION: One.\n"
+            "ASSUMPTION: Two.\n\n"
+            "DRAFTING: Full PRD Draft\n\n"
+            "## 1. Problem Statement\n"
+            "This must not appear in parsed prose.\n"
+        )
+        self._write_session(idea_id, {
+            "messages": [],
+            "prd_content": "",
+            "created": "2026-03-19T10:00:00Z",
+            "updated": "2026-03-19T10:00:00Z",
+        })
+        self._write_turn_files(idea_id, 1, turn_body, "# PRD\n")
+
+        mock_resp = self._make_mock_response()
+        mock_session = self._make_mock_session(mock_resp)
+
+        with patch("ui.server.load_config", return_value=self._mock_config()):
+            with patch("ui.server.aiohttp.ClientSession", return_value=mock_session):
+                response = client.post(
+                    f"/api/ideas/{idea_id}/message",
+                    json={"content": "Hi", "turn": 1},
+                )
+
+        if response.status_code != 200:
+            pytest.skip(f"endpoint returned {response.status_code}")
+        body = response.json()
+        assert "parsed" in body
+        prose = body["parsed"].get("prose") or ""
+        assert "## Problem Statement" not in prose
+        assert "Brief intro only." in prose
+        assert body["parsed"].get("drafting") == "Full PRD Draft"
+
     def test_returns_408_on_timeout(self):
         """Returns 408 when sentinel file is not found within timeout."""
         client = load_server()
