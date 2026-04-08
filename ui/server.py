@@ -16,7 +16,7 @@ from tempfile import mkstemp
 
 import asyncio
 
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse
@@ -2658,6 +2658,96 @@ def _enrich_assistant_messages_with_parsed(session_data: dict) -> None:
         m["parsed"] = _parse_agent_response(content)
 
 
+def _reconcile_ideas_session_after_late_done(
+    idea_dir: Path, session_data: dict
+) -> tuple[dict, bool]:
+    """If the last turn ended in assistant error but turns/n.done arrived later, heal session.
+
+    Uses user row ``ideas_turn`` + ``attempt_start_wall`` (post–post_ideas_message schema).
+    """
+    if not isinstance(session_data, dict):
+        return session_data, False
+    msgs = session_data.get("messages")
+    if not isinstance(msgs, list) or len(msgs) < 2:
+        return session_data, False
+
+    asst_idx = None
+    for i in range(len(msgs) - 1, -1, -1):
+        m = msgs[i]
+        if m.get("role") == "assistant" and m.get("error"):
+            asst_idx = i
+            break
+    if asst_idx is None or asst_idx < 1:
+        return session_data, False
+
+    user = msgs[asst_idx - 1]
+    if user.get("role") != "user":
+        return session_data, False
+
+    turn_n = user.get("ideas_turn")
+    attempt_wall = user.get("attempt_start_wall")
+    if turn_n is None or attempt_wall is None:
+        return session_data, False
+    try:
+        turn_int = int(turn_n)
+        attempt_start = float(attempt_wall)
+    except (TypeError, ValueError):
+        return session_data, False
+
+    turns_dir = idea_dir / "turns"
+    done_path = turns_dir / f"{turn_int}.done"
+    md_path = turns_dir / f"{turn_int}.md"
+    if not done_path.exists():
+        return session_data, False
+    try:
+        done_mtime = os.path.getmtime(done_path)
+    except OSError:
+        return session_data, False
+    if done_mtime < attempt_start:
+        return session_data, False
+
+    agent_response = md_path.read_text() if md_path.exists() else ""
+    prd_draft_path = idea_dir / "prd_draft.md"
+    prd_content = prd_draft_path.read_text() if prd_draft_path.exists() else ""
+
+    parsed = _parse_agent_response(agent_response)
+    now = datetime.utcnow().isoformat() + "Z"
+    asst = msgs[asst_idx]
+    asst["pending"] = False
+    asst["error"] = False
+    asst["content"] = agent_response
+    asst["ts"] = now
+    asst["parsed"] = parsed
+
+    session_data["prd_content"] = prd_content
+    session_data["updated"] = now
+    session_data.pop("pending_system_events", None)
+
+    sc_notes = (user.get("sent_context") or {}).get("notes") or []
+    consume_ids = {n.get("id") for n in sc_notes if n.get("id")}
+    if consume_ids:
+        session_data["annotations"] = [
+            a
+            for a in (session_data.get("annotations") or [])
+            if a.get("id") not in consume_ids
+        ]
+
+    nm = session_data.get("name", "")
+    if nm in ("", "New Idea"):
+        heading_name = _extract_first_h1_heading(prd_content)
+        if heading_name:
+            session_data["name"] = heading_name
+        else:
+            first_user = next(
+                (m["content"] for m in msgs if m.get("role") == "user"),
+                "",
+            )
+            if first_user.strip():
+                session_data["name"] = first_user.strip()[:40].title()
+
+    return session_data, True
+
+
 @app.get("/api/ideas/{idea_id}/session")
 def get_ideas_session(idea_id: str):
     """Return the full session.json for an idea, or empty schema if not found."""
@@ -2675,8 +2765,48 @@ def get_ideas_session(idea_id: str):
     session_data, changed = _rehydrate_session_from_artifacts(idea_dir, session_data)
     if changed:
         _atomic_write_json_file(session_path, session_data)
+    session_data, late_changed = _reconcile_ideas_session_after_late_done(idea_dir, session_data)
+    if late_changed:
+        _atomic_write_json_file(session_path, session_data)
     _enrich_assistant_messages_with_parsed(session_data)
     return session_data
+
+
+def _build_ideas_sent_context(
+    unsubmitted: list,
+    attachment: dict | None,
+) -> dict[str, Any]:
+    """Structured traceability metadata persisted on the user message (not shown as transport syntax)."""
+    out: dict[str, Any] = {}
+    if unsubmitted:
+        out["notes"] = [
+            {
+                "id": a.get("id"),
+                "section": a.get("section", ""),
+                "comment": a.get("comment", ""),
+            }
+            for a in unsubmitted
+        ]
+    if attachment and isinstance(attachment, dict):
+        fn = attachment.get("filename")
+        if fn:
+            out["attachment"] = {"filename": fn}
+    return out
+
+
+def _late_done_valid_for_attempt(done_path: Path | str, attempt_start_wall: float) -> bool:
+    """True when the turn sentinel exists and was written at or after this attempt started.
+
+    Used after poll timeout to avoid restoring draft annotations when the agent completed
+    just after the idle/timeout window (race with late .done write).
+    """
+    p = Path(done_path)
+    if not p.exists():
+        return False
+    try:
+        return os.path.getmtime(p) >= attempt_start_wall
+    except OSError:
+        return False
 
 
 async def _trigger_readiness_assessment(idea_id: str, config: dict) -> None:
@@ -2757,6 +2887,8 @@ async def post_ideas_message(idea_id: str, request: Request):
         message_content = f"[USER ANNOTATIONS]\n{ann_lines}\n[/USER ANNOTATIONS]\n\n{message_content}"
         pending_annotation_ids = [a["id"] for a in unsubmitted]
 
+    sent_context = _build_ideas_sent_context(unsubmitted, attachment)
+
     # Build conversation history block so the agent has full thread context.
     # Each new turn gets a fresh OpenClaw session, so history must be injected
     # explicitly — the agent cannot access prior sessions natively.
@@ -2818,6 +2950,10 @@ async def post_ideas_message(idea_id: str, request: Request):
         "message": f"[SESSION] ideas:{idea_id}:session-{turn_n}\n\n{history_block}{system_events_block}{message_content}",
     }
 
+    # Wall-clock start of this attempt — compared to .done mtime after poll timeout
+    # to detect late completion (agent wrote sentinel just after idle/timeout).
+    _attempt_start_wall = time.time()
+
     # Pre-save user message to session.json BEFORE sending webhook.
     # This ensures the user's message survives even if the poll times out (408).
     # On refresh, the UI will show the user's message with an error placeholder
@@ -2826,8 +2962,17 @@ async def post_ideas_message(idea_id: str, request: Request):
     _pre_save_ts = datetime.utcnow().isoformat() + "Z"
     _pre_save_data = dict(pre_session)
     _pre_save_data.setdefault("messages", [])
+    _user_pre_row: dict[str, Any] = {
+        "role": "user",
+        "content": content,
+        "ts": _pre_save_ts,
+        "ideas_turn": turn_n,
+        "attempt_start_wall": _attempt_start_wall,
+    }
+    if sent_context:
+        _user_pre_row["sent_context"] = sent_context
     _pre_save_data["messages"] = list(_pre_save_data["messages"]) + [
-        {"role": "user", "content": content, "ts": _pre_save_ts},
+        _user_pre_row,
         {"role": "assistant", "content": "Working on your request...", "ts": _pre_save_ts, "pending": True},
     ]
     _pre_save_data["updated"] = _pre_save_ts
@@ -2869,6 +3014,9 @@ async def post_ideas_message(idea_id: str, request: Request):
         done_path, session_key, openclaw_root,
         poll_timeout, poll_interval, idle_threshold, startup_grace,
     )
+    if not sentinel_found and _late_done_valid_for_attempt(done_path, _attempt_start_wall):
+        sentinel_found = True
+
     if not sentinel_found:
         # Timed out / agent idle — update the pre-saved pending placeholder to an error state
         # so the user sees a clear error on refresh instead of a "working…" spinner
@@ -2922,7 +3070,16 @@ async def post_ideas_message(idea_id: str, request: Request):
             break
     if not replaced:
         # Fallback: append both messages (handles case where pre-save was skipped/lost)
-        session_data["messages"].append({"role": "user", "content": content, "ts": now})
+        _ufb: dict[str, Any] = {
+            "role": "user",
+            "content": content,
+            "ts": now,
+            "ideas_turn": turn_n,
+            "attempt_start_wall": _attempt_start_wall,
+        }
+        if sent_context:
+            _ufb["sent_context"] = sent_context
+        session_data["messages"].append(_ufb)
         session_data["messages"].append(
             {"role": "assistant", "content": agent_response, "ts": now, "parsed": parsed}
         )
@@ -2935,11 +3092,13 @@ async def post_ideas_message(idea_id: str, request: Request):
     # Clear consumed system events so they aren't re-injected on subsequent turns
     session_data.pop("pending_system_events", None)
 
-    # Mark submitted annotations
+    # Remove consumed draft annotations (fresh notes can be added for the same section later)
     if pending_annotation_ids:
-        for ann in session_data.get("annotations", []):
-            if ann.get("id") in pending_annotation_ids:
-                ann["submitted"] = True
+        session_data["annotations"] = [
+            a
+            for a in (session_data.get("annotations") or [])
+            if a.get("id") not in pending_annotation_ids
+        ]
 
     # Auto-name from first # heading in prd_draft (only while still "New Idea" or empty)
     nm = session_data.get("name", "")
@@ -2961,7 +3120,14 @@ async def post_ideas_message(idea_id: str, request: Request):
     _readiness_job_started_at[idea_id] = datetime.utcnow().timestamp()
     asyncio.create_task(_trigger_readiness_assessment(idea_id, config))
 
-    return {"response": agent_response, "prd_content": prd_content, "parsed": parsed}
+    out_body: dict[str, Any] = {
+        "response": agent_response,
+        "prd_content": prd_content,
+        "parsed": parsed,
+    }
+    if sent_context:
+        out_body["sent_context"] = sent_context
+    return out_body
 
 
 # ---------------------------------------------------------------------------

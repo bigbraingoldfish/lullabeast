@@ -1,4 +1,5 @@
 """Tests for GET /api/ideas/{id}/session endpoint."""
+import os
 import pytest
 import json
 from pathlib import Path
@@ -161,3 +162,119 @@ class TestApiIdeasSession:
         assert len(body["messages"]) >= 1
         assert any(m.get("role") == "assistant" for m in body["messages"])
         assert "Recovered content" in body["prd_content"]
+
+    def test_get_session_reconciles_when_late_done_appears(self):
+        """408-style error + valid turns/n.done after attempt_start_wall heals on GET."""
+        client = load_server()
+        idea_id = "late-done-ok"
+        attempt_wall = 1000.0
+        session_data = {
+            "name": "Dr Problem",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "go",
+                    "ts": "2026-04-08T10:00:00Z",
+                    "ideas_turn": 3,
+                    "attempt_start_wall": attempt_wall,
+                    "sent_context": {
+                        "notes": [
+                            {
+                                "id": "ann-late-1",
+                                "section": "Open Questions",
+                                "comment": "test",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "role": "assistant",
+                    "error": True,
+                    "pending": False,
+                    "content": "Agent timed out — the model may be slow. You can retry.",
+                    "ts": "2026-04-08T10:10:00Z",
+                },
+            ],
+            "annotations": [
+                {
+                    "id": "ann-late-1",
+                    "section": "Open Questions",
+                    "comment": "test",
+                    "submitted": False,
+                },
+            ],
+            "prd_content": "# Before\n",
+            "created": "2026-04-08T10:00:00Z",
+            "updated": "2026-04-08T10:10:00Z",
+        }
+        self._write_session(idea_id, session_data)
+        idea_dir = self.ideas_dir / idea_id
+        (idea_dir / "prd_draft.md").write_text("# After heal\n")
+
+        with patch("ui.server.load_config", return_value=self._mock_config()):
+            r1 = client.get(f"/api/ideas/{idea_id}/session")
+        assert r1.status_code == 200
+        body1 = r1.json()
+        assert body1["messages"][-1].get("error") is True
+
+        turns = idea_dir / "turns"
+        turns.mkdir(parents=True, exist_ok=True)
+        (turns / "3.md").write_text("Healed from disk")
+        (turns / "3.done").write_text("ok")
+        os.utime(turns / "3.done", (2000, 2000))
+        os.utime(turns / "3.md", (2000, 2000))
+
+        with patch("ui.server.load_config", return_value=self._mock_config()):
+            r2 = client.get(f"/api/ideas/{idea_id}/session")
+        assert r2.status_code == 200
+        body2 = r2.json()
+        last = body2["messages"][-1]
+        assert last.get("error") is not True
+        assert "Healed from disk" in (last.get("content") or "")
+        assert all(a.get("id") != "ann-late-1" for a in (body2.get("annotations") or []))
+        assert "# After heal" in body2.get("prd_content", "")
+
+    def test_get_session_skips_reconcile_when_done_mtime_before_attempt(self):
+        """Stale .done (mtime before attempt_start_wall) does not heal the session."""
+        client = load_server()
+        idea_id = "late-done-stale"
+        attempt_wall = 1000.0
+        session_data = {
+            "name": "Stale",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "go",
+                    "ts": "2026-04-08T10:00:00Z",
+                    "ideas_turn": 2,
+                    "attempt_start_wall": attempt_wall,
+                    "sent_context": {"notes": []},
+                },
+                {
+                    "role": "assistant",
+                    "error": True,
+                    "pending": False,
+                    "content": "Agent timed out — the model may be slow. You can retry.",
+                    "ts": "2026-04-08T10:10:00Z",
+                },
+            ],
+            "annotations": [],
+            "prd_content": "# X\n",
+            "created": "2026-04-08T10:00:00Z",
+            "updated": "2026-04-08T10:10:00Z",
+        }
+        self._write_session(idea_id, session_data)
+        idea_dir = self.ideas_dir / idea_id
+        turns = idea_dir / "turns"
+        turns.mkdir(parents=True, exist_ok=True)
+        (turns / "2.md").write_text("Should not apply")
+        (turns / "2.done").write_text("old")
+        os.utime(turns / "2.done", (500, 500))
+        os.utime(turns / "2.md", (500, 500))
+
+        with patch("ui.server.load_config", return_value=self._mock_config()):
+            r = client.get(f"/api/ideas/{idea_id}/session")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["messages"][-1].get("error") is True
+        assert "Should not apply" not in (body["messages"][-1].get("content") or "")

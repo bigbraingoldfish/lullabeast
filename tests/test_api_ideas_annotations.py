@@ -206,9 +206,12 @@ def test_annotations_injected_into_message_turn(idea_id, config_patch, ideas_dir
     assert 'Section "Edge Cases": "Queue overflow"' in msg
 
 
-def test_annotations_marked_submitted_after_turn(idea_id, config_patch, ideas_dir):
-    """After a turn completes, injected annotations are marked submitted=True."""
-    client.post(f"/api/ideas/{idea_id}/annotations", json={"section": "Functional Requirements", "comment": "Add SSO"})
+def test_annotations_removed_after_successful_turn(idea_id, config_patch, ideas_dir):
+    """After a turn completes, consumed draft annotations are removed (fresh notes allowed)."""
+    client.post(
+        f"/api/ideas/{idea_id}/annotations",
+        json={"section": "Functional Requirements", "comment": "Add SSO"},
+    )
 
     async def fake_post(url, **kwargs):
         mock_resp = MagicMock()
@@ -226,6 +229,7 @@ def test_annotations_marked_submitted_after_turn(idea_id, config_patch, ideas_di
     (turns_dir / "2.done").write_text("done")
 
     import ui.server as srv
+
     orig_timeout = srv.POLL_TIMEOUT
     srv.POLL_TIMEOUT = 5
 
@@ -236,4 +240,129 @@ def test_annotations_marked_submitted_after_turn(idea_id, config_patch, ideas_di
     srv.POLL_TIMEOUT = orig_timeout
 
     annotations = client.get(f"/api/ideas/{idea_id}/annotations").json()
-    assert all(a["submitted"] is True for a in annotations)
+    assert annotations == []
+
+
+def test_annotations_drafts_preserved_on_message_timeout(tmp_path):
+    """408 timeout does not remove or submit draft annotations."""
+    ideas_dir = tmp_path / "ideas"
+    idea_id = str(uuid.uuid4())
+    idea_dir = Path(ideas_dir) / idea_id
+    idea_dir.mkdir(parents=True)
+    (idea_dir / "turns").mkdir()
+    session = {
+        "name": "Timeout",
+        "messages": [],
+        "prd_content": "",
+        "roadmap_content": "",
+        "annotations": [],
+        "created": "2026-01-01T00:00:00Z",
+        "updated": "2026-01-01T00:00:00Z",
+    }
+    (idea_dir / "session.json").write_text(json.dumps(session))
+    cfg = {**FAKE_CONFIG, "ideas_dir": str(ideas_dir)}
+
+    async def fake_post(url, **kwargs):
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read = AsyncMock(return_value=b"")
+        return mock_resp
+
+    fake_session = MagicMock()
+    fake_session.__aenter__ = AsyncMock(return_value=fake_session)
+    fake_session.__aexit__ = AsyncMock(return_value=False)
+    fake_session.post = AsyncMock(side_effect=fake_post)
+
+    async def fake_sleep(seconds):
+        return None
+
+    with patch("ui.server.load_config", return_value=cfg):
+        client.post(
+            f"/api/ideas/{idea_id}/annotations",
+            json={"section": "NFR", "comment": "preserve me"},
+        )
+        with patch("aiohttp.ClientSession", return_value=fake_session):
+            with patch("asyncio.create_task"):
+                with patch("ui.server.POLL_TIMEOUT", 2):
+                    with patch("asyncio.sleep", side_effect=fake_sleep):
+                        resp = client.post(
+                            f"/api/ideas/{idea_id}/message",
+                            json={"content": "slow", "turn": 1},
+                        )
+
+        assert resp.status_code == 408
+        annotations = client.get(f"/api/ideas/{idea_id}/annotations").json()
+        assert len(annotations) == 1
+        assert annotations[0]["submitted"] is False
+        assert annotations[0]["comment"] == "preserve me"
+
+
+def test_late_done_reconciliation_after_poll_false(tmp_path):
+    """Poll returns False but .done is newer than attempt start → 200 and drafts consumed."""
+    ideas_dir = tmp_path / "ideas"
+    idea_id = str(uuid.uuid4())
+    idea_dir = Path(ideas_dir) / idea_id
+    idea_dir.mkdir(parents=True)
+    (idea_dir / "turns").mkdir()
+    session = {
+        "name": "Late",
+        "messages": [],
+        "prd_content": "",
+        "roadmap_content": "",
+        "annotations": [],
+        "created": "2026-01-01T00:00:00Z",
+        "updated": "2026-01-01T00:00:00Z",
+    }
+    (idea_dir / "session.json").write_text(json.dumps(session))
+    cfg = {**FAKE_CONFIG, "ideas_dir": str(ideas_dir)}
+
+    real_gm = os.path.getmtime
+
+    def fake_gm(p):
+        if str(p).endswith("2.done"):
+            return 2000.0
+        return real_gm(p)
+
+    async def fake_post(url, **kwargs):
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read = AsyncMock(return_value=b"")
+        return mock_resp
+
+    fake_session = MagicMock()
+    fake_session.__aenter__ = AsyncMock(return_value=fake_session)
+    fake_session.__aexit__ = AsyncMock(return_value=False)
+    fake_session.post = AsyncMock(side_effect=fake_post)
+
+    turns_dir = idea_dir / "turns"
+    (turns_dir / "2.md").write_text("Recovered response")
+    (turns_dir / "2.done").write_text("done")
+
+    import ui.server as srv
+
+    orig_timeout = srv.POLL_TIMEOUT
+    srv.POLL_TIMEOUT = 5
+
+    with patch("ui.server.load_config", return_value=cfg):
+        client.post(
+            f"/api/ideas/{idea_id}/annotations",
+            json={"section": "API", "comment": "note"},
+        )
+        with patch("aiohttp.ClientSession", return_value=fake_session):
+            with patch("asyncio.create_task"):
+                with patch(
+                    "ui.server._poll_sentinel_with_idle_detect",
+                    AsyncMock(return_value=False),
+                ):
+                    with patch("ui.server.time.time", return_value=1000.0):
+                        with patch("ui.server.os.path.getmtime", side_effect=fake_gm):
+                            resp = client.post(
+                                f"/api/ideas/{idea_id}/message",
+                                json={"content": "Go", "turn": 2},
+                            )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json().get("response") == "Recovered response"
+        assert client.get(f"/api/ideas/{idea_id}/annotations").json() == []
+
+    srv.POLL_TIMEOUT = orig_timeout

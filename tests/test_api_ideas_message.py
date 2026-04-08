@@ -130,6 +130,71 @@ class TestApiIdeasMessage:
             assert "response" in body, f"Missing 'response' field: {body}"
             assert "prd_content" in body, f"Missing 'prd_content' field: {body}"
 
+    def test_user_message_persists_sent_context_and_strips_transport_from_bubble(self):
+        """session user row stores sent_context; plain content only; webhook still has annotations."""
+        client = load_server()
+        idea_id = "sentctx1"
+        ann_id = "ann-kpi-1"
+        sess_path = self.ideas_dir / idea_id / "session.json"
+        self._write_session(idea_id, {
+            "messages": [],
+            "prd_content": "",
+            "annotations": [
+                {
+                    "id": ann_id,
+                    "section": "Goals",
+                    "comment": "Clarify KPIs",
+                    "submitted": False,
+                },
+            ],
+            "created": "2026-03-19T10:00:00Z",
+            "updated": "2026-03-19T10:00:00Z",
+        })
+        self._write_turn_files(idea_id, 1, "Agent done", "# PRD\n")
+
+        captured: dict = {}
+
+        def capture_post(url, **kwargs):
+            captured["hook_message"] = (kwargs.get("json") or {}).get("message", "")
+            mock_resp = MagicMock()
+            mock_resp.status = 200
+            mock_resp.read = AsyncMock(return_value=b"")
+            mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+            mock_resp.__aexit__ = AsyncMock(return_value=None)
+            return mock_resp
+
+        mock_session = MagicMock()
+        mock_session.post = AsyncMock(side_effect=capture_post)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("ui.server.load_config", return_value=self._mock_config()):
+            with patch("ui.server.aiohttp.ClientSession", return_value=mock_session):
+                with patch("asyncio.create_task"):
+                    response = client.post(
+                        f"/api/ideas/{idea_id}/message",
+                        json={
+                            "content": "Please expand",
+                            "turn": 1,
+                            "attachment": {"filename": "extra.md", "content": "# Extra\n"},
+                        },
+                    )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body.get("sent_context", {}).get("notes", [{}])[0].get("section") == "Goals"
+        assert body["sent_context"]["attachment"]["filename"] == "extra.md"
+        assert "[USER ANNOTATIONS]" in captured.get("hook_message", "")
+
+        with open(sess_path) as f:
+            data = json.load(f)
+        users = [m for m in data.get("messages", []) if m.get("role") == "user"]
+        last_u = users[-1]
+        assert last_u["content"] == "Please expand"
+        assert "[USER ANNOTATIONS]" not in last_u["content"]
+        assert last_u["sent_context"]["notes"][0]["comment"] == "Clarify KPIs"
+        assert all(a.get("id") != ann_id for a in (data.get("annotations") or []))
+
     def test_parsed_prose_truncated_when_drafting_mid_message(self):
         """POST response parsed.prose excludes PRD body after mid-message DRAFTING: marker."""
         client = load_server()

@@ -149,3 +149,13 @@ class TestIdeasConversationRendering:
             r"marked\.parse\s*\(\s*bubbleText",
             func_body,
         ), "Assistant prose should render marked.parse(bubbleText) using parsed prose when available"
+
+    def test_user_message_renders_sent_context_chips(self):
+        """User bubbles show structured sent_context (notes/attachment), not raw transport markers."""
+        content = load_index_html()
+        func_body = extract_function_body(content, "IdeasScreen")
+        assert func_body is not None
+        assert "sent_context" in func_body, "IdeasScreen should reference msg.sent_context for traceability"
+        assert re.search(r"msg\.sent_context\.notes", func_body), (
+            "IdeasScreen should render note chips from sent_context.notes"
+        )
