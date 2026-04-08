@@ -13,7 +13,7 @@ FastAPI server (`server.py`) and a single-file React app (`index.html`) for the 
 ### Layout notes (Project Ideas)
 
 - **Main nav** (`Sidebar`): collapses to an icon-only abbreviated state (wider than a thin strip) and uses a centered divider toggle (`‹` / `›`) shared with the chats rail.
-- **Chats rail**: dedicated vertical list with per-row kebab menu (`⋮`) for destructive action (`Delete idea`). The rail can collapse to a compact width; width is intentionally wider than before to prevent divider/button overlap.
+- **Chats rail**: dedicated vertical list with per-row kebab menu (`⋮`) for row actions (`Rename idea`, `Delete idea`). Rename uses inline edit with Enter/Escape save/cancel behavior and persists via `PATCH /api/ideas/{id}`. The rail can collapse to a compact width; width is intentionally wider than before to prevent divider/button overlap.
 - **Action hierarchy**: `Generate Roadmap` is the primary CTA; `Continue to Setup →` appears only after roadmap generation; downloads moved into overflow menu (`⋮`) to reduce visual competition.
 - **PRD checklist + document**: right pane starts with a 12-row PRD completeness checklist (status + criticality) that scrolls to sections. Toggle allows showing/hiding empty section placeholders.
 - **Markdown rendering parity**: conversation assistant bubbles and PRD document pane both use `marked.parse()` + `dangerouslySetInnerHTML` with shared `.msg-md` styling (headers, lists, tables, code blocks).
