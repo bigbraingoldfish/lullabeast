@@ -122,12 +122,12 @@ def test_empty_string():
     assert result["questions"] == []
 
 
-def test_drafting_only_on_first_line():
-    # DRAFTING: on second line is treated as prose, not as the drafting marker
+def test_mid_message_drafting_truncates_prose_and_sets_drafting():
     content = "Some prose\nDRAFTING: Not a marker\nMore prose"
     result = _parse_agent_response(content)
-    assert result["drafting"] is None
-    assert "DRAFTING:" in result["prose"]
+    assert result["drafting"] == "Not a marker"
+    assert result["prose"] == "Some prose"
+    assert "More prose" not in result["prose"]
 
 
 def test_questions_with_prose_before_and_after():
@@ -179,3 +179,91 @@ def test_questions_numbered_question_lines():
     assert result["questions"][0]["options"] == ["Internal tooling", "Customer-facing product"]
     assert "region" in result["questions"][1]["text"].lower()
     assert result["questions"][1]["options"] == ["US", "EU"]
+
+
+FIXTURE_DRAFTING_MID_MESSAGE = """\
+Great — clear answers...
+Another line of intro.
+
+ASSUMPTION: First assumption for the session.
+ASSUMPTION: Second assumption for the session.
+
+DRAFTING: Full PRD Draft
+
+## 1. Problem Statement
+The product solves X.
+
+## 2. Goals
+Goal one and two.
+"""
+
+
+def test_drafting_mid_message_fixture():
+    result = _parse_agent_response(FIXTURE_DRAFTING_MID_MESSAGE)
+    assert result["drafting"] == "Full PRD Draft"
+    assert "## Problem Statement" not in result["prose"]
+    assert "Great — clear answers" in result["prose"]
+    assert result["prose"].strip() == result["prose"]
+    assert len(result["assumptions"]) == 2
+    assert "First assumption" in result["assumptions"][0]
+
+
+FIXTURE_MARKDOWN_QUESTIONS_HEADING = """\
+Intro line.
+
+## QUESTIONS
+**1. Game mode?**
+- Option A
+- Option B
+
+**2. Which platform?**
+- Web
+- Mobile
+"""
+
+
+def test_markdown_questions_heading_and_bold_numbers():
+    result = _parse_agent_response(FIXTURE_MARKDOWN_QUESTIONS_HEADING)
+    assert "Intro line." in result["prose"]
+    assert len(result["questions"]) == 2
+    assert "game mode" in result["questions"][0]["text"].lower()
+    assert result["questions"][0]["options"] == ["Option A", "Option B"]
+    assert "platform" in result["questions"][1]["text"].lower()
+    assert result["questions"][1]["options"] == ["Web", "Mobile"]
+
+
+def test_questions_heading_triple_hash_with_colon():
+    content = (
+        "### QUESTIONS:\n"
+        "1. Pick one?\n"
+        "- X\n"
+        "- Y\n"
+    )
+    result = _parse_agent_response(content)
+    assert len(result["questions"]) == 1
+    assert result["questions"][0]["options"] == ["X", "Y"]
+
+
+def test_questions_heading_bold_wrapped_word():
+    content = (
+        "**QUESTIONS**\n"
+        "1. First?\n"
+        "- A\n"
+    )
+    result = _parse_agent_response(content)
+    assert len(result["questions"]) == 1
+    assert result["questions"][0]["text"].lower().startswith("first")
+
+
+def test_drafting_line_one_mid_line_does_not_override_drafting():
+    content = """\
+DRAFTING: First Section
+Some prose after line-one drafting.
+
+DRAFTING: Should not replace
+Trailing line.
+"""
+    result = _parse_agent_response(content)
+    assert result["drafting"] == "First Section"
+    assert "Should not replace" in result["prose"]
+    assert "Trailing line." in result["prose"]

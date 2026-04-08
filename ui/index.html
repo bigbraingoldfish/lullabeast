@@ -1691,7 +1691,8 @@
                 const line = lines[i];
                 const stripped = line.trim();
                 const qu = stripped.toUpperCase();
-                if (qu === "QUESTIONS" || qu.startsWith("QUESTIONS:")) {
+                const quCore = qu.replace(/^[#*\s]+|[*:\s]+$/g, "");
+                if (quCore === "QUESTIONS") {
                     inQuestions = true;
                     flushQ();
                     i++;
@@ -1703,24 +1704,31 @@
                         const isSingle = stripped.startsWith("[SINGLE]");
                         const rest = stripped.slice(isSingle ? "[SINGLE]".length : "[MULTI]".length).trim();
                         current = { type: isSingle ? "single" : "multi", text: rest, options: [] };
-                    } else if (/^\d+[\.\)]\s+/.test(stripped)) {
-                        flushQ();
-                        const qtext = stripped.replace(/^\d+[\.\)]\s+/, "").trim();
-                        current = { type: "single", text: qtext, options: [] };
-                    } else if ((stripped.startsWith("- ") || stripped.startsWith("* ")) && current) {
-                        current.options.push(stripped.slice(2).trim());
-                    } else if (!stripped) {
-                        /* keep */
-                    } else if (!current && stripped && !stripped.startsWith("[")) {
-                        current = { type: "single", text: stripped, options: [] };
                     } else {
-                        flushQ();
-                        inQuestions = false;
-                        if (line.startsWith("ASSUMPTION:")) assumptions.push(line.slice("ASSUMPTION:".length).trim());
-                        else proseLines.push(line);
+                        const cleanStripped = stripped.replace(/^\*+/, "");
+                        if (/^\d+[\.\)]\s+/.test(cleanStripped)) {
+                            flushQ();
+                            const qtext = cleanStripped.replace(/^\d+[\.\)]\s+/, "").replace(/\*+$/, "").trim();
+                            current = { type: "single", text: qtext, options: [] };
+                        } else if ((stripped.startsWith("- ") || stripped.startsWith("* ")) && current) {
+                            current.options.push(stripped.slice(2).trim());
+                        } else if (!stripped) {
+                            /* keep */
+                        } else if (!current && stripped && !stripped.startsWith("[")) {
+                            current = { type: "single", text: stripped, options: [] };
+                        } else {
+                            flushQ();
+                            inQuestions = false;
+                            if (line.startsWith("ASSUMPTION:")) assumptions.push(line.slice("ASSUMPTION:".length).trim());
+                            else proseLines.push(line);
+                        }
                     }
                     i++;
                     continue;
+                }
+                if (!inQuestions && drafting === null && stripped.startsWith("DRAFTING:")) {
+                    drafting = stripped.slice("DRAFTING:".length).trim();
+                    break;
                 }
                 if (line.startsWith("ASSUMPTION:")) {
                     assumptions.push(line.slice("ASSUMPTION:".length).trim());
@@ -2928,7 +2936,12 @@
                                                 </div>
                                             ))}
                                             {/* Prose bubble + elapsed timer while pending */}
-                                            {(msg.content || "").trim().length > 0 && (
+                                            {(() => {
+                                                const bubbleText =
+                                                    !msg.pending && !msg.error && msg.parsed != null && msg.parsed.prose != null
+                                                        ? msg.parsed.prose
+                                                        : (msg.content || "");
+                                                return (bubbleText || "").trim().length > 0 ? (
                                                 <div className="flex flex-row items-stretch gap-1 w-full min-w-0">
                                                     <div
                                                         className={`msg-md rounded px-3 py-2 text-sm min-w-0 flex-1 ${
@@ -2941,15 +2954,16 @@
                                                         dangerouslySetInnerHTML={{
                                                             __html:
                                                                 typeof marked !== "undefined" && marked.parse
-                                                                    ? marked.parse(msg.content || "", { breaks: true })
-                                                                    : String(msg.content || "")
+                                                                    ? marked.parse(bubbleText || "", { breaks: true })
+                                                                    : String(bubbleText || "")
                                                                           .replace(/&/g, "&amp;")
                                                                           .replace(/</g, "&lt;"),
                                                         }}
                                                     />
                                                     {msg.pending && <ChatElapsedSeconds startTs={msg.ts} />}
                                                 </div>
-                                            )}
+                                                ) : null;
+                                            })()}
                                             {/* Question flow — shown for the last assistant message if questions present and not yet answered */}
                                             {msg.parsed && msg.parsed.questions && msg.parsed.questions.length > 0 && !answeredFlowIds.has(msg.id) && (
                                                 <QuestionFlow

@@ -70,7 +70,11 @@ When you are about to write or update a PRD section, begin your response with:
 ```
 DRAFTING: {Section Name}
 ```
-This line is not shown to the user — the frontend uses it to show a "currently drafting" indicator. It must be the very first line of your response file when used.
+This line is not shown to the user — the frontend uses it to show a "currently drafting" indicator. It must be the **very first line** of your response file (`turns/{n}.md`) when you use it. Nothing may precede it: no conversational prose, no `ASSUMPTION:` lines, no headings. If you have already written introductory prose or assumptions in this turn file, **do not** add `DRAFTING:` in the same file; rely on updates to `prd_draft.md` and the PRD tab instead.
+
+### Response file vs PRD file
+
+Your `turns/{n}.md` file is for conversational prose only: short summary, `ASSUMPTION:` lines, and structured `QUESTIONS` blocks as needed. **Never** paste full PRD section bodies or the 12-section template into `turns/{n}.md`. The full PRD lives in `prd_draft.md`. The chat bubble should reflect your intent and clarifications, not a duplicate of the PRD.
 
 ### ASSUMPTION Declaration
 
@@ -99,6 +103,13 @@ QUESTIONS:
 ```
 
 Use `[SINGLE]` when only one answer is valid. Use `[MULTI]` when multiple selections make sense. Always include 2–4 options. The user can also provide a free-text answer instead of selecting an option.
+
+**Format the header for parsers:** use a plain `QUESTIONS:` line (or `QUESTIONS` on its own line). Avoid markdown-only headings and bold-wrapped numbering for the block header and question numbers, even if the UI sometimes tolerates them.
+
+| Avoid (fragile) | Prefer (reliable) |
+|-----------------|-------------------|
+| `## QUESTIONS` then `**1. Question?**` | `QUESTIONS:` then `[SINGLE]` / `[MULTI]` or `1. Question text` on its own line |
+| `### QUESTIONS:` as the only signal | `QUESTIONS:` as the first line of the block |
 
 You may include a QUESTIONS block alongside prose in the same response. You may also emit a response that is purely a QUESTIONS block with no prose. Do not use QUESTIONS blocks for open-ended conversational questions — only for structured choices where options help the user answer faster and more precisely.
 
