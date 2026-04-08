@@ -1941,6 +1941,7 @@
             const [answeredFlowIds, setAnsweredFlowIds] = useState(new Set());
             const draftingTimerRef = useRef(null);
             const [annotations, setAnnotations] = useState([]);
+            const [hiddenNoteIdsForSend, setHiddenNoteIdsForSend] = useState(() => new Set());
             const [editingAnnotationSection, setEditingAnnotationSection] = useState(null);
             const [annotationDraft, setAnnotationDraft] = useState("");
             const [openAnnotationBubble, setOpenAnnotationBubble] = useState(null);
@@ -1960,6 +1961,7 @@
             const messagesEndRef = useRef(null);
             const readinessPollRef = useRef(null);
             const notificationPollRef = useRef(null);
+            const lateHealPollRef = useRef(null);
             const docPaneRef = useRef(null);
             const [splitPct, setSplitPct] = useState(45);
             const dragRef = useRef({ dragging: false });
@@ -1977,6 +1979,10 @@
             const [formatInvalidDetail, setFormatInvalidDetail] = useState("");
             const [fixFormatLoading, setFixFormatLoading] = useState(false);
             const [operationMetrics, setOperationMetrics] = useState({});
+
+            const visibleDraftAnnotations = annotations.filter(
+                (a) => !a.submitted && !hiddenNoteIdsForSend.has(a.id)
+            );
 
             const stopReadinessPoll = () => {
                 if (readinessPollRef.current) {
@@ -2017,6 +2023,15 @@
                     if (pollCount >= maxPolls) stopNotificationPoll();
                 }, 5000);
             };
+
+            const stopLateHealPoll = () => {
+                if (lateHealPollRef.current) {
+                    clearInterval(lateHealPollRef.current);
+                    lateHealPollRef.current = null;
+                }
+            };
+
+            useEffect(() => () => stopLateHealPoll(), [currentIdeaId]);
 
             const startReadinessPoll = (ideaId) => {
                 stopReadinessPoll();
@@ -2132,6 +2147,7 @@
                 setReadinessTimedOut(false);
                 setHadReadyReadiness(false);
                 setAnnotations([]);
+                setHiddenNoteIdsForSend(() => new Set());
                 setEditingAnnotationSection(null);
                 setAnnotationDraft("");
                 setOpenAnnotationBubble(null);
@@ -2229,6 +2245,18 @@
                     });
             };
 
+            const buildOptimisticSentContext = (draftList, att) => {
+                const notes = (draftList || []).map((a) => ({
+                    id: a.id,
+                    section: a.section || "",
+                    comment: a.comment || "",
+                }));
+                const sc = {};
+                if (notes.length) sc.notes = notes;
+                if (att && att.filename) sc.attachment = { filename: att.filename };
+                return Object.keys(sc).length ? sc : null;
+            };
+
             const submitMessage = (overrideText) => {
                 const t = (overrideText !== undefined ? overrideText : inputText).trim();
                 if (!t || isLoading || !currentIdeaId) return;
@@ -2237,10 +2265,20 @@
                 const userMsgId = `u-${Date.now()}`;
                 const assistantPendingId = `a-${Date.now()}`;
                 const nowIso = new Date().toISOString();
-                const attachment = stagedAttachment;
+                const draftSnap = annotations.filter((a) => !a.submitted);
+                const attachmentSnap = stagedAttachment;
+                const optimisticSentContext = buildOptimisticSentContext(draftSnap, attachmentSnap);
+                const userRow = {
+                    id: userMsgId,
+                    role: "user",
+                    content: t,
+                    ts: nowIso,
+                    ...(optimisticSentContext ? { sent_context: optimisticSentContext } : {}),
+                };
+                setHiddenNoteIdsForSend(() => new Set(draftSnap.map((a) => a.id)));
                 setMessages((prev) => [
                     ...prev,
-                    { id: userMsgId, role: "user", content: t, ts: nowIso },
+                    userRow,
                     { id: assistantPendingId, role: "assistant", content: "Working on your request...", ts: nowIso, pending: true },
                 ]);
                 if (overrideText === undefined) setInputText("");
@@ -2249,7 +2287,7 @@
                 setIsLoading(true);
                 isLoadingRef.current = true;
                 const body = { content: t, turn };
-                if (attachment) body.attachment = attachment;
+                if (attachmentSnap) body.attachment = attachmentSnap;
                 fetch(`/api/ideas/${currentIdeaId}/message`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -2260,6 +2298,7 @@
                         return r.json();
                     })
                     .then((data) => {
+                        stopLateHealPoll();
                         let parsed = data.parsed || null;
                         if (data.response) {
                             const clientParsed = parseAgentResponseClient(data.response);
@@ -2285,6 +2324,7 @@
                         setReadinessData(null);
                         setReadinessTimedOut(false);
                         startReadinessPoll(currentIdeaId);
+                        setHiddenNoteIdsForSend(() => new Set());
                         refreshAnnotations(currentIdeaId);
                         refreshIdeas();
                         fetchPrdSectionDiff(currentIdeaId);
@@ -2312,9 +2352,52 @@
                                     : m
                             )
                         );
-                        setStagedAttachment(null);
+                        setHiddenNoteIdsForSend(() => new Set());
+                        setStagedAttachment(attachmentSnap);
                         setIsLoading(false);
                         isLoadingRef.current = false;
+                        if (status === 408) {
+                            stopLateHealPoll();
+                            const healIdeaId = currentIdeaId;
+                            const maxHealPolls = 24;
+                            let healTicks = 0;
+                            lateHealPollRef.current = setInterval(() => {
+                                healTicks += 1;
+                                if (!healIdeaId || healTicks > maxHealPolls) {
+                                    stopLateHealPoll();
+                                    return;
+                                }
+                                fetch(`/api/ideas/${healIdeaId}/session`)
+                                    .then((r) => r.json())
+                                    .then((d) => {
+                                        const rawMsgs = d.messages || [];
+                                        const anyAsstErr = rawMsgs.some(
+                                            (m) => m.role === "assistant" && m.error
+                                        );
+                                        if (!anyAsstErr) {
+                                            stopLateHealPoll();
+                                            setStagedAttachment(null);
+                                            setHiddenNoteIdsForSend(() => new Set());
+                                            setMessages(
+                                                rawMsgs.map((m, idx) => ({
+                                                    ...m,
+                                                    id:
+                                                        m.id ||
+                                                        `${m.role}-${idx}-${(m.ts || "").slice(0, 19) || idx}`,
+                                                }))
+                                            );
+                                            setPrdContent(d.prd_content || "");
+                                            refreshAnnotations(healIdeaId);
+                                            fetchPrdSectionDiff(healIdeaId);
+                                            setReadinessStatus("updating");
+                                            setReadinessData(null);
+                                            setReadinessTimedOut(false);
+                                            startReadinessPoll(healIdeaId);
+                                        }
+                                    })
+                                    .catch(() => {});
+                            }, 5000);
+                        }
                     });
             };
 
@@ -2331,6 +2414,7 @@
                     .then((d) => {
                         setCurrentIdeaId(d.id);
                         setMessages([]);
+                        setHiddenNoteIdsForSend(() => new Set());
                         setPrdContent("");
                         setRoadmapContent("");
                         setInputText("");
@@ -2357,6 +2441,7 @@
                 setSessionModalIdeaId(null);
                 setUserFirstTurnPending(true);
                 setMessages([]);
+                setHiddenNoteIdsForSend(() => new Set());
                 setIsLoading(false);
                 setSessionModalBusy(false);
             };
@@ -2916,15 +3001,38 @@
                                 <div key={msg.id || i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
                                     {msg.role === "user" ? (
                                         <div className="max-w-[95%] flex flex-col items-end gap-1">
-                                            <div className="rounded px-3 py-2 text-sm bg-[#00b4d8]/20 text-slate-100">
+                                            <div className="rounded px-3 py-2 text-sm bg-[#00b4d8]/20 text-slate-100 whitespace-pre-wrap">
                                                 {msg.content}
                                             </div>
-                                            {msg.attachment_label && (
+                                            {msg.sent_context && (msg.sent_context.notes || msg.sent_context.attachment) ? (
+                                                <div className="flex flex-col items-end gap-1 max-w-full">
+                                                    {msg.sent_context.notes && msg.sent_context.notes.length > 0 && (
+                                                        <div className="flex flex-wrap justify-end gap-1">
+                                                            {msg.sent_context.notes.map((note, ni) => (
+                                                                <span
+                                                                    key={note.id || ni}
+                                                                    className="inline-flex max-w-[220px] px-2 py-0.5 rounded border border-amber-800/50 bg-amber-950/25 text-[10px] text-amber-200/90"
+                                                                    title={note.comment || ""}
+                                                                >
+                                                                    <span className="truncate">{note.section || "Section"}</span>
+                                                                </span>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                    {msg.sent_context.attachment && msg.sent_context.attachment.filename ? (
+                                                        <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-[#1a1d21] border border-[#2a2d31] text-xs text-slate-400">
+                                                            <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
+                                                            <span className="truncate max-w-[200px]">{msg.sent_context.attachment.filename}</span>
+                                                        </div>
+                                                    ) : null}
+                                                </div>
+                                            ) : null}
+                                            {msg.attachment_label && !msg.sent_context ? (
                                                 <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-[#1a1d21] border border-[#2a2d31] text-xs text-slate-400">
                                                     <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
                                                     <span>{msg.attachment_label}</span>
                                                 </div>
-                                            )}
+                                            ) : null}
                                         </div>
                                     ) : (
                                         <div className="max-w-[95%] w-full flex flex-col gap-1">
@@ -3017,7 +3125,7 @@
                             {uploadSpinner && <p className="text-slate-500 text-xs">Synthesizing document…</p>}
                             {uploadError && <p className="text-red-400 text-xs">{uploadError}</p>}
                             {/* Staged attachment pill + annotation pill */}
-                            {(stagedAttachment || annotations.filter((a) => !a.submitted).length > 0) && (
+                            {(stagedAttachment || visibleDraftAnnotations.length > 0) && (
                                 <div className="flex flex-wrap gap-1.5">
                                     {stagedAttachment && (
                                         <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-[#1a1d21] border border-[#2a2d31] text-xs text-slate-300">
@@ -3026,10 +3134,10 @@
                                             <button type="button" onClick={() => setStagedAttachment(null)} className="text-slate-500 hover:text-slate-200 ml-0.5">✕</button>
                                         </div>
                                     )}
-                                    {annotations.filter((a) => !a.submitted).length > 0 && (
+                                    {visibleDraftAnnotations.length > 0 && (
                                         <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-amber-950/30 border border-amber-700/40 text-xs text-amber-300">
                                             <span>✎</span>
-                                            <span>{annotations.filter((a) => !a.submitted).length} section note{annotations.filter((a) => !a.submitted).length !== 1 ? "s" : ""} ready</span>
+                                            <span>{visibleDraftAnnotations.length} section note{visibleDraftAnnotations.length !== 1 ? "s" : ""} ready</span>
                                         </div>
                                     )}
                                 </div>
@@ -3144,7 +3252,7 @@
                                                     : isRemovedDiff
                                                       ? "*Section removed from current draft.*"
                                                       : `*Empty - start a conversation to populate this section.*`;
-                                            const sectionAnnotation = annotations.find((a) => a.section === title);
+                                            const sectionAnnotation = visibleDraftAnnotations.find((a) => a.section === title);
                                             const isEditing = editingAnnotationSection === title;
                                             const diffStatus = diffEntry ? diffEntry.status : null;
                                             const showDiffChrome = !isLoading && !!diffEntry;
