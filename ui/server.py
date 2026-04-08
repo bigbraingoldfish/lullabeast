@@ -3259,6 +3259,36 @@ def post_ideas():
     return {"id": idea_id}
 
 
+class RenameIdeaRequest(BaseModel):
+    name: str
+
+
+@app.patch("/api/ideas/{idea_id}")
+def patch_ideas(idea_id: str, body: RenameIdeaRequest):
+    """Rename an idea document.
+
+    Body: {"name": str}
+    Returns 404 if idea does not exist, 400 for empty/whitespace-only names.
+    """
+    config = load_config()
+    ideas_dir = Path(config.get("ideas_dir") or "")
+    idea_path = Path(ideas_dir) / idea_id
+    session_path = idea_path / "session.json"
+
+    if not idea_path.exists():
+        raise HTTPException(status_code=404, detail="Idea not found")
+
+    new_name = (body.name or "").strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="Idea name cannot be empty")
+
+    session_data = _read_json_file(str(session_path)) if session_path.exists() else _default_idea_session()
+    session_data["name"] = new_name
+    session_data["updated"] = datetime.utcnow().isoformat() + "Z"
+    _atomic_write_json_file(session_path, session_data)
+    return {"ok": True, "id": idea_id, "name": new_name}
+
+
 @app.delete("/api/ideas/{idea_id}")
 def delete_ideas(idea_id: str):
     """Delete an idea document and all its contents.

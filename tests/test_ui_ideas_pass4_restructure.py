@@ -67,6 +67,9 @@ def test_chat_rows_have_kebab_delete_entry():
     func_body = extract_function_body(content, "IdeasScreen")
     assert func_body is not None
     assert "activeIdeaMenuId" in func_body
+    assert "Rename idea" in func_body
+    assert "renamingIdeaId" in func_body
+    assert "setRenameDraft" in func_body
     assert "Delete idea" in func_body
     assert "Idea actions" in func_body
 
