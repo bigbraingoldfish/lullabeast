@@ -3,3 +3,4 @@ fastapi==0.135.1
 uvicorn[standard]==0.42.0
 python-multipart==0.0.22
 aiohttp==3.13.3
+requests>=2.31.0
