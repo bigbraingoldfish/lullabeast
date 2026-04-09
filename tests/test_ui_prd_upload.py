@@ -1,5 +1,4 @@
-"""Tests for PRD upload UI in IdeasScreen."""
-import pytest
+"""Tests for IdeasScreen new-session UX and chat attachment (no upload-synthesis modal)."""
 import re
 
 
@@ -9,7 +8,7 @@ def extract_function_body(html_content, func_name):
     Handles both `function name() {}` and `function name(args) {}` forms.
     """
     match = re.search(
-        rf'\n([ \t]*)function {re.escape(func_name)}\s*\([^)]*\)\s*\{{',
+        rf"\n([ \t]*)function {re.escape(func_name)}\s*\([^)]*\)\s*\{{",
         html_content,
     )
     if not match:
@@ -17,13 +16,13 @@ def extract_function_body(html_content, func_name):
     indent = match.group(1)
     body_start = match.end()
     remainder = html_content[body_start:]
-    next_fn = re.search(rf'\n\n{re.escape(indent)}function \w', remainder)
+    next_fn = re.search(rf"\n\n{re.escape(indent)}function \w", remainder)
     if next_fn:
-        candidate = remainder[:next_fn.start()]
+        candidate = remainder[: next_fn.start()]
     else:
-        script_end = re.search(r'\n\s*</script>', remainder)
-        candidate = remainder[:script_end.start()] if script_end else remainder
-    last_close = candidate.rfind(f'\n{indent}}}')
+        script_end = re.search(r"\n\s*</script>", remainder)
+        candidate = remainder[: script_end.start()] if script_end else remainder
+    last_close = candidate.rfind(f"\n{indent}}}")
     if last_close != -1:
         return candidate[:last_close]
     return candidate
@@ -34,175 +33,105 @@ def load_index_html():
         return f.read()
 
 
-class TestUploadStateVariables:
-    """pass_criteria: Frontend IdeasScreen file input accepts only .md files
-    client-side; submitting a non-.md file does not call the upload endpoint."""
+class TestNoSessionStartModal:
+    """Dedicated upload modal and synthesis entry point removed."""
 
-    def test_has_upload_error_state(self):
-        """IdeasScreen declares uploadError state variable."""
+    def test_no_start_new_idea_modal_copy(self):
+        content = load_index_html()
+        assert "Start a new idea" not in content
+        assert "Upload existing documentation" not in content
+
+    def test_no_session_start_modal_component(self):
+        content = load_index_html()
+        assert "SessionStartModal" not in content
+
+    def test_no_modal_state_in_ideas_screen(self):
         content = load_index_html()
         func_body = extract_function_body(content, "IdeasScreen")
-        assert func_body is not None, "IdeasScreen function body not extracted"
-        assert "uploadError" in func_body, \
-            "IdeasScreen should track uploadError state"
-
-    def test_has_upload_spinner_state(self):
-        """IdeasScreen declares uploadSpinner state variable."""
-        content = load_index_html()
-        func_body = extract_function_body(content, "IdeasScreen")
-        assert "uploadSpinner" in func_body, \
-            "IdeasScreen should track uploadSpinner state"
-
-    def test_has_clarity_pass_state(self):
-        """IdeasScreen declares clarityPass state variable (null | true | false)."""
-        content = load_index_html()
-        func_body = extract_function_body(content, "IdeasScreen")
-        assert "clarityPass" in func_body, \
-            "IdeasScreen should track clarityPass state"
-
-    def test_has_clarity_issues_state(self):
-        """IdeasScreen declares clarityIssues state variable."""
-        content = load_index_html()
-        func_body = extract_function_body(content, "IdeasScreen")
-        assert "clarityIssues" in func_body, \
-            "IdeasScreen should track clarityIssues state"
-
-    def test_has_clarity_missing_state(self):
-        """IdeasScreen declares clarityMissing state variable."""
-        content = load_index_html()
-        func_body = extract_function_body(content, "IdeasScreen")
-        assert "clarityMissing" in func_body, \
-            "IdeasScreen should track clarityMissing state"
-
-
-class TestUploadClientSideValidation:
-    """pass_criteria: Frontend IdeasScreen file input accepts only .md files
-    client-side; submitting a non-.md file does not call the upload endpoint."""
-
-    def test_file_input_has_accept_md(self):
-        """File input has accept='.md' attribute."""
-        content = load_index_html()
-        assert re.search(r'accept\s*=\s*["\']\.md["\']', content), \
-            "File input should have accept='.md' attribute"
-
-    def test_handle_file_change_rejects_non_md(self):
-        """handleFileChange validates .md extension and sets uploadError on non-.md."""
-        content = load_index_html()
-        func_body = extract_function_body(content, "handleFileChange")
-        assert func_body is not None, "handleFileChange function not found"
-
-        # Should check for .md extension
-        assert re.search(r'\.md', func_body), \
-            "handleFileChange should check for .md extension"
-
-        # Should set uploadError for non-.md
-        assert re.search(r'set\w*Error.*?\.md', func_body, re.DOTALL), \
-            "handleFileChange should set uploadError for non-.md files"
-
-    def test_non_md_early_return_before_fetch(self):
-        """handleFileChange returns early for non-.md before any fetch call."""
-        content = load_index_html()
-        func_body = extract_function_body(content, "handleFileChange")
         assert func_body is not None
-
-        # Find index of first fetch call
-        fetch_match = re.search(r'fetch\s*\(', func_body)
-        md_check_match = re.search(r'\.md', func_body)
-
-        if fetch_match and md_check_match:
-            # The .md check should come before the fetch call
-            assert md_check_match.start() < fetch_match.start(), \
-                "Extension check should come before fetch call"
+        assert "showSessionModal" not in func_body
+        assert "sessionModalIdeaId" not in func_body
+        assert "sessionModalBusy" not in func_body
 
 
-class TestUploadApiCall:
-    """IdeasScreen calls POST /api/ideas/{id}/upload on .md file submit."""
+class TestNewIdeaGoesStraightToConversation:
+    """+ New opens chat with first-turn placeholder; no modal."""
 
-    def test_handle_file_change_posts_to_upload_endpoint(self):
-        """handleFileChange fetches POST /api/ideas/{id}/upload."""
+    def test_new_idea_sets_user_first_turn_pending(self):
         content = load_index_html()
-        func_body = extract_function_body(content, "handleFileChange")
-        assert func_body is not None, "handleFileChange function not found"
-
-        assert re.search(r'fetch\s*\(\s*`[^`]*\/upload`', func_body) or \
-               re.search(r'fetch\s*\(\s*["\'][^"\']*\/upload', func_body), \
-            "handleFileChange should POST to /api/ideas/{id}/upload"
-
-    def test_uses_formdata_for_multipart_upload(self):
-        """handleFileChange uses FormData for the upload."""
-        content = load_index_html()
-        func_body = extract_function_body(content, "handleFileChange")
+        func_body = extract_function_body(content, "IdeasScreen")
         assert func_body is not None
-        assert "FormData" in func_body, \
-            "handleFileChange should use FormData for multipart upload"
+        m = re.search(r"const newIdea\s*=\s*\(\)\s*=>\s*\{", func_body)
+        assert m, "const newIdea = () => { not found inside IdeasScreen"
+        chunk = func_body[m.start() : m.start() + 1500]
+        assert "setUserFirstTurnPending(true)" in chunk
+        assert "setShowSessionModal" not in chunk
+        assert "setSessionModalIdeaId" not in chunk
 
-
-class TestClarityCheckIntegration:
-    """On 200 response (format_ok), IdeasScreen auto-invokes
-    POST /api/ideas/{id}/clarity-check and polls for result."""
-
-    def test_trigger_clarity_check_function_exists(self):
-        """IdeasScreen has triggerClarityCheck function."""
+    def test_empty_state_tell_us_about_idea(self):
         content = load_index_html()
-        func_body = extract_function_body(content, "triggerClarityCheck")
-        assert func_body is not None, "triggerClarityCheck function not found"
+        assert "Tell us about your idea" in content
+        assert "userFirstTurnPending" in content and "messages.length === 0" in content
 
-    def test_trigger_clarity_check_posts_to_clarity_check_endpoint(self):
-        """triggerClarityCheck fetches POST /api/ideas/{id}/clarity-check."""
+
+class TestNoUploadSynthesisClient:
+    """No multipart /upload or clarity-check trigger in the frontend."""
+
+    def test_no_handle_file_change(self):
         content = load_index_html()
-        func_body = extract_function_body(content, "triggerClarityCheck")
+        assert "handleFileChange" not in content
+
+    def test_no_trigger_clarity_check(self):
+        content = load_index_html()
+        assert "triggerClarityCheck" not in content
+
+    def test_no_ideas_multipart_upload_fetch(self):
+        content = load_index_html()
+        assert not re.search(r"/ideas/\$\{[^}]+\}/upload", content), (
+            "IdeasScreen should not fetch /api/ideas/.../upload"
+        )
+
+    def test_no_clarity_pass_ui_state_in_ideas_screen(self):
+        content = load_index_html()
+        func_body = extract_function_body(content, "IdeasScreen")
         assert func_body is not None
+        assert "clarityPass" not in func_body
+        assert "clarityIssues" not in func_body
+        assert "clarityMissing" not in func_body
+        assert "uploadError" not in func_body
+        assert "uploadSpinner" not in func_body
 
-        assert re.search(r'fetch\s*\(\s*`[^`]*\/clarity-check`', func_body) or \
-               re.search(r'fetch\s*\(\s*["\'][^"\']*\/clarity-check', func_body), \
-            "triggerClarityCheck should POST to /api/ideas/{id}/clarity-check"
 
-    def test_upload_success_triggers_clarity_check(self):
-        """handleFileChange calls triggerClarityCheck on successful upload (200)."""
+class TestChatAttachmentPathPreserved:
+    """Composer still stages .md and sends attachment with POST /message."""
+
+    def test_attach_file_input_accept_md(self):
         content = load_index_html()
-        func_body = extract_function_body(content, "handleFileChange")
+        assert "attachFileRef" in content
+        assert re.search(
+            r"attachFileRef[\s\S]{0,160}accept=\{?[\"']\.md[\"']\}?",
+            content,
+        ), "attachFileRef file input should accept .md"
+
+    def test_submit_message_includes_attachment_snap(self):
+        content = load_index_html()
+        func_body = extract_function_body(content, "IdeasScreen")
         assert func_body is not None
+        m = re.search(r"const submitMessage\s*=\s*\(", func_body)
+        assert m, "const submitMessage not found inside IdeasScreen"
+        chunk = func_body[m.start() : m.start() + 2200]
+        assert "stagedAttachment" in chunk
+        assert "attachmentSnap" in chunk
+        assert "body.attachment" in chunk
 
-        assert "triggerClarityCheck" in func_body, \
-            "handleFileChange should call triggerClarityCheck on 200 response"
 
+class TestNoClarityBadgesInDom:
+    """Upload-driven clarity badges removed from PRD pane."""
 
-class TestReadyToConvertBadge:
-    """pass_criteria: Frontend IdeasScreen shows 'ready to convert' badge
-    after a successful clarity-check pass response."""
-
-    def test_shows_badge_when_clarity_pass_true(self):
-        """PRD pane header shows 'ready to convert' badge when clarityPass === true."""
+    def test_no_ready_to_convert_clarity_badge(self):
         content = load_index_html()
-        assert "ready to convert" in content, \
-            "IdeasScreen should display 'ready to convert' badge text"
+        assert "ready to convert" not in content
 
-    def test_badge_conditional_on_clarity_pass_true(self):
-        """'ready to convert' badge renders only when clarityPass === true."""
+    def test_no_needs_revision_clarity_badge(self):
         content = load_index_html()
-        assert re.search(r"clarityPass\s*===\s*true", content) or \
-               re.search(r"clarityPass\s*===\s*!0", content), \
-            "Badge should be conditional on clarityPass === true"
-
-
-class TestClarityFailDisplay:
-    """pass_criteria: Frontend IdeasScreen shows missing_sections list
-    after a failing pass=false response."""
-
-    def test_shows_needs_revision_badge_when_pass_false(self):
-        """PRD pane shows 'needs revision' badge when clarityPass === false."""
-        content = load_index_html()
-        assert "needs revision" in content, \
-            "IdeasScreen should display 'needs revision' badge text"
-
-    def test_displays_missing_sections_list(self):
-        """PRD pane shows missing_sections list after pass=false."""
-        content = load_index_html()
-        assert "clarityMissing" in content, \
-            "IdeasScreen should display clarityMissing sections list"
-
-    def test_displays_clarity_issues_list(self):
-        """PRD pane shows issues list after pass=false."""
-        content = load_index_html()
-        assert "clarityIssues" in content, \
-            "IdeasScreen should display clarityIssues list"
+        assert "needs revision" not in content

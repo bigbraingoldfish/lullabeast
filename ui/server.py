@@ -508,7 +508,6 @@ def _idea_paths_for_messages(config: dict, idea_id: str) -> dict[str, str]:
         "adversarial_done": str(d / "adversarial_report.done"),
         "clarity_result": str(d / "clarity_result.json"),
         "clarity_done": str(d / "clarity_result.done"),
-        "uploaded_seed": str(d / "uploaded_seed.md"),
     }
 
 
@@ -3573,114 +3572,6 @@ def download_ideas(idea_id: str):
         media_type="text/markdown; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
-
-
-@app.post("/api/ideas/{idea_id}/upload")
-async def post_ideas_upload(
-    idea_id: str,
-    file: UploadFile = File(...),
-):
-    """Upload any .md file, write uploaded_seed.md, trigger synthesis webhook, poll sentinel.
-
-    Does not reject for template/format — the agent synthesizes into the canonical PRD structure.
-    """
-    filename = file.filename or ""
-    if not filename.lower().endswith(".md"):
-        raise HTTPException(
-            status_code=400,
-            detail="Only .md files are accepted",
-        )
-
-    content = await file.read()
-    try:
-        text = content.decode("utf-8")
-    except UnicodeDecodeError:
-        raise HTTPException(status_code=400, detail="File must be valid UTF-8 text")
-
-    if not text.strip():
-        raise HTTPException(status_code=400, detail="File must be non-empty")
-
-    config = load_config()
-    ideas_dir = Path(config.get("ideas_dir") or "")
-    hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
-    hooks_token = config.get("hooks_token", "")
-    idea_dir = Path(ideas_dir) / idea_id
-
-    if not idea_dir.exists():
-        raise HTTPException(status_code=404, detail="Idea not found")
-
-    # Atomic write: uploaded_seed.md
-    seed_path = idea_dir / "uploaded_seed.md"
-    tmp_seed = str(seed_path) + ".tmp"
-    with open(tmp_seed, "w") as f:
-        f.write(text)
-    os.replace(tmp_seed, seed_path)
-
-    # Next available turn index for sentinel polling (avoid colliding with chat turns)
-    turns_dir = idea_dir / "turns"
-    turns_dir.mkdir(parents=True, exist_ok=True)
-    upload_turn = 1
-    while (turns_dir / f"{upload_turn}.done").exists():
-        upload_turn += 1
-
-    session_key = f"ideas:{idea_id}:upload-{upload_turn}"
-    ip = _idea_paths_for_messages(config, idea_id)
-    webhook_payload = {
-        "agentId": WEBHOOK_AGENT_ID,
-        "sessionKey": session_key,
-        "wakeMode": "now",
-        "message": (
-            f"[SESSION] ideas:{idea_id}:upload-{upload_turn}\n\n"
-            f"I uploaded a file. Please read {ip['uploaded_seed']} "
-            f"and synthesize its content into the canonical PRD template (all sections), "
-            f"preserving my intent. Explain briefly what you structured in your reply."
-        ),
-    }
-
-    poll_timeout = float(config.get("poll_timeout", POLL_TIMEOUT))
-    poll_interval = float(config.get("poll_interval", POLL_INTERVAL))
-    idle_threshold = float(config.get("ideas_idle_threshold", 120))
-    startup_grace = float(config.get("ideas_startup_grace", 30))
-    openclaw_root = os.path.expanduser(config.get("openclaw_root", "~/.openclaw"))
-
-    _snapshot_prd_draft_before_agent_write(idea_dir)
-
-    await _post_agent_webhook(hooks_url, hooks_token, webhook_payload)
-
-    done_path = turns_dir / f"{upload_turn}.done"
-    sentinel_found = await _poll_sentinel_with_idle_detect(
-        done_path, session_key, openclaw_root,
-        poll_timeout, poll_interval, idle_threshold, startup_grace,
-        idea_watch_dir=idea_dir,
-    )
-    if not sentinel_found:
-        raise HTTPException(
-            status_code=408,
-            detail=f"PRD synthesis timed out after {int(poll_timeout)}s — the model may be slow or the agent session may be stalled.",
-        )
-
-    prd_draft_path = idea_dir / "prd_draft.md"
-    prd_content = prd_draft_path.read_text() if prd_draft_path.exists() else text
-
-    session_path = idea_dir / "session.json"
-    session_data = _read_json_file(str(session_path)) or {
-        "name": "New Idea",
-        "messages": [],
-        "prd_content": "",
-        "roadmap_content": "",
-        "created": None,
-        "updated": None,
-    }
-    session_data.setdefault("name", "New Idea")
-    session_data["prd_content"] = prd_content
-    session_data["updated"] = datetime.utcnow().isoformat() + "Z"
-
-    tmp_path = str(session_path) + ".tmp"
-    with open(tmp_path, "w") as f:
-        json.dump(session_data, f)
-    os.replace(tmp_path, session_path)
-
-    return {"status": "format_ok", "trigger_clarity_check": True}
 
 
 @app.post("/api/ideas/{idea_id}/clarity-check")
