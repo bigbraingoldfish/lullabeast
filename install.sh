@@ -323,6 +323,29 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 hdr "6/13  Agent workspace provisioning"
 
+# Each pipeline agent workspace needs pipeline-project → $AUTODEV_ROOT/pipeline-project
+# (the hub the UI/orchestrator update). OpenClaw sandboxes writes to the workspace root.
+ensure_workspace_pipeline_project_symlinks() {
+    local hub="$AUTODEV_ROOT/pipeline-project"
+    local ws_dir link any=0
+    for pipeline_agent in planner executor reviewer escalation; do
+        ws_dir="$AUTODEV_ROOT/workspace-$pipeline_agent"
+        [ -d "$ws_dir" ] || continue
+        any=1
+        link="$ws_dir/pipeline-project"
+        if [ -e "$link" ] && [ ! -L "$link" ]; then
+            warn "$link exists but is not a symlink — skipping (remove or convert manually)"
+            continue
+        fi
+        if ! ln -sfn "$hub" "$link"; then
+            warn "Could not create symlink $link → $hub"
+        fi
+    done
+    if [ "$any" -eq 1 ]; then
+        ok "workspace pipeline-project symlinks → $hub"
+    fi
+}
+
 TOTAL_DEPLOYED=0
 declare -A AGENT_COUNTS
 MISSING_FILES=()
@@ -468,6 +491,8 @@ else
         AGENT_COUNTS[$agent]="current"
     done
 fi
+
+ensure_workspace_pipeline_project_symlinks
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 7/13  EXEC-APPROVALS VALIDATION

@@ -346,6 +346,35 @@ class TestStep6RoadmapConverterWorkspace:
         assert step6.count('mkdir -p "$dst_dir/skills"') >= 1
 
 
+class TestStep6WorkspacePipelineSymlinks:
+    """Contract: install.sh step 6 wires pipeline agents to the shared hub symlink."""
+
+    def test_step6_defines_and_calls_symlink_helper(self):
+        step6 = _install_sh_step6_section()
+        assert "ensure_workspace_pipeline_project_symlinks" in step6
+        # Called at least once (definition + invocation)
+        assert step6.count("ensure_workspace_pipeline_project_symlinks") >= 2
+
+    def test_step6_symlink_uses_hub_and_ln_sfn(self):
+        step6 = _install_sh_step6_section()
+        assert 'local hub="$AUTODEV_ROOT/pipeline-project"' in step6
+        assert 'ln -sfn "$hub" "$link"' in step6
+
+    def test_step6_symlink_covers_four_pipeline_agents(self):
+        step6 = _install_sh_step6_section()
+        assert "planner executor reviewer escalation" in step6.replace("\n", " ")
+
+    def test_step6_skips_pipeline_project_when_not_symlink(self):
+        step6 = _install_sh_step6_section()
+        assert '[ ! -L "$link" ]' in step6
+
+    def test_step6_symlink_helper_before_step7(self):
+        text = _INSTALL_SH.read_text(encoding="utf-8")
+        assert text.index("ensure_workspace_pipeline_project_symlinks()") < text.index(
+            "7/13  EXEC-APPROVALS VALIDATION"
+        )
+
+
 def test_step3_respects_autodev_repo_path_from_environment():
     """install.sh must not overwrite AUTODEV_REPO_PATH when already exported."""
     text = _INSTALL_SH.read_text(encoding="utf-8")

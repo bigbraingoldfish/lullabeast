@@ -1177,6 +1177,7 @@ def _validate_queue_entry_ids_order(entries, entry_ids):
 def _spawn_orchestrator(project_path: str, config: dict | None = None) -> dict:
     """Start orchestrator.py with --project-path. Returns {"ok": bool, "error": str|None}."""
     import subprocess
+    import sys
 
     if config is None:
         config = load_config()
@@ -1194,7 +1195,7 @@ def _spawn_orchestrator(project_path: str, config: dict | None = None) -> dict:
     ):
         env["AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME"] = "1"
     subprocess.Popen(
-        ["python", orchestrator_script, "--project-path", project_path],
+        [sys.executable, orchestrator_script, "--project-path", project_path],
         cwd=autodev_repo_path,
         stdout=log_file,
         stderr=subprocess.STDOUT,
