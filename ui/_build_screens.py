@@ -2,46 +2,6 @@
 from pathlib import Path
 
 MIDDLE = r"""
-        function handleFileChange(event, ideaId, setUploadError, setUploadSpinner, triggerClarityCheck, setClarityPass, setClarityIssues, setClarityMissing) {
-            const f = event.target.files && event.target.files[0];
-            if (!f) return;
-            if (!f.name.toLowerCase().endsWith(".md")) {
-                setUploadError("Only .md files are accepted");
-                return;
-            }
-            setUploadError("");
-            setUploadSpinner(true);
-            const fd = new FormData();
-            fd.append("file", f);
-            fetch(`/api/ideas/${ideaId}/upload`, { method: "POST", body: fd })
-                .then((r) => r.json())
-                .then(() => {
-                    setUploadSpinner(false);
-                    event.target.value = "";
-                    triggerClarityCheck(ideaId, setClarityPass, setClarityIssues, setClarityMissing, setUploadSpinner);
-                })
-                .catch(() => {
-                    setUploadSpinner(false);
-                    setUploadError("Upload failed");
-                });
-        }
-
-        function triggerClarityCheck(ideaId, setClarityPass, setClarityIssues, setClarityMissing, setUploadSpinner) {
-            setUploadSpinner(true);
-            fetch(`/api/ideas/${ideaId}/clarity-check`, { method: "POST" })
-                .then((r) => r.json())
-                .then((data) => {
-                    setUploadSpinner(false);
-                    setClarityPass(data.pass === true ? true : data.pass === false ? false : null);
-                    setClarityIssues(data.issues || []);
-                    setClarityMissing((data.missing_sections || []).join(", "));
-                })
-                .catch(() => {
-                    setUploadSpinner(false);
-                    setClarityPass(false);
-                });
-        }
-
         const PRD_SECTION_TITLES = [
             "Problem Statement", "Goals & Success Metrics", "User Stories", "Functional Requirements",
             "Edge Cases", "Non-Functional Requirements", "Dependencies & Integrations", "Milestones & Timeline",
@@ -59,15 +19,9 @@ MIDDLE = r"""
             const [currentIdeaId, setCurrentIdeaId] = useState("1");
             const [ideasList, setIdeasList] = useState([]);
             const [inputText, setInputText] = useState("");
-            const [uploadError, setUploadError] = useState("");
-            const [uploadSpinner, setUploadSpinner] = useState(false);
-            const [clarityPass, setClarityPass] = useState(null);
-            const [clarityIssues, setClarityIssues] = useState([]);
-            const [clarityMissing, setClarityMissing] = useState("");
             const [readiness, setReadiness] = useState({ ready: false, reason: "" });
             const [chatsRailCollapsed, setChatsRailCollapsed] = useState(false);
             const taRef = useRef(null);
-            const fileRef = useRef(null);
 
             const refreshIdeas = () => {
                 fetch("/api/ideas")
@@ -151,7 +105,6 @@ MIDDLE = r"""
                         setPrdContent("");
                         setRoadmapContent("");
                         setInputText("");
-                        setClarityPass(null);
                         setChatsRailCollapsed(false);
                     });
             };
@@ -310,12 +263,6 @@ MIDDLE = r"""
                             ))}
                         </div>
                         <div className="flex-shrink-0 border-t border-[#1a1d21] p-3 space-y-2 bg-[#141618]">
-                            <input ref={fileRef} type="file" accept=".md" className="hidden" onChange={(e) => handleFileChange(e, currentIdeaId, setUploadError, setUploadSpinner, triggerClarityCheck, setClarityPass, setClarityIssues, setClarityMissing)} />
-                            <button type="button" onClick={() => fileRef.current && fileRef.current.click()} className="header-text w-full text-xs py-1.5 rounded bg-[#1a1d21] text-slate-300 border border-[#1a1d21] hover:border-slate-500">
-                                Upload .md seed
-                            </button>
-                            {uploadError && <p className="text-red-400 text-xs">{uploadError}</p>}
-                            {uploadSpinner && <p className="text-slate-500 text-xs">Working…</p>}
                             <textarea
                                 ref={taRef}
                                 rows={1}
@@ -330,8 +277,6 @@ MIDDLE = r"""
                     <div className="flex-1 flex flex-col min-w-0 bg-[#141618] overflow-hidden">
                         <div className="flex-shrink-0 border-b border-[#1a1d21] px-4 py-2 flex flex-wrap gap-2 items-center justify-between">
                             <div className="flex flex-wrap gap-2 items-center">
-                                {clarityPass === true && <span className="text-xs text-emerald-400 border border-emerald-700 rounded px-2 py-0.5">ready to convert</span>}
-                                {clarityPass === false && <span className="text-xs text-amber-400 border border-amber-700 rounded px-2 py-0.5">needs revision</span>}
                                 {readiness.ready && <span className="text-xs text-slate-500">ready: {readiness.reason}</span>}
                             </div>
                             <div className="flex gap-2">
@@ -355,12 +300,6 @@ MIDDLE = r"""
                                 )}
                             </div>
                         </div>
-                        {clarityPass === false && (
-                            <div className="px-4 py-2 text-xs text-slate-400 border-b border-[#1a1d21]">
-                                {clarityMissing && <div>Missing: {clarityMissing}</div>}
-                                <ul className="list-disc pl-4">{clarityIssues.map((x, j) => <li key={j}>{typeof x === "string" ? x : JSON.stringify(x)}</li>)}</ul>
-                            </div>
-                        )}
                         {convertError && <div className="px-4 py-2 text-xs text-red-400 border-b border-[#1a1d21]">{convertError}</div>}
                         <div className={`flex-1 overflow-y-auto p-4 bg-[#141618] ${isLoading ? "status-pulse opacity-60" : ""}`}>
                             {prdContent.trim() ? (

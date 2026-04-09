@@ -1561,58 +1561,6 @@
             );
         }
 
-
-        function handleFileChange(
-            event,
-            ideaId,
-            setUploadError,
-            setUploadSpinner,
-            triggerClarityCheck,
-            setClarityPass,
-            setClarityIssues,
-            setClarityMissing,
-            onUploadSuccess
-        ) {
-            const f = event.target.files && event.target.files[0];
-            if (!f) return;
-            if (!f.name.toLowerCase().endsWith(".md")) {
-                setUploadError("Only .md files are accepted");
-                return;
-            }
-            setUploadError("");
-            setUploadSpinner(true);
-            const fd = new FormData();
-            fd.append("file", f);
-            fetch(`/api/ideas/${ideaId}/upload`, { method: "POST", body: fd })
-                .then((r) => r.json())
-                .then(() => {
-                    setUploadSpinner(false);
-                    event.target.value = "";
-                    if (typeof onUploadSuccess === "function") onUploadSuccess(ideaId);
-                    triggerClarityCheck(ideaId, setClarityPass, setClarityIssues, setClarityMissing, setUploadSpinner);
-                })
-                .catch(() => {
-                    setUploadSpinner(false);
-                    setUploadError("Upload failed");
-                });
-        }
-
-        function triggerClarityCheck(ideaId, setClarityPass, setClarityIssues, setClarityMissing, setUploadSpinner) {
-            setUploadSpinner(true);
-            fetch(`/api/ideas/${ideaId}/clarity-check`, { method: "POST" })
-                .then((r) => r.json())
-                .then((data) => {
-                    setUploadSpinner(false);
-                    setClarityPass(data.pass === true ? true : data.pass === false ? false : null);
-                    setClarityIssues(data.issues || []);
-                    setClarityMissing((data.missing_sections || []).join(", "));
-                })
-                .catch(() => {
-                    setUploadSpinner(false);
-                    setClarityPass(false);
-                });
-        }
-
         const PRD_SECTION_TITLES = [
             "Problem Statement", "Goals & Success Metrics", "User Stories", "Functional Requirements",
             "Edge Cases", "Non-Functional Requirements", "Dependencies & Integrations", "Milestones & Timeline",
@@ -1740,50 +1688,6 @@
             }
             flushQ();
             return { prose: proseLines.join("\n").trim(), drafting, assumptions, questions };
-        }
-
-        function SessionStartModal({ onStartConversation, onUpload, onClose, busy }) {
-            return (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
-                    <div className="relative w-full max-w-md mx-4 rounded-xl border border-[#2a2d31] bg-[#141618] p-8">
-                        <button
-                            type="button"
-                            onClick={onClose}
-                            disabled={!!busy}
-                            className="absolute top-4 right-4 text-slate-500 hover:text-slate-300 text-lg leading-none disabled:opacity-40"
-                            aria-label="Close"
-                        >✕</button>
-                        <h2 className="header-text text-base text-slate-200 mb-1">Start a new idea</h2>
-                        <p className="text-xs text-slate-500 mb-6">How would you like to begin this PRD session?</p>
-                        <div className="space-y-3">
-                            <button
-                                type="button"
-                                disabled={!!busy}
-                                onClick={onStartConversation}
-                                className="w-full flex items-center gap-3 rounded-lg border border-[#00b4d8]/40 bg-[#0d1f26] px-4 py-3.5 text-left hover:bg-[#0d2c36] transition-colors group disabled:opacity-50 disabled:pointer-events-none"
-                            >
-                                <span className="w-7 h-7 flex items-center justify-center rounded bg-[#00b4d8]/20 text-[#00b4d8] text-sm">▶</span>
-                                <div>
-                                    <p className="header-text text-sm text-[#00b4d8] font-semibold group-hover:text-[#33c5e8]">Start a conversation</p>
-                                    <p className="text-xs text-slate-500 mt-0.5">You send the first message; the agent builds the PRD from your description.</p>
-                                </div>
-                            </button>
-                            <button
-                                type="button"
-                                disabled={!!busy}
-                                onClick={onUpload}
-                                className="w-full flex items-center gap-3 rounded-lg border border-[#2a2d31] bg-[#0d0f11] px-4 py-3.5 text-left hover:bg-[#1a1d21] transition-colors group disabled:opacity-50 disabled:pointer-events-none"
-                            >
-                                <span className="w-7 h-7 flex items-center justify-center rounded bg-[#1a1d21] text-slate-400 text-sm">↑</span>
-                                <div>
-                                    <p className="header-text text-sm text-slate-300 group-hover:text-slate-100">Upload existing documentation</p>
-                                    <p className="text-xs text-slate-500 mt-0.5">Provide a .md file — the agent synthesizes it into the PRD structure.</p>
-                                </div>
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            );
         }
 
         function QuestionFlow({ questions, onSubmit }) {
@@ -1914,11 +1818,6 @@
             const [currentIdeaId, setCurrentIdeaId] = useState(null);
             const [ideasList, setIdeasList] = useState([]);
             const [inputText, setInputText] = useState("");
-            const [uploadError, setUploadError] = useState("");
-            const [uploadSpinner, setUploadSpinner] = useState(false);
-            const [clarityPass, setClarityPass] = useState(null);
-            const [clarityIssues, setClarityIssues] = useState([]);
-            const [clarityMissing, setClarityMissing] = useState("");
             const [readinessStatus, setReadinessStatus] = useState("unavailable");
             const [readinessData, setReadinessData] = useState(null);
             const [hadReadyReadiness, setHadReadyReadiness] = useState(false);
@@ -1934,8 +1833,6 @@
             const [showActionMenu, setShowActionMenu] = useState(false);
             const [activeIdeaMenuId, setActiveIdeaMenuId] = useState(null);
             const showEmptyPlaceholders = false; // CompactProgress removed; empty sections always hidden
-            const [showSessionModal, setShowSessionModal] = useState(false);
-            const [sessionModalIdeaId, setSessionModalIdeaId] = useState(null);
             const [stagedAttachment, setStagedAttachment] = useState(null);
             const [draftingIndicator, setDraftingIndicator] = useState(null);
             const [answeredFlowIds, setAnsweredFlowIds] = useState(new Set());
@@ -1954,9 +1851,7 @@
             const isLoadingRef = useRef(false);
             const [readinessExpanded, setReadinessExpanded] = useState(false);
             const [userFirstTurnPending, setUserFirstTurnPending] = useState(false);
-            const [sessionModalBusy, setSessionModalBusy] = useState(false);
             const taRef = useRef(null);
-            const fileRef = useRef(null);
             const attachFileRef = useRef(null);
             const messagesEndRef = useRef(null);
             const readinessPollRef = useRef(null);
@@ -2151,7 +2046,6 @@
                 setEditingAnnotationSection(null);
                 setAnnotationDraft("");
                 setOpenAnnotationBubble(null);
-                setUserFirstTurnPending(false);
                 setPrdSectionDiff({});
                 setExpandedDiffSlugs([]);
                 setUndoOfferSlugs([]);
@@ -2422,41 +2316,18 @@
                         setReadinessData(null);
                         setHadReadyReadiness(false);
                         setReadinessTimedOut(false);
-                        setClarityPass(null);
                         setChatsRailCollapsed(false);
                         setActiveIdeaMenuId(null);
                         setShowActionMenu(false);
                         setStagedAttachment(null);
-                        setSessionModalIdeaId(d.id);
-                        setShowSessionModal(true);
+                        setUserFirstTurnPending(true);
                     });
             };
 
-            const handleSessionStartConversation = () => {
-                if (sessionModalBusy) return;
-                const ideaId = sessionModalIdeaId;
-                if (!ideaId) return;
-                setSessionModalBusy(true);
-                setShowSessionModal(false);
-                setSessionModalIdeaId(null);
-                setUserFirstTurnPending(true);
-                setMessages([]);
-                setHiddenNoteIdsForSend(() => new Set());
-                setIsLoading(false);
-                setSessionModalBusy(false);
-            };
-
-            const handleSessionUpload = () => {
-                if (sessionModalBusy) return;
-                setSessionModalBusy(true);
-                setUserFirstTurnPending(false);
-                setShowSessionModal(false);
-                setSessionModalIdeaId(null);
-                setSessionModalBusy(false);
-                if (fileRef.current) fileRef.current.click();
-            };
-
             const selectIdeaFromRail = (id) => {
+                if (id !== currentIdeaId) {
+                    setUserFirstTurnPending(false);
+                }
                 setCurrentIdeaId(id);
                 setActiveIdeaMenuId(null);
                 setRenamingIdeaId(null);
@@ -2736,7 +2607,7 @@
                             onClick={() => setRevertConfirmSlug(null)}
                         >
                             <div
-                                className="max-w-md w-full rounded-lg border border-[#2a2d31] bg-[#141618] p-4 shadow-xl"
+                                className="max-w-md w-full rounded-lg border border-[#2a2d31] bg-[#141618] p-4"
                                 onClick={(e) => e.stopPropagation()}
                             >
                                 <p id="prd-revert-confirm-title" className="text-sm text-slate-200 mb-3">
@@ -2764,14 +2635,6 @@
                                 </div>
                             </div>
                         </div>
-                    )}
-                    {showSessionModal && (
-                        <SessionStartModal
-                            busy={sessionModalBusy}
-                            onStartConversation={handleSessionStartConversation}
-                            onUpload={handleSessionUpload}
-                            onClose={() => { if (!sessionModalBusy) { setShowSessionModal(false); setSessionModalIdeaId(null); } }}
-                        />
                     )}
                     {/* Vertical chat list — collapses after picking a chat so conversation + PRD get space */}
                     <div
@@ -3089,31 +2952,6 @@
                             <div ref={messagesEndRef} />
                         </div>
                         <div className="flex-shrink-0 border-t border-[#1a1d21] p-3 space-y-2 bg-[#141618]">
-                            {/* Hidden file inputs */}
-                            <input
-                                ref={fileRef}
-                                type="file"
-                                accept=".md"
-                                className="hidden"
-                                onChange={(e) =>
-                                    handleFileChange(
-                                        e,
-                                        currentIdeaId,
-                                        setUploadError,
-                                        setUploadSpinner,
-                                        triggerClarityCheck,
-                                        setClarityPass,
-                                        setClarityIssues,
-                                        setClarityMissing,
-                                        (id) => {
-                                            fetch(`/api/ideas/${id}/session`)
-                                                .then((r) => r.json())
-                                                .then((d) => setPrdContent(d.prd_content || ""));
-                                            fetchPrdSectionDiff(id);
-                                        }
-                                    )
-                                }
-                            />
                             <input ref={attachFileRef} type="file" accept=".md" className="hidden" onChange={(e) => {
                                 const f = e.target.files && e.target.files[0];
                                 if (!f) return;
@@ -3122,8 +2960,6 @@
                                 reader.readAsText(f);
                                 e.target.value = "";
                             }} />
-                            {uploadSpinner && <p className="text-slate-500 text-xs">Synthesizing document…</p>}
-                            {uploadError && <p className="text-red-400 text-xs">{uploadError}</p>}
                             {/* Staged attachment pill + annotation pill */}
                             {(stagedAttachment || visibleDraftAnnotations.length > 0) && (
                                 <div className="flex flex-wrap gap-1.5">
@@ -3722,16 +3558,6 @@
                                                 {readinessData.recommendation && <p className="text-slate-500 italic">{readinessData.recommendation}</p>}
                                             </React.Fragment>
                                         )}
-                                    </div>
-                                )}
-                                {clarityPass === true && (
-                                    <div><span className="text-xs text-emerald-400 border border-emerald-700 rounded px-2 py-0.5">ready to convert</span></div>
-                                )}
-                                {clarityPass === false && (
-                                    <div className="space-y-1">
-                                        <span className="text-xs text-amber-400 border border-amber-700 rounded px-2 py-0.5">needs revision</span>
-                                        {clarityMissing && <div className="text-xs text-slate-400">Missing: {clarityMissing}</div>}
-                                        <ul className="list-disc pl-4 text-xs text-slate-400">{clarityIssues.map((x, j) => <li key={j}>{typeof x === "string" ? x : JSON.stringify(x)}</li>)}</ul>
                                     </div>
                                 )}
                                 {convertError && <div className="text-xs text-red-400">{convertError}</div>}
