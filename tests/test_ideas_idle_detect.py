@@ -7,10 +7,7 @@ import asyncio
 import json
 import os
 import time
-from pathlib import Path
 from unittest.mock import patch
-
-import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -201,3 +198,77 @@ class TestPollSentinelWithIdleDetect:
         result = asyncio.run(run_with_concurrent_writes())
         assert result is True
         assert write_count[0] > 0
+
+    def test_idea_watch_dir_resets_idle_despite_stale_jsonl(self, tmp_path):
+        """Fresh writes under idea_dir extend liveness when JSONL mtime is flat."""
+        poll = _get_poll()
+        idea_dir = tmp_path / "idea"
+        (idea_dir / "turns").mkdir(parents=True)
+        prd = idea_dir / "prd_draft.md"
+        prd.write_text("v0")
+        os.utime(prd, (1000, 1000))
+
+        sessions_dir = tmp_path / "agents" / "prd-creator" / "sessions"
+        sessions_dir.mkdir(parents=True)
+        session_id = "idea-watch-0000-0000-0000-000000000099"
+        jsonl_path = sessions_dir / f"{session_id}.jsonl"
+        jsonl_path.write_text("static-jsonl\n")
+        os.utime(jsonl_path, (500, 500))
+        (sessions_dir / "sessions.json").write_text(
+            json.dumps(
+                {
+                    "agent:prd-creator:ideas:iwatch:session-1": {
+                        "sessionId": session_id,
+                        "updatedAt": 1700000001000,
+                    }
+                }
+            )
+        )
+        done = tmp_path / "missing.done"
+
+        mono_seq = [0.0, 125.0, 250.0]
+        tick = [0]
+
+        def fake_monotonic():
+            i = tick[0]
+            tick[0] += 1
+            return mono_seq[i] if i < len(mono_seq) else mono_seq[-1] + 200.0
+
+        sleeps: list[None] = []
+
+        async def track_sleep_no_idea_write(_interval):
+            sleeps.append(None)
+
+        async def track_sleep_bump_prd(_interval):
+            sleeps.append(None)
+            if len(sleeps) == 1:
+                prd.write_text("v1")
+                os.utime(prd, (2000, 2000))
+
+        async def run_poll(watch_idea: bool, sleeper):
+            tick[0] = 0
+            sleeps.clear()
+            with patch("ui.server.time.monotonic", fake_monotonic):
+                with patch("ui.server.asyncio.sleep", sleeper):
+                    return await poll(
+                        done_path=done,
+                        session_key="ideas:iwatch:session-1",
+                        openclaw_root=str(tmp_path),
+                        poll_timeout=900.0,
+                        poll_interval=0.01,
+                        idle_threshold=120.0,
+                        startup_grace=0.05,
+                        idea_watch_dir=idea_dir if watch_idea else None,
+                    )
+
+        # JSONL-only: second tick hits idle after one sleep (do not touch prd)
+        assert asyncio.run(run_poll(False, track_sleep_no_idea_write)) is False
+        assert len(sleeps) == 1
+
+        # Reset artifact mtimes so the idea-watch run observes a clear bump after sleep 1
+        prd.write_text("v0")
+        os.utime(prd, (1000, 1000))
+
+        # With idea dir: prd mtime bump after first sleep resets idle; third tick fails
+        assert asyncio.run(run_poll(True, track_sleep_bump_prd)) is False
+        assert len(sleeps) == 2
