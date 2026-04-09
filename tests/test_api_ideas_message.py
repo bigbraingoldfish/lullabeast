@@ -370,6 +370,50 @@ class TestApiIdeasMessage:
         assert "Authorization" in captured_payload.get("headers", {}), \
             f"Missing Authorization header: {captured_payload}"
 
+    def test_ideas_webhook_message_includes_output_contract_footer(self):
+        """Conversational Ideas POST appends OUTPUT CONTRACT with paths and .done last."""
+        client = load_server()
+        idea_id = "contract_footer_idea"
+        turn_n = 4
+        captured: dict = {}
+
+        self._write_session(idea_id, {
+            "messages": [],
+            "prd_content": "",
+            "created": "2026-03-19T10:00:00Z",
+            "updated": "2026-03-19T10:00:00Z",
+        })
+        self._write_turn_files(idea_id, turn_n, "Agent ok", "# Draft")
+
+        def capture_post(url, **kwargs):
+            captured["message"] = (kwargs.get("json") or {}).get("message", "")
+            mock_resp = MagicMock()
+            mock_resp.status = 200
+            mock_resp.read = AsyncMock(return_value=b"")
+            mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+            mock_resp.__aexit__ = AsyncMock(return_value=None)
+            return mock_resp
+
+        mock_session = MagicMock()
+        mock_session.post = AsyncMock(side_effect=capture_post)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("ui.server.load_config", return_value=self._mock_config()):
+            with patch("ui.server.aiohttp.ClientSession", return_value=mock_session):
+                with patch("asyncio.create_task"):
+                    response = client.post(
+                        f"/api/ideas/{idea_id}/message",
+                        json={"content": "Hello", "turn": turn_n},
+                    )
+
+        assert response.status_code == 200, response.text
+        msg = captured.get("message", "")
+        assert "[OUTPUT CONTRACT — THIS TURN]" in msg
+        assert f"ideas/{idea_id}/turns/{turn_n}.done" in msg
+        assert "LAST" in msg
+        assert "done`" in msg or "`done`" in msg
+
     def test_session_json_updated_atomically(self):
         """session.json is written via .tmp + os.replace after agent turn."""
         client = load_server()

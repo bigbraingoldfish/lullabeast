@@ -2413,6 +2413,43 @@ def _resolve_prd_creator_jsonl(session_key: str, openclaw_root: str) -> str | No
     )
 
 
+def _idea_workspace_activity_mtime(idea_dir: Path) -> float | None:
+    """Latest mtime among PRD agent artifacts under an idea directory.
+
+    Watches ``prd_draft.md`` and ``turns/*.md`` only (not ``session.json``), so server
+    writes to session.json do not mask agent idle. Used with Ideas polling when JSONL
+    is quiet but the agent is still writing files.
+    """
+    best: float | None = None
+    prd = idea_dir / "prd_draft.md"
+    if prd.is_file():
+        try:
+            best = os.path.getmtime(prd)
+        except OSError:
+            pass
+    turns = idea_dir / "turns"
+    if turns.is_dir():
+        for p in turns.glob("*.md"):
+            if not p.is_file():
+                continue
+            try:
+                m = os.path.getmtime(p)
+                best = m if best is None else max(best, m)
+            except OSError:
+                pass
+    return best
+
+
+def _ideas_turn_output_contract_footer(idea_id: str, turn_n: int) -> str:
+    """Short per-turn reminder appended to Ideas conversational webhook bodies."""
+    return (
+        "\n\n[OUTPUT CONTRACT — THIS TURN]\n"
+        f"- `ideas/{idea_id}/turns/{turn_n}.md` first: concise chat prose only (never the full PRD).\n"
+        f"- `ideas/{idea_id}/prd_draft.md` second: full PRD or partial PRD edit.\n"
+        f"- `ideas/{idea_id}/turns/{turn_n}.done` LAST, content exactly `done` (server waits on this file)."
+    )
+
+
 async def _poll_sentinel_with_idle_detect(
     done_path,
     session_key: str,
@@ -2421,11 +2458,13 @@ async def _poll_sentinel_with_idle_detect(
     poll_interval: float,
     idle_threshold: float,
     startup_grace: float,
+    idea_watch_dir: Path | None = None,
 ) -> bool:
     """Poll for a sentinel file with JSONL-based idle detection.
 
     Returns True when the sentinel appears.  Returns False when either:
-    - The JSONL mtime has not advanced for ``idle_threshold`` seconds (agent idle), or
+    - No liveness for ``idle_threshold`` seconds: JSONL mtime stale and (when given)
+      ``idea_watch_dir`` artifact mtimes stale, or
     - ``poll_timeout`` seconds have elapsed with no sentinel (hard timeout fallback).
 
     During ``startup_grace`` seconds from start, we retry resolving the JSONL path
@@ -2437,8 +2476,9 @@ async def _poll_sentinel_with_idle_detect(
     deadline = start + poll_timeout
 
     jsonl_path: str | None = None
-    last_mtime: float | None = None
-    last_activity = start  # reset whenever mtime advances
+    last_jsonl_mtime: float | None = None
+    last_idea_mtime: float | None = None
+    last_activity = start  # reset when JSONL or idea artifacts advance
 
     while True:
         if Path(done_path).exists():
@@ -2455,20 +2495,28 @@ async def _poll_sentinel_with_idle_detect(
                 # Grace expired with no session registered — agent never started; fail now
                 return False
 
-        # Check JSONL activity if path is resolved
+        # JSONL heartbeat
         if jsonl_path is not None:
             try:
-                mtime = os.path.getmtime(jsonl_path)
+                jm = os.path.getmtime(jsonl_path)
             except OSError:
-                mtime = None
-
-            if mtime is not None:
-                if last_mtime is None or mtime > last_mtime:
-                    last_mtime = mtime
+                jm = None
+            if jm is not None:
+                if last_jsonl_mtime is None or jm > last_jsonl_mtime:
+                    last_jsonl_mtime = jm
                     last_activity = now
-                elif (now - last_activity) >= idle_threshold:
-                    # No new writes for idle_threshold seconds — declare agent idle
-                    return False
+
+        # Idea-dir file writes (tool output) — recency bias vs JSONL-only idle
+        if idea_watch_dir is not None:
+            im = _idea_workspace_activity_mtime(idea_watch_dir)
+            if im is not None:
+                if last_idea_mtime is None or im > last_idea_mtime:
+                    last_idea_mtime = im
+                    last_activity = now
+
+        if jsonl_path is not None and (now - last_activity) >= idle_threshold:
+            # No JSONL progress and no fresh idea artifacts for idle_threshold
+            return False
 
         await asyncio.sleep(poll_interval)
 
@@ -2943,11 +2991,15 @@ async def post_ideas_message(idea_id: str, request: Request):
     session_key = f"ideas:{idea_id}:session-{turn_n}"
 
     # Webhook payload — first line MUST be [SESSION] for agent output path parsing (AGENTS.md)
+    _contract_footer = _ideas_turn_output_contract_footer(idea_id, int(turn_n))
     webhook_payload = {
         "agentId": WEBHOOK_AGENT_ID,
         "sessionKey": session_key,
         "wakeMode": "now",
-        "message": f"[SESSION] ideas:{idea_id}:session-{turn_n}\n\n{history_block}{system_events_block}{message_content}",
+        "message": (
+            f"[SESSION] ideas:{idea_id}:session-{turn_n}\n\n"
+            f"{history_block}{system_events_block}{message_content}{_contract_footer}"
+        ),
     }
 
     # Wall-clock start of this attempt — compared to .done mtime after poll timeout
@@ -3013,6 +3065,7 @@ async def post_ideas_message(idea_id: str, request: Request):
     sentinel_found = await _poll_sentinel_with_idle_detect(
         done_path, session_key, openclaw_root,
         poll_timeout, poll_interval, idle_threshold, startup_grace,
+        idea_watch_dir=idea_dir,
     )
     if not sentinel_found and _late_done_valid_for_attempt(done_path, _attempt_start_wall):
         sentinel_found = True
@@ -3598,6 +3651,7 @@ async def post_ideas_upload(
     sentinel_found = await _poll_sentinel_with_idle_detect(
         done_path, session_key, openclaw_root,
         poll_timeout, poll_interval, idle_threshold, startup_grace,
+        idea_watch_dir=idea_dir,
     )
     if not sentinel_found:
         raise HTTPException(
@@ -3973,6 +4027,7 @@ async def _notify_prd_agent(idea_id: str, config: dict, report_content: str, che
         sentinel_found = await _poll_sentinel_with_idle_detect(
             done_path, session_key, openclaw_root,
             poll_timeout, poll_interval, idle_threshold, startup_grace,
+            idea_watch_dir=idea_dir,
         )
         if not sentinel_found:
             # Timed out / agent idle — mark the pending placeholder as an error

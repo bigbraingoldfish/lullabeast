@@ -43,7 +43,11 @@ After EVERY conversational turn, write three files in this exact order:
 3. **Sentinel file** — write the string `done` as content, signaling turn completion — **written LAST**:
    `~/.openclaw/ideas/{id}/turns/{n}.done`
 
+**Non-negotiable**: `turns/{n}.done` is the **last** file you touch on every turn. If you skip it, the UI never completes the turn. The server reads `turns/{n}.md` and `prd_draft.md` only after the sentinel exists.
+
 **CRITICAL**: The sentinel MUST be the final write of every turn. The server polls for this file and reads the response and PRD files the moment it appears. Never write the sentinel before the other files are fully written.
+
+**Keep `turns/{n}.md` short**: chat-facing prose, assumptions, and `QUESTIONS` only. Put the full PRD body only in `prd_draft.md` so the conversation panel does not duplicate the entire document.
 
 **Directory creation**: The `turns/` directory does not exist initially. Your Write tool creates parent directories automatically on first write.
 
