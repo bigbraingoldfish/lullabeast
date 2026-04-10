@@ -53,6 +53,8 @@ def test_repo_init_check_uses_autodev_root_custom_path(tmp_path):
 
     env = os.environ.copy()
     env["AUTODEV_ROOT"] = str(oc_root)
+    # Custom OpenClaw tree uses legacy runtime layout (hub at $AUTODEV_ROOT/pipeline-project).
+    env["AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME"] = "1"
 
     result = subprocess.run(
         [sys.executable, str(GATE_SCRIPT)],
@@ -79,6 +81,7 @@ def test_repo_init_check_custom_root_fails_without_workspace(tmp_path):
 
     env = os.environ.copy()
     env["AUTODEV_ROOT"] = str(oc_root)
+    env["AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME"] = "1"
 
     result = subprocess.run(
         [sys.executable, str(GATE_SCRIPT)],
@@ -91,3 +94,48 @@ def test_repo_init_check_custom_root_fails_without_workspace(tmp_path):
     out = result.stdout + result.stderr
     assert "Agent workspace not found" in out
     assert str(oc_root) in out
+
+
+def _seed_agent_workspaces_only(oc_root: Path) -> None:
+    oc_root.mkdir(parents=True, exist_ok=True)
+    for agent in ("planner", "executor", "reviewer", "escalation"):
+        wd = oc_root / f"workspace-{agent}"
+        wd.mkdir(parents=True, exist_ok=True)
+        for doc in ("AGENTS.md", "TOOLS.md", "SOUL.md", "USER.md", "IDENTITY.md"):
+            (wd / doc).write_text("ok\n")
+
+
+@pytest.mark.skipif(not GATE_SCRIPT.is_file(), reason="gate script missing")
+def test_repo_init_check_repo_local_runtime_pipeline_project(tmp_path):
+    """Default layout: pipeline-project under $AUTODEV_REPO_PATH/.autodev (not ~/.openclaw)."""
+    fake_repo = tmp_path / "autodev_repo_clone"
+    fake_repo.mkdir()
+    project = fake_repo / "target_project"
+    project.mkdir()
+    (project / "roadmap.md").write_text("# Roadmap\n")
+    (project / ".gitignore").write_text("*.done\n")
+
+    autodev_rt = fake_repo / ".autodev"
+    autodev_rt.mkdir()
+    pp = autodev_rt / "pipeline-project"
+    try:
+        pp.symlink_to(project, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink not supported")
+
+    oc_root = tmp_path / "openclaw_home"
+    _seed_agent_workspaces_only(oc_root)
+
+    env = os.environ.copy()
+    env["AUTODEV_ROOT"] = str(oc_root)
+    env["AUTODEV_REPO_PATH"] = str(fake_repo)
+
+    result = subprocess.run(
+        [sys.executable, str(GATE_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(REPO_ROOT),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Repo initialization check passed" in (result.stdout + result.stderr)
