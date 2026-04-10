@@ -358,7 +358,7 @@ MIDDLE = r"""
                                 readOnly={repoPathLocked}
                                 value={repoPath}
                                 onChange={(e) => onRepoPathChange(e.target.value)}
-                                placeholder="Enter the full path to your project directory (e.g. /home/pi/projects/my-project)"
+                                placeholder="Enter the full path to your project directory (e.g. /path/to/your-project/my-project)"
                                 className={`w-full rounded border border-[#1a1d21] px-3 py-2 text-sm ${repoPathLocked ? "bg-[#0d0f12] text-slate-300" : "bg-[#1a1d21] text-slate-200"}`}
                             />
                             {repoPathError && <p className="text-red-400 text-xs">{repoPathError}</p>}
