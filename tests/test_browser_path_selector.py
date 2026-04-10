@@ -198,6 +198,21 @@ def test_queue_add_autorepairs_git(pw_page):
 
     assert os.path.isdir(os.path.join(proj, ".git")), "Expected git init on server for queue add"
 
+    # Clean up: remove the test entry from the queue so it doesn't accumulate across runs.
+    try:
+        with urllib.request.urlopen(URL + "/api/queue", timeout=10) as resp:
+            entries = json.loads(resp.read().decode())
+        for entry in entries.get("queue", []):
+            if entry.get("project_path") == proj:
+                req = urllib.request.Request(
+                    URL + f"/api/queue/{entry['id']}",
+                    method="DELETE",
+                )
+                urllib.request.urlopen(req, timeout=10).close()
+                break
+    except Exception:
+        pass  # Best-effort cleanup — don't fail the test if removal fails
+
 
 def test_recents_appear_after_preflight(pw_page):
     """POST preflight via API so recents list is non-empty; datalist gets options in DOM."""
