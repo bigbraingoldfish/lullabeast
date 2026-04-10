@@ -9,12 +9,12 @@
 #
 # Environment:
 #   AUTODEV_ROOT   default ~/.openclaw
-#   PROJECTS_ROOT  default /home/pi/projects
+#   PROJECTS_ROOT  default /tmp/autodev-queue-e2e-projects (override for your layout)
 
 set -euo pipefail
 
 AUTODEV_ROOT="${AUTODEV_ROOT:-$HOME/.openclaw}"
-PROJECTS_ROOT="${PROJECTS_ROOT:-/home/pi/projects}"
+PROJECTS_ROOT="${PROJECTS_ROOT:-/tmp/autodev-queue-e2e-projects}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CREATE_PHASEONLY=0
 

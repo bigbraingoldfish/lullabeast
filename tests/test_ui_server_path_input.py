@@ -49,7 +49,7 @@ class TestServerPathInput:
     def test_placeholder_is_example_path(self):
         body = extract_function(load_html(), "ServerPathInput")
         assert body is not None
-        assert 'placeholder="/home/pi/projects/my-app"' in body
+        assert 'placeholder="/path/to/your-project/my-app"' in body
 
     def test_has_exists_check_indicator(self):
         body = extract_function(load_html(), "ServerPathInput")

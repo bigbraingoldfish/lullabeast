@@ -135,7 +135,7 @@ The `autodev_repo_path` key in DEFAULTS reads from the `AUTODEV_REPO_PATH` envir
 
 ```json
 {
-  "autodev_repo_path": "/home/pi/projects/autodev-ui"
+  "autodev_repo_path": "/path/to/your-project/autodev-ui"
 }
 ```
 

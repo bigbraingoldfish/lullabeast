@@ -114,7 +114,7 @@ INFRA-B1 and INFRA-E1 are complete — confirmed infrastructure.
 ### Milestone 1 — Infrastructure
 
 - [x] `INFRA-E1` | HIGH | Extend init-project skill to cover all repo_init_check.py requirements and validate end-to-end
-  > Test: Extended skill against fresh test dirs in Mode A and Mode B. After each: symlink resolves correctly, `.gitignore` contains all 7 pipeline entries, `repo_init_check.py` exits 0. No existing files overwritten in Mode B. Production symlink restored to `/home/pi/projects/autodev-ui` before commit.
+  > Test: Extended skill against fresh test dirs in Mode A and Mode B. After each: symlink resolves correctly, `.gitignore` contains all 7 pipeline entries, `repo_init_check.py` exits 0. No existing files overwritten in Mode B. Production symlink restored to `/path/to/your-project/autodev-ui` before commit.
 
 ---
 
@@ -233,7 +233,7 @@ INFRA-B1 and INFRA-E1 are complete — confirmed infrastructure.
 ### Milestone 4 — Screen 2: Setup & Preflight
 
 - [ ] `UI-E6` | LOW | Replace the PreflightScreen placeholder with repo path input and roadmap seed input, both with Confirm/Edit lock behavior
-  > Test: Screen 2 renders two input fields. Repo path: plain text input with placeholder "Enter the full path to your project directory (e.g. /home/pi/projects/my-project)". Roadmap seed: file upload or pre-populated from Screen 1. Each field has a "Confirm" button when unlocked and an "Edit" button when locked. Locked state: field is read-only with slightly darker background (`#0d0f12`), green checkmark icon, "Edit" button in muted text. Unlocked state: field is editable, "Confirm" button in accent color (`#00b4d8`). Fields are independent — locking one does not affect the other. If navigated from Screen 1, roadmap seed is pre-populated and pre-locked with a label "From Project Ideas". Pipeline monitor still loads correctly after this change.
+  > Test: Screen 2 renders two input fields. Repo path: plain text input with placeholder "Enter the full path to your project directory (e.g. /path/to/your-project/my-project)". Roadmap seed: file upload or pre-populated from Screen 1. Each field has a "Confirm" button when unlocked and an "Edit" button when locked. Locked state: field is read-only with slightly darker background (`#0d0f12`), green checkmark icon, "Edit" button in muted text. Unlocked state: field is editable, "Confirm" button in accent color (`#00b4d8`). Fields are independent — locking one does not affect the other. If navigated from Screen 1, roadmap seed is pre-populated and pre-locked with a label "From Project Ideas". Pipeline monitor still loads correctly after this change.
   > Notes: Keep component name `PreflightScreen` and screen key `'preflight'` — no routing changes needed.
   >
   > State in `PreflightScreen`: `repoPath: string`, `repoPathLocked: bool`, `roadmapSeed: string`, `roadmapSeedLocked: bool`. Props: `seedRoadmap: string` (from App, may be empty).
@@ -246,7 +246,7 @@ INFRA-B1 and INFRA-E1 are complete — confirmed infrastructure.
 
 - [ ] `UI-E7` | HIGH | Add validation to Confirm buttons: repo path non-empty check and full roadmap template validation with line-specific errors
   > Test: Clicking "Confirm" on empty repo path shows inline error "Enter a directory path to continue" and does not lock. Clicking "Confirm" on a valid path string locks the field. Clicking "Confirm" on the roadmap seed triggers `POST /api/setup/validate-roadmap`. A valid roadmap (all phases match format, every phase has `> Test:`, unique IDs, correct ID format) shows "Valid ✓" and locks. A malformed phase line shows an error with line number, offending content, and expected format. A phase missing `> Test:` names the phase ID. Duplicate IDs are listed. No malformed seed silently passes. Validation is re-runnable after unlocking.
-  > Notes: **Roadmap validation must be thorough.** The agent must read the canonical template at `/home/pi/.openclaw/deployment-package/Updates/Dev_Roadmap_template v3 (updated for oc-auto-dev).md` before implementing `_validate_roadmap_content()`. Understand which fields the pipeline actually reads at runtime (phase IDs, risk levels, goals, test lines, checkbox states) and validate all of them.
+  > Notes: **Roadmap validation must be thorough.** The agent must read the canonical template at `/path/to/.openclaw/deployment-package/Updates/Dev_Roadmap_template v3 (updated for oc-auto-dev).md` before implementing `_validate_roadmap_content()`. Understand which fields the pipeline actually reads at runtime (phase IDs, risk levels, goals, test lines, checkbox states) and validate all of them.
   >
   > **Python implementation** — add `_validate_roadmap_content(content: str) -> dict` to `server.py`:
   >
@@ -290,7 +290,7 @@ INFRA-B1 and INFRA-E1 are complete — confirmed infrastructure.
   > **New endpoint**: `POST /api/setup/preflight` — body: `{"repo_path": str}`. Returns `{"checks": [{"check": str, "status": str, "message": str}]}`.
 
 - [ ] `UI-E9` | HIGH | Add launch sequence — initialize project via Python init logic, set symlink, navigate to pipeline monitor
-  > Test: Use `/tmp/ui-e9-test-launch` as the fixed test path. Launch button is disabled until: repo path locked (valid), roadmap seed locked (valid), preflight shows no `fail` status. Clicking launch calls `POST /api/setup/launch`. On success: symlink resolves to test path (verify `readlink -f`), pipeline monitor reflects new project's roadmap on next poll (within 3s). On failure: verbatim error shown, user stays on Screen 2. **CRITICAL after tests pass**: immediately restore production symlink `ln -sfn /home/pi/projects/autodev-ui ~/.openclaw/pipeline-project` and confirm before committing. The launch endpoint intentionally changes the symlink — failing to restore it breaks the pipeline run.
+  > Test: Use `/tmp/ui-e9-test-launch` as the fixed test path. Launch button is disabled until: repo path locked (valid), roadmap seed locked (valid), preflight shows no `fail` status. Clicking launch calls `POST /api/setup/launch`. On success: symlink resolves to test path (verify `readlink -f`), pipeline monitor reflects new project's roadmap on next poll (within 3s). On failure: verbatim error shown, user stays on Screen 2. **CRITICAL after tests pass**: immediately restore production symlink `ln -sfn /path/to/your-project/autodev-ui ~/.openclaw/pipeline-project` and confirm before committing. The launch endpoint intentionally changes the symlink — failing to restore it breaks the pipeline run.
   > Notes: **Execution model**: `_run_init_project(repo_path: str, roadmap_seed: str) -> dict` in `server.py`. Pure Python + git subprocess calls. No LLM calls. No OpenClaw agent. No API keys needed here.
   >
   > **Mode detection**: Mode A if `{repo_path}/.git` absent. Mode B if `.git` exists.
@@ -330,7 +330,7 @@ INFRA-B1 and INFRA-E1 are complete — confirmed infrastructure.
 Project:     autodev-ui-screens
 Created:     2026-03-19 (rebuilt 2026-03-20 with lessons from first execution)
 Models:      openrouter/minimax/minimax-m2.7 (execute) + claude-sonnet-4-6 (plan + review)
-Repository:  /home/pi/projects/autodev-ui
+Repository:  /path/to/your-project/autodev-ui
 PRD:         docs/prd/autodev-ui-screens.prd.md
 ```
 
@@ -348,5 +348,5 @@ PRD:         docs/prd/autodev-ui-screens.prd.md
 - **Conversion prompt**: `~/.openclaw/deployment-package/Updates/PRD to Roadmap (sonnet 4.5 ideal).txt` — confirmed on disk.
 - **Readiness (FIX-PASS-1)**: `GET /api/ideas/{id}/readiness` returns `{"status","data"}` from `readiness.json` / `readiness.done` (agent assessment via `readiness-reviewer` skill), not Python heuristics. `GET /api/ideas/{id}/readiness/poll` returns `{"done": bool}`.
 - **Setup QOL (FIX-PASS-2)**: `POST /api/setup/validate-repo-path` debounced in UI for format ✓/✗. `POST /api/setup/check-repo-path` returns `{exists, parent_exists, is_git_repo, path}` for create-folder flow. `POST /api/setup/create-repo-dir` creates a single directory when parent exists. Roadmap seed uses **Paste** vs **Upload** toggle; upload uses a styled button (hidden file input). Preflight button becomes **Re-run Preflight** after first run with last-run time; pulses on any `fail`. Ideas list shows relative `updated` timestamps; delete uses inline confirmation; conversation auto-scrolls to latest message.
-- **Repo path validation (post FIX-PASS-2)**: Paths must be **absolute** (`Path.is_absolute()` after `expanduser`). Relative strings like `home/pi/...` are invalid (they previously resolved against the server CWD and broke existence checks). UI debounce uses **filesystem** `check-repo-path`: green ✓ only when `exists`; amber when parent exists but path does not. Confirm handler must check HTTP `ok` on `check-repo-path` so FastAPI errors are not misread as “parent missing.” If the server user cannot traverse `/home/pi` (permissions), `exists` may be false — run the UI server as that user.
+- **Repo path validation (post FIX-PASS-2)**: Paths must be **absolute** (`Path.is_absolute()` after `expanduser`). Relative strings like `path/to/...` are invalid (they previously resolved against the server CWD and broke existence checks). UI debounce uses **filesystem** `check-repo-path`: green ✓ only when `exists`; amber when parent exists but path does not. Confirm handler must check HTTP `ok` on `check-repo-path` so FastAPI errors are not misread as “parent missing.” If the server user cannot traverse `/home/otheruser` (permissions), `exists` may be false — run the UI server as that user.
 - **Readiness architecture (FIX-PASS-3)**: Readiness state is now explicit: `unavailable` (no artifacts and no active/recent run), `updating` (in-flight or triggered within 180s), `ready` (`readiness.done` + parseable `readiness.json`). Frontend polling caps at 40 polls (120s) and shows neutral timeout guidance instead of spinning forever. Server logs structured `[READINESS]` events for trigger/webhook/status/sentinel lifecycle in `/tmp/ui-server.log`.
