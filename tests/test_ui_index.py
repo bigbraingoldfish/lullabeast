@@ -49,13 +49,13 @@ def test_tailwind_cdn_present(html_content):
 
 
 def test_react_cdn_present(html_content):
-    """React and ReactDOM UMD CDN links present in HTML."""
-    # Look for React CDN
-    has_react = bool(re.search(r'react\.umd|unpkg\.com/react|cdn\.jsdelivr\.net.*react', html_content, re.IGNORECASE))
-    has_reactdom = bool(re.search(r'react-dom\.umd|unpkg\.com/react-dom|cdn\.jsdelivr\.net.*react-dom', html_content, re.IGNORECASE))
-    
-    assert has_react, "React UMD CDN link not found"
-    assert has_reactdom, "ReactDOM UMD CDN link not found"
+    """React and ReactDOM UMD links present in HTML (local static or CDN)."""
+    # Look for React — local static path or CDN fallback
+    has_react = bool(re.search(r'/static/react\.min\.js|react\.umd|unpkg\.com/react|cdn\.jsdelivr\.net.*react', html_content, re.IGNORECASE))
+    has_reactdom = bool(re.search(r'/static/react-dom\.min\.js|react-dom\.umd|unpkg\.com/react-dom|cdn\.jsdelivr\.net.*react-dom', html_content, re.IGNORECASE))
+
+    assert has_react, "React UMD link not found"
+    assert has_reactdom, "ReactDOM UMD link not found"
 
 
 def test_google_fonts_header_present(html_content):
