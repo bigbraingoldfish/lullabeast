@@ -7,7 +7,7 @@ _INDEX = Path(__file__).resolve().parent.parent / "ui" / "index.html"
 
 def test_index_includes_diff_cdn_and_prd_diff_flow():
     html = _INDEX.read_text(encoding="utf-8")
-    assert "unpkg.com/diff@8.0.4/dist/diff.min.js" in html
+    assert "/static/diff.min.js" in html
     assert "fetchPrdSectionDiff" in html
     assert "isLoadingRef" in html
     assert "/prd-section-diff" in html

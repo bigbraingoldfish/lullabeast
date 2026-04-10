@@ -670,6 +670,8 @@ def _read_conversion_prompt_text(config: dict) -> str:
 
 # FastAPI app
 app = FastAPI(lifespan=lifespan)
+from fastapi.staticfiles import StaticFiles
+app.mount("/static", StaticFiles(directory="ui/static"), name="static")
 
 
 @app.get("/health")
