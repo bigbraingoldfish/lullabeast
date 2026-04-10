@@ -2168,6 +2168,7 @@ def post_resume_orchestrator():
     Reads project_path from pipeline_state.json and autodev_repo_path from config.
     If pipeline_state.project_path disagrees with the pipeline-project symlink target,
     uses the symlink realpath so resume targets the active project directory.
+    Returns 409 if pipeline.lock indicates an orchestrator is already running.
     Returns 200 immediately without waiting for the orchestrator to start.
     """
     config = load_config()
@@ -2198,6 +2199,16 @@ def post_resume_orchestrator():
 
     if not project_path:
         raise HTTPException(status_code=503, detail="No project_path in pipeline_state.json")
+
+    lock_path = _expand_lock_path(config)
+    if lock_path:
+        try:
+            if _check_orchestrator_liveness(lock_path):
+                raise HTTPException(status_code=409, detail="Orchestrator is already running")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
 
     spawned = _spawn_orchestrator(project_path, config)
     if not spawned.get("ok"):

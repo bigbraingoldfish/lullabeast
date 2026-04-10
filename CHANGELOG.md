@@ -16,6 +16,7 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ### Changed
 
+- Pipeline Monitor: removed the header liveness dot and the **Restart Orchestrator** control from the top bar; when the orchestrator is down during a mid-flight run (`RUNNING` / `WAITING_FOR_SENTINEL`), restart is offered in the **Current Phase** column in an escalation-style panel (same flow as queue/actions messaging). `WAITING_FOR_HUMAN` still uses the escalation panel’s restart affordance only.
 - `install.sh` startup echo updated to recommend loopback binding (`127.0.0.1`) rather than `0.0.0.0`
 
 ### Fixed
