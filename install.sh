@@ -1028,7 +1028,7 @@ else
 fi
 
 echo
-echo "  Start with: cd \"$AUTODEV_REPO_PATH\" && source .env && uvicorn ui.server:app --host 0.0.0.0 --port 18790"
+echo "  Start with: cd \"$AUTODEV_REPO_PATH\" && source .env && uvicorn ui.server:app --host 127.0.0.1 --port 18790 (change to 0.0.0.0 only if serving trusted LAN)"
 echo "  Verify hooks with POST (expect HTTP 200):"
 echo "    curl -sS -o /dev/null -w \"HTTP %{http_code}\\n\" -X POST http://127.0.0.1:18789/hooks/agent \\"
 echo "      -H \"Authorization: Bearer <hooks.token>\" -H \"Content-Type: application/json\" \\"
