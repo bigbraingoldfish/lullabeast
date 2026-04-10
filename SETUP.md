@@ -104,7 +104,7 @@ A healthy gateway returns a JSON models list. A connection refused means the gat
 
 ### 2. `autodev_repo_path` misconfigured
 
-**What it looks like.** Clicking "Launch" in the setup UI returns an error like `orchestrator.py not found at /home/pi/.openclaw/orchestrator.py`. Or the orchestrator launches but immediately fails with `No module named sentinel_poller`.
+**What it looks like.** Clicking "Launch" in the setup UI returns an error like `orchestrator.py not found at /path/to/.openclaw/orchestrator.py`. Or the orchestrator launches but immediately fails with `No module named sentinel_poller`.
 
 **What's happening.** The UI server's `_spawn_orchestrator` function constructs the path to `orchestrator.py` using the `autodev_repo_path` value from `ui/config.json`. If this value is absent or still points to the old `~/.openclaw` location, the wrong directory is searched.
 

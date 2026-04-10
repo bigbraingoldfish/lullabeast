@@ -4720,7 +4720,7 @@ async def post_setup_create_repo_dir(request: Request):
     except ValueError:
         return {
             "ok": False,
-            "error": "Use an absolute path starting with / (e.g. /home/pi/projects/my-app)",
+            "error": "Use an absolute path starting with / (e.g. /path/to/your-project/my-app)",
         }
     try:
         path.mkdir(parents=False, exist_ok=False)

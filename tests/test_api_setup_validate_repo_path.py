@@ -25,10 +25,10 @@ class TestValidateRepoPath:
         assert r.status_code == 200
         assert r.json()["valid"] is False
 
-    def test_valid_path_string(self):
+    def test_valid_path_string(self, tmp_path):
         r = client.post(
             "/api/setup/validate-repo-path",
-            json={"path": "/home/pi/projects/my-app"},
+            json={"path": str(tmp_path)},
         )
         assert r.status_code == 200
         d = r.json()
@@ -54,7 +54,7 @@ class TestValidateRepoPath:
     def test_relative_path_invalid(self):
         r = client.post(
             "/api/setup/validate-repo-path",
-            json={"path": "home/pi/projects/my-app"},
+            json={"path": "path/to/your-project/my-app"},
         )
         assert r.status_code == 200
         d = r.json()

@@ -97,7 +97,7 @@ Returns merged current state from `pipeline_state.json` and `phase_state.json`. 
   "reviewer_retries": 0,
   "last_action": "executor webhook posted",
   "last_action_timestamp": "2026-03-14T10:23:01Z",
-  "project_path": "/home/pi/projects/myproject",
+  "project_path": "/path/to/your-project/myproject",
   "orchestrator_alive": true,
   "last_error_code": "ERR_MANIFEST_FILE_MISSING",
   "escalation_resets": 1,

@@ -4005,7 +4005,7 @@
                             onChange={(e) => onChange(e.target.value)}
                             disabled={disabled}
                             readOnly={disabled}
-                            placeholder="/home/pi/projects/my-app"
+                            placeholder="/path/to/your-project/my-app"
                             className={
                                 "flex-1 min-w-0 rounded border border-[#1a1d21] px-3 py-2 text-sm font-mono " +
                                 (disabled ? "bg-[#0d0f12] text-slate-300" : "bg-[#1a1d21] text-slate-200")
@@ -6263,7 +6263,7 @@
                         } else {
                             setRepoPathError(
                                 "Path does not exist and the parent directory is not reachable. " +
-                                    "Use an absolute path starting with / (e.g. /home/pi/projects/my-app). " +
+                                    "Use an absolute path starting with / (e.g. /path/to/your-project/my-app). " +
                                     "If the path is correct, the server must be able to access it (home dirs are often mode 700 — run the UI server as the same user)."
                             );
                         }

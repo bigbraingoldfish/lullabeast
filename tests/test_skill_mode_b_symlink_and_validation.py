@@ -7,8 +7,12 @@ The symlink verification uses direct subprocess calls, not pytest tmp_path.
 import subprocess
 import os
 import re
+from pathlib import Path
 
 import pytest
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_GATE_DIR = _REPO_ROOT / "autodev" / "pipeline" / "gate_scripts"
 
 PROJECT_DIR = "/tmp/infra-e1-test-b"
 PIPELINE_SYMLINK = os.path.expanduser("~/.openclaw/pipeline-project")
@@ -48,7 +52,7 @@ def test_symlink_points_to_project():
 
 def test_repo_init_check_passes():
     """python3 gate_scripts/repo_init_check.py /tmp/infra-e1-test-b exits 0"""
-    gate_script = "/home/pi/.openclaw/gate_scripts/repo_init_check.py"
+    gate_script = str(_GATE_DIR / "repo_init_check.py")
     result = subprocess.run(
         ["python3", gate_script, PROJECT_DIR],
         capture_output=True, text=True
@@ -93,9 +97,9 @@ def test_roadmap_format_valid():
     assert not malformed, f"Malformed phase lines: {malformed}"
 
 
-def test_roadmap_passes_roadmap_parser():
-    """python3 gate_scripts/roadmap_parser.py /tmp/infra-e1-test-b/roadmap.md exits 0"""
-    gate_script = "/home/pi/.openclaw/gate_scripts/roadmap_parser.py"
+def test_roadmap_passes_phase_resolver():
+    """python3 gate_scripts/phase_resolver.py /tmp/infra-e1-test-b/roadmap.md exits 0"""
+    gate_script = str(_GATE_DIR / "phase_resolver.py")
     roadmap_path = os.path.join(PROJECT_DIR, "roadmap.md")
     result = subprocess.run(
         ["python3", gate_script, roadmap_path],
