@@ -21,6 +21,7 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ### Fixed
 
+- `load_config()` / `ui/config.json`: keys present with empty-string values (as in `config.example.json`) no longer count as user overrides, so `_finalize_autodev_config_paths` still derives `pipeline_state_path`, `project_dir_path`, and related runtime paths. Fixes “pipeline_state_path is not configured” after install when placeholders were left in the file.
 - `repo_init_check.py` resolves `pipeline-project` with the same runtime-root rules as the orchestrator and `phase_resolver` (default: `$AUTODEV_REPO_PATH/.autodev/pipeline-project`; legacy OpenClaw hub layout: set `AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME=1`). Fixes false “symlink not found” checks against `~/.openclaw` when using repo-local runtime.
 - Orchestrator atomic writes (`phase_state`, `failure_context`, related `mkstemp` paths) fall back to `AUTODEV_RUNTIME_ROOT` (with `makedirs`) instead of `AUTODEV_ROOT` when `pipeline-project` is missing, avoiding an uncaught `FileNotFoundError` if `~/.openclaw` was never created (e.g. Docker `AUTODEV_ROOT` not loaded from `.env`).
 - `autodev/tests/test_repo_init_check_paths.py`: legacy-layout cases set `AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME`; added repo-local runtime coverage. Manual skill-mode symlink tests pass the same env when invoking `repo_init_check.py`.
