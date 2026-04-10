@@ -406,10 +406,26 @@ def _truthy_env(v: str) -> bool:
     return v.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _user_override_keys(user_config: dict) -> set[str]:
+    """Keys the user meaningfully set in ui/config.json.
+
+    Empty or whitespace-only strings are treated as unset (same as missing key) so
+    config.example.json placeholders do not block _finalize_autodev_config_paths.
+    Non-string values (port, booleans, numbers) always count as overrides.
+    """
+    out: set[str] = set()
+    for k, v in user_config.items():
+        if isinstance(v, str) and not v.strip():
+            continue
+        out.add(k)
+    return out
+
+
 def _finalize_autodev_config_paths(config: dict, user_override_keys: set[str]) -> None:
     """Fill runtime paths: repo-local ``<repo>/.autodev`` by default, or OpenClaw root if legacy.
 
-    Keys present in ``user_override_keys`` (from ui/config.json) are never overwritten.
+    Keys in ``user_override_keys`` (from ui/config.json via ``_user_override_keys``) are never
+    overwritten. Empty-string file values are excluded from that set so placeholders match defaults.
     """
     legacy = bool(config.get("use_legacy_openclaw_runtime"))
     if _truthy_env(os.environ.get("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "")):
@@ -475,7 +491,7 @@ def load_config(config_path=None):
     if Path(config_path).exists():
         with open(config_path, 'r') as f:
             user_config = json.load(f)
-            user_override_keys = set(user_config.keys())
+            user_override_keys = _user_override_keys(user_config)
             config.update(user_config)
 
     # Webhook Bearer token: env wins over file (avoid committing secrets)
