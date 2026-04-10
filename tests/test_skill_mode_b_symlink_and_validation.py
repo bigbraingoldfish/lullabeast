@@ -106,7 +106,7 @@ def test_roadmap_passes_phase_resolver():
         capture_output=True, text=True
     )
     assert result.returncode == 0, (
-        f"roadmap_parser failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        f"phase_resolver failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
 
 
