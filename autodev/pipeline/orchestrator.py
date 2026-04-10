@@ -56,6 +56,22 @@ VALID_STATES = [
 
 QUEUE_FILE = os.path.join(AUTODEV_RUNTIME_ROOT, "pipeline_queue.json")
 
+
+def _atomic_temp_dir_for_project_writes():
+    """Directory for tempfile.mkstemp before os.replace into SYMLINK_TARGET.
+
+    When pipeline-project is missing, falling back to AUTODEV_ROOT can raise
+    FileNotFoundError if ~/.openclaw was never created — use repo-local runtime instead.
+    """
+    if os.path.exists(SYMLINK_TARGET):
+        return SYMLINK_TARGET
+    try:
+        os.makedirs(AUTODEV_RUNTIME_ROOT, exist_ok=True)
+    except OSError:
+        pass
+    return AUTODEV_RUNTIME_ROOT
+
+
 # llama-server HTTP origin (scheme + host + port, no path). Set AUTODEV_LLAMA_BASE if not localhost.
 _LLAMA_ORIGIN = os.environ.get("AUTODEV_LLAMA_BASE", "http://127.0.0.1:11434").rstrip("/")
 
@@ -714,7 +730,7 @@ class Orchestrator:
 
         phase_state["planner_retries"] = phase_state.get("planner_retries", 0) + 1
         
-        target_dir = SYMLINK_TARGET if os.path.exists(SYMLINK_TARGET) else AUTODEV_ROOT
+        target_dir = _atomic_temp_dir_for_project_writes()
         fd, temp_path = tempfile.mkstemp(dir=target_dir, prefix="phase_state_")
         try:
             with os.fdopen(fd, 'w') as f:
@@ -869,7 +885,7 @@ class Orchestrator:
 
     def write_phase_state_atomic(self, phase_state):
         """Atomically write phase_state.json using temp-file rename."""
-        target_dir = SYMLINK_TARGET if os.path.exists(SYMLINK_TARGET) else AUTODEV_ROOT
+        target_dir = _atomic_temp_dir_for_project_writes()
         fd, temp_path = tempfile.mkstemp(dir=target_dir, prefix="phase_state_")
         try:
             with os.fdopen(fd, 'w') as f:
@@ -1197,7 +1213,7 @@ class Orchestrator:
 
         phase_state["executor_retries"] = phase_state.get("executor_retries", 0) + 1
         
-        target_dir = SYMLINK_TARGET if os.path.exists(SYMLINK_TARGET) else AUTODEV_ROOT
+        target_dir = _atomic_temp_dir_for_project_writes()
         fd, temp_path = tempfile.mkstemp(dir=target_dir, prefix="phase_state_")
         try:
             with os.fdopen(fd, 'w') as f:
@@ -1507,7 +1523,7 @@ class Orchestrator:
                 pass
 
         _failure_context_path = os.path.join(SYMLINK_TARGET, "failure_context.json")
-        _fc_dir = SYMLINK_TARGET if os.path.exists(SYMLINK_TARGET) else AUTODEV_ROOT
+        _fc_dir = _atomic_temp_dir_for_project_writes()
         fd, temp_path = tempfile.mkstemp(dir=_fc_dir, prefix="failure_context_")
         try:
             with os.fdopen(fd, 'w') as f:
@@ -1534,7 +1550,8 @@ class Orchestrator:
             except Exception:
                 pass
         phase_state["reviewer_rejected"] = True
-        fd, temp_path = tempfile.mkstemp(dir=SYMLINK_TARGET, prefix="phase_state_")
+        target_dir = _atomic_temp_dir_for_project_writes()
+        fd, temp_path = tempfile.mkstemp(dir=target_dir, prefix="phase_state_")
         try:
             with os.fdopen(fd, 'w') as f:
                 json.dump(phase_state, f, indent=2)
@@ -1556,7 +1573,7 @@ class Orchestrator:
 
         phase_state["reviewer_retries"] = phase_state.get("reviewer_retries", 0) + 1
         
-        target_dir = SYMLINK_TARGET if os.path.exists(SYMLINK_TARGET) else AUTODEV_ROOT
+        target_dir = _atomic_temp_dir_for_project_writes()
         fd, temp_path = tempfile.mkstemp(dir=target_dir, prefix="phase_state_")
         try:
             with os.fdopen(fd, 'w') as f:
@@ -1742,7 +1759,7 @@ class Orchestrator:
                 webhook_status = invoke_agent_webhook("escalation", session_key, token)
                 if webhook_status != "SUCCESS":
                     print("[ERROR] Escalation webhook failed after repo init failure.")
-                    fallback_dir = SYMLINK_TARGET if os.path.exists(SYMLINK_TARGET) else AUTODEV_ROOT
+                    fallback_dir = _atomic_temp_dir_for_project_writes()
                     error_data = {
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                         "phase": phase,

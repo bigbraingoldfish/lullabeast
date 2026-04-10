@@ -2,6 +2,8 @@ import os
 import sys
 import glob
 
+from utils import _derive_runtime_root
+
 
 def _autodev_root() -> str:
     """OpenClaw install root (workspaces, openclaw.json, pipeline-project symlink).
@@ -18,7 +20,10 @@ def _autodev_root() -> str:
 
 def check_repo_init():
     oc_root = _autodev_root()
-    pipeline_project = os.path.join(oc_root, "pipeline-project")
+    # Match orchestrator / phase_resolver: repo-local `.autodev/pipeline-project` by default,
+    # not only ~/.openclaw/pipeline-project (legacy layout uses AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME).
+    runtime_root = os.path.abspath(os.path.expanduser(_derive_runtime_root()))
+    pipeline_project = os.path.join(runtime_root, "pipeline-project")
 
     if not os.path.exists(pipeline_project):
         print(f"[ERROR] Shared workspace symlink not found: {pipeline_project}")

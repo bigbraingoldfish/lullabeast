@@ -53,9 +53,13 @@ def test_symlink_points_to_project():
 def test_repo_init_check_passes():
     """python3 gate_scripts/repo_init_check.py /tmp/infra-e1-test-b exits 0"""
     gate_script = str(_GATE_DIR / "repo_init_check.py")
+    env = os.environ.copy()
+    env["AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME"] = "1"
     result = subprocess.run(
         ["python3", gate_script, PROJECT_DIR],
-        capture_output=True, text=True
+        capture_output=True,
+        text=True,
+        env=env,
     )
     assert result.returncode == 0, (
         f"repo_init_check failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
