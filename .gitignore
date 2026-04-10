@@ -33,6 +33,7 @@ ui/index.html.bak
 /.cursorrules
 /.windsurfrules
 /.claude/skills/
+.claude/settings.json
 
 # Local / internal planning (not for the public tree)
 /plans/
