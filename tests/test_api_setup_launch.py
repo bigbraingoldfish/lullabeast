@@ -440,8 +440,13 @@ class TestSymlinkSetting:
         src, dst = symlink_calls[0]
         # src should be the expanded repo_path
         assert src == str(repo_path)
-        # dst should be ~/.openclaw/pipeline-project (expanded)
-        assert dst == os.path.expanduser("~/.openclaw/pipeline-project")
+        # dst should be the configured project_dir_path (repo-local .autodev/ by default,
+        # or ~/.openclaw/pipeline-project in legacy mode). Derive from load_config() so
+        # the assertion survives future runtime layout changes.
+        from ui.server import load_config
+        cfg = load_config()
+        expected_dst = os.path.expanduser(cfg["project_dir_path"])
+        assert dst == expected_dst
 
     def test_removes_existing_symlink_before_creating(self, tmp_path):
         """When lexists returns True, os.remove is called before os.symlink."""

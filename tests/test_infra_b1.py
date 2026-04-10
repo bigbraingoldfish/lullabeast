@@ -20,9 +20,10 @@ class TestProjectPathArg:
     def test_orchestrator_spawn_uses_project_path_flag(self):
         with open(SERVER_PY, "r") as f:
             content = f.read()
-        # Find the subprocess.Popen call in or near post_resume_orchestrator
+        # Find the subprocess.Popen call in or near post_resume_orchestrator.
+        # Production uses sys.executable (not the literal string "python") as the interpreter.
         match = re.search(
-            r'\[.*?"python".*?orchestrator_script.*?"--project-path".*?project_path.*?\]',
+            r'\[.*?sys\.executable.*?orchestrator_script.*?"--project-path".*?project_path.*?\]',
             content,
             re.DOTALL,
         )
