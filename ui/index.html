@@ -563,6 +563,7 @@
             last_action,
             escalation_resets,
             orchestrator_alive,
+            onOrchestratorRestarted,
         }) {
             const [commandSent, setCommandSent] = useState(false);
             const [lastSubmittedCommand, setLastSubmittedCommand] = useState(null);
@@ -571,6 +572,8 @@
             const [showConfirmModal, setShowConfirmModal] = useState(false);
             const [modalCommand, setModalCommand] = useState(null);
             const [confirmBusy, setConfirmBusy] = useState(false);
+            const [restartBusy, setRestartBusy] = useState(false);
+            const [restartError, setRestartError] = useState("");
 
             const isResetDisabled = escalation_resets >= 3;
 
@@ -711,11 +714,55 @@
                 );
             };
 
+            const handleRestartOrchestrator = async () => {
+                setRestartError("");
+                setRestartBusy(true);
+                try {
+                    const r = await fetch("/api/resume-orchestrator", { method: "POST" });
+                    const d = await r.json().catch(() => ({}));
+                    if (!r.ok) {
+                        const msg =
+                            typeof d.detail === "string"
+                                ? d.detail
+                                : `Restart failed (${r.status})`;
+                        setRestartError(msg);
+                        return;
+                    }
+                    if (typeof onOrchestratorRestarted === "function") onOrchestratorRestarted();
+                } catch (err) {
+                    setRestartError(String(err?.message || err));
+                } finally {
+                    setRestartBusy(false);
+                }
+            };
+
+            const restartOrchestratorButton = (
+                <button
+                    type="button"
+                    onClick={() => !restartBusy && handleRestartOrchestrator()}
+                    disabled={restartBusy}
+                    className="header-text mt-2 w-full px-3 py-2 text-xs rounded bg-cyan-950 hover:bg-cyan-900 text-cyan-200 border border-cyan-800 transition-colors disabled:opacity-50"
+                >
+                    {restartBusy ? "Restarting…" : "Restart Orchestrator"}
+                </button>
+            );
+
             return (
                 <div className="border-2 border-orange-500 rounded-lg p-4 mt-4 bg-[#141618]/50">
                     <h3 className="header-text text-sm font-semibold text-orange-400 mb-1">
                         {headerText}
                     </h3>
+                    {humanWait && !orchestrator_alive && !commandSent ? (
+                        <div className="mb-3 rounded border border-amber-700/50 bg-amber-950/30 p-2">
+                            <p className="text-amber-600 text-xs leading-relaxed">
+                                Orchestrator is not running. Restart it before commands can be applied.
+                            </p>
+                            {restartOrchestratorButton}
+                            {restartError ? (
+                                <p className="header-text text-xs text-red-400 mt-1">{restartError}</p>
+                            ) : null}
+                        </div>
+                    ) : null}
                     {escalation_message && !commandSent && humanWait ? (
                         <p className="text-slate-300 text-xs mb-3 leading-relaxed">
                             {escalation_message}
@@ -750,9 +797,15 @@
                                     : `${lastSubmittedCommand} submitted — waiting for orchestrator to apply it.`}
                             </span>
                             {!orchestrator_alive ? (
-                                <span className="text-amber-600 text-xs block">
-                                    Orchestrator is not running — start it on the server for this command to take effect.
-                                </span>
+                                <div className="space-y-1">
+                                    <span className="text-amber-600 text-xs block">
+                                        Orchestrator is not running — restart it for this command to take effect.
+                                    </span>
+                                    {restartOrchestratorButton}
+                                    {restartError ? (
+                                        <p className="header-text text-xs text-red-400">{restartError}</p>
+                                    ) : null}
+                                </div>
                             ) : null}
                         </div>
                     ) : canIssueCommands ? (
@@ -4454,7 +4507,7 @@
                 fetch(`/api/queue/${id}/relaunch`, {method: 'POST'})
                     .then(async r => {
                         const d = await r.json().catch(() => ({}));
-                        if (!r.ok) { setHubError(d.detail || 'Relaunch failed'); return; }
+                        if (!r.ok) { setHubError(d.detail || 'Restart failed'); return; }
                         fetchQueue();
                     })
                     .catch(() => setHubError('Request failed'))
@@ -4802,6 +4855,29 @@
                 if (state === 'ACTIVE') {
                     const midFlight = selLive === 'RUNNING' || selLive === 'WAITING_FOR_SENTINEL';
                     if (midFlight) {
+                        const orchDown =
+                            snapshot && snapshot.is_active_project && !snapshot.orchestrator_alive;
+                        if (orchDown) {
+                            return (
+                                <div className="space-y-3">
+                                    <p className="header-text text-xs text-slate-400">
+                                        Orchestrator process has stopped; pipeline state still shows an in-flight run.
+                                    </p>
+                                    <button
+                                        onClick={() => handleRelaunch(selected.id)}
+                                        disabled={hubBusy || reorderDirty}
+                                        title={reorderDirty ? "Save or cancel reorder first" : undefined}
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-slate-900 font-semibold hover:bg-[#00c8f0] disabled:opacity-50 w-full"
+                                    >
+                                        {hubBusy ? "Restarting…" : "Restart Orchestrator"}
+                                    </button>
+                                    {hubError && (
+                                        <p className="header-text text-xs text-red-400">{hubError}</p>
+                                    )}
+                                    {monitorBtn}
+                                </div>
+                            );
+                        }
                         return (
                             <div className="space-y-3">
                                 <p className="header-text text-xs text-slate-400">Pipeline is running for this project.</p>
@@ -4829,7 +4905,7 @@
                             <button onClick={() => handleRelaunch(selected.id)} disabled={hubBusy || reorderDirty}
                                 title={reorderDirty ? "Save or cancel reorder first" : undefined}
                                 className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-slate-900 font-semibold hover:bg-[#00c8f0] disabled:opacity-50 w-full">
-                                {hubBusy ? 'Relaunching…' : 'Relaunch Orchestrator'}
+                                {hubBusy ? 'Restarting…' : 'Restart Orchestrator'}
                             </button>
                             {hubError && <p className="header-text text-xs text-red-400">{hubError}</p>}
                         </div>
@@ -5152,6 +5228,8 @@
             const [stopHint, setStopHint] = useState("");
             const [resumeBusy, setResumeBusy] = useState(false);
             const [resumeError, setResumeError] = useState("");
+            const [orchRestartBusy, setOrchRestartBusy] = useState(false);
+            const [orchRestartError, setOrchRestartError] = useState("");
             const [projectSwitchOpen, setProjectSwitchOpen] = useState(false);
             const [swPath, setSwPath] = useState("");
             const [swRecents, setSwRecents] = useState([]);
@@ -5416,6 +5494,28 @@
                 }
             };
 
+            const handleRestartOrchestrator = async () => {
+                setOrchRestartError("");
+                setOrchRestartBusy(true);
+                try {
+                    const r = await fetch("/api/resume-orchestrator", { method: "POST" });
+                    const d = await r.json().catch(() => ({}));
+                    if (!r.ok) {
+                        const msg =
+                            typeof d.detail === "string"
+                                ? d.detail
+                                : `Restart failed (${r.status})`;
+                        setOrchRestartError(msg);
+                        return;
+                    }
+                    fetchState();
+                } catch (e) {
+                    setOrchRestartError(String(e));
+                } finally {
+                    setOrchRestartBusy(false);
+                }
+            };
+
             const handleGitRecover = async () => {
                 setGitRecoverError("");
                 setGitRecoverBusy(true);
@@ -5447,6 +5547,8 @@
                 status
             );
             const showResumeButton = status === "STOPPED";
+            const showRestartOrchestratorButton =
+                !alive && (status === "RUNNING" || status === "WAITING_FOR_SENTINEL");
 
             // Derive header status label and class
             let statusLabel = '--';
@@ -5550,9 +5652,6 @@
                                         </button>
                                     )}
                                     <span
-                                        className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${alive ? "bg-green-500" : "bg-red-600"}`}
-                                    ></span>
-                                    <span
                                         className={`header-text px-3 py-1 rounded-full text-sm font-medium ${statusClass}`}
                                     >
                                         {statusLabel}
@@ -5639,6 +5738,31 @@
                                 metricsSummary={metricsSummary}
                                 escalation_resets={pState.escalation_resets || 0}
                             />
+                            {showRestartOrchestratorButton && (
+                                <div
+                                    className="border-2 border-orange-500 rounded-lg p-4 mt-4 bg-[#141618]/50"
+                                    data-testid="pipeline-orchestrator-down-panel"
+                                >
+                                    <h3 className="header-text text-sm font-semibold text-orange-400 mb-1">
+                                        Orchestrator stopped
+                                    </h3>
+                                    <p className="text-slate-300 text-xs mb-3 leading-relaxed">
+                                        The orchestrator process exited while pipeline state still shows an in-flight run.
+                                        Restart it to resume sentinel polling and agent work.
+                                    </p>
+                                    <button
+                                        type="button"
+                                        onClick={handleRestartOrchestrator}
+                                        disabled={orchRestartBusy}
+                                        className="header-text w-full px-3 py-2 text-xs rounded bg-cyan-950 hover:bg-cyan-900 text-cyan-200 border border-cyan-800 transition-colors disabled:opacity-50"
+                                    >
+                                        {orchRestartBusy ? "Restarting…" : "Restart Orchestrator"}
+                                    </button>
+                                    {orchRestartError ? (
+                                        <p className="header-text text-xs text-red-400 mt-2">{orchRestartError}</p>
+                                    ) : null}
+                                </div>
+                            )}
                             <EscalationCommandPanel
                                 pipeline_status={status}
                                 escalation_trigger_reason={pState.escalation_trigger_reason}
@@ -5646,6 +5770,7 @@
                                 last_action={pState.last_action}
                                 escalation_resets={pState.escalation_resets || 0}
                                 orchestrator_alive={alive}
+                                onOrchestratorRestarted={fetchState}
                             />
                         </div>
 
