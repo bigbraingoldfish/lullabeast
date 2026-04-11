@@ -40,6 +40,34 @@ CONFIG_FILE = os.path.join(AUTODEV_ROOT, "openclaw.json")
 PHASE_STATE_FILE = os.path.join(SYMLINK_TARGET, "phase_state.json")
 
 ORCHESTRATOR_FILENAME = "orchestrator.py"
+
+
+def _validate_autodev_root(root: str) -> None:
+    """Validate AUTODEV_ROOT and required workspace directories at startup.
+
+    Prints one error line per missing item, then calls sys.exit(1) if anything
+    is absent — so operators see all issues at once rather than hitting a
+    confusing crash deep inside the pipeline.
+    """
+    errors = []
+
+    if not os.path.isdir(root):
+        errors.append(f"  AUTODEV_ROOT does not exist or is not a directory: {root}")
+
+    for role in ("planner", "executor", "reviewer"):
+        ws = os.path.join(root, f"workspace-{role}")
+        if not os.path.isdir(ws):
+            errors.append(f"  Missing workspace directory: {ws}")
+
+    config_path = os.path.join(root, "openclaw.json")
+    if not os.path.exists(config_path):
+        errors.append(f"  openclaw.json not found at: {config_path}")
+
+    if errors:
+        print("[ERROR] AUTODEV_ROOT validation failed:")
+        for msg in errors:
+            print(msg)
+        sys.exit(1)
 WEBHOOK_AGENT_ID_PRD = "prd-creator"
 ORCHESTRATOR_POLL_TIMEOUT = 120
 
@@ -195,6 +223,7 @@ class Orchestrator:
             "last_action_timestamp": datetime.now(timezone.utc).isoformat(),
             "pipeline_status": "RUNNING"
         }
+        _validate_autodev_root(AUTODEV_ROOT)
         self.openclaw_config = self.load_config()
         self.skill_manager = SkillManager(AUTODEV_ROOT)
 

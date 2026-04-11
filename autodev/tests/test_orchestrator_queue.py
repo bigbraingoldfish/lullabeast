@@ -688,6 +688,8 @@ class TestApplyCliProjectPath:
         proj_a.mkdir()
         proj_b.mkdir()
         (tmp_path / "openclaw.json").write_text('{"hooks_url": "http://localhost:18789/hooks/agent", "hooks_token": "test-token"}')
+        for _role in ("planner", "executor", "reviewer"):
+            (tmp_path / f"workspace-{_role}").mkdir()
 
         state_path = Path(orch_mod.STATE_FILE)
         link = Path(orch_mod.SYMLINK_TARGET)
@@ -746,6 +748,8 @@ class TestMainLoopStaleCompleteSyncsQueue:
         queue_file = tmp_path / "pipeline_queue.json"
         state_file = tmp_path / "pipeline_state.json"
         (tmp_path / "openclaw.json").write_text('{"hooks_url": "http://localhost:18789/hooks/agent", "hooks_token": "test-token"}')
+        for _role in ("planner", "executor", "reviewer"):
+            (tmp_path / f"workspace-{_role}").mkdir(exist_ok=True)
 
         proj = tmp_path / "active_proj"
         proj.mkdir()
@@ -822,6 +826,8 @@ class TestMainLoopStaleCompleteSyncsQueue:
         queue_file = tmp_path / "pipeline_queue.json"
         state_file = tmp_path / "pipeline_state.json"
         (tmp_path / "openclaw.json").write_text('{"hooks_url": "http://localhost:18789/hooks/agent", "hooks_token": "test-token"}')
+        for _role in ("planner", "executor", "reviewer"):
+            (tmp_path / f"workspace-{_role}").mkdir(exist_ok=True)
 
         proj = tmp_path / "active_proj"
         proj.mkdir()
