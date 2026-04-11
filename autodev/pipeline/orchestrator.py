@@ -443,8 +443,16 @@ class Orchestrator:
     def _queue_preflight(self, project_path):
         """Lightweight queue preflight: dir exists, is git repo, has roadmap*.md.
 
-        NOTE: Less comprehensive than server _run_preflight_checks. A project
-        passing this check may still fail the full server preflight. Known limitation.
+        LIGHTWEIGHT PREFLIGHT ONLY — this check is intentionally narrower than the
+        server-side `_run_preflight_checks` (which also validates symlink integrity,
+        .gitignore, agent workspace files, and OpenClaw config).  A project that
+        passes this check may still fail mid-pipeline if the full server preconditions
+        are not satisfied.  The server runs `_run_preflight_checks` at queue-add time
+        and at trigger-next time; this method runs only when the orchestrator
+        auto-advances between queue entries without a UI trigger.
+
+        If you add new checks here, keep them lightweight (no network, no subprocess)
+        and ensure they match a subset of `_run_preflight_checks` to avoid divergence.
         """
         if not os.path.isdir(project_path):
             return False, "directory does not exist"
