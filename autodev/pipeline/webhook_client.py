@@ -3,6 +3,11 @@ import requests
 import logging
 
 def invoke_agent_webhook(agent_id: str, session_key: str, token: str, wake_mode: str = "now", model: str = None, message: str = None):
+    # Enqueue-only semantics: OpenClaw returns HTTP 200 when the agent task has been
+    # queued, NOT when it has been executed.  Any 2xx after raise_for_status() means
+    # "successfully enqueued" — not "successfully completed".  Do not inspect the
+    # response body for execution results here; completion is detected via sentinel
+    # files written by the agent to its workspace directory.
     url = "http://localhost:18789/hooks/agent"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     # Default messages per agent role — agents read workspace files for full context
