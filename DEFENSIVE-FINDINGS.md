@@ -189,6 +189,26 @@ Superseded by **[Consolidated summary action list](#consolidated-summary-action-
 
 ---
 
+<!-- SESSION LOG 2026-04-10 (session 2) -->
+## Session log — 2026-04-10 (session 2)
+
+**Completed:** C2-01, C2-02, C2-03, C6-06, C6-05, C7-02, C7-03, C7-04
+
+**In-progress:** none
+
+**Skipped:** none
+
+**Regressions found:**
+- `tests/test_api_ideas_adversarial_check.py::test_returns_200_with_adversarial_report` fails in full suite but passes in isolation — same pre-existing test-ordering issue noted in session 1. Unrelated to this session's changes.
+- C2-02 status check (`resp.status >= 400`) broke 4 existing test files whose mock factories used `MagicMock()` without setting `status` as an integer. Fixed all affected test files by adding `mock_response.status = 200` to their mock factories (`test_api_ideas_adversarial_check.py`, `test_api_ideas_alignment_check.py`, `test_api_ideas_convert.py`, `test_api_ideas_convert_updated.py`).
+- C7-02 (fail-fast on missing openclaw.json keys) broke 3 tests in `test_orchestrator_queue.py` that used `{}` as openclaw.json. Fixed by writing the minimal valid config `{"hooks_url": ..., "hooks_token": ...}` in those fixtures.
+- C7-04 (`_validate_autodev_root`) broke 3 tests in `test_orchestrator_queue.py` that called `Orchestrator()` without workspace dirs. Fixed by adding `workspace-{planner,executor,reviewer}/` mkdir in those fixtures.
+
+**Notes for next session:**
+- Findings #17–38 remain open. Next batch starts at C3-01 (T4, write_state re-raise).
+- C7-03 `skill_health.json` is written atomically (mkstemp + os.replace) to AUTODEV_ROOT. Tests use the real AUTODEV_ROOT path from the environment, so the health file location is `$AUTODEV_ROOT/skill_health.json`.
+- The pre-existing adversarial test ordering issue is a real bug in the test suite (test isolation) but is out of scope for this defensive pass.
+
 <!-- SESSION LOG 2026-04-10 -->
 ## Session log — 2026-04-10
 
