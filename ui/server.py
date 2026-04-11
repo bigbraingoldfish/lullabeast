@@ -913,7 +913,7 @@ def _check_orchestrator_liveness(lock_path):
     Raises:
         BlockingIOError: If lock cannot be acquired (another process holds it).
     """
-    lock_file = open(lock_path, 'w')
+    lock_file = open(lock_path, 'a')
     try:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         # Lock acquired successfully - release immediately
