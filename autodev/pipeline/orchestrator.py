@@ -1490,6 +1490,16 @@ class Orchestrator:
                     # Low confidence or unknown — fall through to Layer 2
                     _append_blame_log(1, _fault, _conf, "fallback", _reasoning)
 
+            except json.JSONDecodeError as _l1_json_err:
+                # Malformed analyst JSON is itself an infra symptom (model truncated output).
+                # Route to 'unknown' and return early rather than falling through to Layer 2
+                # which would default to 'impl' — misrouting an infra failure as impl wastes
+                # a full executor retry.
+                _append_blame_log(1, "malformed_json", "null", "unknown",
+                                  f"malformed analyst JSON: {_l1_json_err}")
+                _record_blame_attribution("unknown")
+                return {"blame": "unknown",
+                        "reason": f"[L1] malformed analyst JSON — escalating: {_l1_json_err}"}
             except Exception as _l1_err:
                 _append_blame_log(1, "null", "null", "fallback",
                                   f"analyst unavailable: {_l1_err}")
