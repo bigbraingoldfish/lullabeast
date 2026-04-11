@@ -46,6 +46,7 @@ class TestApiIdeasConvertUpdated:
 
     def _make_mock_aiohttp(self):
         mock_response = MagicMock()
+        mock_response.status = 200  # must be int so resp.status >= 400 check works
         mock_session = MagicMock()
         mock_session.post = AsyncMock(return_value=mock_response)
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
@@ -113,7 +114,7 @@ class TestApiIdeasConvertUpdated:
 
         async def record_post(*args, **kwargs):
             call_order.append("post")
-            return MagicMock()
+            return MagicMock(status=200)
 
         mock_session.post = record_post
 
