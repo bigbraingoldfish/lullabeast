@@ -270,16 +270,27 @@ class Orchestrator:
             return False
 
     def read_state(self):
-        """Reads pipeline_state.json if it exists."""
+        """Reads pipeline_state.json if it exists.
+
+        On parse failure the corrupt file is quarantined (renamed to
+        pipeline_state.json.corrupt.<timestamp>) and the process exits with code 1.
+        Continuing with in-memory defaults risks duplicate phase work or wrong agent
+        routing on restart.  Operator must manually inspect the quarantined file.
+        """
         if os.path.exists(STATE_FILE):
             try:
                 with open(STATE_FILE, 'r') as f:
                     self.state = json.load(f)
                     print(f"[INFO] Loaded state: {self.state['pipeline_status']}")
             except Exception as e:
-                print(f"[ERROR] Failed to read state file: {e}")
-                # We do not crash on invalid JSON, but we might want to halt.
-                # For Phase 2, we just log and continue with memory state
+                corrupt_path = f"{STATE_FILE}.corrupt.{int(time.time())}"
+                try:
+                    os.rename(STATE_FILE, corrupt_path)
+                    print(f"[ERROR] pipeline_state.json is corrupt; quarantined to {corrupt_path}: {e}")
+                except OSError as rename_err:
+                    print(f"[ERROR] Could not quarantine corrupt state file: {rename_err}")
+                print("[FATAL] Halting — manual recovery required. Inspect the quarantined file.")
+                sys.exit(1)
         else:
             print("[INFO] No existing state file found. Starting fresh.")
             self.write_state()
@@ -894,13 +905,28 @@ class Orchestrator:
             print(f"[ERROR] Failed to reset working tree: {e}")
 
     def read_phase_state(self):
-        """Read phase_state.json, return dict (empty if not found or invalid)."""
+        """Read phase_state.json, return dict (empty if file absent).
+
+        On parse failure the corrupt file is quarantined (renamed to
+        phase_state.json.corrupt.<timestamp>) and a RuntimeError is raised.
+        Silently returning {} on corruption would drop planner_retries /
+        executor_retries / blame attribution fields, causing misrouted retries.
+        """
         if os.path.exists(PHASE_STATE_FILE):
             try:
                 with open(PHASE_STATE_FILE, 'r') as f:
                     return json.load(f)
-            except Exception:
-                return {}
+            except Exception as e:
+                corrupt_path = f"{PHASE_STATE_FILE}.corrupt.{int(time.time())}"
+                try:
+                    os.rename(PHASE_STATE_FILE, corrupt_path)
+                    print(f"[ERROR] phase_state.json is corrupt; quarantined to {corrupt_path}: {e}")
+                except OSError as rename_err:
+                    print(f"[ERROR] Could not quarantine corrupt phase_state.json: {rename_err}")
+                raise RuntimeError(
+                    f"[FATAL] phase_state.json is corrupt and has been quarantined to "
+                    f"{corrupt_path}. Manual recovery required."
+                ) from e
         return {}
 
     def write_phase_state_atomic(self, phase_state):
