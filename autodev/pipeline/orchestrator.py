@@ -350,6 +350,7 @@ class Orchestrator:
             print(f"[ERROR] Failed to write state: {e}")
             if os.path.exists(temp_path):
                 os.remove(temp_path)
+            raise
 
     def transition_state(self, new_status, action_description):
         """Helper to cleanly transition and write state before action."""
