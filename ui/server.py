@@ -2922,6 +2922,13 @@ async def _trigger_readiness_assessment(idea_id: str, config: dict) -> None:
                 timeout=aiohttp.ClientTimeout(total=10),
             )
             logger.info(f"[READINESS] Webhook sent for {idea_id}, response: {resp.status}")
+            if resp.status >= 400:
+                error_path = ideas_dir / idea_id / "readiness_error.json"
+                _atomic_write_json_file(
+                    str(error_path),
+                    {"error": f"webhook returned {resp.status}", "idea_id": idea_id},
+                )
+                return
     except Exception as exc:
         if isinstance(exc, asyncio.TimeoutError):
             logger.warning(f"[READINESS] Assessment timed out for {idea_id}")
