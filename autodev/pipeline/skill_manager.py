@@ -122,7 +122,10 @@ class SkillManager:
             return
 
         # ── 5. Clean then inject ───────────────────────────────────────────────
-        self._clean_workspace_skills(workspace_skills_dir)
+        if not self._clean_workspace_skills(workspace_skills_dir):
+            self._log(timestamp, phase_raw_id, agent_role,
+                      "NONE", "Status=clean_failed Reason=rmtree_error")
+            return
 
         skill_name = f"{discipline}-{agent_role}"      # e.g. "core-logic-executor"
         dest_dir   = os.path.join(workspace_skills_dir, skill_name)
@@ -205,19 +208,25 @@ class SkillManager:
         except OSError as exc:
             print(f"[SKILL] [WARN] Could not write skill_health.json: {exc}")
 
-    def _clean_workspace_skills(self, skills_dir: str) -> None:
+    def _clean_workspace_skills(self, skills_dir: str) -> bool:
         """Remove and recreate the workspace skills/ directory (idempotent).
 
         Removes the entire dir tree so no stale skill from a prior phase can linger.
         Recreates an empty dir so OpenClaw always sees a valid (possibly empty) skills/.
+
+        Returns True on success, False if the directory could not be cleaned.
+        Callers must check the return value and not proceed with skill injection on False —
+        injecting into a dirty tree (stale skill still present) is worse than no injection.
         """
         try:
             if os.path.exists(skills_dir):
                 shutil.rmtree(skills_dir)
             os.makedirs(skills_dir, exist_ok=True)
+            return True
         except OSError as exc:
             print(f"[SKILL] [WARN] Could not clean workspace skills dir "
                   f"{skills_dir}: {exc}")
+            return False
 
     @staticmethod
     def _log(timestamp: str, phase_raw_id: str, agent_role: str,
