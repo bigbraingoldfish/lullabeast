@@ -687,7 +687,7 @@ class TestApplyCliProjectPath:
         proj_b = tmp_path / "proj_b"
         proj_a.mkdir()
         proj_b.mkdir()
-        (tmp_path / "openclaw.json").write_text("{}")
+        (tmp_path / "openclaw.json").write_text('{"hooks_url": "http://localhost:18789/hooks/agent", "hooks_token": "test-token"}')
 
         state_path = Path(orch_mod.STATE_FILE)
         link = Path(orch_mod.SYMLINK_TARGET)
@@ -745,7 +745,7 @@ class TestMainLoopStaleCompleteSyncsQueue:
 
         queue_file = tmp_path / "pipeline_queue.json"
         state_file = tmp_path / "pipeline_state.json"
-        (tmp_path / "openclaw.json").write_text("{}")
+        (tmp_path / "openclaw.json").write_text('{"hooks_url": "http://localhost:18789/hooks/agent", "hooks_token": "test-token"}')
 
         proj = tmp_path / "active_proj"
         proj.mkdir()
@@ -821,7 +821,7 @@ class TestMainLoopStaleCompleteSyncsQueue:
 
         queue_file = tmp_path / "pipeline_queue.json"
         state_file = tmp_path / "pipeline_state.json"
-        (tmp_path / "openclaw.json").write_text("{}")
+        (tmp_path / "openclaw.json").write_text('{"hooks_url": "http://localhost:18789/hooks/agent", "hooks_token": "test-token"}')
 
         proj = tmp_path / "active_proj"
         proj.mkdir()

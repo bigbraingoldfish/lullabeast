@@ -200,14 +200,24 @@ class Orchestrator:
 
     def load_config(self):
         if not os.path.exists(CONFIG_FILE):
-            print("[ERROR] openclaw.json not found")
-            return {}
+            print(f"[ERROR] openclaw.json not found at {CONFIG_FILE}")
+            sys.exit(1)
         try:
             with open(CONFIG_FILE, 'r') as f:
-                return json.load(f)
+                config = json.load(f)
         except Exception as e:
             print(f"[ERROR] Failed to parse openclaw.json: {e}")
-            return {}
+            sys.exit(1)
+        # Fail fast: without these the pipeline silently hits AUTH_ERROR minutes in
+        required = ["hooks_url", "hooks_token"]
+        missing = [k for k in required if not config.get(k)]
+        if missing:
+            print(
+                f"[ERROR] openclaw.json is missing required keys: {missing}. "
+                f"Pipeline would hit AUTH_ERROR silently. Add these keys before starting."
+            )
+            sys.exit(1)
+        return config
 
     def acquire_lock(self):
         """Acquires an exclusive, non-blocking lock using fcntl.flock."""
