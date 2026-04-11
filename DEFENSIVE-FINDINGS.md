@@ -39,7 +39,7 @@ Ordered execution list (crash/corruption first, then API, then clarity, then rem
 | 25 | done | **C2-04** | T4 | `check_traffic_cop_health`: confirm intentional silent `False` (~764-769). | Add `logger.debug("traffic_cop_health check failed: %s", e)` in except. Intentional design confirmed -- `False` = "treat as unhealthy" is the correct safe behavior. Add docstring note. |
 | 26 | done | **C3-06** | T4 | `metrics.jsonl` rewrite: use temp file + `os.replace` (~2254-2284). **Moved from BL -- 5-line quick win.** | Replace `open(metrics_path, 'w')` rewrite with: write to `metrics_path + ".tmp"`, then `os.replace`. Five-line change. Do alongside any other `orchestrator.py` T4 touch. |
 | 27 | done | **C5-04** | T4 | Blame L1: malformed analyst JSON -> infra/unknown, not default `impl` (~1335-1372). **Moved from BL -- direct retry cost.** | In the analyst JSON parse fallback branch: route to `"infra"` or `"unknown"` and escalate. Misrouting a broken infra phase as implementation wastes a full executor retry. One-line change in the fallback. |
-| 28 | open | **C3-04** | T4 check | **Verification only:** `mkstemp` + `os.replace` pattern is correct -- no code change. | Audit any new state-writing functions in future PRs for this pattern. Make it a code review checklist item. |
+| 28 | done | **C3-04** | T4 check | **Verification only:** `mkstemp` + `os.replace` pattern is correct -- no code change. | Audit any new state-writing functions in future PRs for this pattern. Make it a code review checklist item. |
 | 29 | open | **C1-01** | BL | SSE stream: optional close on repeated errors (~358-361). | Add `consecutive_errors` counter; after N errors emit `{"event": "stream_error"}` and close. Client reconnects via `EventSource` auto-reconnect. Low urgency. |
 | 30 | open | **C1-02** | BL | Readiness background task: persist last webhook error on idea dir (~2889-2924). | Write `readiness_error.json` in idea directory on webhook failure. Overlaps with C2-03 -- implement together. |
 | 31 | open | **C1-03** | BL | Gate `utils`: do not silently pass on `phase_state` read failure (~41-42, 77-78). | Replace `except Exception: pass` with `except Exception as e: logger.warning(...)`. Losing prior retry fields silently can misroute blame attribution. |
@@ -124,7 +124,7 @@ Ordered execution list (crash/corruption first, then API, then clarity, then rem
 | **C3-01** | done | `autodev/pipeline/orchestrator.py` `write_state` ~287–302 | On write exception: logs, removes temp; **does not re-raise**. Caller may assume state on disk matches memory. | Restart reads old state; duplicate work or wrong phase. | rare | Raise after log, or return bool and force callers to abort transition. |
 | **C3-02** | done | `autodev/pipeline/orchestrator.py` `_select_next_queue_project` ~500–518 | Queue row set **ACTIVE** and `_write_queue` **before** `update_symlink`; symlink failure only printed. | Queue + `pipeline_state` say new project; agents still read old symlink. | edge | If `update_symlink` returns `False`, revert queue row or mark BLOCKED; do not `write_state` for new project. |
 | **C3-03** | done | `autodev/pipeline/orchestrator.py` `apply_cli_project_path` ~2877–2878 | `write_state` then `update_symlink` — return value ignored. | Same class as C3-02 for CLI path. | edge | Check return value; rollback or exit non-zero. |
-| **C3-04** | open | Core paths | `pipeline_state.json`, `pipeline_queue.json`, gate `phase_state` use **mkstemp + os.replace** | Good — crash mid-write leaves old file. | — | Keep pattern; extend to new multi-file protocols. |
+| **C3-04** | done | Core paths | `pipeline_state.json`, `pipeline_queue.json`, gate `phase_state` use **mkstemp + os.replace** | Good — crash mid-write leaves old file. | — | Keep pattern; extend to new multi-file protocols. |
 | **C3-05** | done | `ui/server.py` ~6147–6158, ~6388–6395 | `pipeline_state.json` written **before** `_spawn_orchestrator()` succeeds. Failed spawn leaves disk `RUNNING` with no process. | Misleading state, broken recovery | edge | Write after spawn succeeds, or rollback state on spawn failure. |
 | **C3-06** | done | `autodev/pipeline/orchestrator.py` ~2254–2284 | Canonical `metrics.jsonl` opened with `"w"` and rewritten in place; crash mid-write truncates history. | Missing / partial metrics | edge | Temp file + `os.replace()` (backlog-friendly). |
 | **C3-07** | done | `autodev/pipeline/gate_scripts/executor_gate.py` ~121–123 | If `phase_base_commit` missing, unaccounted-deletion check **skipped**; guard is no-op when state is corrupt. | Deletion guard ineffective | edge | Fail closed; surface recovery error. |
@@ -188,6 +188,25 @@ Tracker row: **#38 (P8)** in [Consolidated summary action list](#consolidated-su
 Superseded by **[Consolidated summary action list](#consolidated-summary-action-list)** — use that table as the working checklist (rows 1–7 = former Tier-1 bullets).
 
 ---
+
+<!-- SESSION LOG 2026-04-11 (session 3) -->
+## Session log — 2026-04-11 (session 3)
+
+**Completed:** C3-01, C4-02, C4-03, C4-04, C4-05, C6-02, C6-03, C2-05, C2-04, C3-06, C5-04, C3-04
+
+**In-progress:** none
+
+**Skipped:** none
+
+**Regressions found:** none — 167 passed, 1 skipped (pre-existing skip) throughout session.
+
+**Notes for next session:**
+- Findings #17–28 all done. Remaining open items: #29–38 (BL tier: C1-01, C1-02, C1-03, C1-04, C1-06, C5-01, C5-02, C5-03, C5-05, P8).
+- C3-04 verification: the two remaining direct `open(..., 'w')` calls in orchestrator.py are the roadmap checkbox update (git-amend context, version-controlled) and the stop sentinel write (empty content, no data to corrupt). Both are acceptable without atomic rewrites.
+- C4-04: `DEFAULTS["autodev_repo_path"]` was already fixed in a prior session (uses `_AUTODEV_UI_ROOT`). This session cleaned up the stale `~/.openclaw` fallback in `_spawn_orchestrator` line 1207 and marked CLAUDE.md item 3 resolved.
+- C6-02: single-writer note added to both `_read_queue`/_write_queue` docstrings and CLAUDE.md Queue System section.
+- C4-03: `_clean_workspace_skills` now returns `bool`; `inject_skill` step 5 checks return value and logs `Status=clean_failed` before returning early. The four early-exit paths (disabled/no-mapping/missing-file) still call `_clean_workspace_skills` but their return value is not checked — those paths return anyway, so a failed clean there only affects whether the workspace is truly empty (accepted risk for "already bailing" paths).
+- The pre-existing adversarial test-ordering issue (`test_api_ideas_adversarial_check.py`) remains out of scope.
 
 <!-- SESSION LOG 2026-04-10 (session 2) -->
 ## Session log — 2026-04-10 (session 2)
