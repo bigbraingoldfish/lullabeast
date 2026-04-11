@@ -12,8 +12,10 @@ Design principles:
     global tier) is deliberately left untouched to avoid loading all 27 skills simultaneously
 """
 
+import json
 import os
 import shutil
+import tempfile
 from datetime import datetime, timezone
 
 try:
@@ -50,6 +52,7 @@ class SkillManager:
         self._skill_library_dir = os.path.join(_rp, "autodev", "skill-library")
         self._mapping_file = os.path.join(_rp, "autodev", "config", "skill_mapping.yaml")
         self._mapping: dict = self._load_mapping()
+        self._write_health_file()
 
     # ------------------------------------------------------------------
     # Public API
@@ -175,6 +178,32 @@ class SkillManager:
             print(f"[SKILL] [ERROR] Failed to load mapping file {self._mapping_file}: "
                   f"{exc} — skills disabled.")
             return {}
+
+    def _write_health_file(self) -> None:
+        """Write skill_health.json to AUTODEV_ROOT for operator visibility.
+
+        Contains a snapshot of skill-injection readiness at construction time.
+        Never raises — health reporting must not crash the pipeline.
+        """
+        health = {
+            "yaml_available": _YAML_AVAILABLE,
+            "mapping_loaded": bool(self._mapping),
+            "mapping_count": len(self._mapping),
+            "mapping_file": self._mapping_file,
+            "skill_library_dir": self._skill_library_dir,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        health_path = os.path.join(self._workspace_dir, "skill_health.json")
+        try:
+            os.makedirs(self._workspace_dir, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=self._workspace_dir, prefix=".skill_health_")
+            try:
+                os.write(fd, json.dumps(health, indent=2).encode("utf-8"))
+            finally:
+                os.close(fd)
+            os.replace(tmp, health_path)
+        except OSError as exc:
+            print(f"[SKILL] [WARN] Could not write skill_health.json: {exc}")
 
     def _clean_workspace_skills(self, skills_dir: str) -> None:
         """Remove and recreate the workspace skills/ directory (idempotent).
