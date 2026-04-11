@@ -2403,10 +2403,18 @@ class Orchestrator:
                                 "duration_seconds": _duration_seconds,
                             })
 
-                            with open(_metrics_path, 'w') as _f_m:
-                                for _row_line in _existing_rows:
-                                    _f_m.write(_row_line + '\n')
-                                _f_m.write(_canonical_row + '\n')
+                            _metrics_dir = os.path.dirname(_metrics_path) or SYMLINK_TARGET
+                            _fd_m, _tmp_m = tempfile.mkstemp(dir=_metrics_dir, prefix=".metrics_")
+                            try:
+                                with os.fdopen(_fd_m, 'w') as _f_m:
+                                    for _row_line in _existing_rows:
+                                        _f_m.write(_row_line + '\n')
+                                    _f_m.write(_canonical_row + '\n')
+                                os.replace(_tmp_m, _metrics_path)
+                            except Exception:
+                                if os.path.exists(_tmp_m):
+                                    os.remove(_tmp_m)
+                                raise
 
                             print(
                                 f"[INFO] Canonical metrics row written for {_raw_id_for_metrics}: "
