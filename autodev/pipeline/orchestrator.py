@@ -903,6 +903,11 @@ class Orchestrator:
                 print(f"[WARN] /v1/models unreachable ({e}), retrying...")
             time.sleep(poll_interval)
 
+        # Intentional: proceed on timeout rather than blocking indefinitely.
+        # Returning False here is a soft signal — the caller (reviewer invocation path)
+        # logs the warning and continues.  If stricter "block until stable" behaviour is
+        # ever required, return a distinct sentinel (e.g. None / raise) and update the
+        # caller to decide; do not change this return value without updating callers.
         print(f"[WARN] wait_for_model_stable timed out after {timeout}s — proceeding anyway.")
         return False
 
