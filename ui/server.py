@@ -490,7 +490,12 @@ def load_config(config_path=None):
     # Merge user config if exists
     if Path(config_path).exists():
         with open(config_path, 'r') as f:
-            user_config = json.load(f)
+            try:
+                user_config = json.load(f)
+            except json.JSONDecodeError as e:
+                raise RuntimeError(
+                    f"config.json is not valid JSON ({e}). Fix or remove: {config_path}"
+                ) from e
             user_override_keys = _user_override_keys(user_config)
             config.update(user_config)
 
