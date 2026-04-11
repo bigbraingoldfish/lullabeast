@@ -529,9 +529,13 @@ orchestrator_script = os.path.join(autodev_repo_path, "autodev", "pipeline", ORC
 
 `POST /api/setup/switch-project` has a test file (`tests/test_api_setup_switch_project.py`) and is implemented in `ui/server.py`. The `AUTODEV-UI-PRD.md` explicitly marks a multi-project switcher as a **v1 non-requirement**. It is unclear whether this endpoint was added intentionally during the build or was included as scaffolding. Before documenting it in `SETUP.md` or exposing it in the UI, confirm whether it is production-ready.
 
-### 3. `autodev_repo_path` DEFAULTS fallback
+### 3. ~~`autodev_repo_path` DEFAULTS fallback~~ — **RESOLVED**
 
-`DEFAULTS["autodev_repo_path"]` falls back to `os.path.expanduser("~/.openclaw")` when `AUTODEV_REPO_PATH` is not set. After migration, the correct default is the repo root, not `~/.openclaw`. This will silently misbehave on a fresh install where `.env` has not been sourced. `install.sh` mitigates this by writing `.env`, but the in-code default should be fixed.
+`DEFAULTS["autodev_repo_path"]` now falls back to `_AUTODEV_UI_ROOT` (i.e.
+`os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))` — the repo root, two
+levels up from `ui/server.py`). The stale `~/.openclaw` fallback was also removed from
+`_spawn_orchestrator`. Fresh installs without `.env` sourced now correctly derive the
+repo root from file location rather than assuming `~/.openclaw`.
 
 ---
 
