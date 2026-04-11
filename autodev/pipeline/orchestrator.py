@@ -513,6 +513,7 @@ class Orchestrator:
                         visited_ids.add(e["id"])  # prevent re-processing descendants
                 entry["state"] = "SKIPPED_PENDING"
                 entry["skip_count"] = entry.get("skip_count", 0) + 1
+                entry["skip_reason"] = reason
                 # Skip-and-requeue: move entire group past next independent entry
                 group_size = 1 + len(desc_ids)
                 new_pos = min(entry["position"] + group_size, len(entries))
