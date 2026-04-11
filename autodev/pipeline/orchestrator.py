@@ -389,6 +389,15 @@ class Orchestrator:
     def _read_queue(self):
         """Read pipeline_queue.json; returns empty structure if absent.
 
+        SINGLE-WRITER ASSUMPTION: This file is written by two parties —
+        the UI server (human-initiated moments: add, reorder, parent, remove) and
+        the orchestrator (state transitions: ACTIVE, COMPLETED, BLOCKED, SKIPPED).
+        These writes are NOT protected by a file lock; concurrent writes are
+        considered safe enough at this risk level because the UI and orchestrator
+        operate in alternating windows (UI writes while idle; orchestrator writes
+        while running).  If this assumption is ever violated, add an advisory flock
+        or a version/ETag field before relaxing the single-writer model.
+
         If the file exists but is corrupt (invalid JSON or unreadable), it is
         quarantined by renaming to pipeline_queue.json.corrupt.<timestamp> and a
         RuntimeError is raised.  Callers must NOT silently fall through to
@@ -413,7 +422,11 @@ class Orchestrator:
             ) from e
 
     def _write_queue(self, data):
-        """Atomically write pipeline_queue.json (mkstemp + os.replace)."""
+        """Atomically write pipeline_queue.json (mkstemp + os.replace).
+
+        See _read_queue for the single-writer assumption that makes this safe
+        without an explicit file lock.
+        """
         data["last_updated"] = datetime.now(timezone.utc).isoformat()
         os.makedirs(AUTODEV_RUNTIME_ROOT, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=AUTODEV_RUNTIME_ROOT, prefix="queue_")
