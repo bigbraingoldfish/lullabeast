@@ -336,15 +336,30 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     def _read_queue(self):
-        """Read pipeline_queue.json; returns empty structure if absent."""
+        """Read pipeline_queue.json; returns empty structure if absent.
+
+        If the file exists but is corrupt (invalid JSON or unreadable), it is
+        quarantined by renaming to pipeline_queue.json.corrupt.<timestamp> and a
+        RuntimeError is raised.  Callers must NOT silently fall through to
+        _write_queue — doing so would overwrite the queue file with an empty
+        structure, destroying all queue data.
+        """
         if not os.path.exists(QUEUE_FILE):
             return {"queue": [], "queue_mode": "auto", "last_updated": ""}
         try:
             with open(QUEUE_FILE, "r") as f:
                 return json.load(f)
-        except Exception as e:
-            print(f"[QUEUE] Failed to read queue file: {e}")
-            return {"queue": [], "queue_mode": "auto", "last_updated": ""}
+        except (json.JSONDecodeError, OSError) as e:
+            corrupt_path = f"{QUEUE_FILE}.corrupt.{int(time.time())}"
+            try:
+                os.rename(QUEUE_FILE, corrupt_path)
+                print(f"[QUEUE] Quarantined corrupt queue file to {corrupt_path}: {e}")
+            except OSError as rename_err:
+                print(f"[QUEUE] Could not quarantine corrupt queue file: {rename_err}")
+            raise RuntimeError(
+                f"[QUEUE] pipeline_queue.json is corrupt and has been quarantined to "
+                f"{corrupt_path}. Manual recovery required."
+            ) from e
 
     def _write_queue(self, data):
         """Atomically write pipeline_queue.json (mkstemp + os.replace)."""
