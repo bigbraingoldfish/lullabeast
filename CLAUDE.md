@@ -495,6 +495,8 @@ Agent identity docs (`IDENTITY.md`, `SOUL.md`, etc.) are deployed by `install.sh
 
 `~/.openclaw/pipeline_queue.json` holds the project queue. All writes are atomic (`mkstemp + os.replace`). The queue is managed by `ui/server.py` endpoints (`/api/queue/*`) and by `orchestrator.py` methods (`_read_queue`, `_write_queue`, `_select_next_queue_project`, `_queue_update_active_entry`).
 
+**Single-writer assumption:** The queue file is written by two parties — the UI server (human-initiated moments: add, reorder, parent, remove) and the orchestrator (state transitions). These two writers operate in alternating windows (UI writes while pipeline is idle; orchestrator writes while running) and are **not** protected by an explicit file lock. This is safe at the current risk level. If you add a third writer or allow concurrent UI + orchestrator writes, add an advisory `flock` or a version/ETag field before relaxing this assumption.
+
 ### Orchestrator lightweight preflight (`_queue_preflight`)
 
 The orchestrator's `_queue_preflight()` checks: directory exists, `.git` present, `roadmap*.md` present. This is intentionally lighter than the server's `_run_preflight_checks()`, which also validates symlink, `.gitignore`, agent workspace files, etc. **Known MVP limitation:** a project that passes `_queue_preflight` may still fail mid-pipeline if the full server-side preconditions are not met. The server's `_run_preflight_checks` is used at queue-add time and at `trigger-next` time; the orchestrator's check runs only on auto-advance between queue entries.
