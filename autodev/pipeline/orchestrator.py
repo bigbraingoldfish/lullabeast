@@ -510,14 +510,19 @@ class Orchestrator:
                 # Do NOT increment i — entry at this position shifted; visited_ids prevents re-trying
                 continue
 
-            # Pass: mark ACTIVE, update symlink, reset state, start
+            # Pass: update symlink FIRST; only commit ACTIVE + write_state on success.
+            # Committing ACTIVE before the symlink is updated leaves queue + state claiming
+            # a new project is running while agents still read the old symlink target.
             print(f"[QUEUE] Starting project '{entry['name']}' at {entry['project_path']}")
+            project_path = os.path.realpath(os.path.expanduser(entry["project_path"]))
+            if not self.update_symlink(project_path):
+                print(f"[QUEUE] Symlink update failed for '{entry['name']}' — leaving entry READY.")
+                return False
+
             entry["state"] = "ACTIVE"
             entry["started_at"] = now
             self._write_queue(queue_data)
 
-            project_path = os.path.realpath(os.path.expanduser(entry["project_path"]))
-            self.update_symlink(project_path)
             self.state = {
                 "current_phase": 0,
                 "current_phase_raw_id": "",
