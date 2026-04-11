@@ -859,10 +859,19 @@ class Orchestrator:
             return False
 
     def check_traffic_cop_health(self):
+        """Probe the traffic cop (llama-server) /health endpoint.
+
+        Returns True when the server responds 200, False on any network error or
+        non-200 status.  Returning False is intentional — callers treat it as
+        "unhealthy, skip GPU-dependent work" which is the correct safe default.
+        The exception is swallowed deliberately; a debug log is emitted so operators
+        can see probe failures in verbose mode without cluttering normal output.
+        """
         try:
             response = requests.get(f"{_LLAMA_ORIGIN}/health", timeout=5)
             return response.status_code == 200
-        except requests.exceptions.RequestException:
+        except requests.exceptions.RequestException as e:
+            print(f"[DEBUG] check_traffic_cop_health probe failed: {e}")
             return False
 
     def wait_for_model_stable(self, timeout: int = 300, poll_interval: int = 5) -> bool:
