@@ -6144,15 +6144,6 @@ async def post_setup_switch_project(request: Request):
     parent = os.path.dirname(pipeline_state_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    try:
-        _write_json_atomic(pipeline_state_path, _clean_pipeline_state_for_project(repo_abs))
-    except OSError as exc:
-        return {
-            "ok": False,
-            "checks": all_pre,
-            "coherence": {"ok": True, "issues": []},
-            "error": f"Could not write pipeline_state.json: {exc}",
-        }
 
     spawned = _spawn_orchestrator(repo_abs, config)
     if not spawned.get("ok"):
@@ -6161,6 +6152,16 @@ async def post_setup_switch_project(request: Request):
             "checks": all_pre,
             "coherence": {"ok": True, "issues": []},
             "error": spawned.get("error") or "Failed to spawn orchestrator",
+        }
+
+    try:
+        _write_json_atomic(pipeline_state_path, _clean_pipeline_state_for_project(repo_abs))
+    except OSError as exc:
+        return {
+            "ok": False,
+            "checks": all_pre,
+            "coherence": {"ok": True, "issues": []},
+            "error": f"Could not write pipeline_state.json: {exc}",
         }
 
     return {
@@ -6385,14 +6386,15 @@ async def post_setup_launch(request: Request):
     parent = os.path.dirname(pipeline_state_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    try:
-        _write_json_atomic(pipeline_state_path, _clean_pipeline_state_for_project(project_real))
-    except OSError as exc:
-        return {"ok": False, "error": f"Could not write pipeline_state.json: {exc}"}
 
     spawned = _spawn_orchestrator(project_real, config)
     if not spawned.get("ok"):
         return {"ok": False, "error": spawned.get("error") or "Failed to spawn orchestrator"}
+
+    try:
+        _write_json_atomic(pipeline_state_path, _clean_pipeline_state_for_project(project_real))
+    except OSError as exc:
+        return {"ok": False, "error": f"Could not write pipeline_state.json: {exc}"}
 
     try:
         _queue_mark_matching_entry_active(config, project_real)
