@@ -101,11 +101,14 @@ def validate_and_identify(roadmap_path=None):
         print("PIPELINE_COMPLETE")
         sys.exit(0)
         
-    # Write current_phase.json
-    out_path = os.path.join(os.path.dirname(roadmap_path), "current_phase.json")
-    # For testing, write to current dir if pipeline project doesn't exist
-    if not os.path.exists(os.path.dirname(out_path)):
-        out_path = "current_phase.json"
+    # Write current_phase.json alongside the roadmap (requires absolute roadmap path).
+    out_dir = os.path.dirname(roadmap_path)
+    out_path = os.path.join(out_dir, "current_phase.json")
+    if not out_dir or not os.path.exists(out_dir):
+        print(f"[ERROR] Cannot determine output directory for current_phase.json "
+              f"(roadmap_path={roadmap_path!r}). "
+              "Pass an absolute roadmap path so the output directory is unambiguous.")
+        sys.exit(1)
         
     try:
         import tempfile

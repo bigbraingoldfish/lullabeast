@@ -26,7 +26,11 @@ def _derive_pipeline_project() -> str:
 def init_phase():
     workspace = _derive_pipeline_project() + os.sep
     if not os.path.exists(workspace):
-        workspace = "." + os.sep  # fallback for local testing
+        print(f"[ERROR] Derived pipeline project path does not exist: {workspace!r}")
+        print("[FATAL] Cannot fall back to CWD — this would write phase metadata "
+              "to the wrong project tree. Set AUTODEV_REPO_PATH, AUTODEV_ROOT, "
+              "or AUTODEV_RUNTIME_ROOT to point at the correct installation.")
+        sys.exit(1)
         
     # 1. Initialize phase_state.json
     state_file = os.path.join(workspace, "phase_state.json")
