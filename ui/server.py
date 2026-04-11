@@ -3657,7 +3657,9 @@ async def post_ideas_clarity_check(idea_id: str):
     # Send webhook POST
     headers = {"Authorization": f"Bearer {hooks_token}"}
     async with aiohttp.ClientSession() as session:
-        await session.post(hooks_url, json=webhook_payload, headers=headers)
+        resp = await session.post(hooks_url, json=webhook_payload, headers=headers)
+        if resp.status >= 400:
+            raise HTTPException(status_code=502, detail=f"Webhook returned {resp.status}")
 
     # Poll for clarity_result.done
     done_path = idea_dir / "clarity_result.done"
@@ -3797,7 +3799,9 @@ async def post_ideas_convert(idea_id: str):
     op_start = datetime.utcnow().timestamp()
     headers = {"Authorization": f"Bearer {hooks_token}"}
     async with aiohttp.ClientSession() as session:
-        await session.post(hooks_url, json=webhook_payload, headers=headers)
+        resp = await session.post(hooks_url, json=webhook_payload, headers=headers)
+        if resp.status >= 400:
+            raise HTTPException(status_code=502, detail=f"Webhook returned {resp.status}")
 
     # Poll for roadmap_draft.done
     done_path = idea_dir / "roadmap_draft.done"
@@ -4079,7 +4083,9 @@ async def post_ideas_alignment_check(idea_id: str):
     op_start = datetime.utcnow().timestamp()
     headers = {"Authorization": f"Bearer {hooks_token}"}
     async with aiohttp.ClientSession() as session:
-        await session.post(hooks_url, json=webhook_payload, headers=headers)
+        resp = await session.post(hooks_url, json=webhook_payload, headers=headers)
+        if resp.status >= 400:
+            raise HTTPException(status_code=502, detail=f"Webhook returned {resp.status}")
 
     # Poll for alignment_report.done
     done_path = idea_dir / "alignment_report.done"
@@ -4257,7 +4263,9 @@ async def post_ideas_adversarial_check(idea_id: str):
     op_start = datetime.utcnow().timestamp()
     headers = {"Authorization": f"Bearer {hooks_token}"}
     async with aiohttp.ClientSession() as session:
-        await session.post(hooks_url, json=webhook_payload, headers=headers)
+        resp = await session.post(hooks_url, json=webhook_payload, headers=headers)
+        if resp.status >= 400:
+            raise HTTPException(status_code=502, detail=f"Webhook returned {resp.status}")
 
     # Poll for adversarial_report.done
     done_path = idea_dir / "adversarial_report.done"
@@ -4383,7 +4391,9 @@ async def post_ideas_fix_roadmap_format(idea_id: str, body: FixRoadmapFormatRequ
     op_start = datetime.utcnow().timestamp()
     headers = {"Authorization": f"Bearer {hooks_token}"}
     async with aiohttp.ClientSession() as session:
-        await session.post(hooks_url, json=webhook_payload, headers=headers)
+        resp = await session.post(hooks_url, json=webhook_payload, headers=headers)
+        if resp.status >= 400:
+            raise HTTPException(status_code=502, detail=f"Webhook returned {resp.status}")
 
     # Poll for roadmap_draft.done
     deadline = datetime.utcnow().timestamp() + FORMAT_CORRECTION_TIMEOUT
