@@ -2894,8 +2894,13 @@ def apply_cli_project_path(orchestrator, new_target: str) -> None:
             orchestrator.state = disk_state
         orchestrator.state["project_path"] = new_target
 
+    # Update symlink before writing state: if the symlink fails the on-disk state
+    # must not be updated, otherwise the orchestrator starts with the new project
+    # path in state but agents still reading the old symlink target.
+    if not orchestrator.update_symlink(new_target):
+        print(f"[ERROR] Symlink update failed for {new_target!r} — not committing new project state.")
+        return
     orchestrator.write_state()
-    orchestrator.update_symlink(new_target)
 
 
 if __name__ == "__main__":
