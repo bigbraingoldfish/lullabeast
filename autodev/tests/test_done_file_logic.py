@@ -43,6 +43,15 @@ def _make_executor_gate_patch(tmp_dir):
     stack.enter_context(patch.object(executor_gate_module, "WORKSPACE_DIR", tmp_dir + "/"))
     # executor_gate imports PHASE_STATE_FILE directly — must patch in its own namespace too
     stack.enter_context(patch.object(executor_gate_module, "PHASE_STATE_FILE", ps_path))
+
+    # C3-07 fix: gate now fails closed if phase_base_commit is missing.
+    # Write a mock pipeline_state.json with a sentinel commit so tests that are
+    # not specifically testing the deletion guard pass through to PASS/FAIL as before.
+    # The git diff will fail (no real git repo) but the gate handles that gracefully.
+    pipeline_state_path = os.path.join(os.path.dirname(tmp_dir.rstrip("/")), "pipeline_state.json")
+    with open(pipeline_state_path, "w") as _f:
+        json.dump({"phase_base_commit": "0000000000000000000000000000000000000000"}, _f)
+
     return stack
 
 

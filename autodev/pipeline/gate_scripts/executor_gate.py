@@ -119,7 +119,16 @@ def evaluate_executor(output_path=None):
             pass
 
     if not phase_base_commit:
-        print("[GATE WARN] phase_base_commit unavailable — skipping deletion check.", file=sys.stderr)
+        # Fail closed: phase_base_commit is the reference point for detecting file
+        # deletions.  Without it the check is a no-op and MiniMax file deletion goes
+        # undetected.  Return FAIL so the orchestrator retries with a fresh session.
+        print(
+            json.dumps({"error": "ERR_MISSING_BASE_COMMIT", "detail": "cannot verify deletions"}),
+            file=sys.stdout,
+        )
+        print("[GATE FAIL] phase_base_commit unavailable — failing closed to protect deletion guard.", file=sys.stderr)
+        record_error_code_only("executor", "ERR_MISSING_BASE_COMMIT")
+        return "FAIL"
     else:
         try:
             _git_result = subprocess.run(
