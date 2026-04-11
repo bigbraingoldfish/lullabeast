@@ -5287,6 +5287,9 @@ def _queue_run_trigger_next_logic(config: dict) -> dict:
     q = _read_queue_file(config)
     entries = q.get("queue", [])
 
+    if not entries:
+        return {"ok": False, "reason": "queue_empty"}
+
     if any(e["state"] == "ACTIVE" for e in entries):
         raise HTTPException(status_code=409, detail="A project is already ACTIVE in the queue")
 
