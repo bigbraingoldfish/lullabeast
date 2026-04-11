@@ -437,8 +437,12 @@ class Orchestrator:
             return False, "directory does not exist"
         if not os.path.exists(os.path.join(project_path, ".git")):
             return False, "not a git repository"
+        try:
+            entries = os.listdir(project_path)
+        except OSError as e:
+            return False, f"path_unreadable: {e}"
         roadmap = next(
-            (n for n in os.listdir(project_path)
+            (n for n in entries
              if n.lower().startswith("roadmap") and n.endswith(".md")),
             None
         )
