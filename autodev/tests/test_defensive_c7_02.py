@@ -1,8 +1,10 @@
-"""C7-02: Orchestrator load_config must fail fast when required keys
-(hooks_url, hooks_token) are missing from openclaw.json.
+"""C7-02: Orchestrator load_config must fail fast when no webhook bearer token
+is available from openclaw.json.
 
-Without the fix, the orchestrator starts successfully, consumes retry budget
-and time, then surfaces AUTH_ERROR minutes later with no clear diagnostic.
+Token may be top-level hooks_token or OpenClaw-native hooks.token.
+hooks_url is optional (defaults from gateway.port or 18789).
+Without a token, the orchestrator would start, consume retry budget and time,
+then surface AUTH_ERROR minutes later with no clear diagnostic.
 """
 import importlib
 import json
@@ -26,26 +28,41 @@ def _minimal_valid_config():
 
 class TestC702LoadConfigFailFast:
 
-    def test_missing_hooks_url_calls_sys_exit(self, tmp_path, monkeypatch):
-        """load_config must call sys.exit(1) when hooks_url is absent."""
+    def test_missing_hooks_url_uses_default_port(self, tmp_path, monkeypatch):
+        """load_config succeeds when hooks_url is absent but token is present (default URL)."""
         monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
         monkeypatch.setenv("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "1")
 
         import orchestrator as orch_mod
         importlib.reload(orch_mod)
 
-        # Write config without hooks_url
         (tmp_path / "openclaw.json").write_text(
-            json.dumps({"hooks_token": "secret"})
+            json.dumps({"hooks_token": "secret", "gateway": {"port": 18789}})
         )
 
         inst = orch_mod.Orchestrator.__new__(orch_mod.Orchestrator)
-        with pytest.raises(SystemExit) as exc_info:
-            orch_mod.Orchestrator.load_config(inst)
+        result = orch_mod.Orchestrator.load_config(inst)
 
-        assert exc_info.value.code == 1, (
-            "Expected sys.exit(1) when hooks_url is missing from openclaw.json (C7-02 unfixed)"
+        assert result.get("hooks_token") == "secret"
+        assert result.get("hooks_url") == "http://127.0.0.1:18789/hooks/agent"
+
+    def test_nested_hooks_token_openclaw_shape(self, tmp_path, monkeypatch):
+        """OpenClaw stores the bearer token under hooks.token, not top-level hooks_token."""
+        monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
+        monkeypatch.setenv("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "1")
+
+        import orchestrator as orch_mod
+        importlib.reload(orch_mod)
+
+        (tmp_path / "openclaw.json").write_text(
+            json.dumps({"hooks": {"token": "nested-secret"}, "gateway": {"port": 9999}})
         )
+
+        inst = orch_mod.Orchestrator.__new__(orch_mod.Orchestrator)
+        result = orch_mod.Orchestrator.load_config(inst)
+
+        assert result.get("hooks_token") == "nested-secret"
+        assert result.get("hooks_url") == "http://127.0.0.1:9999/hooks/agent"
 
     def test_missing_hooks_token_calls_sys_exit(self, tmp_path, monkeypatch):
         """load_config must call sys.exit(1) when hooks_token is absent."""
