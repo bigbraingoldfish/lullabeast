@@ -237,15 +237,27 @@ class Orchestrator:
         except Exception as e:
             print(f"[ERROR] Failed to parse openclaw.json: {e}")
             sys.exit(1)
-        # Fail fast: without these the pipeline silently hits AUTH_ERROR minutes in
-        required = ["hooks_url", "hooks_token"]
-        missing = [k for k in required if not config.get(k)]
-        if missing:
+        # Fail fast: without a bearer token the pipeline hits AUTH_ERROR with no clear diagnostic.
+        # OpenClaw stores the token at hooks.token; older docs used top-level hooks_token.
+        hooks = config.get("hooks") or {}
+        token = (config.get("hooks_token") or hooks.get("token") or "").strip()
+        if not token:
             print(
-                f"[ERROR] openclaw.json is missing required keys: {missing}. "
-                f"Pipeline would hit AUTH_ERROR silently. Add these keys before starting."
+                "[ERROR] openclaw.json has no webhook bearer token. "
+                "Set hooks.token (OpenClaw layout) or top-level hooks_token. "
+                "Without it the pipeline would hit AUTH_ERROR silently."
             )
             sys.exit(1)
+        # Normalize top-level keys for callers/tests; webhook_client still uses a fixed URL unless updated.
+        hooks_url = (config.get("hooks_url") or "").strip()
+        if not hooks_url:
+            try:
+                port = int((config.get("gateway") or {}).get("port") or 18789)
+            except (TypeError, ValueError):
+                port = 18789
+            hooks_url = f"http://127.0.0.1:{port}/hooks/agent"
+        config["hooks_token"] = token
+        config["hooks_url"] = hooks_url
         return config
 
     def acquire_lock(self):
