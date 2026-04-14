@@ -93,3 +93,64 @@ def test_unaccounted_worktree_deletion_writes_executor_gate_detail(tmp_path):
     detail = json.loads(detail_path.read_text(encoding="utf-8"))
     assert detail.get("gate_error") == "ERR_UNACCOUNTED_DELETION"
     assert "tracked_victim.txt" in detail.get("unaccounted_deletions", [])
+
+
+def test_git_diff_failure_returns_fail_not_skip(tmp_path):
+    """F3: When git diff exits non-zero, gate must return FAIL (not skip the check).
+
+    Previously the else-branch printed [GATE WARN] and allowed the gate to pass,
+    meaning a git diff infrastructure failure silently disabled the deletion guard.
+    """
+    root = tmp_path
+    workspace = root / "pipeline-project"
+    workspace.mkdir()
+    ws_str = str(workspace) + os.sep
+
+    (root / "pipeline_state.json").write_text(
+        json.dumps({"phase_base_commit": "deadbeef0000000000000000000000000000000000"}),
+        encoding="utf-8",
+    )
+
+    planner = {"implementation_plan": [], "tdd_test_structure": [], "pass_criteria": []}
+    (workspace / "planner_output.json").write_text(json.dumps(planner), encoding="utf-8")
+
+    executor_payload = {
+        "status": "complete",
+        "tests_written": [],
+        "test_results": {"all_passing": True},
+        "file_manifest": [],
+        "files_deleted": [],
+    }
+    exec_path = workspace / "executor_output.json"
+    exec_path.write_text(json.dumps(executor_payload), encoding="utf-8")
+
+    ps_path = str(workspace / "phase_state.json")
+
+    # Simulate git diff failing with returncode=128 (not a git repo)
+    import subprocess as _subprocess
+
+    class _FailResult:
+        returncode = 128
+        stdout = ""
+        stderr = "fatal: not a git repo"
+
+    stack = ExitStack()
+    stack.enter_context(patch.object(utils_module, "WORKSPACE_DIR", ws_str))
+    stack.enter_context(patch.object(utils_module, "PHASE_STATE_FILE", ps_path))
+    stack.enter_context(patch.object(executor_gate_module, "WORKSPACE_DIR", ws_str))
+    stack.enter_context(patch.object(executor_gate_module, "PHASE_STATE_FILE", ps_path))
+    stack.enter_context(
+        patch.object(_subprocess, "run", return_value=_FailResult())
+    )
+
+    with stack:
+        result = executor_gate_module.evaluate_executor(str(exec_path))
+
+    assert result == "FAIL", (
+        "git diff failure should return FAIL to prevent the deletion guard being silently disabled"
+    )
+
+    # Error code must be recorded
+    if os.path.exists(ps_path):
+        ps = json.loads(Path(ps_path).read_text(encoding="utf-8"))
+        assert ps.get("last_error_code") == "ERR_GIT_DIFF_FAILED"

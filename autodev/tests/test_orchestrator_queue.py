@@ -807,9 +807,125 @@ class TestMainLoopStaleCompleteSyncsQueue:
 
         inst.run()
 
-        q = json.loads(queue_file.read_text())
-        assert q["queue"][0]["state"] == "COMPLETED"
-        assert q["queue"][0].get("completed_at")
+
+# ---------------------------------------------------------------------------
+# T1: _queue_restore_parked_entry_to_active
+# ---------------------------------------------------------------------------
+
+
+class TestQueueRestoreParkedEntryToActive:
+    """T1: After _queue_park_active_entry sets row to ESCALATION or BLOCKED,
+    _queue_restore_parked_entry_to_active must find the row (by project_path match
+    across those states) and reset it to ACTIVE, clearing park metadata."""
+
+    def test_restores_escalation_row_to_active(self, orch, tmp_path, monkeypatch):
+        """Row parked as ESCALATION is found and restored to ACTIVE with park fields cleared."""
+        inst, queue_file, _, _ = orch
+        proj = tmp_path / "esc_proj"
+        proj.mkdir()
+
+        entry = {
+            **_make_entry("esc_proj"),
+            "state": "ESCALATION",
+            "project_path": str(proj),
+            "parked_at": datetime.now(timezone.utc).isoformat(),
+            "parked_reason": "ERR_VALIDATION_FAILED",
+            "parked_pipeline_status": "WAITING_FOR_HUMAN",
+        }
+        _write_queue(queue_file, [entry])
+
+        import orchestrator as orch_mod
+        monkeypatch.setattr(orch_mod, "SYMLINK_TARGET", str(proj))
+        inst.state["project_path"] = str(proj)
+
+        inst._queue_restore_parked_entry_to_active()
+
+        q = inst._read_queue()
+        row = q["queue"][0]
+        assert row["state"] == "ACTIVE"
+        assert row.get("parked_at") is None
+        assert row.get("parked_reason") is None
+        assert row.get("parked_pipeline_status") is None
+
+    def test_restores_blocked_row_to_active(self, orch, tmp_path, monkeypatch):
+        """Row parked as BLOCKED is also found and restored to ACTIVE."""
+        inst, queue_file, _, _ = orch
+        proj = tmp_path / "blocked_proj"
+        proj.mkdir()
+
+        entry = {
+            **_make_entry("blocked_proj"),
+            "state": "BLOCKED",
+            "project_path": str(proj),
+            "parked_at": datetime.now(timezone.utc).isoformat(),
+            "parked_reason": "ERR_ROADMAP_BLOCKED",
+            "parked_pipeline_status": "BLOCKED",
+        }
+        _write_queue(queue_file, [entry])
+
+        import orchestrator as orch_mod
+        monkeypatch.setattr(orch_mod, "SYMLINK_TARGET", str(proj))
+        inst.state["project_path"] = str(proj)
+
+        inst._queue_restore_parked_entry_to_active()
+
+        q = inst._read_queue()
+        row = q["queue"][0]
+        assert row["state"] == "ACTIVE"
+        assert row.get("parked_at") is None
+
+    def test_completed_after_restore_updates_queue(self, orch, tmp_path, monkeypatch):
+        """After restore, _queue_update_active_entry('COMPLETED') finds the row and updates it."""
+        inst, queue_file, _, _ = orch
+        proj = tmp_path / "comp_proj"
+        proj.mkdir()
+
+        entry = {
+            **_make_entry("comp_proj"),
+            "state": "ESCALATION",
+            "project_path": str(proj),
+            "parked_at": datetime.now(timezone.utc).isoformat(),
+            "parked_reason": "test",
+            "parked_pipeline_status": "WAITING_FOR_HUMAN",
+        }
+        _write_queue(queue_file, [entry])
+
+        import orchestrator as orch_mod
+        monkeypatch.setattr(orch_mod, "SYMLINK_TARGET", str(proj))
+        inst.state["project_path"] = str(proj)
+
+        # Restore then update — simulates the RETRY command path
+        inst._queue_restore_parked_entry_to_active()
+        ts = datetime.now(timezone.utc).isoformat()
+        inst._queue_update_active_entry("COMPLETED", {"completed_at": ts})
+
+        q = inst._read_queue()
+        row = q["queue"][0]
+        assert row["state"] == "COMPLETED"
+        assert row["completed_at"] == ts
+
+    def test_noop_when_no_matching_entry(self, orch, tmp_path, monkeypatch):
+        """Restore is a no-op when no ESCALATION/BLOCKED row matches the project path."""
+        inst, queue_file, _, _ = orch
+        proj = tmp_path / "other_proj"
+        proj.mkdir()
+
+        # Entry for a different project
+        entry = {
+            **_make_entry("other"),
+            "state": "ESCALATION",
+            "project_path": "/some/completely/different/path",
+        }
+        _write_queue(queue_file, [entry])
+
+        import orchestrator as orch_mod
+        monkeypatch.setattr(orch_mod, "SYMLINK_TARGET", str(proj))
+        inst.state["project_path"] = str(proj)
+
+        inst._queue_restore_parked_entry_to_active()  # must not raise
+
+        q = inst._read_queue()
+        assert q["queue"][0]["state"] == "ESCALATION"  # unchanged
 
     def test_stale_complete_with_pending_phases_does_not_mark_queue_completed(
         self, tmp_path, monkeypatch

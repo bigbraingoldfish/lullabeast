@@ -180,10 +180,12 @@ def evaluate_executor(output_path=None):
                     return "FAIL"
             else:
                 print(
-                    f"[GATE WARN] git diff for deletion check failed (rc={_git_result.returncode})"
-                    f" — skipping deletion check.",
+                    f"[GATE FAIL] git diff for deletion check failed (rc={_git_result.returncode})"
+                    f" — failing closed to protect deletion guard.",
                     file=sys.stderr,
                 )
+                record_error_code_only("executor", "ERR_GIT_DIFF_FAILED")
+                return "FAIL"
         except Exception as _del_err:
             print(f"[GATE WARN] Deletion check error: {_del_err} — skipping.", file=sys.stderr)
 

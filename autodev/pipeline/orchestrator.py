@@ -690,6 +690,48 @@ class Orchestrator:
         except Exception as e:
             print(f"[QUEUE] Failed to park active entry ({queue_state}): {e}")
 
+    def _queue_restore_parked_entry_to_active(self):
+        """Restore an ESCALATION or BLOCKED queue row back to ACTIVE for this project.
+
+        Called at the start of every resume command (RETRY, RESET_PHASE, RESET_EXECUTION,
+        RESET_REVIEWER, SKIP, PROCEED) so that downstream _queue_update_active_entry calls
+        can find the row after _queue_park_active_entry set it to a non-ACTIVE state.
+        """
+        try:
+            queue_data = self._read_queue()
+            if not queue_data.get("queue"):
+                return
+            # Resolve the current project path.
+            proj_path = None
+            if os.path.exists(SYMLINK_TARGET):
+                try:
+                    proj_path = os.path.realpath(SYMLINK_TARGET)
+                except OSError:
+                    pass
+            if not proj_path and self.state.get("project_path"):
+                try:
+                    proj_path = os.path.realpath(self.state["project_path"])
+                except OSError:
+                    pass
+            if not proj_path:
+                return
+            for i, entry in enumerate(queue_data["queue"]):
+                if entry.get("state") not in ("ESCALATION", "BLOCKED"):
+                    continue
+                try:
+                    if os.path.realpath(entry["project_path"]) != proj_path:
+                        continue
+                except OSError:
+                    continue
+                entry["state"] = "ACTIVE"
+                entry.pop("parked_at", None)
+                entry.pop("parked_reason", None)
+                entry.pop("parked_pipeline_status", None)
+                self._write_queue(queue_data)
+                return
+        except Exception as e:
+            print(f"[QUEUE] Failed to restore parked entry to ACTIVE: {e}")
+
     def _queue_after_park_maybe_advance(self):
         """After parking, auto-select the next project if queue_mode is auto."""
         queue_data = self._read_queue()
@@ -2100,6 +2142,19 @@ class Orchestrator:
                         time.sleep(5)
                         continue
                         
+                    # RR-F6: Crash-recovery skip — if executor already succeeded in a prior
+                    # run (executor_succeeded flag in phase_state.json), skip re-invocation
+                    # and advance directly to reviewer.  Mirrors the planner_output_preserved
+                    # pattern (lines 2020-2029). Only applied when retries==0 so that a
+                    # deliberate ROUTE_EXECUTOR re-run (which increments executor_retries) is
+                    # not short-circuited.
+                    if retries == 0 and self.executor_output_already_succeeded(self.read_phase_state()):
+                        print("[INFO] [EXECUTOR] executor_succeeded flag is set — skipping re-invocation, advancing to reviewer.")
+                        self.state["current_agent"] = "reviewer"
+                        self.transition_state("RUNNING", "Crash recovery — executor output intact, advancing to reviewer")
+                        time.sleep(2)
+                        continue
+
                     # Target Selection — OpenRouter minimax for all executor attempts
                     model = "openrouter/minimax/minimax-m2.7"
                     session_key = f"pipeline:phase-{phase}:{raw_id}:executor-attempt-{retries + 1}"
@@ -2205,6 +2260,7 @@ class Orchestrator:
                     sentinel_path = os.path.join(SYMLINK_TARGET, "reviewer_output.done")
                     token = self.openclaw_config.get("hooks", {}).get("token", "")
                     
+                    _attempt_start_time = time.time()  # captured before cleanup for stale-sentinel guard
                     cleanup_output_files(SYMLINK_TARGET, "reviewer")
                     self.skill_manager.inject_skill(
                         self.state.get("current_phase_raw_id", ""), "reviewer", self.openclaw_config
@@ -2220,9 +2276,15 @@ class Orchestrator:
                         self.transition_state("RUNNING", error_reason)
                         time.sleep(5)
                         continue
-                        
+
                     _stop_file = os.path.join(SYMLINK_TARGET, "pipeline_stop_requested")
-                    sentinel_found = poll_for_sentinel(sentinel_path, timeout_seconds=600, stop_sentinel_path=_stop_file)
+                    sentinel_found = poll_for_sentinel_with_idle_detect(
+                        sentinel_path, None,
+                        timeout_seconds=600,
+                        watch_dirs=[SYMLINK_TARGET],
+                        min_sentinel_mtime=_attempt_start_time,
+                        stop_sentinel_path=_stop_file,
+                    )
                     
                     if not sentinel_found:
                         print("[ERROR] Sentinel timeout")
@@ -2831,6 +2893,7 @@ class Orchestrator:
                             if command == "RETRY":
                                 # Used by StoppedRecoveryPanel resume flow (STOPPED → WAITING_FOR_HUMAN → RETRY).
                                 # Not shown in the escalation agent UI panel.
+                                self._queue_restore_parked_entry_to_active()
                                 last_action = self.state.get("last_action", "")
                                 if "planner" in last_action.lower(): self.state["current_agent"] = "planner"
                                 elif "executor" in last_action.lower(): self.state["current_agent"] = "executor"
@@ -2841,6 +2904,7 @@ class Orchestrator:
                                 # RESTART PHASE is a legacy alias — remove once confirmed no
                                 # in-flight Signal conversations still reference it.
                                 # Both map to the same capped reset path.
+                                self._queue_restore_parked_entry_to_active()
                                 _ps = self.read_phase_state()
                                 if _ps.get("escalation_resets", 0) >= 3:
                                     self.send_signal_notification(
@@ -2860,6 +2924,7 @@ class Orchestrator:
                                     self.write_phase_state_atomic(_ps)
                                     self.reset_phase()
                             elif command == "RESET_EXECUTION":
+                                self._queue_restore_parked_entry_to_active()
                                 _ps = self.read_phase_state()
                                 if _ps.get("escalation_resets", 0) >= 3:
                                     self.send_signal_notification(
@@ -2869,6 +2934,7 @@ class Orchestrator:
                                     # escalation_resets is incremented inside reset_execution("escalation")
                                     self.reset_execution(caller="escalation")
                             elif command == "RESET_REVIEWER":
+                                self._queue_restore_parked_entry_to_active()
                                 _ps = self.read_phase_state()
                                 if _ps.get("escalation_resets", 0) >= 3:
                                     self.send_signal_notification(
@@ -2878,6 +2944,7 @@ class Orchestrator:
                                     # escalation_resets is incremented inside reset_reviewer()
                                     self.reset_reviewer()
                             elif command == "SKIP":
+                                self._queue_restore_parked_entry_to_active()
                                 _skip_raw = self.state.get("current_phase_raw_id", "")
                                 if _skip_raw:
                                     self._mark_roadmap_phase(_skip_raw, "-")
@@ -2885,6 +2952,7 @@ class Orchestrator:
                                 self.state["current_phase"] = 0
                                 self.transition_state("RUNNING", "Manual SKIP triggered")
                             elif command == "PROCEED":
+                                self._queue_restore_parked_entry_to_active()
                                 _proc_raw = self.state.get("current_phase_raw_id", "") or str(self.state.get("current_phase", ""))
                                 if _proc_raw:
                                     self._mark_roadmap_phase(_proc_raw, "x")
