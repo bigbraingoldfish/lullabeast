@@ -187,3 +187,64 @@ class TestApiRoadmapEndpoint:
         data = response.json()
         for phase in data:
             assert phase["status"] != "in_progress"
+
+
+class TestTerminalStatusesDoNotShowInProgress:
+    """F2: STOPPED and QUEUE_HALTED must be treated as terminal statuses so that the
+    roadmap endpoint does not show an in_progress phase overlay while the pipeline
+    is not running.
+
+    Previously terminal_statuses = {"PIPELINE_COMPLETE", "HALTED_SILENT", "BLOCKED"}.
+    STOPPED and QUEUE_HALTED were omitted, causing the last active phase to remain
+    highlighted as in_progress on the UI even after the pipeline had halted.
+    """
+
+    @pytest.mark.parametrize("terminal_status", ["STOPPED", "QUEUE_HALTED"])
+    def test_no_in_progress_overlay_when_pipeline_is_terminal(
+        self, mock_config, mock_roadmap_with_in_progress, temp_dir, terminal_status
+    ):
+        """When pipeline_status is STOPPED or QUEUE_HALTED, no phase should show
+        status='in_progress' — the pipeline has halted and the overlay is stale."""
+        state = {
+            "pipeline_status": terminal_status,
+            "current_phase_raw_id": "PHASE-2",  # this phase was active when the pipeline stopped
+        }
+        path = os.path.join(temp_dir, "pipeline_state.json")
+        with open(path, "w") as f:
+            json.dump(state, f)
+
+        with patch("ui.server.load_config", return_value=mock_config):
+            response = client.get("/api/roadmap")
+
+        assert response.status_code == 200
+        data = response.json()
+        for phase in data:
+            assert phase["status"] != "in_progress", (
+                f"Phase {phase['id']} shows 'in_progress' when pipeline_status={terminal_status!r}. "
+                f"STOPPED and QUEUE_HALTED must be in terminal_statuses so the in_progress "
+                f"overlay is suppressed when the pipeline is not running."
+            )
+
+    @pytest.mark.parametrize("running_status", ["RUNNING", "WAITING_FOR_SENTINEL", "WAITING_FOR_HUMAN"])
+    def test_in_progress_overlay_present_when_pipeline_is_running(
+        self, mock_config, mock_roadmap_with_in_progress, temp_dir, running_status
+    ):
+        """Sanity check: in_progress overlay must still appear for genuinely running states."""
+        state = {
+            "pipeline_status": running_status,
+            "current_phase_raw_id": "PHASE-2",
+        }
+        path = os.path.join(temp_dir, "pipeline_state.json")
+        with open(path, "w") as f:
+            json.dump(state, f)
+
+        with patch("ui.server.load_config", return_value=mock_config):
+            response = client.get("/api/roadmap")
+
+        assert response.status_code == 200
+        data = response.json()
+        phase2 = next((p for p in data if p["id"] == "PHASE-2"), None)
+        assert phase2 is not None
+        assert phase2["status"] == "in_progress", (
+            f"Phase PHASE-2 should be 'in_progress' when pipeline_status={running_status!r}"
+        )

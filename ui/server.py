@@ -2276,7 +2276,7 @@ def get_roadmap():
     
     # Override status to 'in_progress' for matching phase only when pipeline is
     # actively running — not when it has reached a terminal state like PIPELINE_COMPLETE.
-    terminal_statuses = {"PIPELINE_COMPLETE", "HALTED_SILENT", "BLOCKED"}
+    terminal_statuses = {"PIPELINE_COMPLETE", "HALTED_SILENT", "BLOCKED", "STOPPED", "QUEUE_HALTED"}
     pipeline_status = pipeline_state.get("pipeline_status", "") if pipeline_state_path and _read_json_file(pipeline_state_path) else ""
     if pipeline_state_path:
         _ps = _read_json_file(pipeline_state_path)

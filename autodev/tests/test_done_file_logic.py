@@ -47,10 +47,21 @@ def _make_executor_gate_patch(tmp_dir):
     # C3-07 fix: gate now fails closed if phase_base_commit is missing.
     # Write a mock pipeline_state.json with a sentinel commit so tests that are
     # not specifically testing the deletion guard pass through to PASS/FAIL as before.
-    # The git diff will fail (no real git repo) but the gate handles that gracefully.
     pipeline_state_path = os.path.join(os.path.dirname(tmp_dir.rstrip("/")), "pipeline_state.json")
     with open(pipeline_state_path, "w") as _f:
         json.dump({"phase_base_commit": "0000000000000000000000000000000000000000"}, _f)
+
+    # F3 fix: the gate now fails closed when git diff returns non-zero.
+    # Tests not specifically testing the deletion guard must stub git to return
+    # success with no deleted files, so the gate evaluates the actual payload.
+    import subprocess as _sp
+
+    class _GitOkResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    stack.enter_context(patch.object(_sp, "run", return_value=_GitOkResult()))
 
     return stack
 
