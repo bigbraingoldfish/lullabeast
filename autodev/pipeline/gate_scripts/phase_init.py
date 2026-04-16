@@ -4,14 +4,15 @@ import json
 import subprocess
 import tempfile
 
+# Share env resolution with the orchestrator and other gate scripts.
+_PIPELINE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PIPELINE_DIR not in sys.path:
+    sys.path.insert(0, _PIPELINE_DIR)
+
+from env_resolvers import resolve_pipeline_root  # noqa: E402
+
+
 def _derive_pipeline_project() -> str:
-    explicit = os.environ.get("AUTODEV_RUNTIME_ROOT", "").strip()
-    if explicit:
-        return os.path.join(explicit, "pipeline-project")
-    legacy = os.environ.get("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "").strip().lower()
-    if legacy in ("1", "true", "yes"):
-        root = os.environ.get("AUTODEV_ROOT", os.path.expanduser("~/.openclaw"))
-        return os.path.join(root, "pipeline-project")
     repo_path = os.environ.get(
         "AUTODEV_REPO_PATH",
         os.path.dirname(
@@ -20,7 +21,7 @@ def _derive_pipeline_project() -> str:
             )
         ),
     )
-    return os.path.join(repo_path, ".autodev", "pipeline-project")
+    return os.path.join(resolve_pipeline_root(repo_path), "pipeline-project")
 
 
 def init_phase():
@@ -28,8 +29,8 @@ def init_phase():
     if not os.path.exists(workspace):
         print(f"[ERROR] Derived pipeline project path does not exist: {workspace!r}")
         print("[FATAL] Cannot fall back to CWD — this would write phase metadata "
-              "to the wrong project tree. Set AUTODEV_REPO_PATH, AUTODEV_ROOT, "
-              "or AUTODEV_RUNTIME_ROOT to point at the correct installation.")
+              "to the wrong project tree. Set AUTODEV_REPO_PATH, OPENCLAW_ROOT, "
+              "or AUTODEV_PIPELINE_ROOT to point at the correct installation.")
         sys.exit(1)
         
     # 1. Initialize phase_state.json

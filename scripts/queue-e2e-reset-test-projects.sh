@@ -8,12 +8,12 @@
 #   PROJECTS_ROOT=/other/projects ./scripts/queue-e2e-reset-test-projects.sh
 #
 # Environment:
-#   AUTODEV_ROOT   default ~/.openclaw
+#   OPENCLAW_ROOT   default ~/.openclaw
 #   PROJECTS_ROOT  default /tmp/autodev-queue-e2e-projects (override for your layout)
 
 set -euo pipefail
 
-AUTODEV_ROOT="${AUTODEV_ROOT:-$HOME/.openclaw}"
+OPENCLAW_ROOT="${OPENCLAW_ROOT:-$HOME/.openclaw}"
 PROJECTS_ROOT="${PROJECTS_ROOT:-/tmp/autodev-queue-e2e-projects}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CREATE_PHASEONLY=0
@@ -29,10 +29,10 @@ for arg in "$@"; do
 done
 
 ts="$(date +%Y%m%d%H%M)"
-queue_json="${AUTODEV_ROOT}/pipeline_queue.json"
-state_json="${AUTODEV_ROOT}/pipeline_state.json"
+queue_json="${OPENCLAW_ROOT}/pipeline_queue.json"
+state_json="${OPENCLAW_ROOT}/pipeline_state.json"
 
-echo "[INFO] AUTODEV_ROOT=$AUTODEV_ROOT"
+echo "[INFO] OPENCLAW_ROOT=$OPENCLAW_ROOT"
 echo "[INFO] PROJECTS_ROOT=$PROJECTS_ROOT"
 
 if [[ -f "$queue_json" ]]; then
@@ -166,5 +166,5 @@ echo ""
 echo "=== Next steps ==="
 echo "1) Empty queue in UI or overwrite ${queue_json} with {\"queue\":[],\"queue_mode\":\"manual\",\"last_updated\":\"\"} if appropriate."
 echo "2) V1 (startup PIPELINE_COMPLETE): on queue-test1 run: cp roadmap.B.v1-complete.md roadmap.md && git add roadmap.md && git commit -m 'V1 complete roadmap'"
-echo "3) Symlink before launch: ln -sfn <active_repo> ${AUTODEV_ROOT}/pipeline-project"
+echo "3) Symlink before launch: ln -sfn <active_repo> ${OPENCLAW_ROOT}/pipeline-project"
 echo "4) Run strict E2E per plans/Active/queue-e2e-manual-validation/05-STRICT-E2E-RUNBOOK.md"

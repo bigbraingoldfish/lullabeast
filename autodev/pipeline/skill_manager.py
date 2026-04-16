@@ -15,6 +15,7 @@ Design principles:
 import json
 import os
 import shutil
+import sys
 import tempfile
 from datetime import datetime, timezone
 
@@ -25,7 +26,13 @@ except ImportError:
     _YAML_AVAILABLE = False
 
 
-AUTODEV_ROOT = os.environ.get("AUTODEV_ROOT", os.path.expanduser("~/.openclaw"))
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _THIS_DIR not in sys.path:
+    sys.path.insert(0, _THIS_DIR)
+
+from env_resolvers import resolve_openclaw_root  # noqa: E402
+
+OPENCLAW_ROOT = resolve_openclaw_root()
 
 
 def _autodev_repo_path() -> str:
@@ -40,13 +47,13 @@ class SkillManager:
     """Manages per-phase skill injection into agent workspaces.
 
     Usage (orchestrator):
-        skill_manager = SkillManager(AUTODEV_ROOT)
+        skill_manager = SkillManager(OPENCLAW_ROOT)
         # before each agent webhook call:
         skill_manager.inject_skill(self.state.get("current_phase_raw_id", ""),
                                    "planner", self.openclaw_config)
     """
 
-    def __init__(self, workspace_dir: str = AUTODEV_ROOT):
+    def __init__(self, workspace_dir: str = OPENCLAW_ROOT):
         self._workspace_dir = workspace_dir
         _rp = _autodev_repo_path()
         self._skill_library_dir = os.path.join(_rp, "autodev", "skill-library")
@@ -183,7 +190,7 @@ class SkillManager:
             return {}
 
     def _write_health_file(self) -> None:
-        """Write skill_health.json to AUTODEV_ROOT for operator visibility.
+        """Write skill_health.json to OPENCLAW_ROOT for operator visibility.
 
         Contains a snapshot of skill-injection readiness at construction time.
         Never raises — health reporting must not crash the pipeline.

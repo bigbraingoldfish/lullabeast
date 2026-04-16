@@ -18,4 +18,4 @@ See [plans/Active/queue-e2e-manual-validation/00-source-of-truth.md](../plans/Ac
 
 ## `queue-e2e-strict-freeze.sh`
 
-Timestamped copies of `pipeline_queue.json`, `pipeline_state.json`, and a `readlink` snapshot of `pipeline-project` under `$AUTODEV_ROOT` (default `~/.openclaw`). Use before/after strict dual validations; restore with `cp` + `ln -sfn "$(cat …readlink)"`.
+Timestamped copies of `pipeline_queue.json`, `pipeline_state.json`, and a `readlink` snapshot of `pipeline-project` under `$OPENCLAW_ROOT` (default `~/.openclaw`). Use before/after strict dual validations; restore with `cp` + `ln -sfn "$(cat …readlink)"`.

@@ -24,11 +24,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-OPENCLAW_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-for _p in [OPENCLAW_DIR]:
+_REPO_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PIPELINE_DIR = os.path.join(_REPO_DIR, "autodev", "pipeline")
+for _p in [_REPO_DIR, _PIPELINE_DIR]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from env_resolvers import resolve_openclaw_root  # noqa: E402
+
+OPENCLAW_DIR = resolve_openclaw_root()
 OPENCLAW_JSON = os.path.join(OPENCLAW_DIR, "openclaw.json")
 
 

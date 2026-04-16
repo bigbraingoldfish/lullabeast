@@ -25,9 +25,8 @@ class TestC405NoCwdFallback:
         # Point AUTODEV_REPO_PATH to a nonexistent path so _derive_pipeline_project
         # returns a path that doesn't exist
         env["AUTODEV_REPO_PATH"] = str(tmp_path / "nonexistent")
-        env.pop("AUTODEV_ROOT", None)
-        env.pop("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", None)
-        env.pop("AUTODEV_RUNTIME_ROOT", None)
+        env.pop("OPENCLAW_ROOT", None)
+        env.pop("AUTODEV_PIPELINE_ROOT", None)
 
         result = subprocess.run(
             [sys.executable, PHASE_INIT],
@@ -51,9 +50,8 @@ class TestC405NoCwdFallback:
         )
 
         env = os.environ.copy()
-        env.pop("AUTODEV_ROOT", None)
-        env.pop("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", None)
-        env.pop("AUTODEV_RUNTIME_ROOT", None)
+        env.pop("OPENCLAW_ROOT", None)
+        env.pop("AUTODEV_PIPELINE_ROOT", None)
 
         # Pass a relative roadmap path — dirname will be empty
         result = subprocess.run(

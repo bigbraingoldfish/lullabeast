@@ -196,7 +196,7 @@ class TestServerGroupSkip:
 def orch(tmp_path, monkeypatch):
     """Orchestrator instance with mocked filesystem paths."""
     import importlib
-    monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
+    monkeypatch.setenv("OPENCLAW_ROOT", str(tmp_path))
     import orchestrator as orch_mod
     importlib.reload(orch_mod)
     from orchestrator import Orchestrator as FreshOrch

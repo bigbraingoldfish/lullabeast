@@ -44,10 +44,10 @@ def orch(tmp_path, monkeypatch):
     queue_file = tmp_path / "pipeline_queue.json"
     state_file = tmp_path / "pipeline_state.json"
 
-    monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
-    monkeypatch.setenv("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "1")
+    monkeypatch.setenv("OPENCLAW_ROOT", str(tmp_path))
+    monkeypatch.setenv("AUTODEV_PIPELINE_ROOT", str(tmp_path))
 
-    # Reload module to pick up patched AUTODEV_ROOT (runtime files under tmp_path)
+    # Reload module to pick up patched OPENCLAW_ROOT (runtime files under tmp_path)
     import importlib
     import orchestrator as orch_mod
     importlib.reload(orch_mod)
@@ -66,7 +66,7 @@ def orch(tmp_path, monkeypatch):
     # Patch QUEUE_FILE and STATE_FILE in the module
     monkeypatch.setattr(orch_mod, "QUEUE_FILE", str(queue_file))
     monkeypatch.setattr(orch_mod, "STATE_FILE", str(state_file))
-    monkeypatch.setattr(orch_mod, "AUTODEV_ROOT", str(tmp_path))
+    monkeypatch.setattr(orch_mod, "OPENCLAW_ROOT", str(tmp_path))
 
     return inst, queue_file, state_file, tmp_path
 
@@ -676,8 +676,8 @@ class TestApplyCliProjectPath:
         """Preflight may point pipeline-project at B while state still references A."""
         import importlib
 
-        monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
-        monkeypatch.setenv("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "1")
+        monkeypatch.setenv("OPENCLAW_ROOT", str(tmp_path))
+        monkeypatch.setenv("AUTODEV_PIPELINE_ROOT", str(tmp_path))
         import orchestrator as orch_mod
 
         importlib.reload(orch_mod)
@@ -739,8 +739,8 @@ class TestMainLoopStaleCompleteSyncsQueue:
         """
         import importlib
 
-        monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
-        monkeypatch.setenv("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "1")
+        monkeypatch.setenv("OPENCLAW_ROOT", str(tmp_path))
+        monkeypatch.setenv("AUTODEV_PIPELINE_ROOT", str(tmp_path))
         import orchestrator as orch_mod
 
         importlib.reload(orch_mod)
@@ -933,8 +933,8 @@ class TestQueueRestoreParkedEntryToActive:
         """phase_resolver must confirm completion before ACTIVE→COMPLETED sync."""
         import importlib
 
-        monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
-        monkeypatch.setenv("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "1")
+        monkeypatch.setenv("OPENCLAW_ROOT", str(tmp_path))
+        monkeypatch.setenv("AUTODEV_PIPELINE_ROOT", str(tmp_path))
         import orchestrator as orch_mod
 
         importlib.reload(orch_mod)

@@ -23,7 +23,7 @@ Do not send vulnerability reports by email. We do not publish a security contact
 - The pipeline agents and their gate scripts (`autodev/pipeline/gate_scripts/`)
 - The UI server (`ui/server.py`) and its API routes
 - The install script (`install.sh`) and its handling of secrets and file permissions
-- The environment variable contract (`.env`, `.env.example`, `AUTODEV_HOOKS_TOKEN`, `AUTODEV_ROOT`, `AUTODEV_REPO_PATH`)
+- The environment variable contract (`.env`, `.env.example`, `AUTODEV_HOOKS_TOKEN`, `OPENCLAW_ROOT`, `AUTODEV_REPO_PATH`)
 
 **Out of scope:**
 

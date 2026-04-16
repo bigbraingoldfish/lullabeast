@@ -21,8 +21,8 @@ for _p in [PIPELINE_DIR, REPO_ROOT]:
 
 @pytest.fixture
 def orch(tmp_path, monkeypatch):
-    monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
-    monkeypatch.setenv("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "1")
+    monkeypatch.setenv("OPENCLAW_ROOT", str(tmp_path))
+    monkeypatch.setenv("AUTODEV_PIPELINE_ROOT", str(tmp_path))
 
     import orchestrator as orch_mod
     importlib.reload(orch_mod)
@@ -41,7 +41,7 @@ def orch(tmp_path, monkeypatch):
     inst.skill_manager = MagicMock()
 
     monkeypatch.setattr(orch_mod, "STATE_FILE", str(tmp_path / "pipeline_state.json"))
-    monkeypatch.setattr(orch_mod, "AUTODEV_RUNTIME_ROOT", str(tmp_path))
+    monkeypatch.setattr(orch_mod, "AUTODEV_PIPELINE_ROOT", str(tmp_path))
 
     return inst, orch_mod, tmp_path
 

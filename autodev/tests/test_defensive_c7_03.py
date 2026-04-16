@@ -1,4 +1,4 @@
-"""C7-03: SkillManager must write skill_health.json to AUTODEV_ROOT at construction
+"""C7-03: SkillManager must write skill_health.json to OPENCLAW_ROOT at construction
 time so operators can check skill-injection readiness without reading logs.
 
 The file should describe:
@@ -28,8 +28,8 @@ for _p in [PIPELINE_DIR, REPO_ROOT]:
 class TestC703SkillHealth:
 
     def test_skill_health_json_written_on_init(self, tmp_path, monkeypatch):
-        """SkillManager.__init__ must write skill_health.json to AUTODEV_ROOT."""
-        monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
+        """SkillManager.__init__ must write skill_health.json to OPENCLAW_ROOT."""
+        monkeypatch.setenv("OPENCLAW_ROOT", str(tmp_path))
 
         import skill_manager as sm_mod
         importlib.reload(sm_mod)
@@ -38,13 +38,13 @@ class TestC703SkillHealth:
 
         health_file = tmp_path / "skill_health.json"
         assert health_file.exists(), (
-            "skill_health.json was not written to AUTODEV_ROOT on SkillManager init "
+            "skill_health.json was not written to OPENCLAW_ROOT on SkillManager init "
             "(C7-03 unfixed)"
         )
 
     def test_skill_health_json_contains_expected_fields(self, tmp_path, monkeypatch):
         """skill_health.json must contain yaml_available, mapping_loaded, mapping_count."""
-        monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
+        monkeypatch.setenv("OPENCLAW_ROOT", str(tmp_path))
 
         import skill_manager as sm_mod
         importlib.reload(sm_mod)
@@ -59,7 +59,7 @@ class TestC703SkillHealth:
 
     def test_skill_health_yaml_unavailable_reflected(self, tmp_path, monkeypatch):
         """When PyYAML is not installed, yaml_available must be False in health file."""
-        monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
+        monkeypatch.setenv("OPENCLAW_ROOT", str(tmp_path))
 
         import skill_manager as sm_mod
         importlib.reload(sm_mod)
@@ -79,7 +79,7 @@ class TestC703SkillHealth:
 
     def test_skill_health_with_real_mapping_loaded(self, tmp_path, monkeypatch):
         """When the real mapping file is present, mapping_loaded must be True and count > 0."""
-        monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
+        monkeypatch.setenv("OPENCLAW_ROOT", str(tmp_path))
         # Point AUTODEV_REPO_PATH to the real repo so the real mapping file is found
         monkeypatch.setenv("AUTODEV_REPO_PATH", REPO_ROOT)
 

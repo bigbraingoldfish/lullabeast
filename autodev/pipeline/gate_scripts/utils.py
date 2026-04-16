@@ -1,16 +1,25 @@
 import os
+import sys
 import json
 import tempfile
 
+# Import the shared env resolvers. Gate scripts live one directory below the
+# pipeline package, so add pipeline/ to sys.path before importing.
+_PIPELINE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PIPELINE_DIR not in sys.path:
+    sys.path.insert(0, _PIPELINE_DIR)
+
+from env_resolvers import resolve_pipeline_root  # noqa: E402
+
 
 def _derive_runtime_root() -> str:
-    """Return AUTODEV_RUNTIME_ROOT: env var → repo-local .autodev → ~/.openclaw fallback."""
-    explicit = os.environ.get("AUTODEV_RUNTIME_ROOT", "").strip()
-    if explicit:
-        return explicit
-    legacy = os.environ.get("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "").strip().lower()
-    if legacy in ("1", "true", "yes"):
-        return os.environ.get("AUTODEV_ROOT", os.path.expanduser("~/.openclaw"))
+    """Return the pipeline runtime directory.
+
+    Thin wrapper around :func:`env_resolvers.resolve_pipeline_root` that derives
+    the repo path from ``AUTODEV_REPO_PATH`` or the on-disk file layout when
+    unset. Preserved as a named helper so existing gate-script imports keep
+    working.
+    """
     repo_path = os.environ.get(
         "AUTODEV_REPO_PATH",
         # gate_scripts/ → pipeline/ → autodev/ → repo root: 4 dirname calls
@@ -20,7 +29,7 @@ def _derive_runtime_root() -> str:
             )
         ),
     )
-    return os.path.join(repo_path, ".autodev")
+    return resolve_pipeline_root(repo_path)
 
 
 WORKSPACE_DIR = os.path.join(_derive_runtime_root(), "pipeline-project") + os.sep

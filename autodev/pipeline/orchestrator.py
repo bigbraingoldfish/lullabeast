@@ -14,8 +14,9 @@ from webhook_client import invoke_agent_webhook
 from sentinel_poller import cleanup_output_files, poll_for_sentinel, poll_for_sentinel_with_idle_detect
 from skill_manager import SkillManager
 from queue_semantics import parent_blocks_child
+from env_resolvers import resolve_openclaw_root, resolve_pipeline_root
 
-AUTODEV_ROOT = os.environ.get("AUTODEV_ROOT", os.path.expanduser("~/.openclaw"))
+OPENCLAW_ROOT = resolve_openclaw_root()
 AUTODEV_REPO_PATH = os.environ.get(
     "AUTODEV_REPO_PATH",
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -25,25 +26,23 @@ def _env_truthy(name: str) -> bool:
     return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
-_rt_env = (os.environ.get("AUTODEV_RUNTIME_ROOT") or "").strip()
-if _env_truthy("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME"):
-    AUTODEV_RUNTIME_ROOT = AUTODEV_ROOT
-elif _rt_env:
-    AUTODEV_RUNTIME_ROOT = os.path.expanduser(_rt_env)
-else:
-    AUTODEV_RUNTIME_ROOT = os.path.join(AUTODEV_REPO_PATH, ".autodev")
+# Pipeline state directory. Resolved via env_resolvers: OPENCLAW_ROOT is the
+# OpenClaw hub, AUTODEV_PIPELINE_ROOT is the pipeline state directory. Operators
+# who want state to live next to OpenClaw set AUTODEV_PIPELINE_ROOT=$OPENCLAW_ROOT
+# explicitly — there are no legacy aliases.
+AUTODEV_PIPELINE_ROOT = resolve_pipeline_root(AUTODEV_REPO_PATH)
 
-LOCK_FILE = os.path.join(AUTODEV_RUNTIME_ROOT, "pipeline.lock")
-STATE_FILE = os.path.join(AUTODEV_RUNTIME_ROOT, "pipeline_state.json")
-SYMLINK_TARGET = os.path.join(AUTODEV_RUNTIME_ROOT, "pipeline-project")
-CONFIG_FILE = os.path.join(AUTODEV_ROOT, "openclaw.json")
+LOCK_FILE = os.path.join(AUTODEV_PIPELINE_ROOT, "pipeline.lock")
+STATE_FILE = os.path.join(AUTODEV_PIPELINE_ROOT, "pipeline_state.json")
+SYMLINK_TARGET = os.path.join(AUTODEV_PIPELINE_ROOT, "pipeline-project")
+CONFIG_FILE = os.path.join(OPENCLAW_ROOT, "openclaw.json")
 PHASE_STATE_FILE = os.path.join(SYMLINK_TARGET, "phase_state.json")
 
 ORCHESTRATOR_FILENAME = "orchestrator.py"
 
 
-def _validate_autodev_root(root: str) -> None:
-    """Validate AUTODEV_ROOT and required workspace directories at startup.
+def _validate_openclaw_root(root: str) -> None:
+    """Validate OPENCLAW_ROOT and required workspace directories at startup.
 
     Prints one error line per missing item, then calls sys.exit(1) if anything
     is absent — so operators see all issues at once rather than hitting a
@@ -52,7 +51,7 @@ def _validate_autodev_root(root: str) -> None:
     errors = []
 
     if not os.path.isdir(root):
-        errors.append(f"  AUTODEV_ROOT does not exist or is not a directory: {root}")
+        errors.append(f"  OPENCLAW_ROOT does not exist or is not a directory: {root}")
 
     for role in ("planner", "executor", "reviewer"):
         ws = os.path.join(root, f"workspace-{role}")
@@ -64,7 +63,7 @@ def _validate_autodev_root(root: str) -> None:
         errors.append(f"  openclaw.json not found at: {config_path}")
 
     if errors:
-        print("[ERROR] AUTODEV_ROOT validation failed:")
+        print("[ERROR] OPENCLAW_ROOT validation failed:")
         for msg in errors:
             print(msg)
         sys.exit(1)
@@ -82,22 +81,22 @@ VALID_STATES = [
     "QUEUE_HALTED",
 ]
 
-QUEUE_FILE = os.path.join(AUTODEV_RUNTIME_ROOT, "pipeline_queue.json")
+QUEUE_FILE = os.path.join(AUTODEV_PIPELINE_ROOT, "pipeline_queue.json")
 
 
 def _atomic_temp_dir_for_project_writes():
     """Directory for tempfile.mkstemp before os.replace into SYMLINK_TARGET.
 
-    When pipeline-project is missing, falling back to AUTODEV_ROOT can raise
+    When pipeline-project is missing, falling back to OPENCLAW_ROOT can raise
     FileNotFoundError if ~/.openclaw was never created — use repo-local runtime instead.
     """
     if os.path.exists(SYMLINK_TARGET):
         return SYMLINK_TARGET
     try:
-        os.makedirs(AUTODEV_RUNTIME_ROOT, exist_ok=True)
+        os.makedirs(AUTODEV_PIPELINE_ROOT, exist_ok=True)
     except OSError:
         pass
-    return AUTODEV_RUNTIME_ROOT
+    return AUTODEV_PIPELINE_ROOT
 
 
 # llama-server HTTP origin (scheme + host + port, no path). Set AUTODEV_LLAMA_BASE if not localhost.
@@ -223,9 +222,9 @@ class Orchestrator:
             "last_action_timestamp": datetime.now(timezone.utc).isoformat(),
             "pipeline_status": "RUNNING"
         }
-        _validate_autodev_root(AUTODEV_ROOT)
+        _validate_openclaw_root(OPENCLAW_ROOT)
         self.openclaw_config = self.load_config()
-        self.skill_manager = SkillManager(AUTODEV_ROOT)
+        self.skill_manager = SkillManager(OPENCLAW_ROOT)
 
     def load_config(self):
         if not os.path.exists(CONFIG_FILE):
@@ -263,7 +262,7 @@ class Orchestrator:
     def acquire_lock(self):
         """Acquires an exclusive, non-blocking lock using fcntl.flock."""
         try:
-            os.makedirs(AUTODEV_RUNTIME_ROOT, exist_ok=True)
+            os.makedirs(AUTODEV_PIPELINE_ROOT, exist_ok=True)
             self.lock_fd = os.open(LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o666)
             fcntl.flock(self.lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             
@@ -296,7 +295,7 @@ class Orchestrator:
         Two symlinks are kept in sync:
         1. SYMLINK_TARGET (.autodev/pipeline-project) — used by the orchestrator and
            gate scripts to locate project files.
-        2. AUTODEV_ROOT/pipeline-project (~/.openclaw/pipeline-project) — followed by
+        2. OPENCLAW_ROOT/pipeline-project (~/.openclaw/pipeline-project) — followed by
            agent workspace symlinks (workspace-{agent}/pipeline-project →
            ~/.openclaw/pipeline-project). Without this second update the agent reads
            the previous project's files even though the orchestrator targets the new one.
@@ -306,7 +305,7 @@ class Orchestrator:
             print(f"[ERROR] Target project dir doesn't exist: {target_project_dir}")
             return False
 
-        openclaw_symlink = os.path.join(AUTODEV_ROOT, "pipeline-project")
+        openclaw_symlink = os.path.join(OPENCLAW_ROOT, "pipeline-project")
 
         try:
             subprocess.run(["ln", "-sfn", target_project_dir, SYMLINK_TARGET], check=True)
@@ -351,8 +350,8 @@ class Orchestrator:
         self.state["last_action_timestamp"] = datetime.now(timezone.utc).isoformat()
         
         # Write to temp file then atomic rename
-        os.makedirs(AUTODEV_RUNTIME_ROOT, exist_ok=True)
-        fd, temp_path = tempfile.mkstemp(dir=AUTODEV_RUNTIME_ROOT, prefix="pipeline_state_")
+        os.makedirs(AUTODEV_PIPELINE_ROOT, exist_ok=True)
+        fd, temp_path = tempfile.mkstemp(dir=AUTODEV_PIPELINE_ROOT, prefix="pipeline_state_")
         try:
             with os.fdopen(fd, 'w') as f:
                 json.dump(self.state, f, indent=2)
@@ -440,8 +439,8 @@ class Orchestrator:
         without an explicit file lock.
         """
         data["last_updated"] = datetime.now(timezone.utc).isoformat()
-        os.makedirs(AUTODEV_RUNTIME_ROOT, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=AUTODEV_RUNTIME_ROOT, prefix="queue_")
+        os.makedirs(AUTODEV_PIPELINE_ROOT, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=AUTODEV_PIPELINE_ROOT, prefix="queue_")
         try:
             with os.fdopen(fd, "w") as f:
                 json.dump(data, f, indent=2)
@@ -1007,7 +1006,7 @@ class Orchestrator:
         if not os.path.exists(done_path) or not os.path.exists(json_path):
             return False
         # Import and call the gate function directly so workspace patches in tests take effect.
-        # Subprocess-based call would inherit the real AUTODEV_ROOT and ignore test mocks.
+        # Subprocess-based call would inherit the real OPENCLAW_ROOT and ignore test mocks.
         try:
             gate_dir = os.path.join(AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts")
             if gate_dir not in sys.path:
@@ -1085,7 +1084,7 @@ class Orchestrator:
         Writes skill_injected: None if injection produced no skill (disabled, not mapped,
         or source file missing).  Non-blocking: errors are logged and swallowed.
         """
-        skills_dir = os.path.join(AUTODEV_ROOT, f"workspace-{agent_role}", "skills")
+        skills_dir = os.path.join(OPENCLAW_ROOT, f"workspace-{agent_role}", "skills")
         discipline = None
         try:
             entries = [
@@ -1209,7 +1208,7 @@ class Orchestrator:
             try:
                 subprocess.run(
                     [sys.executable, gate_script, _roadmap_candidates[0]],
-                    cwd=AUTODEV_ROOT, check=True
+                    cwd=OPENCLAW_ROOT, check=True
                 )
                 print("[INFO] reset_phase: roadmap_parser re-run, current_phase.json refreshed.")
             except Exception as _rp_err:
@@ -1249,7 +1248,7 @@ class Orchestrator:
             try:
                 subprocess.run(
                     [sys.executable, _re_gate, _re_roadmap[0]],
-                    cwd=AUTODEV_ROOT, check=True
+                    cwd=OPENCLAW_ROOT, check=True
                 )
                 print(f"[INFO] reset_execution({caller}): roadmap_parser re-run, current_phase.json refreshed.")
             except Exception as _re_err:
@@ -1793,7 +1792,7 @@ class Orchestrator:
         Returns (passed: bool, details: str). Never retries on failure."""
         gate_script = os.path.join(AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts", "repo_init_check.py")
         try:
-            # Inherit env so repo_init_check.py sees AUTODEV_ROOT (Docker / custom OpenClaw roots).
+            # Inherit env so repo_init_check.py sees OPENCLAW_ROOT (Docker / custom OpenClaw roots).
             result = subprocess.run(
                 [sys.executable, gate_script],
                 capture_output=True,
@@ -1898,7 +1897,7 @@ class Orchestrator:
                 try:
                     subprocess.run(
                         [sys.executable, _startup_gate, _startup_roadmap[0]],
-                        cwd=AUTODEV_ROOT,
+                        cwd=OPENCLAW_ROOT,
                         check=True,
                     )
                     print("[INFO] Startup: roadmap_parser re-run, current_phase.json refreshed.")
@@ -1922,7 +1921,7 @@ class Orchestrator:
             # Remove any mkstemp files left behind by a previous crash before
             # running the repo init check, so stale files don't interfere with
             # state reads or git status output.
-            cleanup_stranded_temp_files(AUTODEV_RUNTIME_ROOT)
+            cleanup_stranded_temp_files(AUTODEV_PIPELINE_ROOT)
 
             # --- Repo Init Check (PIPELINE-SPEC §13) ---
             # Runs on every startup/resume before the phase loop. Validates workspace
@@ -2194,7 +2193,7 @@ class Orchestrator:
 
                     # Resolve the active executor session JSONL for idle detection.
                     # sessions.json may take a few seconds to be updated by the gateway.
-                    _sessions_dir = os.path.join(AUTODEV_ROOT, "agents", "executor", "sessions")
+                    _sessions_dir = os.path.join(OPENCLAW_ROOT, "agents", "executor", "sessions")
                     _sessions_json = os.path.join(_sessions_dir, "sessions.json")
                     _full_key = f"agent:executor:{session_key}".lower()  # openclaw normalizes session keys to lowercase
                     _jsonl_path = None
@@ -2515,7 +2514,7 @@ class Orchestrator:
                         _audit_id = self.state.get("current_phase_raw_id", "") or f"phase-{phase}"
                         _audit_flag = os.environ.get("AUTODEV_AUDIT_ARCHIVE_DIR")
                         if _audit_flag is None:
-                            _audit_base = os.path.join(AUTODEV_ROOT, "pipeline-audit")
+                            _audit_base = os.path.join(OPENCLAW_ROOT, "pipeline-audit")
                         elif _audit_flag.strip() == "":
                             _audit_base = None
                         else:
@@ -3026,7 +3025,7 @@ class Orchestrator:
                     "escalation_error": str(escalation_err),
                 }
                 try:
-                    with open(os.path.join(AUTODEV_ROOT, "escalation_failed.json"), "w") as f:
+                    with open(os.path.join(OPENCLAW_ROOT, "escalation_failed.json"), "w") as f:
                         json.dump(error_data, f)
                 except Exception:
                     pass
@@ -3114,6 +3113,13 @@ if __name__ == "__main__":
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
         handlers=[logging.StreamHandler()],
+    )
+
+    # Self-diagnosis: log the resolved roots so operators can spot a
+    # misconfigured env without grepping environment dumps.
+    logging.info(
+        "[STARTUP] OPENCLAW_ROOT=%s AUTODEV_PIPELINE_ROOT=%s STATE_FILE=%s",
+        OPENCLAW_ROOT, AUTODEV_PIPELINE_ROOT, STATE_FILE,
     )
 
     import argparse

@@ -134,8 +134,8 @@ def test_executor_branch_skips_invocation_when_already_succeeded(tmp_path, monke
     """
     import importlib
 
-    monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
-    monkeypatch.setenv("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "1")
+    monkeypatch.setenv("OPENCLAW_ROOT", str(tmp_path))
+    monkeypatch.setenv("AUTODEV_PIPELINE_ROOT", str(tmp_path))
     importlib.reload(orch_mod)
     from orchestrator import Orchestrator as FreshOrch
 
@@ -169,7 +169,7 @@ def test_executor_branch_skips_invocation_when_already_succeeded(tmp_path, monke
 
     # Patch the module-level paths after reload
     monkeypatch.setattr(orch_mod, "SYMLINK_TARGET", str(proj))
-    monkeypatch.setattr(orch_mod, "AUTODEV_ROOT", str(tmp_path))
+    monkeypatch.setattr(orch_mod, "OPENCLAW_ROOT", str(tmp_path))
     monkeypatch.setattr(orch_mod, "STATE_FILE", str(state_path))
     monkeypatch.setattr(orch_mod, "PHASE_STATE_FILE", str(phase_state_path))
 

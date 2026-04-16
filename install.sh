@@ -169,22 +169,24 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 hdr "4/13  OpenClaw detection"
 
-AUTODEV_ROOT=""
+# Capture the operator-provided OPENCLAW_ROOT before we reassign.
+_OC_ENV_INPUT="${OPENCLAW_ROOT:-}"
+OPENCLAW_ROOT=""
 
-# Priority 1: $OPENCLAW_ROOT env var
-if [ -n "${OPENCLAW_ROOT:-}" ] && [ -d "$OPENCLAW_ROOT" ]; then
-    AUTODEV_ROOT="$OPENCLAW_ROOT"
-    ok "Using \$OPENCLAW_ROOT: $AUTODEV_ROOT"
+# Priority 1: $OPENCLAW_ROOT env var (as provided by the operator)
+if [ -n "$_OC_ENV_INPUT" ] && [ -d "$_OC_ENV_INPUT" ]; then
+    OPENCLAW_ROOT="$_OC_ENV_INPUT"
+    ok "Using \$OPENCLAW_ROOT: $OPENCLAW_ROOT"
 fi
 
 # Priority 2: ~/.openclaw default
-if [ -z "$AUTODEV_ROOT" ] && [ -d "$HOME/.openclaw" ]; then
-    AUTODEV_ROOT="$HOME/.openclaw"
-    ok "Found OpenClaw at default path: $AUTODEV_ROOT"
+if [ -z "$OPENCLAW_ROOT" ] && [ -d "$HOME/.openclaw" ]; then
+    OPENCLAW_ROOT="$HOME/.openclaw"
+    ok "Found OpenClaw at default path: $OPENCLAW_ROOT"
 fi
 
 # Priority 3: interactive prompt
-if [ -z "$AUTODEV_ROOT" ]; then
+if [ -z "$OPENCLAW_ROOT" ]; then
     echo "  OpenClaw not found at \$OPENCLAW_ROOT or ~/.openclaw"
     if [ "$NON_INTERACTIVE" -eq 1 ]; then
         fail "OpenClaw not found. Set OPENCLAW_ROOT env var or install OpenClaw at ~/.openclaw."
@@ -193,8 +195,8 @@ if [ -z "$AUTODEV_ROOT" ]; then
         read -r -p "  Enter your OpenClaw directory path: " user_path
         user_path="${user_path/#\~/$HOME}"  # expand leading ~
         if [ -d "$user_path" ] && [ -f "$user_path/openclaw.json" ]; then
-            AUTODEV_ROOT="$user_path"
-            ok "OpenClaw found at: $AUTODEV_ROOT"
+            OPENCLAW_ROOT="$user_path"
+            ok "OpenClaw found at: $OPENCLAW_ROOT"
             break
         elif [ -d "$user_path" ]; then
             echo "  ${YELLOW}⚠${RESET} Directory exists but openclaw.json not found inside it."
@@ -208,48 +210,49 @@ if [ -z "$AUTODEV_ROOT" ]; then
         fi
     done
 fi
+unset _OC_ENV_INPUT
 
 # openclaw.json must already exist — we never create it.
 # Its absence means OpenClaw is not installed or is broken beyond what AutoDev
 # can repair (gateway process, auth-profiles, and agent session management all
 # depend on it).  Fail fast here rather than generating a stub.
-if [ ! -f "$AUTODEV_ROOT/openclaw.json" ]; then
-    fail "openclaw.json not found at $AUTODEV_ROOT/openclaw.json. Install and start OpenClaw, then re-run install.sh."
+if [ ! -f "$OPENCLAW_ROOT/openclaw.json" ]; then
+    fail "openclaw.json not found at $OPENCLAW_ROOT/openclaw.json. Install and start OpenClaw, then re-run install.sh."
 fi
 ok "openclaw.json present"
 
 mkdir -p "$AUTODEV_REPO_PATH/.autodev/ideas"
 ok "Repo-local runtime dir: $AUTODEV_REPO_PATH/.autodev"
 
-if [ -f "$AUTODEV_ROOT/orchestrator.py" ]; then
-    warn "Pre-migration orchestrator still present: $AUTODEV_ROOT/orchestrator.py"
+if [ -f "$OPENCLAW_ROOT/orchestrator.py" ]; then
+    warn "Pre-migration orchestrator still present: $OPENCLAW_ROOT/orchestrator.py"
     warn "  This file is superseded by $AUTODEV_REPO_PATH/autodev/pipeline/orchestrator.py"
-    warn "  Remove it: rm $AUTODEV_ROOT/orchestrator.py"
+    warn "  Remove it: rm $OPENCLAW_ROOT/orchestrator.py"
 else
-    ok "No stale orchestrator.py in \$AUTODEV_ROOT"
+    ok "No stale orchestrator.py in \$OPENCLAW_ROOT"
 fi
 
 REPO_RT="$AUTODEV_REPO_PATH/.autodev"
 if [ -f "$REPO_RT/pipeline.lock" ]; then
     warn "$REPO_RT/pipeline.lock exists — a pipeline may already be running"
     warn "  If no pipeline is active, remove it: rm $REPO_RT/pipeline.lock"
-elif [ -f "$AUTODEV_ROOT/pipeline.lock" ]; then
-    warn "Legacy lock at $AUTODEV_ROOT/pipeline.lock (pre repo-local runtime)"
+elif [ -f "$OPENCLAW_ROOT/pipeline.lock" ]; then
+    warn "Legacy lock at $OPENCLAW_ROOT/pipeline.lock (pre repo-local runtime)"
     warn "  If unused, remove it; see docs/RUNTIME-MIGRATION.md"
 else
-    ok "No stale pipeline.lock under .autodev or \$AUTODEV_ROOT"
+    ok "No stale pipeline.lock under .autodev or \$OPENCLAW_ROOT"
 fi
 
-export AUTODEV_ROOT AUTODEV_REPO_PATH
+export OPENCLAW_ROOT AUTODEV_REPO_PATH
 ok "AUTODEV_REPO_PATH = $AUTODEV_REPO_PATH"
-ok "AUTODEV_ROOT      = $AUTODEV_ROOT"
+ok "OPENCLAW_ROOT     = $OPENCLAW_ROOT"
 
 # Write detected paths to ui/config.json (atomic). Seeds from config.example.json when missing.
-export INSTALL_AUTODEV_ROOT="$AUTODEV_ROOT"
+export INSTALL_OPENCLAW_ROOT="$OPENCLAW_ROOT"
 "$PYTHON" -c "
 import json, os, tempfile
 repo = os.environ['AUTODEV_REPO_PATH']
-oc = os.environ.get('INSTALL_AUTODEV_ROOT', '')
+oc = os.environ.get('INSTALL_OPENCLAW_ROOT', '')
 p = os.path.join(repo, 'ui', 'config.json')
 example = os.path.join(repo, 'ui', 'config.example.json')
 cfg = {}
@@ -280,7 +283,7 @@ print('ok')
 hdr "5/13  OpenClaw version check"
 
 OC_VERSION_STATUS="unknown"
-OC_JSON="$AUTODEV_ROOT/openclaw.json"
+OC_JSON="$OPENCLAW_ROOT/openclaw.json"
 
 if [ -f "$OC_JSON" ]; then
     OC_VERSION=$("$PYTHON" -c "
@@ -323,13 +326,13 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 hdr "6/13  Agent workspace provisioning"
 
-# Each pipeline agent workspace needs pipeline-project → $AUTODEV_ROOT/pipeline-project
+# Each pipeline agent workspace needs pipeline-project → $OPENCLAW_ROOT/pipeline-project
 # (the hub the UI/orchestrator update). OpenClaw sandboxes writes to the workspace root.
 ensure_workspace_pipeline_project_symlinks() {
-    local hub="$AUTODEV_ROOT/pipeline-project"
+    local hub="$OPENCLAW_ROOT/pipeline-project"
     local ws_dir link any=0
     for pipeline_agent in planner executor reviewer escalation; do
-        ws_dir="$AUTODEV_ROOT/workspace-$pipeline_agent"
+        ws_dir="$OPENCLAW_ROOT/workspace-$pipeline_agent"
         [ -d "$ws_dir" ] || continue
         any=1
         link="$ws_dir/pipeline-project"
@@ -352,7 +355,7 @@ MISSING_FILES=()
 
 for agent in planner executor reviewer escalation prd-creator roadmap-converter; do
     src_dir="$AUTODEV_REPO_PATH/autodev/agents/$agent"
-    dst_dir="$AUTODEV_ROOT/workspace-$agent"
+    dst_dir="$OPENCLAW_ROOT/workspace-$agent"
 
     if [ ! -d "$src_dir" ]; then
         warn "Source not found: $src_dir — skipping $agent"
@@ -427,7 +430,7 @@ if [ "${#MISSING_FILES[@]}" -gt 0 ]; then
     if prompt_yn "Deploy agent files? [Y/n]" "Y"; then
         for agent in planner executor reviewer escalation prd-creator roadmap-converter; do
             src_dir="$AUTODEV_REPO_PATH/autodev/agents/$agent"
-            dst_dir="$AUTODEV_ROOT/workspace-$agent"
+            dst_dir="$OPENCLAW_ROOT/workspace-$agent"
             [ -d "$src_dir" ] || continue
             mkdir -p "$dst_dir"
             count=0
@@ -499,7 +502,7 @@ ensure_workspace_pipeline_project_symlinks
 # ─────────────────────────────────────────────────────────────────────────────
 hdr "7/13  Exec-approvals validation"
 
-EXEC_APPROVALS="$AUTODEV_ROOT/exec-approvals.json"
+EXEC_APPROVALS="$OPENCLAW_ROOT/exec-approvals.json"
 APPROVALS_STATUS="missing"
 
 if [ ! -f "$EXEC_APPROVALS" ]; then
@@ -529,13 +532,13 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 hdr "8/13  Cron/jobs.json heartbeat path"
 
-CRON_FILE="$AUTODEV_ROOT/cron/jobs.json"
+CRON_FILE="$OPENCLAW_ROOT/cron/jobs.json"
 CRON_STATUS="not found"
 
 if [ ! -f "$CRON_FILE" ]; then
     warn "cron/jobs.json not found at $CRON_FILE — skipping"
 else
-    OLD_CRON_SCRIPT="$AUTODEV_ROOT/heartbeat_cron.py"
+    OLD_CRON_SCRIPT="$OPENCLAW_ROOT/heartbeat_cron.py"
     NEW_CRON_SCRIPT="$AUTODEV_REPO_PATH/autodev/pipeline/heartbeat_cron.py"
 
     CRON_NEEDS_UPDATE=$("$PYTHON" -c "
@@ -618,7 +621,7 @@ ENV_FILE="$AUTODEV_REPO_PATH/.env"
 if [ ! -f "$REGISTER_AGENT" ]; then
     warn "register_agent.py not found at $REGISTER_AGENT — skipping"
     REGISTER_STATUS_STEP="script missing"
-elif [ ! -f "$AUTODEV_ROOT/openclaw.json" ]; then
+elif [ ! -f "$OPENCLAW_ROOT/openclaw.json" ]; then
     warn "openclaw.json not found — cannot register pipeline agents"
     REGISTER_STATUS_STEP="skipped (no openclaw.json)"
 else
@@ -628,7 +631,7 @@ else
 from autodev.installer.setup_helpers import openclaw_hooks_issues
 import sys
 print(','.join(openclaw_hooks_issues(sys.argv[1])))
-" "$AUTODEV_ROOT/openclaw.json" 2>/dev/null || echo "audit_error"
+" "$OPENCLAW_ROOT/openclaw.json" 2>/dev/null || echo "audit_error"
     )
     if [ "$HOOK_ISSUES" = "audit_error" ]; then
         warn "Could not audit hooks block in openclaw.json — fix JSON syntax and re-run install.sh"
@@ -657,7 +660,7 @@ print(','.join(openclaw_hooks_issues(sys.argv[1])))
 from autodev.installer.setup_helpers import patch_openclaw_hooks_baseline
 import sys
 print(patch_openclaw_hooks_baseline(sys.argv[1]))
-" "$AUTODEV_ROOT/openclaw.json" 2>/dev/null || echo "error:patch"
+" "$OPENCLAW_ROOT/openclaw.json" 2>/dev/null || echo "error:patch"
             )
             case "$HP" in
                 updated) ok "openclaw.json hooks block updated (enabled, session-key flags, prefixes)" ;;
@@ -672,7 +675,7 @@ print(patch_openclaw_hooks_baseline(sys.argv[1]))
 from autodev.installer.setup_helpers import openclaw_hooks_issues
 import sys
 print(','.join(openclaw_hooks_issues(sys.argv[1])))
-" "$AUTODEV_ROOT/openclaw.json" 2>/dev/null || echo "audit_error"
+" "$OPENCLAW_ROOT/openclaw.json" 2>/dev/null || echo "audit_error"
         )
         if [ "$HOOK_ISSUES_AFTER" = "audit_error" ]; then
             warn "Could not re-audit hooks after patch"
@@ -684,7 +687,7 @@ print(','.join(openclaw_hooks_issues(sys.argv[1])))
 from autodev.installer.setup_helpers import patch_openclaw_hooks_baseline
 import sys
 print(patch_openclaw_hooks_baseline(sys.argv[1], token_if_missing=sys.argv[2]))
-" "$AUTODEV_ROOT/openclaw.json" "$GEN_TOKEN" 2>/dev/null || echo "error:token"
+" "$OPENCLAW_ROOT/openclaw.json" "$GEN_TOKEN" 2>/dev/null || echo "error:token"
                 )
                 case "$HT" in
                     updated)
@@ -716,7 +719,7 @@ print(merge_dotenv_missing_keys(os.path.join(sys.argv[1], '.env'), {'AUTODEV_HOO
 from autodev.installer.setup_helpers import openclaw_hooks_issues
 import sys
 print(','.join(openclaw_hooks_issues(sys.argv[1])))
-" "$AUTODEV_ROOT/openclaw.json" 2>/dev/null || echo "audit_error"
+" "$OPENCLAW_ROOT/openclaw.json" 2>/dev/null || echo "audit_error"
         )
         if [ "$HOOK_FINAL" = "audit_error" ]; then
             HOOKS_STEP="audit_error (after patch attempt)"
@@ -742,7 +745,7 @@ print('|'.join([
   '1' if r.env_wrong else '0',
   '1' if r.ui_config_exists else '0',
 ]))
-" "$AUTODEV_ROOT/openclaw.json" "$UI_CONFIG_PATH" "$ENV_FILE" 2>/dev/null || echo "error|0|0|0|0|0"
+" "$OPENCLAW_ROOT/openclaw.json" "$UI_CONFIG_PATH" "$ENV_FILE" 2>/dev/null || echo "error|0|0|0|0|0"
     }
 
     SYNC_STATE=$(read_sync_state)
@@ -755,7 +758,7 @@ print('|'.join([
 from autodev.installer.setup_helpers import read_openclaw_hooks_token
 import sys
 print(read_openclaw_hooks_token(sys.argv[1]) or '')
-" "$AUTODEV_ROOT/openclaw.json" 2>/dev/null || echo ""
+" "$OPENCLAW_ROOT/openclaw.json" 2>/dev/null || echo ""
             )
             if [ -n "$CURRENT_HOOK_TOKEN" ]; then
                 ADD_ENV_RESULT=$(
@@ -787,7 +790,7 @@ from autodev.installer.setup_helpers import read_openclaw_hooks_token, set_ui_co
 import sys
 tok = read_openclaw_hooks_token(sys.argv[1]) or ''
 print(set_ui_config_hooks_token(sys.argv[2], tok) if tok else 'error:empty token')
-" "$AUTODEV_ROOT/openclaw.json" "$UI_CONFIG_PATH" 2>/dev/null || echo "error:ui"
+" "$OPENCLAW_ROOT/openclaw.json" "$UI_CONFIG_PATH" 2>/dev/null || echo "error:ui"
                     )
                     case "$UI_SYNC_RESULT" in
                         updated|unchanged) ok "ui/config.json hooks_token synced to hooks.token ($UI_SYNC_RESULT)" ;;
@@ -812,7 +815,7 @@ from autodev.installer.setup_helpers import read_openclaw_hooks_token, set_doten
 import sys
 tok = read_openclaw_hooks_token(sys.argv[1]) or ''
 print(set_dotenv_key(sys.argv[2], 'AUTODEV_HOOKS_TOKEN', tok) if tok else 'error:empty token')
-" "$AUTODEV_ROOT/openclaw.json" "$ENV_FILE" 2>/dev/null || echo "error:env"
+" "$OPENCLAW_ROOT/openclaw.json" "$ENV_FILE" 2>/dev/null || echo "error:env"
                     )
                     case "$ENV_SYNC_RESULT" in
                         created|updated|unchanged) ok ".env AUTODEV_HOOKS_TOKEN synced ($ENV_SYNC_RESULT)" ;;
@@ -853,7 +856,7 @@ with open(sys.argv[1], encoding='utf-8') as f:
     d = json.load(f)
 t = d.get('tools') or {}
 print((t.get('profile') or '').strip())
-" "$AUTODEV_ROOT/openclaw.json" 2>/dev/null || echo "__invalid__")
+" "$OPENCLAW_ROOT/openclaw.json" 2>/dev/null || echo "__invalid__")
 
     case "$TOOLS_PROFILE" in
         coding|full|"")
@@ -871,11 +874,11 @@ print((t.get('profile') or '').strip())
 from autodev.installer.setup_helpers import set_openclaw_global_tools_profile
 import sys
 print(set_openclaw_global_tools_profile(sys.argv[1], 'coding'))
-" "$AUTODEV_ROOT/openclaw.json" 2>/dev/null || echo "error:helper"
+" "$OPENCLAW_ROOT/openclaw.json" 2>/dev/null || echo "error:helper"
                 )
                 case "$TP_R" in
                     updated)
-                        ok "tools.profile set to coding in $AUTODEV_ROOT/openclaw.json"
+                        ok "tools.profile set to coding in $OPENCLAW_ROOT/openclaw.json"
                         TOOLS_PROFILE_STEP="updated to coding"
                         ;;
                     unchanged)
@@ -892,7 +895,7 @@ print(set_openclaw_global_tools_profile(sys.argv[1], 'coding'))
 
     # Dry-run: status token is the last line of stdout (warnings go to stderr)
     REGISTER_DRY_OUTPUT=$("$PYTHON" "$REGISTER_AGENT" \
-        "$AUTODEV_ROOT/openclaw.json" "$AUTODEV_ROOT" --dry-run)
+        "$OPENCLAW_ROOT/openclaw.json" "$OPENCLAW_ROOT" --dry-run)
     REGISTER_DRY_STATUS=$(echo "$REGISTER_DRY_OUTPUT" | tail -1)
 
     case "$REGISTER_DRY_STATUS" in
@@ -903,10 +906,10 @@ print(set_openclaw_global_tools_profile(sys.argv[1], 'coding'))
         dry_run)
             # Print the preview (everything except the last line)
             echo "$REGISTER_DRY_OUTPUT" | head -n -1
-            info "The above changes would be applied to $AUTODEV_ROOT/openclaw.json"
+            info "The above changes would be applied to $OPENCLAW_ROOT/openclaw.json"
             if prompt_yn "Register missing AutoDev agents (planner, executor, reviewer, escalation, prd-creator, roadmap-converter)? [Y/n]" "Y"; then
                 APPLY_RESULT=$("$PYTHON" "$REGISTER_AGENT" \
-                    "$AUTODEV_ROOT/openclaw.json" "$AUTODEV_ROOT" --apply)
+                    "$OPENCLAW_ROOT/openclaw.json" "$OPENCLAW_ROOT" --apply)
                 case "$APPLY_RESULT" in
                     registered)
                         ok "AutoDev agents registered in openclaw.json"
@@ -969,10 +972,13 @@ from autodev.installer.setup_helpers import merge_dotenv_missing_keys
 import os
 repo_path = os.environ['AUTODEV_REPO_PATH']
 rt = os.path.join(repo_path, '.autodev')
+oc = os.environ['OPENCLAW_ROOT']
+# Canonical names only. The legacy aliases AUTODEV_ROOT / AUTODEV_RUNTIME_ROOT
+# and the AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME switch were removed.
 pairs = {
-    'AUTODEV_ROOT': os.environ['AUTODEV_ROOT'],
+    'OPENCLAW_ROOT': oc,
     'AUTODEV_REPO_PATH': repo_path,
-    'AUTODEV_RUNTIME_ROOT': rt,
+    'AUTODEV_PIPELINE_ROOT': rt,
 }
 print(merge_dotenv_missing_keys(os.path.join(repo_path, '.env'), pairs))
 " 2>/dev/null || echo "error:helper"
@@ -1000,7 +1006,7 @@ echo
 printf "  %-32s %s\n" "OS:"                      "$OS_TYPE ($OS_STATUS)"
 printf "  %-32s %s\n" "Python version:"           "$PYTHON_VERSION"
 printf "  %-32s %s\n" "Pip packages installed:"   "$PIP_INSTALLED"
-printf "  %-32s %s\n" "AUTODEV_ROOT:"             "$AUTODEV_ROOT"
+printf "  %-32s %s\n" "OPENCLAW_ROOT:"            "$OPENCLAW_ROOT"
 printf "  %-32s %s\n" "OpenClaw version:"         "$OC_VERSION_STATUS"
 printf "  %-32s %s\n" "Conversion prompt:"        "$PROMPT_FOUND"
 printf "  %-32s %s\n" "Exec-approvals:"           "$APPROVALS_STATUS"

@@ -1,4 +1,10 @@
-"""repo_init_check respects AUTODEV_ROOT for non-default OpenClaw layouts (e.g. Docker bind mounts)."""
+"""repo_init_check respects OPENCLAW_ROOT for non-default layouts (e.g. Docker bind mounts).
+
+Post hard-cut rules:
+  - Only ``OPENCLAW_ROOT`` is consulted for the OpenClaw hub path.
+  - Only ``AUTODEV_PIPELINE_ROOT`` is consulted for the pipeline state path.
+  - The legacy aliases ``AUTODEV_ROOT`` / ``AUTODEV_RUNTIME_ROOT`` are ignored.
+"""
 
 import os
 import subprocess
@@ -17,7 +23,6 @@ def _seed_minimal_openclaw_layout(oc_root: Path, project_dir: Path) -> None:
     try:
         pp.symlink_to(project_dir, target_is_directory=True)
     except OSError:
-        # Windows tests without symlink privilege: use real dir (gate only needs exists + content)
         pp.mkdir()
         for name in ("roadmap.md", ".gitignore"):
             src = project_dir / name
@@ -41,8 +46,8 @@ def _seed_minimal_openclaw_layout(oc_root: Path, project_dir: Path) -> None:
 
 
 @pytest.mark.skipif(not GATE_SCRIPT.is_file(), reason="gate script missing")
-def test_repo_init_check_uses_autodev_root_custom_path(tmp_path):
-    """When AUTODEV_ROOT points at a custom tree, gate checks that tree—not ~/.openclaw."""
+def test_repo_init_check_uses_openclaw_root_custom_path(tmp_path):
+    """When OPENCLAW_ROOT points at a custom tree, gate checks that tree."""
     project = tmp_path / "pipeline_repo"
     project.mkdir()
     (project / "roadmap.md").write_text("# Roadmap\n")
@@ -52,9 +57,13 @@ def test_repo_init_check_uses_autodev_root_custom_path(tmp_path):
     _seed_minimal_openclaw_layout(oc_root, project)
 
     env = os.environ.copy()
-    env["AUTODEV_ROOT"] = str(oc_root)
-    # Custom OpenClaw tree uses legacy runtime layout (hub at $AUTODEV_ROOT/pipeline-project).
-    env["AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME"] = "1"
+    # Strip legacy aliases to prove they are unused.
+    env.pop("AUTODEV_ROOT", None)
+    env.pop("AUTODEV_RUNTIME_ROOT", None)
+    env["OPENCLAW_ROOT"] = str(oc_root)
+    # Custom OpenClaw tree: pin pipeline state onto the same root so the gate
+    # finds pipeline-project under $OPENCLAW_ROOT.
+    env["AUTODEV_PIPELINE_ROOT"] = str(oc_root)
 
     result = subprocess.run(
         [sys.executable, str(GATE_SCRIPT)],
@@ -80,8 +89,10 @@ def test_repo_init_check_custom_root_fails_without_workspace(tmp_path):
     pp.symlink_to(project, target_is_directory=True)
 
     env = os.environ.copy()
-    env["AUTODEV_ROOT"] = str(oc_root)
-    env["AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME"] = "1"
+    env.pop("AUTODEV_ROOT", None)
+    env.pop("AUTODEV_RUNTIME_ROOT", None)
+    env["OPENCLAW_ROOT"] = str(oc_root)
+    env["AUTODEV_PIPELINE_ROOT"] = str(oc_root)
 
     result = subprocess.run(
         [sys.executable, str(GATE_SCRIPT)],
@@ -127,7 +138,9 @@ def test_repo_init_check_repo_local_runtime_pipeline_project(tmp_path):
     _seed_agent_workspaces_only(oc_root)
 
     env = os.environ.copy()
-    env["AUTODEV_ROOT"] = str(oc_root)
+    env.pop("AUTODEV_ROOT", None)
+    env.pop("AUTODEV_RUNTIME_ROOT", None)
+    env["OPENCLAW_ROOT"] = str(oc_root)
     env["AUTODEV_REPO_PATH"] = str(fake_repo)
 
     result = subprocess.run(
@@ -139,3 +152,39 @@ def test_repo_init_check_repo_local_runtime_pipeline_project(tmp_path):
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Repo initialization check passed" in (result.stdout + result.stderr)
+
+
+@pytest.mark.skipif(not GATE_SCRIPT.is_file(), reason="gate script missing")
+def test_repo_init_check_legacy_autodev_root_is_ignored(tmp_path):
+    """Setting only AUTODEV_ROOT (legacy) must have no effect; gate falls back
+    to ``~/.openclaw`` and either succeeds there or fails cleanly — the key
+    property is that the provided tmp_path is NOT consulted."""
+    project = tmp_path / "pipeline_repo"
+    project.mkdir()
+    (project / "roadmap.md").write_text("# Roadmap\n")
+    (project / ".gitignore").write_text("*.done\n")
+
+    bogus_oc_root = tmp_path / "legacy_ignored"
+    _seed_minimal_openclaw_layout(bogus_oc_root, project)
+
+    env = os.environ.copy()
+    env.pop("OPENCLAW_ROOT", None)
+    env.pop("AUTODEV_PIPELINE_ROOT", None)
+    env.pop("AUTODEV_RUNTIME_ROOT", None)
+    # Only legacy alias set — must be ignored.
+    env["AUTODEV_ROOT"] = str(bogus_oc_root)
+
+    result = subprocess.run(
+        [sys.executable, str(GATE_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(REPO_ROOT),
+    )
+    combined = result.stdout + result.stderr
+    # Gate should never reference the legacy-only tmp path — proving the alias
+    # was ignored. It may pass (real ~/.openclaw is seeded) or fail, but must
+    # not touch bogus_oc_root.
+    assert str(bogus_oc_root) not in combined, (
+        f"Legacy AUTODEV_ROOT should not be consulted, but gate referenced it:\n{combined}"
+    )
