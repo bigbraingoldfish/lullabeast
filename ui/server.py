@@ -30,7 +30,11 @@ import sys as _sys
 _AUTODEV_UI_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _AUTODEV_UI_ROOT not in _sys.path:
     _sys.path.insert(0, _AUTODEV_UI_ROOT)
+_AUTODEV_PIPELINE_DIR = os.path.join(_AUTODEV_UI_ROOT, "autodev", "pipeline")
+if _AUTODEV_PIPELINE_DIR not in _sys.path:
+    _sys.path.insert(0, _AUTODEV_PIPELINE_DIR)
 from autodev.pipeline.queue_semantics import parent_blocks_child
+from env_resolvers import resolve_openclaw_root, resolve_pipeline_root  # noqa: E402
 
 ORCHESTRATOR_FILENAME = "orchestrator.py"
 WEBHOOK_AGENT_ID = "prd-creator"
@@ -377,7 +381,8 @@ async def lifespan(app: FastAPI):
 # Canonical default values
 DEFAULTS = {
     "port": 18790,
-    # Paths below are placeholders; _finalize_autodev_config_paths applies repo-local or legacy layout.
+    # Paths below are placeholders; _finalize_autodev_config_paths derives the
+    # repo-local <repo>/.autodev layout (or honours AUTODEV_PIPELINE_ROOT when set).
     "pipeline_state_path": "",
     "phase_state_path": "",
     "lock_path": "",
@@ -389,10 +394,12 @@ DEFAULTS = {
     "hooks_token": "",
     "base_branch": "",
     "conversion_prompt_path": "",
-    "openclaw_root": os.environ.get("AUTODEV_ROOT") or "~/.openclaw",
+    # OPENCLAW_ROOT — OpenClaw hub (contains openclaw.json, workspace-*).
+    "openclaw_root": resolve_openclaw_root(),
     "autodev_repo_path": os.environ.get("AUTODEV_REPO_PATH") or _AUTODEV_UI_ROOT,
-    "use_legacy_openclaw_runtime": False,
-    "autodev_runtime_root": "",
+    # AUTODEV_PIPELINE_ROOT — pipeline state directory. Empty string means
+    # "derive default from repo path" in _finalize_autodev_config_paths.
+    "autodev_pipeline_root": "",
     "roadmap_converter_workspace": "~/.openclaw/workspace-roadmap-converter",
     "pipeline_queue_path": "",
     "poll_timeout": 180,
@@ -422,27 +429,41 @@ def _user_override_keys(user_config: dict) -> set[str]:
 
 
 def _finalize_autodev_config_paths(config: dict, user_override_keys: set[str]) -> None:
-    """Fill runtime paths: repo-local ``<repo>/.autodev`` by default, or OpenClaw root if legacy.
+    """Fill runtime paths.
+
+    Resolution order for the pipeline state directory (highest → lowest):
+      1. JSON config key ``autodev_pipeline_root``.
+      2. Environment variable ``AUTODEV_PIPELINE_ROOT``.
+      3. ``<repo>/.autodev`` default.
+
+    Legacy aliases (``autodev_runtime_root`` JSON key, ``AUTODEV_RUNTIME_ROOT``
+    env var, ``AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME`` switch) are ignored —
+    operators who need pipeline state to live next to OpenClaw set
+    ``AUTODEV_PIPELINE_ROOT`` to the OpenClaw root explicitly.
 
     Keys in ``user_override_keys`` (from ui/config.json via ``_user_override_keys``) are never
     overwritten. Empty-string file values are excluded from that set so placeholders match defaults.
     """
-    legacy = bool(config.get("use_legacy_openclaw_runtime"))
-    if _truthy_env(os.environ.get("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "")):
-        legacy = True
-
     repo = config.get("autodev_repo_path") or _AUTODEV_UI_ROOT
-    oc = config.get("openclaw_root") or os.path.expanduser("~/.openclaw")
+    oc = config.get("openclaw_root") or resolve_openclaw_root()
 
-    if "autodev_runtime_root" in user_override_keys and config.get("autodev_runtime_root"):
-        runtime_base = os.path.expanduser(str(config["autodev_runtime_root"]))
-    elif legacy:
-        runtime_base = oc
+    # 1: honour user-supplied JSON canonical key.
+    explicit_json = ""
+    if (
+        "autodev_pipeline_root" in user_override_keys
+        and config.get("autodev_pipeline_root")
+    ):
+        explicit_json = os.path.expanduser(str(config["autodev_pipeline_root"]))
+
+    if explicit_json:
+        runtime_base = explicit_json
     else:
-        runtime_base = os.path.join(repo, ".autodev")
+        # 2/3: env var or the repo-local default.
+        runtime_base = resolve_pipeline_root(repo)
 
-    if "autodev_runtime_root" not in user_override_keys:
-        config["autodev_runtime_root"] = runtime_base
+    config["autodev_pipeline_root"] = runtime_base
+    # Drop any legacy alias key that may have crept in from older config files.
+    config.pop("autodev_runtime_root", None)
 
     derived = {
         "pipeline_state_path": os.path.join(runtime_base, "pipeline_state.json"),
@@ -1198,7 +1219,19 @@ def _validate_queue_entry_ids_order(entries, entry_ids):
 
 
 def _spawn_orchestrator(project_path: str, config: dict | None = None) -> dict:
-    """Start orchestrator.py with --project-path. Returns {"ok": bool, "error": str|None}."""
+    """Start orchestrator.py with --project-path. Returns {"ok": bool, "error": str|None}.
+
+    Env construction rules (canonical names only — no legacy aliases):
+      * ``OPENCLAW_ROOT`` is always set from ``config["openclaw_root"]``.
+      * ``AUTODEV_PIPELINE_ROOT`` is only written when the UI config supplies a
+        non-empty value. If the config is blank we **preserve** whatever the
+        parent env exported — writing ``""`` over a real value was the original
+        bug.
+      * Legacy aliases (``AUTODEV_ROOT``, ``AUTODEV_RUNTIME_ROOT``,
+        ``AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME``) are never emitted. Stale values
+        carried over from the parent env are also scrubbed so downstream readers
+        cannot accidentally resurrect the old layout.
+    """
     import subprocess
     import sys
 
@@ -1210,13 +1243,24 @@ def _spawn_orchestrator(project_path: str, config: dict | None = None) -> dict:
         return {"ok": False, "error": f"{ORCHESTRATOR_FILENAME} not found at {orchestrator_script}"}
     log_file = open("/tmp/orchestrator.log", "a")
     env = os.environ.copy()
-    env["AUTODEV_ROOT"] = str(config.get("openclaw_root") or os.path.expanduser("~/.openclaw"))
+
+    openclaw_root_value = str(config.get("openclaw_root") or resolve_openclaw_root())
+    env["OPENCLAW_ROOT"] = openclaw_root_value
     env["AUTODEV_REPO_PATH"] = str(autodev_repo_path)
-    env["AUTODEV_RUNTIME_ROOT"] = str(config.get("autodev_runtime_root") or "")
-    if config.get("use_legacy_openclaw_runtime") or _truthy_env(
-        os.environ.get("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "")
+
+    pipeline_root_value = str(config.get("autodev_pipeline_root") or "").strip()
+    if pipeline_root_value:
+        env["AUTODEV_PIPELINE_ROOT"] = pipeline_root_value
+
+    # Hard-cut scrub: legacy aliases must never reach the orchestrator, even if
+    # they were inherited from the parent env (e.g. a stale operator shell).
+    for legacy in (
+        "AUTODEV_ROOT",
+        "AUTODEV_RUNTIME_ROOT",
+        "AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME",
     ):
-        env["AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME"] = "1"
+        env.pop(legacy, None)
+
     subprocess.Popen(
         [sys.executable, orchestrator_script, "--project-path", project_path],
         cwd=autodev_repo_path,
@@ -5942,7 +5986,7 @@ def _check_installer_status(config: dict) -> dict:
     """
     missing_items = []
 
-    # OpenClaw install lives under ~/.openclaw (AUTODEV_ROOT), not the git repo path.
+    # OpenClaw install lives under ~/.openclaw (OPENCLAW_ROOT), not the git repo path.
     openclaw_root = config.get("openclaw_root") or os.path.expanduser("~/.openclaw")
     repo_path = config.get("autodev_repo_path") or os.path.expanduser("~/.openclaw")
     openclaw_json_path = os.path.join(openclaw_root, "openclaw.json")
@@ -6034,8 +6078,8 @@ def get_setup_status():
         }
 
     missing_items values:
-        "openclaw_root"             — AUTODEV_ROOT directory not found
-        "openclaw_json"             — openclaw.json missing from AUTODEV_ROOT
+        "openclaw_root"             — OPENCLAW_ROOT directory not found
+        "openclaw_json"             — openclaw.json missing from OPENCLAW_ROOT
         "openclaw_agent_<id>"       — pipeline agent missing from openclaw.json agents.list
                                     (id uses underscores, e.g. openclaw_agent_prd_creator)
         "workspace-{agent}"         — agent workspace directory missing

@@ -28,6 +28,30 @@ for _p in [GATE_SCRIPTS_DIR, PIPELINE_DIR, OPENCLAW_DIR]:
 
 
 # ---------------------------------------------------------------------------
+# Environment hygiene — prevent the developer's real `.env` (sourced into the
+# shell before running pytest) from leaking into hermetic tests. Individual
+# tests that set these via monkeypatch.setenv still work because the autouse
+# fixture runs before the per-test monkeypatch.
+# ---------------------------------------------------------------------------
+
+_ENV_KEYS_TO_SCRUB = (
+    "OPENCLAW_ROOT",
+    "AUTODEV_PIPELINE_ROOT",
+    "AUTODEV_HOOKS_TOKEN",
+)
+
+
+@pytest.fixture(autouse=True)
+def _scrub_autodev_env(monkeypatch):
+    """Remove AutoDev env vars inherited from the host shell so tests that set
+    them via monkeypatch are not shadowed by a value already present in the
+    shell after ``source .env``. Only canonical names are listed; the legacy
+    aliases were removed in the hard cut."""
+    for key in _ENV_KEYS_TO_SCRUB:
+        monkeypatch.delenv(key, raising=False)
+
+
+# ---------------------------------------------------------------------------
 # Shared data fixtures
 # ---------------------------------------------------------------------------
 

@@ -2,26 +2,30 @@ import os
 import sys
 import glob
 
-from utils import _derive_runtime_root
+# Share env resolution with the orchestrator and other gate scripts.
+_PIPELINE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PIPELINE_DIR not in sys.path:
+    sys.path.insert(0, _PIPELINE_DIR)
+
+from env_resolvers import resolve_openclaw_root  # noqa: E402
+from utils import _derive_runtime_root  # noqa: E402
 
 
-def _autodev_root() -> str:
+def _openclaw_root() -> str:
     """OpenClaw install root (workspaces, openclaw.json, pipeline-project symlink).
 
-    Must match orchestrator.py / skill_manager.py: same env var, same default.
-    Docker or bind-mounted installs set AUTODEV_ROOT to that path (e.g.
-    /home/user/project/.openclaw) instead of ~/.openclaw.
+    Wraps :func:`env_resolvers.resolve_openclaw_root`. Canonical env var is
+    ``OPENCLAW_ROOT``. Docker or bind-mounted installs set ``OPENCLAW_ROOT`` to
+    that path (e.g. /home/user/project/.openclaw) instead of ``~/.openclaw``.
     """
-    raw = (os.environ.get("AUTODEV_ROOT") or "").strip()
-    if not raw:
-        raw = os.path.expanduser("~/.openclaw")
-    return os.path.abspath(os.path.expanduser(raw))
+    return os.path.abspath(resolve_openclaw_root())
 
 
 def check_repo_init():
-    oc_root = _autodev_root()
-    # Match orchestrator / phase_resolver: repo-local `.autodev/pipeline-project` by default,
-    # not only ~/.openclaw/pipeline-project (legacy layout uses AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME).
+    oc_root = _openclaw_root()
+    # Match orchestrator / phase_resolver: repo-local `.autodev/pipeline-project`
+    # by default. Operators who want state next to OpenClaw set
+    # AUTODEV_PIPELINE_ROOT to the OpenClaw root explicitly.
     runtime_root = os.path.abspath(os.path.expanduser(_derive_runtime_root()))
     pipeline_project = os.path.join(runtime_root, "pipeline-project")
 

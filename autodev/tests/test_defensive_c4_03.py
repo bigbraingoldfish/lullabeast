@@ -21,7 +21,7 @@ for _p in [PIPELINE_DIR, REPO_ROOT]:
 
 @pytest.fixture
 def mgr(tmp_path, monkeypatch):
-    monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
+    monkeypatch.setenv("OPENCLAW_ROOT", str(tmp_path))
     monkeypatch.setenv("AUTODEV_REPO_PATH", str(REPO_ROOT))
 
     import skill_manager as sm_mod

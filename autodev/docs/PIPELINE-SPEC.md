@@ -1192,7 +1192,7 @@ Runs on Pi, once daily.
 ### Audit Archive
 
 ```
-$AUTODEV_ROOT/pipeline-audit/{project-name}/phase-N/
+$OPENCLAW_ROOT/pipeline-audit/{project-name}/phase-N/
 ```
 
 Archive written **before** clearing working files. Project name in path prevents cross-project conflicts. Archive failure is a non-blocking informational escalation only (logs a warning to stdout/log file, does NOT trigger the Signal webhook).

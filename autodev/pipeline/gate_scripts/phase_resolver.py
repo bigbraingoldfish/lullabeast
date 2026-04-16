@@ -3,6 +3,14 @@ import re
 import json
 import sys
 
+# Share env resolution with the orchestrator and other gate scripts.
+_PIPELINE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PIPELINE_DIR not in sys.path:
+    sys.path.insert(0, _PIPELINE_DIR)
+
+from env_resolvers import resolve_pipeline_root  # noqa: E402
+
+
 def parse_roadmap(filepath):
     with open(filepath, 'r') as f:
         lines = f.readlines()
@@ -60,13 +68,6 @@ def parse_roadmap(filepath):
 
 def _derive_pipeline_project() -> str:
     """Resolve pipeline-project path using the same runtime-root logic as the orchestrator."""
-    explicit = os.environ.get("AUTODEV_RUNTIME_ROOT", "").strip()
-    if explicit:
-        return os.path.join(explicit, "pipeline-project")
-    legacy = os.environ.get("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "").strip().lower()
-    if legacy in ("1", "true", "yes"):
-        root = os.environ.get("AUTODEV_ROOT", os.path.expanduser("~/.openclaw"))
-        return os.path.join(root, "pipeline-project")
     repo_path = os.environ.get(
         "AUTODEV_REPO_PATH",
         # gate_scripts/ → pipeline/ → autodev/ → repo root: 4 dirname calls
@@ -76,7 +77,7 @@ def _derive_pipeline_project() -> str:
             )
         ),
     )
-    return os.path.join(repo_path, ".autodev", "pipeline-project")
+    return os.path.join(resolve_pipeline_root(repo_path), "pipeline-project")
 
 
 def validate_and_identify(roadmap_path=None):

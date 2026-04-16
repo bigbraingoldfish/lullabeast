@@ -357,7 +357,7 @@ class TestStep6WorkspacePipelineSymlinks:
 
     def test_step6_symlink_uses_hub_and_ln_sfn(self):
         step6 = _install_sh_step6_section()
-        assert 'local hub="$AUTODEV_ROOT/pipeline-project"' in step6
+        assert 'local hub="$OPENCLAW_ROOT/pipeline-project"' in step6
         assert 'ln -sfn "$hub" "$link"' in step6
 
     def test_step6_symlink_covers_four_pipeline_agents(self):

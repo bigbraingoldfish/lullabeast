@@ -54,7 +54,10 @@ def test_repo_init_check_passes():
     """python3 gate_scripts/repo_init_check.py /tmp/infra-e1-test-b exits 0"""
     gate_script = str(_GATE_DIR / "repo_init_check.py")
     env = os.environ.copy()
-    env["AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME"] = "1"
+    # See test_skill_mode_a: the manual infra places pipeline-project under
+    # OPENCLAW_ROOT, so point the pipeline root there explicitly.
+    openclaw_root = env.get("OPENCLAW_ROOT") or os.path.expanduser("~/.openclaw")
+    env["AUTODEV_PIPELINE_ROOT"] = openclaw_root
     result = subprocess.run(
         ["python3", gate_script, PROJECT_DIR],
         capture_output=True,

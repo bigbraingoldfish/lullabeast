@@ -1,8 +1,15 @@
 import os
+import sys
 import time
 from pathlib import Path
 
-AUTODEV_ROOT = os.environ.get("AUTODEV_ROOT", os.path.expanduser("~/.openclaw"))
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _THIS_DIR not in sys.path:
+    sys.path.insert(0, _THIS_DIR)
+
+from env_resolvers import resolve_openclaw_root  # noqa: E402
+
+OPENCLAW_ROOT = resolve_openclaw_root()
 
 def cleanup_output_files(workspace_dir: str, agent_prefix: str):
     """Deletes the specific .done and .json output files before a run."""

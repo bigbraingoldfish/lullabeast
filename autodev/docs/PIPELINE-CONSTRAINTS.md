@@ -293,7 +293,7 @@ Decisions made explicitly — not defaults to drift from. Preserved for human re
 
 ### Archive Failure Policy
 
-- Archive failure (phase snapshot copies under `$AUTODEV_ROOT/pipeline-audit/` or `AUTODEV_AUDIT_ARCHIVE_DIR`) is non-blocking.
+- Archive failure (phase snapshot copies under `$OPENCLAW_ROOT/pipeline-audit/` or `AUTODEV_AUDIT_ARCHIVE_DIR`) is non-blocking.
 - Rationale: losing audit data is preferable to halting a working pipeline. Archive is informational, not structural.
 
 ### JSON Parse = Structural Validation Failure

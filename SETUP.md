@@ -69,18 +69,38 @@ What the script does (summary):
 1. OS check (Linux required for pipeline locking unless `--force`).
 2. Python 3.9+ and pip availability.
 3. `pip install -r ui/requirements.txt` (interactive confirm unless `--non-interactive`).
-4. OpenClaw detection: resolves `AUTODEV_ROOT`, **requires** `openclaw.json`, creates **`$AUTODEV_REPO_PATH/.autodev/`**, updates **`ui/config.json`** paths from `config.example.json` when needed.
+4. OpenClaw detection: resolves `OPENCLAW_ROOT`, **requires** `openclaw.json`, creates **`$AUTODEV_REPO_PATH/.autodev/`**, updates **`ui/config.json`** paths from `config.example.json` when needed.
 5. OpenClaw version check (warning-only if below recommended).
 6. **Creates** missing `workspace-{agent}/` directories under OpenClaw and stages agent identity file copies with `cp -u`.
 7. **Refreshes** stale `gate_scripts` paths inside `exec-approvals.json` when possible (atomic rewrite).
 8. Updates `cron/jobs.json` heartbeat script path when applicable.
 9. **Hooks preflight** — audits `hooks.enabled`, `hooks.token`, `hooks.allowRequestSessionKey`, and `hooks.allowedSessionKeyPrefixes` (`pipeline:`, `ideas:`). Optionally patches them atomically (preserves an existing `hooks.token`); if `hooks.token` is still empty, can generate one and append **`AUTODEV_HOOKS_TOKEN`** to `.env` when that key is not already set. Then warns if `tools.profile` is not `coding` or `full` (optional prompt to set `coding`), and registers **planner, executor, reviewer, escalation, prd-creator, and roadmap-converter** in `agents.list` / `hooks.allowedAgentIds`.
 10. Confirms bundled PRD→roadmap instructions at `autodev/prompts/prd-to-roadmap-conversion.txt`.
-11. **Merges** `.env` non-destructively (`AUTODEV_ROOT`, `AUTODEV_REPO_PATH`, `AUTODEV_RUNTIME_ROOT`, and any keys added in step 9).
+11. **Merges** `.env` non-destructively. Writes only the canonical names (`OPENCLAW_ROOT`, `AUTODEV_PIPELINE_ROOT`, `AUTODEV_REPO_PATH`) plus any keys added in step 9. Legacy aliases (`AUTODEV_ROOT`, `AUTODEV_RUNTIME_ROOT`, `AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME`) have been removed and are ignored at runtime.
 12. Writes setup-complete marker.
 13. Prints summary.
 
 If install.sh exits cleanly with no warnings, the system is ready. If it exits with warnings, read each warning — most require a one-line manual fix.
+
+### Environment variables (canonical names)
+
+AutoDev exposes two root paths, each with a single canonical name. Legacy
+aliases have been removed; set the canonical names below.
+
+| Concept                          | Env                     | UI JSON                 |
+| -------------------------------- | ----------------------- | ----------------------- |
+| OpenClaw install root            | `OPENCLAW_ROOT`         | `openclaw_root`         |
+| AutoDev pipeline state directory | `AUTODEV_PIPELINE_ROOT` | `autodev_pipeline_root` |
+
+Resolution order at every read site: env var → UI JSON key → built-in default.
+Empty strings are treated as "unset".
+
+Legacy names (`AUTODEV_ROOT`, `AUTODEV_RUNTIME_ROOT`,
+`AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME`, and the UI `autodev_runtime_root` /
+`use_legacy_openclaw_runtime` keys) have been removed and are ignored if set.
+To collapse the pipeline directory onto the OpenClaw directory, set
+`AUTODEV_PIPELINE_ROOT=$OPENCLAW_ROOT` explicitly. See
+[`docs/RUNTIME-MIGRATION.md`](docs/RUNTIME-MIGRATION.md) for history.
 
 ---
 

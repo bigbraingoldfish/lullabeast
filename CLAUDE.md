@@ -81,15 +81,35 @@ autodev-ui/
 
 Every pipeline file resolves two constants at module load time. Use these — never hardcode paths.
 
-### `AUTODEV_ROOT`
+### `OPENCLAW_ROOT` (env: `OPENCLAW_ROOT`)
 
 ```python
-AUTODEV_ROOT = os.environ.get("AUTODEV_ROOT", os.path.expanduser("~/.openclaw"))
+# autodev/pipeline/env_resolvers.py
+def resolve_openclaw_root() -> str:
+    v = (os.environ.get("OPENCLAW_ROOT") or "").strip()
+    return os.path.expanduser(v or "~/.openclaw")
+
+# Pipeline modules:
+OPENCLAW_ROOT = resolve_openclaw_root()
 ```
 
-Points to the OpenClaw installation directory. **This is not the repo directory.** It is where OpenClaw lives: workspace directories, `openclaw.json`, `pipeline.lock`, `pipeline_state.json`, `pipeline-project` symlink.
+Points to the OpenClaw installation directory. **This is not the repo directory.** It is where OpenClaw lives: workspace directories, `openclaw.json`, `workspace-{agent}/` trees, and OpenClaw session state.
 
-Used for: `pipeline.lock`, `pipeline_state.json`, `pipeline-project` symlink, `workspace-{agent}/`, `openclaw.json`, `cron/jobs.json`.
+The legacy `AUTODEV_ROOT` alias has been removed — it is no longer read. Set `OPENCLAW_ROOT` (the canonical name) instead.
+
+Used for: `workspace-{agent}/`, `openclaw.json`, `cron/jobs.json`, `pipeline-audit/` default.
+
+### `AUTODEV_PIPELINE_ROOT` (env: `AUTODEV_PIPELINE_ROOT`)
+
+```python
+def resolve_pipeline_root(repo_path: str) -> str:
+    v = (os.environ.get("AUTODEV_PIPELINE_ROOT") or "").strip()
+    return os.path.expanduser(v) if v else os.path.join(repo_path, ".autodev")
+```
+
+Points to the AutoDev pipeline state directory. Default is `<AUTODEV_REPO_PATH>/.autodev/`. Holds `pipeline.lock`, `pipeline_state.json`, `pipeline_queue.json`, `pipeline_events.jsonl`, `orchestrator.log`, `ideas/`, and the `pipeline-project` symlink.
+
+The legacy `AUTODEV_RUNTIME_ROOT` alias and the `AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME` flag have been removed. To reproduce the old layout where pipeline state lived alongside OpenClaw data, set `AUTODEV_PIPELINE_ROOT=$OPENCLAW_ROOT` explicitly.
 
 ### `AUTODEV_REPO_PATH`
 
@@ -325,7 +345,7 @@ The subsystem is extracted from the phase ID by `phase_raw_id.split("-")[0].uppe
 ### Destination
 
 ```
-AUTODEV_ROOT/workspace-{agent_role}/skills/{discipline}-{agent_role}/SKILL.md
+OPENCLAW_ROOT/workspace-{agent_role}/skills/{discipline}-{agent_role}/SKILL.md
 ```
 
 Example: `~/.openclaw/workspace-executor/skills/core-logic-executor/SKILL.md`
@@ -450,7 +470,7 @@ These values appear throughout the codebase. Do not change them without understa
 | Base branch override | optional `base_branch` config key (empty = auto-detect) | Used by orchestrator git checkout/reset paths and `/api/pipeline/git-recover` |
 | `prd-creator` agent ID | `"prd-creator"` | `WEBHOOK_AGENT_ID` in `ui/server.py` — used in all idea-to-PRD webhook calls |
 | `AUTODEV_LLAMA_BASE` | default `http://127.0.0.1:11434` | Orchestrator `check_traffic_cop_health`, `wait_for_model_stable`, blame L1, and `heartbeat_cron.py` — HTTP origin when `openclaw.json` has no `llama-local` `baseUrl` |
-| `AUTODEV_AUDIT_ARCHIVE_DIR` | unset → `$AUTODEV_ROOT/pipeline-audit`; empty string → disabled | Phase-complete snapshot copies in `orchestrator.py` |
+| `AUTODEV_AUDIT_ARCHIVE_DIR` | unset → `$OPENCLAW_ROOT/pipeline-audit`; empty string → disabled | Phase-complete snapshot copies in `orchestrator.py` |
 | `AUTODEV_HOOKS_TOKEN` | optional | Overrides `hooks_token` from `ui/config.json` / `DEFAULTS` for UI → OpenClaw webhook calls |
 
 ### `pipeline.lock` locking mechanism
@@ -478,7 +498,7 @@ These constraints are defined in `openclaw.json` under `agents.list[].tools` and
 ./install.sh --force  # Override OS check (UI-only development on macOS)
 ```
 
-The script writes `.env` with `AUTODEV_ROOT` and `AUTODEV_REPO_PATH`. Source it before running any pipeline code:
+The script writes `.env` with the canonical names only (`OPENCLAW_ROOT`, `AUTODEV_PIPELINE_ROOT`, `AUTODEV_REPO_PATH`). Legacy aliases (`AUTODEV_ROOT`, `AUTODEV_RUNTIME_ROOT`) have been removed and are ignored at runtime. Source it before running any pipeline code:
 
 ```bash
 source .env

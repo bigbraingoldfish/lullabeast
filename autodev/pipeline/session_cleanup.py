@@ -1,11 +1,18 @@
 import os
+import sys
 import json
 import logging
 import logging.handlers
 from datetime import datetime, timezone, timedelta
 
-AUTODEV_ROOT = os.environ.get("AUTODEV_ROOT", os.path.expanduser("~/.openclaw"))
-LOG_FILE = os.path.join(AUTODEV_ROOT, "session_cleanup.log")
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _THIS_DIR not in sys.path:
+    sys.path.insert(0, _THIS_DIR)
+
+from env_resolvers import resolve_openclaw_root  # noqa: E402
+
+OPENCLAW_ROOT = resolve_openclaw_root()
+LOG_FILE = os.path.join(OPENCLAW_ROOT, "session_cleanup.log")
 
 # Setup logging with simple log rotation (keep size small)
 logging.basicConfig(
@@ -23,7 +30,7 @@ TTL_DAYS = 30
 
 def rotate_pipeline_logs():
     for log_name in ["heartbeat.log", "orchestrator.log"]:
-        log_path = os.path.join(AUTODEV_ROOT, log_name)
+        log_path = os.path.join(OPENCLAW_ROOT, log_name)
         if os.path.exists(log_path):
             try:
                 # We use a simple strategy: if it exceeds 5MB, keep newest 1MB
@@ -47,7 +54,7 @@ def cleanup_sessions():
         if agent == "escalation":
             continue
             
-        sessions_json_path = os.path.join(AUTODEV_ROOT, f"workspace-{agent}", "sessions", "sessions.json")
+        sessions_json_path = os.path.join(OPENCLAW_ROOT, f"workspace-{agent}", "sessions", "sessions.json")
         sessions_dir = os.path.dirname(sessions_json_path)
         
         if not os.path.exists(sessions_json_path):

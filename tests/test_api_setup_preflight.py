@@ -54,14 +54,19 @@ def _make_openclaw_dir(tmp_path: Path, repo_path: Path):
 
 
 def _preflight_config(openclaw: Path, repo_path: Path) -> dict:
-    """Legacy-style symlink under openclaw (explicit config avoids real load_config())."""
+    """Symlink under openclaw_root (explicit config avoids real load_config()).
+
+    Pipeline state files are pinned under the OpenClaw root by setting
+    ``autodev_pipeline_root`` to the openclaw dir. The removed
+    ``use_legacy_openclaw_runtime`` flag is intentionally not used.
+    """
     pp = str(openclaw / "pipeline-project")
     oc = str(openclaw)
     return {
         "openclaw_root": oc,
         "project_dir_path": pp,
         "autodev_repo_path": str(repo_path),
-        "use_legacy_openclaw_runtime": True,
+        "autodev_pipeline_root": oc,
         "pipeline_state_path": os.path.join(oc, "pipeline_state.json"),
         "lock_path": os.path.join(oc, "pipeline.lock"),
         "pipeline_queue_path": os.path.join(oc, "pipeline_queue.json"),

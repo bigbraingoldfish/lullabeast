@@ -22,8 +22,8 @@ for _p in [PIPELINE_DIR, REPO_ROOT]:
 @pytest.fixture
 def orch(tmp_path, monkeypatch):
     """Minimal Orchestrator with all filesystem paths in tmp_path."""
-    monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
-    monkeypatch.setenv("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "1")
+    monkeypatch.setenv("OPENCLAW_ROOT", str(tmp_path))
+    monkeypatch.setenv("AUTODEV_PIPELINE_ROOT", str(tmp_path))
 
     import orchestrator as orch_mod
     importlib.reload(orch_mod)

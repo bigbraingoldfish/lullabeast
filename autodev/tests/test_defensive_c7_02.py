@@ -30,8 +30,8 @@ class TestC702LoadConfigFailFast:
 
     def test_missing_hooks_url_uses_default_port(self, tmp_path, monkeypatch):
         """load_config succeeds when hooks_url is absent but token is present (default URL)."""
-        monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
-        monkeypatch.setenv("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "1")
+        monkeypatch.setenv("OPENCLAW_ROOT", str(tmp_path))
+        monkeypatch.setenv("AUTODEV_PIPELINE_ROOT", str(tmp_path))
 
         import orchestrator as orch_mod
         importlib.reload(orch_mod)
@@ -48,8 +48,8 @@ class TestC702LoadConfigFailFast:
 
     def test_nested_hooks_token_openclaw_shape(self, tmp_path, monkeypatch):
         """OpenClaw stores the bearer token under hooks.token, not top-level hooks_token."""
-        monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
-        monkeypatch.setenv("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "1")
+        monkeypatch.setenv("OPENCLAW_ROOT", str(tmp_path))
+        monkeypatch.setenv("AUTODEV_PIPELINE_ROOT", str(tmp_path))
 
         import orchestrator as orch_mod
         importlib.reload(orch_mod)
@@ -66,8 +66,8 @@ class TestC702LoadConfigFailFast:
 
     def test_missing_hooks_token_calls_sys_exit(self, tmp_path, monkeypatch):
         """load_config must call sys.exit(1) when hooks_token is absent."""
-        monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
-        monkeypatch.setenv("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "1")
+        monkeypatch.setenv("OPENCLAW_ROOT", str(tmp_path))
+        monkeypatch.setenv("AUTODEV_PIPELINE_ROOT", str(tmp_path))
 
         import orchestrator as orch_mod
         importlib.reload(orch_mod)
@@ -87,8 +87,8 @@ class TestC702LoadConfigFailFast:
 
     def test_empty_config_calls_sys_exit(self, tmp_path, monkeypatch):
         """load_config must call sys.exit(1) when openclaw.json is {} (both keys absent)."""
-        monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
-        monkeypatch.setenv("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "1")
+        monkeypatch.setenv("OPENCLAW_ROOT", str(tmp_path))
+        monkeypatch.setenv("AUTODEV_PIPELINE_ROOT", str(tmp_path))
 
         import orchestrator as orch_mod
         importlib.reload(orch_mod)
@@ -105,8 +105,8 @@ class TestC702LoadConfigFailFast:
 
     def test_valid_config_returns_dict(self, tmp_path, monkeypatch):
         """Sanity: a config with both required keys must be returned without exiting."""
-        monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
-        monkeypatch.setenv("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "1")
+        monkeypatch.setenv("OPENCLAW_ROOT", str(tmp_path))
+        monkeypatch.setenv("AUTODEV_PIPELINE_ROOT", str(tmp_path))
 
         import orchestrator as orch_mod
         importlib.reload(orch_mod)
@@ -121,8 +121,8 @@ class TestC702LoadConfigFailFast:
 
     def test_missing_file_calls_sys_exit(self, tmp_path, monkeypatch):
         """load_config must still exit(1) when openclaw.json does not exist."""
-        monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
-        monkeypatch.setenv("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "1")
+        monkeypatch.setenv("OPENCLAW_ROOT", str(tmp_path))
+        monkeypatch.setenv("AUTODEV_PIPELINE_ROOT", str(tmp_path))
 
         import orchestrator as orch_mod
         importlib.reload(orch_mod)

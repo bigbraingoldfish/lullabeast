@@ -22,8 +22,8 @@ for _p in [PIPELINE_DIR, REPO_ROOT]:
 @pytest.fixture
 def orch(tmp_path, monkeypatch):
     """Orchestrator instance with state/queue files under tmp_path."""
-    monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
-    monkeypatch.setenv("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "1")
+    monkeypatch.setenv("OPENCLAW_ROOT", str(tmp_path))
+    monkeypatch.setenv("AUTODEV_PIPELINE_ROOT", str(tmp_path))
 
     import orchestrator as orch_mod
     importlib.reload(orch_mod)
@@ -35,7 +35,7 @@ def orch(tmp_path, monkeypatch):
 
     monkeypatch.setattr(orch_mod, "STATE_FILE", str(state_file))
     monkeypatch.setattr(orch_mod, "PHASE_STATE_FILE", str(phase_state_file))
-    monkeypatch.setattr(orch_mod, "AUTODEV_RUNTIME_ROOT", str(tmp_path))
+    monkeypatch.setattr(orch_mod, "AUTODEV_PIPELINE_ROOT", str(tmp_path))
 
     inst = FreshOrch.__new__(FreshOrch)
     inst.state = {

@@ -134,15 +134,36 @@ def test_openclaw_hooks_issues_detects_gaps(tmp_path):
 
 def test_merge_dotenv_missing_keys_appends(tmp_path):
     envp = tmp_path / ".env"
-    envp.write_text("AUTODEV_ROOT=/a\n")
+    envp.write_text("OPENCLAW_ROOT=/a\n")
     r = setup_helpers.merge_dotenv_missing_keys(
         str(envp),
-        {"AUTODEV_REPO_PATH": "/r", "AUTODEV_RUNTIME_ROOT": "/r/.autodev"},
+        {"AUTODEV_REPO_PATH": "/r", "AUTODEV_PIPELINE_ROOT": "/r/.autodev"},
     )
     assert r == "updated"
     text = envp.read_text()
     assert "AUTODEV_REPO_PATH=/r" in text
-    assert "AUTODEV_RUNTIME_ROOT=" in text
+    assert "AUTODEV_PIPELINE_ROOT=" in text
+
+
+def test_merge_dotenv_emits_canonical_names_only(tmp_path):
+    """Fresh installs must write canonical env vars only; legacy aliases must
+    never be emitted."""
+    envp = tmp_path / ".env"
+    r = setup_helpers.merge_dotenv_missing_keys(
+        str(envp),
+        {
+            "OPENCLAW_ROOT": "/oc",
+            "AUTODEV_REPO_PATH": "/r",
+            "AUTODEV_PIPELINE_ROOT": "/r/.autodev",
+        },
+    )
+    assert r == "created"
+    text = envp.read_text()
+    assert "OPENCLAW_ROOT=/oc" in text
+    assert "AUTODEV_PIPELINE_ROOT=/r/.autodev" in text
+    assert "AUTODEV_ROOT=" not in text
+    assert "AUTODEV_RUNTIME_ROOT=" not in text
+    assert "AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME" not in text
 
 
 def test_read_openclaw_hooks_token_returns_value(tmp_path):
@@ -177,7 +198,7 @@ def test_set_ui_config_hooks_token_updates_atomically(tmp_path):
 
 def test_set_dotenv_key_replaces_existing_value(tmp_path):
     envp = tmp_path / ".env"
-    envp.write_text("AUTODEV_ROOT=/x\nAUTODEV_HOOKS_TOKEN=old\n")
+    envp.write_text("OPENCLAW_ROOT=/x\nAUTODEV_HOOKS_TOKEN=old\n")
     r = setup_helpers.set_dotenv_key(str(envp), "AUTODEV_HOOKS_TOKEN", "new")
     assert r == "updated"
     text = envp.read_text()

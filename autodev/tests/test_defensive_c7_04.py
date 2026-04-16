@@ -1,9 +1,9 @@
-"""C7-04: Orchestrator must validate AUTODEV_ROOT and required workspace directories
+"""C7-04: Orchestrator must validate OPENCLAW_ROOT and required workspace directories
 at startup.  Missing dirs should produce per-item error messages + sys.exit(1),
 not a confusing crash deep in the pipeline.
 
 Checks:
-  - AUTODEV_ROOT directory exists
+  - OPENCLAW_ROOT directory exists
   - workspace-planner/, workspace-executor/, workspace-reviewer/ exist
   - openclaw.json present (belt-and-suspenders; also guarded by load_config)
 """
@@ -28,12 +28,12 @@ _VALID_CONFIG = json.dumps({
 })
 
 
-class TestC704ValidateAutodevRoot:
+class TestC704ValidateOpenclawRoot:
 
     def _setup(self, tmp_path, monkeypatch):
-        """Reload orchestrator module with AUTODEV_ROOT pointing to tmp_path."""
-        monkeypatch.setenv("AUTODEV_ROOT", str(tmp_path))
-        monkeypatch.setenv("AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME", "1")
+        """Reload orchestrator module with OPENCLAW_ROOT pointing to tmp_path."""
+        monkeypatch.setenv("OPENCLAW_ROOT", str(tmp_path))
+        monkeypatch.setenv("AUTODEV_PIPELINE_ROOT", str(tmp_path))
         import orchestrator as orch_mod
         importlib.reload(orch_mod)
         return orch_mod
@@ -54,7 +54,7 @@ class TestC704ValidateAutodevRoot:
         (tmp_path / "workspace-reviewer").mkdir()
 
         with pytest.raises(SystemExit) as exc_info:
-            orch_mod._validate_autodev_root(str(tmp_path))
+            orch_mod._validate_openclaw_root(str(tmp_path))
 
         assert exc_info.value.code == 1, (
             "Expected sys.exit(1) for missing workspace-planner (C7-04 unfixed)"
@@ -68,7 +68,7 @@ class TestC704ValidateAutodevRoot:
         (tmp_path / "workspace-reviewer").mkdir()
 
         with pytest.raises(SystemExit) as exc_info:
-            orch_mod._validate_autodev_root(str(tmp_path))
+            orch_mod._validate_openclaw_root(str(tmp_path))
 
         assert exc_info.value.code == 1
 
@@ -80,7 +80,7 @@ class TestC704ValidateAutodevRoot:
         (tmp_path / "workspace-executor").mkdir()
 
         with pytest.raises(SystemExit) as exc_info:
-            orch_mod._validate_autodev_root(str(tmp_path))
+            orch_mod._validate_openclaw_root(str(tmp_path))
 
         assert exc_info.value.code == 1
 
@@ -91,7 +91,7 @@ class TestC704ValidateAutodevRoot:
         # No openclaw.json written
 
         with pytest.raises(SystemExit) as exc_info:
-            orch_mod._validate_autodev_root(str(tmp_path))
+            orch_mod._validate_openclaw_root(str(tmp_path))
 
         assert exc_info.value.code == 1
 
@@ -102,10 +102,10 @@ class TestC704ValidateAutodevRoot:
         self._create_workspaces(tmp_path)
 
         # Must not raise
-        orch_mod._validate_autodev_root(str(tmp_path))
+        orch_mod._validate_openclaw_root(str(tmp_path))
 
     def test_validate_called_at_orchestrator_init(self, tmp_path, monkeypatch):
-        """Orchestrator.__init__ must call _validate_autodev_root so missing dirs
+        """Orchestrator.__init__ must call _validate_openclaw_root so missing dirs
         are caught at construction time, not mid-run."""
         orch_mod = self._setup(tmp_path, monkeypatch)
         self._write_valid_config(tmp_path)
@@ -117,5 +117,5 @@ class TestC704ValidateAutodevRoot:
 
         assert exc_info.value.code == 1, (
             "Expected Orchestrator() to call sys.exit(1) when workspace dirs are missing "
-            "(C7-04 unfixed — _validate_autodev_root not called from __init__)"
+            "(C7-04 unfixed — _validate_openclaw_root not called from __init__)"
         )
