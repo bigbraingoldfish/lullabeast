@@ -35,6 +35,7 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ### Fixed
 
+- `test_idea_watch_dir_resets_idle_despite_stale_jsonl`: mock `_idea_workspace_activity_mtime` instead of scanning real files under `idea/` so the Ideas idle poller unit test stays fast and deterministic under patched `time.monotonic` / `asyncio.sleep` (avoids FS hot-loop on slow hosts).
 - `load_config()` / `ui/config.json`: keys present with empty-string values (as in `config.example.json`) no longer count as user overrides, so `_finalize_autodev_config_paths` still derives `pipeline_state_path`, `project_dir_path`, and related runtime paths. Fixes “pipeline_state_path is not configured” after install when placeholders were left in the file.
 - `repo_init_check.py` resolves `pipeline-project` with the same runtime-root rules as the orchestrator and `phase_resolver` (default: `$AUTODEV_REPO_PATH/.autodev/pipeline-project`). Fixes false “symlink not found” checks against `~/.openclaw` when using repo-local runtime.
 - Orchestrator atomic writes (`phase_state`, `failure_context`, related `mkstemp` paths) fall back to the pipeline root (with `makedirs`) instead of the OpenClaw root when `pipeline-project` is missing, avoiding an uncaught `FileNotFoundError` if `~/.openclaw` was never created (e.g. Docker `OPENCLAW_ROOT` not loaded from `.env`).
