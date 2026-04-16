@@ -7,7 +7,7 @@ import asyncio
 import json
 import os
 import time
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +200,12 @@ class TestPollSentinelWithIdleDetect:
         assert write_count[0] > 0
 
     def test_idea_watch_dir_resets_idle_despite_stale_jsonl(self, tmp_path):
-        """Fresh writes under idea_dir extend liveness when JSONL mtime is flat."""
+        """When JSONL mtime is flat, rising idea-workspace activity delays idle.
+
+        ``_idea_workspace_activity_mtime`` is mocked so this test does not scan
+        real files under ``idea/`` (avoids a hot FS loop under patched
+        ``time.monotonic`` / ``asyncio.sleep`` on slow hosts).
+        """
         poll = _get_poll()
         idea_dir = tmp_path / "idea"
         (idea_dir / "turns").mkdir(parents=True)
@@ -239,17 +244,11 @@ class TestPollSentinelWithIdleDetect:
         async def track_sleep_no_idea_write(_interval):
             sleeps.append(None)
 
-        async def track_sleep_bump_prd(_interval):
-            sleeps.append(None)
-            if len(sleeps) == 1:
-                prd.write_text("v1")
-                os.utime(prd, (2000, 2000))
-
-        async def run_poll(watch_idea: bool, sleeper):
+        async def run_poll_jsonl_only():
             tick[0] = 0
             sleeps.clear()
             with patch("ui.server.time.monotonic", fake_monotonic):
-                with patch("ui.server.asyncio.sleep", sleeper):
+                with patch("ui.server.asyncio.sleep", track_sleep_no_idea_write):
                     return await poll(
                         done_path=done,
                         session_key="ideas:iwatch:session-1",
@@ -258,17 +257,48 @@ class TestPollSentinelWithIdleDetect:
                         poll_interval=0.01,
                         idle_threshold=120.0,
                         startup_grace=0.05,
-                        idea_watch_dir=idea_dir if watch_idea else None,
+                        idea_watch_dir=None,
                     )
 
+        async def run_poll_with_mocked_idea_workspace_mtime():
+            tick[0] = 0
+            sleeps.clear()
+            idea_activity = {"t": 1000.0}
+
+            def fake_idea_mtime(_p):
+                return idea_activity["t"]
+
+            mock_idea = MagicMock(side_effect=fake_idea_mtime)
+
+            async def bump_idea_activity_on_first_sleep(_interval):
+                sleeps.append(None)
+                if len(sleeps) == 1:
+                    idea_activity["t"] = 2000.0
+
+            with patch("ui.server.time.monotonic", fake_monotonic):
+                with patch("ui.server.asyncio.sleep", bump_idea_activity_on_first_sleep):
+                    with patch(
+                        "ui.server._idea_workspace_activity_mtime", new=mock_idea
+                    ):
+                        result = await poll(
+                            done_path=done,
+                            session_key="ideas:iwatch:session-1",
+                            openclaw_root=str(tmp_path),
+                            poll_timeout=900.0,
+                            poll_interval=0.01,
+                            idle_threshold=120.0,
+                            startup_grace=0.05,
+                            idea_watch_dir=idea_dir,
+                        )
+            assert mock_idea.call_count >= 2, (
+                "expected multiple poll iterations to consult idea workspace mtime"
+            )
+            return result
+
         # JSONL-only: second tick hits idle after one sleep (do not touch prd)
-        assert asyncio.run(run_poll(False, track_sleep_no_idea_write)) is False
+        assert asyncio.run(run_poll_jsonl_only()) is False
         assert len(sleeps) == 1
 
-        # Reset artifact mtimes so the idea-watch run observes a clear bump after sleep 1
-        prd.write_text("v0")
-        os.utime(prd, (1000, 1000))
-
-        # With idea dir: prd mtime bump after first sleep resets idle; third tick fails
-        assert asyncio.run(run_poll(True, track_sleep_bump_prd)) is False
+        # With idea dir: simulated activity bump after first sleep resets idle; later tick fails
+        assert asyncio.run(run_poll_with_mocked_idea_workspace_mtime()) is False
         assert len(sleeps) == 2
