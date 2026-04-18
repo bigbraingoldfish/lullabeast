@@ -319,7 +319,7 @@ Six command buttons, each labeled and described:
 
 **Destructive command confirmation:** RESET_PHASE, SKIP, and STOP require a confirmation step before executing — a modal or inline confirmation prompt: "Are you sure? This cannot be undone." RETRY, RESET_EXECUTION, and PROCEED execute immediately on click (they are recoverable or safe).
 
-**Reset cap awareness:** If `escalation_resets >= 3` (readable from `phase_state.json`), RESET_PHASE and RESET_EXECUTION buttons are disabled with a tooltip: "Reset cap reached (3/3). Use PROCEED or STOP." This mirrors the orchestrator's own cap enforcement.
+**Reset cap awareness:** If `escalation_resets >= 3` (readable from `phase_state.json`), RESET_PHASE, RESET_EXECUTION, and RESET_REVIEWER buttons are disabled with a native `title` tooltip (visible labels **Proceed** / **Stop**, plus a short anti-loop / manual-repo hint) and an inline amber notice. This mirrors the orchestrator's own cap enforcement.
 
 **Post-command behavior:** After a command is issued, the command panel shows a brief "Command sent — waiting for orchestrator..." state and transitions back to read-only as soon as `pipeline_status` changes away from `WAITING_FOR_HUMAN` (detected via the next state poll or SSE event).
 
@@ -336,7 +336,7 @@ Accepts a command and writes it through the same mechanism the escalation agent 
 **Validation:**
 - Reject if `pipeline_status` is not `WAITING_FOR_HUMAN` — return 409 with `{"error": "Pipeline is not waiting for human input"}`
 - Reject unknown command strings — return 400
-- Reject if `escalation_resets >= 3` and command is `RESET_PHASE` or `RESET_EXECUTION` — return 409 with `{"error": "Reset cap reached"}`
+- Reject if `escalation_resets >= 3` and command is `RESET_PHASE`, `RESET_EXECUTION`, or `RESET_REVIEWER` — return 409 with `{"error": "Reset cap reached"}` (detail text names PROCEED / STOP for operators; UI copy uses button labels **Proceed** / **Stop**)
 
 **File format written (matches escalation agent output exactly):**
 ```json

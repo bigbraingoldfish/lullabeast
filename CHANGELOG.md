@@ -8,6 +8,10 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Changed
+
+- **P1-04 — Reset cap UX (verified + copy polish):** Tracker row closed — `EscalationCommandPanel` and `StoppedRecoveryPanel` already exposed native **`title`** tooltips and inline guidance when `escalation_resets >= 3` (aligned with `ui/server.py` `RESET_CAP_COMMANDS`). `ui/index.html` tooltip and amber notice now use visible **Proceed** / **Stop** labels plus a short anti-loop / manual-repo hint; `tests/test_ui_escalation_command_panel.py` updated. See `plans/Active/ux-friction-2026-04-16.md`.
+
 ### Added
 
 - **B-04 — Orchestrator crash context:** `GET /api/state` includes `orchestrator_spawn_log_tail` (up to five lines) when `orchestrator_alive` is false and `pipeline_status` is `RUNNING` or `WAITING_FOR_SENTINEL`, read from the same path the UI uses for spawned orchestrator stdout/stderr (`ORCHESTRATOR_SPAWN_LOG_PATH`, default `/tmp/orchestrator.log`). Pipeline Monitor **Orchestrator stopped** panel renders those lines in a `<pre>` (`data-testid="pipeline-orchestrator-spawn-log-tail"`). `POST /api/resume-orchestrator` behavior is unchanged (still returns 200 after a successful spawn without waiting for liveness). See `tests/test_api_state.py`.
