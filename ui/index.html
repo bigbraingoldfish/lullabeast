@@ -342,7 +342,13 @@
             }
             return queueOnlyRowPill(entry.state);
         }
-        
+
+        /** True when any queue row's live_pipeline_status is an in-flight pipeline (B-02). Not queue row ACTIVE alone. */
+        function queueEntriesHaveBusyLivePipeline(entries) {
+            const busy = new Set(["RUNNING", "WAITING_FOR_SENTINEL", "WAITING_FOR_HUMAN"]);
+            return (entries || []).some((e) => busy.has(e && e.live_pipeline_status));
+        }
+
         const AGENT_COLORS = {
             'PLANNER': 'bg-[#1a1d21] text-white',
             'EXECUTOR': 'bg-emerald-600 text-white',
@@ -6698,7 +6704,7 @@
                 if (currentScreen !== 'preflight') return;
                 fetch('/api/queue')
                     .then(r => r.json())
-                    .then(d => setPreflightQueueActive((d.queue || []).some(e => e.state === 'ACTIVE')))
+                    .then(d => setPreflightQueueActive(queueEntriesHaveBusyLivePipeline(d.queue)))
                     .catch(() => {});
             }, [currentScreen]);
 
@@ -6709,7 +6715,7 @@
                     // Check if there is an active queue entry
                     const qr = await fetch('/api/queue').then(r => r.json()).catch(() => ({queue: []}));
                     const qActive = (qr.queue || []).find(e => e.state === 'ACTIVE');
-                    setPreflightQueueActive(!!qActive);
+                    setPreflightQueueActive(queueEntriesHaveBusyLivePipeline(qr.queue));
 
                     if (qActive) {
                         // Insert at top of queue — add then move to position 1
