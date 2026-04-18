@@ -266,3 +266,22 @@ class TestPreflightServerPathInput:
         app_html = extract_function(html, "App")
         assert app_html is not None, "App function not found"
         assert "/api/setup/repo-roadmap-hint" in app_html
+
+
+class TestAppPreflightQueueActiveGating:
+    """B-02: preflight 'currently running' banner follows live_pipeline_status, not queue ACTIVE alone."""
+
+    def test_queue_busy_helper_exists(self):
+        html = load_html()
+        assert "function queueEntriesHaveBusyLivePipeline" in html
+        assert "WAITING_FOR_SENTINEL" in html
+        assert "WAITING_FOR_HUMAN" in html
+
+    def test_preflight_queue_probe_uses_live_status_not_active_only(self):
+        html = load_html()
+        app_html = extract_function(html, "App")
+        assert app_html is not None, "App function not found"
+        assert "queueEntriesHaveBusyLivePipeline(d.queue)" in app_html
+        assert "setPreflightQueueActive((d.queue || []).some(e => e.state === 'ACTIVE'))" not in app_html
+        assert "setPreflightQueueActive(!!qActive)" not in app_html
+        assert "queueEntriesHaveBusyLivePipeline(qr.queue)" in app_html
