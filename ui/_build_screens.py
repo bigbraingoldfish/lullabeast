@@ -218,7 +218,7 @@ MIDDLE = r"""
                                         </div>
                                     ))}
                                     {ideasList.length === 0 && !showUnlistedSession ? (
-                                        <p className="text-slate-600 text-xs italic px-1 py-2">No ideas yet. Click + New.</p>
+                                        <p className="text-slate-600 text-xs italic px-1 py-2">No projects yet. Click + New to start a PRD conversation.</p>
                                     ) : null}
                                 </div>
                             </>
