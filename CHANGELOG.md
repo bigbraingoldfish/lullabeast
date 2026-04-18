@@ -10,6 +10,7 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ### Added
 
+- **B-04 — Orchestrator crash context:** `GET /api/state` includes `orchestrator_spawn_log_tail` (up to five lines) when `orchestrator_alive` is false and `pipeline_status` is `RUNNING` or `WAITING_FOR_SENTINEL`, read from the same path the UI uses for spawned orchestrator stdout/stderr (`ORCHESTRATOR_SPAWN_LOG_PATH`, default `/tmp/orchestrator.log`). Pipeline Monitor **Orchestrator stopped** panel renders those lines in a `<pre>` (`data-testid="pipeline-orchestrator-spawn-log-tail"`). `POST /api/resume-orchestrator` behavior is unchanged (still returns 200 after a successful spawn without waiting for liveness). See `tests/test_api_state.py`.
 - `SECURITY.md` — security model, vulnerability reporting process, scope, and known limitations
 - `CONTRIBUTING.md` — development setup, test commands, PR conventions, skill authoring guidance
 - `CHANGELOG.md` — this file

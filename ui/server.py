@@ -41,6 +41,8 @@ WEBHOOK_AGENT_ID = "prd-creator"
 ROADMAP_CONVERTER_AGENT_ID = "roadmap-converter"
 # ORCHESTRATOR_POLL_TIMEOUT: spawn/orchestrator wait (separate from ideas POLL_TIMEOUT below).
 ORCHESTRATOR_POLL_TIMEOUT = 120
+# Stdout/stderr from UI-spawned orchestrator (`_spawn_orchestrator`); tail surfaced on /api/state when down mid-flight (B-04).
+ORCHESTRATOR_SPAWN_LOG_PATH = "/tmp/orchestrator.log"
 
 
 # Ring buffer for synthetic events (max 50 entries)
@@ -952,6 +954,41 @@ def _check_orchestrator_liveness(lock_path):
         return True
 
 
+def _read_log_tail_lines(path: str, max_lines: int = 5) -> list[str]:
+    """Return up to the last ``max_lines`` complete lines from a text file (bounded read from EOF).
+
+    Used for B-04 diagnostics when the orchestrator exits while pipeline_state still shows
+    an in-flight run. Missing file, empty file, and decode errors are non-fatal.
+    """
+    if not path or max_lines <= 0:
+        return []
+    max_chunk = 65536
+    try:
+        with open(path, "rb") as f:
+            try:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+            except OSError:
+                return []
+            if size <= 0:
+                return []
+            chunk = min(max_chunk, size)
+            try:
+                f.seek(size - chunk, os.SEEK_SET)
+            except OSError:
+                return []
+            raw = f.read()
+    except OSError:
+        return []
+    if not raw:
+        return []
+    text = raw.decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    if not lines:
+        return []
+    return lines[-max_lines:]
+
+
 # Whitelisted filenames under project root for user-confirmed destructive repair (switch-project).
 _SWITCH_DESTRUCTIVE_WHITELIST = frozenset({"current_phase.json", "phase_state.json"})
 
@@ -1365,7 +1402,7 @@ def _spawn_orchestrator(project_path: str, config: dict | None = None) -> dict:
     orchestrator_script = os.path.join(autodev_repo_path, "autodev", "pipeline", ORCHESTRATOR_FILENAME)
     if not os.path.exists(orchestrator_script):
         return {"ok": False, "error": f"{ORCHESTRATOR_FILENAME} not found at {orchestrator_script}"}
-    log_file = open("/tmp/orchestrator.log", "a")
+    log_file = open(ORCHESTRATOR_SPAWN_LOG_PATH, "a")
     env = os.environ.copy()
 
     openclaw_root_value = str(config.get("openclaw_root") or resolve_openclaw_root())
@@ -1957,7 +1994,15 @@ def get_state():
             response["orchestrator_alive"] = False
     else:
         response["orchestrator_alive"] = False
-    
+
+    tail: list[str] = []
+    if not response.get("orchestrator_alive") and response.get("pipeline_status") in (
+        "RUNNING",
+        "WAITING_FOR_SENTINEL",
+    ):
+        tail = _read_log_tail_lines(ORCHESTRATOR_SPAWN_LOG_PATH, 5)
+    response["orchestrator_spawn_log_tail"] = tail
+
     # Event source
     response["event_source"] = _determine_event_source(events_path) if events_path else "synthetic"
 

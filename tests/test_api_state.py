@@ -135,6 +135,43 @@ class TestCheckOrchestratorLiveness:
             lock_file.close()
 
 
+class TestOrchestratorSpawnLogTail:
+    """Tests for B-04: _read_log_tail_lines and orchestrator spawn log path."""
+
+    def test_read_log_tail_returns_last_n_lines(self, temp_dir):
+        from ui.server import _read_log_tail_lines
+
+        path = os.path.join(temp_dir, "spawn.log")
+        with open(path, "w", encoding="utf-8") as f:
+            for i in range(1, 8):
+                f.write(f"line{i}\n")
+        assert _read_log_tail_lines(path, 5) == ["line3", "line4", "line5", "line6", "line7"]
+
+    def test_read_log_tail_missing_file(self, temp_dir):
+        from ui.server import _read_log_tail_lines
+
+        assert _read_log_tail_lines(os.path.join(temp_dir, "nope.log"), 5) == []
+
+    def test_read_log_tail_empty_file(self, temp_dir):
+        from ui.server import _read_log_tail_lines
+
+        path = os.path.join(temp_dir, "empty.log")
+        with open(path, "w"):
+            pass
+        assert _read_log_tail_lines(path, 5) == []
+
+    def test_read_log_tail_invalid_utf8_does_not_raise(self, temp_dir):
+        from ui.server import _read_log_tail_lines
+
+        path = os.path.join(temp_dir, "badbytes.log")
+        with open(path, "wb") as f:
+            f.write(b"ok\n\xff\xfe\nlast\n")
+        out = _read_log_tail_lines(path, 5)
+        assert isinstance(out, list)
+        assert len(out) >= 1
+        assert out[-1] == "last"
+
+
 class TestDetermineEventSource:
     """Tests for _determine_event_source helper."""
 
@@ -160,11 +197,15 @@ class TestDetermineEventSource:
 class TestApiStateEndpoint:
     """Tests for GET /api/state endpoint."""
 
-    def test_returns_200_with_merged_state(self, mock_config, mock_pipeline_state, mock_phase_state, mock_events_file):
+    def test_returns_200_with_merged_state(self, mock_config, mock_pipeline_state, mock_phase_state, mock_events_file, temp_dir):
         """Test endpoint returns 200 with merged state when all files exist and lock is free."""
-        with patch("ui.server.load_config", return_value=mock_config):
-            response = client.get("/api/state")
-        
+        orch_log = os.path.join(temp_dir, "orch_spawn.log")
+        with open(orch_log, "w", encoding="utf-8") as f:
+            f.write("x\ny\nz\n")
+        with patch("ui.server.ORCHESTRATOR_SPAWN_LOG_PATH", orch_log):
+            with patch("ui.server.load_config", return_value=mock_config):
+                response = client.get("/api/state")
+
         assert response.status_code == 200
         data = response.json()
         assert data["pipeline_status"] == "RUNNING"
@@ -178,6 +219,47 @@ class TestApiStateEndpoint:
         assert data["event_source"] == "file"
         assert data.get("project_dir_ok") is True
         assert data.get("project_dir_message") is None
+        assert data.get("orchestrator_spawn_log_tail") == ["x", "y", "z"]
+
+    def test_orchestrator_spawn_log_tail_empty_when_alive(self, mock_config, mock_pipeline_state, mock_phase_state, mock_events_file, temp_dir):
+        orch_log = os.path.join(temp_dir, "orch_spawn.log")
+        with open(orch_log, "w", encoding="utf-8") as f:
+            f.write("only\nwhen\n")
+        lock_path = mock_config["lock_path"]
+        lock_file = open(lock_path, "w")
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            with patch("ui.server.ORCHESTRATOR_SPAWN_LOG_PATH", orch_log):
+                with patch("ui.server.load_config", return_value=mock_config):
+                    response = client.get("/api/state")
+            assert response.status_code == 200
+            assert response.json().get("orchestrator_spawn_log_tail") == []
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            lock_file.close()
+
+    def test_orchestrator_spawn_log_tail_empty_when_not_mid_flight(self, temp_dir):
+        """WAITING_FOR_HUMAN + dead orchestrator does not attach spawn log tail (B-04 panel gate)."""
+        state_path = os.path.join(temp_dir, "pipeline_state.json")
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump({"pipeline_status": "WAITING_FOR_HUMAN", "project_path": "/tmp"}, f)
+        orch_log = os.path.join(temp_dir, "orch_spawn.log")
+        with open(orch_log, "w", encoding="utf-8") as f:
+            f.write("secret\n")
+        project_root = os.path.join(temp_dir, "pipeline_project")
+        os.makedirs(project_root, exist_ok=True)
+        cfg = {
+            "pipeline_state_path": state_path,
+            "phase_state_path": os.path.join(temp_dir, "phase_state.json"),
+            "lock_path": os.path.join(temp_dir, "pipeline.lock"),
+            "events_path": os.path.join(temp_dir, "pipeline_events.jsonl"),
+            "project_dir_path": project_root,
+        }
+        with patch("ui.server.ORCHESTRATOR_SPAWN_LOG_PATH", orch_log):
+            with patch("ui.server.load_config", return_value=cfg):
+                response = client.get("/api/state")
+        assert response.status_code == 200
+        assert response.json().get("orchestrator_spawn_log_tail") == []
 
     def test_returns_unknown_when_pipeline_state_missing(self, mock_config, mock_phase_state):
         """Test endpoint returns defaults when pipeline_state.json is absent."""
