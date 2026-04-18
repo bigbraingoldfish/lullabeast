@@ -756,7 +756,9 @@
                 const cls = disabled
                     ? `${baseClass} opacity-50 cursor-not-allowed`
                     : `${baseClass} hover:bg-[#252830]`;
-                const title = disabled ? "Reset cap reached (3/3). Use PROCEED or STOP." : undefined;
+                const title = disabled
+                    ? "Reset cap reached (3/3). Use Proceed or Stop to advance or halt. Cap prevents infinite reset loops; fix the repo manually if needed."
+                    : undefined;
                 return (
                     <button
                         key={command}
@@ -831,8 +833,9 @@
                     ) : null}
                     {isResetDisabled && !commandSent ? (
                         <p className="text-amber-500 text-xs mb-3">
-                            Reset cap reached (3/3). RESET EXECUTION, RESET REVIEWER, and RESET PHASE are disabled.
-                            Use PROCEED to advance or STOP to halt.
+                            Reset cap reached (3/3). Revert to Planner, Revert to Executor, and Revert to Reviewer are
+                            disabled. Use Proceed to advance or Stop to halt. Cap prevents infinite reset loops; fix the
+                            repo manually if the phase is stuck.
                         </p>
                     ) : null}
                     {commandErrParts ? (
@@ -1058,7 +1061,11 @@
                                         key={command}
                                         onClick={() => !disabled && handleResume(command)}
                                         disabled={disabled}
-                                        title={disabled ? 'Reset cap reached — use Resume or manually intervene' : undefined}
+                                        title={
+                                            disabled
+                                                ? 'Reset cap reached — use Resume, or fix the repo manually in git. Cap prevents infinite reset loops.'
+                                                : undefined
+                                        }
                                         className={`w-full text-left px-3 py-2.5 rounded border transition-colors ${
                                             disabled
                                                 ? 'border-[#1a1d21] bg-[#0f1012] text-slate-600 cursor-not-allowed'

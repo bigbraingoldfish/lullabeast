@@ -234,11 +234,14 @@ class TestResetCapEnforcement:
         assert button_disabled is True
     
     def test_disabled_reset_buttons_show_tooltip(self):
-        """When escalation_resets >= 3, disabled reset buttons show tooltip 'Reset cap reached (3/3). Use PROCEED or STOP.' on hover."""
+        """When escalation_resets >= 3, disabled reset buttons show the reset-cap tooltip (Proceed/Stop + anti-loop hint) on hover."""
         escalation_resets = 3
         is_reset_disabled = escalation_resets >= 3
         
-        expected_tooltip = 'Reset cap reached (3/3). Use PROCEED or STOP.'
+        expected_tooltip = (
+            "Reset cap reached (3/3). Use Proceed or Stop to advance or halt. "
+            "Cap prevents infinite reset loops; fix the repo manually if needed."
+        )
         
         if is_reset_disabled:
             tooltip = expected_tooltip
