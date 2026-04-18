@@ -650,6 +650,8 @@
                 pipeline_status === "QUEUE_HALTED" &&
                 !!(escalation_trigger_reason || escalation_message);
             const canIssueCommands = humanWait || queueHaltedEscalation;
+            const orchestratorDownBlocksCommands =
+                canIssueCommands && !orchestrator_alive && !commandSent;
             const keepPanelMounted = canIssueCommands || showConfirmModal || commandSent;
             if (!keepPanelMounted) return null;
 
@@ -810,18 +812,14 @@
                     <h3 className="header-text text-sm font-semibold text-orange-400 mb-1">
                         {headerText}
                     </h3>
-                    {humanWait && !orchestrator_alive && !commandSent ? (
+                    {orchestratorDownBlocksCommands ? (
                         <div className="mb-3 rounded border border-amber-700/50 bg-amber-950/30 p-2">
                             <p className="text-amber-600 text-xs leading-relaxed">
-                                Orchestrator is not running. Restart it before commands can be applied.
+                                Orchestrator is not running. Use <strong className="font-semibold">Restart Orchestrator</strong> in the banner above; escalation commands stay hidden until the process is running again.
                             </p>
-                            {restartOrchestratorButton}
-                            {restartError ? (
-                                <p className="header-text text-xs text-red-400 mt-1">{restartError}</p>
-                            ) : null}
                         </div>
                     ) : null}
-                    {escalation_message && !commandSent && humanWait ? (
+                    {escalation_message && !commandSent && (humanWait || queueHaltedEscalation) ? (
                         <p className="text-slate-300 text-xs mb-3 leading-relaxed">
                             {escalation_message}
                         </p>
@@ -866,7 +864,7 @@
                                 </div>
                             ) : null}
                         </div>
-                    ) : canIssueCommands ? (
+                    ) : canIssueCommands && !orchestratorDownBlocksCommands ? (
                         <div className="grid grid-cols-2 gap-2">
                             {GRID_COMMANDS.map(renderGridButton)}
                         </div>
@@ -5692,6 +5690,14 @@
             const showResumeButton = status === "STOPPED";
             const showRestartOrchestratorButton =
                 !alive && (status === "RUNNING" || status === "WAITING_FOR_SENTINEL");
+            const queueHaltedEscalationForRecovery =
+                status === "QUEUE_HALTED" &&
+                !!(pState.escalation_trigger_reason || pState.escalation_message);
+            const showHeaderOrchestratorRecoveryBanner =
+                !alive &&
+                (status === "WAITING_FOR_HUMAN" ||
+                    status === "STOPPED" ||
+                    queueHaltedEscalationForRecovery);
 
             // Derive header status label and class
             let statusLabel = '--';
@@ -5862,6 +5868,31 @@
                                 >
                                     Recover Git
                                 </button>
+                            </div>
+                        ) : null}
+                        {showHeaderOrchestratorRecoveryBanner ? (
+                            <div
+                                className="border-t border-amber-800/50 bg-amber-950/25 px-6 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
+                                data-testid="pipeline-orchestrator-recovery-banner"
+                            >
+                                <p className="header-text text-xs text-amber-100/95 leading-relaxed flex-1 min-w-0">
+                                    The orchestrator process is not running. Restart it to apply escalation commands, resume polling, or continue from a stopped pipeline.
+                                </p>
+                                <div className="flex flex-col items-stretch sm:items-end gap-1 shrink-0 sm:min-w-[11rem]">
+                                    <button
+                                        type="button"
+                                        onClick={handleRestartOrchestrator}
+                                        disabled={orchRestartBusy}
+                                        className="header-text px-3 py-2 text-xs rounded bg-cyan-950 hover:bg-cyan-900 text-cyan-200 border border-cyan-800 transition-colors disabled:opacity-50 whitespace-nowrap"
+                                    >
+                                        {orchRestartBusy ? "Restarting…" : "Restart Orchestrator"}
+                                    </button>
+                                    {orchRestartError ? (
+                                        <p className="header-text text-xs text-red-400 max-w-md text-right">
+                                            {orchRestartError}
+                                        </p>
+                                    ) : null}
+                                </div>
                             </div>
                         ) : null}
                     </header>
