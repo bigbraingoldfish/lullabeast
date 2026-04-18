@@ -1619,13 +1619,50 @@ Transitions `pipeline_status` from `STOPPED` to `WAITING_FOR_HUMAN` atomically. 
 
 #### `POST /api/resume-orchestrator`
 
-Spawns a new `orchestrator.py` process non-blocking. Reads `project_path` from `pipeline_state.json` and `autodev_repo_path` from `config.json`. Logs to `/tmp/orchestrator.log`.
+Spawns a new `orchestrator.py` process non-blocking. Reads `project_path` from `pipeline_state.json` and `autodev_repo_path` from `config.json`. When `project_dir_path` (or `symlink_target` / `project_dir`) resolves to a realpath that **differs** from the resolved `project_path` in `pipeline_state.json`, the server **repoints the pipeline-project symlink** to match state (**Policy A — state wins**), logs `[RESUME] reconcile symlink_to_state …`, then continues to lock check and spawn. Logs to `/tmp/orchestrator.log`.
 
 **Success response (HTTP 200):**
 ```json
-{"ok": true}
+{
+  "ok": true,
+  "reconciled": false,
+  "reconcile_action": null,
+  "previous_symlink_real": null,
+  "canonical_project_real": "<resolved project_path>"
+}
 ```
+
+When a repoint ran, `reconciled` is `true`, `reconcile_action` is `"symlink_to_state"`, and `previous_symlink_real` is the symlink’s realpath before replacement (if known).
 
 Returns immediately — does not wait for the orchestrator to reach a stable state. The UI's polling loop detects the state transition.
 
-**UI usage:** Called after `POST /api/command` as the final step of the resume flow from the StoppedRecoveryPanel.
+**Error response (HTTP 409) — `pipeline.lock` held (orchestrator already running):**
+
+`detail` is a string: `"Orchestrator is already running"`.
+
+**Error response (HTTP 422) — symlink path cannot be safely updated:**
+
+`detail` is a string (e.g. `project_dir_path` is a real directory or regular file, target path missing, parent not creatable). The orchestrator is not spawned.
+
+**Error response (HTTP 503) — spawn failed after a successful repoint:**
+
+JSON body (not FastAPI `detail` wrapper), so the client can show recovery copy and retry:
+
+```json
+{
+  "ok": false,
+  "reconciled": true,
+  "reconcile_action": "symlink_to_state",
+  "previous_symlink_real": "<path or null>",
+  "canonical_project_real": "<resolved project_path>",
+  "error": "<spawn error>"
+}
+```
+
+**Error response (HTTP 503) — spawn failed with no repoint:** `detail` is a string (unchanged from other failure paths).
+
+**UI usage:** Called after `POST /api/command` as the final step of the resume flow from the StoppedRecoveryPanel; also called from the Pipeline Monitor “Restart Orchestrator” control. The Pipeline Monitor header strip may show a one-line notice when `reconciled` is true or when the 503-after-reconcile body above is returned.
+
+#### `GET /api/queue`
+
+Returns the project queue plus dependency metadata. **Response ordering:** after merging any synthetic **ingested** row for `pipeline_state.json` projects missing from the queue file, entries whose `project_path` realpath matches `pipeline_state.json` `project_path` are listed **first** (stable order), then all other rows. This is a read-only presentation sort; the authoritative persisted order is still `position` on each row after reconciliation writes (`_queue_mark_matching_entry_active` pins the active project to `position: 1`).

@@ -19,6 +19,7 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ### Changed
 
+- **`POST /api/resume-orchestrator` (Policy A — B-01):** When the configured pipeline-project symlink realpath disagrees with `pipeline_state.json` `project_path`, the UI server **repoints the symlink** to match state instead of returning **409** `symlink_project_mismatch`. Successful responses include `reconciled`, `reconcile_action`, `previous_symlink_real`, and `canonical_project_real`. **422** if the link path cannot be safely replaced (e.g. real directory or file at `project_dir_path`). **503** returns a JSON body with `reconciled: true` if spawn fails after a successful repoint (operator can retry **Restart**). **409** is reserved for `pipeline.lock` / orchestrator already running. Pipeline Monitor shows a single amber header line for reconcile / spawn-after-reconcile failures (`ui/index.html`). See `autodev/docs/PIPELINE-SPEC.md` and `tests/test_api_resume_orchestrator.py`.
 - Environment variable rename (hard cut — legacy aliases removed):
   - `AUTODEV_ROOT` → `OPENCLAW_ROOT`
   - `AUTODEV_RUNTIME_ROOT` → `AUTODEV_PIPELINE_ROOT`
