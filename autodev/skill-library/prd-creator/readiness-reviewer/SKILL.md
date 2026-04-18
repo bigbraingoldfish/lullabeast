@@ -122,11 +122,11 @@ Examples of partial:
 
 ### Overall Status Thresholds
 
-**`ready`**: All critical sections are `complete`. No blocking gaps exist. Any ambiguities are minor (supplementary sections thin or missing) and would not cause the conversion to produce phases that misrepresent user intent. Score: 8–10. Conversion confidence: `high`.
+**`ready`**: All critical sections are `complete`. No blocking gaps exist. Any ambiguities are minor (supplementary sections thin or missing) and would not cause the conversion to produce phases that misrepresent user intent. Score: 8–10. Roadmap confidence (`conversion_confidence` in `readiness.json`): `high`.
 
-**`approaching_ready`**: Most critical sections are `complete` or `partial`. At least one critical section is `partial` but not `empty`. Blocking gaps are identified and addressable in one more conversation turn. The conversion could proceed but quality would suffer in predictable ways. Score: 5–7. Conversion confidence: `medium`.
+**`approaching_ready`**: Most critical sections are `complete` or `partial`. At least one critical section is `partial` but not `empty`. Blocking gaps are identified and addressable in one more conversation turn. The conversion could proceed but quality would suffer in predictable ways. Score: 5–7. Roadmap confidence (`conversion_confidence` in `readiness.json`): `medium`.
 
-**`not_ready`**: One or more critical sections are `empty`, or a critical section has such fundamental ambiguity that the conversion would produce a roadmap that misrepresents user intent. Score: 0–4. Conversion confidence: `low`.
+**`not_ready`**: One or more critical sections are `empty`, or a critical section has such fundamental ambiguity that the conversion would produce a roadmap that misrepresents user intent. Score: 0–4. Roadmap confidence (`conversion_confidence` in `readiness.json`): `low`.
 
 ### Score Calibration
 
@@ -209,6 +209,8 @@ Schema:
   "recommendation": "One sentence telling the user what single action would most improve readiness right now"
 }
 ```
+
+**Dashboard mapping (AutoDev UI):** The operator dashboard shows **`PRD readiness:`** with `score` out of 10, and **`Roadmap confidence:`** with the value from the `conversion_confidence` field above. Do **not** rename `conversion_confidence` in JSON — the UI label is display-only.
 
 **Field constraints:**
 
