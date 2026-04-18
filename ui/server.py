@@ -5609,6 +5609,19 @@ def get_queue_status():
     }
 
 
+def _queue_trigger_next_halted_reason(entries: list) -> str:
+    """Why POST /api/queue/trigger-next found no runnable row (orchestrator halt buckets, L-07)."""
+    non_terminal = [e.get("state") for e in entries if e.get("state") not in ("COMPLETED", "FAILED")]
+    if not non_terminal:
+        return "all_completed"
+    parked = frozenset({"BLOCKED", "ESCALATION"})
+    if all(s in parked for s in non_terminal):
+        return "all_blocked"
+    if all(s == "DEPENDENCY_HOLD" for s in non_terminal):
+        return "all_dependency_hold"
+    return "mixed"
+
+
 def _queue_run_trigger_next_logic(config: dict) -> dict:
     """Pick next READY/SKIPPED_PENDING row, preflight, set ACTIVE, spawn orchestrator.
 
@@ -5666,7 +5679,12 @@ def _queue_run_trigger_next_logic(config: dict) -> dict:
             raise HTTPException(status_code=500, detail=result.get("error", "Failed to spawn orchestrator"))
         return {"ok": True, "started": entry["name"]}
 
-    return {"queue_halted": True, "error": "all projects blocked or in dependency hold"}
+    halted_reason = _queue_trigger_next_halted_reason(entries)
+    return {
+        "queue_halted": True,
+        "error": "all projects blocked or in dependency hold",
+        "queue_halted_reason": halted_reason,
+    }
 
 
 def _maybe_auto_kick_queue_after_manual_to_auto(config: dict) -> dict:
