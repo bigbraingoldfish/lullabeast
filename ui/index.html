@@ -349,6 +349,14 @@
             return (entries || []).some((e) => busy.has(e && e.live_pipeline_status));
         }
 
+        /** P0-01: first-run default screen — Ideas when pipeline is not running and queue has no in-flight live status. */
+        function shouldOpenIdeasOnColdBootstrap(pipelineStatus, queueEntries) {
+            const ps = pipelineStatus || "";
+            const idleLike = ps === "IDLE" || ps === "UNKNOWN";
+            if (!idleLike) return false;
+            return !queueEntriesHaveBusyLivePipeline(queueEntries);
+        }
+
         const AGENT_COLORS = {
             'PLANNER': 'bg-[#1a1d21] text-white',
             'EXECUTOR': 'bg-emerald-600 text-white',
@@ -6329,6 +6337,38 @@
             }, [setupComplete]);
 
             const [currentScreen, setCurrentScreen] = useState("pipeline");
+            const currentScreenRef = useRef(currentScreen);
+            const coldBootstrapScreenAppliedRef = useRef(false);
+            useEffect(() => {
+                currentScreenRef.current = currentScreen;
+            }, [currentScreen]);
+
+            useEffect(() => {
+                if (setupComplete !== true) return;
+                if (coldBootstrapScreenAppliedRef.current) return;
+                let cancelled = false;
+                Promise.all([
+                    fetch("/api/state").then((r) => r.json()),
+                    fetch("/api/queue")
+                        .then((r) => r.json())
+                        .catch(() => ({ queue: [] })),
+                ])
+                    .then(([st, qu]) => {
+                        if (cancelled) return;
+                        if (coldBootstrapScreenAppliedRef.current) return;
+                        if (currentScreenRef.current !== "pipeline") return;
+                        const queue = qu.queue || [];
+                        const ps = st.pipeline_status || "";
+                        if (!shouldOpenIdeasOnColdBootstrap(ps, queue)) return;
+                        setCurrentScreen("ideas");
+                        coldBootstrapScreenAppliedRef.current = true;
+                    })
+                    .catch(() => {});
+                return () => {
+                    cancelled = true;
+                };
+            }, [setupComplete]);
+
             const [, setUnsavedQueueOrderState] = useState(false);
             /** Synced on every setter call so safeNavigate can read latest without waiting for re-render. */
             const unsavedQueueOrderRef = useRef(false);
