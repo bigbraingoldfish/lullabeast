@@ -3011,7 +3011,7 @@
                                         </div>
                                     ))}
                                     {ideasList.length === 0 && !showUnlistedSession ? (
-                                        <p className="text-slate-600 text-xs italic px-1 py-2">No ideas yet. Click + New.</p>
+                                        <p className="text-slate-600 text-xs italic px-1 py-2">No projects yet. Click + New to start a PRD conversation.</p>
                                     ) : null}
                                         </>
                                     )}
@@ -3726,11 +3726,11 @@
                                                           : "text-red-400"
                                                 }`}
                                             >
-                                                Readiness: {typeof readinessData.score === "number" ? readinessData.score : "—"} / 10
+                                                PRD readiness: {typeof readinessData.score === "number" ? readinessData.score : "—"} / 10
                                             </span>
                                             {readinessData.conversion_confidence && (
                                                 <span className="text-[10px] px-1.5 py-0.5 rounded border border-slate-600 text-slate-400">
-                                                    Conversion confidence: {readinessData.conversion_confidence}
+                                                    Roadmap confidence: {readinessData.conversion_confidence}
                                                 </span>
                                             )}
                                             <div className="flex-1"/>
