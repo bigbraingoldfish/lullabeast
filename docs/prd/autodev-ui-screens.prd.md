@@ -254,6 +254,13 @@ Tab or toggle: **Activity** vs **Escalation** paired view — trigger time, reas
 | **Download PRD** | Control in **document** chrome; **enabled only** when there is real content — **never** empty/zero-byte downloads. |
 | **Clarity / readiness / convert** | Surfaces pass/fail, issues, readiness, roadmap output, download roadmap, **Proceed to Setup**. |
 
+#### Shipped UI copy (Ideas rail + PRD strip)
+
+These strings are implemented in `ui/index.html` (`IdeasScreen`) and are the operator-facing source of truth (see UX tracker L-17–L-19):
+
+- **Empty ideas list** (chats rail, no sessions): `No projects yet. Click + New to start a PRD conversation.`
+- **When readiness is `ready`** and `readiness.json` is loaded: the PRD document strip shows **`PRD readiness:`** `{score}` **`/ 10`** and **`Roadmap confidence:`** `{value}`. The value is still the **`conversion_confidence`** field from `readiness.json`, returned as-is in `GET /api/ideas/{id}/readiness` under `data` (display label only — do not rename the JSON key in agent output).
+
 ---
 
 ### Screen 3 — Setup & Preflight

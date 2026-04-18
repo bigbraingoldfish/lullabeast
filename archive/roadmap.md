@@ -130,7 +130,7 @@ INFRA-B1 and INFRA-E1 are complete — confirmed infrastructure.
   >
   > **PRD skeleton section headers** (source: `~/.openclaw/workspace/skills/prd-creator/skill.md`): `## Problem Statement`, `## Goals & Success Metrics`, `## User Stories`, `## Functional Requirements`, `## Edge Cases`, `## Non-Functional Requirements`, `## Dependencies & Integrations`, `## Milestones & Timeline`, `## Risks & Mitigations`, `## Open Questions`, `## Glossary & Domain Terms`, `## Revision History`. Each followed by `*Empty — start a conversation to populate this section.*` in `text-slate-600 italic text-sm`.
   >
-  > **Left panel also needs**: a top strip showing the ideas list (rendered above the conversation area) and a "New Idea" button. For this phase, the list is static empty state ("No ideas yet") and the button does nothing. The list and its behavior are wired in UI-E3.
+  > **Left panel also needs**: a top strip showing the ideas list (rendered above the conversation area) and a "New Idea" button. *UI-E1 originally specified empty copy “No ideas yet”; **superseded (2026-04)** — shipped empty state:* `No projects yet. Click + New to start a PRD conversation.` *For this phase the list could remain static and the button do nothing; full list behavior is wired in UI-E3.*
   >
   > **No agent wiring in this phase.** Textarea submit does nothing. Message list is empty.
 
