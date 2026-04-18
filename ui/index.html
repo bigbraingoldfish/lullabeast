@@ -4607,6 +4607,24 @@
             const selected = queue.find(e => e.id === selectedId) || null;
             const activeEntry = queue.find(e => e.state === 'ACTIVE');
 
+            const busyPipelineStatuses = ['RUNNING', 'WAITING_FOR_SENTINEL', 'WAITING_FOR_HUMAN'];
+            const runNextProjectDisabled =
+                triggerBusy ||
+                !!activeEntry ||
+                reorderDirty ||
+                busyPipelineStatuses.includes(pipelineStatus);
+
+            /** Native tooltip when Run next project is disabled; priority matches `disabled`. */
+            const getRunNextProjectDisabledReason = () => {
+                if (triggerBusy) return 'Starting the next project…';
+                if (activeEntry) return 'A project is already active in the queue.';
+                if (reorderDirty) return 'Save or cancel reorder first.';
+                if (pipelineStatus === 'RUNNING') return 'Pipeline is running.';
+                if (pipelineStatus === 'WAITING_FOR_SENTINEL') return 'Pipeline is waiting on an agent.';
+                if (pipelineStatus === 'WAITING_FOR_HUMAN') return 'Pipeline is waiting for your input.';
+                return null;
+            };
+
             const handleModeToggle = () => {
                 if (reorderDirty) return;
                 const newMode = queueMode === 'auto' ? 'manual' : 'auto';
@@ -5267,9 +5285,14 @@
                             ))}
                         </div>
                         {queueMode === 'manual' && (
-                            <button onClick={handleTriggerNext} disabled={triggerBusy || !!activeEntry || reorderDirty || ['RUNNING','WAITING_FOR_SENTINEL','WAITING_FOR_HUMAN'].includes(pipelineStatus)}
-                                className="header-text text-xs px-3 py-1.5 rounded bg-emerald-700 text-white hover:bg-emerald-600 disabled:opacity-50">
-                                {triggerBusy ? 'Starting…' : 'Trigger Next'}
+                            <button
+                                type="button"
+                                data-testid="queue-trigger-next"
+                                onClick={handleTriggerNext}
+                                disabled={runNextProjectDisabled}
+                                title={getRunNextProjectDisabledReason() ?? undefined}
+                                className={`header-text text-xs px-3 py-1.5 rounded bg-emerald-700 text-white hover:bg-emerald-600 disabled:opacity-50${!runNextProjectDisabled ? ' run-pulse' : ''}`}>
+                                {triggerBusy ? 'Starting…' : 'Run next project'}
                             </button>
                         )}
                         {triggerMsg && <span className="header-text text-xs text-amber-400">{triggerMsg}</span>}
