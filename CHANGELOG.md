@@ -10,6 +10,9 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ### Changed
 
+- **Documentation — UI label sync:** PRDs (`docs/prd/AUTODEV-UI-PRD.md`, `autodev/docs/AUTODEV-UI-PRD.md`, `docs/prd/autodev-ui-screens.prd.md`), roadmap acceptance text (`autodev/docs/AUTODEV-UI-ROADMAP.md`, `archive/roadmap-pipeline-monitor-build.md`), `CLAUDE.md` (`QUEUE_HALTED` pill vs queue chip), and `autodev/docs/AUTODEV-PROJECT-VISION.md` now match shipped dashboard copy (`PIPELINE_LIVE_PILL`, `queueOnlyRowPill`) and animation rules (`run-pulse` on `RUNNING` only).
+
+- **P2 labels L-01–L-07, L-30 (UX friction tracker):** Pipeline and queue status pills use operator-facing copy aligned with API enums — e.g. queue slot **`ACTIVE`**, **`RUNNING (agent)`** / **`NEEDS YOUR INPUT`** / **`INTERVENTION REQUIRED`** (with native header **`title`** for silent halt) / **`Queue stalled`**, queue-only **`Waiting on parent`** and **`Preflight failed`**. **`POST /api/queue/trigger-next`** now includes **`queue_halted_reason`** (`all_blocked`, `all_dependency_hold`, `mixed`, or `all_completed`) when no project can start; the queue UI maps that to short **Queue stalled — …** messages. See `ui/index.html`, `ui/server.py` (`_queue_trigger_next_halted_reason`), `tests/test_ui_p2_label_pass_l01_l07_l30.py`, and `tests/test_queue_api.py`.
 - **P1-04 — Reset cap UX (verified + copy polish):** Tracker row closed — `EscalationCommandPanel` and `StoppedRecoveryPanel` already exposed native **`title`** tooltips and inline guidance when `escalation_resets >= 3` (aligned with `ui/server.py` `RESET_CAP_COMMANDS`). `ui/index.html` tooltip and amber notice now use visible **Proceed** / **Stop** labels plus a short anti-loop / manual-repo hint; `tests/test_ui_escalation_command_panel.py` updated. See `plans/Active/ux-friction-2026-04-16.md`.
 
 ### Added

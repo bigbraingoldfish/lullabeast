@@ -921,6 +921,48 @@ class TestPostQueueTriggerNext:
         data = resp.json()
         assert data.get("queue_halted") is True
 
+    def test_queue_halted_reason_all_blocked(self, client):
+        c, queue_file, _ = client
+        entries = [
+            _make_entry("a", state="BLOCKED", position=1),
+            _make_entry("b", state="ESCALATION", position=2),
+        ]
+        _write_queue(str(queue_file), entries, queue_mode="manual")
+
+        resp = c.post("/api/queue/trigger-next")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data.get("queue_halted") is True
+        assert data.get("queue_halted_reason") == "all_blocked"
+
+    def test_queue_halted_reason_all_dependency_hold(self, client):
+        c, queue_file, _ = client
+        entries = [
+            _make_entry("a", state="DEPENDENCY_HOLD", position=1),
+            _make_entry("b", state="DEPENDENCY_HOLD", position=2),
+        ]
+        _write_queue(str(queue_file), entries, queue_mode="manual")
+
+        resp = c.post("/api/queue/trigger-next")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data.get("queue_halted") is True
+        assert data.get("queue_halted_reason") == "all_dependency_hold"
+
+    def test_queue_halted_reason_mixed(self, client):
+        c, queue_file, _ = client
+        entries = [
+            _make_entry("a", state="BLOCKED", position=1),
+            _make_entry("b", state="DEPENDENCY_HOLD", position=2),
+        ]
+        _write_queue(str(queue_file), entries, queue_mode="manual")
+
+        resp = c.post("/api/queue/trigger-next")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data.get("queue_halted") is True
+        assert data.get("queue_halted_reason") == "mixed"
+
 
 # ---------------------------------------------------------------------------
 # PATCH /api/queue/mode

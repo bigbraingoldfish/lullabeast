@@ -27,10 +27,13 @@ def test_status_pill_with_running_state():
 
 
 def test_status_pill_waiting_for_sentinel():
-    """WAITING_FOR_SENTINEL uses static amber (no pulse); header may append agent to WAITING label."""
+    """WAITING_FOR_SENTINEL uses static amber (no pulse); label RUNNING (agent) (L-02/L-30)."""
     with open('ui/index.html', 'r') as f:
         content = f.read()
-    assert 'WAITING' in content, "Should show WAITING label"
+    assert re.search(
+        r"WAITING_FOR_SENTINEL:\s*\{[^}]*label:\s*['\"]RUNNING \(agent\)['\"]",
+        content,
+    ), "Sentinel wait pill should use RUNNING (agent)"
     assert 'current_agent' in content, "Should reference current_agent for waiting header"
     assert not re.search(r"WAITING_FOR_SENTINEL:\s*\{[^}]*run-pulse", content), \
         "Sentinel wait must not use run-pulse in pipeline pill map"
@@ -47,13 +50,11 @@ def test_status_pill_waiting_for_human():
 
 
 def test_status_pill_halted_silent():
-    """Status pill renders with correct label for HALTED_SILENT state (red solid)."""
+    """HALTED_SILENT shows INTERVENTION REQUIRED (L-04)."""
     with open('ui/index.html', 'r') as f:
         content = f.read()
-    
-    # Check for HALTED_SILENT state handling
-    assert 'HALTED_SILENT' in content or 'Halted' in content, \
-        "Should handle HALTED_SILENT state"
+    assert "INTERVENTION REQUIRED" in content, "HALTED_SILENT user label"
+    assert "HALTED_SILENT" in content, "State key still present for mapping"
 
 
 def test_status_pill_blocked():

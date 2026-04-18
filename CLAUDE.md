@@ -215,7 +215,7 @@ VALID_STATES = [
 ]
 ```
 
-`QUEUE_HALTED` is written when the project queue is active but all remaining entries are blocked, in dependency hold, or fail preflight. The `pipeline_state.json` will additionally contain `queue_halted_reason: "all_blocked" | "all_dependency_hold" | "mixed"`. The Pipeline Monitor surfaces this state with an amber "Queue: halted" pill. The orchestrator exits cleanly; the queue screen shows which projects are blocked and why.
+`QUEUE_HALTED` is written when the project queue is active but all remaining entries are blocked, in dependency hold, or fail preflight. The `pipeline_state.json` will additionally contain `queue_halted_reason: "all_blocked" | "all_dependency_hold" | "mixed"`. In the dashboard, the **pipeline status pill** for this state is labeled **Queue stalled** (`ui/index.html` `PIPELINE_LIVE_PILL`). Do not confuse that with the header **Queue: halted** *chip* (navigation to the queue when `queue_halted` is true) — different control, different copy. `POST /api/queue/trigger-next` returns `queue_halted_reason` when it cannot start a project so the queue UI can show a matching **Queue stalled — …** toast. The orchestrator exits cleanly; the queue screen shows which projects are blocked and why.
 
 `pipeline_state.json` has **two** status fields: `status` and `pipeline_status`. Both must be updated together on any state transition — `transition_state()` writes both. Never update one without the other.
 
@@ -531,7 +531,7 @@ Clearing a parent (`parent_id: null`) via the API restores a `DEPENDENCY_HOLD` c
 
 ### `QUEUE_HALTED` pipeline status
 
-`QUEUE_HALTED` is one of the 8 valid `pipeline_status` values (see State Machine Rules). It is set by the orchestrator when all remaining queue entries are blocked, in dependency hold, or fail preflight. The `pipeline_state.json` also contains `queue_halted_reason: "all_blocked" | "all_dependency_hold" | "mixed"`. The Pipeline Monitor surfaces this as an amber "Queue: halted" pill.
+`QUEUE_HALTED` is one of the 8 valid `pipeline_status` values (see State Machine Rules). It is set by the orchestrator when all remaining queue entries are blocked, in dependency hold, or fail preflight. The `pipeline_state.json` also contains `queue_halted_reason: "all_blocked" | "all_dependency_hold" | "mixed"`. The dashboard pill label is **Queue stalled**; the header **Queue: halted** chip is separate (see `QUEUE_HALTED` paragraph in State Machine Rules above).
 
 ---
 

@@ -182,10 +182,12 @@ Responsive: on narrow screens, stack vertically (header → phase → roadmap �
 
 | Status | Treatment (intent) |
 |--------|---------------------|
-| RUNNING | Amber pulse |
-| WAITING_FOR_SENTINEL | Amber pulse; label includes waiting agent where applicable |
-| WAITING_FOR_HUMAN | Orange solid — human action required |
-| HALTED_SILENT / BLOCKED | Red solid |
+| RUNNING | Teal `run-pulse` (active compute) |
+| WAITING_FOR_SENTINEL | Static amber; pill **RUNNING (agent)**; header may show **RUNNING (agent) — {agent}** when `current_agent` is set |
+| WAITING_FOR_HUMAN | Orange solid; pill **NEEDS YOUR INPUT** |
+| HALTED_SILENT | Red solid; pill **INTERVENTION REQUIRED** (native `title` with escalation-failure hint) |
+| BLOCKED | Red solid |
+| Other `pipeline_status` values | See `docs/prd/AUTODEV-UI-PRD.md` § Header Bar (`PIPELINE_LIVE_PILL` in `ui/index.html`) |
 | Orchestrator dead while RUNNING / WAITING_FOR_SENTINEL | Override: ORCHESTRATOR DOWN (red) |
 
 #### Current Phase Panel (left)

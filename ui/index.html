@@ -275,20 +275,34 @@
         // ─── Unified pipeline + queue status pills (pipeline > queue for primary pill) ───
         const PIPELINE_BLOCKED_TOOLTIP = 'Pipeline execution is blocked';
         const QUEUE_BLOCKED_TOOLTIP = 'Row is blocked in queue.';
-        const QUEUE_CURRENT_TOOLTIP = 'Current project in the queue. Live run status is not available for this path.';
+        const QUEUE_CURRENT_TOOLTIP =
+            'Active queue slot for this path. Live pipeline status is not available until the orchestrator runs here.';
 
         /** Live pipeline_status from GET /api/queue → single pill (shared with Pipeline Monitor header). */
         const PIPELINE_LIVE_PILL = {
             RUNNING: { label: 'RUNNING', className: 'bg-teal-600 text-white run-pulse', title: '' },
-            WAITING_FOR_SENTINEL: { label: 'WAITING', className: 'bg-amber-500 text-slate-900', title: '' },
-            WAITING_FOR_HUMAN: { label: 'WAITING FOR HUMAN', className: 'bg-orange-500 text-white', title: '' },
-            HALTED_SILENT: { label: 'HALTED', className: 'bg-red-600 text-white', title: '' },
+            WAITING_FOR_SENTINEL: { label: 'RUNNING (agent)', className: 'bg-amber-500 text-slate-900', title: '' },
+            WAITING_FOR_HUMAN: { label: 'NEEDS YOUR INPUT', className: 'bg-orange-500 text-white', title: '' },
+            HALTED_SILENT: {
+                label: 'INTERVENTION REQUIRED',
+                className: 'bg-red-600 text-white',
+                title:
+                    'Pipeline halted — escalation path failed; check orchestrator logs and project escalation_failed.json.',
+            },
             BLOCKED: { label: 'BLOCKED', className: 'bg-red-600 text-white', title: PIPELINE_BLOCKED_TOOLTIP },
             PIPELINE_COMPLETE: { label: 'COMPLETE', className: 'bg-emerald-700 text-white', title: '' },
             STOPPED: { label: 'STOPPED', className: 'bg-red-600 text-white', title: '' },
-            QUEUE_HALTED: { label: 'QUEUE HALTED', className: 'bg-amber-600 text-slate-900', title: '' },
+            QUEUE_HALTED: { label: 'Queue stalled', className: 'bg-amber-600 text-slate-900', title: '' },
             IDLE: { label: 'IDLE', className: 'bg-slate-600 text-slate-200', title: '' },
             UNKNOWN: { label: 'UNKNOWN', className: 'bg-slate-600 text-slate-200', title: '' },
+        };
+
+        /** POST /api/queue/trigger-next `queue_halted_reason` → one-line user message (L-07). */
+        const QUEUE_HALTED_TRIGGER_MSG = {
+            all_blocked: 'Queue stalled — No projects ready.',
+            all_dependency_hold: 'Queue stalled — All waiting on parents.',
+            mixed: 'Queue stalled — Multiple blockers.',
+            all_completed: 'Queue stalled — No projects left to run.',
         };
 
         const STATE_LABELS = {
@@ -304,10 +318,10 @@
         function queueOnlyRowPill(state) {
             const q = {
                 READY: { label: 'READY', className: 'bg-slate-600 text-slate-200', title: '' },
-                ACTIVE: { label: 'CURRENT', className: 'bg-slate-600 text-slate-200', title: QUEUE_CURRENT_TOOLTIP },
+                ACTIVE: { label: 'ACTIVE', className: 'bg-slate-600 text-slate-200', title: QUEUE_CURRENT_TOOLTIP },
                 BLOCKED: { label: 'QUEUE BLOCKED', className: 'bg-amber-600 text-slate-900', title: QUEUE_BLOCKED_TOOLTIP },
-                SKIPPED_PENDING: { label: 'SKIPPED_PENDING', className: 'bg-indigo-900 text-indigo-200', title: '' },
-                DEPENDENCY_HOLD: { label: 'DEPENDENCY_HOLD', className: 'bg-orange-600 text-white', title: '' },
+                SKIPPED_PENDING: { label: 'Preflight failed', className: 'bg-indigo-900 text-indigo-200', title: '' },
+                DEPENDENCY_HOLD: { label: 'Waiting on parent', className: 'bg-orange-600 text-white', title: '' },
                 ESCALATION: { label: 'ESCALATION', className: 'bg-amber-500 text-slate-900', title: '' },
                 COMPLETED: { label: 'COMPLETED', className: 'bg-emerald-800 text-emerald-200', title: '' },
                 FAILED: { label: 'FAILED', className: 'bg-red-700 text-white', title: '' },
@@ -4729,8 +4743,13 @@
                     .then(async r => {
                         const d = await r.json().catch(() => ({}));
                         if (r.status === 409) { setTriggerMsg('A project is already active.'); return; }
-                        if (d.queue_halted) { setTriggerMsg('Queue halted — all projects blocked.'); }
-                        else { setTriggerMsg(`Started: ${d.started || 'next project'}`); }
+                        if (d.queue_halted) {
+                            const rsn = d.queue_halted_reason;
+                            setTriggerMsg(
+                                (rsn && QUEUE_HALTED_TRIGGER_MSG[rsn]) ||
+                                    'Queue stalled — resolve blockers or dependency holds.'
+                            );
+                        } else { setTriggerMsg(`Started: ${d.started || 'next project'}`); }
                         fetchQueue();
                     })
                     .catch(() => setTriggerMsg('Request failed'))
@@ -5874,16 +5893,21 @@
                     status === "STOPPED" ||
                     queueHaltedEscalationForRecovery);
 
-            // Derive header status label and class
+            // Derive header status label, optional native tooltip (title), and class
             let statusLabel = '--';
+            let statusTitle = '';
             let statusClass = 'bg-[#1a1d21] text-slate-300';
             if (!alive && (status === 'RUNNING' || status === 'WAITING_FOR_SENTINEL')) {
                 statusLabel = 'ORCHESTRATOR DOWN';
                 statusClass = 'bg-red-600 text-white';
             } else if (status in STATE_LABELS) {
                 statusLabel = STATE_LABELS[status];
+                const pillMeta = PIPELINE_LIVE_PILL[status];
+                if (pillMeta && pillMeta.title) {
+                    statusTitle = pillMeta.title;
+                }
                 if (status === 'WAITING_FOR_SENTINEL' && pState.current_agent) {
-                    statusLabel = `WAITING — ${pState.current_agent}`;
+                    statusLabel = `RUNNING (agent) — ${pState.current_agent}`;
                 }
                 statusClass = STATE_CLASSES[status] || 'bg-[#1a1d21] text-slate-300';
             }
@@ -5977,6 +6001,7 @@
                                     )}
                                     <span
                                         className={`header-text px-3 py-1 rounded-full text-sm font-medium ${statusClass}`}
+                                        title={statusTitle || undefined}
                                     >
                                         {statusLabel}
                                     </span>

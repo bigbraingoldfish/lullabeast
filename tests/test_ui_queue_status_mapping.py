@@ -43,6 +43,9 @@ def test_terminal_pipeline_status_not_teal_pulse(html_content):
                 pytest.fail(f"{term} mapping must not include run-pulse near key")
 
 
-def test_current_queue_slot_label(html_content):
-    """Queue-only ACTIVE slot uses neutral CURRENT label (no false running signal)."""
-    assert re.search(r"['\"]CURRENT['\"]", html_content), "CURRENT label for queue slot expected"
+def test_active_queue_slot_label(html_content):
+    """Queue-only ACTIVE slot uses ACTIVE label (matches queue/API enum, L-01)."""
+    assert re.search(
+        r"ACTIVE:\s*\{[^}]*label:\s*['\"]ACTIVE['\"]",
+        html_content,
+    ), "ACTIVE label for queue-only ACTIVE slot expected (queueOnlyRowPill)"

@@ -165,18 +165,25 @@ Responsive: on narrow screens, stack vertically (phase → roadmap → feed).
 
 **Left:** "AUTODEV" wordmark in a distinctive display font. Not Inter. Not system font. Pick something with character — something monospace-adjacent or industrial. Suggest: `JetBrains Mono`, `Space Mono`, or `Courier Prime` for the wordmark specifically.
 
-**Center:** Pipeline status pill. Large, color-coded, immediately readable from across the room.
+**Center:** Pipeline status pill (`pipeline_status` from `GET /api/state`). Large, color-coded, immediately readable from across the room. Canonical strings and Tailwind classes live in `ui/index.html` (`PIPELINE_LIVE_PILL`); this table is the operator-facing contract.
 
-| Status | Color | Label |
-|---|---|---|
-| RUNNING | Amber pulse | RUNNING |
-| WAITING_FOR_SENTINEL | Amber pulse | WAITING — {agent} |
-| WAITING_FOR_HUMAN | Orange solid | WAITING FOR HUMAN |
-| HALTED_SILENT | Red solid | HALTED SILENT |
-| BLOCKED | Red solid | BLOCKED |
-| Orchestrator dead + status RUNNING | Red solid | ORCHESTRATOR DOWN |
+| `pipeline_status` | Animation | UI label (header / live pill) | Notes |
+|---|---|---|---|
+| RUNNING | Teal `run-pulse` | RUNNING | Active compute |
+| WAITING_FOR_SENTINEL | Static amber (no pulse) | `RUNNING (agent)`; when `current_agent` is set, header shows `RUNNING (agent) — {agent}` | Agent invoked; polling for sentinel |
+| WAITING_FOR_HUMAN | Static orange | NEEDS YOUR INPUT | Escalation / human gate |
+| HALTED_SILENT | Static red | INTERVENTION REQUIRED | Native `title` on pill: escalation path failed; check orchestrator logs and project `escalation_failed.json` |
+| BLOCKED | Static red | BLOCKED | |
+| PIPELINE_COMPLETE | Static green | COMPLETE | |
+| STOPPED | Static red | STOPPED | Operator halt |
+| QUEUE_HALTED | Static amber | Queue stalled | Distinct from the header **Queue: halted** chip (navigation); that chip text is unchanged |
+| IDLE | Static slate | IDLE | |
+| UNKNOWN | Static slate | UNKNOWN | |
+| Orchestrator dead + (`RUNNING` or `WAITING_FOR_SENTINEL`) | — | ORCHESTRATOR DOWN (red) | Overrides pill while process is down mid-flight |
 
-"Amber pulse" = animated pulse to indicate active processing. Static colors for terminal states.
+**Animation:** Only `RUNNING` uses the repeating `run-pulse` animation. `WAITING_FOR_SENTINEL`, `WAITING_FOR_HUMAN`, terminal states, and `QUEUE_HALTED` use static pills (see `tests/test_ui_status_pulse_animation.py`).
+
+**Queue row pills:** When `GET /api/queue` supplies `live_pipeline_status` for a row, the row pill uses the same live labels as above. Otherwise the UI uses queue-only labels (`ACTIVE`, `Preflight failed`, `Waiting on parent`, `QUEUE BLOCKED`, etc.) from `queueOnlyRowPill` in `ui/index.html`.
 
 **Right:** Project folder path in monospace, truncated to last two path segments. Orchestrator liveness indicator — small dot, green if alive, red if dead (derived from lock file check).
 
