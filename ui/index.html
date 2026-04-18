@@ -5304,6 +5304,7 @@
             const [pState, setPState] = useState({
                 pipeline_status: 'Loading...',
                 orchestrator_alive: true,
+                orchestrator_spawn_log_tail: [],
                 current_agent: null,
                 project_path: null,
                 current_phase_raw_id: '',
@@ -5891,6 +5892,15 @@
                                         The orchestrator process exited while pipeline state still shows an in-flight run.
                                         Restart it to resume sentinel polling and agent work.
                                     </p>
+                                    {Array.isArray(pState.orchestrator_spawn_log_tail) &&
+                                    pState.orchestrator_spawn_log_tail.length > 0 ? (
+                                        <pre
+                                            className="text-xs text-slate-400 bg-black/30 border border-slate-700/50 rounded p-2 mb-3 overflow-auto max-h-24 font-mono whitespace-pre-wrap break-all"
+                                            data-testid="pipeline-orchestrator-spawn-log-tail"
+                                        >
+                                            {pState.orchestrator_spawn_log_tail.join("\n")}
+                                        </pre>
+                                    ) : null}
                                     <button
                                         type="button"
                                         onClick={handleRestartOrchestrator}
