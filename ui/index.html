@@ -332,6 +332,14 @@
                 if (meta) return { label: meta.label, className: meta.className, title: meta.title || '' };
                 return { label: String(live), className: 'bg-slate-600 text-slate-200', title: '' };
             }
+            // Row ACTIVE in queue file but path does not match global pipeline_state (defensive).
+            if (entry.state === 'ACTIVE') {
+                return {
+                    label: 'ACTIVE (stale)',
+                    className: 'bg-slate-700 text-slate-400',
+                    title: 'Queue row is ACTIVE but does not match the current pipeline project_path.',
+                };
+            }
             return queueOnlyRowPill(entry.state);
         }
         
@@ -472,6 +480,38 @@
             return { friendly: detail.slice(0, i), technical: detail.slice(i + 1).trim() };
         }
 
+        /** Human-readable message from FastAPI JSON body (`detail` string or object). */
+        function formatFetchDetail(d) {
+            if (!d || d.detail === undefined || d.detail === null) {
+                return "";
+            }
+            const det = d.detail;
+            if (typeof det === "string") {
+                return det;
+            }
+            if (typeof det === "object" && det !== null && typeof det.message === "string") {
+                let s = det.message;
+                const lines = [];
+                if (det.state_path) lines.push(`pipeline_state path: ${det.state_path}`);
+                if (det.symlink_path) lines.push(`symlink target: ${det.symlink_path}`);
+                if (lines.length) s += "\n" + lines.join("\n");
+                return s;
+            }
+            try {
+                return JSON.stringify(det);
+            } catch (e) {
+                return String(det);
+            }
+        }
+
+        /** Error string for failed /api/resume-orchestrator (handles 503 JSON after reconcile). */
+        function formatResumeOrchestratorError(od, status) {
+            if (status === 503 && od && typeof od === "object" && od.reconciled === true && od.error) {
+                return String(od.error);
+            }
+            return formatFetchDetail(od) || `Resume orchestrator failed (${status})`;
+        }
+
         // ─── Modals ───────────────────────────────────────────────────────────────
 
         function ConfirmationModal({ command, onConfirm, onDismiss, busy }) {
@@ -564,6 +604,7 @@
             escalation_resets,
             orchestrator_alive,
             onOrchestratorRestarted,
+            onResumeOrchestratorResponse,
         }) {
             const [commandSent, setCommandSent] = useState(false);
             const [lastSubmittedCommand, setLastSubmittedCommand] = useState(null);
@@ -720,12 +761,15 @@
                 try {
                     const r = await fetch("/api/resume-orchestrator", { method: "POST" });
                     const d = await r.json().catch(() => ({}));
+                    if (typeof onResumeOrchestratorResponse === "function") {
+                        onResumeOrchestratorResponse(d, { ok: r.ok, status: r.status });
+                    }
                     if (!r.ok) {
-                        const msg =
-                            typeof d.detail === "string"
-                                ? d.detail
-                                : `Restart failed (${r.status})`;
-                        setRestartError(msg);
+                        if (r.status === 503 && d && d.reconciled === true) {
+                            setRestartError("");
+                        } else {
+                            setRestartError(formatFetchDetail(d) || `Restart failed (${r.status})`);
+                        }
                         return;
                     }
                     if (typeof onOrchestratorRestarted === "function") onOrchestratorRestarted();
@@ -908,27 +952,51 @@
                     typeof cd.detail === "string" ? cd.detail : `Command failed (${cr.status})`;
                 return { ok: false, error: msg };
             }
-            await fetch("/api/resume-orchestrator", { method: "POST" });
-            return { ok: true };
+            const orch = await fetch("/api/resume-orchestrator", { method: "POST" });
+            const od = await orch.json().catch(() => ({}));
+            if (!orch.ok) {
+                return {
+                    ok: false,
+                    error: formatResumeOrchestratorError(od, orch.status),
+                    resumeOrch: { body: od, fetchOk: orch.ok, status: orch.status },
+                };
+            }
+            return {
+                ok: true,
+                resumeOrch: { body: od, fetchOk: orch.ok, status: orch.status },
+            };
         }
 
         // ─── StoppedRecoveryPanel ─────────────────────────────────────────────────
 
-        function StoppedRecoveryPanel({ current_phase_raw_id, escalation_resets, onResumeSent }) {
+        function StoppedRecoveryPanel({
+            current_phase_raw_id,
+            escalation_resets,
+            onResumeSent,
+            onResumeOrchestratorResponse,
+        }) {
             const [sent, setSent] = useState(false);
+            const [flowError, setFlowError] = useState("");
             const isCapReached = (escalation_resets || 0) >= 3;
 
             const handleResume = async (command) => {
+                setFlowError("");
                 try {
                     const result = await runStoppedResumeFlow(command);
+                    if (result.resumeOrch && typeof onResumeOrchestratorResponse === "function") {
+                        onResumeOrchestratorResponse(result.resumeOrch.body, {
+                            ok: result.resumeOrch.fetchOk,
+                            status: result.resumeOrch.status,
+                        });
+                    }
                     if (!result.ok) {
-                        console.error(result.error);
+                        setFlowError(result.error || "Resume failed");
                         return;
                     }
                     setSent(true);
                     if (typeof onResumeSent === "function") onResumeSent();
                 } catch (e) {
-                    console.error("Resume flow failed:", e);
+                    setFlowError(String(e?.message || e));
                 }
             };
 
@@ -995,6 +1063,9 @@
                             {isCapReached && (
                                 <p className="text-xs text-amber-600 pt-1">Reset cap reached (3/3) — only Resume is available.</p>
                             )}
+                            {flowError ? (
+                                <p className="header-text text-xs text-red-400 mt-1 whitespace-pre-wrap">{flowError}</p>
+                            ) : null}
                         </div>
                     )}
                 </div>
@@ -1003,12 +1074,35 @@
 
         // ─── CurrentPhasePanel ────────────────────────────────────────────────────
 
-        function CurrentPhasePanel({ current_phase_raw_id, current_agent, roadmap, planner_retries, executor_retries, reviewer_retries, last_error_code, last_action_timestamp, skill_injected, skill_agent, pipeline_status, metricsSummary, escalation_resets }) {
+        function CurrentPhasePanel({
+            current_phase_raw_id,
+            current_agent,
+            roadmap,
+            planner_retries,
+            executor_retries,
+            reviewer_retries,
+            last_error_code,
+            last_action_timestamp,
+            skill_injected,
+            skill_agent,
+            pipeline_status,
+            metricsSummary,
+            escalation_resets,
+            onResumeSent,
+            onResumeOrchestratorResponse,
+        }) {
             if (pipeline_status === 'PIPELINE_COMPLETE') {
                 return <PipelineCompletePanel roadmap={roadmap} metricsSummary={metricsSummary} />;
             }
             if (pipeline_status === 'STOPPED') {
-                return <StoppedRecoveryPanel current_phase_raw_id={current_phase_raw_id} escalation_resets={escalation_resets} />;
+                return (
+                    <StoppedRecoveryPanel
+                        current_phase_raw_id={current_phase_raw_id}
+                        escalation_resets={escalation_resets}
+                        onResumeSent={onResumeSent}
+                        onResumeOrchestratorResponse={onResumeOrchestratorResponse}
+                    />
+                );
             }
 
             const goal = getGoalForPhase(current_phase_raw_id, roadmap);
@@ -5230,6 +5324,8 @@
             const [resumeError, setResumeError] = useState("");
             const [orchRestartBusy, setOrchRestartBusy] = useState(false);
             const [orchRestartError, setOrchRestartError] = useState("");
+            /** One-line header strip after resume-orchestrator symlink reconcile (Policy A). */
+            const [resumeSymlinkNotice, setResumeSymlinkNotice] = useState(null);
             const [projectSwitchOpen, setProjectSwitchOpen] = useState(false);
             const [swPath, setSwPath] = useState("");
             const [swRecents, setSwRecents] = useState([]);
@@ -5333,6 +5429,7 @@
                 setSwDestructiveSelected([]);
                 setSwPath(pState.project_path || "");
                 setSwFsStatus(null);
+                setResumeSymlinkNotice(null);
                 setProjectSwitchOpen(true);
             }
 
@@ -5376,6 +5473,7 @@
                         setSwCoherence(d.coherence || null);
                         if (d.ok && d.started) {
                             closeProjectSwitch();
+                            setResumeSymlinkNotice(null);
                             fetchState();
                             fetchRoadmap();
                             fetchMetricsSummary();
@@ -5477,11 +5575,40 @@
                 }
             };
 
+            function applyResumeOrchestratorClientResult(d, res) {
+                const ok = res && res.ok;
+                const status = res && res.status;
+                if (ok) {
+                    if (d && d.reconciled === true) {
+                        setResumeSymlinkNotice(
+                            "Resume re-aligned the project symlink to match pipeline state."
+                        );
+                    } else {
+                        setResumeSymlinkNotice(null);
+                    }
+                    return;
+                }
+                if (status === 503 && d && d.reconciled === true) {
+                    const err = d.error || "Failed to spawn";
+                    setResumeSymlinkNotice(
+                        `Symlink was re-aligned to match pipeline state; orchestrator did not start (${err}). Click Restart again.`
+                    );
+                    return;
+                }
+                setResumeSymlinkNotice(null);
+            }
+
             const handleHeaderResume = async () => {
                 setResumeError("");
                 setResumeBusy(true);
                 try {
                     const result = await runStoppedResumeFlow("RETRY");
+                    if (result.resumeOrch) {
+                        applyResumeOrchestratorClientResult(result.resumeOrch.body, {
+                            ok: result.resumeOrch.fetchOk,
+                            status: result.resumeOrch.status,
+                        });
+                    }
                     if (!result.ok) {
                         setResumeError(result.error);
                         return;
@@ -5500,12 +5627,13 @@
                 try {
                     const r = await fetch("/api/resume-orchestrator", { method: "POST" });
                     const d = await r.json().catch(() => ({}));
+                    applyResumeOrchestratorClientResult(d, { ok: r.ok, status: r.status });
                     if (!r.ok) {
-                        const msg =
-                            typeof d.detail === "string"
-                                ? d.detail
-                                : `Restart failed (${r.status})`;
-                        setOrchRestartError(msg);
+                        if (r.status === 503 && d && d.reconciled === true) {
+                            setOrchRestartError("");
+                        } else {
+                            setOrchRestartError(formatFetchDetail(d) || `Restart failed (${r.status})`);
+                        }
                         return;
                     }
                     fetchState();
@@ -5693,9 +5821,14 @@
                                 ) : null}
                             </div>
                         </div>
-                        {pathBroken ? (
-                            <div className="border-t border-amber-800/50 bg-amber-950/20 px-6 py-2">
-                                <p className="header-text text-xs text-amber-200/90">{repairPathHintText}</p>
+                        {pathBroken || resumeSymlinkNotice ? (
+                            <div className="border-t border-amber-800/50 bg-amber-950/20 px-6 py-2 space-y-2">
+                                {pathBroken ? (
+                                    <p className="header-text text-xs text-amber-200/90">{repairPathHintText}</p>
+                                ) : null}
+                                {resumeSymlinkNotice ? (
+                                    <p className="header-text text-xs text-amber-200/90">{resumeSymlinkNotice}</p>
+                                ) : null}
                             </div>
                         ) : null}
                         {hasGitOperationFailure ? (
@@ -5737,6 +5870,8 @@
                                 pipeline_status={status}
                                 metricsSummary={metricsSummary}
                                 escalation_resets={pState.escalation_resets || 0}
+                                onResumeSent={fetchState}
+                                onResumeOrchestratorResponse={applyResumeOrchestratorClientResult}
                             />
                             {showRestartOrchestratorButton && (
                                 <div
@@ -5771,6 +5906,7 @@
                                 escalation_resets={pState.escalation_resets || 0}
                                 orchestrator_alive={alive}
                                 onOrchestratorRestarted={fetchState}
+                                onResumeOrchestratorResponse={applyResumeOrchestratorClientResult}
                             />
                         </div>
 

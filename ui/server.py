@@ -1005,39 +1005,163 @@ def _write_queue_file(path: str, data: dict) -> None:
     _write_json_atomic(path, data)
 
 
+def _queue_demote_stale_active_entries(config: dict, canonical_real: str) -> bool:
+    """Demote queue rows stuck in ACTIVE whose project_path realpath != *canonical*.
+
+    ``canonical_real`` may be any path string that resolves to the canonical project
+    directory (typically the same realpath as ``pipeline_state.json`` ``project_path``).
+
+    Returns True if ``pipeline_queue.json`` was modified. No-op when *canonical_real*
+    is empty or cannot be resolved (never demotes on bad input).
+    """
+    if not canonical_real or not str(canonical_real).strip():
+        return False
+    try:
+        target = os.path.realpath(os.path.expanduser(str(canonical_real)))
+    except OSError:
+        return False
+
+    q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
+    if not q_path:
+        return False
+    q = _read_queue_file(config)
+    entries = q.get("queue", [])
+    if not entries:
+        return False
+
+    changed = False
+    for e in entries:
+        if e.get("state") != "ACTIVE":
+            continue
+        ep = (e.get("project_path") or "").strip()
+        if not ep:
+            e["state"] = "READY"
+            e["started_at"] = None
+            changed = True
+            continue
+        try:
+            er = os.path.realpath(os.path.expanduser(ep))
+        except OSError:
+            e["state"] = "READY"
+            e["started_at"] = None
+            changed = True
+            continue
+        if er != target:
+            e["state"] = "READY"
+            e["started_at"] = None
+            changed = True
+    if changed:
+        _write_queue_file(q_path, q)
+    return changed
+
+
+def _queue_demote_stale_active_from_pipeline_state(config: dict) -> bool:
+    """Demote ACTIVE rows that disagree with ``pipeline_state.json`` ``project_path``."""
+    ps_path = os.path.expanduser(config.get("pipeline_state_path") or "")
+    if not ps_path or not os.path.exists(ps_path):
+        return False
+    ps = _read_json_file(ps_path) or {}
+    pp = (ps.get("project_path") or "").strip()
+    if not pp:
+        return False
+    return _queue_demote_stale_active_entries(config, pp)
+
+
+def _queue_entry_realpath(e: dict) -> str | None:
+    """Resolved realpath for a queue entry's ``project_path``, or None if missing/invalid."""
+    ep = (e.get("project_path") or "").strip()
+    if not ep:
+        return None
+    try:
+        return os.path.realpath(os.path.expanduser(ep))
+    except OSError:
+        return None
+
+
 def _queue_mark_matching_entry_active(config: dict, project_real: str) -> None:
-    """If a queue row's project_path realpath matches *project_real*, set state ACTIVE and started_at."""
+    """Align queue with the orchestrator spawn path: demote stale ACTIVE, promote match, pin to front.
+
+    Demotes any ACTIVE row whose project_path realpath differs from *project_real*,
+    sets ACTIVE + ``started_at`` on matching rows, then moves matching rows to positions
+    ``1..M`` (stable order), with all other rows following in their prior relative order.
+    Single atomic write when anything changes.
+    """
     from datetime import datetime, timezone as tz
 
     try:
         target = os.path.realpath(os.path.expanduser(str(project_real)))
     except OSError:
         return
+
     q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
+    if not q_path:
+        return
     q = _read_queue_file(config)
     entries = q.get("queue", [])
     if not entries:
         return
+
     now = datetime.now(tz.utc).isoformat()
     changed = False
+
     for e in entries:
-        ep = (e.get("project_path") or "").strip()
-        if not ep:
+        if e.get("state") != "ACTIVE":
             continue
-        try:
-            er = os.path.realpath(os.path.expanduser(ep))
-        except OSError:
+        er = _queue_entry_realpath(e)
+        if er is None:
+            e["state"] = "READY"
+            e["started_at"] = None
+            changed = True
             continue
         if er != target:
-            continue
+            e["state"] = "READY"
+            e["started_at"] = None
+            changed = True
+
+    by_position = sorted(entries, key=lambda x: x.get("position") or 0)
+    matching = []
+    non_matching = []
+    for e in by_position:
+        er = _queue_entry_realpath(e)
+        if er is not None and er == target:
+            matching.append(e)
+        else:
+            non_matching.append(e)
+
+    for e in matching:
         if e.get("state") != "ACTIVE":
             e["state"] = "ACTIVE"
             changed = True
         if not e.get("started_at"):
             e["started_at"] = now
             changed = True
+
+    if matching:
+        new_order = matching + non_matching
+        for i, e in enumerate(new_order, start=1):
+            if e.get("position") != i:
+                changed = True
+            e["position"] = i
+        q["queue"] = new_order
+    elif changed:
+        q["queue"] = by_position
+
     if changed:
         _write_queue_file(q_path, q)
+
+
+def _queue_entries_active_first_by_pipeline_state(ordered: list, ps_real: str) -> list:
+    """Stable read-only reorder: rows whose path realpath matches *ps_real* appear first."""
+    if not ps_real or not ordered:
+        return list(ordered)
+    front, rest = [], []
+    for e in ordered:
+        er = _queue_entry_realpath(e)
+        if er and er == ps_real:
+            front.append(e)
+        else:
+            rest.append(e)
+    return front + rest
 
 
 def _merge_ingested_active_project(ordered, ps):
@@ -2226,15 +2350,97 @@ def post_resume_ready():
     return {"ok": True}
 
 
+def _repoint_pipeline_project_symlink(config: dict, target_real: str) -> dict:
+    """Repoint pipeline-project symlink to target_real (Policy A: pipeline_state wins).
+
+    Does not mutate pipeline_state.json. Returns dict with keys:
+    ok (bool), error (str|None), previous_symlink_real (str|None).
+    """
+    link_raw = (
+        config.get("project_dir_path")
+        or config.get("symlink_target")
+        or config.get("project_dir")
+    )
+    link_raw = os.path.expanduser(link_raw) if link_raw else None
+    if not link_raw or not str(link_raw).strip():
+        return {
+            "ok": False,
+            "error": (
+                "project_dir_path (or symlink_target / project_dir) is not set in config; "
+                "cannot repoint symlink"
+            ),
+            "previous_symlink_real": None,
+        }
+    link_path = link_raw
+
+    if not os.path.isdir(target_real):
+        return {
+            "ok": False,
+            "error": (
+                f"Target project path does not exist or is not a directory: {target_real}"
+            ),
+            "previous_symlink_real": None,
+        }
+
+    previous_symlink_real: str | None = None
+    try:
+        if os.path.lexists(link_path):
+            try:
+                previous_symlink_real = os.path.realpath(link_path)
+            except OSError:
+                previous_symlink_real = None
+
+        if os.path.isdir(link_path) and not os.path.islink(link_path):
+            return {
+                "ok": False,
+                "error": (
+                    "project_dir_path is a real directory, not a symlink; "
+                    "refusing to delete or replace"
+                ),
+                "previous_symlink_real": previous_symlink_real,
+            }
+        if os.path.isfile(link_path) and not os.path.islink(link_path):
+            return {
+                "ok": False,
+                "error": "project_dir_path exists as a file; refusing to replace",
+                "previous_symlink_real": previous_symlink_real,
+            }
+
+        parent = os.path.dirname(link_path)
+        if parent:
+            try:
+                os.makedirs(parent, exist_ok=True)
+            except OSError as exc:
+                return {
+                    "ok": False,
+                    "error": f"Cannot create parent directory for symlink: {exc}",
+                    "previous_symlink_real": previous_symlink_real,
+                }
+
+        if os.path.lexists(link_path) and os.path.islink(link_path):
+            os.remove(link_path)
+        os.symlink(target_real, link_path)
+    except OSError as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "previous_symlink_real": previous_symlink_real,
+        }
+    return {"ok": True, "error": None, "previous_symlink_real": previous_symlink_real}
+
+
 @app.post("/api/resume-orchestrator")
 def post_resume_orchestrator():
     """Spawn the orchestrator process as a non-blocking subprocess.
 
     Reads project_path from pipeline_state.json and autodev_repo_path from config.
-    If pipeline_state.project_path disagrees with the pipeline-project symlink target,
-    uses the symlink realpath so resume targets the active project directory.
+    If pipeline_state.project_path disagrees with the pipeline-project symlink realpath,
+    repoints the symlink to match state (Policy A), logs, then spawns.
+    Returns 422 if the symlink path cannot be safely updated (e.g. real directory at link).
     Returns 409 if pipeline.lock indicates an orchestrator is already running.
     Returns 200 immediately without waiting for the orchestrator to start.
+    If spawn fails after a successful repoint, returns 503 with JSON body including
+    reconciled: true so the client can retry.
     """
     config = load_config()
     pipeline_state_path = config.get("pipeline_state_path")
@@ -2252,18 +2458,40 @@ def post_resume_orchestrator():
         except OSError:
             symlink_real = None
 
+    reconciled = False
+    reconcile_action = None
+    previous_symlink_real_out = None
+
     if symlink_real and project_path:
         try:
             state_real = os.path.realpath(os.path.expanduser(str(project_path)))
         except OSError:
             state_real = str(project_path)
         if state_real != symlink_real:
-            project_path = symlink_real
+            repoint = _repoint_pipeline_project_symlink(config, state_real)
+            if not repoint.get("ok"):
+                raise HTTPException(
+                    status_code=422,
+                    detail=repoint.get("error") or "Could not repoint pipeline-project symlink",
+                )
+            reconciled = True
+            reconcile_action = "symlink_to_state"
+            previous_symlink_real_out = repoint.get("previous_symlink_real")
+            logger.info(
+                "[RESUME] reconcile symlink_to_state prev=%s target=%s",
+                previous_symlink_real_out,
+                state_real,
+            )
     elif symlink_real and not project_path:
         project_path = symlink_real
 
     if not project_path:
         raise HTTPException(status_code=503, detail="No project_path in pipeline_state.json")
+
+    try:
+        canonical_project_real = os.path.realpath(os.path.expanduser(str(project_path)))
+    except OSError:
+        canonical_project_real = str(project_path)
 
     lock_path = _expand_lock_path(config)
     if lock_path:
@@ -2277,14 +2505,33 @@ def post_resume_orchestrator():
 
     spawned = _spawn_orchestrator(project_path, config)
     if not spawned.get("ok"):
-        raise HTTPException(status_code=503, detail=spawned.get("error") or "Failed to spawn orchestrator")
+        err_msg = spawned.get("error") or "Failed to spawn orchestrator"
+        if reconciled:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "ok": False,
+                    "reconciled": True,
+                    "reconcile_action": "symlink_to_state",
+                    "previous_symlink_real": previous_symlink_real_out,
+                    "canonical_project_real": canonical_project_real,
+                    "error": err_msg,
+                },
+            )
+        raise HTTPException(status_code=503, detail=err_msg)
 
     try:
         _queue_mark_matching_entry_active(config, project_path)
     except Exception:
         pass
 
-    return {"ok": True}
+    return {
+        "ok": True,
+        "reconciled": reconciled,
+        "reconcile_action": reconcile_action if reconciled else None,
+        "previous_symlink_real": previous_symlink_real_out if reconciled else None,
+        "canonical_project_real": canonical_project_real,
+    }
 
 
 @app.get("/api/roadmap")
@@ -5334,6 +5581,10 @@ def _queue_run_trigger_next_logic(config: dict) -> dict:
     if not entries:
         return {"ok": False, "reason": "queue_empty"}
 
+    _queue_demote_stale_active_from_pipeline_state(config)
+    q = _read_queue_file(config)
+    entries = q.get("queue", [])
+
     if any(e["state"] == "ACTIVE" for e in entries):
         raise HTTPException(status_code=409, detail="A project is already ACTIVE in the queue")
 
@@ -5386,6 +5637,7 @@ def _maybe_auto_kick_queue_after_manual_to_auto(config: dict) -> dict:
     st = (ps.get("pipeline_status") or "").strip()
     if st in ("RUNNING", "WAITING_FOR_SENTINEL"):
         return {"attempted": False, "reason": "pipeline_status_busy"}
+    _queue_demote_stale_active_from_pipeline_state(config)
     q = _read_queue_file(config)
     if any(e["state"] == "ACTIVE" for e in q.get("queue", [])):
         return {"attempted": False, "reason": "queue_has_active"}
@@ -5451,6 +5703,8 @@ def get_queue():
         ps_real = ""
 
     merged, _ingested = _merge_ingested_active_project(ordered, ps)
+    # Sort after merge so synthetic ``ingest-*`` rows (active project not in queue file) are first too.
+    merged = _queue_entries_active_first_by_pipeline_state(merged, ps_real)
 
     enriched = []
     for e in merged:
@@ -6232,6 +6486,11 @@ async def post_setup_switch_project(request: Request):
             "coherence": {"ok": True, "issues": []},
             "error": f"Could not write pipeline_state.json: {exc}",
         }
+
+    try:
+        _queue_mark_matching_entry_active(config, repo_abs)
+    except Exception:
+        pass
 
     return {
         "ok": True,
