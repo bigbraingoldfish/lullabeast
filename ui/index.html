@@ -1347,9 +1347,20 @@
             const goal = getGoalForPhase(current_phase_raw_id, roadmap);
 
             if (!current_phase_raw_id) {
-                return (
-                    <div className="text-slate-400 italic">No active phase</div>
-                );
+                if (pipeline_status === "IDLE" || pipeline_status === "UNKNOWN") {
+                    return (
+                        <div className="space-y-1" data-testid="current-phase-empty-idle">
+                            <div className="text-slate-400">No pipeline running.</div>
+                            <p className="text-slate-500 text-sm leading-relaxed">
+                                Use <span className="text-slate-400">Project Ideas</span> to draft a PRD, then{" "}
+                                <span className="text-slate-400">Setup &amp; Preflight</span> to attach a repo and
+                                launch. Open the <span className="text-slate-400">queue</span> when you are ready to
+                                run projects.
+                            </p>
+                        </div>
+                    );
+                }
+                return <div className="text-slate-400 italic">No active phase</div>;
             }
 
             return (
@@ -1407,7 +1418,7 @@
         // Wrapped in React.memo so it only re-renders when roadmap or metricsSummary
         // props actually change — avoids DOM churn caused by parent pState polling.
 
-        const RoadmapPanel = React.memo(function RoadmapPanel({ roadmap, metricsSummary }) {
+        const RoadmapPanel = React.memo(function RoadmapPanel({ roadmap, metricsSummary, pipelineStatus }) {
             const [expandedPhaseId, setExpandedPhaseId] = useState(null);
 
             const handlePhaseClick = (phaseId) => {
@@ -1415,9 +1426,20 @@
             };
 
             if (!roadmap || !Array.isArray(roadmap) || roadmap.length === 0) {
-                return (
-                    <div className="text-slate-500 italic">No roadmap data available</div>
-                );
+                if (pipelineStatus === "IDLE" || pipelineStatus === "UNKNOWN") {
+                    return (
+                        <div className="space-y-1" data-testid="roadmap-empty-idle">
+                            <div className="text-slate-500">No roadmap loaded for this view.</div>
+                            <p className="text-slate-500 text-sm leading-relaxed">
+                                Use <span className="text-slate-400">Project Ideas</span> and{" "}
+                                <span className="text-slate-400">Setup &amp; Preflight</span> with a repo that
+                                contains <span className="font-mono text-slate-400">roadmap.md</span>, or wait until a
+                                pipeline phase is running to see phases here.
+                            </p>
+                        </div>
+                    );
+                }
+                return <div className="text-slate-500 italic">No roadmap data available</div>;
             }
 
             const totalPhases = roadmap.length;
@@ -5763,6 +5785,7 @@
                 escalation_resets: 0,
                 project_dir_ok: true,
                 project_dir_message: null,
+                git_recover_suggested_branch: null,
             });
             const [roadmap, setRoadmap] = useState(null);
             const [metricsSummary, setMetricsSummary] = useState(null);
@@ -6298,13 +6321,18 @@
                         {hasGitOperationFailure ? (
                             <div className="border-t border-amber-800/50 bg-amber-950/20 px-6 py-2 flex items-center justify-between gap-3">
                                 <p className="header-text text-xs text-amber-200/90">
-                                    Git branch checkout failed. Recover by selecting the correct base branch.
+                                    Git checkout failed. Open Recover to return the repo to the prefilled branch from
+                                    this project (change it only if that branch is wrong).
                                 </p>
                                 <button
                                     type="button"
+                                    title="Stashes local changes (including untracked files), checks out the branch you confirm below, then updates pipeline status. Does not run git reset."
                                     onClick={() => {
                                         setGitRecoverError("");
-                                        setGitRecoverBranch("main");
+                                        const s = pState.git_recover_suggested_branch;
+                                        const picked =
+                                            s != null && String(s).trim() !== "" ? String(s).trim() : "main";
+                                        setGitRecoverBranch(picked);
                                         setShowGitRecoverModal(true);
                                     }}
                                     className="header-text text-xs px-2.5 py-1 rounded border border-amber-700/70 text-amber-200 hover:text-white hover:border-amber-500 transition-colors"
@@ -6411,7 +6439,7 @@
                         {/* Right: Roadmap */}
                         <div className="right-panel bg-[#141618] rounded-lg border border-[#1a1d21] p-4 overflow-auto">
                             <h2 className="header-text text-lg font-semibold text-slate-300 mb-4">Roadmap</h2>
-                            <RoadmapPanel roadmap={roadmap} metricsSummary={metricsSummary} />
+                            <RoadmapPanel roadmap={roadmap} metricsSummary={metricsSummary} pipelineStatus={status} />
                         </div>
                     </main>
 
@@ -6487,11 +6515,13 @@
                     {showGitRecoverModal && (
                         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" role="dialog" aria-modal="true">
                             <div className="bg-[#141618] border border-[#1a1d21] rounded-lg max-w-sm w-full p-5 space-y-3">
-                                <h2 className="header-text text-base text-slate-200">Recover git checkout</h2>
+                                <h2 className="header-text text-base text-slate-200">Return repository to branch</h2>
                                 <p className="text-sm text-slate-400">
-                                    Enter the repository base branch to recover from checkout failures.
+                                    We prefilled the branch from your active project path and UI settings (same rule as
+                                    automatic recovery). Change it only if checkout failed because the wrong branch
+                                    was used.
                                 </p>
-                                <label className="text-xs text-slate-500 header-text block">Base branch</label>
+                                <label className="text-xs text-slate-500 header-text block">Branch to return to</label>
                                 <input
                                     type="text"
                                     value={gitRecoverBranch}

@@ -7,9 +7,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import subprocess
 from fastapi.testclient import TestClient
 
-from ui.server import app, load_config
+from ui.server import app, load_config, _detect_base_branch
 
 
 client = TestClient(app)
@@ -421,3 +422,81 @@ class TestApiStateEndpoint:
         msg = data.get("escalation_message", "")
         assert "Queue halted" in msg
         assert "all queued projects are currently BLOCKED" in msg
+
+    def test_git_recover_suggested_branch_matches_detect_for_repo(self, temp_dir):
+        """L-32: /api/state exposes branch prefilled for Recover Git modal (config + repo heuristics)."""
+        repo = os.path.join(temp_dir, "git_repo")
+        os.makedirs(repo, exist_ok=True)
+        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "checkout", "-b", "develop"], cwd=repo, check=True, capture_output=True)
+        with open(os.path.join(repo, "f.txt"), "w") as f:
+            f.write("x")
+        subprocess.run(["git", "add", "f.txt"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+
+        expected = _detect_base_branch(repo, "")
+        assert expected == "develop"
+
+        state_path = os.path.join(temp_dir, "pipeline_state.json")
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump({"pipeline_status": "RUNNING", "project_path": repo}, f)
+
+        cfg = {
+            "pipeline_state_path": state_path,
+            "phase_state_path": os.path.join(temp_dir, "phase_state.json"),
+            "lock_path": os.path.join(temp_dir, "pipeline.lock"),
+            "events_path": os.path.join(temp_dir, "pipeline_events.jsonl"),
+            "project_dir_path": repo,
+            "base_branch": "",
+        }
+        with patch("ui.server.load_config", return_value=cfg):
+            response = client.get("/api/state")
+        assert response.status_code == 200
+        assert response.json().get("git_recover_suggested_branch") == "develop"
+
+    def test_git_recover_suggested_branch_respects_config_base_branch(self, temp_dir):
+        repo = os.path.join(temp_dir, "git_repo2")
+        os.makedirs(repo, exist_ok=True)
+        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "checkout", "-b", "main"], cwd=repo, check=True, capture_output=True)
+        with open(os.path.join(repo, "f.txt"), "w") as f:
+            f.write("x")
+        subprocess.run(["git", "add", "f.txt"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+
+        state_path = os.path.join(temp_dir, "pipeline_state.json")
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump({"pipeline_status": "IDLE", "project_path": repo}, f)
+
+        cfg = {
+            "pipeline_state_path": state_path,
+            "phase_state_path": os.path.join(temp_dir, "phase_state.json"),
+            "lock_path": os.path.join(temp_dir, "pipeline.lock"),
+            "events_path": os.path.join(temp_dir, "pipeline_events.jsonl"),
+            "project_dir_path": repo,
+            "base_branch": "develop",
+        }
+        with patch("ui.server.load_config", return_value=cfg):
+            response = client.get("/api/state")
+        assert response.status_code == 200
+        assert response.json().get("git_recover_suggested_branch") == "develop"
+
+    def test_git_recover_suggested_branch_null_when_project_dir_missing(self, temp_dir):
+        state_path = os.path.join(temp_dir, "pipeline_state.json")
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump({"pipeline_status": "IDLE"}, f)
+        cfg = {
+            "pipeline_state_path": state_path,
+            "phase_state_path": os.path.join(temp_dir, "phase_state.json"),
+            "lock_path": os.path.join(temp_dir, "pipeline.lock"),
+            "events_path": os.path.join(temp_dir, "pipeline_events.jsonl"),
+            "project_dir_path": os.path.join(temp_dir, "nonexistent_project_dir"),
+        }
+        with patch("ui.server.load_config", return_value=cfg):
+            response = client.get("/api/state")
+        assert response.status_code == 200
+        assert response.json().get("git_recover_suggested_branch") is None

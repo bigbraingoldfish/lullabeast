@@ -134,7 +134,7 @@ These apply to every phase:
 ### Milestone 4 — Dashboard Panels
 
 - [x] `UI-3` | LOW | Implement the Current Phase panel showing phase ID, goal text, and active agent badge
-  > Test: `current_phase_raw_id` from state renders in monospace as the phase ID label. Goal text for the current phase is fetched from `GET /api/roadmap` by matching `current_phase_raw_id` and renders as a readable sentence below the ID. Agent badge renders one of four variants (PLANNER, EXECUTOR, REVIEWER, ESCALATION), each in a distinct muted color. When `current_phase_raw_id` is empty or not found in roadmap, panel shows a neutral "No active phase" placeholder without errors.
+  > Test: `current_phase_raw_id` from state renders in monospace as the phase ID label. Goal text for the current phase is fetched from `GET /api/roadmap` by matching `current_phase_raw_id` and renders as a readable sentence below the ID. Agent badge renders one of four variants (PLANNER, EXECUTOR, REVIEWER, ESCALATION), each in a distinct muted color. When `current_phase_raw_id` is empty: for **`IDLE`** / **`UNKNOWN`**, show **`No pipeline running.`** plus steering copy (`data-testid="current-phase-empty-idle"`); for other statuses, show neutral **No active phase** without errors.
   > Notes: Requires one `GET /api/state` call (for ID and agent) and one `GET /api/roadmap` call (for goal text). Goal text lookup should only trigger when `current_phase_raw_id` changes, not on every state poll.
 
 - [x] `UI-4` | LOW | Add attempt counters, last error code, elapsed timer, and skill injected display to the Current Phase panel
