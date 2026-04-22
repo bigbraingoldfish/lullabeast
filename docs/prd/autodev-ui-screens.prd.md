@@ -183,7 +183,7 @@ Responsive: on narrow screens, stack vertically (header → phase → roadmap �
 | Status | Treatment (intent) |
 |--------|---------------------|
 | RUNNING | Teal `run-pulse` on `bg-[#0d9488]` (active compute) |
-| WAITING_FOR_SENTINEL | Static teal `#0d9488` (no pulse); pill **RUNNING (agent)**; header may show **RUNNING (agent) — {agent}** when `current_agent` is set |
+| WAITING_FOR_SENTINEL | Static teal `#0d9488` (no pulse); pill **Running** or **Running {Agent}** (`formatWaitForSentinelLabel` from `current_agent` / `live_current_agent`) |
 | WAITING_FOR_HUMAN | Orange solid; pill **NEEDS YOUR INPUT** |
 | HALTED_SILENT | Red solid; pill **INTERVENTION REQUIRED** (native `title` with escalation-failure hint) |
 | BLOCKED | Red solid |

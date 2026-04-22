@@ -172,7 +172,7 @@ Responsive: on narrow screens, stack vertically (phase → roadmap → feed).
 | `pipeline_status` | Animation | UI label (header / live pill) | Notes |
 |---|---|---|---|
 | RUNNING | Teal `run-pulse` (`bg-[#0d9488]`) | RUNNING | Active compute |
-| WAITING_FOR_SENTINEL | Static teal `#0d9488` (no pulse; same surface as `RUNNING`, without animation) | `RUNNING (agent)`; when `current_agent` is set, header shows `RUNNING (agent) — {agent}` | Agent invoked; polling for sentinel |
+| WAITING_FOR_SENTINEL | Static teal `#0d9488` (no pulse; same surface as `RUNNING`, without animation) | `Running` or `Running {Agent}` from `current_agent` (title case, e.g. `Running Executor`); queue rows use `live_current_agent` from `GET /api/queue` for the project whose path matches `pipeline_state` | Agent invoked; polling for sentinel |
 | WAITING_FOR_HUMAN | Static orange | NEEDS YOUR INPUT | Escalation / human gate |
 | HALTED_SILENT | Static red | INTERVENTION REQUIRED | Native `title` on pill: escalation path failed; check orchestrator logs and project `escalation_failed.json` |
 | BLOCKED | Static red | BLOCKED | |

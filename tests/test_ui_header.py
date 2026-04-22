@@ -27,13 +27,14 @@ def test_status_pill_with_running_state():
 
 
 def test_status_pill_waiting_for_sentinel():
-    """WAITING_FOR_SENTINEL uses static teal #0d9488 (no pulse); label RUNNING (agent) (L-02/L-30)."""
+    """WAITING_FOR_SENTINEL uses static teal (no pulse); base label Running + formatWaitForSentinelLabel (L-02/L-30)."""
     with open('ui/index.html', 'r') as f:
         content = f.read()
     assert re.search(
-        r"WAITING_FOR_SENTINEL:\s*\{[^}]*label:\s*['\"]RUNNING \(agent\)['\"]",
+        r"WAITING_FOR_SENTINEL:\s*\{[^}]*label:\s*['\"]Running['\"]",
         content,
-    ), "Sentinel wait pill should use RUNNING (agent)"
+    ), "Sentinel wait base label is Running"
+    assert "formatWaitForSentinelLabel" in content
     assert re.search(r"WAITING_FOR_SENTINEL:\s*\{[^}]*#0d9488", content), \
         "Sentinel wait pill should use teal surface bg-[#0d9488]"
     assert 'current_agent' in content, "Should reference current_agent for waiting header"
