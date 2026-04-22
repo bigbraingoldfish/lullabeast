@@ -563,7 +563,7 @@ repo root from file location rather than assuming `~/.openclaw`.
 
 ## Key Reference Documents
 
-All in `autodev/docs/`:
+Operator setup and dashboard terminology: **`SETUP.md`** and **`GLOSSARY.md`** at repo root. Technical specs in **`autodev/docs/`**:
 
 | Document | What it is | When to read it |
 |----------|-----------|-----------------|

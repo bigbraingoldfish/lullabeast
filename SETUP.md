@@ -1,6 +1,6 @@
 # AutoDev Setup Guide
 
-AutoDev is an autonomous development pipeline that runs on top of OpenClaw. It manages a planner → executor → reviewer loop against your project repository, with a web dashboard for monitoring and a PRD ideation system.
+AutoDev is an autonomous development pipeline that runs on top of OpenClaw. It manages a planner → executor → reviewer loop against your project repository, with a web dashboard for monitoring and a PRD ideation system. For dashboard terminology (pipeline and queue states, skills, metrics), see [GLOSSARY.md](GLOSSARY.md).
 
 ---
 
@@ -104,9 +104,9 @@ To collapse the pipeline directory onto the OpenClaw directory, set
 
 ---
 
-## The Three Silent Failure Modes
+## Silent failure modes (four cases)
 
-These failures produce no obvious error at startup. Each one causes a specific symptom that is easy to misread.
+These failures produce no obvious error at startup (or are easy to misread after switching projects). Each one causes a specific symptom.
 
 ### 1. Orchestrator webhook server not running
 
@@ -147,6 +147,16 @@ If `ui/config.json` exists and contains an `autodev_repo_path` key, that value t
 
 **Where to put it.** The file must be in `~/.openclaw/deployment-package/Updates/` and its filename must match `PRD to Roadmap*.txt`. The exact filename does not matter beyond the prefix — the server takes the first match. `install.sh` step 10 checks for this file and warns if it is missing.
 
+### 4. `pipeline-project` symlink out of sync with `pipeline_state.json`
+
+**What it looks like.** After copying `pipeline_state.json` from another machine, restoring an old state file, or pointing tests at the wrong project, the **Pipeline Monitor** and queue can disagree about which git repository is active. Until recently this could look like a silent “wrong project” run; the UI now reconciles on resume when safe.
+
+**What's happening.** Under `AUTODEV_PIPELINE_ROOT` (see environment table above), the **`pipeline-project`** entry is a symlink to the active project repository. `pipeline_state.json` records the canonical **`project_path`**. The orchestrator and agents work through that symlink.
+
+**What the UI does.** `POST /api/resume-orchestrator` compares the symlink’s real path to `project_path` in `pipeline_state.json`. If they differ, it **repoints** the symlink to match state (returns JSON **`reconciled`: true** when it did). **`HTTP 422`** if the symlink location cannot be updated safely (for example a real directory where the link should be). **`HTTP 409`** if the pipeline lock shows an orchestrator already running. **`HTTP 503`** if spawning the orchestrator fails; if repointing had just succeeded, the JSON body can still include **`reconciled`: true** so you can fix the underlying spawn error and retry.
+
+**How to verify manually.** With `.env` loaded, compare `readlink -f` / `realpath` on `$AUTODEV_PIPELINE_ROOT/pipeline-project` to the `project_path` field inside `$AUTODEV_PIPELINE_ROOT/pipeline_state.json` (paths depend on your config — see `pipeline_state_path` / `autodev_pipeline_root` in `ui/config.json` if overridden).
+
 ---
 
 ## Security and network exposure
@@ -183,6 +193,8 @@ curl http://localhost:18790/api/state
 
 A healthy response contains a JSON object with `pipeline_status`, `current_agent`, and `current_phase_raw_id` fields. If the response is an error or the server refuses the connection, check the uvicorn output for import errors — a missing Python dependency or an incorrect `AUTODEV_REPO_PATH` will surface there.
 
+**First load.** When `pipeline_status` is idle or unknown and no queue row shows a busy live pipeline, the dashboard opens **Project Ideas** by default. Use **Setup & Preflight** to select the repository path, run preflight, and launch. **Pipeline Monitor** is where you watch an active or resumed run.
+
 Before opening Project Ideas for the first time, run the POST `/hooks/agent` check in **New User Webhook Checklist** so token mismatches are caught early.
 
 To run as a background service, see `ui/autodev-ui.service` for a systemd unit file.
@@ -193,7 +205,7 @@ To run as a background service, see `ui/autodev-ui.service` for a systemd unit f
 
 Tested against OpenClaw [VERSION] — earlier versions may have schema differences in `pipeline_state.json`. See openclaw.json requirements below.
 
-The fields AutoDev reads from `pipeline_state.json` are: `pipeline_status`, `status`, `current_agent`, `current_phase`, `current_phase_raw_id`, `planner_retries`, `executor_retries`, `reviewer_retries`, `last_action_timestamp`, and `project_path`. If your OpenClaw version writes different field names, the UI status endpoint will return partial data.
+The fields AutoDev reads from `pipeline_state.json` are: `pipeline_status`, `status`, `current_agent`, `current_phase`, `current_phase_raw_id`, `planner_retries`, `executor_retries`, `reviewer_retries`, `last_action_timestamp`, and `project_path`. Values of **`current_phase_raw_id`** (for example `INT-E1`) are the same phase identifiers used in the project’s **`roadmap.md`**. If your OpenClaw version writes different field names, the UI status endpoint will return partial data.
 
 ---
 
