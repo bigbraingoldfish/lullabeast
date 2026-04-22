@@ -10,6 +10,8 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ### Changed
 
+- **H-29 (UX friction tracker):** Setup preflight workspace checks include **`(under OPENCLAW_ROOT)`** in user-facing `message` strings for `workspace-*` pass/fail rows (directory missing, per-doc missing, all-docs pass). See `ui/server.py` (`_run_preflight_checks`), `tests/test_api_setup_preflight.py` (`TestWorkspaceCheckMessagesH29`), `plans/Active/ux-friction-2026-04-16.md`.
+
 - **H-27 + H-28 (UX friction tracker — P3 hints):** **Switch project** modal heading — native **`title`** via **`P3_SWITCH_PROJECT_MODAL_TITLE`** (plain-language: active project switch after preflight; stop pipeline first except broken-path repair). **Sidebar** **Project Ideas** — optional **`navTitle`** on nav items with **`P3_SIDEBAR_IDEAS_TAB_TITLE`** (*Draft PRDs with the PRD agent.*); **`title={item.navTitle ?? item.label}`**. Tests: **`tests/test_ui_switch_project_modal.py`**, **`tests/test_ui_ideas_pass4_restructure.py`**. Tracker: **`plans/Active/ux-friction-2026-04-16.md`**.
 
 - **H-23 (UX friction tracker):** Pipeline Monitor **last gate error** chip — native **`title`** for five common `last_error_code` values plus `ERR_VALIDATION_FAILED` with **planner** vs **reviewer** text via `currentAgent` (`getLastErrorCodeTitle`, `P3_LAST_ERROR_CODE_TITLES`, `P3_VALIDATION_FAILED_*`, default for unknown codes). `data-testid="last-error-code"`. See `ui/index.html` (`LastErrorCode`), `tests/test_ui_p3_hints_h01_h26.py` (`test_last_error_code_titles_h23`), `plans/Active/ux-friction-2026-04-16.md`.
