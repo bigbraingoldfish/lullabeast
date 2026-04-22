@@ -53,8 +53,13 @@ def test_get_goal_for_phase_helper(html_content):
 
 def test_phase_id_renders_in_monospace(html_content):
     """current_phase_raw_id renders in monospace font (JetBrains Mono)."""
-    # Check for rendering of phase ID with header-text class (JetBrains Mono)
-    has_phase_render = bool(re.search(r'current_phase_raw_id.*header-text|header-text.*current_phase_raw_id', html_content))
+    # Multi-line span: header-text wrapper then phase id child (H-25 adds title= between)
+    has_phase_render = bool(
+        re.search(
+            r"header-text\s+text-sm\s+font-semibold\s+text-slate-300[\s\S]{0,220}?\{current_phase_raw_id\}",
+            html_content,
+        )
+    )
     assert has_phase_render, "Phase ID not rendered with header-text (monospace) class"
 
 

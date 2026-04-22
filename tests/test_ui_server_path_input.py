@@ -47,9 +47,14 @@ class TestServerPathInput:
         assert "<datalist" in body
 
     def test_placeholder_is_example_path(self):
-        body = extract_function(load_html(), "ServerPathInput")
+        html = load_html()
+        body = extract_function(html, "ServerPathInput")
         assert body is not None
-        assert 'placeholder="/path/to/your-project/my-app"' in body
+        assert 'placeholder={placeholder}' in body
+        assert re.search(
+            r'function ServerPathInput\(\{[^}]*placeholder = "/path/to/your-project/my-app"',
+            html,
+        ), "Default placeholder param on ServerPathInput"
 
     def test_has_exists_check_indicator(self):
         body = extract_function(load_html(), "ServerPathInput")
