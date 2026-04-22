@@ -293,6 +293,42 @@
         const QUEUE_CURRENT_TOOLTIP =
             'Active queue slot for this path. Live pipeline status is not available until the orchestrator runs here.';
 
+        /** P3 queue-only row pill native titles (H-01–H-04). */
+        const P3_QUEUE_ONLY_PILL_TITLES = {
+            DEPENDENCY_HOLD: 'Blocked until the parent project completes. Clears automatically.',
+            SKIPPED_PENDING:
+                'Preflight failed for this row (or a parent); clears automatically when checks pass.',
+            FAILED: 'Gate failed; retries exhausted. See phase state for the specific gate.',
+            ESCALATION: 'Awaiting your decision in the active phase.',
+        };
+
+        /** P3: Depends on parent selector — set parent (H-05) + clear via None (H-06). */
+        const P3_QUEUE_DEPENDS_ON_TITLE =
+            'Overwrites any existing parent. Child enters Waiting on parent until the parent completes. ' +
+            'Choose None: Removes parent and restores the entry to READY.';
+
+        /** P3 Setup & Preflight button titles (H-07, H-08, H-09, H-12). */
+        const P3_PREFLIGHT_TITLE_VALIDATE_ROADMAP = 'Required format check before Run Preflight.';
+        const P3_PREFLIGHT_TITLE_RUN_PREFLIGHT = 'Required before Launch.';
+        const P3_PREFLIGHT_TITLE_RERUN_PREFLIGHT =
+            'Runs the full preflight (symlink, .gitignore, workspace files, roadmap). Not the same as the lightweight queue check.';
+        const P3_PREFLIGHT_TITLE_LAUNCH_NOW =
+            'Creates phase branch and starts the orchestrator. Use Stop Pipeline to halt.';
+
+        /** P3 PRD agent — alignment / adversarial / readiness strip (H-13–H-16). */
+        const P3_PRD_TITLE_ALIGNMENT_CHECK =
+            '~30–90s. Checks PRD vs. roadmap consistency. Produces commentary in the thread, does not edit the PRD.';
+        const P3_PRD_TITLE_ADVERSARIAL_REVIEW =
+            '~30–90s. Stress-tests the PRD for edge cases and missing assumptions. Produces commentary only.';
+        const P3_PRD_TITLE_READINESS_SCORE = 'PRD-agent score. 8+ recommended before Generate Roadmap.';
+        const P3_PRD_TITLE_ROADMAP_CONFIDENCE = 'Agent confidence before roadmap generation.';
+
+        const P3_PIPELINE_PHASE_RAW_ID_TITLE = 'Phase ID from roadmap.md.';
+        const P3_ACTIVITY_TAB_TITLE =
+            'Orchestrator + gate + webhook events on Activity tab; escalation-only on Escalation tab.';
+        const P3_STOPPED_RESUME_TITLE = 'Continues from the current agent in the current phase.';
+        const P3_QUEUE_ADD_PATH_PLACEHOLDER = '/absolute/path/to/existing/git/repo';
+
         /** Tailwind defaults for live pills — keep in sync with AGENT_ATTEMPT_DOT_HEX (dots use inline hex). */
         const PIPELINE_STATUS_PILL_HEX = {
             teal600: '#0d9488',
@@ -359,11 +395,27 @@
                 READY: { label: 'READY', className: 'bg-slate-600 text-slate-200', title: '' },
                 ACTIVE: { label: 'ACTIVE', className: 'bg-slate-600 text-slate-200', title: QUEUE_CURRENT_TOOLTIP },
                 BLOCKED: { label: 'QUEUE BLOCKED', className: 'bg-amber-600 text-slate-900', title: QUEUE_BLOCKED_TOOLTIP },
-                SKIPPED_PENDING: { label: 'Preflight failed', className: 'bg-indigo-900 text-indigo-200', title: '' },
-                DEPENDENCY_HOLD: { label: 'Waiting on parent', className: 'bg-orange-600 text-white', title: '' },
-                ESCALATION: { label: 'ESCALATION', className: 'bg-amber-500 text-slate-900', title: '' },
+                SKIPPED_PENDING: {
+                    label: 'Preflight failed',
+                    className: 'bg-indigo-900 text-indigo-200',
+                    title: P3_QUEUE_ONLY_PILL_TITLES.SKIPPED_PENDING,
+                },
+                DEPENDENCY_HOLD: {
+                    label: 'Waiting on parent',
+                    className: 'bg-orange-600 text-white',
+                    title: P3_QUEUE_ONLY_PILL_TITLES.DEPENDENCY_HOLD,
+                },
+                ESCALATION: {
+                    label: 'ESCALATION',
+                    className: 'bg-amber-500 text-slate-900',
+                    title: P3_QUEUE_ONLY_PILL_TITLES.ESCALATION,
+                },
                 COMPLETED: { label: 'COMPLETED', className: 'bg-emerald-800 text-emerald-200', title: '' },
-                FAILED: { label: 'FAILED', className: 'bg-red-700 text-white', title: '' },
+                FAILED: {
+                    label: 'FAILED',
+                    className: 'bg-red-700 text-white',
+                    title: P3_QUEUE_ONLY_PILL_TITLES.FAILED,
+                },
             };
             const row = q[state];
             if (row) return { ...row };
@@ -1325,6 +1377,7 @@
                     label: 'Resume',
                     desc: 'Continue from where it stopped',
                     capped: false,
+                    hintTitle: P3_STOPPED_RESUME_TITLE,
                 },
                 {
                     command: 'RESET_EXECUTION',
@@ -1358,7 +1411,7 @@
                         </div>
                     ) : (
                         <div className="space-y-2 pt-1">
-                            {RESUME_OPTIONS.map(({ command, label, desc, capped }) => {
+                            {RESUME_OPTIONS.map(({ command, label, desc, capped, hintTitle }) => {
                                 const disabled = capped && isCapReached;
                                 return (
                                     <button
@@ -1368,7 +1421,7 @@
                                         title={
                                             disabled
                                                 ? 'Reset cap reached — use Resume, or fix the repo manually in git. Cap prevents infinite reset loops.'
-                                                : undefined
+                                                : hintTitle || undefined
                                         }
                                         className={`w-full text-left px-3 py-2.5 rounded border transition-colors ${
                                             disabled
@@ -1457,7 +1510,12 @@
             return (
                 <div className="space-y-3">
                     <div className="flex items-center gap-3">
-                        <span className="header-text text-sm font-semibold text-slate-300">{current_phase_raw_id}</span>
+                        <span
+                            className="header-text text-sm font-semibold text-slate-300"
+                            title={P3_PIPELINE_PHASE_RAW_ID_TITLE}
+                        >
+                            {current_phase_raw_id}
+                        </span>
                         <AgentBadge agent={current_agent} />
                         <ElapsedTimer lastActionTimestamp={last_action_timestamp} pipeline_status={pipeline_status} />
                     </div>
@@ -1945,9 +2003,11 @@
                 e.event_type === 'escalation_trigger' || e.event_type === 'escalation_resolve'
             );
 
-            const TabButton = ({ tab, label }) => (
+            const TabButton = ({ tab, label, title: tabTitle }) => (
                 <button
+                    type="button"
                     onClick={() => setActivityTab(tab)}
+                    title={tabTitle}
                     className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
                         activityTab === tab
                             ? 'bg-blue-600 text-white'
@@ -1961,8 +2021,8 @@
             return (
                 <div className="flex flex-col h-full min-h-0">
                     <div className="flex gap-2 mb-3 flex-shrink-0">
-                        <TabButton tab="activity" label="Activity" />
-                        <TabButton tab="escalation" label="Escalation" />
+                        <TabButton tab="activity" label="Activity" title={P3_ACTIVITY_TAB_TITLE} />
+                        <TabButton tab="escalation" label="Escalation" title={P3_ACTIVITY_TAB_TITLE} />
                     </div>
                     <div className="flex-1 min-h-0 overflow-y-auto">
                         {activityTab === 'escalation' ? (
@@ -3957,6 +4017,7 @@
                                                 className="header-text text-xs px-3 py-2 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500 disabled:opacity-40"
                                                 onClick={doAlignmentCheck}
                                                 disabled={alignmentLoading}
+                                                title={P3_PRD_TITLE_ALIGNMENT_CHECK}
                                             >
                                                 {alignmentLoading ? `Running alignment check... (${_opEstimate("alignment_check")})` : "Run Alignment Check"}
                                             </button>
@@ -4011,6 +4072,7 @@
                                                 className="header-text text-xs px-3 py-2 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500 disabled:opacity-40"
                                                 onClick={doAdversarialCheck}
                                                 disabled={adversarialLoading}
+                                                title={P3_PRD_TITLE_ADVERSARIAL_REVIEW}
                                             >
                                                 {adversarialLoading ? `Running adversarial review... (${_opEstimate("adversarial_check")})` : "Run Adversarial Review"}
                                             </button>
@@ -4081,11 +4143,15 @@
                                                           ? "text-amber-400"
                                                           : "text-red-400"
                                                 }`}
+                                                title={P3_PRD_TITLE_READINESS_SCORE}
                                             >
                                                 PRD readiness: {typeof readinessData.score === "number" ? readinessData.score : "—"} / 10
                                             </span>
                                             {readinessData.conversion_confidence && (
-                                                <span className="text-[10px] px-1.5 py-0.5 rounded border border-slate-600 text-slate-400">
+                                                <span
+                                                    className="text-[10px] px-1.5 py-0.5 rounded border border-slate-600 text-slate-400"
+                                                    title={P3_PRD_TITLE_ROADMAP_CONFIDENCE}
+                                                >
                                                     Roadmap confidence: {readinessData.conversion_confidence}
                                                 </span>
                                             )}
@@ -4438,7 +4504,12 @@
                                 </div>
                                 <div className="flex gap-2 items-center shrink-0 self-start">
                                     {!roadmapSeedLocked ? (
-                                        <button type="button" onClick={onRoadmapSeedConfirm} className="header-text text-sm px-3 py-1 rounded bg-[#00b4d8] text-[#0d0f12] font-medium">
+                                        <button
+                                            type="button"
+                                            onClick={onRoadmapSeedConfirm}
+                                            title={P3_PREFLIGHT_TITLE_VALIDATE_ROADMAP}
+                                            className="header-text text-sm px-3 py-1 rounded bg-[#00b4d8] text-[#0d0f12] font-medium"
+                                        >
                                             Validate roadmap
                                         </button>
                                     ) : (
@@ -4584,6 +4655,11 @@
                                         type="button"
                                         onClick={onRunPreflight}
                                         disabled={!repoPathLocked || !roadmapSeedLocked}
+                                        title={
+                                            preflightChecks
+                                                ? P3_PREFLIGHT_TITLE_RERUN_PREFLIGHT
+                                                : P3_PREFLIGHT_TITLE_RUN_PREFLIGHT
+                                        }
                                         className={`header-text text-sm px-4 py-2 rounded bg-[#1a1d21] text-slate-200 border border-[#1a1d21] disabled:opacity-40 whitespace-nowrap ${hasFail ? "status-pulse" : ""}`}
                                     >
                                         {preflightBtnLabel}
@@ -4654,8 +4730,13 @@
                                 className="header-text text-sm px-4 py-2 rounded bg-[#1a1d21] text-[#00b4d8] border border-[#00b4d8]/40 font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:border-[#00b4d8]/70">
                                 {addToQueueBusy ? 'Adding…' : 'Add to Queue'}
                             </button>
-                            <button type="button" onClick={onLaunch} disabled={launchDisabled || launchLoading}
-                                className="header-text text-sm px-4 py-2 rounded bg-[#00b4d8] text-[#0d0f12] font-medium disabled:bg-[#2a2d31] disabled:text-slate-600 disabled:cursor-not-allowed">
+                            <button
+                                type="button"
+                                onClick={onLaunch}
+                                disabled={launchDisabled || launchLoading}
+                                title={P3_PREFLIGHT_TITLE_LAUNCH_NOW}
+                                className="header-text text-sm px-4 py-2 rounded bg-[#00b4d8] text-[#0d0f12] font-medium disabled:bg-[#2a2d31] disabled:text-slate-600 disabled:cursor-not-allowed"
+                            >
                                 {launchLoading ? 'Launching…' : 'Launch Now'}
                             </button>
                             <button type="button" onClick={onBack} className="header-text text-sm px-4 py-2 rounded border border-[#1a1d21] text-slate-400">
@@ -4673,7 +4754,7 @@
             );
         }
 
-        function ServerPathInput({ value, onChange, disabled, fsStatus, recents, id }) {
+        function ServerPathInput({ value, onChange, disabled, fsStatus, recents, id, placeholder = "/path/to/your-project/my-app" }) {
             const listId = id ? id + "-recents" : undefined;
             return (
                 <div className="relative">
@@ -4686,7 +4767,7 @@
                             onChange={(e) => onChange(e.target.value)}
                             disabled={disabled}
                             readOnly={disabled}
-                            placeholder="/path/to/your-project/my-app"
+                            placeholder={placeholder}
                             className={
                                 "flex-1 min-w-0 rounded border border-[#1a1d21] px-3 py-2 text-sm font-mono " +
                                 (disabled ? "bg-[#0d0f12] text-slate-300" : "bg-[#1a1d21] text-slate-200")
@@ -4823,6 +4904,7 @@
                                     disabled={false}
                                     fsStatus={queueAddPathFsStatus}
                                     recents={pathRecents}
+                                    placeholder={P3_QUEUE_ADD_PATH_PLACEHOLDER}
                                 />
                             </div>
 
@@ -5349,7 +5431,12 @@
                                 {snap.current_phase_raw_id && (
                                     <div>
                                         <span className="header-text text-xs text-slate-500">Current phase: </span>
-                                        <span className="header-text text-xs text-slate-300 font-mono">{snap.current_phase_raw_id}</span>
+                                        <span
+                                            className="header-text text-xs text-slate-300 font-mono"
+                                            title={P3_PIPELINE_PHASE_RAW_ID_TITLE}
+                                        >
+                                            {snap.current_phase_raw_id}
+                                        </span>
                                         {snap.current_phase_desc && (
                                             <span className="header-text text-xs text-slate-500"> — {snap.current_phase_desc}</span>
                                         )}
@@ -5401,7 +5488,7 @@
                             value={selected.parent_id || ''}
                             onChange={e => handleSetParent(selected.id, e.target.value || null)}
                             disabled={hubBusy || reorderDirty}
-                            title={reorderDirty ? "Save or cancel reorder first" : undefined}
+                            title={reorderDirty ? "Save or cancel reorder first" : P3_QUEUE_DEPENDS_ON_TITLE}
                             className="header-text text-xs bg-[#1a1d21] text-slate-200 border border-[#2a2d32] rounded px-2 py-1 w-full disabled:opacity-40">
                             <option value="">None</option>
                             {queue.filter(e => e.id !== selected.id && !descendantsHub.includes(e.id)).map(e => (
