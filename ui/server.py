@@ -5750,7 +5750,9 @@ def get_queue():
     Each entry may include ``live_pipeline_status`` when its ``project_path``
     (realpath) matches the global ``pipeline_state.json`` ``project_path`` —
     same rule as ``GET /api/queue/{entry_id}/snapshot``. Other entries set
-    ``live_pipeline_status`` to null.
+    ``live_pipeline_status`` to null. When the paths match, ``live_current_agent``
+    is also set from pipeline state (for ``WAITING_FOR_SENTINEL`` “Running {agent}”
+    queue pills); otherwise null.
     """
     config = load_config()
     q = _read_queue_file(config)
@@ -5780,15 +5782,21 @@ def get_queue():
                 er = ""
             if er and er == ps_real:
                 entry["live_pipeline_status"] = ps.get("pipeline_status")
+                # UI: WAITING_FOR_SENTINEL pill — "Running {agent}" (see formatWaitForSentinelLabel in index.html)
+                entry["live_current_agent"] = (ps.get("current_agent") or None)
             elif entry.get("parked_pipeline_status"):
                 entry["live_pipeline_status"] = entry["parked_pipeline_status"]
+                entry["live_current_agent"] = None
             else:
                 entry["live_pipeline_status"] = None
+                entry["live_current_agent"] = None
         else:
             if entry.get("parked_pipeline_status"):
                 entry["live_pipeline_status"] = entry["parked_pipeline_status"]
+                entry["live_current_agent"] = None
             else:
                 entry["live_pipeline_status"] = None
+                entry["live_current_agent"] = None
         enriched.append(entry)
 
     return {

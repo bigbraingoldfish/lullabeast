@@ -137,6 +137,7 @@ class TestGetQueue:
         assert "next_eligible" in data
         for e in data["queue"]:
             assert e.get("live_pipeline_status") is None
+            assert e.get("live_current_agent") is None
 
     def test_live_pipeline_status_set_when_entry_path_matches_pipeline_state(self, client):
         c, queue_file, tmp_path = client
@@ -149,7 +150,14 @@ class TestGetQueue:
         e2["project_path"] = proj_b
         _write_queue(str(queue_file), [e1, e2])
         with open(pipeline_state_file, "w") as f:
-            json.dump({"project_path": proj_a, "pipeline_status": "WAITING_FOR_HUMAN"}, f)
+            json.dump(
+                {
+                    "project_path": proj_a,
+                    "pipeline_status": "WAITING_FOR_HUMAN",
+                    "current_agent": "executor",
+                },
+                f,
+            )
 
         resp = c.get("/api/queue")
         assert resp.status_code == 200
@@ -157,7 +165,9 @@ class TestGetQueue:
         q = data["queue"]
         assert len(q) == 2
         assert q[0]["live_pipeline_status"] == "WAITING_FOR_HUMAN"
+        assert q[0]["live_current_agent"] == "executor"
         assert q[1]["live_pipeline_status"] is None
+        assert q[1].get("live_current_agent") is None
 
     def test_next_eligible_identifies_first_ready_no_parent(self, client):
         c, queue_file, _ = client

@@ -301,10 +301,22 @@
             slate600: '#475569',
         };
 
+        /**
+         * WAITING_FOR_SENTINEL: short label "Running" or "Running {Agent}" (title case) from `current_agent`.
+         * No literal "(agent)"; agent name is optional when state is unknown.
+         */
+        function formatWaitForSentinelLabel(agentRaw) {
+            const t = (agentRaw || '').toString().trim();
+            if (!t) return 'Running';
+            const lower = t.toLowerCase();
+            const name = lower.charAt(0).toUpperCase() + lower.slice(1);
+            return `Running ${name}`;
+        }
+
         /** Live pipeline_status from GET /api/queue → single pill (shared with Pipeline Monitor header). */
         const PIPELINE_LIVE_PILL = {
             RUNNING: { label: 'RUNNING', className: 'bg-[#0d9488] text-white run-pulse', title: '' },
-            WAITING_FOR_SENTINEL: { label: 'RUNNING (agent)', className: 'bg-[#0d9488] text-white', title: '' },
+            WAITING_FOR_SENTINEL: { label: 'Running', className: 'bg-[#0d9488] text-white', title: '' },
             WAITING_FOR_HUMAN: { label: 'NEEDS YOUR INPUT', className: 'bg-orange-500 text-white', title: '' },
             HALTED_SILENT: {
                 label: 'INTERVENTION REQUIRED',
@@ -369,6 +381,17 @@
             if (!entry) return { label: '', className: 'bg-slate-700 text-white', title: '' };
             const live = entry.live_pipeline_status;
             if (live != null && live !== '') {
+                if (live === 'WAITING_FOR_SENTINEL') {
+                    const meta = PIPELINE_LIVE_PILL[live];
+                    if (!meta) {
+                        return { label: 'Running', className: 'bg-slate-600 text-slate-200', title: '' };
+                    }
+                    return {
+                        label: formatWaitForSentinelLabel(entry.live_current_agent),
+                        className: meta.className,
+                        title: meta.title || '',
+                    };
+                }
                 const meta = PIPELINE_LIVE_PILL[live];
                 if (meta) return { label: meta.label, className: meta.className, title: meta.title || '' };
                 return { label: String(live), className: 'bg-slate-600 text-slate-200', title: '' };
@@ -6126,8 +6149,8 @@
                 if (pillMeta && pillMeta.title) {
                     statusTitle = pillMeta.title;
                 }
-                if (status === 'WAITING_FOR_SENTINEL' && pState.current_agent) {
-                    statusLabel = `RUNNING (agent) — ${pState.current_agent}`;
+                if (status === 'WAITING_FOR_SENTINEL') {
+                    statusLabel = formatWaitForSentinelLabel(pState.current_agent);
                 }
                 statusClass = STATE_CLASSES[status] || 'bg-[#1a1d21] text-slate-300';
             }
