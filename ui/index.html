@@ -738,12 +738,94 @@
             }
         }
 
-        /** Error string for failed /api/resume-orchestrator (handles 503 JSON after reconcile). */
-        function formatResumeOrchestratorError(od, status) {
-            if (status === 503 && od && typeof od === "object" && od.reconciled === true && od.error) {
+        /** Raw server text for failed POST /api/resume-orchestrator (detail or spawn error field). */
+        function extractResumeOrchestratorRawDetail(od, status) {
+            if (od && typeof od === "object" && status === 503 && od.reconciled === true && od.error != null) {
                 return String(od.error);
             }
-            return formatFetchDetail(od) || `Resume orchestrator failed (${status})`;
+            return formatFetchDetail(od);
+        }
+
+        /**
+         * Map ui/server.py repoint / resume-orchestrator messages to plain language.
+         * Returns null when the raw string should be shown alone (no separate technical line).
+         */
+        function mapResumeOrchestratorFriendlyMessage(raw, status) {
+            if (typeof raw !== "string" || !raw.trim()) return null;
+            const s = raw.trim();
+            const lower = s.toLowerCase();
+            if (
+                lower.includes("real directory, not a symlink") ||
+                (lower.includes("not a symlink") && lower.includes("real directory"))
+            ) {
+                return (
+                    "The configured project folder is a real directory, not the pipeline-project symlink. " +
+                    "Set project_dir_path in ui/config.json to a symlink target, or remove the blocking folder."
+                );
+            }
+            if (lower.includes("exists as a file") && lower.includes("refusing")) {
+                return (
+                    "The pipeline-project path points to a file instead of a symlink. Fix project_dir_path in ui/config.json."
+                );
+            }
+            if (lower.includes("not set in config") && lower.includes("cannot repoint symlink")) {
+                return (
+                    "project_dir_path (symlink location) is not set in ui/config.json — the UI cannot align the pipeline-project symlink."
+                );
+            }
+            if (lower.includes("target project path does not exist")) {
+                return (
+                    "The project path from pipeline state does not exist or is not a folder. Use Switch project or Setup & Preflight."
+                );
+            }
+            if (lower.includes("cannot create parent directory for symlink")) {
+                return (
+                    "Could not create the directory needed for the pipeline-project symlink. Check OPENCLAW_ROOT and filesystem permissions."
+                );
+            }
+            if (lower.includes("no project_path") && lower.includes("pipeline_state")) {
+                return "No active project path in pipeline state. Use Setup & Preflight or Switch project.";
+            }
+            if (s === "Orchestrator is already running") {
+                return (
+                    "An orchestrator instance may already be running (pipeline lock). If this seems wrong, inspect pipeline.lock."
+                );
+            }
+            if (lower.includes("orchestrator.py") && lower.includes("not found")) {
+                return (
+                    "Could not find orchestrator.py under autodev_repo_path. Set autodev_repo_path in ui/config.json to this repository root."
+                );
+            }
+            if (lower.includes("failed to spawn orchestrator")) {
+                return (
+                    "Could not start the orchestrator process. Check spawn logs and that Python can launch autodev/pipeline/orchestrator.py."
+                );
+            }
+            if (s === "Could not repoint pipeline-project symlink") {
+                return (
+                    "Could not update the pipeline-project symlink. Check project_dir_path and filesystem permissions."
+                );
+            }
+            return null;
+        }
+
+        /** Friendly first line + optional raw detail (mirrors stop-path UX). */
+        function resumeOrchestratorErrorPresentation(od, status) {
+            const raw = extractResumeOrchestratorRawDetail(od, status).trim();
+            if (!raw) {
+                return { friendly: `Resume orchestrator failed (${status})`, technical: "" };
+            }
+            const mapped = mapResumeOrchestratorFriendlyMessage(raw, status);
+            const friendly = mapped !== null ? mapped : raw;
+            const technical = mapped !== null ? raw : "";
+            return { friendly, technical };
+        }
+
+        /** Error string for failed /api/resume-orchestrator (newline joins friendly + technical for splitApiDetail). */
+        function formatResumeOrchestratorError(od, status) {
+            const p = resumeOrchestratorErrorPresentation(od, status);
+            if (p.technical) return `${p.friendly}\n${p.technical}`;
+            return p.friendly;
         }
 
         // ─── Modals ───────────────────────────────────────────────────────────────
@@ -1006,7 +1088,9 @@
                         if (r.status === 503 && d && d.reconciled === true) {
                             setRestartError("");
                         } else {
-                            setRestartError(formatFetchDetail(d) || `Restart failed (${r.status})`);
+                            setRestartError(
+                                formatResumeOrchestratorError(d, r.status) || `Restart failed (${r.status})`
+                            );
                         }
                         return;
                     }
@@ -1303,7 +1387,14 @@
                                 <p className="text-xs text-amber-600 pt-1">Reset cap reached (3/3) — only Resume is available.</p>
                             )}
                             {flowError ? (
-                                <p className="header-text text-xs text-red-400 mt-1 whitespace-pre-wrap">{flowError}</p>
+                                <div className="header-text text-xs text-red-400 mt-1 space-y-1">
+                                    <span className="block">{splitApiDetail(flowError).friendly}</span>
+                                    {splitApiDetail(flowError).technical ? (
+                                        <span className="block text-slate-500 font-mono text-[10px] leading-snug whitespace-pre-wrap">
+                                            {splitApiDetail(flowError).technical}
+                                        </span>
+                                    ) : null}
+                                </div>
                             ) : null}
                         </div>
                     )}
@@ -6070,9 +6161,11 @@
                     return;
                 }
                 if (status === 503 && d && d.reconciled === true) {
-                    const err = d.error || "Failed to spawn";
+                    const rawErr = d.error || "Failed to spawn";
+                    const spawnLine =
+                        mapResumeOrchestratorFriendlyMessage(String(rawErr), 503) || String(rawErr);
                     setResumeSymlinkNotice(
-                        `Symlink was re-aligned to match pipeline state; orchestrator did not start (${err}). Click Restart again.`
+                        `Symlink was re-aligned to match pipeline state; orchestrator did not start (${spawnLine}). Click Restart again.`
                     );
                     return;
                 }
@@ -6113,7 +6206,9 @@
                         if (r.status === 503 && d && d.reconciled === true) {
                             setOrchRestartError("");
                         } else {
-                            setOrchRestartError(formatFetchDetail(d) || `Restart failed (${r.status})`);
+                            setOrchRestartError(
+                                formatResumeOrchestratorError(d, r.status) || `Restart failed (${r.status})`
+                            );
                         }
                         return;
                     }
@@ -6295,9 +6390,14 @@
                                     )}
                                 </div>
                                 {resumeError ? (
-                                    <span className="header-text text-xs text-red-400 max-w-md text-right">
-                                        {resumeError}
-                                    </span>
+                                    <div className="header-text text-xs text-red-400 max-w-md text-right space-y-1">
+                                        <span className="block">{splitApiDetail(resumeError).friendly}</span>
+                                        {splitApiDetail(resumeError).technical ? (
+                                            <span className="block text-slate-500 font-mono text-[10px] leading-snug">
+                                                {splitApiDetail(resumeError).technical}
+                                            </span>
+                                        ) : null}
+                                    </div>
                                 ) : null}
                                 {stopError ? (
                                     <div className="header-text text-xs text-red-400 max-w-md text-right space-y-1">
@@ -6367,9 +6467,14 @@
                                         {orchRestartBusy ? "Restarting…" : "Restart Orchestrator"}
                                     </button>
                                     {orchRestartError ? (
-                                        <p className="header-text text-xs text-red-400 max-w-md text-right">
-                                            {orchRestartError}
-                                        </p>
+                                        <div className="header-text text-xs text-red-400 max-w-md text-right space-y-1">
+                                            <span className="block">{splitApiDetail(orchRestartError).friendly}</span>
+                                            {splitApiDetail(orchRestartError).technical ? (
+                                                <span className="block text-slate-500 font-mono text-[10px] leading-snug">
+                                                    {splitApiDetail(orchRestartError).technical}
+                                                </span>
+                                            ) : null}
+                                        </div>
                                     ) : null}
                                 </div>
                             </div>
@@ -6428,7 +6533,14 @@
                                         {orchRestartBusy ? "Restarting…" : "Restart Orchestrator"}
                                     </button>
                                     {orchRestartError ? (
-                                        <p className="header-text text-xs text-red-400 mt-2">{orchRestartError}</p>
+                                        <div className="header-text text-xs text-red-400 mt-2 space-y-1">
+                                            <span className="block">{splitApiDetail(orchRestartError).friendly}</span>
+                                            {splitApiDetail(orchRestartError).technical ? (
+                                                <span className="block text-slate-500 font-mono text-[10px] leading-snug">
+                                                    {splitApiDetail(orchRestartError).technical}
+                                                </span>
+                                            ) : null}
+                                        </div>
                                     ) : null}
                                 </div>
                             )}

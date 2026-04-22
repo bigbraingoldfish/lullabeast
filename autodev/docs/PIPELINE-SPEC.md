@@ -1663,6 +1663,8 @@ JSON body (not FastAPI `detail` wrapper), so the client can show recovery copy a
 
 **UI usage:** Called after `POST /api/command` as the final step of the resume flow from the StoppedRecoveryPanel; also called from the Pipeline Monitor “Restart Orchestrator” control. The Pipeline Monitor header strip may show a one-line notice when `reconciled` is true or when the 503-after-reconcile body above is returned.
 
+**Dashboard (L-38):** The UI maps known `detail` strings and spawn `error` text from this endpoint to **operator-facing** sentences in `index.html` (`resumeOrchestratorErrorPresentation`, `mapResumeOrchestratorFriendlyMessage`), with the raw server message optionally shown on a second monospace line. Exact strings live in code and `tests/test_ui_l38_resume_orchestrator_errors.py`; path issues steer to **Switch project** / Setup.
+
 #### `GET /api/queue`
 
 Returns the project queue plus dependency metadata. **Response ordering:** after merging any synthetic **ingested** row for `pipeline_state.json` projects missing from the queue file, entries whose `project_path` realpath matches `pipeline_state.json` `project_path` are listed **first** (stable order), then all other rows. This is a read-only presentation sort; the authoritative persisted order is still `position` on each row after reconciliation writes (`_queue_mark_matching_entry_active` pins the active project to `position: 1`).
