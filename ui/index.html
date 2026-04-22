@@ -329,6 +329,37 @@
         const P3_STOPPED_RESUME_TITLE = 'Continues from the current agent in the current phase.';
         const P3_QUEUE_ADD_PATH_PLACEHOLDER = '/absolute/path/to/existing/git/repo';
 
+        /** P3 Pipeline Monitor — `last_error_code` chip native `title` (H-23). */
+        const P3_LAST_ERROR_CODE_DEFAULT_TITLE =
+            'Something in the last pipeline step failed. See orchestrator or gate logs for details.';
+        const P3_VALIDATION_FAILED_TITLES = {
+            planner:
+                "Planner Error: output didn’t pass validation. Retrying if attempts remain.",
+            reviewer:
+                "Reviewer Error: checks or review output didn’t pass. Next step is picked automatically (executor, planner, or escalation).",
+        };
+        const P3_VALIDATION_FAILED_FALLBACK_TITLE = 'Error: validation failed. See logs for what happens next.';
+        const P3_LAST_ERROR_CODE_TITLES = {
+            ERR_UNACCOUNTED_DELETION:
+                "Executor Error: files were removed that weren’t part of the phase’s declared work. Discarded work. Attempting retry.",
+            ERR_TESTS_FAILING: "Executor Error: tests failed. Discarded work. Attempting retry.",
+            ERR_GIT_DIFF_FAILED:
+                "Executor Error: a required Git check could not run in the project. Action required: fix Git in the working tree (corrupt repo, lock, or permissions) — the pipeline will not get past this step until Git commands succeed. Automatic retries alone will not fix a broken repository.",
+            ERR_INFRA_FAILURE:
+                "Reviewer output error: missing or unreadable review file. Retrying or recovering automatically.",
+        };
+
+        function getLastErrorCodeTitle(errorCode, currentAgent) {
+            if (!errorCode) return "";
+            if (errorCode === "ERR_VALIDATION_FAILED") {
+                const a = (currentAgent || "").toString().toLowerCase();
+                if (a === "planner") return P3_VALIDATION_FAILED_TITLES.planner;
+                if (a === "reviewer") return P3_VALIDATION_FAILED_TITLES.reviewer;
+                return P3_VALIDATION_FAILED_FALLBACK_TITLE;
+            }
+            return P3_LAST_ERROR_CODE_TITLES[errorCode] || P3_LAST_ERROR_CODE_DEFAULT_TITLE;
+        }
+
         /** Tailwind defaults for live pills — keep in sync with AGENT_ATTEMPT_DOT_HEX (dots use inline hex). */
         const PIPELINE_STATUS_PILL_HEX = {
             teal600: '#0d9488',
@@ -721,10 +752,16 @@
             );
         }
 
-        function LastErrorCode({ errorCode }) {
+        function LastErrorCode({ errorCode, currentAgent }) {
             if (!errorCode) return null;
             return (
-                <span className="font-mono text-xs text-red-400 bg-[#141618] px-1.5 py-0.5 rounded">{errorCode}</span>
+                <span
+                    className="font-mono text-xs text-red-400 bg-[#141618] px-1.5 py-0.5 rounded"
+                    data-testid="last-error-code"
+                    title={getLastErrorCodeTitle(errorCode, currentAgent)}
+                >
+                    {errorCode}
+                </span>
             );
         }
 
@@ -1557,7 +1594,7 @@
                             reviewer_retries={reviewer_retries}
                         />
                     </div>
-                    <LastErrorCode errorCode={last_error_code} />
+                    <LastErrorCode errorCode={last_error_code} currentAgent={current_agent} />
                     <SkillInjected skillInjected={skill_injected} skillAgent={skill_agent} />
                 </div>
             );
