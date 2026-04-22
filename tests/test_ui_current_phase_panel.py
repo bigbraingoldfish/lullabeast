@@ -93,15 +93,28 @@ def test_agent_badge_colors(html_content):
     assert bool(re.search(r"'ESCALATION':\s*'[^']+'", html_content)), "ESCALATION color entry not found"
 
 
-def test_no_active_phase_placeholder(html_content):
-    """When current_phase_raw_id is empty or not found, shows 'No active phase' placeholder."""
-    # Check for placeholder text or conditional rendering
-    has_placeholder = bool(re.search(r'No active phase', html_content, re.IGNORECASE))
-    assert has_placeholder, "'No active phase' placeholder not found"
-    
-    # Check for conditional logic that handles empty/missing phase
-    has_conditional = bool(re.search(r'!current_phase_raw_id|current_phase_raw_id\s*==?\s*["\']|phase.*not.*found', html_content, re.IGNORECASE))
+def test_no_active_phase_placeholder_non_idle(html_content):
+    """Non-IDLE/UNKNOWN empty phase still shows neutral 'No active phase' placeholder."""
+    assert "No active phase" in html_content
+    has_conditional = bool(
+        re.search(r"!current_phase_raw_id", html_content, re.IGNORECASE)
+    )
     assert has_conditional, "Conditional logic for empty/missing phase ID not found"
+
+
+def test_idle_empty_current_phase_copy_l36(html_content):
+    """L-36: IDLE/UNKNOWN + no phase shows steering copy and test id."""
+    assert "data-testid=\"current-phase-empty-idle\"" in html_content
+    assert "No pipeline running." in html_content
+    assert "Project Ideas" in html_content
+    assert "Setup &amp; Preflight" in html_content or "Setup & Preflight" in html_content
+
+
+def test_roadmap_panel_accepts_pipeline_status_and_idle_empty_l36(html_content):
+    assert "function RoadmapPanel" in html_content or "RoadmapPanel(" in html_content
+    assert "pipelineStatus" in html_content
+    assert "data-testid=\"roadmap-empty-idle\"" in html_content
+    assert "roadmap.md" in html_content
 
 
 def test_roadmap_caching_logic(html_content):

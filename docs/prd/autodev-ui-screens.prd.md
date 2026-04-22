@@ -204,11 +204,17 @@ Responsive: on narrow screens, stack vertically (header → phase → roadmap �
 
 **Skill injected** — When `skill_injected` + `skill_agent` present: small muted line.
 
+**Empty phase** — `IDLE` / `UNKNOWN` + no `current_phase_raw_id`: **No pipeline running.** + steer to Ideas / Setup / queue (`data-testid="current-phase-empty-idle"`). Else: **No active phase**.
+
+**Git checkout recovery** — `last_action` contains **Git operation failed** → amber strip + **Recover Git** (`title`: stash + checkout + state update; not `git reset`). **`GET /api/state`** → **`git_recover_suggested_branch`**; modal **Branch to return to** prefilled from `base_branch` config + repo detection.
+
 **Escalation Command Panel** — See dedicated section below; only when `WAITING_FOR_HUMAN`.
 
 #### Roadmap Panel (right)
 
 Scrollable list: status icons (complete / in_progress / pending / skipped / blocked), **current** row highlighted with **accent** left border, progress **N / T** at top. Rows expand inline for full goal + exit criteria. **Git tag** on complete rows: deferred unless API exists.
+
+**Empty roadmap** — `IDLE` / `UNKNOWN` + no rows: idle copy + `data-testid="roadmap-empty-idle"`. Else: generic empty line.
 
 #### Activity Feed (bottom)
 

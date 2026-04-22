@@ -209,6 +209,10 @@ Responsive: on narrow screens, stack vertically (phase → roadmap → feed).
 
 **Skill injected** — If a skill was injected for the current phase/agent, show the discipline name in small text. "infra-config / executor" for example. If no skill, show nothing. *Requires PATCH-1 (see Pre-Implementation Orchestrator Patches): the orchestrator must write `skill_injected` and `skill_agent` to `phase_state.json` at each injection call site. Without this patch, this field has no data source and must show nothing.*
 
+**Empty phase (no `current_phase_raw_id`)** — When `pipeline_status` is **`IDLE`** or **`UNKNOWN`**, show **No pipeline running.** and steering copy to Project Ideas / Setup & Preflight / queue (`data-testid="current-phase-empty-idle"`). Other statuses: single **No active phase** line.
+
+**Git checkout recovery** — When `last_action` contains **Git operation failed**, amber strip + **Recover Git** with `title` (stash including untracked, checkout, state update; not `git reset`). **`GET /api/state`** → **`git_recover_suggested_branch`**; modal **Branch to return to** prefilled from config + repo.
+
 ---
 
 ### Roadmap Panel (Right)
@@ -228,6 +232,8 @@ Scrollable list of all phases. Each phase is one row:
 Current phase row is highlighted with a left border accent in the primary brand color. Complete phases are muted. Blocked phases are red-tinted.
 
 Phase count summary at the top: `4 / 18 complete` as a small progress bar.
+
+**Empty roadmap list** — For **`IDLE`** / **`UNKNOWN`** with no roadmap rows, idle-oriented copy + `data-testid="roadmap-empty-idle"`. Otherwise a single generic empty line.
 
 Clicking a phase row expands it inline to show: full goal text, exit criteria (if available from the roadmap), and for complete phases the git tag name.
 

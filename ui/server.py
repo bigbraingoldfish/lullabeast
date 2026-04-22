@@ -2045,6 +2045,23 @@ def get_state():
     except Exception:
         pass  # queue summary is non-critical
 
+    # Suggested branch for git checkout recovery (same resolution as POST /api/pipeline/git-recover
+    # when the client does not override — config base_branch then repo heuristics).
+    _gcr_path = config.get("project_dir_path")
+    _gcr_path = os.path.expanduser(_gcr_path) if _gcr_path else ""
+    _gcr_real = ""
+    if _gcr_path:
+        try:
+            _gcr_real = os.path.realpath(_gcr_path)
+        except OSError:
+            _gcr_real = ""
+    if _gcr_real and os.path.isdir(_gcr_real):
+        response["git_recover_suggested_branch"] = _detect_base_branch(
+            _gcr_real, (config.get("base_branch") or "").strip()
+        )
+    else:
+        response["git_recover_suggested_branch"] = None
+
     return response
 
 

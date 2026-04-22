@@ -280,6 +280,12 @@ The simplest way to trigger the approval prompt is to start a pipeline run — O
 
 ---
 
+## Pipeline Monitor: git checkout recovery
+
+When `pipeline_state.json` surfaces a **Git operation failed** message, the Pipeline Monitor shows **Recover Git**. That opens a dialog to confirm the **Branch to return to** (prefilled from context). The server endpoint **`POST /api/pipeline/git-recover`** runs **`git stash push --include-untracked`**, then **`git checkout`** on the resolved branch name, then updates pipeline state so the run can continue. It does **not** run **`git reset`**. **`GET /api/state`** includes **`git_recover_suggested_branch`**: the same branch the UI prefills, derived from optional **`base_branch`** in `ui/config.json` and otherwise from repository detection (`main`, `master`, `develop`, `origin/HEAD`, `init.defaultBranch`, in that style). Override the field in the dialog only if checkout failed because the wrong branch was targeted.
+
+---
+
 ## Running Tests
 
 ```bash
