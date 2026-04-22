@@ -5644,15 +5644,23 @@
                             </>
                         )}
                         {reorderError && <span className="header-text text-xs text-red-400 max-w-xs">{reorderError}</span>}
-                        <div className="flex items-center gap-1 rounded-full bg-[#1a1d21] p-0.5 border border-[#2a2d31]">
-                            {['auto', 'manual'].map(m => (
-                                <button key={m} onClick={handleModeToggle}
-                                    disabled={reorderDirty}
-                                    title={reorderDirty ? "Save or cancel reorder first" : undefined}
-                                    className={`header-text text-xs px-3 py-1 rounded-full transition-colors disabled:opacity-40 ${
-                                        queueMode === m ? 'bg-[#00b4d8] text-slate-900 font-semibold' : 'text-slate-400 hover:text-slate-200'
-                                    }`}>{m === 'auto' ? 'Auto' : 'Manual'}</button>
-                            ))}
+                        <div className="flex items-center gap-2">
+                            <span
+                                data-testid="queue-progression-label"
+                                className="header-text text-xs uppercase tracking-wide text-white"
+                                title="Auto advances the queue when eligible; Manual requires Run next project.">
+                                Progression
+                            </span>
+                            <div className="flex items-center gap-1 rounded-full bg-[#1a1d21] p-0.5 border border-[#2a2d31]">
+                                {['auto', 'manual'].map(m => (
+                                    <button key={m} onClick={handleModeToggle}
+                                        disabled={reorderDirty}
+                                        title={reorderDirty ? "Save or cancel reorder first" : undefined}
+                                        className={`header-text text-xs px-3 py-1 rounded-full transition-colors disabled:opacity-40 ${
+                                            queueMode === m ? 'bg-[#00b4d8] text-slate-900 font-semibold' : 'text-slate-400 hover:text-slate-200'
+                                        }`}>{m === 'auto' ? 'Auto' : 'Manual'}</button>
+                                ))}
+                            </div>
                         </div>
                         {queueMode === 'manual' && (
                             <button
