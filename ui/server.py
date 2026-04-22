@@ -5489,23 +5489,30 @@ def _run_preflight_checks(repo_path: str, config: dict | None = None) -> list:
                                         "or create main/master."
                                     )})
 
-    # 5. Workspace directories and docs
+    # 5. Workspace directories and docs (under OPENCLAW_ROOT — install docs use this name)
+    _workspaces_under_openclaw = " (under OPENCLAW_ROOT)"
     for agent in _WORKSPACE_AGENTS:
         ws_dir = os.path.join(openclaw_dir, f"workspace-{agent}")
         if not os.path.isdir(ws_dir):
             checks.append({"check": f"workspace-{agent}", "status": "fail",
-                            "message": f"workspace-{agent} directory missing"})
+                            "message": f"workspace-{agent} directory missing{_workspaces_under_openclaw}"})
         else:
             for doc in _WORKSPACE_DOCS:
                 doc_path = os.path.join(ws_dir, doc)
                 if not os.path.exists(doc_path):
                     checks.append({"check": f"workspace-{agent}/{doc}", "status": "fail",
-                                    "message": f"workspace-{agent}/{doc} missing — operator must install this file."})
+                                    "message": (
+                                        f"workspace-{agent}/{doc} missing — operator must install this file."
+                                        f"{_workspaces_under_openclaw}"
+                                    )})
             # Only add pass if no failures for this workspace
             missing_docs = [d for d in _WORKSPACE_DOCS if not os.path.exists(os.path.join(ws_dir, d))]
             if not missing_docs:
                 checks.append({"check": f"workspace-{agent}", "status": "pass",
-                                "message": f"workspace-{agent} present with all required docs"})
+                                "message": (
+                                    f"workspace-{agent} present with all required docs"
+                                    f"{_workspaces_under_openclaw}"
+                                )})
 
     # 6. Roadmap file on disk (warn if missing)
     import glob as glob_mod

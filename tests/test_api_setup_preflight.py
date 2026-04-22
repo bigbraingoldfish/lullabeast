@@ -1,6 +1,7 @@
 """Tests for POST /api/setup/preflight endpoint and _run_preflight_checks helper."""
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -471,6 +472,69 @@ class TestRoadmapFileCheck:
 
         roadmap = next(c for c in results if c["check"] == "roadmap file")
         assert roadmap["status"] == "pass"
+
+
+_OPENCLAW_ROOT_MSG_HINT = " (under OPENCLAW_ROOT)"
+
+
+class TestWorkspaceCheckMessagesH29:
+    """H-29: workspace-* preflight messages clarify location (OPENCLAW_ROOT)."""
+
+    def test_pass_workspace_rows_include_openclaw_root_hint(self, tmp_path):
+        repo_path = tmp_path / "myproject"
+        repo_path.mkdir()
+        openclaw = _make_openclaw_dir(tmp_path, repo_path)
+        _make_gitignore(repo_path, _full_gitignore_content())
+        _make_git_repo(repo_path)
+        (repo_path / "roadmap.md").write_text("# Roadmap\n")
+
+        with patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
+
+        for c in results:
+            if c["status"] == "pass" and c["check"].startswith("workspace-") and "/" not in c["check"]:
+                assert _OPENCLAW_ROOT_MSG_HINT in c["message"], c
+
+    def test_missing_workspace_dir_message_includes_openclaw_root_hint(self, tmp_path):
+        repo_path = tmp_path / "myproject"
+        repo_path.mkdir()
+        openclaw = _make_openclaw_dir(tmp_path, repo_path)
+        shutil.rmtree(openclaw / "workspace-planner")
+        _make_gitignore(repo_path, _full_gitignore_content())
+        _make_git_repo(repo_path)
+        (repo_path / "roadmap.md").write_text("# Roadmap\n")
+
+        with patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
+
+        miss = next(c for c in results if c["check"] == "workspace-planner" and c["status"] == "fail")
+        assert "directory missing" in miss["message"]
+        assert _OPENCLAW_ROOT_MSG_HINT in miss["message"]
+
+    def test_missing_workspace_doc_message_includes_openclaw_root_hint(self, tmp_path):
+        repo_path = tmp_path / "myproject"
+        repo_path.mkdir()
+        openclaw = _make_openclaw_dir(tmp_path, repo_path)
+        (openclaw / "workspace-planner" / "AGENTS.md").unlink()
+        _make_gitignore(repo_path, _full_gitignore_content())
+        _make_git_repo(repo_path)
+        (repo_path / "roadmap.md").write_text("# Roadmap\n")
+
+        with patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
+
+        miss = next(
+            c for c in results
+            if c["check"] == "workspace-planner/AGENTS.md" and c["status"] == "fail"
+        )
+        assert "missing" in miss["message"].lower()
+        assert _OPENCLAW_ROOT_MSG_HINT in miss["message"]
 
 
 class TestAllChecksInResponse:
