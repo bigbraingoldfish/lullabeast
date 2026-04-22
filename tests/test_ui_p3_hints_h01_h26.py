@@ -1,4 +1,4 @@
-"""P3 UX hints H-01–H-17, H-22, H-25, H-26 — native title / placeholder strings in ui/index.html."""
+"""P3 UX hints H-01–H-17, H-22, H-23, H-25, H-26 — native title / placeholder strings in ui/index.html."""
 
 from pathlib import Path
 
@@ -125,3 +125,47 @@ def test_server_path_input_accepts_placeholder_prop(html_content):
     block = html_content[start : start + 450]
     assert "placeholder" in block
     assert 'placeholder = "/path/to/your-project/my-app"' in block
+
+
+# H-23: LastErrorCode / getLastErrorCodeTitle — native titles for gate last_error_code (top 5 + validation split)
+
+H23_ERR_UNACCOUNTED = (
+    "Executor Error: files were removed that weren’t part of the phase’s declared work. "
+    "Discarded work. Attempting retry."
+)
+H23_ERR_TESTS = "Executor Error: tests failed. Discarded work. Attempting retry."
+H23_ERR_GIT_DIFF = (
+    "Executor Error: a required Git check could not run in the project. Action required: fix Git in the "
+    "working tree (corrupt repo, lock, or permissions) — the pipeline will not get past this step until "
+    "Git commands succeed. Automatic retries alone will not fix a broken repository."
+)
+H23_ERR_INFRA = (
+    "Reviewer output error: missing or unreadable review file. "
+    "Retrying or recovering automatically."
+)
+H23_V_PLANNER = "Planner Error: output didn’t pass validation. Retrying if attempts remain."
+H23_V_REVIEWER = (
+    "Reviewer Error: checks or review output didn’t pass. "
+    "Next step is picked automatically (executor, planner, or escalation)."
+)
+H23_V_FALLBACK = "Error: validation failed. See logs for what happens next."
+H23_DEFAULT = "Something in the last pipeline step failed. See orchestrator or gate logs for details."
+
+
+def test_last_error_code_titles_h23(html_content):
+    assert H23_ERR_UNACCOUNTED in html_content
+    assert H23_ERR_TESTS in html_content
+    assert H23_ERR_GIT_DIFF in html_content
+    assert H23_ERR_INFRA in html_content
+    assert H23_V_PLANNER in html_content
+    assert H23_V_REVIEWER in html_content
+    assert H23_V_FALLBACK in html_content
+    assert H23_DEFAULT in html_content
+    assert "function getLastErrorCodeTitle" in html_content
+    assert "P3_LAST_ERROR_CODE_DEFAULT_TITLE" in html_content
+    assert 'data-testid="last-error-code"' in html_content
+    assert "title={getLastErrorCodeTitle(errorCode, currentAgent)}" in html_content
+    assert (
+        "<LastErrorCode errorCode={last_error_code} currentAgent={current_agent} />"
+        in html_content
+    )
