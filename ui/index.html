@@ -329,6 +329,12 @@
         const P3_STOPPED_RESUME_TITLE = 'Continues from the current agent in the current phase.';
         const P3_QUEUE_ADD_PATH_PLACEHOLDER = '/absolute/path/to/existing/git/repo';
 
+        /** P3 Switch project dialog — native `title` on heading (H-27). Backend: POST /api/setup/switch-project. */
+        const P3_SWITCH_PROJECT_MODAL_TITLE =
+            'After preflight passes, switches the active project to this path. Stop the pipeline first unless repairing a missing or broken configured project path.';
+        /** P3 Sidebar — Project Ideas nav button native `title` (H-28). */
+        const P3_SIDEBAR_IDEAS_TAB_TITLE = 'Draft PRDs with the PRD agent.';
+
         /** P3 Pipeline Monitor — `last_error_code` chip native `title` (H-23). */
         const P3_LAST_ERROR_CODE_DEFAULT_TITLE =
             'Something in the last pipeline step failed. See orchestrator or gate logs for details.';
@@ -2132,6 +2138,7 @@
                 {
                     key: 'ideas',
                     label: 'Project Ideas',
+                    navTitle: P3_SIDEBAR_IDEAS_TAB_TITLE,
                     icon: (
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4 flex-shrink-0">
                             <path d="M9 18h6M10 22h4M12 2C8.13 2 5 5.13 5 9c0 2.38 1.19 4.47 3 5.74V17h8v-2.26C17.81 13.47 19 11.38 19 9c0-3.87-3.13-7-7-7z"/>
@@ -2164,7 +2171,7 @@
                                 <button
                                     key={item.key}
                                     type="button"
-                                    title={item.label}
+                                    title={item.navTitle ?? item.label}
                                     onClick={() => onNavigate(item.key)}
                                     className={`w-full flex items-center gap-2.5 px-3 py-2.5 text-left transition-colors ${
                                         isActive
@@ -6804,7 +6811,11 @@
                             aria-labelledby="switch-project-title"
                         >
                             <div className="bg-[#141618] border border-[#1a1d21] rounded-lg max-w-lg w-full max-h-[90vh] overflow-y-auto p-5">
-                                <h2 id="switch-project-title" className="header-text text-lg text-slate-200 mb-3">
+                                <h2
+                                    id="switch-project-title"
+                                    className="header-text text-lg text-slate-200 mb-3"
+                                    title={P3_SWITCH_PROJECT_MODAL_TITLE}
+                                >
                                     Switch project
                                 </h2>
                                 <p className="text-xs text-slate-500 mb-3">

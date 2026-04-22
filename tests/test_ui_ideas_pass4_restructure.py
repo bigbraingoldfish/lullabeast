@@ -90,3 +90,18 @@ def test_sidebar_uses_center_divider_chevron_toggle():
     assert ideas_body is not None
     assert "side-divider-btn" in content
     assert "›" in content and "‹" in content
+
+
+P3_SIDEBAR_IDEAS_TAB_TITLE_EXPECTED = "Draft PRDs with the PRD agent."
+
+
+def test_sidebar_ideas_nav_uses_p3_title_hint_h28():
+    content = load_index_html()
+    assert P3_SIDEBAR_IDEAS_TAB_TITLE_EXPECTED in content
+    assert "P3_SIDEBAR_IDEAS_TAB_TITLE" in content
+    sidebar_body = extract_function_body(content, "Sidebar")
+    assert sidebar_body is not None
+    assert "navTitle" in sidebar_body
+    assert "title={item.navTitle ?? item.label}" in sidebar_body
+    assert "key: 'ideas'" in sidebar_body or "key: \"ideas\"" in sidebar_body
+    assert "P3_SIDEBAR_IDEAS_TAB_TITLE" in sidebar_body
