@@ -58,6 +58,8 @@ Claude Code must determine during pre-flight whether it exists. If it does not:
 
 Valid event types: `gate_pass`, `gate_fail`, `retry`, `escalation_trigger`, `escalation_resolve`, `phase_complete`, `phase_skip`, `skill_inject`, `pipeline_start`, `pipeline_complete`, `orchestrator_crash`, `heartbeat_resume`
 
+**UI mapping:** The dashboard maps canonical log types to **operator-facing labels** on the activity badge; the **raw machine id** remains available via the badge’s native **`title`** (and optional `data-event-type`). Log lines may use the jsonl field **`event`** or the UI may receive **`event_type`** from synthetic server events — both are accepted. Canonical display strings live in `EVENT_TYPE_DISPLAY` / `formatActivityEventTypeLabel` in `ui/index.html` (avoid duplicating the full table here).
+
 ---
 
 ## Backend — FastAPI Server
@@ -169,8 +171,8 @@ Responsive: on narrow screens, stack vertically (phase → roadmap → feed).
 
 | `pipeline_status` | Animation | UI label (header / live pill) | Notes |
 |---|---|---|---|
-| RUNNING | Teal `run-pulse` | RUNNING | Active compute |
-| WAITING_FOR_SENTINEL | Static amber (no pulse) | `RUNNING (agent)`; when `current_agent` is set, header shows `RUNNING (agent) — {agent}` | Agent invoked; polling for sentinel |
+| RUNNING | Teal `run-pulse` (`bg-[#0d9488]`) | RUNNING | Active compute |
+| WAITING_FOR_SENTINEL | Static teal `#0d9488` (no pulse; same surface as `RUNNING`, without animation) | `RUNNING (agent)`; when `current_agent` is set, header shows `RUNNING (agent) — {agent}` | Agent invoked; polling for sentinel |
 | WAITING_FOR_HUMAN | Static orange | NEEDS YOUR INPUT | Escalation / human gate |
 | HALTED_SILENT | Static red | INTERVENTION REQUIRED | Native `title` on pill: escalation path failed; check orchestrator logs and project `escalation_failed.json` |
 | BLOCKED | Static red | BLOCKED | |
@@ -195,13 +197,7 @@ Responsive: on narrow screens, stack vertically (phase → roadmap → feed).
 
 **Active agent** — Which agent is currently working. Displayed as a badge: PLANNER / EXECUTOR / REVIEWER / ESCALATION. Each with a distinct but muted color (not traffic-light — more like terminal syntax highlighting hues).
 
-**Attempt counters** — Three small counters in a row:
-```
-Planner  ●●○  2/3
-Executor ●○○  1/3  
-Reviewer ●○○  1/3
-```
-Filled dots = attempts consumed. Shows at a glance how much retry budget remains.
+**Agent attempts** — Section heading plus three rows (`Planner` / `Executor` / `Reviewer`). Each row shows up to **three dots** derived from `planner_retries` / `executor_retries` / `reviewer_retries`, `current_agent`, and `pipeline_status`: **slate** (`#475569`) = slot not used yet; **in-flight** = teal `#0d9488` (subtle opacity pulse on that slot only; when pipeline is `RUNNING` or `WAITING_FOR_SENTINEL`); **success** = lime `#2DEB1E` (same as **COMPLETE** pill; dark label on the pill for contrast); **failure** = red `#dc2626` (same as **BLOCKED** / **STOPPED** / **HALTED** pills). Each dot has a native **`title`** explaining its state. Hex values are centralized as `PIPELINE_STATUS_PILL_HEX` / `AGENT_ATTEMPT_DOT_HEX` in `ui/index.html`. (Orchestrator may reset `executor_retries` on `ROUTE_EXECUTOR` — dots follow live counters.)
 
 **Last failure reason** — Only shown if the last gate failed. Muted text, truncated to 120 characters. Monospace. Click to expand full content in a modal or inline expansion.
 
@@ -244,7 +240,7 @@ Last 30 events, reverse chronological. Each row:
 10:14:50   retry         planner     CORE-2   attempt 2   plan rejected: attribution=impl
 ```
 
-Columns: timestamp (time only, monospace), event type (color-coded badge), agent, phase, attempt, detail (truncated).
+Columns: timestamp (time only, monospace), event type (**human-readable** color-coded badge; raw id on **`title`**), agent, phase, attempt, detail (truncated).
 
 Event type color coding (muted, not saturated):
 - `gate_pass` — green tint
@@ -400,7 +396,7 @@ Claude Code should validate and adjust this, but a reasonable phase breakdown:
 6. **UI-SHELL** — HTML skeleton, CDN imports, layout structure, header bar with status pill
 7. **UI-PHASE** — Current phase panel, agent badge, attempt counters, failure reason, elapsed timer
 8. **UI-ROADMAP** — Roadmap panel, phase rows, expand/collapse, progress bar
-9. **UI-FEED** — Activity feed, event type badges, live SSE updates, absent-log fallback
+9. **UI-FEED** — Activity feed, event type badges (labels + raw on hover), live SSE updates, absent-log fallback
 10. **UI-ESCALATION** — Escalation log tab/section
 11. **UI-COMMAND** — Escalation command panel (conditional on `WAITING_FOR_HUMAN`), confirmation modals, reset cap enforcement, post-command state transition
 12. **POLISH** — Typography, color system, responsive stacking, pulse animation, systemd service file
