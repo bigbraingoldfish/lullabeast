@@ -182,8 +182,8 @@ Responsive: on narrow screens, stack vertically (header → phase → roadmap �
 
 | Status | Treatment (intent) |
 |--------|---------------------|
-| RUNNING | Teal `run-pulse` (active compute) |
-| WAITING_FOR_SENTINEL | Static amber; pill **RUNNING (agent)**; header may show **RUNNING (agent) — {agent}** when `current_agent` is set |
+| RUNNING | Teal `run-pulse` on `bg-[#0d9488]` (active compute) |
+| WAITING_FOR_SENTINEL | Static teal `#0d9488` (no pulse); pill **RUNNING (agent)**; header may show **RUNNING (agent) — {agent}** when `current_agent` is set |
 | WAITING_FOR_HUMAN | Orange solid; pill **NEEDS YOUR INPUT** |
 | HALTED_SILENT | Red solid; pill **INTERVENTION REQUIRED** (native `title` with escalation-failure hint) |
 | BLOCKED | Red solid |
@@ -212,11 +212,13 @@ Scrollable list: status icons (complete / in_progress / pending / skipped / bloc
 
 #### Activity Feed (bottom)
 
-Last ~30 events, reverse chronological. Columns: time (monospace), **badge** (event type), agent, phase, attempt, truncated detail — expand row for full detail.
+Last ~30 events, reverse chronological. Columns: time (monospace), **badge** (human-readable event type label; **raw machine id** on native **`title`**), agent, phase, attempt, truncated detail — expand row for full detail.
 
 **Event type colors (muted):** Same intent as original — e.g. gate_pass green tint; gate_fail/retry amber; escalation_trigger orange; escalation_resolve blue; phase_complete brighter green; neutral gray for others.
 
 **Live updates:** SSE where possible; new rows fade in ~300ms. **Fallback:** poll `GET /api/events` if SSE fails.
+
+**Empty buffer:** Muted **"No events yet. Events appear here as the pipeline runs."** when the in-memory ring has no rows.
 
 **Absent log:** Muted placeholder — event log unavailable; core panels still work.
 

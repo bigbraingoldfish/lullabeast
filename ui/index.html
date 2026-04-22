@@ -98,6 +98,21 @@
             animation: chat-pending-soft 2s ease-in-out infinite;
         }
 
+        /* L-28: in-flight attempt dot only — subtle opacity pulse (distinct from static green success dot) */
+        @keyframes agent-attempt-inflight-pulse {
+            0%, 100% { opacity: 0.72; }
+            50% { opacity: 1; }
+        }
+        .agent-attempt-dot--inflight {
+            animation: agent-attempt-inflight-pulse 2.75s ease-in-out infinite;
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .agent-attempt-dot--inflight {
+                animation: none;
+                opacity: 1;
+            }
+        }
+
         /* Fade-in animation for new event rows */
         @keyframes fade-in-row {
             0% {
@@ -278,10 +293,18 @@
         const QUEUE_CURRENT_TOOLTIP =
             'Active queue slot for this path. Live pipeline status is not available until the orchestrator runs here.';
 
+        /** Tailwind defaults for live pills — keep in sync with AGENT_ATTEMPT_DOT_HEX (dots use inline hex). */
+        const PIPELINE_STATUS_PILL_HEX = {
+            teal600: '#0d9488',
+            red600: '#dc2626',
+            successGreen: '#28D11B',
+            slate600: '#475569',
+        };
+
         /** Live pipeline_status from GET /api/queue → single pill (shared with Pipeline Monitor header). */
         const PIPELINE_LIVE_PILL = {
-            RUNNING: { label: 'RUNNING', className: 'bg-teal-600 text-white run-pulse', title: '' },
-            WAITING_FOR_SENTINEL: { label: 'RUNNING (agent)', className: 'bg-amber-500 text-slate-900', title: '' },
+            RUNNING: { label: 'RUNNING', className: 'bg-[#0d9488] text-white run-pulse', title: '' },
+            WAITING_FOR_SENTINEL: { label: 'RUNNING (agent)', className: 'bg-[#0d9488] text-white', title: '' },
             WAITING_FOR_HUMAN: { label: 'NEEDS YOUR INPUT', className: 'bg-orange-500 text-white', title: '' },
             HALTED_SILENT: {
                 label: 'INTERVENTION REQUIRED',
@@ -290,7 +313,11 @@
                     'Pipeline halted — escalation path failed; check orchestrator logs and project escalation_failed.json.',
             },
             BLOCKED: { label: 'BLOCKED', className: 'bg-red-600 text-white', title: PIPELINE_BLOCKED_TOOLTIP },
-            PIPELINE_COMPLETE: { label: 'COMPLETE', className: 'bg-emerald-700 text-white', title: '' },
+            PIPELINE_COMPLETE: {
+                label: 'COMPLETE',
+                className: 'bg-[#28D11B] text-slate-900',
+                title: '',
+            },
             STOPPED: { label: 'STOPPED', className: 'bg-red-600 text-white', title: '' },
             QUEUE_HALTED: { label: 'Queue stalled', className: 'bg-amber-600 text-slate-900', title: '' },
             IDLE: { label: 'IDLE', className: 'bg-slate-600 text-slate-200', title: '' },
@@ -408,7 +435,8 @@
         }
 
         function getEventBadgeColor(eventType) {
-            switch (eventType) {
+            const raw = (eventType || '').toLowerCase();
+            switch (raw) {
                 case 'gate_pass': return 'bg-green-600 text-white';
                 case 'gate_fail': return 'bg-amber-600 text-white';
                 case 'retry': return 'bg-amber-600 text-white';
@@ -418,6 +446,151 @@
                 case 'status_changed': return 'bg-slate-600 text-white';
                 default: return 'bg-[#1a1d21] text-white';
             }
+        }
+
+        /** Canonical jsonl / synthetic event type → operator-facing label (L-31). */
+        const EVENT_TYPE_DISPLAY = {
+            gate_pass: 'Gate pass',
+            gate_fail: 'Gate fail',
+            retry: 'Retry',
+            escalation_trigger: 'Escalation trigger',
+            escalation_resolve: 'Escalation resolve',
+            phase_complete: 'Phase complete',
+            status_changed: 'Status changed',
+            phase_skip: 'Phase skip',
+            skill_inject: 'Skill inject',
+            pipeline_start: 'Pipeline start',
+            pipeline_complete: 'Pipeline complete',
+            orchestrator_crash: 'Orchestrator crash',
+            heartbeat_resume: 'Heartbeat resume',
+            phase_start: 'Phase start',
+            gate_verdict: 'Gate verdict',
+            agent_retry: 'Agent retry',
+            webhook_invoke: 'Webhook invoke',
+            state_transition: 'State transition',
+        };
+
+        function humanizeSnakeCase(s) {
+            if (!s || typeof s !== 'string') return 'Unknown';
+            return s
+                .split('_')
+                .map((w) => (w.length ? w[0].toUpperCase() + w.slice(1).toLowerCase() : ''))
+                .join(' ')
+                .trim() || 'Unknown';
+        }
+
+        function getEventTypeRaw(event) {
+            if (!event) return '';
+            const t = event.event_type ?? event.event;
+            return typeof t === 'string' ? t : String(t || '');
+        }
+
+        function formatActivityEventTypeLabel(raw) {
+            const key = (raw || '').toLowerCase();
+            if (EVENT_TYPE_DISPLAY[key]) return EVENT_TYPE_DISPLAY[key];
+            return humanizeSnakeCase(key);
+        }
+
+        const AGENT_ATTEMPT_DOT_TITLES = {
+            neutral: 'Attempt not started yet for this phase.',
+            blue: 'Attempt in progress — agent running or waiting for sentinel output.',
+            green: 'Attempt succeeded — pipeline advanced past this agent for this phase.',
+            red: 'Attempt failed (gate or timeout) — retry or escalation follows if cap reached.',
+        };
+
+        /** L-28 palette — inline hex; matches PIPELINE_STATUS_PILL_HEX / live pill surfaces (COMPLETE uses same success lime). */
+        const AGENT_ATTEMPT_DOT_HEX = {
+            neutral: PIPELINE_STATUS_PILL_HEX.slate600,
+            blue: PIPELINE_STATUS_PILL_HEX.teal600,
+            green: PIPELINE_STATUS_PILL_HEX.successGreen,
+            red: PIPELINE_STATUS_PILL_HEX.red600,
+        };
+
+        /**
+         * L-28 per-slot states: 'neutral' | 'blue' | 'green' | 'red'
+         * @param {string} agentRole planner|executor|reviewer
+         * @param {number|null|undefined} rowRetries failure count for this row
+         */
+        function getAgentAttemptDotStates(agentRole, rowRetries, currentAgent, pipelineStatus, allRetries) {
+            const ORDER = ['planner', 'executor', 'reviewer'];
+            const rowIdx = ORDER.indexOf(agentRole);
+            if (rowIdx < 0) return ['neutral', 'neutral', 'neutral'];
+
+            const ca = (currentAgent || '').toLowerCase(); // L-28: canonical agent id compare
+            const ps = String(pipelineStatus ?? '').trim();
+            const r = Math.min(Math.max(Number(rowRetries) || 0, 0), 3);
+            const p = Math.min(Math.max(Number(allRetries?.planner) || 0, 0), 3);
+            const e = Math.min(Math.max(Number(allRetries?.executor) || 0, 0), 3);
+            const rev = Math.min(Math.max(Number(allRetries?.reviewer) || 0, 0), 3);
+
+            const terminalNoBlue = new Set([
+                'STOPPED',
+                'HALTED_SILENT',
+                'BLOCKED',
+                'QUEUE_HALTED',
+                'PIPELINE_COMPLETE',
+            ]);
+            const allowBlue =
+                (ps === 'RUNNING' || ps === 'WAITING_FOR_SENTINEL') &&
+                !terminalNoBlue.has(ps) &&
+                ps !== 'WAITING_FOR_HUMAN';
+
+            let activeIdx = -1;
+            if (ca === 'planner') activeIdx = 0;
+            else if (ca === 'executor') activeIdx = 1;
+            else if (ca === 'reviewer') activeIdx = 2;
+            else if (ca === 'escalation') activeIdx = 3;
+
+            const slotStates = () => ['neutral', 'neutral', 'neutral'];
+            const threeRed = () => ['red', 'red', 'red'];
+            const completedLeg = (failures) => {
+                const out = ['neutral', 'neutral', 'neutral'];
+                const retries = Math.min(Math.max(Number(failures) || 0, 0), 3);
+                for (let i = 0; i < 3; i++) {
+                    if (i < retries) out[i] = 'red';
+                    else if (i === retries) out[i] = 'green';
+                    else out[i] = 'neutral';
+                }
+                return out;
+            };
+            const activeRow = (failures, withBlue) => {
+                const out = ['neutral', 'neutral', 'neutral'];
+                const retries = Math.min(Math.max(Number(failures) || 0, 0), 3);
+                for (let i = 0; i < 3; i++) {
+                    if (i < retries) out[i] = 'red';
+                    else if (i === retries) out[i] = withBlue ? 'blue' : 'neutral';
+                    else out[i] = 'neutral';
+                }
+                return out;
+            };
+
+            if (ca === 'escalation') {
+                if (agentRole === 'planner') {
+                    if (p >= 3) return threeRed();
+                    return completedLeg(p);
+                }
+                if (agentRole === 'executor') {
+                    if (p >= 3) return slotStates();
+                    if (e >= 3) return threeRed();
+                    return completedLeg(e);
+                }
+                if (agentRole === 'reviewer') {
+                    if (p >= 3 || e >= 3) return slotStates();
+                    if (rev >= 3) return threeRed();
+                    return completedLeg(rev);
+                }
+            }
+
+            if (activeIdx < 0) return slotStates();
+
+            if (rowIdx > activeIdx) return slotStates();
+
+            if (rowIdx < activeIdx) return completedLeg(r);
+
+            // rowIdx === activeIdx
+            if (ps === 'WAITING_FOR_HUMAN' && r >= 3) return threeRed();
+            if (!allowBlue) return activeRow(r, false);
+            return activeRow(r, true);
         }
 
         /** Format seconds as "Xh Ym" or "Ym" or "—" */
@@ -443,20 +616,30 @@
             );
         }
         
-        function DotCounter({ count, label }) {
+        function DotCounter({ count, label, agentRole, currentAgent, pipelineStatus, planner_retries, executor_retries, reviewer_retries }) {
             const maxDots = 3;
             if (count === undefined || count === null) return null;
-            const filled = Math.min(count, maxDots);
-            const empty = maxDots - filled;
+            const allRetries = {
+                planner: planner_retries,
+                executor: executor_retries,
+                reviewer: reviewer_retries,
+            };
+            const states = getAgentAttemptDotStates(agentRole, count, currentAgent, pipelineStatus, allRetries).slice(0, maxDots);
             return (
                 <div className="flex items-center gap-1.5">
                     <span className="text-slate-500 text-xs w-16">{label}</span>
                     <div className="flex gap-1">
-                        {Array.from({length: filled}).map((_, i) => (
-                            <span key={i} className="w-2 h-2 rounded-full bg-amber-500 inline-block"></span>
-                        ))}
-                        {Array.from({length: empty}).map((_, i) => (
-                            <span key={filled + i} className="w-2 h-2 rounded-full bg-[#1a1d21] inline-block"></span>
+                        {states.map((st, i) => (
+                            <span
+                                key={i}
+                                data-agent-dot-state={st}
+                                title={AGENT_ATTEMPT_DOT_TITLES[st]}
+                                className={
+                                    'w-2 h-2 rounded-full inline-block shrink-0' +
+                                    (st === 'blue' ? ' agent-attempt-dot--inflight' : '')
+                                }
+                                style={{ backgroundColor: AGENT_ATTEMPT_DOT_HEX[st] || AGENT_ATTEMPT_DOT_HEX.neutral }}
+                            />
                         ))}
                     </div>
                 </div>
@@ -1157,9 +1340,39 @@
                         <p className="text-slate-400 text-sm leading-relaxed">{goal}</p>
                     )}
                     <div className="space-y-1">
-                        <DotCounter count={planner_retries} label="Planner" />
-                        <DotCounter count={executor_retries} label="Executor" />
-                        <DotCounter count={reviewer_retries} label="Reviewer" />
+                        <div className="text-slate-500 text-xs font-medium tracking-wide uppercase mb-0.5" data-testid="agent-attempts-heading">
+                            Agent attempts
+                        </div>
+                        <DotCounter
+                            agentRole="planner"
+                            count={planner_retries}
+                            label="Planner"
+                            currentAgent={current_agent}
+                            pipelineStatus={pipeline_status}
+                            planner_retries={planner_retries}
+                            executor_retries={executor_retries}
+                            reviewer_retries={reviewer_retries}
+                        />
+                        <DotCounter
+                            agentRole="executor"
+                            count={executor_retries}
+                            label="Executor"
+                            currentAgent={current_agent}
+                            pipelineStatus={pipeline_status}
+                            planner_retries={planner_retries}
+                            executor_retries={executor_retries}
+                            reviewer_retries={reviewer_retries}
+                        />
+                        <DotCounter
+                            agentRole="reviewer"
+                            count={reviewer_retries}
+                            label="Reviewer"
+                            currentAgent={current_agent}
+                            pipelineStatus={pipeline_status}
+                            planner_retries={planner_retries}
+                            executor_retries={executor_retries}
+                            reviewer_retries={reviewer_retries}
+                        />
                     </div>
                     <LastErrorCode errorCode={last_error_code} />
                     <SkillInjected skillInjected={skill_injected} skillAgent={skill_agent} />
@@ -1329,8 +1542,11 @@
                 : event.detail;
             
             const attemptDisplay = event.attempt ?? '—';
-            const badgeColor = getEventBadgeColor(event.event_type);
-            
+            const rawType = getEventTypeRaw(event);
+            const labelText = rawType ? formatActivityEventTypeLabel(rawType) : 'Unknown';
+            const badgeColor = getEventBadgeColor(rawType);
+            const machineTitle = `Machine id: ${rawType || 'unknown'}`;
+
             return (
                 <div
                     className={"event-row p-2 border-b border-[#1a1d21] cursor-pointer rounded" + (isNew ? " event-row-fade-in" : "")}
@@ -1340,8 +1556,12 @@
                         <span className="font-mono text-xs text-slate-400 w-14 flex-shrink-0">
                             {timeOnly}
                         </span>
-                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${badgeColor} flex-shrink-0`}>
-                            {event.event_type || 'unknown'}
+                        <span
+                            data-event-type={rawType || 'unknown'}
+                            title={machineTitle}
+                            className={`px-2 py-0.5 rounded text-xs font-medium ${badgeColor} flex-shrink-0`}
+                        >
+                            {labelText}
                         </span>
                         <span className="text-xs text-slate-300 w-20 flex-shrink-0 truncate">
                             {event.agent || '—'}
@@ -1612,7 +1832,7 @@
                         {activityTab === 'escalation' ? (
                             <EscalationLogPanel events={escalationEvents} />
                         ) : events.length === 0 ? (
-                            <div className="text-slate-500 italic text-sm">No events recorded yet</div>
+                            <div className="text-slate-500 italic text-sm">No events yet. Events appear here as the pipeline runs.</div>
                         ) : (
                             <div className="space-y-1">
                                 {events.map((event, index) => (

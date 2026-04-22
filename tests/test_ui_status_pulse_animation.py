@@ -20,7 +20,7 @@ def test_running_state_has_run_pulse_class(html_content):
 
 
 def test_waiting_for_sentinel_state_has_no_pulse_class(html_content):
-    """WAITING_FOR_SENTINEL is static amber — no run-pulse or status-pulse in mapping."""
+    """WAITING_FOR_SENTINEL is static teal — no run-pulse or status-pulse in mapping."""
     bad = bool(re.search(r"WAITING_FOR_SENTINEL:\s*\{[^}]*run-pulse", html_content))
     assert not bad, "WAITING_FOR_SENTINEL must not use run-pulse"
     bad2 = bool(re.search(r"WAITING_FOR_SENTINEL:\s*\{[^}]*status-pulse", html_content))

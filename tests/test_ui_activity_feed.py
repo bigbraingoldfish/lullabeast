@@ -35,8 +35,10 @@ def test_event_row_displays_timestamp_time_only(html_content):
     assert has_monospace, "EventRow timestamp is not in monospace font"
 
 def test_event_row_displays_event_type_badge(html_content):
-    has_badge = bool(re.search(r"event.*type.*badge|badge.*event.*type", html_content, re.IGNORECASE))
-    assert has_badge, "EventRow does not display event type badge"
+    has_badge = bool(
+        re.search(r"formatActivityEventTypeLabel|data-event-type", html_content)
+    )
+    assert has_badge, "EventRow should map event types via formatActivityEventTypeLabel / data-event-type"
 
 def test_event_row_displays_agent_field(html_content):
     has_agent = bool(re.search(r"event.*\.agent|event.*agent", html_content))
@@ -95,8 +97,24 @@ def test_inline_expansion_shows_full_detail(html_content):
     assert has_inline_expand, "No inline expansion for full detail when expanded"
 
 def test_empty_state_renders_placeholder(html_content):
-    has_empty_state = bool(re.search(r"No events recorded yet", html_content))
-    assert has_empty_state, "Empty state placeholder not found"
+    expected = "No events yet. Events appear here as the pipeline runs."
+    assert expected in html_content, f"L-37 empty state copy not found: {expected!r}"
+
+
+def test_format_activity_event_type_label_helper_exists(html_content):
+    assert "function formatActivityEventTypeLabel" in html_content
+
+
+def test_event_type_display_map_includes_gate_pass_and_status_changed(html_content):
+    assert "EVENT_TYPE_DISPLAY" in html_content
+    assert '"gate_pass"' in html_content or "'gate_pass'" in html_content
+    assert "Gate pass" in html_content
+    assert "Status changed" in html_content
+
+
+def test_get_event_type_raw_coalesces_event_and_event_type(html_content):
+    assert "function getEventTypeRaw" in html_content
+    assert "event.event_type" in html_content and "event.event" in html_content
 
 # SSE and fallback tests
 def test_sse_connection_via_event_source(html_content):
