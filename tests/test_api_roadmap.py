@@ -248,3 +248,120 @@ class TestTerminalStatusesDoNotShowInProgress:
         assert phase2["status"] == "in_progress", (
             f"Phase PHASE-2 should be 'in_progress' when pipeline_status={running_status!r}"
         )
+
+
+class TestRoadmapResolvesFromPipelineState:
+    """GET /api/roadmap: prefer pipeline_state[project_path] + _canonical_roadmap_path;
+    fall back to config[roadmap_path] when state has no usable project path."""
+
+    def _roadmap_block(self, *phase_ids: str) -> str:
+        lines = ["# Test Roadmap", ""]
+        for pid in phase_ids:
+            lines.append(f"- [ ] `{pid}` | LOW | {pid} goal")
+        return "\n".join(lines) + "\n"
+
+    def test_state_project_path_takes_precedence_over_config_roadmap_path(self, temp_dir):
+        state_project = os.path.join(temp_dir, "state_project")
+        config_project = os.path.join(temp_dir, "config_project")
+        os.makedirs(state_project, exist_ok=True)
+        os.makedirs(config_project, exist_ok=True)
+        with open(os.path.join(state_project, "roadmap.md"), "w") as f:
+            f.write(self._roadmap_block("STATE-1", "STATE-2"))
+        with open(os.path.join(config_project, "roadmap.md"), "w") as f:
+            f.write(self._roadmap_block("CONFIG-1", "CONFIG-2"))
+
+        state_path = os.path.join(temp_dir, "pipeline_state.json")
+        with open(state_path, "w") as f:
+            json.dump(
+                {
+                    "pipeline_status": "RUNNING",
+                    "project_path": state_project,
+                },
+                f,
+            )
+        mock_config = {
+            "pipeline_state_path": state_path,
+            "phase_state_path": os.path.join(temp_dir, "phase_state.json"),
+            "lock_path": os.path.join(temp_dir, "pipeline.lock"),
+            "events_path": os.path.join(temp_dir, "pipeline_events.jsonl"),
+            "roadmap_path": os.path.join(config_project, "roadmap.md"),
+        }
+        with patch("ui.server.load_config", return_value=mock_config):
+            response = client.get("/api/roadmap")
+        assert response.status_code == 200
+        data = response.json()
+        ids = [p["id"] for p in data]
+        assert "STATE-1" in ids
+        assert "CONFIG-1" not in ids
+
+    def test_falls_back_to_config_when_pipeline_state_has_no_project_path(self, temp_dir):
+        """When project_path is missing, /api/roadmap uses config roadmap_path (unchanged)."""
+        fb_path = os.path.join(temp_dir, "fallback_roadmap.md")
+        with open(fb_path, "w") as f:
+            f.write(self._roadmap_block("FALLBACK-1", "FALLBACK-2"))
+        state_path = os.path.join(temp_dir, "pipeline_state.json")
+        with open(state_path, "w") as f:
+            json.dump({"pipeline_status": "RUNNING"}, f)
+        mock_config = {
+            "pipeline_state_path": state_path,
+            "phase_state_path": os.path.join(temp_dir, "phase_state.json"),
+            "lock_path": os.path.join(temp_dir, "pipeline.lock"),
+            "events_path": os.path.join(temp_dir, "pipeline_events.jsonl"),
+            "roadmap_path": fb_path,
+        }
+        with patch("ui.server.load_config", return_value=mock_config):
+            response = client.get("/api/roadmap")
+        assert response.status_code == 200
+        data = response.json()
+        assert any(p["id"] == "FALLBACK-1" for p in data)
+
+    def test_falls_back_to_config_when_pipeline_state_file_absent(self, temp_dir):
+        """No pipeline_state.json — use config roadmap only."""
+        fb_path = os.path.join(temp_dir, "only_roadmap.md")
+        with open(fb_path, "w") as f:
+            f.write(self._roadmap_block("FALLBACK-1"))
+        mock_config = {
+            "pipeline_state_path": os.path.join(temp_dir, "no_such_state.json"),
+            "phase_state_path": os.path.join(temp_dir, "phase_state.json"),
+            "lock_path": os.path.join(temp_dir, "pipeline.lock"),
+            "events_path": os.path.join(temp_dir, "pipeline_events.jsonl"),
+            "roadmap_path": fb_path,
+        }
+        with patch("ui.server.load_config", return_value=mock_config):
+            response = client.get("/api/roadmap")
+        assert response.status_code == 200
+        data = response.json()
+        assert any(p["id"] == "FALLBACK-1" for p in data)
+
+    def test_canonical_roadmap_path_glob_for_nonstandard_filename(self, temp_dir):
+        state_project = os.path.join(temp_dir, "globs")
+        other_project = os.path.join(temp_dir, "other")
+        os.makedirs(state_project, exist_ok=True)
+        os.makedirs(other_project, exist_ok=True)
+        with open(os.path.join(state_project, "my-roadmap.md"), "w") as f:
+            f.write(self._roadmap_block("GLOB-1"))
+        with open(os.path.join(other_project, "roadmap.md"), "w") as f:
+            f.write(self._roadmap_block("OTHER-1"))
+        state_path = os.path.join(temp_dir, "pipeline_state.json")
+        with open(state_path, "w") as f:
+            json.dump(
+                {
+                    "pipeline_status": "RUNNING",
+                    "project_path": state_project,
+                },
+                f,
+            )
+        mock_config = {
+            "pipeline_state_path": state_path,
+            "phase_state_path": os.path.join(temp_dir, "phase_state.json"),
+            "lock_path": os.path.join(temp_dir, "pipeline.lock"),
+            "events_path": os.path.join(temp_dir, "pipeline_events.jsonl"),
+            "roadmap_path": os.path.join(other_project, "roadmap.md"),
+        }
+        with patch("ui.server.load_config", return_value=mock_config):
+            response = client.get("/api/roadmap")
+        assert response.status_code == 200
+        data = response.json()
+        ids = [p["id"] for p in data]
+        assert "GLOB-1" in ids
+        assert "OTHER-1" not in ids
