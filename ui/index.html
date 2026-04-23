@@ -98,16 +98,16 @@
             animation: chat-pending-soft 2s ease-in-out infinite;
         }
 
-        /* L-28: in-flight attempt dot only — subtle opacity pulse (distinct from static green success dot) */
+        /* L-28: in-flight attempt cell only — subtle opacity pulse */
         @keyframes agent-attempt-inflight-pulse {
             0%, 100% { opacity: 0.72; }
             50% { opacity: 1; }
         }
-        .agent-attempt-dot--inflight {
+        .agent-attempt-cell--inflight {
             animation: agent-attempt-inflight-pulse 2.75s ease-in-out infinite;
         }
         @media (prefers-reduced-motion: reduce) {
-            .agent-attempt-dot--inflight {
+            .agent-attempt-cell--inflight {
                 animation: none;
                 opacity: 1;
             }
@@ -370,7 +370,7 @@
         const PIPELINE_STATUS_PILL_HEX = {
             teal600: '#0d9488',
             red600: '#dc2626',
-            successGreen: '#28D11B',
+            successGreen: '#2DEB1E',
             slate600: '#475569',
         };
 
@@ -400,7 +400,7 @@
             BLOCKED: { label: 'BLOCKED', className: 'bg-red-600 text-white', title: PIPELINE_BLOCKED_TOOLTIP },
             PIPELINE_COMPLETE: {
                 label: 'COMPLETE',
-                className: 'bg-[#28D11B] text-slate-900',
+                className: 'bg-[#2DEB1E] text-slate-900',
                 title: '',
             },
             STOPPED: { label: 'STOPPED', className: 'bg-red-600 text-white', title: '' },
@@ -610,10 +610,10 @@
             red: 'Attempt failed (gate or timeout) — retry or escalation follows if cap reached.',
         };
 
-        /** L-28 palette — inline hex; matches PIPELINE_STATUS_PILL_HEX / live pill surfaces (COMPLETE uses same success lime). */
+        /** L-28 palette — inline hex for attempt cells. In-flight `blue` uses mock-like blue (not pipeline teal) so it does not read like success lime. */
         const AGENT_ATTEMPT_DOT_HEX = {
             neutral: PIPELINE_STATUS_PILL_HEX.slate600,
-            blue: PIPELINE_STATUS_PILL_HEX.teal600,
+            blue: '#3b82f6',
             green: PIPELINE_STATUS_PILL_HEX.successGreen,
             red: PIPELINE_STATUS_PILL_HEX.red600,
         };
@@ -705,6 +705,25 @@
             return activeRow(r, true);
         }
 
+        /**
+         * Consumption count (0..3) for Agent attempts row fraction `n/3`.
+         * Rules: resolved = reds + greens; if any blue and reds > 0 return reds; if any blue and reds === 0 and slot 0 is blue return 1; if any blue otherwise return 0; else return resolved.
+         */
+        function computeAgentAttemptFractionN(states) {
+            const s = (states || []).slice(0, 3);
+            while (s.length < 3) s.push('neutral');
+            const red = s.filter((x) => x === 'red').length;
+            const green = s.filter((x) => x === 'green').length;
+            const resolved = red + green;
+            const hasBlue = s.some((x) => x === 'blue');
+            if (hasBlue) {
+                if (red > 0) return red;
+                if (red === 0 && s[0] === 'blue') return 1;
+                return 0;
+            }
+            return resolved;
+        }
+
         /** Format seconds as "Xh Ym" or "Ym" or "—" */
         function formatDuration(seconds) {
             if (seconds === null || seconds === undefined) return '—';
@@ -728,31 +747,105 @@
             );
         }
         
-        function DotCounter({ count, label, agentRole, currentAgent, pipelineStatus, planner_retries, executor_retries, reviewer_retries }) {
-            const maxDots = 3;
+        function AgentAttemptCellIcon({ st }) {
+            const hx = AGENT_ATTEMPT_DOT_HEX;
+            if (st === 'green') {
+                return (
+                    <svg className="h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <path
+                            d="M20 6L9 17l-5-5"
+                            stroke={hx.green}
+                            strokeWidth="2.25"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                        />
+                    </svg>
+                );
+            }
+            if (st === 'red') {
+                return (
+                    <svg className="h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <path d="M18 6L6 18M6 6l12 12" stroke={hx.red} strokeWidth="2.25" strokeLinecap="round" />
+                    </svg>
+                );
+            }
+            return null;
+        }
+
+        function AgentAttemptRow({ count, label, agentRole, currentAgent, pipelineStatus, planner_retries, executor_retries, reviewer_retries }) {
+            const maxSlots = 3;
             if (count === undefined || count === null) return null;
             const allRetries = {
                 planner: planner_retries,
                 executor: executor_retries,
                 reviewer: reviewer_retries,
             };
-            const states = getAgentAttemptDotStates(agentRole, count, currentAgent, pipelineStatus, allRetries).slice(0, maxDots);
+            const states = getAgentAttemptDotStates(agentRole, count, currentAgent, pipelineStatus, allRetries).slice(0, maxSlots);
+            const n = computeAgentAttemptFractionN(states);
+            const fractionLabel = `${n}/3`;
+            const hx = AGENT_ATTEMPT_DOT_HEX;
+            const baseCell =
+                'flex h-6 w-6 shrink-0 items-center justify-center rounded border text-[11px] font-medium tabular-nums';
             return (
-                <div className="flex items-center gap-1.5">
-                    <span className="text-slate-500 text-xs w-16">{label}</span>
-                    <div className="flex gap-1">
-                        {states.map((st, i) => (
-                            <span
-                                key={i}
-                                data-agent-dot-state={st}
-                                title={AGENT_ATTEMPT_DOT_TITLES[st]}
-                                className={
-                                    'w-2 h-2 rounded-full inline-block shrink-0' +
-                                    (st === 'blue' ? ' agent-attempt-dot--inflight' : '')
+                <div data-agent-attempt-row={agentRole} className="flex w-full items-center gap-1">
+                    <span className="w-12 shrink-0 text-xs text-slate-500">{label}</span>
+                    <div className="flex shrink-0 items-center gap-2">
+                        <div className="flex gap-0.5">
+                            {states.map((st, i) => {
+                                const slotNum = i + 1;
+                                let cellClass = baseCell;
+                                let cellStyle = {};
+                                if (st === 'neutral') {
+                                    cellClass += ' border-slate-600 text-slate-400';
+                                    cellStyle = { backgroundColor: 'rgba(148, 163, 184, 0.06)' };
+                                } else if (st === 'red') {
+                                    cellClass += ' border';
+                                    cellStyle = {
+                                        backgroundColor: 'rgba(220, 38, 38, 0.14)',
+                                        borderColor: '#7f1d1d',
+                                    };
+                                } else if (st === 'green') {
+                                    cellClass += ' border';
+                                    cellStyle = {
+                                        backgroundColor: 'rgba(45, 235, 30, 0.1)',
+                                        borderColor: '#15803d',
+                                    };
+                                } else if (st === 'blue') {
+                                    cellClass += ' agent-attempt-cell--inflight border-2';
+                                    cellStyle = {
+                                        backgroundColor: 'rgba(59, 130, 246, 0.14)',
+                                        borderColor: hx.blue,
+                                    };
                                 }
-                                style={{ backgroundColor: AGENT_ATTEMPT_DOT_HEX[st] || AGENT_ATTEMPT_DOT_HEX.neutral }}
-                            />
-                        ))}
+                                const icon = st === 'green' || st === 'red' ? <AgentAttemptCellIcon st={st} /> : null;
+                                const showNum = st === 'neutral' || st === 'blue';
+                                const numEl =
+                                    showNum && st === 'blue' ? (
+                                        <span style={{ color: hx.blue }}>{slotNum}</span>
+                                    ) : showNum ? (
+                                        <span>{slotNum}</span>
+                                    ) : null;
+                                return (
+                                    <div
+                                        key={i}
+                                        data-agent-attempt-slot={String(i)}
+                                        data-agent-attempt-state={st}
+                                        title={AGENT_ATTEMPT_DOT_TITLES[st] || ''}
+                                        aria-label={AGENT_ATTEMPT_DOT_TITLES[st] || undefined}
+                                        className={cellClass}
+                                        style={cellStyle}
+                                    >
+                                        {icon || numEl}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                        <span
+                            data-agent-attempt-fraction
+                            className="min-w-[2rem] shrink-0 text-right text-xs tabular-nums text-slate-500"
+                        >
+                            {fractionLabel}
+                        </span>
                     </div>
                 </div>
             );
@@ -1706,7 +1799,7 @@
                         <div className="text-slate-500 text-xs font-medium tracking-wide uppercase mb-0.5" data-testid="agent-attempts-heading">
                             Agent attempts
                         </div>
-                        <DotCounter
+                        <AgentAttemptRow
                             agentRole="planner"
                             count={planner_retries}
                             label="Planner"
@@ -1716,7 +1809,7 @@
                             executor_retries={executor_retries}
                             reviewer_retries={reviewer_retries}
                         />
-                        <DotCounter
+                        <AgentAttemptRow
                             agentRole="executor"
                             count={executor_retries}
                             label="Executor"
@@ -1726,7 +1819,7 @@
                             executor_retries={executor_retries}
                             reviewer_retries={reviewer_retries}
                         />
-                        <DotCounter
+                        <AgentAttemptRow
                             agentRole="reviewer"
                             count={reviewer_retries}
                             label="Reviewer"
@@ -6639,7 +6732,7 @@
                                                 setStopHint("");
                                                 setShowStopModal(true);
                                             }}
-                                            className="header-text px-3 py-1 text-xs bg-red-950 hover:bg-red-900 text-red-400 rounded border border-red-800 transition-colors"
+                                            className="header-text px-3 py-1 text-xs bg-[#1a1d21] hover:bg-[#1f2226] text-red-400 rounded border border-red-800 hover:border-red-700 transition-colors"
                                         >
                                             Stop Pipeline
                                         </button>
@@ -6648,7 +6741,7 @@
                                         <button
                                             type="button"
                                             disabled
-                                            className="header-text px-3 py-1 text-xs bg-red-950 text-red-400 rounded border border-red-800 opacity-70 status-pulse cursor-not-allowed"
+                                            className="header-text px-3 py-1 text-xs bg-[#1a1d21] text-red-400 rounded border border-red-800 opacity-70 status-pulse cursor-not-allowed"
                                         >
                                             Stopping...
                                         </button>
@@ -6911,7 +7004,7 @@
                                                     })
                                                     .catch((e) => setPathStopErr(String(e?.message || e)));
                                             }}
-                                            className="header-text text-xs px-3 py-1.5 rounded bg-red-950 hover:bg-red-900 text-red-400 border border-red-800 transition-colors"
+                                            className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] hover:bg-[#1f2226] text-red-400 border border-red-800 hover:border-red-700 transition-colors"
                                         >
                                             Stop Pipeline
                                         </button>

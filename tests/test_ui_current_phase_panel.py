@@ -134,51 +134,86 @@ def test_current_phase_panel_rendered_in_left_panel(html_content):
     has_render = bool(re.search(r'<CurrentPhasePanel|<CurrentPhasePanel\s*/>|CurrentPhasePanel\s+/>', html_content))
     assert has_render, "CurrentPhasePanel is not rendered in the UI"
 
-# Tests for L-28 Agent attempt dots (semantic colors + tooltips)
+# Tests for L-28 Agent attempt track (boxed cells + neutral n/3 fraction)
 
-def test_dot_counter_component_exists(html_content):
-    """DotCounter + getAgentAttemptDotStates implement L-28 palette aligned to live pills."""
-    has_component = bool(re.search(r'function\s+DotCounter|DotCounter\s*=', html_content))
-    assert has_component, "DotCounter component not found"
+def test_agent_attempt_row_component_exists(html_content):
+    """AgentAttemptRow + getAgentAttemptDotStates + computeAgentAttemptFractionN (L-28)."""
+    assert bool(re.search(r"function\s+AgentAttemptRow|AgentAttemptRow\s*=", html_content)), "AgentAttemptRow not found"
     assert "function getAgentAttemptDotStates" in html_content
+    assert "function computeAgentAttemptFractionN" in html_content
     assert "PIPELINE_STATUS_PILL_HEX" in html_content
     assert "AGENT_ATTEMPT_DOT_HEX" in html_content
     assert "#475569" in html_content and "#0d9488" in html_content
-    assert "#28D11B" in html_content and "#dc2626" in html_content
-    assert "backgroundColor: AGENT_ATTEMPT_DOT_HEX" in html_content
-    assert "agent-attempt-dot--inflight" in html_content
+    assert "#3b82f6" in html_content, "In-flight attempt cells use blue distinct from pipeline teal"
+    assert "#2DEB1E" in html_content and "#dc2626" in html_content
+    assert "data-agent-attempt-row" in html_content
+    assert "data-agent-attempt-slot" in html_content
+    assert "data-agent-attempt-state" in html_content
+    assert "data-agent-attempt-fraction" in html_content
+    assert "agent-attempt-cell--inflight" in html_content
     assert "agent-attempt-inflight-pulse" in html_content
-    has_max_dots = bool(re.search(r'maxDots\s*=\s*3|maxDots.*3', html_content))
-    assert has_max_dots, "DotCounter should cap at 3 dots"
+    assert "data-agent-dot-state" not in html_content, "Legacy dot data attribute removed (boxed cells use data-agent-attempt-slot)"
+    has_max_slots = bool(re.search(r"maxSlots\s*=\s*3|maxSlots.*3", html_content))
+    assert has_max_slots, "AgentAttemptRow should cap at 3 slots"
 
 
-def test_dot_counter_receives_count_and_label_props(html_content):
-    """DotCounter accepts count, label, agentRole, currentAgent, pipelineStatus, and per-role retries."""
+def test_agent_attempt_row_receives_count_and_label_props(html_content):
+    """AgentAttemptRow accepts count, label, agentRole, currentAgent, pipelineStatus, and per-role retries."""
     has_props = bool(
         re.search(
-            r'DotCounter\s*\(\s*\{[^}]*count[^}]*label[^}]*agentRole[^}]*currentAgent[^}]*pipelineStatus',
+            r"AgentAttemptRow\s*\(\s*\{[^}]*count[^}]*label[^}]*agentRole[^}]*currentAgent[^}]*pipelineStatus",
             html_content,
             re.DOTALL,
         )
     )
-    assert has_props, "DotCounter should accept L-28 props including agentRole and pipeline state"
+    assert has_props, "AgentAttemptRow should accept L-28 props including agentRole and pipeline state"
 
 
-def test_dot_counter_renders_conditionally(html_content):
-    """DotCounter returns null when count is undefined or null."""
+def test_agent_attempt_row_renders_conditionally(html_content):
+    """AgentAttemptRow returns null when count is undefined or null."""
     has_conditional = bool(re.search(r'count\s*===\s*undefined.*return\s+null|count\s*===\s*null.*return\s+null', html_content))
-    assert has_conditional, "DotCounter should return null when count is undefined/null"
+    assert has_conditional, "AgentAttemptRow should return null when count is undefined/null"
 
 
-def test_agent_attempt_dots_per_dot_titles(html_content):
-    """Each dot state has a native title string (AGENT_ATTEMPT_DOT_TITLES)."""
+def test_agent_attempt_cells_have_titles(html_content):
+    """Each cell uses AGENT_ATTEMPT_DOT_TITLES for native title."""
     assert "AGENT_ATTEMPT_DOT_TITLES" in html_content
-    assert "title={AGENT_ATTEMPT_DOT_TITLES" in html_content or "AGENT_ATTEMPT_DOT_TITLES[st]" in html_content
+    assert "AGENT_ATTEMPT_DOT_TITLES[st]" in html_content
 
 
-def test_agent_attempt_inflight_dot_pulse_class_only_on_blue(html_content):
-    """In-flight dot applies agent-attempt-dot--inflight only when st === 'blue'."""
-    assert "st === 'blue'" in html_content and "agent-attempt-dot--inflight" in html_content
+def test_agent_attempt_inflight_pulse_class_only_on_blue(html_content):
+    """In-flight cell applies agent-attempt-cell--inflight only when st === 'blue'."""
+    assert "st === 'blue'" in html_content and "agent-attempt-cell--inflight" in html_content
+
+
+def test_compute_agent_attempt_fraction_n_logic_snippets(html_content):
+    """
+    Fraction n for n/3 (single JS implementation in index.html):
+    - resolved = reds + greens
+    - if any blue: n = red count when red > 0; else if first slot blue with no reds, n = 1; else 0
+    - if no blue: n = resolved
+    Vectors: [n,n,n]->0; [b,n,n]->1; [r,r,b]->2; [r,r,r]->3; [g,n,n]->1
+    """
+    start = html_content.find("function computeAgentAttemptFractionN")
+    assert start != -1, "computeAgentAttemptFractionN not found"
+    end = html_content.find("function formatDuration", start)
+    assert end != -1
+    body = html_content[start:end]
+    assert "resolved" in body
+    assert "hasBlue" in body or "=== 'blue'" in body
+    assert "s[0] === 'blue'" in body or "s[0]==='blue'" in body
+    assert "return red" in body or "return red;" in body
+    assert "return resolved" in body or "return resolved;" in body
+
+
+def test_agent_attempt_fraction_neutral_text_only(html_content):
+    """data-agent-attempt-fraction matches row label mute — no semantic red/teal on that node."""
+    assert re.search(
+        r'data-agent-attempt-fraction[^>]*className=\{?[`"\'][^`"\']*text-slate-500',
+        html_content,
+    ), "Fraction should use text-slate-500 (same family as Planner/Executor/Reviewer labels)"
+    assert not re.search(r"data-agent-attempt-fraction[^>]*text-red-", html_content)
+    assert not re.search(r"data-agent-attempt-fraction[^>]*text-teal-", html_content)
 
 
 def test_get_agent_attempt_dot_states_logic_anchors(html_content):
@@ -195,18 +230,17 @@ def test_get_agent_attempt_dot_states_logic_anchors(html_content):
     assert "toLowerCase" in body
 
 
-def test_current_phase_panel_renders_dot_counters(html_content):
-    """CurrentPhasePanel renders Agent attempts heading and DotCounter rows (L-28)."""
+def test_current_phase_panel_renders_agent_attempt_rows(html_content):
+    """CurrentPhasePanel renders Agent attempts heading and AgentAttemptRow rows (L-28)."""
     assert "Agent attempts" in html_content
-    has_dot_counter = bool(re.search(r'<DotCounter', html_content))
-    assert has_dot_counter, "DotCounter not rendered in CurrentPhasePanel"
+    assert bool(re.search(r"<AgentAttemptRow", html_content)), "AgentAttemptRow not rendered in CurrentPhasePanel"
     assert 'agentRole="planner"' in html_content
     assert "currentAgent={current_agent}" in html_content
     assert "pipelineStatus={pipeline_status}" in html_content
     has_planner = bool(re.search(r'count=\{planner_retries\}', html_content))
     has_executor = bool(re.search(r'count=\{executor_retries\}', html_content))
     has_reviewer = bool(re.search(r'count=\{reviewer_retries\}', html_content))
-    assert has_planner and has_executor and has_reviewer, "DotCounter rows must bind planner/executor/reviewer retry counts"
+    assert has_planner and has_executor and has_reviewer, "AgentAttemptRow rows must bind planner/executor/reviewer retry counts"
 
 
 def test_app_state_includes_retry_counts(html_content):

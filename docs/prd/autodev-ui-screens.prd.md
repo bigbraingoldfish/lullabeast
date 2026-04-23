@@ -196,7 +196,7 @@ Responsive: on narrow screens, stack vertically (header → phase → roadmap �
 
 **Active agent** — Badge: PLANNER / EXECUTOR / REVIEWER / ESCALATION — distinct muted hues (terminal-like, not traffic lights).
 
-**Attempt counters** — Planner / Executor / Reviewer dot rows reflecting retry consumption.
+**Attempt counters** — Planner / Executor / Reviewer **`AgentAttemptRow`** lines: three boxed cells (icons / digits) plus neutral **`n/3`** fraction; `getAgentAttemptDotStates` + `computeAgentAttemptFractionN`.
 
 **Last error code** — When present, monospace; optional expand.
 
