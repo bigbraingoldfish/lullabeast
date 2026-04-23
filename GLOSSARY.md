@@ -72,9 +72,41 @@ Each row in `pipeline_queue.json` has a `state`. Labels below are the queue-only
 
 ---
 
+## Retry counters vs escalation resets (D-08)
+
+Three different counter families govern how many attempts an agent phase can use before the pipeline escalates or halts. They reset at different scopes and serve different purposes.
+
+### Per-agent retry counters (`planner_retries`, `executor_retries`, `reviewer_retries`)
+
+- Stored in `phase_state.json` under the respective key.
+- **Auto-reset to 0 at the start of each new phase.** A retry consumed on Phase 1 does not carry into Phase 2.
+- Incremented each time the orchestrator re-invokes that agent after a gate failure within the same phase.
+- Typical max values are set in orchestrator logic (e.g. 3 executor retries before escalation triggers).
+- Visible in the dashboard counter strip as **Executor retries: N/3** (and equivalents).
+
+### Escalation reset counter (`escalation_resets`)
+
+- Stored in `phase_state.json` under `escalation_resets`.
+- **Cumulative for the entire lifetime of a phase** — it is NOT reset between escalation episodes within the same phase. Each time a RESET_PHASE, RESET_EXECUTION, or RESET_REVIEWER command is issued via the escalation panel, this counter increments by 1.
+- Hard cap: **3 combined resets per phase**. Once `escalation_resets >= 3`, the Recover group (Reset Phase / Reset Execution / Re-run Reviewer) is replaced by a status message in the dashboard. Only PROCEED (Mark Complete), Abandon Phase, and Stop Pipeline remain available.
+- The cap is intentional: if three structured recovery attempts have not resolved a phase, continued automated recovery is unlikely to succeed without operator investigation or a fundamental change to the project.
+- Visible in the dashboard counter strip as **Escalation loops: N/3**.
+
+### What happens at the cap
+
+When `escalation_resets >= 3`, the escalation panel disables all three reset commands. The operator must either:
+- **Mark Complete** (`PROCEED`) — force-advances the phase as if it succeeded (requires merge probe to pass first).
+- **Abandon Phase** (`SKIP`) — marks the phase as skipped and lets the pipeline continue.
+- **Stop Pipeline** — halts the pipeline cleanly for manual investigation.
+
+There is no automatic way to increment the cap. It can be manually decremented by editing `phase_state.json` directly, which is an operator escape hatch for exceptional cases.
+
+---
+
 ## Skill injection
 
 - Each planner / executor / reviewer invocation can receive **one** skill file copied into **`OPENCLAW_ROOT/workspace-{role}/skills/{discipline}-{role}/SKILL.md`**, sourced from `autodev/skill-library/{discipline}/{role}/SKILL.md`.
 - The roadmap phase id prefix (e.g. `CORE` from `CORE-E2`) maps to a discipline directory via **`autodev/config/skill_mapping.yaml`**. Unmapped prefixes skip injection.
+- The escalation agent receives a **permanent workspace skill** at `OPENCLAW_ROOT/workspace-escalation/skills/escalation-summary/SKILL.md`, deployed by `install.sh`. It instructs the agent to write a structured `escalation_summary.json` to the project directory so the dashboard advisory block can show AI-generated context rather than the raw error code.
 - Workspace skills are **wiped and recreated** before each injection so no stale skill carries between phases.
 - Orchestrator logs lines like **`[SKILL] Status=none_mapped`** when the subsystem has no YAML mapping, skills are disabled in `openclaw.json`, the skill file is missing, PyYAML is missing, or similar — **not necessarily an error**; it means that phase ran without an injected skill file.

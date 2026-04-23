@@ -390,7 +390,7 @@ for agent in planner executor reviewer escalation prd-creator roadmap-converter;
     # Ensure expected skills directories exist for non-pipeline agents that
     # consume static skills from workspace paths.
     case "$agent" in
-        prd-creator|roadmap-converter)
+        prd-creator|roadmap-converter|escalation)
             mkdir -p "$dst_dir/skills"
             ;;
     esac
@@ -404,6 +404,18 @@ for agent in planner executor reviewer escalation prd-creator roadmap-converter;
             fi
         else
             MISSING_FILES+=("  MISSING SOURCE: autodev/skill-library/prd-creator/readiness-reviewer/SKILL.md")
+        fi
+    fi
+
+    if [ "$agent" = "escalation" ]; then
+        src="$AUTODEV_REPO_PATH/autodev/agents/escalation/skills/escalation-summary/SKILL.md"
+        dst="$dst_dir/skills/escalation-summary/SKILL.md"
+        if [ -f "$src" ]; then
+            if [ ! -f "$dst" ] || [ "$src" -nt "$dst" ]; then
+                MISSING_FILES+=("  $agent/skills/escalation-summary/SKILL.md")
+            fi
+        else
+            MISSING_FILES+=("  MISSING SOURCE: autodev/agents/escalation/skills/escalation-summary/SKILL.md")
         fi
     fi
 
@@ -449,7 +461,7 @@ if [ "${#MISSING_FILES[@]}" -gt 0 ]; then
                 ;;
             esac
             case "$agent" in
-                prd-creator|roadmap-converter)
+                prd-creator|roadmap-converter|escalation)
                     mkdir -p "$dst_dir/skills"
                     ;;
             esac
@@ -462,6 +474,17 @@ if [ "${#MISSING_FILES[@]}" -gt 0 ]; then
                     count=$((count + 1))
                 else
                     warn "Missing skill source for prd-creator: $src"
+                fi
+            fi
+
+            if [ "$agent" = "escalation" ]; then
+                src="$AUTODEV_REPO_PATH/autodev/agents/escalation/skills/escalation-summary/SKILL.md"
+                if [ -f "$src" ]; then
+                    mkdir -p "$dst_dir/skills/escalation-summary"
+                    cp -u "$src" "$dst_dir/skills/escalation-summary/SKILL.md"
+                    count=$((count + 1))
+                else
+                    warn "Missing skill source for escalation: $src"
                 fi
             fi
 
