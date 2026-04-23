@@ -925,27 +925,31 @@
 
         // ─── Modals ───────────────────────────────────────────────────────────────
 
-        function ConfirmationModal({ command, onConfirm, onDismiss, busy }) {
+        function ConfirmationModal({ command, onConfirm, onDismiss, busy, escalationResets = 0 }) {
             let title = "Confirm action";
-            let body = "Are you sure?";
-            if (command === "STOP") {
-                title = "Confirm STOP";
-                body = "Halt the pipeline entirely? No further phases will run. You can resume from the STOPPED state if needed.";
-            } else if (command === "SKIP") {
-                title = "Confirm SKIP";
-                body =
-                    "Skip the current phase? The phase will be marked skipped in the roadmap and the pipeline advances to the next phase. In-progress work is not committed.";
-            } else if (command === "RESET_PHASE") {
-                title = "Confirm RESET PHASE";
-                body =
-                    "Full phase reset: git will rewind to the pre-phase commit, the phase branch will be deleted, and a fresh planner run will start. Use only when the plan itself is flawed.";
+            let body = "Are you sure you want to run this command?";
+            let cta = "Confirm";
+
+            if (command === "RESET_PHASE") {
+                title = "Reset Phase";
+                body = `Hard-resets to the pre-phase commit, deletes the phase branch, and wipes all agent artifacts. Increments the reset counter (now ${escalationResets + 1}/3). This cannot be undone from the UI.`;
+                cta = "Reset Phase";
+            } else if (command === "RESET_EXECUTION") {
+                title = "Reset Execution";
+                body = "Checks out the phase branch, hard-resets it, and clears executor and reviewer outputs. Planner output is preserved. Increments the reset counter.";
+                cta = "Reset Execution";
             } else if (command === "RESET_REVIEWER") {
-                title = "Confirm RESET REVIEWER";
-                body =
-                    "Clear reviewer output and re-run the reviewer from scratch. Executor output is preserved. Use when the reviewer failed but the implementation looks correct.";
-            } else {
-                title = "Confirm action";
-                body = "Are you sure you want to run this command?";
+                title = "Re-run Reviewer";
+                body = "Deletes reviewer output only and reruns the reviewer. Executor output is preserved.";
+                cta = "Re-run Reviewer";
+            } else if (command === "SKIP") {
+                title = "Abandon Phase";
+                body = "Marks this phase skipped in the roadmap. The phase branch and artifacts will NOT be cleaned up — you'll need to handle that manually in the repo. This cannot be undone from the UI.";
+                cta = "Abandon Phase";
+            } else if (command === "PROCEED") {
+                title = "Mark Complete";
+                body = "Roadmap marks this phase complete and the pipeline advances to the next phase. Merge was confirmed on base before this action was unlocked.";
+                cta = "Mark Complete";
             }
             return (
                 <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
@@ -971,7 +975,7 @@
                                 disabled={busy}
                                 className="px-4 py-2 rounded bg-red-600 hover:bg-red-500 text-white font-medium transition-colors disabled:opacity-50"
                             >
-                                {busy ? "Sending…" : "Confirm"}
+                                {busy ? "Sending…" : cta}
                             </button>
                         </div>
                     </div>
@@ -1005,6 +1009,35 @@
             );
         }
 
+        // ─── InfoGroupLabel ───────────────────────────────────────────────────────
+
+        function InfoGroupLabel({ children, hiddenItems = [] }) {
+            const [showTip, setShowTip] = React.useState(false);
+            return (
+                <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6, position: 'relative' }}>
+                    <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                        {children}
+                    </span>
+                    {hiddenItems.length > 0 && (
+                        <span style={{ position: 'relative', marginLeft: 6 }}>
+                            <button
+                                type="button"
+                                onMouseEnter={() => setShowTip(true)}
+                                onMouseLeave={() => setShowTip(false)}
+                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-slate-400, #94a3b8)', fontSize: 12, lineHeight: 1, padding: 0 }}
+                                aria-label="Hidden items info"
+                            >ⓘ</button>
+                            {showTip && (
+                                <span style={{ position: 'absolute', left: '100%', top: '50%', transform: 'translateY(-50%)', marginLeft: 8, background: '#212936', border: '1px solid #3a4a60', borderRadius: 4, padding: '3px 8px', fontSize: 11, color: '#cbd5e1', whiteSpace: 'nowrap', zIndex: 20, boxShadow: '0 2px 8px rgba(0,0,0,0.4)', pointerEvents: 'none' }}>
+                                    {hiddenItems[0]}
+                                </span>
+                            )}
+                        </span>
+                    )}
+                </div>
+            );
+        }
+
         // ─── EscalationCommandPanel ───────────────────────────────────────────────
 
         function EscalationCommandPanel({
@@ -1016,6 +1049,10 @@
             orchestrator_alive,
             onOrchestratorRestarted,
             onResumeOrchestratorResponse,
+            executor_output_exists = true,
+            planner_output_exists = true,
+            phase_branch_exists = true,
+            merge_probe_passed = false,
         }) {
             const [commandSent, setCommandSent] = useState(false);
             const [lastSubmittedCommand, setLastSubmittedCommand] = useState(null);
@@ -1026,6 +1063,7 @@
             const [confirmBusy, setConfirmBusy] = useState(false);
             const [restartBusy, setRestartBusy] = useState(false);
             const [restartError, setRestartError] = useState("");
+            const [advisoryExpanded, setAdvisoryExpanded] = useState(escalation_resets === 0);
 
             const isResetDisabled = escalation_resets >= 3;
 
@@ -1060,7 +1098,13 @@
             const commandErrParts = commandError ? splitApiDetail(commandError) : null;
 
             const handleCommand = (command) => {
-                if (command === "RESET_PHASE" || command === "RESET_REVIEWER" || command === "SKIP" || command === "STOP") {
+                if (
+                    command === "RESET_PHASE" ||
+                    command === "RESET_EXECUTION" ||
+                    command === "RESET_REVIEWER" ||
+                    command === "SKIP" ||
+                    command === "PROCEED"
+                ) {
                     setModalCommand(command);
                     setShowConfirmModal(true);
                     return;
@@ -1137,38 +1181,39 @@
                 setModalCommand(null);
             };
 
-            // Commands shown in the main grid — left col: revert options, right col: flow control
-            const GRID_COMMANDS = [
-                { command: "RESET_PHASE",     label: "Revert to Planner",  desc: "Full reset: git rewind, new plan, re-run from the top.",      capped: true  },
-                { command: "SKIP",            label: "Skip",               desc: "Mark this phase skipped and advance to the next.",            capped: false },
-                { command: "RESET_EXECUTION", label: "Revert to Executor", desc: "Keep the plan. Re-run executor from a clean working tree.",   capped: true  },
-                { command: "PROCEED",         label: "Proceed",            desc: "Accept current output as-is and advance (skips merge).",      capped: false },
-                { command: "RESET_REVIEWER",  label: "Revert to Reviewer", desc: "Keep executor output. Re-run reviewer from scratch.",         capped: true  },
-                { command: "STOP",            label: "Stop",               desc: "Halt the pipeline. No further phases will run.",              capped: false },
-            ];
+            // ── Phase 2 visibility constants ──────────────────────────────────────
+            const capReached = escalation_resets >= 3;
+            const showRerunReviewer = executor_output_exists;
+            const showMarkComplete = merge_probe_passed;
 
-            const renderGridButton = ({ command, label, desc, capped }) => {
-                const disabled = capped && isResetDisabled;
-                const baseClass = "flex flex-col items-start text-left px-3 py-2 rounded bg-[#1a1d21] transition-colors";
-                const cls = disabled
-                    ? `${baseClass} opacity-50 cursor-not-allowed`
-                    : `${baseClass} hover:bg-[#252830]`;
-                const title = disabled
-                    ? "Reset cap reached (3/3). Use Proceed or Stop to advance or halt. Cap prevents infinite reset loops; fix the repo manually if needed."
-                    : undefined;
-                return (
-                    <button
-                        key={command}
-                        className={cls}
-                        disabled={disabled}
-                        title={title}
-                        onClick={disabled ? undefined : () => handleCommand(command)}
-                    >
-                        <span className="header-text text-sm font-medium">{label}</span>
-                        <span className="text-slate-400 text-xs mt-0.5 leading-snug">{desc}</span>
-                    </button>
-                );
-            };
+            const hiddenRecoverItems = !showRerunReviewer
+                ? ["Re-run Reviewer — no executor output to review"]
+                : [];
+            const hiddenFinalizeItems = !showMarkComplete
+                ? ["Mark Complete — phase branch not yet merged into base"]
+                : [];
+
+            // Advisory text fallback chain
+            const advisoryText = escalation_message
+                || escalation_trigger_reason
+                || last_action
+                || "See orchestrator log for details.";
+
+            // Counter strip
+            const counterText = `Escalation loops: ${escalation_resets}/3`;
+
+            // ── Shared action button renderer ─────────────────────────────────────
+            const renderActionButton = ({ command, label, desc, title: cmdTitle }) => (
+                <button
+                    key={command}
+                    className="flex flex-col items-start text-left px-3 py-2 rounded bg-[#1a1d21] hover:bg-[#252830] transition-colors w-full"
+                    title={cmdTitle}
+                    onClick={() => handleCommand(command)}
+                >
+                    <span className="header-text text-sm font-medium">{label}</span>
+                    {desc && <span className="text-slate-400 text-xs mt-0.5 leading-snug">{desc}</span>}
+                </button>
+            );
 
             const handleRestartOrchestrator = async () => {
                 setRestartError("");
@@ -1209,10 +1254,13 @@
             );
 
             return (
-                <div className="border-2 border-orange-500 rounded-lg p-4 mt-4 bg-[#141618]/50">
-                    <h3 className="header-text text-sm font-semibold text-orange-400 mb-1">
-                        {headerText}
-                    </h3>
+                <div
+                    className={`border-2 rounded-lg p-4 mt-4 bg-[#141618]/50 ${
+                        capReached ? "border-red-500" : "border-orange-500"
+                    }`}
+                >
+
+                    {/* ── Orchestrator-down warning ─────────────────────────── */}
                     {orchestratorDownBlocksCommands ? (
                         <div className="mb-3 rounded border border-amber-700/50 bg-amber-950/30 p-2">
                             <p className="text-amber-600 text-xs leading-relaxed">
@@ -1220,23 +1268,15 @@
                             </p>
                         </div>
                     ) : null}
-                    {escalation_message && !commandSent && (humanWait || queueHaltedEscalation) ? (
-                        <p className="text-slate-300 text-xs mb-3 leading-relaxed">
-                            {escalation_message}
-                        </p>
-                    ) : null}
+
+                    {/* ── Status-changed warning (modal still open after poll) ── */}
                     {!humanWait && showConfirmModal && !commandSent ? (
                         <p className="text-amber-400/90 text-xs mb-3 leading-relaxed">
                             Status is no longer &quot;waiting for human&quot; on the last poll. You can still confirm — the server accepts the command only if the orchestrator is still in that state.
                         </p>
                     ) : null}
-                    {isResetDisabled && !commandSent ? (
-                        <p className="text-amber-500 text-xs mb-3">
-                            Reset cap reached (3/3). Revert to Planner, Revert to Executor, and Revert to Reviewer are
-                            disabled. Use Proceed to advance or Stop to halt. Cap prevents infinite reset loops; fix the
-                            repo manually if the phase is stuck.
-                        </p>
-                    ) : null}
+
+                    {/* ── Command error ─────────────────────────────────────── */}
                     {commandErrParts ? (
                         <div className="mb-2 space-y-1">
                             <p className="text-red-400 text-xs">{commandErrParts.friendly}</p>
@@ -1247,7 +1287,9 @@
                             ) : null}
                         </div>
                     ) : null}
+
                     {commandSent ? (
+                        /* ── Command sent confirmation ───────────────────────── */
                         <div className="text-center py-4 space-y-2">
                             <span className="text-amber-400 text-sm block">
                                 {lastSubmittedCommand === "STOP"
@@ -1267,18 +1309,113 @@
                             ) : null}
                         </div>
                     ) : canIssueCommands && !orchestratorDownBlocksCommands ? (
-                        <div className="grid grid-cols-2 gap-2">
-                            {GRID_COMMANDS.map(renderGridButton)}
+                        /* ── Grouped command layout ──────────────────────────── */
+                        <div className="space-y-3">
+
+                            {/* 1. Collapsible advisory block */}
+                            <div className="rounded border border-[#2a3040] bg-[#111418]/60">
+                                <button
+                                    type="button"
+                                    className="w-full flex items-center gap-2 px-3 py-2 text-left"
+                                    onClick={() => setAdvisoryExpanded(v => !v)}
+                                    aria-expanded={advisoryExpanded}
+                                >
+                                    <span className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${capReached ? 'bg-red-500' : 'bg-orange-400'}`}
+                                        style={{ animation: 'pulse 2s cubic-bezier(0.4,0,0.6,1) infinite' }}
+                                    />
+                                    <span className="header-text text-xs text-slate-300 flex-1 leading-snug">
+                                        {escalation_trigger_reason || last_action || "Awaiting escalation command"}
+                                    </span>
+                                    <span className="text-slate-500 text-xs ml-1 flex-shrink-0">
+                                        {advisoryExpanded ? '▲' : '▼'}
+                                    </span>
+                                </button>
+                                {advisoryExpanded && (
+                                    <div className="px-3 pb-3 space-y-1.5 border-t border-[#2a3040]/60">
+                                        <p className="text-slate-500 text-xs pt-2 font-mono">
+                                            {counterText}
+                                        </p>
+                                        <p className="text-slate-400 text-xs leading-relaxed">
+                                            <span className="text-sky-400 font-medium">Advisory · </span>
+                                            {advisoryText}
+                                        </p>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* 2. Recover group OR cap-reached notice */}
+                            {capReached ? (
+                                <p className="text-amber-500 text-xs px-1">
+                                    Recover unavailable · reset budget of 3 exhausted. Use Abandon Phase or Stop Pipeline to exit.
+                                </p>
+                            ) : (
+                                <div className="space-y-1.5">
+                                    <InfoGroupLabel hiddenItems={hiddenRecoverItems}>Recover</InfoGroupLabel>
+                                    {renderActionButton({
+                                        command: "RESET_PHASE",
+                                        label: "Reset Phase",
+                                        desc: "Deletes branch · wipes all artifacts · reruns from top.",
+                                        title: "Destructive: git reset to pre-phase commit + branch delete + full artifact wipe. Increments reset counter.",
+                                    })}
+                                    {renderActionButton({
+                                        command: "RESET_EXECUTION",
+                                        label: "Reset Execution",
+                                        desc: "Keeps plan · reruns executor from a clean working tree.",
+                                        title: "Destructive: git reset --hard on phase branch + clears executor/reviewer outputs. Planner preserved.",
+                                    })}
+                                    {showRerunReviewer && renderActionButton({
+                                        command: "RESET_REVIEWER",
+                                        label: "Re-run Reviewer",
+                                        desc: "Deletes reviewer output only · reruns review.",
+                                        title: "Deletes reviewer outputs only. Executor work is preserved. Increments reset counter.",
+                                    })}
+                                </div>
+                            )}
+
+                            <div className="border-t border-[#2a2d31]" />
+
+                            {/* 3. Advance manually group */}
+                            <div className="space-y-1.5">
+                                <InfoGroupLabel hiddenItems={hiddenFinalizeItems}>Advance manually</InfoGroupLabel>
+                                {showMarkComplete && !capReached && renderActionButton({
+                                    command: "PROCEED",
+                                    label: "Mark Complete",
+                                    desc: "Merge confirmed · advances pipeline to next phase.",
+                                    title: "Marks roadmap [x], force-tags phase complete, advances to next phase. No merge is executed.",
+                                })}
+                                {renderActionButton({
+                                    command: "SKIP",
+                                    label: "Abandon Phase",
+                                    desc: "Marks skipped · no git cleanup · branch stays in repo.",
+                                    title: "Marks roadmap [-], advances. No branch delete, no file cleanup. Manual git work required.",
+                                })}
+                            </div>
+
+                            <div className="border-t border-[#2a2d31]" />
+
+                            {/* 4. Stop Pipeline — standalone, red label */}
+                            <button
+                                type="button"
+                                className="w-full flex flex-col items-start text-left px-3 py-2 rounded bg-[#1a1d21] hover:bg-[#252830] transition-colors"
+                                title="Halts the pipeline. No further phases will run. Current phase state is preserved."
+                                onClick={() => { setModalCommand("STOP"); setShowConfirmModal(true); }}
+                            >
+                                <span className="header-text text-sm font-medium text-red-400">Stop Pipeline</span>
+                                <span className="text-slate-400 text-xs mt-0.5 leading-snug">Halts all pipeline activity immediately.</span>
+                            </button>
+
                         </div>
                     ) : showConfirmModal ? (
                         <p className="text-slate-500 text-xs">Finish confirmation below, or cancel.</p>
                     ) : null}
+
                     {showConfirmModal && (
                         <ConfirmationModal
                             command={modalCommand}
                             onConfirm={modalConfirm}
                             onDismiss={modalDismiss}
                             busy={confirmBusy}
+                            escalationResets={escalation_resets}
                         />
                     )}
                 </div>
@@ -5559,13 +5696,22 @@
                 );
 
                 const ESCALATION_CMDS = [
-                    { command: 'RESET_PHASE',     label: 'Revert to Planner',  needsConfirm: true  },
-                    { command: 'RESET_EXECUTION', label: 'Revert to Executor', needsConfirm: false },
-                    { command: 'RESET_REVIEWER',  label: 'Revert to Reviewer', needsConfirm: true  },
-                    { command: 'SKIP',            label: 'Skip Phase',          needsConfirm: true  },
-                    { command: 'PROCEED',         label: 'Accept & Advance',    needsConfirm: false },
-                    { command: 'STOP',            label: 'Halt Pipeline',       needsConfirm: true  },
+                    { command: 'RESET_PHASE',     label: 'Reset Phase',     needsConfirm: true  },
+                    { command: 'RESET_EXECUTION', label: 'Reset Execution', needsConfirm: false },
+                    { command: 'RESET_REVIEWER',  label: 'Re-run Reviewer', needsConfirm: true  },
+                    { command: 'SKIP',            label: 'Abandon Phase',   needsConfirm: true  },
+                    { command: 'PROCEED',         label: 'Mark Complete',   needsConfirm: false },
+                    { command: 'STOP',            label: 'Stop Pipeline',   needsConfirm: true  },
                 ];
+
+                // Phase 2 eligibility fields from the active pipeline snapshot
+                const hubEscalationResets = (snapshot && snapshot.escalation_resets) || 0;
+                const capReached = hubEscalationResets >= 3;
+                const hubExecutorOutputExists = snapshot ? (snapshot.executor_output_exists ?? true) : true;
+                const hubMergeProbePassed = snapshot ? (snapshot.merge_probe_passed ?? false) : false;
+
+                // Recover commands — hidden when cap reached
+                const RECOVER_CMDS = ['RESET_PHASE', 'RESET_EXECUTION', 'RESET_REVIEWER'];
 
                 if (isEscalationWaiting) {
                     return (
@@ -5577,7 +5723,15 @@
                                 )}
                             </div>
                             <div className="grid grid-cols-2 gap-1.5">
-                                {ESCALATION_CMDS.map(({command, label, needsConfirm}) => {
+                                {ESCALATION_CMDS.filter(({command}) => {
+                                    // Cap reached: hide all recover commands
+                                    if (capReached && RECOVER_CMDS.includes(command)) return false;
+                                    // Re-run Reviewer: hidden when no executor output
+                                    if (command === 'RESET_REVIEWER' && !hubExecutorOutputExists) return false;
+                                    // Mark Complete: hidden when merge probe not passed
+                                    if (command === 'PROCEED' && !hubMergeProbePassed) return false;
+                                    return true;
+                                }).map(({command, label, needsConfirm}) => {
                                     const confirming = pendingCommand === command;
                                     return (
                                         <div key={command}>
@@ -6684,6 +6838,10 @@
                                 orchestrator_alive={alive}
                                 onOrchestratorRestarted={fetchState}
                                 onResumeOrchestratorResponse={applyResumeOrchestratorClientResult}
+                                executor_output_exists={pState.executor_output_exists ?? true}
+                                planner_output_exists={pState.planner_output_exists ?? true}
+                                phase_branch_exists={pState.phase_branch_exists ?? true}
+                                merge_probe_passed={pState.merge_probe_passed ?? false}
                             />
                         </div>
 

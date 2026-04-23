@@ -849,6 +849,26 @@ class Orchestrator:
         """
         return self.state.get("pipeline_status") not in ("WAITING_FOR_HUMAN", "QUEUE_HALTED")
 
+    def _read_escalation_summary(self):
+        """Read escalation agent's human-facing summary from project directory.
+
+        Returns the summary string if valid, None otherwise.
+        Never raises — all failures are logged and return None.
+        """
+        try:
+            summary_path = os.path.join(SYMLINK_TARGET, "escalation_summary.json")
+            if not os.path.isfile(summary_path):
+                return None
+            with open(summary_path, "r") as f:
+                data = json.load(f)
+            summary = data.get("summary", "")
+            if not isinstance(summary, str) or not summary.strip():
+                return None
+            return summary.strip()[:200]  # hard cap
+        except Exception as e:
+            print(f"[ESCALATION] Could not read escalation_summary.json: {e}")
+            return None
+
     def _check_stop_requested(self) -> bool:
         """Check for the stop sentinel file written by the UI server.
 
@@ -2896,6 +2916,12 @@ class Orchestrator:
                                 command = cmd_data.get("command", "").upper()
                             except Exception:
                                 command = "STOP"
+
+                            _summary = self._read_escalation_summary()
+                            if _summary:
+                                _ps = self.read_phase_state()
+                                _ps["escalation_message"] = _summary
+                                self.write_phase_state_atomic(_ps)
 
                             print(f"[INFO] Human command received: {command}")
                             _esc_root = os.path.dirname(out_path)

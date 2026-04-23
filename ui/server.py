@@ -1961,6 +1961,9 @@ def get_state():
                 response["escalation_message"] = phase_state["escalation_message"]
             elif "escalation_trigger_reason" in phase_state:
                 response["escalation_message"] = phase_state["escalation_trigger_reason"]
+            # Enforce max length — never pass raw agent output through uncapped
+            if "escalation_message" in response and isinstance(response["escalation_message"], str):
+                response["escalation_message"] = response["escalation_message"][:500]
 
     # Humanize queue-halted escalation reasons in monitor text.
     # Keep pipeline_state.queue_halted_reason as the machine token.
@@ -1985,6 +1988,52 @@ def get_state():
             if _friendly:
                 response["escalation_message"] = _friendly
     
+    # File probe: artifact existence fields
+    # Used by UI to gate action visibility (Re-run Reviewer, Mark Complete)
+    _project_dir = config.get("project_dir_path") or ""
+    if _project_dir:
+        _project_real = os.path.realpath(os.path.expanduser(_project_dir))
+        _executor_output_path = os.path.join(_project_real, "executor_output.json")
+        response["executor_output_exists"] = os.path.isfile(_executor_output_path)
+        _planner_output_path = os.path.join(_project_real, "planner_output.json")
+        response["planner_output_exists"] = os.path.isfile(_planner_output_path)
+    else:
+        _project_real = ""
+        response["executor_output_exists"] = False
+        response["planner_output_exists"] = False
+
+    # phase_branch_exists: probe refs/heads/phase/<raw_id> in the project repo
+    _raw_id = response.get("current_phase_raw_id", "") or ""
+    if _project_real and _raw_id:
+        try:
+            _br_result = subprocess.run(
+                ["git", "show-ref", "--verify", "--quiet", f"refs/heads/phase/{_raw_id}"],
+                cwd=_project_real,
+                capture_output=True,
+            )
+            response["phase_branch_exists"] = _br_result.returncode == 0
+        except Exception:
+            response["phase_branch_exists"] = False
+    else:
+        response["phase_branch_exists"] = False
+
+    # merge_probe_passed: probe whether phase/<raw_id> is an ancestor of base branch
+    if _project_real and _raw_id:
+        try:
+            _base_branch = (config.get("base_branch") or "").strip()
+            if not _base_branch:
+                _base_branch = _detect_base_branch(_project_real)
+            _mp_result = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", f"phase/{_raw_id}", _base_branch],
+                cwd=_project_real,
+                capture_output=True,
+            )
+            response["merge_probe_passed"] = _mp_result.returncode == 0
+        except Exception:
+            response["merge_probe_passed"] = False
+    else:
+        response["merge_probe_passed"] = False
+
     # Add server-derived fields
     # Orchestrator liveness
     if lock_path:

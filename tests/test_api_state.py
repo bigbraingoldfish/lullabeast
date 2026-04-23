@@ -500,3 +500,342 @@ class TestApiStateEndpoint:
             response = client.get("/api/state")
         assert response.status_code == 200
         assert response.json().get("git_recover_suggested_branch") is None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 1.4 — executor_output_exists in GET /api/state
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestExecutorOutputExists:
+    """Step 1.4 — GET /api/state must include executor_output_exists boolean."""
+
+    def _make_cfg(self, temp_dir, project_root):
+        state_path = os.path.join(temp_dir, "pipeline_state.json")
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump({"pipeline_status": "WAITING_FOR_HUMAN"}, f)
+        return {
+            "pipeline_state_path": state_path,
+            "phase_state_path": os.path.join(temp_dir, "phase_state.json"),
+            "lock_path": os.path.join(temp_dir, "pipeline.lock"),
+            "events_path": os.path.join(temp_dir, "pipeline_events.jsonl"),
+            "project_dir_path": project_root,
+        }
+
+    def test_executor_output_exists_true_when_file_present(self, temp_dir):
+        """When executor_output.json is present in project dir, response has executor_output_exists=true."""
+        project_root = os.path.join(temp_dir, "pipeline_project")
+        os.makedirs(project_root, exist_ok=True)
+        # Create executor_output.json in the project dir
+        with open(os.path.join(project_root, "executor_output.json"), "w") as f:
+            json.dump({"status": "done"}, f)
+
+        cfg = self._make_cfg(temp_dir, project_root)
+        with patch("ui.server.load_config", return_value=cfg):
+            response = client.get("/api/state")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "executor_output_exists" in data, \
+            "GET /api/state response does not include 'executor_output_exists'"
+        assert data["executor_output_exists"] is True, \
+            "executor_output_exists should be True when executor_output.json exists"
+
+    def test_executor_output_exists_false_when_file_absent(self, temp_dir):
+        """When executor_output.json is absent, response has executor_output_exists=false."""
+        project_root = os.path.join(temp_dir, "pipeline_project")
+        os.makedirs(project_root, exist_ok=True)
+        # Do NOT create executor_output.json
+
+        cfg = self._make_cfg(temp_dir, project_root)
+        with patch("ui.server.load_config", return_value=cfg):
+            response = client.get("/api/state")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "executor_output_exists" in data, \
+            "GET /api/state response does not include 'executor_output_exists'"
+        assert data["executor_output_exists"] is False, \
+            "executor_output_exists should be False when executor_output.json is absent"
+
+    def test_executor_output_exists_false_when_project_dir_path_not_configured(self, temp_dir):
+        """When project_dir_path is not configured, executor_output_exists is False."""
+        state_path = os.path.join(temp_dir, "pipeline_state.json")
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump({"pipeline_status": "IDLE"}, f)
+        cfg = {
+            "pipeline_state_path": state_path,
+            "phase_state_path": os.path.join(temp_dir, "phase_state.json"),
+            "lock_path": os.path.join(temp_dir, "pipeline.lock"),
+            "events_path": os.path.join(temp_dir, "pipeline_events.jsonl"),
+            # No project_dir_path key
+        }
+        with patch("ui.server.load_config", return_value=cfg):
+            response = client.get("/api/state")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "executor_output_exists" in data, \
+            "GET /api/state response does not include 'executor_output_exists'"
+        assert data["executor_output_exists"] is False
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 2.1 — Phase 2 eligibility fields in GET /api/state
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _make_git_repo(temp_dir, branch_name="main"):
+    """Create a minimal git repo in temp_dir with one commit on branch_name."""
+    repo = os.path.join(temp_dir, "git_project")
+    os.makedirs(repo, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "checkout", "-b", branch_name], cwd=repo, check=True, capture_output=True)
+    with open(os.path.join(repo, "README.md"), "w") as f:
+        f.write("init")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+    return repo
+
+
+class TestPlannerOutputExists:
+    """Step 2.1a — GET /api/state must include planner_output_exists boolean."""
+
+    def _make_cfg(self, temp_dir, project_root):
+        state_path = os.path.join(temp_dir, "pipeline_state.json")
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump({"pipeline_status": "WAITING_FOR_HUMAN"}, f)
+        return {
+            "pipeline_state_path": state_path,
+            "phase_state_path": os.path.join(temp_dir, "phase_state.json"),
+            "lock_path": os.path.join(temp_dir, "pipeline.lock"),
+            "events_path": os.path.join(temp_dir, "pipeline_events.jsonl"),
+            "project_dir_path": project_root,
+        }
+
+    def test_planner_output_exists_true_when_file_present(self, temp_dir):
+        """When planner_output.json is in project dir, response has planner_output_exists=true."""
+        project_root = os.path.join(temp_dir, "pp")
+        os.makedirs(project_root, exist_ok=True)
+        with open(os.path.join(project_root, "planner_output.json"), "w") as f:
+            json.dump({"status": "done"}, f)
+
+        cfg = self._make_cfg(temp_dir, project_root)
+        with patch("ui.server.load_config", return_value=cfg):
+            response = client.get("/api/state")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "planner_output_exists" in data, \
+            "GET /api/state response does not include 'planner_output_exists'"
+        assert data["planner_output_exists"] is True
+
+    def test_planner_output_exists_false_when_file_absent(self, temp_dir):
+        """When planner_output.json is absent, response has planner_output_exists=false."""
+        project_root = os.path.join(temp_dir, "pp")
+        os.makedirs(project_root, exist_ok=True)
+
+        cfg = self._make_cfg(temp_dir, project_root)
+        with patch("ui.server.load_config", return_value=cfg):
+            response = client.get("/api/state")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "planner_output_exists" in data
+        assert data["planner_output_exists"] is False
+
+
+class TestPhaseBranchExists:
+    """Step 2.1b — GET /api/state must include phase_branch_exists boolean."""
+
+    def _make_cfg(self, temp_dir, project_root, raw_id="CORE-E1"):
+        state_path = os.path.join(temp_dir, "pipeline_state.json")
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump({"pipeline_status": "WAITING_FOR_HUMAN", "current_phase_raw_id": raw_id}, f)
+        phase_path = os.path.join(temp_dir, "phase_state.json")
+        with open(phase_path, "w", encoding="utf-8") as f:
+            json.dump({"escalation_resets": 1}, f)
+        return {
+            "pipeline_state_path": state_path,
+            "phase_state_path": phase_path,
+            "lock_path": os.path.join(temp_dir, "pipeline.lock"),
+            "events_path": os.path.join(temp_dir, "pipeline_events.jsonl"),
+            "project_dir_path": project_root,
+        }
+
+    def test_phase_branch_exists_true_when_branch_present(self, temp_dir):
+        """When phase/<raw_id> branch exists in the repo, phase_branch_exists=true."""
+        repo = _make_git_repo(temp_dir)
+        subprocess.run(
+            ["git", "checkout", "-b", "phase/CORE-E1"], cwd=repo, check=True, capture_output=True
+        )
+        subprocess.run(["git", "checkout", "main"], cwd=repo, check=True, capture_output=True)
+
+        cfg = self._make_cfg(temp_dir, repo, raw_id="CORE-E1")
+        with patch("ui.server.load_config", return_value=cfg):
+            response = client.get("/api/state")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "phase_branch_exists" in data, \
+            "GET /api/state response does not include 'phase_branch_exists'"
+        assert data["phase_branch_exists"] is True
+
+    def test_phase_branch_exists_false_when_branch_missing(self, temp_dir):
+        """When phase/<raw_id> branch does not exist, phase_branch_exists=false."""
+        repo = _make_git_repo(temp_dir)
+        cfg = self._make_cfg(temp_dir, repo, raw_id="CORE-E1")
+        with patch("ui.server.load_config", return_value=cfg):
+            response = client.get("/api/state")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "phase_branch_exists" in data
+        assert data["phase_branch_exists"] is False
+
+    def test_phase_branch_exists_false_when_raw_id_empty(self, temp_dir):
+        """When current_phase_raw_id is empty, phase_branch_exists=false (no subprocess)."""
+        repo = _make_git_repo(temp_dir)
+        cfg = self._make_cfg(temp_dir, repo, raw_id="")
+        with patch("ui.server.load_config", return_value=cfg):
+            response = client.get("/api/state")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "phase_branch_exists" in data
+        assert data["phase_branch_exists"] is False
+
+
+class TestEscalationMessageTruncation:
+    """Step 3.4/3.5 — GET /api/state must truncate escalation_message at 500 chars."""
+
+    def _make_cfg(self, temp_dir, escalation_message):
+        state_path = os.path.join(temp_dir, "pipeline_state.json")
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump({"pipeline_status": "WAITING_FOR_HUMAN"}, f)
+        phase_path = os.path.join(temp_dir, "phase_state.json")
+        with open(phase_path, "w", encoding="utf-8") as f:
+            json.dump({"escalation_message": escalation_message}, f)
+        return {
+            "pipeline_state_path": state_path,
+            "phase_state_path": phase_path,
+            "lock_path": os.path.join(temp_dir, "pipeline.lock"),
+            "events_path": os.path.join(temp_dir, "pipeline_events.jsonl"),
+            "project_dir_path": temp_dir,
+        }
+
+    def test_escalation_message_over_500_truncated(self, temp_dir):
+        """phase_state.json escalation_message > 500 chars → response capped at 500."""
+        long_msg = "X" * 600
+        cfg = self._make_cfg(temp_dir, long_msg)
+        with patch("ui.server.load_config", return_value=cfg):
+            response = client.get("/api/state")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "escalation_message" in data
+        assert len(data["escalation_message"]) == 500
+        assert data["escalation_message"] == "X" * 500
+
+    def test_escalation_message_under_500_unchanged(self, temp_dir):
+        """phase_state.json escalation_message ≤ 500 chars → returned unchanged."""
+        short_msg = "Executor failed due to missing env var."
+        cfg = self._make_cfg(temp_dir, short_msg)
+        with patch("ui.server.load_config", return_value=cfg):
+            response = client.get("/api/state")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["escalation_message"] == short_msg
+
+
+class TestMergeProbePassed:
+    """Step 2.1c — GET /api/state must include merge_probe_passed boolean."""
+
+    def _make_cfg(self, temp_dir, project_root, raw_id="CORE-E1", base_branch="main"):
+        state_path = os.path.join(temp_dir, "pipeline_state.json")
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump({"pipeline_status": "WAITING_FOR_HUMAN", "current_phase_raw_id": raw_id}, f)
+        phase_path = os.path.join(temp_dir, "phase_state.json")
+        with open(phase_path, "w", encoding="utf-8") as f:
+            json.dump({"escalation_resets": 1}, f)
+        return {
+            "pipeline_state_path": state_path,
+            "phase_state_path": phase_path,
+            "lock_path": os.path.join(temp_dir, "pipeline.lock"),
+            "events_path": os.path.join(temp_dir, "pipeline_events.jsonl"),
+            "project_dir_path": project_root,
+            "base_branch": base_branch,
+        }
+
+    def test_merge_probe_passed_true_when_branch_merged(self, temp_dir):
+        """When phase/<raw_id> is an ancestor of base branch, merge_probe_passed=true."""
+        repo = _make_git_repo(temp_dir)
+        # Create phase branch from main commit (same HEAD = is-ancestor)
+        subprocess.run(
+            ["git", "checkout", "-b", "phase/CORE-E1"], cwd=repo, check=True, capture_output=True
+        )
+        # Merge it into main
+        subprocess.run(["git", "checkout", "main"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "merge", "--no-ff", "phase/CORE-E1", "-m", "Merge phase"],
+            cwd=repo, check=True, capture_output=True
+        )
+
+        cfg = self._make_cfg(temp_dir, repo, raw_id="CORE-E1", base_branch="main")
+        with patch("ui.server.load_config", return_value=cfg):
+            response = client.get("/api/state")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "merge_probe_passed" in data, \
+            "GET /api/state response does not include 'merge_probe_passed'"
+        assert data["merge_probe_passed"] is True
+
+    def test_merge_probe_passed_false_when_branch_not_merged(self, temp_dir):
+        """When phase/<raw_id> has commits not in base branch, merge_probe_passed=false."""
+        repo = _make_git_repo(temp_dir)
+        # Create phase branch with a new commit not in main
+        subprocess.run(
+            ["git", "checkout", "-b", "phase/CORE-E1"], cwd=repo, check=True, capture_output=True
+        )
+        with open(os.path.join(repo, "work.txt"), "w") as f:
+            f.write("work")
+        subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "phase work"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "checkout", "main"], cwd=repo, check=True, capture_output=True)
+
+        cfg = self._make_cfg(temp_dir, repo, raw_id="CORE-E1", base_branch="main")
+        with patch("ui.server.load_config", return_value=cfg):
+            response = client.get("/api/state")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "merge_probe_passed" in data
+        assert data["merge_probe_passed"] is False
+
+    def test_merge_probe_passed_false_when_subprocess_error(self, temp_dir):
+        """When git subprocess fails, merge_probe_passed=false (never raises)."""
+        project_root = os.path.join(temp_dir, "notarepo")
+        os.makedirs(project_root, exist_ok=True)
+
+        cfg = self._make_cfg(temp_dir, project_root, raw_id="CORE-E1", base_branch="main")
+        with patch("ui.server.load_config", return_value=cfg):
+            response = client.get("/api/state")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "merge_probe_passed" in data
+        assert data["merge_probe_passed"] is False
+
+    def test_merge_probe_passed_false_when_raw_id_empty(self, temp_dir):
+        """When current_phase_raw_id is empty, merge_probe_passed=false."""
+        repo = _make_git_repo(temp_dir)
+        cfg = self._make_cfg(temp_dir, repo, raw_id="", base_branch="main")
+        with patch("ui.server.load_config", return_value=cfg):
+            response = client.get("/api/state")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "merge_probe_passed" in data
+        assert data["merge_probe_passed"] is False
