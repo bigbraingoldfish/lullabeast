@@ -2599,47 +2599,54 @@ def post_resume_orchestrator():
 @app.get("/api/roadmap")
 def get_roadmap():
     """Get the parsed roadmap with in-progress phase identified.
-    
+
+    Resolves roadmap file with this priority:
+    1. pipeline_state[\"project_path\"] (realpath) → _canonical_roadmap_path
+    2. config [\"roadmap_path\"] (fallback: first-time setup, idle, explicit override)
+
     Returns a JSON array of phase objects with id, goal, status, and exit_criteria.
-    If pipeline_state.json contains current_phase_raw_id, the matching phase's status
-    is overridden to 'in_progress' (taking precedence over checkbox status).
-    Returns [] when roadmap_path is absent or file is empty.
+    If pipeline_state contains current_phase_raw_id, the matching phase's status
+    is overridden to 'in_progress' (taking precedence over checkbox status) when
+    pipeline_status is not terminal. Returns [] when no roadmap file is found or
+    the file is empty.
     """
     config = load_config()
-    
-    roadmap_path = config.get('roadmap_path')
-    pipeline_state_path = config.get('pipeline_state_path')
-    
-    # Expand paths if not already expanded
-    roadmap_path = os.path.expanduser(roadmap_path) if roadmap_path else None
+
+    pipeline_state_path = config.get("pipeline_state_path")
     pipeline_state_path = os.path.expanduser(pipeline_state_path) if pipeline_state_path else None
-    
-    # Parse roadmap - returns [] if absent or empty
+
+    pipeline_state = _read_json_file(pipeline_state_path) if pipeline_state_path else None
+
+    # Resolution: prefer pipeline_state project_path, fall back to config
+    roadmap_path = None
+    raw_project_path = (pipeline_state or {}).get("project_path", "")
+    if raw_project_path:
+        try:
+            project_real = os.path.realpath(os.path.expanduser(str(raw_project_path)))
+        except OSError:
+            project_real = ""
+        if project_real and os.path.isdir(project_real):
+            roadmap_path = _canonical_roadmap_path(project_real)
+
+    if not roadmap_path:
+        roadmap_path = config.get("roadmap_path")
+        roadmap_path = os.path.expanduser(roadmap_path) if roadmap_path else None
+
     phases = parse_roadmap(roadmap_path) if roadmap_path else []
-    
+
     if not phases:
         return []
-    
-    # Read pipeline_state to get current_phase_raw_id
-    current_phase_raw_id = None
-    if pipeline_state_path:
-        pipeline_state = _read_json_file(pipeline_state_path)
-        if pipeline_state:
-            current_phase_raw_id = pipeline_state.get('current_phase_raw_id')
-    
-    # Override status to 'in_progress' for matching phase only when pipeline is
-    # actively running — not when it has reached a terminal state like PIPELINE_COMPLETE.
+
+    current_phase_raw_id = (pipeline_state or {}).get("current_phase_raw_id")
+
     terminal_statuses = {"PIPELINE_COMPLETE", "HALTED_SILENT", "BLOCKED", "STOPPED", "QUEUE_HALTED"}
-    pipeline_status = pipeline_state.get("pipeline_status", "") if pipeline_state_path and _read_json_file(pipeline_state_path) else ""
-    if pipeline_state_path:
-        _ps = _read_json_file(pipeline_state_path)
-        pipeline_status = _ps.get("pipeline_status", "") if _ps else ""
+    pipeline_status = (pipeline_state or {}).get("pipeline_status", "")
     if current_phase_raw_id and pipeline_status not in terminal_statuses:
         for phase in phases:
-            if phase['id'] == current_phase_raw_id:
-                phase['status'] = 'in_progress'
+            if phase["id"] == current_phase_raw_id:
+                phase["status"] = "in_progress"
                 break
-    
+
     return phases
 
 

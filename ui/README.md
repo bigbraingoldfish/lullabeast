@@ -38,6 +38,7 @@ FastAPI server (`server.py`) and a single-file React app (`index.html`) for the 
 
 - **Agent attempts:** Under **Current phase**, an **Agent attempts** heading precedes three rows (Planner / Executor / Reviewer). Dots reflect `*_retries`, `current_agent`, and `pipeline_status` with native **`title`** tooltips — see `getAgentAttemptDotStates` and `DotCounter` in `index.html`. Fill colors use **`AGENT_ATTEMPT_DOT_HEX`** (aligned to **`PIPELINE_STATUS_PILL_HEX` / `PIPELINE_LIVE_PILL`**: slate `#475569`, teal `#0d9488` in-flight with a subtle opacity pulse on that dot only, success `#28D11B`, failure `#dc2626`) as inline styles so the Play CDN cannot strip dynamic `bg-*` utilities.
 - **Activity tab:** Event badges show **human-readable** type labels; hover the badge for **`Machine id: …`** (raw `event` or `event_type`). Empty ring buffer: **No events yet. Events appear here as the pipeline runs.**
+- **`GET /api/roadmap`**: Roadmap file resolution prefers `pipeline_state.json` `project_path` (then `_canonical_roadmap_path` on the real project directory) so the phase list matches the project shown in the header; it falls back to `config.roadmap_path` when that field is empty or the path is not a directory. This avoids split-brain when the `pipeline-project` symlink lags `project_path` (Policy A in **Resume** repoints the symlink, but the API does not require it to display correctly).
 
 ### Release / verification
 
