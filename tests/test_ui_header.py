@@ -43,14 +43,14 @@ def test_status_pill_waiting_for_sentinel():
 
 
 def test_status_pill_pipeline_complete_lime():
-    """PIPELINE_COMPLETE uses lime #28D11B with dark label text (distinct from teal in-flight)."""
+    """PIPELINE_COMPLETE uses lime #2DEB1E with dark label text (distinct from teal in-flight)."""
     with open("ui/index.html", "r") as f:
         content = f.read()
     assert re.search(
-        r"PIPELINE_COMPLETE:\s*\{[^}]*#28D11B[^}]*text-slate-900",
+        r"PIPELINE_COMPLETE:\s*\{[^}]*#2DEB1E[^}]*text-slate-900",
         content,
         re.DOTALL,
-    ), "COMPLETE pill should use bg-[#28D11B] and text-slate-900"
+    ), "COMPLETE pill should use bg-[#2DEB1E] and text-slate-900"
 
 
 def test_status_pill_waiting_for_human():
