@@ -6855,18 +6855,18 @@
                         ) : null}
                         {showHeaderOrchestratorRecoveryBanner ? (
                             <div
-                                className="border-t border-amber-800/50 bg-amber-950/25 px-6 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
+                                className="mt-3 border border-amber-800/50 bg-amber-950/25 rounded-md px-5 sm:px-6 py-2.5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2"
                                 data-testid="pipeline-orchestrator-recovery-banner"
                             >
-                                <p className="header-text text-xs text-amber-100/95 leading-relaxed flex-1 min-w-0">
+                                <p className="header-text text-xs text-amber-100/95 leading-snug flex-1 min-w-0 pr-1 sm:pr-2">
                                     The orchestrator process is not running. Restart it to apply escalation commands, resume polling, or continue from a stopped pipeline.
                                 </p>
-                                <div className="flex flex-col items-stretch sm:items-end gap-1 shrink-0 sm:min-w-[11rem]">
+                                <div className="flex flex-col items-stretch sm:items-end sm:self-center gap-1 shrink-0 sm:min-w-[11rem]">
                                     <button
                                         type="button"
                                         onClick={handleRestartOrchestrator}
                                         disabled={orchRestartBusy}
-                                        className="header-text px-3 py-2 text-xs rounded bg-cyan-950 hover:bg-cyan-900 text-cyan-200 border border-cyan-800 transition-colors disabled:opacity-50 whitespace-nowrap"
+                                        className="header-text px-2.5 py-1 text-xs rounded bg-cyan-950 hover:bg-cyan-900 text-cyan-200 border border-cyan-800 transition-colors disabled:opacity-50 whitespace-nowrap self-center sm:self-end"
                                     >
                                         {orchRestartBusy ? "Restarting…" : "Restart Orchestrator"}
                                     </button>
