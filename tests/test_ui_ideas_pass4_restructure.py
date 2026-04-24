@@ -90,7 +90,8 @@ def test_sidebar_uses_header_chevron_toggle():
     assert ideas_body is not None
     assert "setSidebarCollapsed" in sidebar_body
     assert "Expand sidebar" in sidebar_body
-    assert "›" in sidebar_body and "‹" in sidebar_body
+    assert "‹" in sidebar_body
+    assert ">AD</span>" in sidebar_body
     assert "side-divider-btn" not in content
 
 
