@@ -2312,9 +2312,16 @@
             );
         }
 
-        // ─── Sidebar navigation ───────────────────────────────────────────────────
+        // ─── Primary nav column (brand + nav; optional Project Ideas chats stack below) ──
 
-        function Sidebar({ currentScreen, onNavigate, sidebarCollapsed, setSidebarCollapsed }) {
+        function PrimaryNavColumn({
+            currentScreen,
+            onNavigate,
+            sidebarCollapsed,
+            setSidebarCollapsed,
+            expandedWidthClass,
+            belowNav,
+        }) {
             const navItems = [
                 {
                     key: 'pipeline',
@@ -2367,14 +2374,15 @@
                     )
                 }
             ];
-
+            const expW = expandedWidthClass || "w-44";
+            const hasBelow = belowNav != null && belowNav !== false;
             return (
                 <div
                     className={`${
-                        sidebarCollapsed ? "w-14" : "w-44"
-                    } relative flex-shrink-0 bg-[#141618] border-r border-[#1a1d21] flex flex-col transition-[width] duration-200 ease-out`}
+                        sidebarCollapsed ? "w-14" : expW
+                    } relative flex-shrink-0 bg-[#141618] border-r border-[#1a1d21] flex flex-col h-full min-h-0 max-h-full transition-[width] duration-200 ease-out`}
                 >
-                    <div className="px-2 py-4 border-b border-[#1a1d21] flex items-center gap-1 min-h-[52px]">
+                    <div className="px-2 py-4 border-b border-[#1a1d21] flex items-center gap-1 min-h-[52px] flex-shrink-0">
                         {sidebarCollapsed ? (
                             <button
                                 type="button"
@@ -2402,7 +2410,13 @@
                             </>
                         )}
                     </div>
-                    <nav className="flex-1 py-2 overflow-y-auto">
+                    <nav
+                        className={
+                            hasBelow
+                                ? "flex-shrink-0 py-2 overflow-y-auto overflow-x-hidden max-h-[min(40vh,14rem)] border-b border-[#1a1d21]"
+                                : "flex-1 py-2 overflow-y-auto overflow-x-hidden min-h-0"
+                        }
+                    >
                         {navItems.map((item) => {
                             const isActive = currentScreen === item.key;
                             return (
@@ -2425,8 +2439,13 @@
                             );
                         })}
                     </nav>
+                    {hasBelow ? <div className="flex flex-col flex-1 min-h-0 min-w-0">{belowNav}</div> : null}
                 </div>
             );
+        }
+
+        function Sidebar(props) {
+            return <PrimaryNavColumn {...props} expandedWidthClass="w-44" belowNav={null} />;
         }
 
         const PRD_SECTION_TITLES = [
@@ -2722,6 +2741,9 @@
         function IdeasScreen() {
             const ctx = useContext(AppCtx);
             const sidebarCollapsed = ctx && ctx.sidebarCollapsed === true;
+            const currentScreen = (ctx && ctx.currentScreen) || "ideas";
+            const safeNav = (ctx && ctx.safeNavigate) || (() => {});
+            const setSidebarCollapsedCtx = (ctx && ctx.setSidebarCollapsed) || (() => {});
             const [messages, setMessages] = useState([]);
             const [prdContent, setPrdContent] = useState("");
             const [roadmapContent, setRoadmapContent] = useState("");
@@ -3540,7 +3562,7 @@
             });
 
             return (
-                <div className="flex h-full min-w-0">
+                <div className="flex h-full min-h-0 min-w-0">
                     {revertConfirmSlug && (
                         <div
                             className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 px-4"
@@ -3579,9 +3601,16 @@
                             </div>
                         </div>
                     )}
-                    {/* Chats rail: omit from layout when sidebar collapsed so only the nav column remains */}
-                    {!sidebarCollapsed && (
-                    <div className="w-56 sm:w-60 relative flex-shrink-0 flex flex-col bg-[#0d0f11] border-r border-[#1a1d21] transition-[width] duration-200 ease-out">
+                    {/* M2 ideas merged: one column — AUTODEV + nav, then Chats (not a sibling rail) */}
+                    <PrimaryNavColumn
+                        currentScreen={currentScreen}
+                        onNavigate={safeNav}
+                        sidebarCollapsed={!!sidebarCollapsed}
+                        setSidebarCollapsed={setSidebarCollapsedCtx}
+                        expandedWidthClass="w-72 sm:w-80"
+                        belowNav={
+                            !sidebarCollapsed ? (
+                                <div className="flex flex-col flex-1 min-h-0 bg-[#0d0f11]">
                                 <div className="flex-shrink-0 flex items-center justify-between gap-2 px-3 py-2 border-b border-[#1a1d21]">
                                     <span className="header-text text-xs text-slate-400 uppercase tracking-wide">Chats</span>
                                     <button
@@ -3779,8 +3808,10 @@
                                         </>
                                     )}
                                 </div>
-                    </div>
-                    )}
+                                </div>
+                            ) : null
+                        }
+                    />
 
                     <div ref={containerRef} className="flex flex-1 min-w-0">
                     <div style={{ width: splitPct + "%" }} className="flex-shrink-0 flex flex-col min-w-0 bg-[#141618] overflow-hidden">
@@ -7960,6 +7991,7 @@
                 setSeedRoadmap,
                 setRoadmapSeedLocked,
                 setCurrentScreen,
+                currentScreen,
                 safeNavigate,
                 setUnsavedQueueOrder,
                 pipelineStatus,
@@ -7989,12 +8021,14 @@
             return (
                 <AppCtx.Provider value={appCtxValue}>
                     <div className="flex h-screen overflow-hidden bg-[#0d0f12]">
+                        {currentScreen !== "ideas" && (
                         <Sidebar
                             currentScreen={currentScreen}
                             onNavigate={safeNavigate}
                             sidebarCollapsed={sidebarCollapsed}
                             setSidebarCollapsed={setSidebarCollapsed}
                         />
+                        )}
                         <div className="flex-1 flex flex-col overflow-hidden">
                             {currentScreen === "pipeline" && <PipelineScreen />}
                             {currentScreen === "queue" && <QueueScreen />}

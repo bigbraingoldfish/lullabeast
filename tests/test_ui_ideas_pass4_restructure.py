@@ -84,14 +84,14 @@ def test_prd_completeness_checklist_present():
 
 def test_sidebar_uses_header_chevron_toggle():
     content = load_index_html()
-    sidebar_body = extract_function_body(content, "Sidebar")
+    nav_body = extract_function_body(content, "PrimaryNavColumn")
     ideas_body = extract_function_body(content, "IdeasScreen")
-    assert sidebar_body is not None
+    assert nav_body is not None
     assert ideas_body is not None
-    assert "setSidebarCollapsed" in sidebar_body
-    assert "Expand sidebar" in sidebar_body
-    assert "‹" in sidebar_body
-    assert ">AD</span>" in sidebar_body
+    assert "setSidebarCollapsed" in nav_body
+    assert "Expand sidebar" in nav_body
+    assert "‹" in nav_body
+    assert ">AD</span>" in nav_body
     assert "side-divider-btn" not in content
 
 
@@ -102,9 +102,9 @@ def test_sidebar_ideas_nav_uses_p3_title_hint_h28():
     content = load_index_html()
     assert P3_SIDEBAR_IDEAS_TAB_TITLE_EXPECTED in content
     assert "P3_SIDEBAR_IDEAS_TAB_TITLE" in content
-    sidebar_body = extract_function_body(content, "Sidebar")
-    assert sidebar_body is not None
-    assert "navTitle" in sidebar_body
-    assert "title={item.navTitle ?? item.label}" in sidebar_body
-    assert "key: 'ideas'" in sidebar_body or "key: \"ideas\"" in sidebar_body
-    assert "P3_SIDEBAR_IDEAS_TAB_TITLE" in sidebar_body
+    nav_body = extract_function_body(content, "PrimaryNavColumn")
+    assert nav_body is not None
+    assert "navTitle" in nav_body
+    assert "title={item.navTitle ?? item.label}" in nav_body
+    assert "key: 'ideas'" in nav_body or "key: \"ideas\"" in nav_body
+    assert "P3_SIDEBAR_IDEAS_TAB_TITLE" in nav_body

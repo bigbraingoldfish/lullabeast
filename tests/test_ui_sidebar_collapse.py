@@ -77,5 +77,5 @@ def test_index_html_sidebar_unified_wiring():
     assert "setChatsRailCollapsed" not in html
     assert "sidebarCollapsed" in html
     assert "setSidebarCollapsed" in html
-    assert "omit from layout when sidebar collapsed" in html
-    assert "!sidebarCollapsed &&" in html
+    assert "M2 ideas merged: one column" in html
+    assert "PrimaryNavColumn" in html

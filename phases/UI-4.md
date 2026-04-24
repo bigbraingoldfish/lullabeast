@@ -28,3 +28,4 @@ pytest tests/ -q
 - `setChatsRailCollapsed` on new idea removed — collapse state is global.
 - `sidebarCollapsed` persists when navigating away from Project Ideas (by design).
 - **Follow-up (same milestone):** Collapsed header uses a single **AD** button to expand (no separate **›** control). **‹** collapse control only when expanded. Chats rail is **unmounted** when collapsed (`{!sidebarCollapsed && (...)}`) so the flex row does not keep a second zero-width column.
+- **Project Ideas layout:** On the **ideas** route only, the global `Sidebar` is hidden; `IdeasScreen` renders **`PrimaryNavColumn`** with **Chats** (filter, + New, list) in **`belowNav`** so AUTODEV + nav + chats are **one vertical column** (`w-72 sm:w-80` expanded). Other routes still use `Sidebar` alone.
