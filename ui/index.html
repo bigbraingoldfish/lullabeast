@@ -2374,7 +2374,7 @@
                     )
                 }
             ];
-            const expW = expandedWidthClass || "w-44";
+            const expW = expandedWidthClass || "w-[220px]";
             const hasBelow = belowNav != null && belowNav !== false;
             return (
                 <div
@@ -2413,7 +2413,7 @@
                     <nav
                         className={
                             hasBelow
-                                ? "flex-shrink-0 py-2 overflow-y-auto overflow-x-hidden max-h-[min(40vh,14rem)] border-b border-[#1a1d21]"
+                                ? "flex-shrink-0 py-2 overflow-y-auto overflow-x-hidden max-h-[min(40vh,14rem)]"
                                 : "flex-1 py-2 overflow-y-auto overflow-x-hidden min-h-0"
                         }
                     >
@@ -2445,7 +2445,7 @@
         }
 
         function Sidebar(props) {
-            return <PrimaryNavColumn {...props} expandedWidthClass="w-44" belowNav={null} />;
+            return <PrimaryNavColumn {...props} expandedWidthClass="w-[220px]" belowNav={null} />;
         }
 
         const PRD_SECTION_TITLES = [
@@ -3607,28 +3607,28 @@
                         onNavigate={safeNav}
                         sidebarCollapsed={!!sidebarCollapsed}
                         setSidebarCollapsed={setSidebarCollapsedCtx}
-                        expandedWidthClass="w-72 sm:w-80"
+                        expandedWidthClass="w-[220px]"
                         belowNav={
                             !sidebarCollapsed ? (
-                                <div className="flex flex-col flex-1 min-h-0 bg-[#0d0f11]">
-                                <div className="flex-shrink-0 flex items-center justify-between gap-2 px-3 py-2 border-b border-[#1a1d21]">
+                                <div className="flex flex-col flex-1 min-h-0 bg-[#141618] border-t border-[#1a1d21] pt-3">
+                                <div className="flex-shrink-0 flex items-center justify-between gap-2 px-3 pb-2">
                                     <span className="header-text text-xs text-slate-400 uppercase tracking-wide">Chats</span>
                                     <button
                                         type="button"
                                         onClick={newIdea}
-                                        className="header-text text-xs px-2 py-1 rounded bg-[#1a1d21] text-[#00b4d8] border border-[#1a1d21] hover:border-[#00b4d8]/50"
+                                        className="header-text text-xs font-medium text-[#00b4d8] bg-transparent border-0 p-0 cursor-pointer hover:text-[#33c3e0] hover:underline shrink-0"
                                     >
                                         + New
                                     </button>
                                 </div>
-                                <div className="flex-shrink-0 flex items-center gap-1 px-2 pt-2 pb-1.5 border-b border-[#1a1d21]">
+                                <div className="flex-shrink-0 flex items-center gap-1 px-3 pb-2">
                                     <input
                                         type="search"
                                         value={filterText}
                                         onChange={(e) => setFilterText(e.target.value)}
-                                        placeholder="Filter projects…"
-                                        aria-label="Filter projects by title"
-                                        className="flex-1 min-w-0 rounded border border-[#2a2d31] bg-[#101214] px-2 py-1 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#00b4d8]/50"
+                                        placeholder="Search by title"
+                                        aria-label="Search projects by title"
+                                        className="w-full min-w-0 rounded border border-[#2a2d31] bg-[#101214] px-2 py-1.5 text-xs text-slate-300 placeholder-slate-500 focus:outline-none focus:border-[#00b4d8]/50"
                                     />
                                     {filterText.length > 0 ? (
                                         <button
@@ -3642,7 +3642,7 @@
                                         </button>
                                     ) : null}
                                 </div>
-                                <div className="flex-1 overflow-y-auto py-2 px-2 space-y-1 min-h-0">
+                                <div className="flex-1 overflow-y-auto py-1 px-3 space-y-1 min-h-0">
                                     {ideasLoading ? (
                                         <>
                                             {[0, 1, 2].map((idx) => (
@@ -3665,7 +3665,7 @@
                                                         : ""
                                                 }`}
                                             >
-                                                <div className="text-slate-200 truncate text-xs font-medium header-text">Draft</div>
+                                                <div className={`truncate text-xs font-medium header-text ${currentIdeaId && !listedIds.has(currentIdeaId) ? "text-slate-100" : "text-slate-400"}`}>Draft</div>
                                                 <div className="text-slate-500 truncate text-[11px]">Not listed until first turn completes</div>
                                             </button>
                                         </div>
@@ -3674,7 +3674,7 @@
                                         <div
                                             key={it.id}
                                             className={`group flex rounded border border-transparent ${
-                                                currentIdeaId === it.id ? "border-[#00b4d8]/40 bg-[#1a1d21]" : "hover:bg-[#1a1d21]/70"
+                                                currentIdeaId === it.id ? "border-[#00b4d8]/40 bg-[#1a1d21]" : "hover:bg-[#1a1d21]/60"
                                             }`}
                                         >
                                             <button
@@ -3682,7 +3682,7 @@
                                                 onClick={() => selectIdeaFromRail(it.id)}
                                                 className="flex-1 min-w-0 text-left px-2 py-2"
                                             >
-                                                <div className="text-slate-200 truncate text-xs font-medium header-text">{it.name || it.id}</div>
+                                                <div className={`truncate text-xs font-medium header-text ${currentIdeaId === it.id ? "text-slate-100" : "text-slate-400"}`}>{it.name || it.id}</div>
                                                 <div className="text-slate-500 truncate text-[11px]">{it.updated ? relativeTime(it.updated) : "—"}</div>
                                             </button>
                                             {renamingIdeaId === it.id ? (

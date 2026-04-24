@@ -51,8 +51,8 @@ def test_filter_no_match_returns_empty():
 
 
 def test_index_html_project_filter_wired():
-    """Controlled filter input present above chats rail list."""
+    """Controlled search input present above chats list."""
     html = (_repo_root() / "ui" / "index.html").read_text(encoding="utf-8")
     assert "filterText" in html
     assert "filteredIdeas" in html
-    assert "Filter projects" in html
+    assert "Search by title" in html
