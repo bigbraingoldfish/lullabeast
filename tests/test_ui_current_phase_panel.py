@@ -293,10 +293,12 @@ def test_elapsed_timer_component_exists(html_content):
 
 def test_elapsed_timer_uses_useeffect(html_content):
     """ElapsedTimer uses useEffect to manage the timer interval."""
-    timer_match = re.search(r'function\s+ElapsedTimer[^{]*\{(.*?)^\s*\}', html_content, re.MULTILINE | re.DOTALL)
-    assert timer_match, "ElapsedTimer function not found"
-    timer_code = timer_match.group(1)
-    assert "useEffect" in timer_code, "ElapsedTimer should use useEffect"
+    start = html_content.find("function ElapsedTimer")
+    assert start != -1, "ElapsedTimer function not found"
+    end = html_content.find("function SkillInjected", start)
+    assert end != -1, "SkillInjected boundary not found after ElapsedTimer"
+    timer_block = html_content[start:end]
+    assert "useEffect" in timer_block, "ElapsedTimer should use useEffect"
 
 
 def test_elapsed_timer_amber_color_condition(html_content):
@@ -309,9 +311,11 @@ def test_elapsed_timer_amber_color_condition(html_content):
 
 
 def test_elapsed_timer_renders_conditionally(html_content):
-    """ElapsedTimer returns null when lastActionTimestamp is not present."""
-    has_conditional = bool(re.search(r'!lastActionTimestamp.*return\s+null|lastActionTimestamp\s*===\s*null.*return\s+null', html_content))
-    assert has_conditional, "ElapsedTimer should return null when lastActionTimestamp is absent"
+    """ElapsedTimer returns null when tick anchor (sentinel or last action) is not present."""
+    has_conditional = bool(
+        re.search(r"if\s*\(\s*!tickAnchor|!tickAnchor\s*\)", html_content)
+    )
+    assert has_conditional, "ElapsedTimer should guard on tickAnchor when timestamps are absent"
 
 
 def test_current_phase_panel_renders_elapsed_timer(html_content):

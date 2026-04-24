@@ -70,6 +70,9 @@ def _validate_openclaw_root(root: str) -> None:
 WEBHOOK_AGENT_ID_PRD = "prd-creator"
 ORCHESTRATOR_POLL_TIMEOUT = 120
 
+# Hard cap for gate script subprocess.run — prevents hung gates from stalling the orchestrator.
+GATE_SUBPROCESS_TIMEOUT = 60
+
 VALID_STATES = [
     "RUNNING",
     "WAITING_FOR_SENTINEL",
@@ -371,6 +374,8 @@ class Orchestrator:
             
         self.state["pipeline_status"] = new_status
         self.state["last_action"] = action_description
+        if new_status != "WAITING_FOR_SENTINEL":
+            self.state.pop("sentinel_wait_started_at", None)
         self.write_state()
 
     def _phase_resolver_indicates_pipeline_complete(self) -> bool:
@@ -924,9 +929,13 @@ class Orchestrator:
                 capture_output=True,
                 text=True,
                 check=True,
+                timeout=GATE_SUBPROCESS_TIMEOUT,
             )
             output = result.stdout.strip()
             return output == "PASS"
+        except subprocess.TimeoutExpired as e:
+            print(f"[ERROR] Planner gate subprocess timed out after {GATE_SUBPROCESS_TIMEOUT}s: {e}")
+            return False
         except subprocess.CalledProcessError as e:
             print(f"[ERROR] Gate script failed: {e}")
             return False
@@ -1430,9 +1439,18 @@ class Orchestrator:
     def run_executor_output_gate(self):
         gate_script = os.path.join(AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts", "executor_gate.py")
         try:
-            result = subprocess.run([sys.executable, gate_script], capture_output=True, text=True, check=True)
+            result = subprocess.run(
+                [sys.executable, gate_script],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=GATE_SUBPROCESS_TIMEOUT,
+            )
             output = result.stdout.strip()
             return output == "PASS"
+        except subprocess.TimeoutExpired as e:
+            print(f"[ERROR] Executor gate subprocess timed out after {GATE_SUBPROCESS_TIMEOUT}s: {e}")
+            return False
         except subprocess.CalledProcessError as e:
             print(f"[ERROR] Gate script failed: {e}")
             return False
@@ -1800,9 +1818,18 @@ class Orchestrator:
     def run_reviewer_output_gate(self):
         gate_script = os.path.join(AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts", "reviewer_gate.py")
         try:
-            result = subprocess.run([sys.executable, gate_script], capture_output=True, text=True, check=True)
+            result = subprocess.run(
+                [sys.executable, gate_script],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=GATE_SUBPROCESS_TIMEOUT,
+            )
             output = result.stdout.strip()
             return output
+        except subprocess.TimeoutExpired as e:
+            print(f"[ERROR] Reviewer gate subprocess timed out after {GATE_SUBPROCESS_TIMEOUT}s: {e}")
+            return "ROUTE_ESCALATE"
         except subprocess.CalledProcessError as e:
             print(f"[ERROR] Gate script failed: {e}")
             return "ROUTE_ESCALATE"
@@ -1818,6 +1845,7 @@ class Orchestrator:
                 capture_output=True,
                 text=True,
                 env=os.environ,
+                timeout=GATE_SUBPROCESS_TIMEOUT,
             )
             output = (result.stdout + result.stderr).strip()
             if result.returncode == 0:
@@ -1826,6 +1854,10 @@ class Orchestrator:
             else:
                 print(f"[ERROR] Repo init check failed:\n{output}")
                 return False, output
+        except subprocess.TimeoutExpired as e:
+            details = f"Repo init check subprocess timed out after {GATE_SUBPROCESS_TIMEOUT}s: {e}"
+            print(f"[ERROR] {details}")
+            return False, details
         except Exception as e:
             details = f"Repo init check subprocess error: {e}"
             print(f"[ERROR] {details}")
@@ -2069,6 +2101,7 @@ class Orchestrator:
                     )
                     self._record_injected_skill("planner")
 
+                    self.state["sentinel_wait_started_at"] = datetime.now(timezone.utc).isoformat()
                     self.transition_state("WAITING_FOR_SENTINEL", "Invoking Planner via webhook")
                     webhook_status = invoke_agent_webhook(
                         "planner", session_key, token, model=self._get_agent_model("planner")
@@ -2095,6 +2128,7 @@ class Orchestrator:
                             # restart can distinguish this state from an intentional ROUTE_PLANNER.
                             _ps_pp = self.read_phase_state()
                             _ps_pp["planner_output_preserved"] = True
+                            _ps_pp.pop("last_error_code", None)
                             self.write_phase_state_atomic(_ps_pp)
                             self.state["planner_output_preserved"] = True
                             self.state["current_agent"] = "executor"
@@ -2200,6 +2234,7 @@ class Orchestrator:
                         self.state.get("current_phase_raw_id", ""), "executor", self.openclaw_config
                     )
                     self._record_injected_skill("executor")
+                    self.state["sentinel_wait_started_at"] = datetime.now(timezone.utc).isoformat()
                     self.transition_state("WAITING_FOR_SENTINEL", f"Invoking Executor ({attempt_label}) - Attempt {retries + 1}")
 
                     webhook_status = invoke_agent_webhook("executor", session_key, token, model=model)
@@ -2246,6 +2281,9 @@ class Orchestrator:
                     if outcome == "executor_succeeded":
                         gate_passed = self.run_executor_output_gate()
                         if gate_passed:
+                            _ps_ex = self.read_phase_state()
+                            _ps_ex.pop("last_error_code", None)
+                            self.write_phase_state_atomic(_ps_ex)
                             self.state["current_agent"] = "reviewer"
                             self.transition_state("RUNNING", "Executor passed, moving to reviewer")
                             self.wait_for_model_stable()
@@ -2263,6 +2301,9 @@ class Orchestrator:
                         gate_passed = self.run_executor_output_gate()
                         if gate_passed:
                             print("[INFO] [EXECUTOR] Preempted executor output passed gate — treating as succeeded.")
+                            _ps_ep = self.read_phase_state()
+                            _ps_ep.pop("last_error_code", None)
+                            self.write_phase_state_atomic(_ps_ep)
                             self.state["current_agent"] = "reviewer"
                             self.transition_state("RUNNING", "Executor preempted but output valid — moving to reviewer")
                             self.wait_for_model_stable()
@@ -2297,6 +2338,7 @@ class Orchestrator:
                         self.state.get("current_phase_raw_id", ""), "reviewer", self.openclaw_config
                     )
                     self._record_injected_skill("reviewer")
+                    self.state["sentinel_wait_started_at"] = datetime.now(timezone.utc).isoformat()
                     self.transition_state("WAITING_FOR_SENTINEL", f"Invoking Reviewer - Attempt {retries + 1}")
 
                     webhook_status = invoke_agent_webhook("reviewer", session_key, token, model=self._get_agent_model("reviewer"))
@@ -2328,6 +2370,9 @@ class Orchestrator:
                         self.write_failure_context("reviewer", self.state.get("reviewer_retries", 0) + 1)
 
                     if gate_result == "PASS":
+                        _ps_rv = self.read_phase_state()
+                        _ps_rv.pop("last_error_code", None)
+                        self.write_phase_state_atomic(_ps_rv)
                         self.transition_state("RUNNING", "Reviewer passed, entering Phase 10 Git Operations")
 
                         # 1. Merge & Commit
