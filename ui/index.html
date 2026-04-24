@@ -189,39 +189,6 @@
         }
         .msg-md th { background: #1a1d21; color: #cbd5e1; }
 
-        .side-divider {
-            width: 2px;
-            background: #1a1d21;
-            position: absolute;
-            top: 0;
-            bottom: 0;
-            right: 0;
-        }
-        .side-divider-btn {
-            position: absolute;
-            top: 50%;
-            right: 0;
-            transform: translate(50%, -50%);
-            width: 24px;
-            height: 48px;
-            border: 1px solid #1a1d21;
-            border-radius: 6px;
-            background: #141618;
-            color: #94a3b8;
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 16px;
-            line-height: 1;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            z-index: 20;
-        }
-        .side-divider-btn:hover {
-            color: #00b4d8;
-            border-color: #334155;
-            background: #1a1d21;
-        }
-
         /* ── Dark-theme scrollbars (Webkit / Blink) ──────────────────────────
            Track: matches the darkest panel bg (#0d0f11).
            Thumb: mid-tone (#2a2d31) at rest → lighter (#3d4249) on hover.
@@ -2347,8 +2314,7 @@
 
         // ─── Sidebar navigation ───────────────────────────────────────────────────
 
-        function Sidebar({ currentScreen, onNavigate }) {
-            const [navCollapsed, setNavCollapsed] = useState(false);
+        function Sidebar({ currentScreen, onNavigate, sidebarCollapsed, setSidebarCollapsed }) {
             const navItems = [
                 {
                     key: 'pipeline',
@@ -2405,19 +2371,28 @@
             return (
                 <div
                     className={`${
-                        navCollapsed ? "w-14" : "w-44"
+                        sidebarCollapsed ? "w-14" : "w-44"
                     } relative flex-shrink-0 bg-[#141618] border-r border-[#1a1d21] flex flex-col transition-[width] duration-200 ease-out`}
                 >
-                    <div className="px-2 py-4 border-b border-[#1a1d21] flex items-center justify-center gap-1 min-h-[52px]">
-                        {!navCollapsed ? (
-                            <h1 className="header-text text-base font-bold text-amber-400 tracking-widest flex-1 text-center truncate px-1">
+                    <div className="px-2 py-4 border-b border-[#1a1d21] flex items-center gap-1 min-h-[52px]">
+                        {!sidebarCollapsed ? (
+                            <h1 className="header-text text-base font-bold text-amber-400 tracking-widest flex-1 text-center truncate px-1 min-w-0">
                                 AUTODEV
                             </h1>
                         ) : (
-                            <span className="header-text text-sm font-bold text-amber-400" title="AUTODEV">
+                            <span className="header-text text-sm font-bold text-amber-400 flex-1 text-center min-w-0" title="AUTODEV">
                                 A
                             </span>
                         )}
+                        <button
+                            type="button"
+                            onClick={() => setSidebarCollapsed((c) => !c)}
+                            className="shrink-0 w-7 h-7 flex items-center justify-center rounded border border-[#2a2d31] bg-[#1a1d21] text-slate-400 hover:text-slate-200 hover:border-slate-500 text-sm leading-none"
+                            title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+                            aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+                        >
+                            {sidebarCollapsed ? "›" : "‹"}
+                        </button>
                     </div>
                     <nav className="flex-1 py-2 overflow-y-auto">
                         {navItems.map((item) => {
@@ -2432,26 +2407,16 @@
                                         isActive
                                             ? "text-[#00b4d8] bg-[#00b4d8]/10 border-r-2 border-[#00b4d8]"
                                             : "text-slate-400 hover:text-slate-200 hover:bg-[#1a1d21]"
-                                    } ${navCollapsed ? "justify-center px-0" : ""}`}
+                                    } ${sidebarCollapsed ? "justify-center px-0" : ""}`}
                                 >
                                     {item.icon}
-                                    {!navCollapsed ? (
+                                    {!sidebarCollapsed ? (
                                         <span className="header-text text-xs font-medium leading-tight">{item.label}</span>
                                     ) : null}
                                 </button>
                             );
                         })}
                     </nav>
-                    <div className="side-divider"></div>
-                    <button
-                        type="button"
-                        onClick={() => setNavCollapsed((c) => !c)}
-                        className="side-divider-btn"
-                        title={navCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-                        aria-label={navCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-                    >
-                        {navCollapsed ? "›" : "‹"}
-                    </button>
                 </div>
             );
         }
@@ -2748,6 +2713,7 @@
 
         function IdeasScreen() {
             const ctx = useContext(AppCtx);
+            const sidebarCollapsed = ctx && ctx.sidebarCollapsed === true;
             const [messages, setMessages] = useState([]);
             const [prdContent, setPrdContent] = useState("");
             const [roadmapContent, setRoadmapContent] = useState("");
@@ -2769,7 +2735,6 @@
             const [readinessTimedOut, setReadinessTimedOut] = useState(false);
             const [showContinueWarning] = useState(false); // legacy — kept for test compat, not rendered
             const [continueNavPending, setContinueNavPending] = useState(false);
-            const [chatsRailCollapsed, setChatsRailCollapsed] = useState(false);
             const [deleteConfirmId, setDeleteConfirmId] = useState(null);
             const [renamingIdeaId, setRenamingIdeaId] = useState(null);
             const [renameDraft, setRenameDraft] = useState("");
@@ -3262,7 +3227,6 @@
                         setReadinessData(null);
                         setHadReadyReadiness(false);
                         setReadinessTimedOut(false);
-                        setChatsRailCollapsed(false);
                         setActiveIdeaMenuId(null);
                         setShowActionMenu(false);
                         setStagedAttachment(null);
@@ -3610,10 +3574,12 @@
                     {/* Vertical chat list — collapses after picking a chat so conversation + PRD get space */}
                     <div
                         className={`${
-                            chatsRailCollapsed ? "w-16" : "w-56 sm:w-60"
-                        } relative flex-shrink-0 flex flex-col bg-[#0d0f11] border-r border-[#1a1d21] transition-[width] duration-200 ease-out`}
+                            sidebarCollapsed
+                                ? "w-0 min-w-0 overflow-hidden opacity-0 pointer-events-none border-0 p-0 relative flex-shrink-0 flex flex-col bg-[#0d0f11] transition-[width] duration-200 ease-out"
+                                : "w-56 sm:w-60 relative flex-shrink-0 flex flex-col bg-[#0d0f11] border-r border-[#1a1d21] transition-[width] duration-200 ease-out"
+                        }`}
                     >
-                        {!chatsRailCollapsed ? (
+                        {!sidebarCollapsed ? (
                             <>
                                 <div className="flex-shrink-0 flex items-center justify-between gap-2 px-3 py-2 border-b border-[#1a1d21]">
                                     <span className="header-text text-xs text-slate-400 uppercase tracking-wide">Chats</span>
@@ -3814,16 +3780,6 @@
                                 </div>
                             </>
                         ) : null}
-                        <div className="side-divider"></div>
-                        <button
-                            type="button"
-                            onClick={() => setChatsRailCollapsed((c) => !c)}
-                            className="side-divider-btn"
-                            title={chatsRailCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-                            aria-label={chatsRailCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-                        >
-                            {chatsRailCollapsed ? "›" : "‹"}
-                        </button>
                     </div>
 
                     <div ref={containerRef} className="flex flex-1 min-w-0">
@@ -7485,6 +7441,7 @@
             }, [setupComplete]);
 
             const [currentScreen, setCurrentScreen] = useState("pipeline");
+            const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
             const currentScreenRef = useRef(currentScreen);
             const coldBootstrapScreenAppliedRef = useRef(false);
             useEffect(() => {
@@ -8004,6 +7961,8 @@
                 setUnsavedQueueOrder,
                 pipelineStatus,
                 setPipelineStatus,
+                sidebarCollapsed,
+                setSidebarCollapsed,
             };
 
             if (setupComplete === null) {
@@ -8027,7 +7986,12 @@
             return (
                 <AppCtx.Provider value={appCtxValue}>
                     <div className="flex h-screen overflow-hidden bg-[#0d0f12]">
-                        <Sidebar currentScreen={currentScreen} onNavigate={safeNavigate} />
+                        <Sidebar
+                            currentScreen={currentScreen}
+                            onNavigate={safeNavigate}
+                            sidebarCollapsed={sidebarCollapsed}
+                            setSidebarCollapsed={setSidebarCollapsed}
+                        />
                         <div className="flex-1 flex flex-col overflow-hidden">
                             {currentScreen === "pipeline" && <PipelineScreen />}
                             {currentScreen === "queue" && <QueueScreen />}

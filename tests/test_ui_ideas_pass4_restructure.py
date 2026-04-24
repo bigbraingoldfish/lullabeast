@@ -82,14 +82,16 @@ def test_prd_completeness_checklist_present():
     assert "PRD_SECTION_TITLES" in func_body
 
 
-def test_sidebar_uses_center_divider_chevron_toggle():
+def test_sidebar_uses_header_chevron_toggle():
     content = load_index_html()
     sidebar_body = extract_function_body(content, "Sidebar")
     ideas_body = extract_function_body(content, "IdeasScreen")
     assert sidebar_body is not None
     assert ideas_body is not None
-    assert "side-divider-btn" in content
-    assert "›" in content and "‹" in content
+    assert "setSidebarCollapsed" in sidebar_body
+    assert "Expand sidebar" in sidebar_body
+    assert "›" in sidebar_body and "‹" in sidebar_body
+    assert "side-divider-btn" not in content
 
 
 P3_SIDEBAR_IDEAS_TAB_TITLE_EXPECTED = "Draft PRDs with the PRD agent."
