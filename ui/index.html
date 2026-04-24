@@ -256,7 +256,7 @@
     <div id="app-root"></div>
 
     <script type="text/babel">
-        const { useState, useEffect, useRef, useCallback, createContext, useContext } = React;
+        const { useState, useEffect, useRef, useCallback, useMemo, createContext, useContext } = React;
         const AppCtx = createContext(null);
 
         /** Relative time for idea list (from API `updated` ISO string). */
@@ -2585,6 +2585,50 @@
             return { prose: proseLines.join("\n").trim(), drafting, assumptions, questions };
         }
 
+        function AssistantAssumptionsDisclosure({ assumptions }) {
+            const [open, setOpen] = React.useState(false);
+            const [listId] = React.useState(
+                () => "assistant-assumptions-" + Math.random().toString(36).slice(2, 11)
+            );
+            const n = assumptions.length;
+            if (n === 0) return null;
+            const label =
+                n === 1
+                    ? "1 AI assumption made"
+                    : `${n} AI assumptions made`;
+            return (
+                <div>
+                    <button
+                        type="button"
+                        aria-expanded={open}
+                        aria-controls={listId}
+                        onClick={() => setOpen((v) => !v)}
+                        className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-[#141618]/50 transition-colors"
+                    >
+                        <span className="text-amber-300/90 text-xs font-medium header-text truncate min-w-0">
+                            {label}
+                        </span>
+                        <span className="ml-auto text-slate-500 text-xs shrink-0" aria-hidden="true">
+                            {open ? "▲" : "▼"}
+                        </span>
+                    </button>
+                    {open && (
+                        <ul
+                            id={listId}
+                            className="border-t border-[#2a2d31] bg-[#0d0f11]/90 px-3 py-2 space-y-1.5 text-xs text-slate-400 list-none"
+                        >
+                            {assumptions.map((text, i) => (
+                                <li key={i} className="flex gap-2">
+                                    <span className="text-slate-500 shrink-0">•</span>
+                                    <span>{text}</span>
+                                </li>
+                            ))}
+                        </ul>
+                    )}
+                </div>
+            );
+        }
+
         function QuestionFlow({ questions, onSubmit }) {
             const [index, setIndex] = React.useState(0);
             const [selections, setSelections] = React.useState({});
@@ -2629,7 +2673,7 @@
             };
 
             return (
-                <div className="mt-3 rounded border border-[#2a2d31] bg-[#0d0f11] p-4 space-y-3">
+                <div className="rounded-xl border border-[#2a2d31] bg-[#1a1d21] p-4 space-y-3 w-full min-w-0">
                     <div className="flex items-start justify-between gap-2">
                         <p className="text-sm text-slate-200 font-medium leading-snug">{q.text}</p>
                         <div className="flex items-center gap-1 shrink-0 mt-0.5">
@@ -2647,9 +2691,9 @@
                                     type="button"
                                     onClick={() => toggleOption(opt)}
                                     onKeyDown={(e) => { if (e.key === " ") { e.preventDefault(); toggleOption(opt); } }}
-                                    className={`w-full text-left text-xs px-3 py-2 rounded border transition-colors ${
+                                    className={`w-full text-left text-xs px-3 py-2 rounded-lg border transition-colors ${
                                         active
-                                            ? "border-[#00b4d8] bg-[#00b4d8]/20 text-[#7dd3fc]"
+                                            ? "border-[#00b4d8]/50 bg-[#00b4d8]/10 text-slate-100"
                                             : "border-[#2a2d31] bg-[#141618] text-slate-400 hover:border-slate-500 hover:text-slate-300"
                                     }`}
                                 >
@@ -2712,6 +2756,12 @@
             const [convertError, setConvertError] = useState("");
             const [currentIdeaId, setCurrentIdeaId] = useState(null);
             const [ideasList, setIdeasList] = useState([]);
+            const [filterText, setFilterText] = useState("");
+            const filteredIdeas = useMemo(() => {
+                const q = (filterText || "").trim().toLowerCase();
+                if (!q) return ideasList;
+                return ideasList.filter((it) => (it.name || "").toLowerCase().includes(q));
+            }, [ideasList, filterText]);
             const [inputText, setInputText] = useState("");
             const [readinessStatus, setReadinessStatus] = useState("unavailable");
             const [readinessData, setReadinessData] = useState(null);
@@ -2989,7 +3039,7 @@
                 if (!el) return;
                 el.style.height = "auto";
                 const lh = 22;
-                const maxH = lh * 5;
+                const maxH = 160;
                 el.style.height = Math.min(el.scrollHeight, maxH) + "px";
             };
 
@@ -3575,6 +3625,27 @@
                                         + New
                                     </button>
                                 </div>
+                                <div className="flex-shrink-0 flex items-center gap-1 px-2 pt-2 pb-1.5 border-b border-[#1a1d21]">
+                                    <input
+                                        type="search"
+                                        value={filterText}
+                                        onChange={(e) => setFilterText(e.target.value)}
+                                        placeholder="Filter projects…"
+                                        aria-label="Filter projects by title"
+                                        className="flex-1 min-w-0 rounded border border-[#2a2d31] bg-[#101214] px-2 py-1 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#00b4d8]/50"
+                                    />
+                                    {filterText.length > 0 ? (
+                                        <button
+                                            type="button"
+                                            onClick={() => setFilterText("")}
+                                            className="shrink-0 px-1.5 py-0.5 text-slate-500 hover:text-slate-300 text-sm leading-none rounded hover:bg-[#1a1d21]"
+                                            aria-label="Clear filter"
+                                            title="Clear"
+                                        >
+                                            ×
+                                        </button>
+                                    ) : null}
+                                </div>
                                 <div className="flex-1 overflow-y-auto py-2 px-2 space-y-1 min-h-0">
                                     {ideasLoading ? (
                                         <>
@@ -3603,7 +3674,7 @@
                                             </button>
                                         </div>
                                     ) : null}
-                                    {ideasList.map((it) => (
+                                    {filteredIdeas.map((it) => (
                                         <div
                                             key={it.id}
                                             className={`group flex rounded border border-transparent ${
@@ -3785,7 +3856,7 @@
                                 <div key={msg.id || i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
                                     {msg.role === "user" ? (
                                         <div className="max-w-[95%] flex flex-col items-end gap-1">
-                                            <div className="rounded px-3 py-2 text-sm bg-[#00b4d8]/20 text-slate-100 whitespace-pre-wrap">
+                                            <div className="rounded-xl px-3 py-2 text-sm bg-[#00b4d8]/20 text-slate-100 whitespace-pre-wrap leading-[1.6]">
                                                 {msg.content}
                                             </div>
                                             {msg.sent_context && (msg.sent_context.notes || msg.sent_context.attachment) ? (
@@ -3819,63 +3890,82 @@
                                             ) : null}
                                         </div>
                                     ) : (
-                                        <div className="max-w-[95%] w-full flex flex-col gap-1">
-                                            {/* Assumption blocks — grouped into one labelled box */}
-                                            {msg.parsed && msg.parsed.assumptions && msg.parsed.assumptions.length > 0 && (
-                                                <div className="rounded border border-amber-700/50 bg-amber-950/20 px-3 py-2 text-xs text-amber-200">
-                                                    <div className="flex items-center gap-1.5 mb-1.5 font-semibold text-amber-300/90 header-text">
-                                                        <span>⚠</span>
-                                                        <span>AI assumptions</span>
-                                                    </div>
-                                                    <ul className="space-y-1 pl-3">
-                                                        {msg.parsed.assumptions.map((assumption, ai) => (
-                                                            <li key={ai} className="flex items-start gap-1.5">
-                                                                <span className="shrink-0 mt-0.5 text-amber-500/70">•</span>
-                                                                <span className="italic">{assumption}</span>
-                                                            </li>
-                                                        ))}
-                                                    </ul>
-                                                </div>
-                                            )}
-                                            {/* Prose bubble + elapsed timer while pending */}
+                                        <div className="max-w-[95%] w-full flex flex-col gap-2">
                                             {(() => {
                                                 const bubbleText =
                                                     !msg.pending && !msg.error && msg.parsed != null && msg.parsed.prose != null
                                                         ? msg.parsed.prose
                                                         : (msg.content || "");
-                                                return (bubbleText || "").trim().length > 0 ? (
-                                                <div className="flex flex-row items-stretch gap-1 w-full min-w-0">
-                                                    <div
-                                                        className={`msg-md rounded px-3 py-2 text-sm min-w-0 flex-1 ${
-                                                            msg.error
-                                                                ? "bg-red-950/30 border border-red-900/60 text-red-200"
-                                                                : msg.pending
-                                                                  ? "bg-[#1a1d21] text-slate-400 border border-slate-600/50 chat-pending-soft"
-                                                                  : "bg-[#1a1d21] text-slate-200"
-                                                        }`}
-                                                        dangerouslySetInnerHTML={{
-                                                            __html:
-                                                                typeof marked !== "undefined" && marked.parse
-                                                                    ? marked.parse(bubbleText || "", { breaks: true })
-                                                                    : String(bubbleText || "")
-                                                                          .replace(/&/g, "&amp;")
-                                                                          .replace(/</g, "&lt;"),
-                                                        }}
-                                                    />
-                                                    {msg.pending && <ChatElapsedSeconds startTs={msg.ts} />}
-                                                </div>
-                                                ) : null;
+                                                const hasProse =
+                                                    (bubbleText || "").trim().length > 0 || msg.pending || msg.error;
+                                                const assumptions =
+                                                    msg.parsed && Array.isArray(msg.parsed.assumptions)
+                                                        ? msg.parsed.assumptions
+                                                        : [];
+                                                const hasAssumptions = assumptions.length > 0;
+                                                const showAssistantCard = hasProse || hasAssumptions;
+                                                const assistantCardShell =
+                                                    msg.error
+                                                        ? "rounded-xl border border-red-900/60 bg-red-950/40 overflow-hidden w-full min-w-0"
+                                                        : msg.pending
+                                                          ? "rounded-xl border border-slate-600/50 bg-[#1a1d21] overflow-hidden w-full min-w-0 chat-pending-soft"
+                                                          : "rounded-xl border border-[#2a2d31] bg-[#1a1d21] overflow-hidden w-full min-w-0";
+                                                const proseAssumptionsDivider =
+                                                    hasAssumptions
+                                                        ? msg.error
+                                                            ? "border-b border-red-900/50"
+                                                            : msg.pending
+                                                              ? "border-b border-slate-600/40"
+                                                              : "border-b border-[#2a2d31]"
+                                                        : "";
+                                                return (
+                                                    <>
+                                                        {showAssistantCard ? (
+                                                            <div className={assistantCardShell}>
+                                                                {hasProse ? (
+                                                                    <div
+                                                                        className={`flex flex-row items-stretch gap-1 px-3 py-2 w-full min-w-0 ${proseAssumptionsDivider}`}
+                                                                    >
+                                                                        <div
+                                                                            className={`msg-md text-sm min-w-0 flex-1 leading-[1.6] ${
+                                                                                msg.error
+                                                                                    ? "text-red-100"
+                                                                                    : msg.pending
+                                                                                      ? "text-slate-400"
+                                                                                      : "text-slate-200"
+                                                                            }`}
+                                                                            dangerouslySetInnerHTML={{
+                                                                                __html:
+                                                                                    typeof marked !== "undefined" && marked.parse
+                                                                                        ? marked.parse(bubbleText || "", { breaks: true })
+                                                                                        : String(bubbleText || "")
+                                                                                              .replace(/&/g, "&amp;")
+                                                                                              .replace(/</g, "&lt;"),
+                                                                            }}
+                                                                        />
+                                                                        {msg.pending && <ChatElapsedSeconds startTs={msg.ts} />}
+                                                                    </div>
+                                                                ) : null}
+                                                                {hasAssumptions ? (
+                                                                    <AssistantAssumptionsDisclosure assumptions={assumptions} />
+                                                                ) : null}
+                                                            </div>
+                                                        ) : null}
+                                                        {msg.parsed &&
+                                                        msg.parsed.questions &&
+                                                        msg.parsed.questions.length > 0 &&
+                                                        !answeredFlowIds.has(msg.id) ? (
+                                                            <QuestionFlow
+                                                                questions={msg.parsed.questions}
+                                                                onSubmit={(bundled) => {
+                                                                    setAnsweredFlowIds((prev) => new Set([...prev, msg.id]));
+                                                                    submitMessage(bundled);
+                                                                }}
+                                                            />
+                                                        ) : null}
+                                                    </>
+                                                );
                                             })()}
-                                            {/* Question flow — shown for the last assistant message if questions present and not yet answered */}
-                                            {msg.parsed && msg.parsed.questions && msg.parsed.questions.length > 0 && !answeredFlowIds.has(msg.id) && (
-                                                <QuestionFlow
-                                                    questions={msg.parsed.questions}
-                                                    onSubmit={(bundled) => {
-                                                        setAnsweredFlowIds((prev) => new Set([...prev, msg.id]));
-                                                        submitMessage(bundled);
-                                                    }}
-                                                />
-                                            )}
                                         </div>
                                     )}
                                 </div>
@@ -3929,7 +4019,7 @@
                                     onChange={(e) => { setInputText(e.target.value); adjustTa(); }}
                                     onKeyDown={onKeyDown}
                                     placeholder={userFirstTurnPending && messages.filter((m) => m.role === "user").length === 0 ? "Describe what you're building…" : "Type a message…"}
-                                    className="flex-1 bg-[#1a1d21] border border-[#2a2d31] rounded px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-slate-500 resize-none max-h-[110px] overflow-y-auto"
+                                    className="flex-1 bg-[#1a1d21] border border-[#2a2d31] rounded px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-slate-500 resize-none max-h-[160px] overflow-y-auto"
                                 />
                                 <button
                                     type="button"
