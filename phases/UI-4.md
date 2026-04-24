@@ -27,3 +27,4 @@ pytest tests/ -q
 - `IdeasScreen` stays zero-arg so indentation-based `extract_function_body` tests keep matching; rail width uses `AppCtx.sidebarCollapsed`.
 - `setChatsRailCollapsed` on new idea removed — collapse state is global.
 - `sidebarCollapsed` persists when navigating away from Project Ideas (by design).
+- **Follow-up (same milestone):** Collapsed header uses a single **AD** button to expand (no separate **›** control). **‹** collapse control only when expanded. Chats rail is **unmounted** when collapsed (`{!sidebarCollapsed && (...)}`) so the flex row does not keep a second zero-width column.

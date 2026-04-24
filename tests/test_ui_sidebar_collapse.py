@@ -21,13 +21,9 @@ def nav_rail_outer_class(sidebar_collapsed: bool) -> str:
 
 
 def chats_rail_outer_class(sidebar_collapsed: bool) -> str:
-    """Outer class string for the chats rail column in IdeasScreen."""
+    """Outer class string for the chats rail column in IdeasScreen (unmounted when collapsed)."""
     if sidebar_collapsed:
-        return (
-            "w-0 min-w-0 overflow-hidden opacity-0 pointer-events-none border-0 p-0 "
-            "relative flex-shrink-0 flex flex-col bg-[#0d0f11] "
-            "transition-[width] duration-200 ease-out"
-        )
+        return "__chats_rail_absent_when_collapsed__"
     return (
         "w-56 sm:w-60 relative flex-shrink-0 flex flex-col bg-[#0d0f11] "
         "border-r border-[#1a1d21] transition-[width] duration-200 ease-out"
@@ -45,12 +41,10 @@ def test_nav_rail_width_tokens():
     assert "w-14" not in nav_rail_outer_class(False)
 
 
-def test_chats_rail_collapsed_zero_width_no_w16():
+def test_chats_rail_collapsed_unmounted_no_reserved_strip():
     s = chats_rail_outer_class(True)
-    assert "w-0" in s
-    assert "min-w-0" in s
-    assert "overflow-hidden" in s
-    assert "w-16" not in s
+    assert s == "__chats_rail_absent_when_collapsed__"
+    assert "w-16" not in chats_rail_outer_class(False)
 
 
 def test_chats_rail_expanded_width():
@@ -83,4 +77,5 @@ def test_index_html_sidebar_unified_wiring():
     assert "setChatsRailCollapsed" not in html
     assert "sidebarCollapsed" in html
     assert "setSidebarCollapsed" in html
-    assert "w-0 min-w-0 overflow-hidden" in html
+    assert "omit from layout when sidebar collapsed" in html
+    assert "!sidebarCollapsed &&" in html
