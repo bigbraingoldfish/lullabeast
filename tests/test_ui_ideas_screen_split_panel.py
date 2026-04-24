@@ -52,7 +52,7 @@ class TestIdeasScreenSplitPanel:
         assert func_body is not None, "IdeasScreen function body not extracted"
 
         assert "flex h-full min-w-0" in func_body, "Outer container should use flex h-full min-w-0"
-        assert "chatsRailCollapsed" in func_body, "Chat list rail should be collapsible"
+        assert "sidebarCollapsed" in func_body, "Chat list rail width follows unified sidebarCollapsed"
         assert "selectIdeaFromRail" in func_body, "Ideas should switch via rail, not only dropdown"
         assert "border-r border-[#1a1d21]" in func_body, \
             "Column separators should use border-r border-[#1a1d21]"
