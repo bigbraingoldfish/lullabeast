@@ -864,24 +864,42 @@
             );
         }
 
-        function ElapsedTimer({ lastActionTimestamp, pipeline_status }) {
+        function ElapsedTimer({
+            lastActionTimestamp,
+            sentinelWaitStartedAt,
+            orchestratorAlive,
+            pipeline_status,
+        }) {
             const [elapsed, setElapsed] = useState(0);
+            const tickAnchor =
+                pipeline_status === "WAITING_FOR_SENTINEL" && sentinelWaitStartedAt
+                    ? sentinelWaitStartedAt
+                    : lastActionTimestamp;
+            const orchestratorDown =
+                orchestratorAlive === false &&
+                (pipeline_status === "RUNNING" || pipeline_status === "WAITING_FOR_SENTINEL");
             useEffect(() => {
-                if (!lastActionTimestamp || pipeline_status === "WAITING_FOR_HUMAN") return;
-                const startTime = new Date(lastActionTimestamp).getTime();
+                if (!tickAnchor || pipeline_status === "WAITING_FOR_HUMAN") return;
+                const startTime = new Date(tickAnchor).getTime();
                 const tick = () => setElapsed(Math.floor((Date.now() - startTime) / 1000));
                 tick();
+                if (orchestratorDown) {
+                    return;
+                }
                 const interval = setInterval(tick, 1000);
                 return () => clearInterval(interval);
-            }, [lastActionTimestamp, pipeline_status]);
+            }, [tickAnchor, pipeline_status, orchestratorDown]);
             if (pipeline_status === "WAITING_FOR_HUMAN") return null;
-            if (!lastActionTimestamp) return null;
-            const isOverdue = pipeline_status === 'WAITING_FOR_SENTINEL' && elapsed > 300;
-            const colorClass = isOverdue ? 'text-amber-400' : 'text-slate-400';
+            if (!tickAnchor) return null;
+            const isOverdue = pipeline_status === "WAITING_FOR_SENTINEL" && elapsed > 300;
+            const colorClass = isOverdue ? "text-amber-400" : "text-slate-400";
             const mins = Math.floor(elapsed / 60);
             const secs = elapsed % 60;
+            const suffix = orchestratorDown ? " · orchestrator offline" : "";
             return (
-                <span className={`header-text text-xs ${colorClass}`}>{mins}m {String(secs).padStart(2, '0')}s</span>
+                <span className={`header-text text-xs ${colorClass}`} data-testid="elapsed-timer">
+                    {mins}m {String(secs).padStart(2, "0")}s{suffix}
+                </span>
             );
         }
 
@@ -1739,6 +1757,8 @@
             reviewer_retries,
             last_error_code,
             last_action_timestamp,
+            sentinel_wait_started_at,
+            orchestrator_alive,
             skill_injected,
             skill_agent,
             pipeline_status,
@@ -1790,7 +1810,12 @@
                             {current_phase_raw_id}
                         </span>
                         <AgentBadge agent={current_agent} />
-                        <ElapsedTimer lastActionTimestamp={last_action_timestamp} pipeline_status={pipeline_status} />
+                        <ElapsedTimer
+                            lastActionTimestamp={last_action_timestamp}
+                            sentinelWaitStartedAt={sentinel_wait_started_at}
+                            orchestratorAlive={orchestrator_alive}
+                            pipeline_status={pipeline_status}
+                        />
                     </div>
                     {goal && (
                         <p className="text-slate-400 text-sm leading-relaxed">{goal}</p>
@@ -6255,6 +6280,7 @@
                 reviewer_retries: null,
                 last_error_code: null,
                 last_action_timestamp: null,
+                sentinel_wait_started_at: null,
                 skill_injected: null,
                 skill_agent: null,
                 escalation_trigger_reason: null,
@@ -6873,6 +6899,8 @@
                                 reviewer_retries={pState.reviewer_retries}
                                 last_error_code={pState.last_error_code}
                                 last_action_timestamp={pState.last_action_timestamp}
+                                sentinel_wait_started_at={pState.sentinel_wait_started_at}
+                                orchestrator_alive={alive}
                                 skill_injected={pState.skill_injected}
                                 skill_agent={pState.skill_agent}
                                 pipeline_status={status}

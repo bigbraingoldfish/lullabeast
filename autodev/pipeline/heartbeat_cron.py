@@ -37,6 +37,35 @@ _LLAMA_ORIGIN = os.environ.get("AUTODEV_LLAMA_BASE", "http://127.0.0.1:11434").r
 HEARTBEAT_MODEL_URL = f"{_LLAMA_ORIGIN}/v1/chat/completions"
 HEARTBEAT_MODEL_NAME = "qwen3.5-27b"
 
+# Stale mid-flight: lock is free (orchestrator dead) but state still claims active work.
+# Stagger 5+ minutes above the planner's 10-minute sentinel poll cap.
+STALE_FLIGHT_THRESHOLD_MINUTES = 15
+
+
+def _parse_last_action_utc(last_action_str: str) -> datetime | None:
+    """Parse pipeline_state last_action_timestamp to timezone-aware UTC, or None."""
+    if not last_action_str or not str(last_action_str).strip():
+        return None
+    try:
+        s = str(last_action_str).strip().replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_stale_orphaned_midflight(state: dict) -> bool:
+    """True when state claims RUNNING or WAITING_FOR_SENTINEL but last_action is older than threshold."""
+    ps = state.get("pipeline_status", "")
+    if ps not in ("RUNNING", "WAITING_FOR_SENTINEL"):
+        return False
+    last_action_time = _parse_last_action_utc(state.get("last_action_timestamp") or "")
+    if last_action_time is None:
+        return False
+    return datetime.now(timezone.utc) - last_action_time > timedelta(minutes=STALE_FLIGHT_THRESHOLD_MINUTES)
+
 HEARTBEAT_SYSTEM_PROMPT = """
 You are a pipeline heartbeat monitor. You will be given the current state of an autonomous development pipeline.
 Your only job is to classify the state and output exactly one of three tokens: RESUME, WAIT, or NOTIFY.
@@ -159,6 +188,26 @@ def run_heartbeat():
 
         with open(STATE_FILE, 'r') as f:
             state = json.load(f)
+
+        # Deterministic orphan recovery: no live orchestrator (lock free) but state stuck
+        # in active flight with a stale last_action_timestamp — restart without LLM.
+        if _is_stale_orphaned_midflight(state):
+            project_path = state.get("project_path", "")
+            if not project_path:
+                print(
+                    "[ERROR] Heartbeat: stale mid-flight state but project_path missing from "
+                    "pipeline_state.json. Manual intervention required."
+                )
+                return
+            print(
+                "[INFO] Stale mid-flight pipeline state (orchestrator dead, lock free). "
+                f"last_action_timestamp exceeds {STALE_FLIGHT_THRESHOLD_MINUTES}m — restarting without model query."
+            )
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+            lock_fd = None
+            start_orchestrator(project_path)
+            return
 
         # Query local model for RESUME / WAIT / NOTIFY decision (B7).
         # Conservative fallback: if model is unreachable, notify human rather than guessing.

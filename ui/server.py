@@ -1921,6 +1921,7 @@ def get_state():
             "current_agent": pipeline_state.get("current_agent", ""),
             "project_path": pipeline_state.get("project_path", ""),
             "last_action_timestamp": pipeline_state.get("last_action_timestamp"),
+            "sentinel_wait_started_at": pipeline_state.get("sentinel_wait_started_at"),
             "queue_halted_reason": pipeline_state.get("queue_halted_reason"),
             "counters": counters,
             # Retry counters are top-level fields in pipeline_state.json written by orchestrator.py
@@ -1937,6 +1938,7 @@ def get_state():
             "planner_retries": 0,
             "executor_retries": 0,
             "reviewer_retries": 0,
+            "sentinel_wait_started_at": None,
         }
     
     # Read phase state and conditionally add fields
