@@ -3661,7 +3661,7 @@
                                                 onClick={() => selectIdeaFromRail(currentIdeaId)}
                                                 className={`w-full text-left px-2 py-2 rounded border ${
                                                     currentIdeaId && !listedIds.has(currentIdeaId)
-                                                        ? "border-[#2d5a63] bg-[#141618]"
+                                                        ? "border-[#2d5a63] bg-[#1a1d21]/60"
                                                         : "border-transparent"
                                                 }`}
                                             >
@@ -3675,7 +3675,7 @@
                                             key={it.id}
                                             className={`group flex rounded border ${
                                                 currentIdeaId === it.id
-                                                    ? "border-[#2d5a63] bg-[#141618]"
+                                                    ? "border-[#2d5a63] bg-[#1a1d21]"
                                                     : "border-transparent hover:bg-[#1a1d21]/60"
                                             }`}
                                         >
