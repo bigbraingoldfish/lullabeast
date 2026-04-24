@@ -3659,10 +3659,10 @@
                                             <button
                                                 type="button"
                                                 onClick={() => selectIdeaFromRail(currentIdeaId)}
-                                                className={`w-full text-left px-2 py-2 rounded ${
+                                                className={`w-full text-left px-2 py-2 rounded border ${
                                                     currentIdeaId && !listedIds.has(currentIdeaId)
-                                                        ? "ring-1 ring-[#00b4d8]/40 bg-[#1a1d21]/60"
-                                                        : ""
+                                                        ? "border-[#2d5a63] bg-[#141618]"
+                                                        : "border-transparent"
                                                 }`}
                                             >
                                                 <div className={`truncate text-xs font-medium header-text ${currentIdeaId && !listedIds.has(currentIdeaId) ? "text-slate-100" : "text-slate-400"}`}>Draft</div>
@@ -3673,8 +3673,10 @@
                                     {filteredIdeas.map((it) => (
                                         <div
                                             key={it.id}
-                                            className={`group flex rounded border border-transparent ${
-                                                currentIdeaId === it.id ? "border-[#00b4d8]/40 bg-[#1a1d21]" : "hover:bg-[#1a1d21]/60"
+                                            className={`group flex rounded border ${
+                                                currentIdeaId === it.id
+                                                    ? "border-[#2d5a63] bg-[#141618]"
+                                                    : "border-transparent hover:bg-[#1a1d21]/60"
                                             }`}
                                         >
                                             <button
