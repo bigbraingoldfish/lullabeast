@@ -143,6 +143,8 @@ The PRD must follow these 12 sections exactly. Use these as the section headers 
 11. `## Glossary & Domain Terms`
 12. `## Revision History`
 
+**Heading format — do not add ordinal prefixes to the `##` line.** Write `## Problem Statement`, not `## 1. Problem Statement`. The dashboard parses `prd_draft.md` by matching the exact heading text to these 12 titles; a leading `1.` inside the `##` line causes the parser to miss the section, which silently drops the per-section Note, diff, and change-indicator UI for the entire PRD. The parsers now tolerate the numbered form as a fallback, but the correct contract remains the unnumbered `##` title — use it.
+
 ---
 
 ## Behavioral Contract — Conversational Role

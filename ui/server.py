@@ -581,11 +581,23 @@ def _slugify_section(title: str) -> str:
 _PRD_SLUG_TO_TITLE: dict[str, str] = {_slugify_section(t): t for t in PRD_SECTION_TITLES}
 
 
+def _normalize_prd_section_heading_text(inner: str) -> str:
+    """Strip a leading ordinal prefix (e.g. '1. ' or '12.  ') from a heading title.
+
+    Handles the common model output style '## 1. Problem Statement' so that
+    the extracted inner text ('1. Problem Statement') is normalised to
+    'Problem Statement' before matching against PRD_SECTION_TITLES.
+
+    Keep in sync with the frontend parsePrdSections normalisation in ui/index.html.
+    """
+    return re.sub(r"^\d+\.\s*", "", inner.strip())
+
+
 def _match_prd_section_heading_line(line: str) -> Optional[str]:
     """If line opens a canonical PRD section, return its title; else None."""
     m = re.match(r"^#{1,3}\s+(.+)\s*$", line)
     if m:
-        raw = m.group(1).strip().lower()
+        raw = _normalize_prd_section_heading_text(m.group(1)).lower()
         for t in PRD_SECTION_TITLES:
             if t.lower() == raw:
                 return t

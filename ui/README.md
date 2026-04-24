@@ -45,6 +45,26 @@ FastAPI server (`server.py`) and a single-file React app (`index.html`) for the 
 - Before merging a change that touches setup or the pipeline monitor, run the full test suite and manually exercise Launch, preflight (including multi-roadmap confirm), and the switch-project modal in a browser (backend tests alone may miss UI regressions).
 - **Queue vs monitor consistency (browser):** After seeding or reordering queue rows, wait **2–5 s** after navigation or POST (`browser_wait_for` / sleep) before asserting pills; compare `GET /api/queue` with `GET /api/state` `project_path` if the UI looks split-brain.
 
+### Browser / MCP E2E testing protocol for Project Ideas agent turns
+
+Agent turns in Project Ideas (prd-creator webhook → file writes → sentinel poll) can take **60–300 s** on real hardware. Failing to wait for completion before asserting produces false negatives (e.g. "Note / Show diff missing") that have nothing to do with the code under test.
+
+**Required sequence for any agent using `cursor-ide-browser` to verify the Ideas PRD pane:**
+
+1. Click **Send** (or submit the composer in whatever way the test requires).
+2. Wait for the "Sending…" / pending state to disappear **before** taking any assertion snapshot:
+   ```
+   browser_wait_for(textGone="Sending…", timeout=120000)
+   ```
+   Use **`timeout` of at least 120 000 ms (2 min)** for warm models. Increase to **300 000 ms (5 min)** for cold starts or slow hardware.
+3. After `textGone` resolves, add a fixed cushion of **3–5 s** to allow the PRD tab state to re-render and the optional readiness poll to start:
+   ```
+   browser_wait_for(time=5)
+   ```
+4. Then take a fresh `browser_snapshot` (or `browser_search` for a stable string such as **"PRD readiness:"** or **"Note"** in the section header row) to assert the final state.
+5. **Never** conclude that controls are missing from a snapshot taken less than 2 s after send on a real agent run.
+6. If using MCP code-review-graph after edits, run `get_impact_radius` on `_match_prd_section_heading_line` / `parsePrdSections` to ensure all affected paths are covered by the new tests.
+
 ## Editing `index.html`
 
 1. **Backup:** `cp ui/index.html ui/index.html.bak` (per roadmap).
