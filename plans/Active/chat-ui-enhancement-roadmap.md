@@ -117,13 +117,13 @@ A phase is complete only when ALL of the following are true:
 
 ---
 
-- [ ] `UI-6` | LOW | Add `readiness_score` field to each item in the `GET /api/ideas` response
+- [x] `UI-6` | LOW | Add `readiness_score` field to each item in the `GET /api/ideas` response
   > Test: Extend `tests/test_api_ideas_list.py` with a new test class `TestGetIdeasListReadinessScore`. Write tests that: (1) an idea with a `readiness.json` containing `{"score": 7}` returns `{"readiness_score": 7}` in the list item; (2) an idea with no `readiness.json` returns `{"readiness_score": null}` in the list item; (3) an idea with a `readiness.json` that is malformed (invalid JSON) returns `{"readiness_score": null}` without raising an exception. All three tests must fail before the `server.py` edit.
   > Notes: The readiness assessment result is stored per-idea. Confirm the exact storage path by checking `_trigger_readiness_assessment()` at line 3317 of `server.py` — it likely writes to `{ideas_dir}/{idea_id}/readiness.json`. Read this file in `get_ideas()` for each subdirectory, extract `score` (integer or null), and append `readiness_score` to the ideas dict at line 3906. Use a try/except around the file read so a missing or corrupt file always produces `null` — never raises a 500. The field name must be `readiness_score` (snake_case, consistent with existing API style). Do not change any other response fields.
 
 ---
 
-- [ ] `UI-7` | LOW | Add `has_prd` and `has_roadmap` boolean fields to each item in the `GET /api/ideas` response
+- [x] `UI-7` | LOW | Add `has_prd` and `has_roadmap` boolean fields to each item in the `GET /api/ideas` response
   > Test: Extend `tests/test_api_ideas_list.py` with `TestGetIdeasListDocFlags`. Write tests that: (1) an idea with non-empty `prd_content` in `session.json` returns `has_prd: true`; (2) an idea with empty or absent `prd_content` returns `has_prd: false`; (3) an idea with non-empty `roadmap_content` in `session.json` returns `has_roadmap: true`; (4) an idea with empty or absent `roadmap_content` returns `has_roadmap: false`. All four tests must fail before the `server.py` edit.
   > Notes: Both values are already present in `session_data` within `get_ideas()` — `prd_content` at line 3892 and `roadmap_content` can be retrieved the same way. Compute `has_prd = bool((session_data.get("prd_content") or "").strip())` and `has_roadmap = bool((session_data.get("roadmap_content") or "").strip())`. Append both to the dict at line 3906 alongside `readiness_score` from UI-6. The updated response shape for each list item is `{id, name, summary, updated, readiness_score, has_prd, has_roadmap}`. No existing field changes.
 
