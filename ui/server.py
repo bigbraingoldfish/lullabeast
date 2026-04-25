@@ -3865,10 +3865,10 @@ def get_ideas():
     """List all idea documents.
 
     Returns:
-        JSON array of {id, name, summary, updated} objects, sorted newest-first.
+        JSON array of {id, name, summary, updated, readiness_score, has_prd,
+        has_roadmap} objects, sorted newest-first.
         Returns [] if ideas_dir is absent or empty.
     """
-    import shutil
     config = load_config()
     ideas_dir = Path(config.get("ideas_dir") or "")
     ideas_path = Path(ideas_dir)
@@ -3903,11 +3903,29 @@ def get_ideas():
         summary = _extract_summary(prd_content)
         updated = session_data.get("updated", "")
 
+        readiness_score = None
+        readiness_path = subdir / "readiness.json"
+        if readiness_path.exists():
+            try:
+                rd = _read_json_file(str(readiness_path))
+                if isinstance(rd, dict):
+                    v = rd.get("score")
+                    if isinstance(v, (int, float)):
+                        readiness_score = int(v)
+            except Exception:
+                pass
+
+        has_prd = bool((session_data.get("prd_content") or "").strip())
+        has_roadmap = bool((session_data.get("roadmap_content") or "").strip())
+
         ideas.append({
             "id": subdir.name,
             "name": name,
             "summary": summary,
             "updated": updated,
+            "readiness_score": readiness_score,
+            "has_prd": has_prd,
+            "has_roadmap": has_roadmap,
         })
 
     # Sort newest first by updated timestamp

@@ -217,6 +217,22 @@
         ::-webkit-scrollbar-corner {
             background: #0d0f11;
         }
+
+        /* Chats rail: scrollbar overlays content (no reserved gutter in Chromium). */
+        .sidebar-scroll {
+            overflow-y: auto;
+            overflow-y: overlay;
+        }
+        .sidebar-scroll::-webkit-scrollbar-thumb {
+            background: transparent;
+            transition: background 0.15s;
+        }
+        .sidebar-scroll:hover::-webkit-scrollbar-thumb {
+            background: #2a2d31;
+        }
+        .sidebar-scroll:hover::-webkit-scrollbar-thumb:hover {
+            background: #3d4249;
+        }
     </style>
 </head>
 <body>
@@ -367,7 +383,7 @@
             BLOCKED: { label: 'BLOCKED', className: 'bg-red-600 text-white', title: PIPELINE_BLOCKED_TOOLTIP },
             PIPELINE_COMPLETE: {
                 label: 'COMPLETE',
-                className: 'bg-[#2DEB1E] text-slate-900',
+                className: 'bg-emerald-950 text-emerald-400 border border-emerald-700/60',
                 title: '',
             },
             STOPPED: { label: 'STOPPED', className: 'bg-red-600 text-white', title: '' },
@@ -2374,7 +2390,7 @@
                     )
                 }
             ];
-            const expW = expandedWidthClass || "w-[220px]";
+            const expW = expandedWidthClass || "w-[240px]";
             const hasBelow = belowNav != null && belowNav !== false;
             return (
                 <div
@@ -2445,7 +2461,7 @@
         }
 
         function Sidebar(props) {
-            return <PrimaryNavColumn {...props} expandedWidthClass="w-[220px]" belowNav={null} />;
+            return <PrimaryNavColumn {...props} expandedWidthClass="w-[240px]" belowNav={null} />;
         }
 
         const PRD_SECTION_TITLES = [
@@ -3607,7 +3623,7 @@
                         onNavigate={safeNav}
                         sidebarCollapsed={!!sidebarCollapsed}
                         setSidebarCollapsed={setSidebarCollapsedCtx}
-                        expandedWidthClass="w-[220px]"
+                        expandedWidthClass="w-[240px]"
                         belowNav={
                             !sidebarCollapsed ? (
                                 <div className="flex flex-col flex-1 min-h-0 bg-[#141618] border-t border-[#1a1d21] pt-3">
@@ -3642,7 +3658,7 @@
                                         </button>
                                     ) : null}
                                 </div>
-                                <div className="flex-1 overflow-y-auto py-1 px-3 space-y-1 min-h-0">
+                                <div className="flex-1 sidebar-scroll py-1 px-3 space-y-1 min-h-0">
                                     {ideasLoading ? (
                                         <>
                                             {[0, 1, 2].map((idx) => (

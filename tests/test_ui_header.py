@@ -42,15 +42,15 @@ def test_status_pill_waiting_for_sentinel():
         "Sentinel wait must not use run-pulse in pipeline pill map"
 
 
-def test_status_pill_pipeline_complete_lime():
-    """PIPELINE_COMPLETE uses lime #2DEB1E with dark label text (distinct from teal in-flight)."""
+def test_status_pill_pipeline_complete_emerald():
+    """PIPELINE_COMPLETE uses same emerald palette as Pipeline Complete panel (not bright lime)."""
     with open("ui/index.html", "r") as f:
         content = f.read()
     assert re.search(
-        r"PIPELINE_COMPLETE:\s*\{[^}]*#2DEB1E[^}]*text-slate-900",
+        r"PIPELINE_COMPLETE:\s*\{[^}]*bg-emerald-950[^}]*text-emerald-400",
         content,
         re.DOTALL,
-    ), "COMPLETE pill should use bg-[#2DEB1E] and text-slate-900"
+    ), "COMPLETE pill should use bg-emerald-950 and text-emerald-400 like PipelineCompletePanel"
 
 
 def test_status_pill_waiting_for_human():

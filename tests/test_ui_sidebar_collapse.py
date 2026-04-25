@@ -15,7 +15,7 @@ def nav_rail_outer_class(sidebar_collapsed: bool) -> str:
         "w-14 relative flex-shrink-0 bg-[#141618] border-r border-[#1a1d21] "
         "flex flex-col transition-[width] duration-200 ease-out"
         if sidebar_collapsed
-        else "w-[220px] relative flex-shrink-0 bg-[#141618] border-r border-[#1a1d21] "
+        else "w-[240px] relative flex-shrink-0 bg-[#141618] border-r border-[#1a1d21] "
         "flex flex-col transition-[width] duration-200 ease-out"
     )
 
@@ -34,7 +34,7 @@ def chats_rail_shows_project_chrome(sidebar_collapsed: bool) -> bool:
 
 def test_nav_rail_width_tokens():
     assert "w-14" in nav_rail_outer_class(True)
-    assert "w-[220px]" in nav_rail_outer_class(False)
+    assert "w-[240px]" in nav_rail_outer_class(False)
     assert "w-14" not in nav_rail_outer_class(False)
 
 
@@ -78,4 +78,4 @@ def test_index_html_sidebar_unified_wiring():
     assert "M2 ideas merged: one column" in html
     assert "PrimaryNavColumn" in html
     assert "Search by title" in html
-    assert html.count("w-[220px]") >= 2
+    assert html.count("w-[240px]") >= 2

@@ -1,6 +1,7 @@
 """Tests for GET /api/ideas list endpoint."""
 import json
 import os
+from pathlib import Path
 import shutil
 import tempfile
 import pytest
@@ -184,6 +185,152 @@ class TestGetIdeasList:
         assert len(data) == 2
         assert data[0]["id"] == "new"
         assert data[1]["id"] == "old"
+
+
+class TestGetIdeasListReadinessScore:
+    """UI-6: GET /api/ideas includes readiness_score from readiness.json."""
+
+    def _create_listed_idea(self, ideas_dir, idea_id: str, session: dict) -> Path:
+        idea_path = ideas_dir / idea_id
+        idea_path.mkdir()
+        turns = idea_path / "turns"
+        turns.mkdir()
+        (turns / "1.done").write_text("done")
+        (idea_path / "session.json").write_text(json.dumps(session))
+        return idea_path
+
+    def test_readiness_score_returned_when_json_exists(self, client, monkeypatch):
+        """Idea with readiness.json {"score": 7} returns readiness_score 7."""
+        client_obj, ideas_dir = client
+        idea_path = self._create_listed_idea(
+            ideas_dir,
+            "ready-idea",
+            {
+                "messages": [],
+                "prd_content": "# T\n\n## Problem Statement\nx.",
+                "updated": "2026-01-02T00:00:00Z",
+            },
+        )
+        (idea_path / "readiness.json").write_text(json.dumps({"score": 7}))
+
+        response = client_obj.get("/api/ideas")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["readiness_score"] == 7
+
+    def test_readiness_score_null_when_file_absent(self, client, monkeypatch):
+        """Idea with no readiness.json returns readiness_score null."""
+        client_obj, ideas_dir = client
+        self._create_listed_idea(
+            ideas_dir,
+            "no-readiness",
+            {
+                "messages": [],
+                "prd_content": "# T\n\n## Problem Statement\nx.",
+                "updated": "2026-01-02T00:00:00Z",
+            },
+        )
+
+        response = client_obj.get("/api/ideas")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["readiness_score"] is None
+
+    def test_readiness_score_null_when_file_malformed(self, client, monkeypatch):
+        """Malformed readiness.json returns readiness_score null, no 500."""
+        client_obj, ideas_dir = client
+        idea_path = self._create_listed_idea(
+            ideas_dir,
+            "bad-json",
+            {
+                "messages": [],
+                "prd_content": "# T\n\n## Problem Statement\nx.",
+                "updated": "2026-01-02T00:00:00Z",
+            },
+        )
+        (idea_path / "readiness.json").write_text("{ not valid json")
+
+        response = client_obj.get("/api/ideas")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["readiness_score"] is None
+
+
+class TestGetIdeasListDocFlags:
+    """UI-7: GET /api/ideas includes has_prd and has_roadmap from session.json."""
+
+    def _create_listed_idea(self, ideas_dir, idea_id: str, session: dict) -> Path:
+        idea_path = ideas_dir / idea_id
+        idea_path.mkdir()
+        turns = idea_path / "turns"
+        turns.mkdir()
+        (turns / "1.done").write_text("done")
+        (idea_path / "session.json").write_text(json.dumps(session))
+        return idea_path
+
+    def test_has_prd_true_when_prd_content_present(self, client, monkeypatch):
+        client_obj, ideas_dir = client
+        self._create_listed_idea(
+            ideas_dir,
+            "prd-yes",
+            {
+                "messages": [],
+                "prd_content": "# Title\n\nBody.",
+                "updated": "2026-01-02T00:00:00Z",
+            },
+        )
+        response = client_obj.get("/api/ideas")
+        assert response.status_code == 200
+        assert response.json()[0]["has_prd"] is True
+
+    def test_has_prd_false_when_prd_content_empty(self, client, monkeypatch):
+        client_obj, ideas_dir = client
+        self._create_listed_idea(
+            ideas_dir,
+            "prd-no",
+            {
+                "messages": [],
+                "prd_content": "   ",
+                "updated": "2026-01-02T00:00:00Z",
+            },
+        )
+        response = client_obj.get("/api/ideas")
+        assert response.status_code == 200
+        assert response.json()[0]["has_prd"] is False
+
+    def test_has_roadmap_true_when_roadmap_content_present(self, client, monkeypatch):
+        client_obj, ideas_dir = client
+        self._create_listed_idea(
+            ideas_dir,
+            "rm-yes",
+            {
+                "messages": [],
+                "prd_content": "# T\n\n## Problem Statement\nx.",
+                "roadmap_content": "# Roadmap\n\nPhase 1.",
+                "updated": "2026-01-02T00:00:00Z",
+            },
+        )
+        response = client_obj.get("/api/ideas")
+        assert response.status_code == 200
+        assert response.json()[0]["has_roadmap"] is True
+
+    def test_has_roadmap_false_when_roadmap_content_empty(self, client, monkeypatch):
+        client_obj, ideas_dir = client
+        self._create_listed_idea(
+            ideas_dir,
+            "rm-no",
+            {
+                "messages": [],
+                "prd_content": "# T\n\n## Problem Statement\nx.",
+                "updated": "2026-01-02T00:00:00Z",
+            },
+        )
+        response = client_obj.get("/api/ideas")
+        assert response.status_code == 200
+        assert response.json()[0]["has_roadmap"] is False
 
 
 class TestDeleteIdeas:
