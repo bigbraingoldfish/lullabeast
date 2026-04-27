@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- AutoDev UI — macOS LaunchAgent (per-user, not LaunchDaemon).
+
+     AutoDev runs as the invoking user, talks to per-user ~/.openclaw/ files,
+     and never needs root, so this is a LaunchAgent loaded under the user GUI
+     session — not a system LaunchDaemon.
+
+     Mirrors ui/autodev-ui.service (the systemd unit). Both files declare
+     equivalent WorkingDirectory, executable, restart policy, and log paths.
+     See the drift-guard note in CLAUDE.md before editing one without the other.
+
+     Installation (macOS):
+       1. EDIT the placeholder paths below (WorkingDirectory + ProgramArguments).
+       2. cp ui/com.autodev.ui.plist ~/Library/LaunchAgents/com.autodev.ui.plist
+       3. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.autodev.ui.plist
+       4. launchctl enable gui/$(id -u)/com.autodev.ui
+     Tail logs: tail -f /tmp/autodev-ui.log /tmp/autodev-ui.err
+     Unload:    launchctl bootout gui/$(id -u)/com.autodev.ui
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.autodev.ui</string>
+
+    <!-- EDIT THE PATHS BELOW BEFORE INSTALLING.
+         First entry: path to your python3 (e.g. /usr/bin/python3 or
+         /opt/homebrew/bin/python3).  Last entry must reference ui/server.py
+         inside your AutoDev checkout. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>ui/server.py</string>
+    </array>
+
+    <!-- EDIT THIS PATH BEFORE INSTALLING — set to your AutoDev checkout root. -->
+    <key>WorkingDirectory</key>
+    <string>/path/to/autodev</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- KeepAlive=true mirrors Restart=on-failure from the systemd unit but is
+         slightly stricter: launchd will also restart on a clean exit.
+         For exact Restart=on-failure parity replace with the dict form:
+             <key>KeepAlive</key>
+             <dict>
+                 <key>Crashed</key>         <true/>
+                 <key>SuccessfulExit</key>  <false/>
+             </dict>
+    -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/autodev-ui.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/autodev-ui.err</string>
+</dict>
+</plist>

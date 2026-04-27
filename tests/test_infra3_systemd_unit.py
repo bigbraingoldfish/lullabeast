@@ -31,16 +31,24 @@ def test_unit_section_contains_description_and_after():
 
 
 def test_service_section_exec_start():
-    """Service section must contain ExecStart with correct python path."""
+    """Service section must contain ExecStart that invokes python and references ui/server.py.
+
+    The python path itself is intentionally flexible — distros may ship python at
+    /usr/bin/python3, /usr/local/bin/python3, or elsewhere. This mirrors the
+    placeholder posture of the launchd plist (see test_infra3_launchd_plist.py)
+    so the systemd unit and the plist can drift only on intent, not on lint shape.
+    """
     with open(SERVICE_FILE) as f:
         content = f.read()
-    
+
     # Extract [Service] section
     service_match = re.search(r"\[Service\](.*?)(?:\[|$)", content, re.DOTALL)
     assert service_match, "Could not find [Service] section"
     service_content = service_match.group(1)
-    
-    assert "/usr/bin/python3" in service_content, "ExecStart must use /usr/bin/python3"
+
+    assert re.search(r"ExecStart=.*\bpython3?\b", service_content), (
+        "ExecStart must invoke python (e.g., /usr/bin/python3 or another path)"
+    )
     assert "ui/server.py" in service_content, "ExecStart must reference ui/server.py"
 
 

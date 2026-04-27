@@ -6,9 +6,9 @@ AutoDev is an autonomous development pipeline that runs on top of OpenClaw. It m
 
 ## Prerequisites
 
-**Python 3.9 or later.** The pipeline code uses `fcntl` for advisory file locking, which is part of the Python standard library on Linux only. Running AutoDev on macOS or Windows is not supported — the orchestrator will fail to acquire the pipeline lock. If you need to run the UI server alone for development, `install.sh --force` will skip the OS check.
+**Python 3.9 or later.** The pipeline code uses `fcntl` for advisory file locking. `fcntl` is part of the POSIX standard and is available on Linux and macOS. Native Windows lacks `fcntl` and is not supported; WSL2 runs a real Linux kernel and works without any code changes.
 
-**Linux.** This is a hard dependency, not a soft one. `fcntl.flock` is how the orchestrator and heartbeat watchdog coordinate without racing. There is no cross-platform fallback.
+**Linux, macOS, or WSL2.** AutoDev runs on Linux (including WSL2) and macOS. Native Windows is not supported. `fcntl.flock` is how the orchestrator and heartbeat watchdog coordinate without racing — it is a POSIX advisory lock, not a Linux-only mechanism.
 
 **git.** The executor agent commits completed phases to the project repository. git must be on the PATH.
 
@@ -66,12 +66,12 @@ cd autodev-ui
 
 What the script does (summary):
 
-1. OS check (Linux required for pipeline locking unless `--force`).
+1. OS check (Linux, macOS, and WSL2 supported; native Windows is rejected).
 2. Python 3.9+ and pip availability.
 3. `pip install -r ui/requirements.txt` (interactive confirm unless `--non-interactive`).
 4. OpenClaw detection: resolves `OPENCLAW_ROOT`, **requires** `openclaw.json`, creates **`$AUTODEV_REPO_PATH/.autodev/`**, updates **`ui/config.json`** paths from `config.example.json` when needed.
 5. OpenClaw version check (warning-only if below recommended).
-6. **Creates** missing `workspace-{agent}/` directories under OpenClaw and stages agent identity file copies with `cp -u`.
+6. **Creates** missing `workspace-{agent}/` directories under OpenClaw and deploys agent identity files (skipping any destination file that is already newer).
 7. **Refreshes** stale `gate_scripts` paths inside `exec-approvals.json` when possible (atomic rewrite).
 8. Updates `cron/jobs.json` heartbeat script path when applicable.
 9. **Hooks preflight** — audits `hooks.enabled`, `hooks.token`, `hooks.allowRequestSessionKey`, and `hooks.allowedSessionKeyPrefixes` (`pipeline:`, `ideas:`). Optionally patches them atomically (preserves an existing `hooks.token`); if `hooks.token` is still empty, can generate one and append **`AUTODEV_HOOKS_TOKEN`** to `.env` when that key is not already set. Then warns if `tools.profile` is not `coding` or `full` (optional prompt to set `coding`), and registers **planner, executor, reviewer, escalation, prd-creator, and roadmap-converter** in `agents.list` / `hooks.allowedAgentIds`.
@@ -81,6 +81,101 @@ What the script does (summary):
 13. Prints summary.
 
 If install.sh exits cleanly with no warnings, the system is ready. If it exits with warnings, read each warning — most require a one-line manual fix.
+
+### Installing on macOS
+
+AutoDev runs on macOS without any code changes. The pipeline uses `fcntl.flock` for advisory locking, which is a POSIX mechanism available on Darwin.
+
+**Prerequisites on macOS:**
+
+```bash
+# Python 3.9+ via Homebrew (recommended)
+brew install python@3.11
+# or via pyenv
+pyenv install 3.11 && pyenv global 3.11
+
+# git (if not already present)
+brew install git
+```
+
+**Run install.sh as normal:**
+
+```bash
+git clone <this-repo> autodev-ui
+cd autodev-ui
+./install.sh
+```
+
+The OS check prints `OS: macOS (Darwin)` and proceeds without warnings.
+
+**Register as a LaunchAgent (background service):**
+
+```bash
+# 1. Edit WorkingDirectory and ProgramArguments in ui/com.autodev.ui.plist
+#    (set your actual checkout path and python3 path)
+nano ui/com.autodev.ui.plist
+
+# 2. Install the plist
+cp ui/com.autodev.ui.plist ~/Library/LaunchAgents/
+
+# 3. Load it into the current login session
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.autodev.ui.plist
+
+# 4. Enable it to start automatically at login
+launchctl enable gui/$(id -u)/com.autodev.ui
+
+# Tail logs
+tail -f /tmp/autodev-ui.log /tmp/autodev-ui.err
+
+# Unload (stop and prevent autostart)
+launchctl bootout gui/$(id -u)/com.autodev.ui
+```
+
+### Installing on WSL2
+
+WSL2 runs a real Linux kernel — no code changes are needed. The flow is identical to native Linux.
+
+**Keep the repo under your Linux home directory**, not under `/mnt/c/…`. Windows NTFS mounts have case-insensitive semantics, symlink restrictions, and much slower IO for file-watch operations.
+
+```bash
+# Good
+~/projects/autodev-ui
+
+# Avoid
+/mnt/c/Users/You/projects/autodev-ui
+```
+
+**Run install.sh as normal:**
+
+```bash
+git clone <this-repo> autodev-ui
+cd autodev-ui
+./install.sh
+```
+
+The OS check detects WSL2 via `/proc/version` and prints `OS: Linux (WSL2)`.
+
+**Enabling systemd (optional, for the systemd unit file):**
+
+WSL2 supports systemd when enabled in `/etc/wsl.conf`. If not already enabled:
+
+```
+# /etc/wsl.conf — add these lines, then restart the WSL instance
+[boot]
+systemd=true
+```
+
+After restarting, install the unit as on native Linux:
+
+```bash
+sudo cp ui/autodev-ui.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now autodev-ui
+```
+
+If you prefer not to enable systemd, run `uvicorn` directly in a `tmux`/`screen` session instead.
+
+**Reaching the UI from Windows:** once AutoDev is running inside WSL2, open `http://localhost:18790` in a Windows browser. WSL2 automatically forwards loopback ports to the Windows host.
 
 ### Environment variables (canonical names)
 
@@ -197,7 +292,7 @@ A healthy response contains a JSON object with `pipeline_status`, `current_agent
 
 Before opening Project Ideas for the first time, run the POST `/hooks/agent` check in **New User Webhook Checklist** so token mismatches are caught early.
 
-To run as a background service, see `ui/autodev-ui.service` for a systemd unit file.
+To run as a background service, see `ui/autodev-ui.service` (Linux/WSL2 systemd unit) or `ui/com.autodev.ui.plist` (macOS LaunchAgent). The install script prints OS-specific next steps after setup completes.
 
 ---
 
