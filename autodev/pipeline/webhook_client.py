@@ -2,6 +2,11 @@ import time
 import requests
 import logging
 
+# Workspace-relative prefix agents must use for pipeline artifacts (matches PROJECT_ARTIFACTS_DIR /
+# .autodev/pipeline on the resolved pipeline-project symlink target).
+_PIPELINE_ARTIFACTS = "pipeline-project/.autodev/pipeline"
+
+
 def invoke_agent_webhook(agent_id: str, session_key: str, token: str, wake_mode: str = "now", model: str = None, message: str = None):
     # Enqueue-only semantics: OpenClaw returns HTTP 200 when the agent task has been
     # queued, NOT when it has been executed.  Any 2xx after raise_for_status() means
@@ -11,11 +16,26 @@ def invoke_agent_webhook(agent_id: str, session_key: str, token: str, wake_mode:
     url = "http://localhost:18789/hooks/agent"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     # Default messages per agent role — agents read workspace files for full context
+    _p = _PIPELINE_ARTIFACTS
     default_messages = {
-        "planner": "Begin planning. Read pipeline-project/current_phase.json and pipeline-project/phase_state.json. Produce pipeline-project/planner_output.json then write pipeline-project/planner_output.done.",
-        "executor": "Begin implementation. Read pipeline-project/planner_output.json for your task list. Produce pipeline-project/executor_output.json then write pipeline-project/executor_output.done.",
-        "reviewer": "Begin code review. Read pipeline-project/executor_output.json, pipeline-project/planner_output.json, and pipeline-project/current_phase.json. Produce pipeline-project/reviewer_output.json then write pipeline-project/reviewer_output.done.",
-        "escalation": "Pipeline needs human intervention. Read pipeline-project/phase_state.json and relevant output files for context. Send a Signal notification, then write your assessment to pipeline-project/escalation_output.json and pipeline-project/escalation_output.done.",
+        "planner": (
+            f"Begin planning. Read {_p}/current_phase.json and {_p}/phase_state.json. "
+            f"Produce {_p}/planner_output.json then write {_p}/planner_output.done."
+        ),
+        "executor": (
+            f"Begin implementation. Read {_p}/planner_output.json for your task list. "
+            f"Produce {_p}/executor_output.json then write {_p}/executor_output.done."
+        ),
+        "reviewer": (
+            f"Begin code review. Read {_p}/executor_output.json, {_p}/planner_output.json, "
+            f"and {_p}/current_phase.json. Produce {_p}/reviewer_output.json "
+            f"then write {_p}/reviewer_output.done."
+        ),
+        "escalation": (
+            f"Pipeline needs human intervention. Read {_p}/phase_state.json and relevant output "
+            f"files for context. Send a Signal notification, then write your assessment to "
+            f"{_p}/escalation_output.json and {_p}/escalation_output.done."
+        ),
     }
     payload = {
         "agentId": agent_id,

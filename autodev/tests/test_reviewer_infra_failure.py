@@ -29,12 +29,14 @@ import reviewer_gate as reviewer_gate_module
 def _patch_workspace(tmp_dir):
     """Return an ExitStack that redirects gate workspace paths to tmp_dir."""
     stack = ExitStack()
-    stack.enter_context(patch.object(utils_module, "WORKSPACE_DIR", tmp_dir + "/"))
-    stack.enter_context(patch.object(utils_module, "PHASE_STATE_FILE",
-                                     os.path.join(tmp_dir, "phase_state.json")))
-    stack.enter_context(patch.object(reviewer_gate_module, "WORKSPACE_DIR", tmp_dir + "/"))
-    stack.enter_context(patch.object(reviewer_gate_module, "PHASE_STATE_FILE",
-                                     os.path.join(tmp_dir, "phase_state.json")))
+    tmp_dir = tmp_dir.rstrip(os.sep) + os.sep
+    stack.enter_context(patch.object(utils_module, "WORKSPACE_DIR", tmp_dir))
+    stack.enter_context(patch.object(utils_module, "ARTIFACTS_DIR", tmp_dir))
+    ps = os.path.join(tmp_dir.rstrip(os.sep), "phase_state.json")
+    stack.enter_context(patch.object(utils_module, "PHASE_STATE_FILE", ps))
+    stack.enter_context(patch.object(reviewer_gate_module, "WORKSPACE_DIR", tmp_dir))
+    stack.enter_context(patch.object(reviewer_gate_module, "ARTIFACTS_DIR", tmp_dir))
+    stack.enter_context(patch.object(reviewer_gate_module, "PHASE_STATE_FILE", ps))
     return stack
 
 

@@ -8,13 +8,19 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
-from utils import load_json_safe, record_error_code_only, WORKSPACE_DIR, PHASE_STATE_FILE
+from utils import (
+    ARTIFACTS_DIR,
+    load_json_safe,
+    record_error_code_only,
+    PHASE_STATE_FILE,
+    WORKSPACE_DIR,
+)
 
 EXECUTOR_GATE_DETAIL_JSON = "executor_gate_detail.json"
 
 
 def _executor_gate_detail_path():
-    return os.path.join(WORKSPACE_DIR, EXECUTOR_GATE_DETAIL_JSON)
+    return os.path.join(ARTIFACTS_DIR, EXECUTOR_GATE_DETAIL_JSON)
 
 
 def _clear_executor_gate_detail():
@@ -27,8 +33,8 @@ def _clear_executor_gate_detail():
 def _write_executor_gate_detail(payload: dict) -> None:
     """Atomic JSON write for orchestrator to merge into failure_context.json."""
     dest = _executor_gate_detail_path()
-    os.makedirs(WORKSPACE_DIR, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=WORKSPACE_DIR, prefix="executor_gate_detail_")
+    os.makedirs(ARTIFACTS_DIR, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=ARTIFACTS_DIR.rstrip(os.sep), prefix="executor_gate_detail_")
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(payload, f, indent=2)
@@ -43,7 +49,7 @@ def _write_executor_gate_detail(payload: dict) -> None:
 
 def evaluate_executor(output_path=None):
     if output_path is None:
-        output_path = os.path.join(WORKSPACE_DIR, "executor_output.json")
+        output_path = os.path.join(ARTIFACTS_DIR, "executor_output.json")
 
     _clear_executor_gate_detail()
 
@@ -81,7 +87,7 @@ def evaluate_executor(output_path=None):
 
     # Cross-reference tests_written against planner's tdd_test_structure.
     # Orchestrator owns the retry increment on FAIL, so we use record_error_code_only.
-    planner_output_path = os.path.join(WORKSPACE_DIR, "planner_output.json")
+    planner_output_path = os.path.join(ARTIFACTS_DIR, "planner_output.json")
     planner_data = load_json_safe(planner_output_path, "executor")
     if planner_data is not None:
         planned_tests = planner_data.get("tdd_test_structure", [])

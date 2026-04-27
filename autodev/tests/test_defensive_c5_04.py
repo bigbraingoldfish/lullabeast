@@ -47,6 +47,7 @@ def orch(tmp_path, monkeypatch):
     }
 
     monkeypatch.setattr(orch_mod, "SYMLINK_TARGET", str(tmp_path))
+    monkeypatch.setattr(orch_mod, "PROJECT_ARTIFACTS_DIR", str(tmp_path))
     monkeypatch.setattr(orch_mod, "STATE_FILE", str(tmp_path / "pipeline_state.json"))
     monkeypatch.setattr(orch_mod, "PHASE_STATE_FILE", str(tmp_path / "phase_state.json"))
     monkeypatch.setattr(orch_mod, "AUTODEV_PIPELINE_ROOT", str(tmp_path))

@@ -43,6 +43,7 @@ def _make_test_orchestrator(tmp_dir: str):
     with (
         patch.object(orc_module, "STATE_FILE", state_file),
         patch.object(orc_module, "SYMLINK_TARGET", tmp_dir),
+        patch.object(orc_module, "PROJECT_ARTIFACTS_DIR", tmp_dir),
         patch.object(orc_module, "LOCK_FILE", lock_file),
         patch.object(orc_module, "CONFIG_FILE", config_file),
         patch.object(orc_module, "PHASE_STATE_FILE", phase_state_file),
@@ -76,7 +77,10 @@ class TestReadEscalationSummary:
 
         import orchestrator as orc_module
 
-        with patch.object(orc_module, "SYMLINK_TARGET", str(tmp_path)):
+        with (
+            patch.object(orc_module, "SYMLINK_TARGET", str(tmp_path)),
+            patch.object(orc_module, "PROJECT_ARTIFACTS_DIR", str(tmp_path)),
+        ):
             result = orch._read_escalation_summary()
 
         assert result == "Executor failed due to missing env var."
@@ -95,6 +99,7 @@ class TestReadEscalationSummary:
 
         with (
             patch.object(orc_module, "SYMLINK_TARGET", str(tmp_path)),
+            patch.object(orc_module, "PROJECT_ARTIFACTS_DIR", str(tmp_path)),
             patch.object(orc_module, "PHASE_STATE_FILE", phase_state_file),
         ):
             result = orch._read_escalation_summary()
@@ -122,7 +127,10 @@ class TestReadEscalationSummary:
 
         import orchestrator as orc_module
 
-        with patch.object(orc_module, "SYMLINK_TARGET", str(tmp_path)):
+        with (
+            patch.object(orc_module, "SYMLINK_TARGET", str(tmp_path)),
+            patch.object(orc_module, "PROJECT_ARTIFACTS_DIR", str(tmp_path)),
+        ):
             result = orch._read_escalation_summary()
 
         assert result is not None
@@ -135,7 +143,10 @@ class TestReadEscalationSummary:
 
         import orchestrator as orc_module
 
-        with patch.object(orc_module, "SYMLINK_TARGET", str(tmp_path)):
+        with (
+            patch.object(orc_module, "SYMLINK_TARGET", str(tmp_path)),
+            patch.object(orc_module, "PROJECT_ARTIFACTS_DIR", str(tmp_path)),
+        ):
             result = orch._read_escalation_summary()
 
         assert result is None
@@ -147,7 +158,10 @@ class TestReadEscalationSummary:
 
         import orchestrator as orc_module
 
-        with patch.object(orc_module, "SYMLINK_TARGET", str(tmp_path)):
+        with (
+            patch.object(orc_module, "SYMLINK_TARGET", str(tmp_path)),
+            patch.object(orc_module, "PROJECT_ARTIFACTS_DIR", str(tmp_path)),
+        ):
             result = orch._read_escalation_summary()
 
         assert result is None
@@ -164,7 +178,10 @@ class TestReadEscalationSummary:
 
         import orchestrator as orc_module
 
-        with patch.object(orc_module, "SYMLINK_TARGET", str(tmp_path)):
+        with (
+            patch.object(orc_module, "SYMLINK_TARGET", str(tmp_path)),
+            patch.object(orc_module, "PROJECT_ARTIFACTS_DIR", str(tmp_path)),
+        ):
             result = orch._read_escalation_summary()
 
         assert result == "Concise summary of the failure."

@@ -65,7 +65,10 @@ def test_unaccounted_worktree_deletion_writes_executor_gate_detail(tmp_path):
         "tdd_test_structure": [],
         "pass_criteria": [],
     }
-    (workspace / "planner_output.json").write_text(json.dumps(planner), encoding="utf-8")
+    art = workspace / ".autodev" / "pipeline"
+    art.mkdir(parents=True)
+
+    (art / "planner_output.json").write_text(json.dumps(planner), encoding="utf-8")
 
     executor_payload = {
         "status": "complete",
@@ -74,21 +77,24 @@ def test_unaccounted_worktree_deletion_writes_executor_gate_detail(tmp_path):
         "file_manifest": [],
         "files_deleted": [],
     }
-    exec_path = workspace / "executor_output.json"
+    exec_path = art / "executor_output.json"
     exec_path.write_text(json.dumps(executor_payload), encoding="utf-8")
 
-    ps_path = str(workspace / "phase_state.json")
+    art_str = str(art) + os.sep
+    ps_path = str(art / "phase_state.json")
     stack = ExitStack()
     stack.enter_context(patch.object(utils_module, "WORKSPACE_DIR", ws_str))
+    stack.enter_context(patch.object(utils_module, "ARTIFACTS_DIR", art_str))
     stack.enter_context(patch.object(utils_module, "PHASE_STATE_FILE", ps_path))
     stack.enter_context(patch.object(executor_gate_module, "WORKSPACE_DIR", ws_str))
+    stack.enter_context(patch.object(executor_gate_module, "ARTIFACTS_DIR", art_str))
     stack.enter_context(patch.object(executor_gate_module, "PHASE_STATE_FILE", ps_path))
 
     with stack:
         result = executor_gate_module.evaluate_executor(str(exec_path))
 
     assert result == "FAIL"
-    detail_path = workspace / executor_gate_module.EXECUTOR_GATE_DETAIL_JSON
+    detail_path = art / executor_gate_module.EXECUTOR_GATE_DETAIL_JSON
     assert detail_path.is_file()
     detail = json.loads(detail_path.read_text(encoding="utf-8"))
     assert detail.get("gate_error") == "ERR_UNACCOUNTED_DELETION"
@@ -111,8 +117,12 @@ def test_git_diff_failure_returns_fail_not_skip(tmp_path):
         encoding="utf-8",
     )
 
+    art = workspace / ".autodev" / "pipeline"
+    art.mkdir(parents=True)
+    art_str = str(art) + os.sep
+
     planner = {"implementation_plan": [], "tdd_test_structure": [], "pass_criteria": []}
-    (workspace / "planner_output.json").write_text(json.dumps(planner), encoding="utf-8")
+    (art / "planner_output.json").write_text(json.dumps(planner), encoding="utf-8")
 
     executor_payload = {
         "status": "complete",
@@ -121,10 +131,10 @@ def test_git_diff_failure_returns_fail_not_skip(tmp_path):
         "file_manifest": [],
         "files_deleted": [],
     }
-    exec_path = workspace / "executor_output.json"
+    exec_path = art / "executor_output.json"
     exec_path.write_text(json.dumps(executor_payload), encoding="utf-8")
 
-    ps_path = str(workspace / "phase_state.json")
+    ps_path = str(art / "phase_state.json")
 
     # Simulate git diff failing with returncode=128 (not a git repo)
     import subprocess as _subprocess
@@ -136,8 +146,10 @@ def test_git_diff_failure_returns_fail_not_skip(tmp_path):
 
     stack = ExitStack()
     stack.enter_context(patch.object(utils_module, "WORKSPACE_DIR", ws_str))
+    stack.enter_context(patch.object(utils_module, "ARTIFACTS_DIR", art_str))
     stack.enter_context(patch.object(utils_module, "PHASE_STATE_FILE", ps_path))
     stack.enter_context(patch.object(executor_gate_module, "WORKSPACE_DIR", ws_str))
+    stack.enter_context(patch.object(executor_gate_module, "ARTIFACTS_DIR", art_str))
     stack.enter_context(patch.object(executor_gate_module, "PHASE_STATE_FILE", ps_path))
     stack.enter_context(
         patch.object(_subprocess, "run", return_value=_FailResult())

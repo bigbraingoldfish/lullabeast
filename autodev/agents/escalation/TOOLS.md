@@ -8,14 +8,14 @@
   - `ps aux | grep llama` — check if llama-server is running
   - `ls`, `find`, `cat` — inspect file existence and content
 - **File write (sandboxed)** — Write access is restricted to your workspace directory by OpenClaw's sandbox. The `pipeline-project/` symlink inside your workspace is your only write path to shared pipeline files. You write exactly two files:
-  - `pipeline-project/escalation_output.json` — the resume command from the operator
-  - `pipeline-project/escalation_output.done` — empty sentinel, written after the JSON
+  - `pipeline-project/.autodev/pipeline/escalation_output.json` — the resume command from the operator
+  - `pipeline-project/.autodev/pipeline/escalation_output.done` — empty sentinel, written after the JSON
 
 ## Path Convention
 
-- ✅ CORRECT: `pipeline-project/escalation_output.json`
-- ❌ WRONG: `~/.openclaw/pipeline-project/escalation_output.json` — writes to absolute paths outside your workspace are silently accepted by the write tool but the files are discarded by OpenClaw's sandbox. The file will appear to succeed but will not be created.
-- ❌ WRONG: `/home/pi/.openclaw/pipeline-project/escalation_output.json` — same sandbox discard behavior
+- ✅ CORRECT: `pipeline-project/.autodev/pipeline/escalation_output.json`
+- ❌ WRONG: `~/.openclaw/pipeline-project/.autodev/pipeline/escalation_output.json` — writes to absolute paths outside your workspace are silently accepted by the write tool but the files are discarded by OpenClaw's sandbox. The file will appear to succeed but will not be created.
+- ❌ WRONG: `/home/pi/.openclaw/pipeline-project/.autodev/pipeline/escalation_output.json` — same sandbox discard behavior
 
 ## Explicitly Denied by OpenClaw Policy
 

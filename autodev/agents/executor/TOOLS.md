@@ -10,10 +10,10 @@
 
 All pipeline output files use workspace-relative paths through the `pipeline-project/` symlink:
 
-- ✅ CORRECT: `pipeline-project/executor_output.json`
-- ✅ CORRECT: `pipeline-project/executor_output.done`
-- ❌ WRONG: `~/.openclaw/pipeline-project/executor_output.json` (absolute path — silently discarded by sandbox)
-- ❌ WRONG: `/home/pi/.openclaw/pipeline-project/executor_output.json` (same problem)
+- ✅ CORRECT: `pipeline-project/.autodev/pipeline/executor_output.json`
+- ✅ CORRECT: `pipeline-project/.autodev/pipeline/executor_output.done`
+- ❌ WRONG: `~/.openclaw/pipeline-project/.autodev/pipeline/executor_output.json` (absolute path — silently discarded by sandbox)
+- ❌ WRONG: `/home/pi/.openclaw/pipeline-project/.autodev/pipeline/executor_output.json` (same problem)
 
 Source files within the project are also accessed via the symlink, e.g., `pipeline-project/src/feature.py`.
 

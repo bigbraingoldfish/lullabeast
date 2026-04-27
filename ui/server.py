@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import time
 import uuid
@@ -83,6 +84,58 @@ _active_readiness_jobs: set[str] = set()  # idea IDs currently sending readiness
 _readiness_job_started_at: dict[str, float] = {}  # idea ID -> epoch seconds
 # Ideas UI polls readiness for 60×3s (180s); keep this window aligned (ui/index.html startReadinessPoll).
 READINESS_ACTIVE_WINDOW_SECONDS = 180
+
+
+def _pipeline_artifacts_dir(project_root: str | os.PathLike) -> str:
+    """Resolved per-project pipeline artifact directory (matches orchestrator PROJECT_ARTIFACTS_DIR)."""
+    root = os.path.realpath(os.path.expanduser(str(project_root)))
+    return os.path.join(root, ".autodev", "pipeline")
+
+
+def _migrate_legacy_pipeline_artifacts(repo_path: str) -> list[str]:
+    """Move legacy root-level pipeline files into ``.autodev/pipeline/``. Idempotent."""
+    repo_path = os.path.realpath(os.path.expanduser(repo_path))
+    art = os.path.join(repo_path, ".autodev", "pipeline")
+    os.makedirs(art, exist_ok=True)
+    msgs: list[str] = []
+    legacy_files = (
+        "phase_state.json",
+        "current_phase.json",
+        "pipeline.json",
+        "lessons.md",
+        "metrics.jsonl",
+        "planner_output.json",
+        "executor_output.json",
+        "reviewer_output.json",
+        "escalation_output.json",
+        "escalation_output.done",
+        "pending_escalation_command.json",
+        "pending_escalation_command.done",
+        "failure_context.json",
+        "pipeline_stop_requested",
+        "escalation_summary.json",
+    )
+    for name in legacy_files:
+        src = os.path.join(repo_path, name)
+        if not os.path.lexists(src):
+            continue
+        dst = os.path.join(art, name)
+        if os.path.lexists(dst):
+            continue
+        try:
+            shutil.move(src, dst)
+            msgs.append(f"migrated {name}")
+        except OSError:
+            pass
+    root_phases = os.path.join(repo_path, "phases")
+    dst_phases = os.path.join(art, "phases")
+    if os.path.isdir(root_phases) and not os.path.lexists(dst_phases):
+        try:
+            shutil.move(root_phases, dst_phases)
+            msgs.append("migrated phases/")
+        except OSError:
+            pass
+    return msgs
 
 
 def _create_synthetic_event(event_type, agent=None, phase=None, detail=None):
@@ -370,6 +423,15 @@ async def _stream_events(events_path, client_id):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager to start/stop background polling."""
+    try:
+        _cfg = load_config()
+        if _cfg.get("auto_sync_agent_workspaces", True):
+            _sync_agent_workspaces(_cfg)
+    except Exception as e:
+        # File-level errors are collected inside _sync_agent_workspaces; this is
+        # a last-resort guard so startup always continues.
+        _wlog = logging.getLogger("autodev.workspace_sync")
+        _wlog.warning("WORKSPACE-SYNC startup: %s", e, exc_info=True)
     # Start polling loop
     task = asyncio.create_task(_polling_loop())
     yield
@@ -408,6 +470,10 @@ DEFAULTS = {
     "poll_interval": 2,
     "ideas_idle_threshold": 120,  # seconds of JSONL silence before declaring agent idle
     "ideas_startup_grace": 30,    # seconds to wait for OpenClaw to register the session
+    # When True, copy autodev/agents/* guidance into OPENCLAW_ROOT/workspace-* on each
+    # UI server start (same mtime rules as install.sh). Set False to manage workspace
+    # files only via ./install.sh (e.g. custom agent instructions).
+    "auto_sync_agent_workspaces": True,
 }
 
 
@@ -481,7 +547,9 @@ def _finalize_autodev_config_paths(config: dict, user_override_keys: set[str]) -
 
     pd = config.get("project_dir_path", "")
     if "phase_state_path" not in user_override_keys:
-        config["phase_state_path"] = os.path.join(pd, "phase_state.json")
+        config["phase_state_path"] = os.path.join(
+            pd, ".autodev", "pipeline", "phase_state.json"
+        )
     if "roadmap_path" not in user_override_keys:
         config["roadmap_path"] = os.path.join(pd, "roadmap.md")
 
@@ -1546,7 +1614,7 @@ def _validate_project_coherence(repo_abs: str) -> dict:
         }
     phases = parse_roadmap(rpath)
     phase_ids = {p["id"] for p in phases}
-    cp = os.path.join(repo_abs, "current_phase.json")
+    cp = os.path.join(_pipeline_artifacts_dir(repo_abs), "current_phase.json")
     if not os.path.exists(cp):
         return {"ok": True, "issues": []}
     try:
@@ -1590,10 +1658,11 @@ def _validate_project_coherence(repo_abs: str) -> dict:
 
 
 def _apply_destructive_project_files(repo_abs: str, names: list) -> tuple[bool, str]:
+    art = _pipeline_artifacts_dir(repo_abs)
     for n in names:
         if n not in _SWITCH_DESTRUCTIVE_WHITELIST:
             return False, f"Destructive action not allowed for {n!r}"
-        p = os.path.join(repo_abs, n)
+        p = os.path.join(art, n)
         if os.path.lexists(p):
             try:
                 os.remove(p)
@@ -2007,9 +2076,10 @@ def get_state():
     _project_dir = config.get("project_dir_path") or ""
     if _project_dir:
         _project_real = os.path.realpath(os.path.expanduser(_project_dir))
-        _executor_output_path = os.path.join(_project_real, "executor_output.json")
+        _art = _pipeline_artifacts_dir(_project_real)
+        _executor_output_path = os.path.join(_art, "executor_output.json")
         response["executor_output_exists"] = os.path.isfile(_executor_output_path)
-        _planner_output_path = os.path.join(_project_real, "planner_output.json")
+        _planner_output_path = os.path.join(_art, "planner_output.json")
         response["planner_output_exists"] = os.path.isfile(_planner_output_path)
     else:
         _project_real = ""
@@ -2178,12 +2248,13 @@ def _validate_command_request(project_dir_path, pipeline_status, escalation_rese
 
 
 def _write_escalation_files(project_dir_path, command):
-    """Write escalation output files atomically under the resolved project root.
+    """Write escalation output files atomically under ``.autodev/pipeline/``.
 
     Uses realpath so writes land in the symlink target when project_dir_path is a symlink.
     """
     root = os.path.realpath(os.path.expanduser(str(project_dir_path)))
-    project_path = Path(root)
+    project_path = Path(_pipeline_artifacts_dir(root))
+    project_path.mkdir(parents=True, exist_ok=True)
     json_path = project_path / "escalation_output.json"
     done_path = project_path / "escalation_output.done"
     
@@ -2207,9 +2278,11 @@ def _write_escalation_files(project_dir_path, command):
 def _write_pending_escalation_files(project_dir_path, command):
     """Defer a command for a parked project (symlink points elsewhere). Write-then-done ordering."""
     root = os.path.realpath(os.path.expanduser(str(project_dir_path)))
-    project_path = Path(root)
-    if not project_path.is_dir():
+    root_path = Path(root)
+    if not root_path.is_dir():
         raise HTTPException(status_code=503, detail=f"Target project directory not found: {root}")
+    project_path = Path(_pipeline_artifacts_dir(root))
+    project_path.mkdir(parents=True, exist_ok=True)
     json_path = project_path / "pending_escalation_command.json"
     done_path = project_path / "pending_escalation_command.done"
     data = {
@@ -2333,7 +2406,7 @@ def post_command(request: dict):
                 status_code=409,
                 detail="Deferred command requires a parked queue entry (ESCALATION) for target_project_path.",
             )
-        tgt_phase = os.path.join(deferred_target, "phase_state.json")
+        tgt_phase = os.path.join(_pipeline_artifacts_dir(deferred_target), "phase_state.json")
         phase_state = _read_json_file(tgt_phase) if os.path.exists(tgt_phase) else {}
         escalation_resets = phase_state.get("escalation_resets", 0) if phase_state else 0
         is_valid, error_msg, error_code = _validate_command_request(
@@ -2730,7 +2803,7 @@ def _empty_metrics_summary():
 def get_metrics_summary():
     """Return aggregated run metrics from metrics.jsonl in the project directory.
 
-    Reads {project_dir_path}/metrics.jsonl. Deduplicates by phase (keeps last row
+    Reads ``{project_dir_path}/.autodev/pipeline/metrics.jsonl``. Deduplicates by phase (keeps last row
     per phase, so cumulative attempt counts are correct even if a phase was reset
     and re-run). Returns sensible zeros if the file is absent or empty.
     """
@@ -2739,7 +2812,7 @@ def get_metrics_summary():
     if not project_dir_path:
         return _empty_metrics_summary()
 
-    metrics_path = Path(project_dir_path) / "metrics.jsonl"
+    metrics_path = Path(_pipeline_artifacts_dir(project_dir_path)) / "metrics.jsonl"
     if not metrics_path.exists():
         return _empty_metrics_summary()
 
@@ -4929,7 +5002,7 @@ def _orchestrator_alive_from_config(config: dict) -> bool:
 def post_stop():
     """Request pipeline halt: sentinel file for active agents, or escalation STOP when waiting for human.
 
-    - RUNNING / WAITING_FOR_SENTINEL: writes ``pipeline_stop_requested`` under the project directory.
+    - RUNNING / WAITING_FOR_SENTINEL: writes ``pipeline_stop_requested`` under ``.autodev/pipeline/``.
     - WAITING_FOR_HUMAN: validates and writes ``escalation_output.json`` + ``escalation_output.done``
       (same contract as ``POST /api/command`` with STOP).
 
@@ -4955,7 +5028,7 @@ def post_stop():
     alive = _orchestrator_alive_from_config(config)
 
     if status in ("RUNNING", "WAITING_FOR_SENTINEL"):
-        stop_file = Path(os.path.realpath(project_dir_path)) / "pipeline_stop_requested"
+        stop_file = Path(_pipeline_artifacts_dir(project_dir_path)) / "pipeline_stop_requested"
         stop_file.parent.mkdir(parents=True, exist_ok=True)
         stop_file.touch()
 
@@ -5236,15 +5309,7 @@ async def post_setup_validate_roadmap(request: Request):
 
 # ─── Preflight checks ────────────────────────────────────────────────────────
 
-_PIPELINE_GITIGNORE_ENTRIES = [
-    "*.done",
-    "phase_state.json",
-    "planner_output.json",
-    "executor_output.json",
-    "reviewer_output.json",
-    "escalation_output.json",
-    "current_phase.json",
-]
+_PIPELINE_GITIGNORE_ENTRIES = [".autodev/pipeline/"]
 _PIPELINE_GITIGNORE_HEADER = "# Pipeline metadata — orchestrator-managed per-turn state, never committed"
 
 _WORKSPACE_DOCS = ["AGENTS.md", "TOOLS.md", "SOUL.md", "USER.md", "IDENTITY.md"]
@@ -5417,6 +5482,30 @@ def _run_preflight_checks(repo_path: str, config: dict | None = None) -> list:
                 f"Could not create symlink ({exc}). Run: "
                 f"ln -sfn {repo_path} {symlink_path}"
             ),
+        }        )
+
+    # 1b. Pipeline artifact directory + optional legacy migration from repo root
+    art = _pipeline_artifacts_dir(repo_path)
+    try:
+        os.makedirs(art, exist_ok=True)
+        mig_msgs = _migrate_legacy_pipeline_artifacts(repo_path)
+    except OSError as exc:
+        checks.append({
+            "check": "pipeline artifacts dir",
+            "status": "fail",
+            "message": f"Could not create {art}: {exc}",
+        })
+    else:
+        if mig_msgs:
+            checks.append({
+                "check": "pipeline artifacts migration",
+                "status": "fixed",
+                "message": "; ".join(mig_msgs),
+            })
+        checks.append({
+            "check": "pipeline artifacts dir",
+            "status": "pass",
+            "message": f"Pipeline artifacts directory ready ({art})",
         })
 
     # 2. .gitignore presence — create with pipeline block if missing
@@ -6313,7 +6402,7 @@ def get_queue_entry_snapshot(entry_id: str):
 
     escalation_resets = None
     if is_active_project and project_path:
-        psp = os.path.join(project_path, "phase_state.json")
+        psp = os.path.join(_pipeline_artifacts_dir(project_path), "phase_state.json")
         ph = _read_json_file(psp) if os.path.exists(psp) else {}
         if isinstance(ph, dict):
             escalation_resets = ph.get("escalation_resets", 0)
@@ -6402,6 +6491,139 @@ async def post_queue_entry_revalidate(entry_id: str):
     q["queue"] = entries
     _write_queue_file(q_path, q)
     return {"ok": True, "checks": checks, "entry": target}
+
+
+# Agent IDs and relative paths kept in sync with install.sh (agent workspace deploy step).
+_WORKSPACE_SYNC_AGENT_IDS = (
+    "planner",
+    "executor",
+    "reviewer",
+    "escalation",
+    "prd-creator",
+    "roadmap-converter",
+)
+_WORKSPACE_SYNC_CORE_DOCS = ("IDENTITY.md", "SOUL.md", "TOOLS.md", "AGENTS.md", "USER.md")
+
+
+def _sync_agent_workspaces(config: dict) -> dict:
+    """Copy agent guidance from the repo into OpenClaw workspace dirs (install.sh semantics).
+
+    Copies when the repository file is newer than the workspace copy, or the workspace
+    file is missing. Skips when the destination is newer (operator-local customization).
+
+    Returns:
+        {"synced": int, "skipped": int, "errors": list[str]}
+    """
+    synced = 0
+    skipped = 0
+    errors: list[str] = []
+    log = logging.getLogger("autodev.workspace_sync")
+
+    try:
+        repo = os.path.expanduser(str(config.get("autodev_repo_path") or _AUTODEV_UI_ROOT))
+        openclaw = os.path.expanduser(str(config.get("openclaw_root") or resolve_openclaw_root()))
+    except Exception as e:
+        return {"synced": 0, "skipped": 0, "errors": [f"resolve paths: {e}"]}
+
+    def _copy_if_newer(src: str, dst: str, label: str) -> None:
+        nonlocal synced, skipped
+        if not os.path.isfile(src):
+            return
+        _parent = os.path.dirname(dst)
+        if _parent:
+            try:
+                os.makedirs(_parent, exist_ok=True)
+            except OSError as e:
+                errors.append(f"{label}: makedirs {e}")
+                return
+        if os.path.isfile(dst) and os.path.getmtime(src) <= os.path.getmtime(dst):
+            skipped += 1
+            log.debug("[WORKSPACE-SYNC] skip %s (dest newer)", label)
+            return
+        try:
+            shutil.copy2(src, dst)
+            synced += 1
+            log.info("[WORKSPACE-SYNC] synced %s", label)
+        except OSError as e:
+            errors.append(f"{label}: {e}")
+
+    for agent in _WORKSPACE_SYNC_AGENT_IDS:
+        src_dir = os.path.join(repo, "autodev", "agents", agent)
+        if not os.path.isdir(src_dir):
+            continue
+        dst_dir = os.path.join(openclaw, f"workspace-{agent}")
+        try:
+            os.makedirs(dst_dir, exist_ok=True)
+        except OSError as e:
+            errors.append(f"workspace-{agent}: mkdir {e}")
+            continue
+
+        for doc in _WORKSPACE_SYNC_CORE_DOCS:
+            _copy_if_newer(
+                os.path.join(src_dir, doc),
+                os.path.join(dst_dir, doc),
+                f"{agent}/{doc}",
+            )
+
+        if agent in ("planner", "executor", "reviewer"):
+            _copy_if_newer(
+                os.path.join(src_dir, "HEARTBEAT.md"),
+                os.path.join(dst_dir, "HEARTBEAT.md"),
+                f"{agent}/HEARTBEAT.md",
+            )
+
+        if agent in ("prd-creator", "roadmap-converter", "escalation"):
+            try:
+                os.makedirs(os.path.join(dst_dir, "skills"), exist_ok=True)
+            except OSError as e:
+                errors.append(f"workspace-{agent}/skills: {e}")
+
+        if agent == "prd-creator":
+            prd_src = os.path.join(
+                repo, "autodev", "skill-library", "prd-creator", "readiness-reviewer", "SKILL.md"
+            )
+            prd_dst = os.path.join(
+                dst_dir, "skills", "readiness-reviewer", "SKILL.md"
+            )
+            if os.path.isfile(prd_src):
+                try:
+                    os.makedirs(os.path.join(dst_dir, "skills", "readiness-reviewer"), exist_ok=True)
+                except OSError as e:
+                    errors.append(f"prd-creator/readiness-reviewer: makedirs {e}")
+                _copy_if_newer(prd_src, prd_dst, "prd-creator/skills/readiness-reviewer/SKILL.md")
+
+        if agent == "escalation":
+            esc_src = os.path.join(
+                repo, "autodev", "agents", "escalation", "skills", "escalation-summary", "SKILL.md"
+            )
+            esc_dst = os.path.join(
+                dst_dir, "skills", "escalation-summary", "SKILL.md"
+            )
+            if os.path.isfile(esc_src):
+                try:
+                    os.makedirs(os.path.join(dst_dir, "skills", "escalation-summary"), exist_ok=True)
+                except OSError as e:
+                    errors.append(f"escalation/escalation-summary: makedirs {e}")
+                _copy_if_newer(esc_src, esc_dst, "escalation/skills/escalation-summary/SKILL.md")
+
+        if agent == "roadmap-converter":
+            for skill in ("roadmap-generation", "alignment-check", "adversarial-review"):
+                ssrc = os.path.join(
+                    repo, "autodev", "skill-library", "roadmap-converter", skill, "SKILL.md"
+                )
+                sdst = os.path.join(dst_dir, "skills", skill, "SKILL.md")
+                if os.path.isfile(ssrc):
+                    try:
+                        os.makedirs(
+                            os.path.join(dst_dir, "skills", skill), exist_ok=True
+                        )
+                    except OSError as e:
+                        errors.append(f"roadmap-converter/{skill}: makedirs {e}")
+                    _copy_if_newer(
+                        ssrc, sdst, f"roadmap-converter/skills/{skill}/SKILL.md"
+                    )
+
+    return {"synced": synced, "skipped": skipped, "errors": errors}
 
 
 def _check_installer_status(config: dict) -> dict:
@@ -6709,8 +6931,9 @@ def _run_init_project(repo_path: str, roadmap_seed: str, prd_content=None) -> di
 
     try:
         if mode == "A":
-            # Step 1: directory structure
-            os.makedirs(os.path.join(repo_path, "phases"), exist_ok=True)
+            # Step 1: directory structure (pipeline artifacts under .autodev/pipeline/)
+            art = os.path.join(repo_path, ".autodev", "pipeline")
+            os.makedirs(os.path.join(art, "phases"), exist_ok=True)
             os.makedirs(os.path.join(repo_path, "tests"), exist_ok=True)
             src_dir = os.path.join(repo_path, "src", name)
             os.makedirs(src_dir, exist_ok=True)
@@ -6728,7 +6951,7 @@ def _run_init_project(repo_path: str, roadmap_seed: str, prd_content=None) -> di
                 "completed_count": 0,
                 "status": "idle",
             }
-            atomic_write(os.path.join(repo_path, "pipeline.json"), json.dumps(pipeline, indent=2))
+            atomic_write(os.path.join(art, "pipeline.json"), json.dumps(pipeline, indent=2))
 
             # Step 3: roadmap.md
             atomic_write(os.path.join(repo_path, "roadmap.md"), roadmap_seed)
@@ -6746,10 +6969,10 @@ def _run_init_project(repo_path: str, roadmap_seed: str, prd_content=None) -> di
                 atomic_write(prd_path, str(prd_content))
             elif not os.path.exists(prd_path):
                 atomic_write(prd_path, "# PRD\n\n_To be completed._\n")
-            lessons_path = os.path.join(repo_path, "lessons.md")
+            lessons_path = os.path.join(art, "lessons.md")
             if not os.path.exists(lessons_path):
                 atomic_write(lessons_path, "# Lessons\n\n_Hard-won insights go here._\n")
-            metrics_path = os.path.join(repo_path, "metrics.jsonl")
+            metrics_path = os.path.join(art, "metrics.jsonl")
             if not os.path.exists(metrics_path):
                 open(metrics_path, "w").close()
 
@@ -6772,9 +6995,10 @@ def _run_init_project(repo_path: str, roadmap_seed: str, prd_content=None) -> di
             )
 
         else:  # Mode B
-            # Create only missing structure
-            for d in ["phases", "tests"]:
-                os.makedirs(os.path.join(repo_path, d), exist_ok=True)
+            # Create only missing structure (pipeline artifacts under .autodev/pipeline/)
+            art = os.path.join(repo_path, ".autodev", "pipeline")
+            os.makedirs(os.path.join(art, "phases"), exist_ok=True)
+            os.makedirs(os.path.join(repo_path, "tests"), exist_ok=True)
             src_dir = os.path.join(repo_path, "src", name)
             os.makedirs(src_dir, exist_ok=True)
             init_py = os.path.join(src_dir, "__init__.py")
@@ -6787,12 +7011,15 @@ def _run_init_project(repo_path: str, roadmap_seed: str, prd_content=None) -> di
                     "current_plan": None, "phase_start_time": None,
                     "completed_count": 0, "status": "idle",
                 }, indent=2)),
-                ("roadmap.md", roadmap_seed),
                 ("lessons.md", "# Lessons\n\n_Hard-won insights go here._\n"),
             ]:
-                path = os.path.join(repo_path, fname)
+                path = os.path.join(art, fname)
                 if not os.path.exists(path):
                     atomic_write(path, content)
+
+            roadmap_path_b = os.path.join(repo_path, "roadmap.md")
+            if not os.path.exists(roadmap_path_b):
+                atomic_write(roadmap_path_b, roadmap_seed)
 
             prd_path = os.path.join(repo_path, "prd.md")
             if prd_content and str(prd_content).strip():
@@ -6800,7 +7027,7 @@ def _run_init_project(repo_path: str, roadmap_seed: str, prd_content=None) -> di
             elif not os.path.exists(prd_path):
                 atomic_write(prd_path, "# PRD\n\n_To be completed._\n")
 
-            metrics_path = os.path.join(repo_path, "metrics.jsonl")
+            metrics_path = os.path.join(art, "metrics.jsonl")
             if not os.path.exists(metrics_path):
                 open(metrics_path, "w").close()
 

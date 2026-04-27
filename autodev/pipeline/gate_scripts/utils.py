@@ -33,7 +33,11 @@ def _derive_runtime_root() -> str:
 
 
 WORKSPACE_DIR = os.path.join(_derive_runtime_root(), "pipeline-project") + os.sep
-PHASE_STATE_FILE = os.path.join(WORKSPACE_DIR, "phase_state.json")
+# Per-project pipeline artifacts (JSON, sentinels, metrics) live under the
+# symlink target at .autodev/pipeline/ — not at repo root next to roadmap.md.
+AUTODEV_PIPELINE_SUBDIR = os.path.join(".autodev", "pipeline")
+ARTIFACTS_DIR = os.path.join(WORKSPACE_DIR.rstrip(os.sep), AUTODEV_PIPELINE_SUBDIR) + os.sep
+PHASE_STATE_FILE = os.path.join(ARTIFACTS_DIR, "phase_state.json")
 
 
 def record_error_code_only(agent_type, error_code):
@@ -50,8 +54,8 @@ def record_error_code_only(agent_type, error_code):
         except Exception:
             pass
     state["last_error_code"] = error_code
-    os.makedirs(WORKSPACE_DIR, exist_ok=True)
-    fd, temp_path = tempfile.mkstemp(dir=WORKSPACE_DIR, prefix="phase_state_")
+    os.makedirs(ARTIFACTS_DIR, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(dir=ARTIFACTS_DIR, prefix="phase_state_")
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(state, f, indent=2)
@@ -90,9 +94,9 @@ def update_phase_state_error(agent_type, error_code):
     state[retry_key] = state.get(retry_key, 0) + 1
     state["last_error_code"] = error_code
 
-    os.makedirs(WORKSPACE_DIR, exist_ok=True)
+    os.makedirs(ARTIFACTS_DIR, exist_ok=True)
 
-    fd, temp_path = tempfile.mkstemp(dir=WORKSPACE_DIR, prefix="phase_state_")
+    fd, temp_path = tempfile.mkstemp(dir=ARTIFACTS_DIR, prefix="phase_state_")
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(state, f, indent=2)

@@ -19,7 +19,7 @@ import json
 import os
 import sys
 import tempfile
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -34,11 +34,26 @@ import planner_gate as planner_gate_module
 import utils as utils_module
 
 
+@contextmanager
+def _patch_orch_project_paths(orc_module, tmp_workspace, phase_state_path=None):
+    """Flat tmp dir as project root and artifact dir (matches pre-relocation tests)."""
+    ps = phase_state_path or os.path.join(tmp_workspace, "phase_state.json")
+    with (
+        patch.object(orc_module, "SYMLINK_TARGET", tmp_workspace),
+        patch.object(orc_module, "PROJECT_ARTIFACTS_DIR", tmp_workspace),
+        patch.object(orc_module, "PHASE_STATE_FILE", ps),
+    ):
+        yield
+
+
 def _patch_workspace(tmp_dir):
     stack = ExitStack()
     stack.enter_context(patch.object(utils_module, "WORKSPACE_DIR", tmp_dir + "/"))
-    stack.enter_context(patch.object(utils_module, "PHASE_STATE_FILE",
-                                     os.path.join(tmp_dir, "phase_state.json")))
+    _ad = os.path.join(tmp_dir.rstrip(os.sep), ".autodev", "pipeline") + os.sep
+    stack.enter_context(patch.object(utils_module, "ARTIFACTS_DIR", _ad))
+    stack.enter_context(
+        patch.object(utils_module, "PHASE_STATE_FILE", os.path.join(_ad.rstrip(os.sep), "phase_state.json"))
+    )
     stack.enter_context(patch.object(planner_gate_module, "WORKSPACE_DIR", tmp_dir + "/"))
     return stack
 
@@ -76,11 +91,7 @@ class TestPlannerPreservation:
             "Current code has no such check — this is the missing feature (FIND-PLANNER-PRESERVE)."
         )
 
-        with (
-            patch.object(orc_module, "SYMLINK_TARGET", tmp_workspace),
-            patch.object(orc_module, "PHASE_STATE_FILE",
-                         os.path.join(tmp_workspace, "phase_state.json")),
-        ):
+        with _patch_orch_project_paths(orc_module, tmp_workspace):
             from orchestrator import Orchestrator
             orch = Orchestrator.__new__(Orchestrator)
             orch.lock_fd = None
@@ -119,7 +130,7 @@ class TestPlannerPreservation:
             "Orchestrator.planner_output_is_valid must be implemented"
         )
 
-        with patch.object(orc_module, "SYMLINK_TARGET", tmp_workspace):
+        with _patch_orch_project_paths(orc_module, tmp_workspace):
             from orchestrator import Orchestrator
             orch = Orchestrator.__new__(Orchestrator)
             orch.lock_fd = None
@@ -179,10 +190,7 @@ class TestPlannerPreservation:
                 "reviewer_retries": 0, "escalation_resets": 0,
             }, f)
 
-        with (
-            patch.object(orc_module, "SYMLINK_TARGET", tmp_workspace),
-            patch.object(orc_module, "PHASE_STATE_FILE", phase_state_path),
-        ):
+        with _patch_orch_project_paths(orc_module, tmp_workspace, phase_state_path):
             from orchestrator import Orchestrator
             orch = Orchestrator.__new__(Orchestrator)
             orch.lock_fd = None
@@ -248,10 +256,7 @@ class TestPlannerPreservation:
                 "planner_output_preserved": True,
             }, f)
 
-        with (
-            patch.object(orc_module, "SYMLINK_TARGET", tmp_workspace),
-            patch.object(orc_module, "PHASE_STATE_FILE", phase_state_path),
-        ):
+        with _patch_orch_project_paths(orc_module, tmp_workspace, phase_state_path):
             orch = Orchestrator.__new__(Orchestrator)
             orch.lock_fd = None
             orch.openclaw_config = {"hooks": {"token": "tok"}}
@@ -284,7 +289,7 @@ class TestPlannerPreservation:
         )
 
         # Simulate the skip branch outcome: current_agent advances to executor
-        with patch.object(orc_module, "SYMLINK_TARGET", tmp_workspace):
+        with _patch_orch_project_paths(orc_module, tmp_workspace):
             orch2 = Orchestrator.__new__(Orchestrator)
             orch2.lock_fd = None
             orch2.openclaw_config = {"hooks": {"token": "tok"}}
@@ -352,10 +357,7 @@ class TestPlannerPreservation:
         with open(phase_state_path, "w") as f:
             json.dump(initial_phase_state, f)
 
-        with (
-            patch.object(orc_module, "SYMLINK_TARGET", tmp_workspace),
-            patch.object(orc_module, "PHASE_STATE_FILE", phase_state_path),
-        ):
+        with _patch_orch_project_paths(orc_module, tmp_workspace, phase_state_path):
             orch = Orchestrator.__new__(Orchestrator)
             orch.lock_fd = None
             orch.openclaw_config = {"hooks": {"token": "tok"}}
@@ -411,7 +413,7 @@ class TestPlannerPreservation:
 
         # 4. Crash-recovery skip must NOT fire after ROUTE_PLANNER clears the flag
         # (even though valid files still exist on disk)
-        with patch.object(orc_module, "SYMLINK_TARGET", tmp_workspace):
+        with _patch_orch_project_paths(orc_module, tmp_workspace):
             skip_would_fire = (
                 orch.state.get("planner_retries", 0) == 0
                 and orch.state.get("planner_output_preserved", False)

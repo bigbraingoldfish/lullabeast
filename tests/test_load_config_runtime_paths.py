@@ -56,7 +56,9 @@ def test_default_runtime_under_dot_autodev(monkeypatch, tmp_path):
     assert cfg["pipeline_queue_path"] == os.path.join(rt, "pipeline_queue.json")
     assert cfg["ideas_dir"] == os.path.join(rt, "ideas")
     assert cfg["project_dir_path"] == os.path.join(rt, "pipeline-project")
-    assert cfg["phase_state_path"] == os.path.join(rt, "pipeline-project", "phase_state.json")
+    assert cfg["phase_state_path"] == os.path.join(
+        rt, "pipeline-project", ".autodev", "pipeline", "phase_state.json"
+    )
     assert cfg["roadmap_path"] == os.path.join(rt, "pipeline-project", "roadmap.md")
 
 
@@ -248,7 +250,9 @@ def test_config_example_empty_path_placeholders_still_derive(monkeypatch, tmp_pa
     assert cfg["autodev_pipeline_root"] == rt
     assert cfg["pipeline_state_path"] == os.path.join(rt, "pipeline_state.json")
     assert cfg["project_dir_path"] == os.path.join(rt, "pipeline-project")
-    assert cfg["phase_state_path"] == os.path.join(rt, "pipeline-project", "phase_state.json")
+    assert cfg["phase_state_path"] == os.path.join(
+        rt, "pipeline-project", ".autodev", "pipeline", "phase_state.json"
+    )
     assert cfg["roadmap_path"] == os.path.join(rt, "pipeline-project", "roadmap.md")
     assert cfg["lock_path"] == os.path.join(rt, "pipeline.lock")
     assert cfg["pipeline_queue_path"] == os.path.join(rt, "pipeline_queue.json")

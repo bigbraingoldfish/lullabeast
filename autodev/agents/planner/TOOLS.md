@@ -2,19 +2,19 @@
 
 ## Available Tools
 
-- **File read** — Read existing source files, configuration, and pipeline JSON. Use to understand codebase structure before writing your plan. Always read `pipeline-project/current_phase.json` and `pipeline-project/phase_state.json` at the start of every invocation.
+- **File read** — Read existing source files, configuration, and pipeline JSON. Use to understand codebase structure before writing your plan. Always read `pipeline-project/.autodev/pipeline/current_phase.json` and `pipeline-project/.autodev/pipeline/phase_state.json` at the start of every invocation.
 - **File write** — Write output files ONLY. Your two permitted write targets:
-  - `pipeline-project/planner_output.json` (your plan output)
-  - `pipeline-project/planner_output.done` (sentinel — written last, after JSON is complete)
+  - `pipeline-project/.autodev/pipeline/planner_output.json` (your plan output)
+  - `pipeline-project/.autodev/pipeline/planner_output.done` (sentinel — written last, after JSON is complete)
 - **Shell execution** — Run read-only shell commands: `ls`, `find`, `grep`, `head`, `cat` to explore project structure and understand existing code. Do NOT run destructive commands, install packages, or execute build/test scripts.
 
 ## Path Convention
 
 All output files use workspace-relative paths through the `pipeline-project/` symlink inside your workspace. The symlink is transparent — write to it as if it were a regular directory.
 
-- ✅ CORRECT: `pipeline-project/planner_output.json`
-- ❌ WRONG: `~/.openclaw/pipeline-project/planner_output.json` (absolute path — silently discarded by sandbox)
-- ❌ WRONG: `/home/pi/.openclaw/pipeline-project/planner_output.json` (same problem)
+- ✅ CORRECT: `pipeline-project/.autodev/pipeline/planner_output.json`
+- ❌ WRONG: `~/.openclaw/pipeline-project/.autodev/pipeline/planner_output.json` (absolute path — silently discarded by sandbox)
+- ❌ WRONG: `/home/pi/.openclaw/pipeline-project/.autodev/pipeline/planner_output.json` (same problem)
 
 ## Explicit Denials
 

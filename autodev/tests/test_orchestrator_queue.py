@@ -517,7 +517,9 @@ class TestSelectNextQueueProject:
         proj.mkdir()
         (proj / ".git").mkdir()
         (proj / "roadmap.md").write_text("# x")
-        pending = proj / "pending_escalation_command.json"
+        art = proj / ".autodev" / "pipeline"
+        art.mkdir(parents=True)
+        pending = art / "pending_escalation_command.json"
         pending.write_text(json.dumps({"command": "RETRY"}))
 
         entry = {**_make_entry("goodproj", state="READY", position=1), "project_path": str(proj)}
@@ -534,7 +536,7 @@ class TestSelectNextQueueProject:
 
         assert inst._select_next_queue_project() is True
         assert not pending.exists()
-        esc_done = proj / "escalation_output.done"
+        esc_done = art / "escalation_output.done"
         assert esc_done.exists()
         assert inst.state.get("pipeline_status") == "WAITING_FOR_HUMAN"
         assert inst.state.get("current_agent") == "escalation"

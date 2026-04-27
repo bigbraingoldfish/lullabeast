@@ -66,20 +66,12 @@ def test_repo_init_check_passes():
 
 
 def test_gitignore_has_all_pipeline_entries():
-    """cat /tmp/infra-e1-test-a/.gitignore contains all 7 required pipeline entries"""
+    """cat /tmp/infra-e1-test-a/.gitignore ignores the consolidated pipeline artifact dir"""
     gitignore_path = os.path.join(PROJECT_DIR, ".gitignore")
     with open(gitignore_path) as f:
         content = f.read()
 
-    required = [
-        "*.done",
-        "phase_state.json",
-        "planner_output.json",
-        "executor_output.json",
-        "reviewer_output.json",
-        "escalation_output.json",
-        "current_phase.json",
-    ]
+    required = [".autodev/pipeline/"]
     missing = [e for e in required if e not in content]
     assert not missing, f"Missing .gitignore entries: {missing}"
 

@@ -96,16 +96,22 @@ def validate_and_identify(roadmap_path=None):
     if not roadmap_path or not os.path.exists(roadmap_path):
         print("[ERROR] Roadmap file not found.")
         sys.exit(1)
-        
-    phase = parse_roadmap(roadmap_path)
+
+    _rp = os.path.expanduser(str(roadmap_path))
+    if not os.path.isabs(_rp):
+        print("[ERROR] Roadmap path must be absolute (no CWD-relative output for current_phase.json).")
+        sys.exit(1)
+
+    phase = parse_roadmap(_rp)
     if not phase:
         print("PIPELINE_COMPLETE")
         sys.exit(0)
         
-    # Write current_phase.json alongside the roadmap (requires absolute roadmap path).
-    out_dir = os.path.dirname(roadmap_path)
+    # Write current_phase.json under .autodev/pipeline/ in the project root (roadmap dir).
+    project_root = os.path.dirname(os.path.abspath(_rp))
+    out_dir = os.path.join(project_root, ".autodev", "pipeline")
     out_path = os.path.join(out_dir, "current_phase.json")
-    if not out_dir or not os.path.exists(out_dir):
+    if not project_root or not os.path.isdir(project_root):
         print(f"[ERROR] Cannot determine output directory for current_phase.json "
               f"(roadmap_path={roadmap_path!r}). "
               "Pass an absolute roadmap path so the output directory is unambiguous.")
@@ -113,7 +119,8 @@ def validate_and_identify(roadmap_path=None):
         
     try:
         import tempfile
-        fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(out_path), prefix="current_phase_")
+        os.makedirs(out_dir, exist_ok=True)
+        fd, temp_path = tempfile.mkstemp(dir=out_dir, prefix="current_phase_")
         with os.fdopen(fd, 'w') as f:
             # exclude status and raw_id from the spec's output schema, but we need status to halt orchestrator
             # Actually, spec says Write "current_phase.json" – phase detail, category, exit_criteria

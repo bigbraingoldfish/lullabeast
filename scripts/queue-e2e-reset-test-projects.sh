@@ -49,6 +49,23 @@ clean_artifacts() {
   [[ -d "$d" ]] || return 0
   # shellcheck disable=SC2164
   cd "$d"
+  local art=".autodev/pipeline"
+  if [[ -d "$art" ]]; then
+    rm -f \
+      "$art/current_phase.json" \
+      "$art/planner_output.json" "$art/planner_output.done" \
+      "$art/executor_output.json" "$art/executor_output.done" \
+      "$art/reviewer_output.json" "$art/reviewer_output.done" \
+      "$art/phase_state.json" \
+      "$art/failure_context.json" \
+      "$art/executor_gate_detail.json" \
+      "$art/pending_escalation_command.json" \
+      "$art/escalation_output.json" "$art/escalation_output.done" \
+      2>/dev/null || true
+    rm -f "$art"/*.done 2>/dev/null || true
+    find "$art" -maxdepth 1 -name 'phase_state_*' -type f -delete 2>/dev/null || true
+  fi
+  # Legacy root-level artifacts (pre-.autodev/pipeline layout); no-ops when absent
   rm -f \
     current_phase.json \
     planner_output.json planner_output.done \
