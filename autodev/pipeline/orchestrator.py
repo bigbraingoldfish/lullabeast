@@ -35,8 +35,10 @@ AUTODEV_PIPELINE_ROOT = resolve_pipeline_root(AUTODEV_REPO_PATH)
 LOCK_FILE = os.path.join(AUTODEV_PIPELINE_ROOT, "pipeline.lock")
 STATE_FILE = os.path.join(AUTODEV_PIPELINE_ROOT, "pipeline_state.json")
 SYMLINK_TARGET = os.path.join(AUTODEV_PIPELINE_ROOT, "pipeline-project")
+# Per-project pipeline artifacts (not roadmap.md / prd.md at repo root).
+PROJECT_ARTIFACTS_DIR = os.path.join(SYMLINK_TARGET, ".autodev", "pipeline")
 CONFIG_FILE = os.path.join(OPENCLAW_ROOT, "openclaw.json")
-PHASE_STATE_FILE = os.path.join(SYMLINK_TARGET, "phase_state.json")
+PHASE_STATE_FILE = os.path.join(PROJECT_ARTIFACTS_DIR, "phase_state.json")
 
 ORCHESTRATOR_FILENAME = "orchestrator.py"
 
@@ -154,6 +156,16 @@ def cleanup_stranded_temp_files(base_dir: str) -> None:
                     removed.append(stale_path)
                 except Exception:
                     pass
+        # Stranded mkstemp files may also live under .autodev/pipeline/.
+        _ad_pipe = os.path.join(directory, ".autodev", "pipeline")
+        if os.path.isdir(_ad_pipe):
+            for pattern in _STRANDED_TEMP_PATTERNS:
+                for stale_path in _glob.glob(os.path.join(_ad_pipe, pattern)):
+                    try:
+                        os.remove(stale_path)
+                        removed.append(stale_path)
+                    except Exception:
+                        pass
 
     # Always log the orphan scan result so the operator can see what was cleaned.
     logging.info(
@@ -167,8 +179,11 @@ def cleanup_stranded_temp_files(base_dir: str) -> None:
     artifacts = []
     try:
         if os.path.isdir(project_dir):
+            _real_pp = os.path.realpath(project_dir)
+            _artifact_sub = os.path.join(_real_pp, ".autodev", "pipeline")
             for pattern in ("*_output.json", "*_output.done"):
-                for p in _glob.glob(os.path.join(project_dir, pattern)):
+                glob_root = _artifact_sub if os.path.isdir(_artifact_sub) else _real_pp
+                for p in _glob.glob(os.path.join(glob_root, pattern)):
                     artifacts.append(os.path.basename(p))
     except Exception:
         pass
@@ -790,8 +805,9 @@ class Orchestrator:
         deadline = time.time() + timeout_seconds
         while time.time() < deadline:
             for root in self._escalation_poll_roots():
-                done_p = os.path.join(root, "escalation_output.done")
-                json_p = os.path.join(root, "escalation_output.json")
+                _esc = os.path.join(root, ".autodev", "pipeline")
+                done_p = os.path.join(_esc, "escalation_output.done")
+                json_p = os.path.join(_esc, "escalation_output.json")
                 if os.path.exists(done_p):
                     return json_p
             time.sleep(interval)
@@ -800,7 +816,12 @@ class Orchestrator:
     def _apply_pending_escalation_command(self, project_path):
         """If UI deferred a command while another project was active, apply it now."""
         root = os.path.realpath(os.path.expanduser(project_path))
-        pending_json = os.path.join(root, "pending_escalation_command.json")
+        art = os.path.join(root, ".autodev", "pipeline")
+        try:
+            os.makedirs(art, exist_ok=True)
+        except OSError:
+            pass
+        pending_json = os.path.join(art, "pending_escalation_command.json")
         if not os.path.exists(pending_json):
             return
         try:
@@ -813,21 +834,21 @@ class Orchestrator:
             os.remove(pending_json)
         except OSError:
             pass
-        pending_done = os.path.join(root, "pending_escalation_command.done")
+        pending_done = os.path.join(art, "pending_escalation_command.done")
         try:
             if os.path.exists(pending_done):
                 os.remove(pending_done)
         except OSError:
             pass
-        esc_json = os.path.join(root, "escalation_output.json")
-        esc_done = os.path.join(root, "escalation_output.done")
+        esc_json = os.path.join(art, "escalation_output.json")
+        esc_done = os.path.join(art, "escalation_output.done")
         payload = {
             "command": command,
             "source": "deferred",
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         try:
-            fd, tmp = tempfile.mkstemp(dir=root, prefix="esc_out_")
+            fd, tmp = tempfile.mkstemp(dir=art, prefix="esc_out_")
             try:
                 with os.fdopen(fd, "w") as f:
                     json.dump(payload, f)
@@ -861,7 +882,7 @@ class Orchestrator:
         Never raises — all failures are logged and return None.
         """
         try:
-            summary_path = os.path.join(SYMLINK_TARGET, "escalation_summary.json")
+            summary_path = os.path.join(PROJECT_ARTIFACTS_DIR, "escalation_summary.json")
             if not os.path.isfile(summary_path):
                 return None
             with open(summary_path, "r") as f:
@@ -883,7 +904,7 @@ class Orchestrator:
         Returns:
             True if the stop sentinel was present and consumed, False otherwise.
         """
-        stop_file = os.path.join(SYMLINK_TARGET, "pipeline_stop_requested")
+        stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
         if os.path.exists(stop_file):
             try:
                 os.remove(stop_file)
@@ -922,7 +943,7 @@ class Orchestrator:
         
     def run_planner_output_gate(self):
         gate_script = os.path.join(AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts", "planner_gate.py")
-        json_path = os.path.join(SYMLINK_TARGET, "planner_output.json")
+        json_path = os.path.join(PROJECT_ARTIFACTS_DIR, "planner_output.json")
         try:
             result = subprocess.run(
                 [sys.executable, gate_script, json_path],
@@ -1030,8 +1051,8 @@ class Orchestrator:
         Uses the planner gate script as the single source of truth for validity so the
         check is consistent with the normal execution path.
         """
-        done_path = os.path.join(SYMLINK_TARGET, "planner_output.done")
-        json_path = os.path.join(SYMLINK_TARGET, "planner_output.json")
+        done_path = os.path.join(PROJECT_ARTIFACTS_DIR, "planner_output.done")
+        json_path = os.path.join(PROJECT_ARTIFACTS_DIR, "planner_output.json")
         if not os.path.exists(done_path) or not os.path.exists(json_path):
             return False
         # Import and call the gate function directly so workspace patches in tests take effect.
@@ -1093,6 +1114,10 @@ class Orchestrator:
 
     def write_phase_state_atomic(self, phase_state):
         """Atomically write phase_state.json using temp-file rename."""
+        try:
+            os.makedirs(PROJECT_ARTIFACTS_DIR, exist_ok=True)
+        except OSError:
+            pass
         target_dir = _atomic_temp_dir_for_project_writes()
         fd, temp_path = tempfile.mkstemp(dir=target_dir, prefix="phase_state_")
         try:
@@ -1198,7 +1223,7 @@ class Orchestrator:
             "executor_gate_detail.json",
         ]:
             try:
-                os.remove(os.path.join(SYMLINK_TARGET, fname))
+                os.remove(os.path.join(PROJECT_ARTIFACTS_DIR, fname))
             except FileNotFoundError:
                 pass
 
@@ -1293,7 +1318,7 @@ class Orchestrator:
             "executor_gate_detail.json",
         ]:
             try:
-                os.remove(os.path.join(SYMLINK_TARGET, fname))
+                os.remove(os.path.join(PROJECT_ARTIFACTS_DIR, fname))
             except FileNotFoundError:
                 pass
 
@@ -1345,7 +1370,7 @@ class Orchestrator:
             "reviewer_output.json", "reviewer_output.done",
         ]:
             try:
-                os.remove(os.path.join(SYMLINK_TARGET, fname))
+                os.remove(os.path.join(PROJECT_ARTIFACTS_DIR, fname))
             except FileNotFoundError:
                 pass
 
@@ -1475,7 +1500,7 @@ class Orchestrator:
         """
         phase_raw_id = self.state.get("current_phase_raw_id", "?")
         attempt = self.state.get("executor_retries", 0)
-        lessons_path = os.path.join(SYMLINK_TARGET, "lessons.md")
+        lessons_path = os.path.join(PROJECT_ARTIFACTS_DIR, "lessons.md")
 
         def _append_blame_log(layer: int, fault, confidence, routing: str, reasoning: str):
             ts = datetime.now(timezone.utc).isoformat()
@@ -1501,7 +1526,7 @@ class Orchestrator:
         # -----------------------------------------------------------------------
         # Layer 1 — qwen3.5-27b analyst (primary path)
         # -----------------------------------------------------------------------
-        failure_context_path = os.path.join(SYMLINK_TARGET, "failure_context.json")
+        failure_context_path = os.path.join(PROJECT_ARTIFACTS_DIR, "failure_context.json")
         failure_context_data = None
         if os.path.exists(failure_context_path):
             try:
@@ -1602,7 +1627,7 @@ class Orchestrator:
         # Layer 2 — deterministic heuristics (preserved from prior implementation)
         # -----------------------------------------------------------------------
         failure_text = ""
-        executor_output_path = os.path.join(SYMLINK_TARGET, "executor_output.json")
+        executor_output_path = os.path.join(PROJECT_ARTIFACTS_DIR, "executor_output.json")
         if os.path.exists(executor_output_path):
             try:
                 with open(executor_output_path, 'r') as f:
@@ -1640,7 +1665,7 @@ class Orchestrator:
         return {"blame": "impl", "reason": f"[L3] {_r}"}
 
     def write_failure_context(self, failing_agent: str, attempt_number: int) -> None:
-        """Write failure_context.json atomically to SYMLINK_TARGET.
+        """Write failure_context.json atomically under PROJECT_ARTIFACTS_DIR.
 
         Called at every point where an agent has failed and a routing decision is about
         to be made: planner gate fail, executor gate fail (including retry-exhausted /
@@ -1656,7 +1681,7 @@ class Orchestrator:
 
         # --- Agent self-report fields (executor output, if present) ---
         executor_output = {}
-        executor_output_path = os.path.join(SYMLINK_TARGET, "executor_output.json")
+        executor_output_path = os.path.join(PROJECT_ARTIFACTS_DIR, "executor_output.json")
         if os.path.exists(executor_output_path):
             try:
                 with open(executor_output_path, 'r') as f:
@@ -1666,7 +1691,7 @@ class Orchestrator:
 
         # --- Reviewer blocking issues (if reviewer just failed) ---
         reviewer_output = {}
-        reviewer_output_path = os.path.join(SYMLINK_TARGET, "reviewer_output.json")
+        reviewer_output_path = os.path.join(PROJECT_ARTIFACTS_DIR, "reviewer_output.json")
         if os.path.exists(reviewer_output_path):
             try:
                 with open(reviewer_output_path, 'r') as f:
@@ -1693,7 +1718,10 @@ class Orchestrator:
         files_present_on_disk = []
         try:
             for _root, _dirs, _files in os.walk(SYMLINK_TARGET):
-                _dirs[:] = [d for d in _dirs if d not in ('.git', '__pycache__', 'node_modules')]
+                _dirs[:] = [
+                    d for d in _dirs
+                    if d not in ('.git', '__pycache__', 'node_modules', '.autodev')
+                ]
                 for _fname in _files:
                     if _fname in _pipeline_meta or _fname.endswith('.done'):
                         continue
@@ -1732,7 +1760,7 @@ class Orchestrator:
             "prior_blame_attributions": phase_state.get("prior_blame_attributions", []),
         }
 
-        _gate_detail_path = os.path.join(SYMLINK_TARGET, "executor_gate_detail.json")
+        _gate_detail_path = os.path.join(PROJECT_ARTIFACTS_DIR, "executor_gate_detail.json")
         if os.path.exists(_gate_detail_path):
             try:
                 with open(_gate_detail_path, "r") as _gf:
@@ -1749,8 +1777,12 @@ class Orchestrator:
             except OSError:
                 pass
 
-        _failure_context_path = os.path.join(SYMLINK_TARGET, "failure_context.json")
-        _fc_dir = _atomic_temp_dir_for_project_writes()
+        _failure_context_path = os.path.join(PROJECT_ARTIFACTS_DIR, "failure_context.json")
+        try:
+            os.makedirs(PROJECT_ARTIFACTS_DIR, exist_ok=True)
+        except OSError:
+            pass
+        _fc_dir = os.path.dirname(_failure_context_path) or "."
         fd, temp_path = tempfile.mkstemp(dir=_fc_dir, prefix="failure_context_")
         try:
             with os.fdopen(fd, 'w') as f:
@@ -1882,7 +1914,7 @@ class Orchestrator:
                 result = subprocess.run([sys.executable, gate_script], capture_output=True, text=True)
                 output = result.stdout.strip()
                 if result.returncode == 0 and "PENDING: Phase" in output:
-                    cp_path = os.path.join(SYMLINK_TARGET, "current_phase.json")
+                    cp_path = os.path.join(PROJECT_ARTIFACTS_DIR, "current_phase.json")
                     if os.path.exists(cp_path):
                         with open(cp_path) as f:
                             first_phase = json.load(f)
@@ -1989,7 +2021,7 @@ class Orchestrator:
                 session_key = f"pipeline:phase-{phase}:{raw_id}:repo-init-failure"
                 token = self.openclaw_config.get("hooks", {}).get("token", "")
                 if os.path.exists(SYMLINK_TARGET):
-                    cleanup_output_files(SYMLINK_TARGET, "escalation")
+                    cleanup_output_files(PROJECT_ARTIFACTS_DIR, "escalation")
                 _ps = self.read_phase_state()
                 _ps["escalation_trigger_reason"] = failure_context
                 self.write_phase_state_atomic(_ps)
@@ -2092,10 +2124,10 @@ class Orchestrator:
                         continue
 
                     session_key = f"pipeline:phase-{phase}:{raw_id}:planner-attempt-{retries + 1}"
-                    sentinel_path = os.path.join(SYMLINK_TARGET, "planner_output.done")
+                    sentinel_path = os.path.join(PROJECT_ARTIFACTS_DIR, "planner_output.done")
                     token = self.openclaw_config.get("hooks", {}).get("token", "")
 
-                    cleanup_output_files(SYMLINK_TARGET, "planner")
+                    cleanup_output_files(PROJECT_ARTIFACTS_DIR, "planner")
                     self.skill_manager.inject_skill(
                         self.state.get("current_phase_raw_id", ""), "planner", self.openclaw_config
                     )
@@ -2114,7 +2146,7 @@ class Orchestrator:
                         time.sleep(5)
                         continue
 
-                    _stop_file = os.path.join(SYMLINK_TARGET, "pipeline_stop_requested")
+                    _stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
                     sentinel_found = poll_for_sentinel(sentinel_path, timeout_seconds=600, stop_sentinel_path=_stop_file)
                     
                     if not sentinel_found:
@@ -2154,6 +2186,31 @@ class Orchestrator:
                     retries = self.state.get("executor_retries", 0)
                     
                     if retries >= 3:
+                        # EX-RR: Before blame attribution, check whether a valid executor
+                        # output arrived on disk from an orphaned background session that
+                        # completed AFTER the orchestrator's sentinel poll ended.  If the
+                        # gate passes, advance directly to reviewer so the successful work
+                        # is not discarded.  executor_retries is reset to 0 to prevent a
+                        # fresh restart from immediately re-entering this exhausted block.
+                        _ex_rr_sentinel = os.path.join(PROJECT_ARTIFACTS_DIR, "executor_output.done")
+                        _ex_rr_json = os.path.join(PROJECT_ARTIFACTS_DIR, "executor_output.json")
+                        if os.path.exists(_ex_rr_sentinel) and os.path.exists(_ex_rr_json):
+                            print("[INFO] [EX-RR] Surviving executor output found — running gate before blame.")
+                            if self.run_executor_output_gate():
+                                print("[INFO] [EX-RR] Gate passed — advancing to reviewer instead of escalating.")
+                                _ps_rr = self.read_phase_state()
+                                _ps_rr.pop("last_error_code", None)
+                                _ps_rr["executor_succeeded"] = True
+                                self.write_phase_state_atomic(_ps_rr)
+                                self.state["current_agent"] = "reviewer"
+                                self.state["executor_retries"] = 0
+                                self.transition_state(
+                                    "RUNNING",
+                                    "EX-RR: surviving executor output passed gate — advancing to reviewer",
+                                )
+                                time.sleep(2)
+                                continue
+                            print("[INFO] [EX-RR] Gate failed on surviving output — proceeding with blame attribution.")
                         print("[INFO] Executor retries exhausted. Running blame attribution.")
                         self.write_failure_context("executor", self.state.get("executor_retries", 0))
                         blame_result = self.run_blame_attribution()
@@ -2166,8 +2223,14 @@ class Orchestrator:
                             except Exception:
                                 pass
                         phase_state["blame_context"] = blame_result.get("reason", "")
-                        
-                        fd, temp_path = tempfile.mkstemp(dir=SYMLINK_TARGET, prefix="phase_state_")
+                        try:
+                            os.makedirs(PROJECT_ARTIFACTS_DIR, exist_ok=True)
+                        except OSError:
+                            pass
+                        fd, temp_path = tempfile.mkstemp(
+                            dir=os.path.dirname(PHASE_STATE_FILE.rstrip(os.sep)) or ".",
+                            prefix="phase_state_",
+                        )
                         try:
                             with os.fdopen(fd, 'w') as f:
                                 json.dump(phase_state, f, indent=2)
@@ -2225,11 +2288,11 @@ class Orchestrator:
                     session_key = f"pipeline:phase-{phase}:{raw_id}:executor-attempt-{retries + 1}"
                     attempt_label = "Cloud"
 
-                    sentinel_path = os.path.join(SYMLINK_TARGET, "executor_output.done")
+                    sentinel_path = os.path.join(PROJECT_ARTIFACTS_DIR, "executor_output.done")
                     token = self.openclaw_config.get("hooks", {}).get("token", "")
 
                     _attempt_start_time = time.time()  # captured before cleanup for stale-sentinel guard
-                    cleanup_output_files(SYMLINK_TARGET, "executor")
+                    cleanup_output_files(PROJECT_ARTIFACTS_DIR, "executor")
                     self.skill_manager.inject_skill(
                         self.state.get("current_phase_raw_id", ""), "executor", self.openclaw_config
                     )
@@ -2263,7 +2326,7 @@ class Orchestrator:
                             pass
                         time.sleep(2)
 
-                    _stop_file = os.path.join(SYMLINK_TARGET, "pipeline_stop_requested")
+                    _stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
                     sentinel_found = poll_for_sentinel_with_idle_detect(
                         sentinel_path, _jsonl_path, timeout_seconds=1200,
                         watch_dirs=[SYMLINK_TARGET],
@@ -2274,7 +2337,7 @@ class Orchestrator:
 
                     # RR-3 (Phase 3): Classify executor terminal state before deciding action.
                     # executor_output_path is .json counterpart to sentinel_path (.done).
-                    executor_output_path = os.path.join(SYMLINK_TARGET, "executor_output.json")
+                    executor_output_path = os.path.join(PROJECT_ARTIFACTS_DIR, "executor_output.json")
                     outcome = self.classify_executor_outcome(sentinel_found, executor_output_path)
                     print(f"[INFO] [EXECUTOR] Outcome classified: {outcome}")
 
@@ -2329,11 +2392,11 @@ class Orchestrator:
                     retries = self.state.get("reviewer_retries", 0)
                     session_key = f"pipeline:phase-{phase}:{raw_id}:reviewer-attempt-{retries + 1}"
                     
-                    sentinel_path = os.path.join(SYMLINK_TARGET, "reviewer_output.done")
+                    sentinel_path = os.path.join(PROJECT_ARTIFACTS_DIR, "reviewer_output.done")
                     token = self.openclaw_config.get("hooks", {}).get("token", "")
                     
                     _attempt_start_time = time.time()  # captured before cleanup for stale-sentinel guard
-                    cleanup_output_files(SYMLINK_TARGET, "reviewer")
+                    cleanup_output_files(PROJECT_ARTIFACTS_DIR, "reviewer")
                     self.skill_manager.inject_skill(
                         self.state.get("current_phase_raw_id", ""), "reviewer", self.openclaw_config
                     )
@@ -2350,7 +2413,7 @@ class Orchestrator:
                         time.sleep(5)
                         continue
 
-                    _stop_file = os.path.join(SYMLINK_TARGET, "pipeline_stop_requested")
+                    _stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
                     sentinel_found = poll_for_sentinel_with_idle_detect(
                         sentinel_path, None,
                         timeout_seconds=600,
@@ -2390,7 +2453,7 @@ class Orchestrator:
                             if status_output.stdout.strip():
                                 _raw_id = self.state.get("current_phase_raw_id", "") or f"phase-{phase}"
                                 try:
-                                    _cp_data = json.load(open(os.path.join(SYMLINK_TARGET, "current_phase.json")))
+                                    _cp_data = json.load(open(os.path.join(PROJECT_ARTIFACTS_DIR, "current_phase.json")))
                                     _detail = _cp_data.get("detail", "")
                                     # detail format: "Phase CORE-2: Implement core game logic..."
                                     _goal = _detail.split(": ", 1)[1] if ": " in _detail else _raw_id
@@ -2478,14 +2541,14 @@ class Orchestrator:
                             continue
                                 
                         # 3. Suggestions Append
-                        reviewer_output_path = os.path.join(SYMLINK_TARGET, "reviewer_output.json")
+                        reviewer_output_path = os.path.join(PROJECT_ARTIFACTS_DIR, "reviewer_output.json")
                         if os.path.exists(reviewer_output_path):
                             try:
                                 with open(reviewer_output_path, 'r') as f:
                                     rev_out = json.load(f)
                                 suggestions = rev_out.get("suggestions", [])
                                 if suggestions:
-                                    sugg_path = os.path.join(SYMLINK_TARGET, "suggestions.md")
+                                    sugg_path = os.path.join(PROJECT_ARTIFACTS_DIR, "suggestions.md")
                                     with open(sugg_path, 'a') as f:
                                         f.write(f"\n## Phase {phase} Suggestions\n")
                                         for s in suggestions:
@@ -2496,7 +2559,7 @@ class Orchestrator:
                         # 3.1 Canonical metrics row — deduplicate and write one authoritative row
                         # after the merge so that reviewer-rejection retries (which cause the
                         # executor to append extra rows) produce exactly one row per phase.
-                        _metrics_path = os.path.join(SYMLINK_TARGET, "metrics.jsonl")
+                        _metrics_path = os.path.join(PROJECT_ARTIFACTS_DIR, "metrics.jsonl")
                         _raw_id_for_metrics = self.state.get("current_phase_raw_id", "")
                         try:
                             # Compute duration_seconds from phase_start_time written at phase start.
@@ -2512,7 +2575,7 @@ class Orchestrator:
                             # Read goal from current_phase.json (still present before step 4 cleanup).
                             # detail already contains "Phase X: ..." prefix so use it directly.
                             _goal_text = ""
-                            _cp_path_m = os.path.join(SYMLINK_TARGET, "current_phase.json")
+                            _cp_path_m = os.path.join(PROJECT_ARTIFACTS_DIR, "current_phase.json")
                             if os.path.exists(_cp_path_m):
                                 try:
                                     with open(_cp_path_m, 'r') as _f_m:
@@ -2551,7 +2614,7 @@ class Orchestrator:
                                 "duration_seconds": _duration_seconds,
                             })
 
-                            _metrics_dir = os.path.dirname(_metrics_path) or SYMLINK_TARGET
+                            _metrics_dir = os.path.dirname(_metrics_path) or PROJECT_ARTIFACTS_DIR
                             _fd_m, _tmp_m = tempfile.mkstemp(dir=_metrics_dir, prefix=".metrics_")
                             try:
                                 with os.fdopen(_fd_m, 'w') as _f_m:
@@ -2600,7 +2663,7 @@ class Orchestrator:
                                     "reviewer_output.json",
                                 ]
                                 for filename in files_to_archive:
-                                    src = os.path.join(SYMLINK_TARGET, filename)
+                                    src = os.path.join(PROJECT_ARTIFACTS_DIR, filename)
                                     if os.path.exists(src):
                                         shutil.copy2(src, os.path.join(archive_dir, filename))
                                 print(f"[INFO] Audit archive written to {archive_dir}")
@@ -2625,7 +2688,7 @@ class Orchestrator:
                         ]
                         for t in targets:
                             try:
-                                os.remove(os.path.join(SYMLINK_TARGET, t))
+                                os.remove(os.path.join(PROJECT_ARTIFACTS_DIR, t))
                             except FileNotFoundError:
                                 pass
                                 
@@ -2642,8 +2705,8 @@ class Orchestrator:
                             if result.returncode == 0 and "PENDING: Phase" in output:
                                 # Start next phase correctly
                                 # The current_phase.json is written by phase_resolver.py
-                                if os.path.exists(os.path.join(SYMLINK_TARGET, "current_phase.json")):
-                                    with open(os.path.join(SYMLINK_TARGET, "current_phase.json"), 'r') as f:
+                                if os.path.exists(os.path.join(PROJECT_ARTIFACTS_DIR, "current_phase.json")):
+                                    with open(os.path.join(PROJECT_ARTIFACTS_DIR, "current_phase.json"), 'r') as f:
                                         new_phase = json.load(f)
                                     self.state["current_phase"] = new_phase.get("phase_number", 0)
                                     self.state["current_phase_raw_id"] = new_phase.get("raw_id", "")
@@ -2758,9 +2821,9 @@ class Orchestrator:
                             _artifact_instruction = (
                                 f"MISSING COMPLETION ARTIFACTS: Before writing executor_output.done, "
                                 f"you MUST produce two mandatory artifacts: "
-                                f"(1) Write the phase archive to phases/{_raw_id}.md using the format "
+                                f"(1) Write the phase archive to .autodev/pipeline/phases/{_raw_id}.md using the format "
                                 f"in your AGENTS.md. "
-                                f"(2) Append a metrics row to metrics.jsonl using the format in your "
+                                f"(2) Append a metrics row to .autodev/pipeline/metrics.jsonl using the format in your "
                                 f"AGENTS.md. Write the archive first, metrics second, sentinel last."
                             )
                             _ps_ma["artifact_instruction"] = _artifact_instruction
@@ -2770,7 +2833,7 @@ class Orchestrator:
                             self.transition_state(
                                 "RUNNING",
                                 f"Reviewer MISSING_ARTIFACTS: re-invoking executor to produce "
-                                f"phases/{_raw_id}.md and metrics.jsonl",
+                                f".autodev/pipeline/phases/{_raw_id}.md and .autodev/pipeline/metrics.jsonl",
                             )
                         time.sleep(5)
                         continue
@@ -2916,7 +2979,7 @@ class Orchestrator:
                         session_key = f"pipeline:phase-{phase}:{raw_id}:escalation"
                         token = self.openclaw_config.get("hooks", {}).get("token", "")
                         
-                        cleanup_output_files(SYMLINK_TARGET, "escalation")
+                        cleanup_output_files(PROJECT_ARTIFACTS_DIR, "escalation")
                         _ps = self.read_phase_state()
                         _ps["escalation_trigger_reason"] = self.state.get("last_action", "escalation triggered")
                         self.write_phase_state_atomic(_ps)
@@ -2942,7 +3005,7 @@ class Orchestrator:
                                     "gate": "escalation",
                                     "original_failure_reason": self.state.get("last_action")
                                 }
-                                with open(os.path.join(SYMLINK_TARGET, "escalation_failed.json"), "w") as f:
+                                with open(os.path.join(PROJECT_ARTIFACTS_DIR, "escalation_failed.json"), "w") as f:
                                     json.dump(error_data, f)
                                 self.transition_state("HALTED_SILENT", "Escalation delivery failed")
                                 self._queue_update_active_entry(
@@ -3043,7 +3106,7 @@ class Orchestrator:
                                 self.state["current_phase"] = 0
                                 self.transition_state("RUNNING", "Manual PROCEED triggered")
                             elif command == "STOP":
-                                stop_file = os.path.join(SYMLINK_TARGET, "pipeline_stop_requested")
+                                stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
                                 try:
                                     with open(stop_file, 'w') as _sf:
                                         _sf.write("")
