@@ -789,7 +789,7 @@ Two artifacts must be written by the executor **before** `executor_output.done` 
 
 **Phase archive — `phases/{phase_raw_id}.md`**
 
-Written to `pipeline-project/phases/` (create directory if absent). Documents what was built so future agents and operators have per-phase history without reading git logs.
+Written to `pipeline-project/.autodev/pipeline/phases/` (create directory if absent). Documents what was built so future agents and operators have per-phase history without reading git logs.
 
 ```markdown
 # {phase_raw_id} — {goal from current_phase.json detail field}
@@ -809,7 +809,7 @@ Read `phase_state.json` for `executor_retries` and `reviewer_retries`; default t
 
 **Metrics row — `metrics.jsonl`**
 
-Append one JSON line to `pipeline-project/metrics.jsonl`:
+Append one JSON line to `pipeline-project/.autodev/pipeline/metrics.jsonl`:
 
 ```json
 {"ts": "<ISO 8601 UTC>", "phase": "<phase_raw_id>", "goal": "<detail from current_phase.json>", "executor_attempts": <int>, "reviewer_passes": <int>, "blame_fires": 0, "escalations": 0, "duration_seconds": null, "skill_used": "<discipline name or null>"}
@@ -1078,7 +1078,7 @@ Each agent workspace contains a symlink providing write access to the shared pro
 
 The outer symlink `~/.openclaw/pipeline-project` resolves to the actual project directory. When the orchestrator swaps projects (via `ln -sfn`), all four workspace symlinks follow automatically.
 
-Agent `AGENTS.md` files instruct agents to use the workspace-relative path `pipeline-project/` for all reads and writes (e.g., `pipeline-project/planner_output.json`), not the absolute path `~/.openclaw/pipeline-project/`.
+Agent `AGENTS.md` files instruct agents to use the workspace-relative symlink `pipeline-project/` to reach the target repo. **Pipeline state and sentinels** (`planner_output.*`, `phase_state.json`, `*_output.done`, `phases/`, `metrics.jsonl`, etc.) are under `pipeline-project/.autodev/pipeline/`, not the project root. Do not use the absolute path `~/.openclaw/pipeline-project/` in agent write instructions.
 
 ### Git Operations
 

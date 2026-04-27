@@ -6,11 +6,17 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
-from utils import load_json_safe, record_error_code_only, WORKSPACE_DIR, PHASE_STATE_FILE
+from utils import (
+    ARTIFACTS_DIR,
+    load_json_safe,
+    record_error_code_only,
+    PHASE_STATE_FILE,
+    WORKSPACE_DIR,
+)
 
 def evaluate_reviewer(output_path=None):
     if output_path is None:
-        output_path = os.path.join(WORKSPACE_DIR, "reviewer_output.json")
+        output_path = os.path.join(ARTIFACTS_DIR, "reviewer_output.json")
 
     # ------------------------------------------------------------------
     # FIND-DONE-CRITERIA: Deterministic pre-review artifact compliance check.
@@ -53,7 +59,7 @@ def evaluate_reviewer(output_path=None):
 
 def _get_current_phase_raw_id() -> str:
     """Return current_phase_raw_id from current_phase.json, or empty string."""
-    current_phase_path = os.path.join(WORKSPACE_DIR, "current_phase.json")
+    current_phase_path = os.path.join(ARTIFACTS_DIR, "current_phase.json")
     if not os.path.exists(current_phase_path):
         return ""
     try:
@@ -75,12 +81,12 @@ def _check_done_criteria_artifacts(phase_raw_id: str) -> list:
     missing = []
 
     # Check 1: phase archive
-    phase_archive_path = os.path.join(WORKSPACE_DIR, "phases", f"{phase_raw_id}.md")
+    phase_archive_path = os.path.join(ARTIFACTS_DIR, "phases", f"{phase_raw_id}.md")
     if not os.path.exists(phase_archive_path):
         missing.append(f"phases/{phase_raw_id}.md")
 
     # Check 2: metrics.jsonl with current phase entry
-    metrics_path = os.path.join(WORKSPACE_DIR, "metrics.jsonl")
+    metrics_path = os.path.join(ARTIFACTS_DIR, "metrics.jsonl")
     if not os.path.exists(metrics_path):
         missing.append("metrics.jsonl (file missing)")
     else:

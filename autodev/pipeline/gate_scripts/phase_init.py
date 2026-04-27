@@ -32,9 +32,14 @@ def init_phase():
               "to the wrong project tree. Set AUTODEV_REPO_PATH, OPENCLAW_ROOT, "
               "or AUTODEV_PIPELINE_ROOT to point at the correct installation.")
         sys.exit(1)
+
+    # Same layout as utils.ARTIFACTS_DIR — derived from workspace so tests can patch
+    # _derive_pipeline_project without stale import-time paths.
+    artifacts_dir = os.path.join(workspace.rstrip(os.sep), ".autodev", "pipeline") + os.sep
         
-    # 1. Initialize phase_state.json
-    state_file = os.path.join(workspace, "phase_state.json")
+    # 1. Initialize phase_state.json under .autodev/pipeline/ (matches orchestrator).
+    os.makedirs(artifacts_dir, exist_ok=True)
+    state_file = os.path.join(artifacts_dir, "phase_state.json")
     initial_state = {
         "planner_retries": 0,
         "executor_retries": 0,
@@ -43,7 +48,7 @@ def init_phase():
     }
     
     try:
-        fd, temp_path = tempfile.mkstemp(dir=workspace, prefix="phase_state_")
+        fd, temp_path = tempfile.mkstemp(dir=artifacts_dir.rstrip(os.sep), prefix="phase_state_")
         with os.fdopen(fd, 'w') as f:
             json.dump(initial_state, f, indent=2)
         os.replace(temp_path, state_file)
@@ -53,7 +58,7 @@ def init_phase():
         sys.exit(1)
         
     # 2. Get Phase ID to create git branch
-    current_phase_file = os.path.join(workspace, "current_phase.json")
+    current_phase_file = os.path.join(artifacts_dir, "current_phase.json")
     phase_id = "unknown"
     if os.path.exists(current_phase_file):
         with open(current_phase_file, 'r') as f:

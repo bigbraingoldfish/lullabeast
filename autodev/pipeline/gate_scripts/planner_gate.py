@@ -5,11 +5,11 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
-from utils import load_json_safe, record_error_code_only, WORKSPACE_DIR
+from utils import ARTIFACTS_DIR, load_json_safe, record_error_code_only
 
 def evaluate_planner(output_path=None):
     if output_path is None:
-        output_path = os.path.join(WORKSPACE_DIR, "planner_output.json")
+        output_path = os.path.join(ARTIFACTS_DIR, "planner_output.json")
         
     data = load_json_safe(output_path, "planner")
     if data is None: 

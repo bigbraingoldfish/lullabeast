@@ -50,7 +50,7 @@ class TestPostApiStop:
         data = r.json()
         assert data["ok"] is True
         assert "orchestrator_alive" in data
-        assert (proj / "pipeline_stop_requested").exists()
+        assert (proj / ".autodev" / "pipeline" / "pipeline_stop_requested").exists()
 
     def test_stop_waiting_for_sentinel_creates_stop_file(self, test_client, tmp_path):
         proj = tmp_path / "proj"
@@ -70,7 +70,7 @@ class TestPostApiStop:
         ):
             r = test_client.post("/api/stop")
         assert r.status_code == 200
-        assert (proj / "pipeline_stop_requested").exists()
+        assert (proj / ".autodev" / "pipeline" / "pipeline_stop_requested").exists()
 
     def test_stop_waiting_for_human_writes_escalation_files(self, test_client, tmp_path):
         proj = tmp_path / "proj"
@@ -98,8 +98,9 @@ class TestPostApiStop:
         assert data["message"] == "Stop command queued for orchestrator"
         assert data["orchestrator_alive"] is True
         assert "hint" not in data
-        ej = proj / "escalation_output.json"
-        ed = proj / "escalation_output.done"
+        art = proj / ".autodev" / "pipeline"
+        ej = art / "escalation_output.json"
+        ed = art / "escalation_output.done"
         assert ej.exists() and ed.exists()
         written = json.loads(ej.read_text(encoding="utf-8"))
         assert written["command"] == "STOP"
@@ -153,8 +154,9 @@ class TestPostApiStop:
         ):
             r = test_client.post("/api/stop")
         assert r.status_code == 200
-        assert (real / "escalation_output.json").exists()
-        assert (real / "escalation_output.done").exists()
+        art = real / ".autodev" / "pipeline"
+        assert (art / "escalation_output.json").exists()
+        assert (art / "escalation_output.done").exists()
 
     def test_stop_rejects_stopped_state(self, test_client, tmp_path):
         ps = tmp_path / "pipeline_state.json"

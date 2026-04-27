@@ -109,7 +109,9 @@ def _make_config(openclaw: Path, tmp_path: Path, prompt_path: str = None) -> dic
         "openclaw_root": str(openclaw),
         "autodev_repo_path": str(openclaw),
         "pipeline_state_path": str(openclaw / "pipeline_state.json"),
-        "phase_state_path": str(openclaw / "pipeline-project" / "phase_state.json"),
+        "phase_state_path": str(
+            openclaw / "pipeline-project" / ".autodev" / "pipeline" / "phase_state.json"
+        ),
         "lock_path": str(openclaw / "pipeline.lock"),
         "events_path": str(openclaw / "pipeline_events.jsonl"),
         "project_dir_path": str(openclaw / "pipeline-project"),

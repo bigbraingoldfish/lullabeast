@@ -631,7 +631,7 @@ class TestPostCommandDeferred:
         assert resp.status_code == 200
         data = resp.json()
         assert data.get("deferred") is True
-        assert (proj_a / "pending_escalation_command.json").exists()
+        assert (proj_a / ".autodev" / "pipeline" / "pending_escalation_command.json").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -1331,3 +1331,42 @@ class TestSetupLaunchQueueSync:
             q = json.load(f)
         assert q["queue"][0]["state"] == "ACTIVE"
         assert q["queue"][0]["started_at"] is not None
+
+
+# ---------------------------------------------------------------------------
+# GET /api/queue/{entry_id}/snapshot — phase_state under .autodev/pipeline/
+# ---------------------------------------------------------------------------
+
+
+class TestQueueEntrySnapshotPhaseStatePath:
+    def test_snapshot_reads_escalation_resets_from_autodev_pipeline(self, client):
+        c, queue_file, base = client
+        proj = base / "snap_proj"
+        proj.mkdir()
+        (proj / "roadmap.md").write_text(
+            "- [ ] `T1` | LOW | Phase one\n  > Test: ok.\n"
+        )
+        art = proj / ".autodev" / "pipeline"
+        art.mkdir(parents=True)
+        (art / "phase_state.json").write_text(json.dumps({"escalation_resets": 4}))
+
+        ps_path = base / "pipeline_state.json"
+        with open(ps_path, "w") as f:
+            json.dump(
+                {
+                    "project_path": str(proj),
+                    "pipeline_status": "RUNNING",
+                    "current_phase_raw_id": "T1",
+                    "current_agent": "planner",
+                },
+                f,
+            )
+
+        eid = str(uuid.uuid4())
+        entry = _make_entry("snap", entry_id=eid)
+        entry["project_path"] = str(proj)
+        _write_queue(str(queue_file), [entry])
+
+        resp = c.get(f"/api/queue/{eid}/snapshot")
+        assert resp.status_code == 200
+        assert resp.json().get("escalation_resets") == 4

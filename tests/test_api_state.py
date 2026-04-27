@@ -525,8 +525,10 @@ class TestExecutorOutputExists:
         """When executor_output.json is present in project dir, response has executor_output_exists=true."""
         project_root = os.path.join(temp_dir, "pipeline_project")
         os.makedirs(project_root, exist_ok=True)
-        # Create executor_output.json in the project dir
-        with open(os.path.join(project_root, "executor_output.json"), "w") as f:
+        # Create executor_output.json under .autodev/pipeline/
+        art = os.path.join(project_root, ".autodev", "pipeline")
+        os.makedirs(art, exist_ok=True)
+        with open(os.path.join(art, "executor_output.json"), "w") as f:
             json.dump({"status": "done"}, f)
 
         cfg = self._make_cfg(temp_dir, project_root)
@@ -617,7 +619,9 @@ class TestPlannerOutputExists:
         """When planner_output.json is in project dir, response has planner_output_exists=true."""
         project_root = os.path.join(temp_dir, "pp")
         os.makedirs(project_root, exist_ok=True)
-        with open(os.path.join(project_root, "planner_output.json"), "w") as f:
+        art = os.path.join(project_root, ".autodev", "pipeline")
+        os.makedirs(art, exist_ok=True)
+        with open(os.path.join(art, "planner_output.json"), "w") as f:
             json.dump({"status": "done"}, f)
 
         cfg = self._make_cfg(temp_dir, project_root)

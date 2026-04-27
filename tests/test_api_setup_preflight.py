@@ -18,7 +18,11 @@ def load_server():
     return TestClient(app)
 
 
-from ui.server import _run_preflight_checks, _preflight_materialize
+from ui.server import (
+    _PIPELINE_GITIGNORE_ENTRIES,
+    _preflight_materialize,
+    _run_preflight_checks,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +77,7 @@ def _preflight_config(openclaw: Path, repo_path: Path) -> dict:
         "pipeline_queue_path": os.path.join(oc, "pipeline_queue.json"),
         "events_path": os.path.join(oc, "pipeline_events.jsonl"),
         "ideas_dir": os.path.join(oc, "ideas"),
-        "phase_state_path": os.path.join(pp, "phase_state.json"),
+        "phase_state_path": os.path.join(pp, ".autodev", "pipeline", "phase_state.json"),
         "roadmap_path": os.path.join(pp, "roadmap.md"),
     }
 
@@ -88,15 +92,7 @@ def _make_gitignore(repo_path: Path, content: str = ""):
 
 
 def _all_gitignore_entries():
-    return [
-        "*.done",
-        "phase_state.json",
-        "planner_output.json",
-        "executor_output.json",
-        "reviewer_output.json",
-        "escalation_output.json",
-        "current_phase.json",
-    ]
+    return list(_PIPELINE_GITIGNORE_ENTRIES)
 
 
 def _full_gitignore_content():
@@ -537,6 +533,50 @@ class TestWorkspaceCheckMessagesH29:
         assert _OPENCLAW_ROOT_MSG_HINT in miss["message"]
 
 
+def test_pipeline_gitignore_entries_constant():
+    assert _PIPELINE_GITIGNORE_ENTRIES == [".autodev/pipeline/"]
+
+
+class TestPipelineArtifactsDirPreflight:
+
+    def test_preflight_creates_artifacts_dir(self, tmp_path):
+        repo_path = tmp_path / "myproject"
+        repo_path.mkdir()
+        openclaw = _make_openclaw_dir(tmp_path, repo_path)
+        _make_gitignore(repo_path, _full_gitignore_content())
+        _make_git_repo(repo_path)
+        (repo_path / "roadmap.md").write_text("# Roadmap\n")
+
+        with patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
+
+        art = repo_path / ".autodev" / "pipeline"
+        assert art.is_dir()
+        row = next(c for c in results if c["check"] == "pipeline artifacts dir")
+        assert row["status"] == "pass"
+
+    def test_preflight_migrates_legacy_phase_state(self, tmp_path):
+        repo_path = tmp_path / "myproject"
+        repo_path.mkdir()
+        (repo_path / "phase_state.json").write_text('{"escalation_resets": 0}')
+        openclaw = _make_openclaw_dir(tmp_path, repo_path)
+        _make_gitignore(repo_path, _full_gitignore_content())
+        _make_git_repo(repo_path)
+        (repo_path / "roadmap.md").write_text("# Roadmap\n")
+
+        with patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
+
+        assert not (repo_path / "phase_state.json").exists()
+        assert (repo_path / ".autodev" / "pipeline" / "phase_state.json").exists()
+        mig = [c for c in results if c["check"] == "pipeline artifacts migration"]
+        assert mig and mig[0]["status"] == "fixed"
+
+
 class TestAllChecksInResponse:
 
     def test_all_checks_in_response(self, tmp_path):
@@ -555,6 +595,7 @@ class TestAllChecksInResponse:
 
         check_names = [c["check"] for c in results]
         assert "symlink" in check_names
+        assert "pipeline artifacts dir" in check_names
         assert ".gitignore" in check_names or ".gitignore entries" in check_names
         assert "git" in check_names
         assert "git repo" in check_names

@@ -62,6 +62,8 @@ cd autodev-ui
 ./install.sh
 ```
 
+**Upgrading:** after `git pull`, restart the AutoDev UI service. The server automatically syncs updated agent workspace guidance into `OPENCLAW_ROOT/workspace-*` on startup (same mtime rules as step 6 of `install.sh`). To manage those files only yourself—for example you maintain custom agent instructions—set `"auto_sync_agent_workspaces": false` in `ui/config.json` and re-run `./install.sh` after each update when you want upstream guidance copied.
+
 `install.sh` works through thirteen steps in order. You will see colored output for each step. Early steps exit on failure when prerequisites are missing; later steps often warn and continue, collecting issues for the final summary.
 
 What the script does (summary):

@@ -18,5 +18,6 @@
   "poll_timeout": 180,
   "poll_interval": 2,
   "ideas_idle_threshold": 120,
-  "ideas_startup_grace": 30
+  "ideas_startup_grace": 30,
+  "auto_sync_agent_workspaces": true
 }

@@ -9,6 +9,10 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 
+def _pipeline_art(project_dir: str) -> str:
+    return os.path.join(project_dir, ".autodev", "pipeline")
+
+
 @pytest.fixture
 def mock_lifespan():
     from contextlib import asynccontextmanager
@@ -56,7 +60,7 @@ class TestPostApiCommand:
                 assert response.status_code == 200
 
     def test_command_creates_escalation_output_json(self, test_client, temp_project_dir):
-        escalation_output_path = os.path.join(temp_project_dir, "escalation_output.json")
+        escalation_output_path = os.path.join(_pipeline_art(temp_project_dir), "escalation_output.json")
         
         with patch("ui.server.load_config") as mock_config:
             mock_config.return_value = {
@@ -86,8 +90,8 @@ class TestPostApiCommand:
                 assert "timestamp" in content
 
     def test_command_creates_escalation_output_done_after_json(self, test_client, temp_project_dir):
-        escalation_output_path = os.path.join(temp_project_dir, "escalation_output.json")
-        escalation_done_path = os.path.join(temp_project_dir, "escalation_output.done")
+        escalation_output_path = os.path.join(_pipeline_art(temp_project_dir), "escalation_output.json")
+        escalation_done_path = os.path.join(_pipeline_art(temp_project_dir), "escalation_output.done")
         
         with patch("ui.server.load_config") as mock_config:
             mock_config.return_value = {
@@ -331,5 +335,6 @@ class TestPostApiCommand:
             assert response.status_code == 200
             payload = response.json()
             assert payload.get("deferred") is True
-            assert os.path.exists(os.path.join(temp_project_dir, "pending_escalation_command.json"))
-            assert os.path.exists(os.path.join(temp_project_dir, "pending_escalation_command.done"))
+            art = _pipeline_art(temp_project_dir)
+            assert os.path.exists(os.path.join(art, "pending_escalation_command.json"))
+            assert os.path.exists(os.path.join(art, "pending_escalation_command.done"))

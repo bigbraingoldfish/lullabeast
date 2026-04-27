@@ -37,17 +37,20 @@ import executor_gate as executor_gate_module
 
 def _make_executor_gate_patch(tmp_dir):
     stack = ExitStack()
-    ps_path = os.path.join(tmp_dir, "phase_state.json")
-    stack.enter_context(patch.object(utils_module, "WORKSPACE_DIR", tmp_dir + "/"))
+    tmp_dir = tmp_dir.rstrip(os.sep) + os.sep
+    ps_path = os.path.join(tmp_dir.rstrip(os.sep), "phase_state.json")
+    stack.enter_context(patch.object(utils_module, "WORKSPACE_DIR", tmp_dir))
+    stack.enter_context(patch.object(utils_module, "ARTIFACTS_DIR", tmp_dir))
     stack.enter_context(patch.object(utils_module, "PHASE_STATE_FILE", ps_path))
-    stack.enter_context(patch.object(executor_gate_module, "WORKSPACE_DIR", tmp_dir + "/"))
+    stack.enter_context(patch.object(executor_gate_module, "WORKSPACE_DIR", tmp_dir))
     # executor_gate imports PHASE_STATE_FILE directly — must patch in its own namespace too
+    stack.enter_context(patch.object(executor_gate_module, "ARTIFACTS_DIR", tmp_dir))
     stack.enter_context(patch.object(executor_gate_module, "PHASE_STATE_FILE", ps_path))
 
     # C3-07 fix: gate now fails closed if phase_base_commit is missing.
     # Write a mock pipeline_state.json with a sentinel commit so tests that are
     # not specifically testing the deletion guard pass through to PASS/FAIL as before.
-    pipeline_state_path = os.path.join(os.path.dirname(tmp_dir.rstrip("/")), "pipeline_state.json")
+    pipeline_state_path = os.path.join(os.path.dirname(tmp_dir.rstrip(os.sep)), "pipeline_state.json")
     with open(pipeline_state_path, "w") as _f:
         json.dump({"phase_base_commit": "0000000000000000000000000000000000000000"}, _f)
 
@@ -182,9 +185,12 @@ class TestDoneFileLogic:
 
         from contextlib import ExitStack
         stack = ExitStack()
-        stack.enter_context(patch.object(utils_module, "WORKSPACE_DIR", tmp_workspace + "/"))
+        tw = tmp_workspace.rstrip(os.sep) + os.sep
+        stack.enter_context(patch.object(utils_module, "WORKSPACE_DIR", tw))
+        stack.enter_context(patch.object(utils_module, "ARTIFACTS_DIR", tw))
         stack.enter_context(patch.object(utils_module, "PHASE_STATE_FILE", phase_state_path))
-        stack.enter_context(patch.object(reviewer_gate_module, "WORKSPACE_DIR", tmp_workspace + "/"))
+        stack.enter_context(patch.object(reviewer_gate_module, "WORKSPACE_DIR", tw))
+        stack.enter_context(patch.object(reviewer_gate_module, "ARTIFACTS_DIR", tw))
         stack.enter_context(patch.object(reviewer_gate_module, "PHASE_STATE_FILE", phase_state_path))
 
         with stack:

@@ -231,6 +231,7 @@ class TestApiIdeasAlignmentCheck:
         with patch("ui.server.load_config", return_value=self._mock_config()), \
              patch("ui.server.aiohttp.ClientSession", mock_cls), \
              patch("ui.server._inject_converter_skill"), \
+             patch("ui.server.asyncio.create_task"), \
              patch("ui.server.ALIGNMENT_CHECK_POLL_INTERVAL", 0.05), \
              patch("ui.server.asyncio.sleep", AsyncMock(side_effect=write_sentinel)):
             r = client.post("/api/ideas/8/alignment-check")

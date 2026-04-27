@@ -17,15 +17,7 @@ VALID_ROADMAP_SEED = (
     "  > Test: It works.\n"
 )
 
-PIPELINE_GITIGNORE_ENTRIES = [
-    "*.done",
-    "phase_state.json",
-    "planner_output.json",
-    "executor_output.json",
-    "reviewer_output.json",
-    "escalation_output.json",
-    "current_phase.json",
-]
+PIPELINE_GITIGNORE_ENTRIES = [".autodev/pipeline/"]
 
 
 def load_server():
@@ -35,6 +27,10 @@ def load_server():
 
 
 from ui.server import _run_init_project
+
+
+def _art(repo: Path) -> Path:
+    return repo / ".autodev" / "pipeline"
 
 
 def _make_subprocess_pass():
@@ -160,7 +156,7 @@ class TestEndpointBasics:
 class TestModeADirectoryStructure:
 
     def test_mode_a_creates_directory_structure(self, tmp_path):
-        """New dir gets phases/, tests/, src/{name}/, src/{name}/__init__.py."""
+        """New dir gets .autodev/pipeline/phases/, tests/, src/{name}/, src/{name}/__init__.py."""
         repo_path = tmp_path / "myproject"
 
         with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
@@ -170,7 +166,7 @@ class TestModeADirectoryStructure:
             result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED)
 
         assert result["ok"] is True
-        assert (repo_path / "phases").is_dir()
+        assert (_art(repo_path) / "phases").is_dir()
         assert (repo_path / "tests").is_dir()
         assert (repo_path / "src" / "myproject").is_dir()
         assert (repo_path / "src" / "myproject" / "__init__.py").exists()
@@ -187,7 +183,7 @@ class TestModeADirectoryStructure:
             result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED)
 
         assert result["ok"] is True
-        pipeline = json.loads((repo_path / "pipeline.json").read_text())
+        pipeline = json.loads((_art(repo_path) / "pipeline.json").read_text())
         assert pipeline["project"] == "myproject"
         assert pipeline["status"] == "idle"
         assert "created" in pipeline
@@ -203,11 +199,13 @@ class TestModeADirectoryStructure:
             result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED)
 
         assert result["ok"] is True
-        for fname in ["pipeline.json", "roadmap.md", "prd.md", "lessons.md", "metrics.jsonl", ".gitignore"]:
+        for fname in ["roadmap.md", "prd.md", ".gitignore"]:
             assert (repo_path / fname).exists(), f"Missing file: {fname}"
+        for fname in ["pipeline.json", "lessons.md", "metrics.jsonl"]:
+            assert (_art(repo_path) / fname).exists(), f"Missing artifact: {fname}"
 
     def test_mode_a_gitignore_has_pipeline_entries(self, tmp_path):
-        """Mode A .gitignore contains all 7 pipeline entries."""
+        """Mode A .gitignore contains the pipeline artifact directory entry."""
         repo_path = tmp_path / "myproject"
 
         with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
@@ -382,8 +380,7 @@ class TestModeBExistingRepo:
 
         assert result["ok"] is True
         gitignore = (repo_path / ".gitignore").read_text()
-        # Count occurrences of first entry — should be exactly 1
-        assert gitignore.count("*.done") == 1
+        assert gitignore.count(".autodev/pipeline/") == 1
 
     def test_mode_b_creates_missing_structure(self, tmp_path):
         """Mode B creates phases/, tests/, src/{name}/ if not present."""
@@ -396,7 +393,7 @@ class TestModeBExistingRepo:
             result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED)
 
         assert result["ok"] is True
-        assert (repo_path / "phases").is_dir()
+        assert (_art(repo_path) / "phases").is_dir()
         assert (repo_path / "tests").is_dir()
         assert (repo_path / "src" / "myproject").is_dir()
 
