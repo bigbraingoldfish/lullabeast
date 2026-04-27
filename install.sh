@@ -51,32 +51,27 @@ hdr "1/13  OS check"
 
 OS_TYPE=$(uname -s)
 OS_STATUS="ok"
+IS_WSL2=0
 
 if [ "$OS_TYPE" = "Linux" ]; then
-    ok "OS: Linux"
-elif [ "$OS_TYPE" = "Darwin" ]; then
-    echo "${YELLOW}  ⚠${RESET} OS is macOS. fcntl-based pipeline locking is Linux-only."
-    echo "    The orchestrator pipeline will not function correctly on macOS."
-    echo "    This installation is suitable for UI-only development."
-    if [ "$FORCE" -eq 1 ] || [ "$NON_INTERACTIVE" -eq 1 ]; then
-        warn "macOS detected — pipeline locking disabled (--force or --non-interactive)"
-        OS_STATUS="macOS (warned)"
+    if [ -r /proc/version ] && grep -qi microsoft /proc/version 2>/dev/null; then
+        IS_WSL2=1
+        ok "OS: Linux (WSL2)"
+        OS_STATUS="WSL2"
     else
-        if prompt_yn "Continue anyway? [y/N]" "N"; then
-            warn "macOS detected — pipeline locking will not function correctly"
-            OS_STATUS="macOS (warned)"
-        else
-            fail "Aborted. Re-run on Linux or with --force to proceed anyway."
-        fi
+        ok "OS: Linux"
     fi
+elif [ "$OS_TYPE" = "Darwin" ]; then
+    ok "OS: macOS (Darwin)"
+    OS_STATUS="macOS"
 elif echo "$OS_TYPE" | grep -qiE 'MINGW|CYGWIN|MSYS'; then
-    fail "Windows is not supported. AutoDev requires Linux (fcntl locking)."
+    fail "Windows native is not supported. Use WSL2."
 else
     if [ "$FORCE" -eq 1 ]; then
         warn "Unknown OS: $OS_TYPE — proceeding due to --force"
         OS_STATUS="unknown (forced)"
     else
-        fail "Unsupported OS: $OS_TYPE. AutoDev requires Linux."
+        fail "Unsupported OS: $OS_TYPE. AutoDev requires Linux, macOS, or WSL2."
     fi
 fi
 
@@ -350,8 +345,31 @@ ensure_workspace_pipeline_project_symlinks() {
 }
 
 TOTAL_DEPLOYED=0
-declare -A AGENT_COUNTS
+# Parallel indexed array of "agent=count" pairs (bash 3.2-compatible — macOS
+# default bash lacks `declare -A`). Use _set_count / _get_count helpers below.
+AGENT_COUNTS=()
 MISSING_FILES=()
+
+_set_count() {
+    # Replace existing entry if present, else append.
+    local key="$1" val="$2" prefix="$1=" i
+    for i in "${!AGENT_COUNTS[@]}"; do
+        case "${AGENT_COUNTS[$i]}" in
+            "$prefix"*) AGENT_COUNTS[$i]="$key=$val"; return ;;
+        esac
+    done
+    AGENT_COUNTS+=("$key=$val")
+}
+
+_get_count() {
+    local prefix="$1=" item
+    for item in "${AGENT_COUNTS[@]}"; do
+        case "$item" in
+            "$prefix"*) echo "${item#"$prefix"}"; return ;;
+        esac
+    done
+    echo "0"
+}
 
 for agent in planner executor reviewer escalation prd-creator roadmap-converter; do
     src_dir="$AUTODEV_REPO_PATH/autodev/agents/$agent"
@@ -359,7 +377,7 @@ for agent in planner executor reviewer escalation prd-creator roadmap-converter;
 
     if [ ! -d "$src_dir" ]; then
         warn "Source not found: $src_dir — skipping $agent"
-        AGENT_COUNTS[$agent]="skip"
+        _set_count "$agent" "skip"
         continue
     fi
 
@@ -448,14 +466,20 @@ if [ "${#MISSING_FILES[@]}" -gt 0 ]; then
             count=0
             for doc in IDENTITY.md SOUL.md TOOLS.md AGENTS.md USER.md; do
                 src="$src_dir/$doc"
+                dst="$dst_dir/$doc"
                 [ -f "$src" ] || continue
-                cp -u "$src" "$dst_dir/$doc"
-                count=$((count + 1))
+                # Same "newer-than" predicate the dry-run preview block uses
+                # (above, ~line 371). BSD `cp` lacks `-u`; this is portable.
+                if [ ! -f "$dst" ] || [ "$src" -nt "$dst" ]; then
+                    cp "$src" "$dst"
+                    count=$((count + 1))
+                fi
             done
             case "$agent" in planner|executor|reviewer)
                 src="$src_dir/HEARTBEAT.md"
-                if [ -f "$src" ]; then
-                    cp -u "$src" "$dst_dir/HEARTBEAT.md"
+                dst="$dst_dir/HEARTBEAT.md"
+                if [ -f "$src" ] && { [ ! -f "$dst" ] || [ "$src" -nt "$dst" ]; }; then
+                    cp "$src" "$dst"
                     count=$((count + 1))
                 fi
                 ;;
@@ -468,10 +492,13 @@ if [ "${#MISSING_FILES[@]}" -gt 0 ]; then
 
             if [ "$agent" = "prd-creator" ]; then
                 src="$AUTODEV_REPO_PATH/autodev/skill-library/prd-creator/readiness-reviewer/SKILL.md"
+                dst="$dst_dir/skills/readiness-reviewer/SKILL.md"
                 if [ -f "$src" ]; then
                     mkdir -p "$dst_dir/skills/readiness-reviewer"
-                    cp -u "$src" "$dst_dir/skills/readiness-reviewer/SKILL.md"
-                    count=$((count + 1))
+                    if [ ! -f "$dst" ] || [ "$src" -nt "$dst" ]; then
+                        cp "$src" "$dst"
+                        count=$((count + 1))
+                    fi
                 else
                     warn "Missing skill source for prd-creator: $src"
                 fi
@@ -479,10 +506,13 @@ if [ "${#MISSING_FILES[@]}" -gt 0 ]; then
 
             if [ "$agent" = "escalation" ]; then
                 src="$AUTODEV_REPO_PATH/autodev/agents/escalation/skills/escalation-summary/SKILL.md"
+                dst="$dst_dir/skills/escalation-summary/SKILL.md"
                 if [ -f "$src" ]; then
                     mkdir -p "$dst_dir/skills/escalation-summary"
-                    cp -u "$src" "$dst_dir/skills/escalation-summary/SKILL.md"
-                    count=$((count + 1))
+                    if [ ! -f "$dst" ] || [ "$src" -nt "$dst" ]; then
+                        cp "$src" "$dst"
+                        count=$((count + 1))
+                    fi
                 else
                     warn "Missing skill source for escalation: $src"
                 fi
@@ -491,16 +521,19 @@ if [ "${#MISSING_FILES[@]}" -gt 0 ]; then
             if [ "$agent" = "roadmap-converter" ]; then
                 for skill in roadmap-generation alignment-check adversarial-review; do
                     src="$AUTODEV_REPO_PATH/autodev/skill-library/roadmap-converter/$skill/SKILL.md"
+                    dst="$dst_dir/skills/$skill/SKILL.md"
                     if [ -f "$src" ]; then
                         mkdir -p "$dst_dir/skills/$skill"
-                        cp -u "$src" "$dst_dir/skills/$skill/SKILL.md"
-                        count=$((count + 1))
+                        if [ ! -f "$dst" ] || [ "$src" -nt "$dst" ]; then
+                            cp "$src" "$dst"
+                            count=$((count + 1))
+                        fi
                     else
                         warn "Missing skill source for roadmap-converter ($skill): $src"
                     fi
                 done
             fi
-            AGENT_COUNTS[$agent]=$count
+            _set_count "$agent" "$count"
             TOTAL_DEPLOYED=$((TOTAL_DEPLOYED + count))
             ok "$agent: $count file(s) deployed → $dst_dir"
         done
@@ -508,13 +541,13 @@ if [ "${#MISSING_FILES[@]}" -gt 0 ]; then
     else
         warn "Agent workspace provisioning skipped"
         for agent in planner executor reviewer escalation prd-creator roadmap-converter; do
-            AGENT_COUNTS[$agent]="skipped"
+            _set_count "$agent" "skipped"
         done
     fi
 else
     ok "All agent workspace files are current — nothing to deploy"
     for agent in planner executor reviewer escalation prd-creator roadmap-converter; do
-        AGENT_COUNTS[$agent]="current"
+        _set_count "$agent" "current"
     done
 fi
 
@@ -928,7 +961,8 @@ print(set_openclaw_global_tools_profile(sys.argv[1], 'coding'))
             ;;
         dry_run)
             # Print the preview (everything except the last line)
-            echo "$REGISTER_DRY_OUTPUT" | head -n -1
+            # `head -n -1` is GNU-only; `sed '$d'` (delete last line) is BSD/GNU portable.
+            echo "$REGISTER_DRY_OUTPUT" | sed '$d'
             info "The above changes would be applied to $OPENCLAW_ROOT/openclaw.json"
             if prompt_yn "Register missing AutoDev agents (planner, executor, reviewer, escalation, prd-creator, roadmap-converter)? [Y/n]" "Y"; then
                 APPLY_RESULT=$("$PYTHON" "$REGISTER_AGENT" \
@@ -1040,7 +1074,7 @@ printf "  %-32s %s\n" "OpenClaw tools.profile:"   "$TOOLS_PROFILE_STEP"
 printf "  %-32s %s\n" "OpenClaw agents (register):" "$REGISTER_STATUS_STEP"
 echo   "  Agent files deployed:"
 for agent in planner executor reviewer escalation prd-creator roadmap-converter; do
-    printf "    %-24s %s\n" "$agent:" "${AGENT_COUNTS[$agent]:-0}"
+    printf "    %-24s %s\n" "$agent:" "$(_get_count "$agent")"
 done
 
 if [ "${#WARNINGS[@]}" -gt 0 ]; then
@@ -1062,4 +1096,25 @@ echo "  Verify hooks with POST (expect HTTP 200):"
 echo "    curl -sS -o /dev/null -w \"HTTP %{http_code}\\n\" -X POST http://127.0.0.1:18789/hooks/agent \\"
 echo "      -H \"Authorization: Bearer <hooks.token>\" -H \"Content-Type: application/json\" \\"
 echo "      -d '{\"agentId\":\"prd-creator\",\"sessionKey\":\"ideas:install-check:0\",\"wakeMode\":\"now\",\"message\":\"ping\"}'"
+echo
+echo "  To run as a background service:"
+if [ "$OS_TYPE" = "Darwin" ]; then
+    echo "    macOS — install the bundled LaunchAgent:"
+    echo "      1. Edit WorkingDirectory and ProgramArguments in ui/com.autodev.ui.plist"
+    echo "      2. cp \"$AUTODEV_REPO_PATH/ui/com.autodev.ui.plist\" ~/Library/LaunchAgents/"
+    echo "      3. launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/com.autodev.ui.plist"
+    echo "      4. launchctl enable gui/\$(id -u)/com.autodev.ui"
+    echo "    Tail logs: tail -f /tmp/autodev-ui.log /tmp/autodev-ui.err"
+elif [ "$IS_WSL2" -eq 1 ]; then
+    echo "    WSL2 — enable systemd first (if not already enabled):"
+    echo "      echo '[boot]' | sudo tee -a /etc/wsl.conf && echo 'systemd=true' | sudo tee -a /etc/wsl.conf"
+    echo "      (Restart the WSL instance for systemd to take effect.)"
+    echo "    Then install the bundled systemd unit:"
+    echo "      sudo cp \"$AUTODEV_REPO_PATH/ui/autodev-ui.service\" /etc/systemd/system/"
+    echo "      sudo systemctl daemon-reload && sudo systemctl enable --now autodev-ui"
+else
+    echo "    Linux — install the bundled systemd unit:"
+    echo "      sudo cp \"$AUTODEV_REPO_PATH/ui/autodev-ui.service\" /etc/systemd/system/"
+    echo "      sudo systemctl daemon-reload && sudo systemctl enable --now autodev-ui"
+fi
 echo

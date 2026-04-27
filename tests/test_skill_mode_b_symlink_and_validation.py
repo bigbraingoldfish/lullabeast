@@ -22,14 +22,9 @@ def _manual_infra_ready() -> bool:
     """Only run when fixture dir exists and pipeline symlink points at it."""
     if not os.path.isdir(PROJECT_DIR):
         return False
-    result = subprocess.run(
-        ["readlink", "-f", PIPELINE_SYMLINK],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
+    if not os.path.lexists(PIPELINE_SYMLINK):
         return False
-    return result.stdout.strip() == os.path.realpath(PROJECT_DIR)
+    return os.path.realpath(PIPELINE_SYMLINK) == os.path.realpath(PROJECT_DIR)
 
 
 pytestmark = pytest.mark.skipif(
@@ -39,14 +34,14 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_symlink_points_to_project():
-    """readlink -f ~/.openclaw/pipeline-project equals /tmp/infra-e1-test-b"""
-    result = subprocess.run(
-        ["readlink", "-f", PIPELINE_SYMLINK],
-        capture_output=True, text=True
-    )
-    assert result.returncode == 0, f"readlink failed: {result.stderr}"
-    assert result.stdout.strip() == PROJECT_DIR, (
-        f"Expected {PROJECT_DIR}, got {result.stdout.strip()}"
+    """os.path.realpath(~/.openclaw/pipeline-project) equals realpath of PROJECT_DIR.
+
+    Compares canonicalised paths so the test works on macOS too (where /tmp is
+    itself a symlink to /private/tmp).
+    """
+    assert os.path.realpath(PIPELINE_SYMLINK) == os.path.realpath(PROJECT_DIR), (
+        f"Expected {os.path.realpath(PROJECT_DIR)}, "
+        f"got {os.path.realpath(PIPELINE_SYMLINK)}"
     )
 
 

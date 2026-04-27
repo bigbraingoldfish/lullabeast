@@ -62,7 +62,8 @@ autodev-ui/
 │   ├── config.example.json         # Template for local ui/config.json (committed)
 │   ├── config.json                 # Local overrides — gitignored; copy from config.example.json
 │   ├── requirements.txt            # fastapi, uvicorn, python-multipart, aiohttp
-│   └── autodev-ui.service          # systemd unit file
+│   ├── autodev-ui.service          # systemd unit file (Linux / WSL2)
+│   └── com.autodev.ui.plist        # macOS LaunchAgent — mirrors the systemd unit
 ├── tests/                          # UI server tests (~50 pytest files)
 ├── install.sh                      # Deployment script (10 steps, see SETUP.md)
 ├── SETUP.md                        # Human-facing setup guide
@@ -494,8 +495,7 @@ These constraints are defined in `openclaw.json` under `agents.list[].tools` and
 ## Install and Deployment
 
 ```bash
-./install.sh          # Linux only (fcntl dependency)
-./install.sh --force  # Override OS check (UI-only development on macOS)
+./install.sh          # Linux and macOS (POSIX fcntl); WSL2 supported
 ```
 
 The script writes `.env` with the canonical names only (`OPENCLAW_ROOT`, `AUTODEV_PIPELINE_ROOT`, `AUTODEV_REPO_PATH`). Legacy aliases (`AUTODEV_ROOT`, `AUTODEV_RUNTIME_ROOT`) have been removed and are ignored at runtime. Source it before running any pipeline code:
@@ -507,7 +507,11 @@ uvicorn ui.server:app --host 127.0.0.1 --port 18790
 
 The UI API has **no authentication**; prefer loopback binding. See **Security and network exposure** in [SETUP.md](SETUP.md) before using `--host 0.0.0.0`.
 
-Agent identity docs (`IDENTITY.md`, `SOUL.md`, etc.) are deployed by `install.sh` step 5 from `autodev/agents/{agent}/` into `~/.openclaw/workspace-{agent}/` using `cp -u` (no overwrite if dest is newer). The source of truth for these files is now this repo, not `~/.openclaw/workspace-*`.
+Agent identity docs (`IDENTITY.md`, `SOUL.md`, etc.) are deployed by `install.sh` step 5 from `autodev/agents/{agent}/` into `~/.openclaw/workspace-{agent}/` (skipped when destination is already newer). The source of truth for these files is now this repo, not `~/.openclaw/workspace-*`.
+
+### Service file drift guard
+
+**When you change `ui/autodev-ui.service`, also update `ui/com.autodev.ui.plist` (and vice versa).** The two declare equivalent `WorkingDirectory`, executable, restart policy, and log paths. The static-lint tests `tests/test_infra3_systemd_unit.py` and `tests/test_infra3_launchd_plist.py` enforce structural parity — a change to one that is not reflected in the other will fail CI.
 
 ---
 

@@ -16,7 +16,7 @@ for f in pipeline_queue.json pipeline_state.json; do
 done
 PP="${OPENCLAW_ROOT}/pipeline-project"
 if [[ -L "$PP" ]] || [[ -e "$PP" ]]; then
-  readlink -f "$PP" > "${OPENCLAW_ROOT}/pipeline-project.strict-freeze.${TS}.readlink" || true
+  python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$PP" > "${OPENCLAW_ROOT}/pipeline-project.strict-freeze.${TS}.readlink" || true
   echo "[ok] pipeline-project.strict-freeze.${TS}.readlink"
 else
   echo "[skip] missing $PP"
