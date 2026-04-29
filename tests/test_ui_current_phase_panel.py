@@ -230,6 +230,53 @@ def test_get_agent_attempt_dot_states_logic_anchors(html_content):
     assert "toLowerCase" in body
 
 
+def test_escalation_branch_guards_terminal_status(html_content):
+    """Escalation branch must check terminalNoBlue.has(ps) before calling completedLeg.
+
+    Root cause of HALTED_SILENT + escalation green-dot bug: when current_agent is
+    'escalation' and retries are low, completedLeg(x) was called unconditionally, putting
+    a green dot at slot x even while pipeline_status is HALTED_SILENT / BLOCKED / STOPPED.
+    Fix: guard with terminalNoBlue.has(ps) so terminal statuses use activeRow(..., false)
+    (neutral current slot) instead of green.
+    """
+    fn_start = html_content.find("function getAgentAttemptDotStates")
+    assert fn_start != -1, "getAgentAttemptDotStates not found"
+    esc_start = html_content.find("if (ca === 'escalation')", fn_start)
+    assert esc_start != -1, "escalation branch not found"
+    # End of escalation block is just before the activeIdx fall-through
+    esc_end = html_content.find("if (activeIdx < 0)", esc_start)
+    assert esc_end != -1, "escalation block end boundary not found"
+    esc_block = html_content[esc_start:esc_end]
+    assert "terminalNoBlue.has(ps)" in esc_block, (
+        "getAgentAttemptDotStates escalation branch must guard completedLeg() with "
+        "terminalNoBlue.has(ps). HALTED_SILENT + escalation + 0 retries must not "
+        "produce green dots. Add: if (terminalNoBlue.has(ps)) return activeRow(x, false);"
+        " before each return completedLeg(x) in the escalation block."
+    )
+
+
+def test_escalation_terminal_uses_active_row(html_content):
+    """Escalation branch must call activeRow(..., false) for terminal pipeline statuses.
+
+    When pipeline_status is in terminalNoBlue (HALTED_SILENT, BLOCKED, STOPPED,
+    QUEUE_HALTED, PIPELINE_COMPLETE) and current_agent is 'escalation', the dot states
+    must use activeRow(x, false) — neutral current slot, reds for failures — NOT
+    completedLeg(x) which renders green and implies success.
+    """
+    fn_start = html_content.find("function getAgentAttemptDotStates")
+    assert fn_start != -1
+    esc_start = html_content.find("if (ca === 'escalation')", fn_start)
+    assert esc_start != -1
+    esc_end = html_content.find("if (activeIdx < 0)", esc_start)
+    assert esc_end != -1
+    esc_block = html_content[esc_start:esc_end]
+    assert "activeRow(" in esc_block, (
+        "getAgentAttemptDotStates escalation branch must call activeRow(..., false) "
+        "when terminalNoBlue.has(ps) is true. Terminal halt must not emit green. "
+        "Add: if (terminalNoBlue.has(ps)) return activeRow(x, false); in the escalation block."
+    )
+
+
 def test_current_phase_panel_renders_agent_attempt_rows(html_content):
     """CurrentPhasePanel renders Agent attempts heading and AgentAttemptRow rows (L-28)."""
     assert "Agent attempts" in html_content

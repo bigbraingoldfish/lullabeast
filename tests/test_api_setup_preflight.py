@@ -332,8 +332,13 @@ class TestGitRepoCheck:
         assert git["status"] == "fail"
         assert "no commits" in git["message"].lower() or "main" in git["message"].lower()
 
-    def test_git_repo_unborn_main_branch_warns_not_fails(self, tmp_path):
-        """Unborn main/master branch should warn with initial commit guidance."""
+    def test_git_repo_unborn_main_branch_attempts_commit_fixed(self, tmp_path):
+        """Unborn main/master branch: preflight attempts initial commit → 'fixed'.
+
+        ISSUE-5: previously this case emitted 'warn' and asked the operator to
+        commit manually. Now preflight runs git add -A + git commit (mirroring the
+        fresh-init path) and emits 'git initial commit' / 'fixed' on success.
+        """
         repo_path = tmp_path / "myproject"
         repo_path.mkdir()
         openclaw = _make_openclaw_dir(tmp_path, repo_path)
@@ -359,6 +364,7 @@ class TestGitRepoCheck:
                 mock.returncode = 0
                 mock.stdout = "main\n"
                 return mock
+            # add / commit succeed (simulates ISSUE-5 fix path)
             mock.returncode = 0
             mock.stdout = ""
             return mock
@@ -368,10 +374,9 @@ class TestGitRepoCheck:
                 str(repo_path), config=_preflight_config(openclaw, repo_path)
             )
 
-        git = next(c for c in results if c["check"] == "git repo")
-        assert git["status"] == "warn"
-        assert "no commits yet" in git["message"].lower()
-        assert "commit -m 'init'" in git["message"]
+        init_check = next(c for c in results if c["check"] == "git initial commit")
+        assert init_check["status"] == "fixed"
+        assert "phase_base_commit" in init_check["message"].lower() or "head" in init_check["message"].lower()
 
     def test_git_repo_phase_only_branch_warns_when_head_has_commits(self, tmp_path):
         """Repo with commits on phase/* (no main/master) → warn, not fail."""
@@ -746,3 +751,164 @@ class TestPreflightEndpointWithSeed:
         assert (repo_path / "roadmap.md").read_text().strip() == VALID_ROADMAP_SEED.strip()
         names = [c["check"] for c in response.json()["checks"]]
         assert "roadmap seed" in names
+
+
+# ---------------------------------------------------------------------------
+# ISSUE-5: existing repo with no commits — unborn main branch
+#
+# When a .git dir already exists but the repo has zero commits (HEAD
+# does not resolve), preflight must attempt to create an initial commit
+# and report "fixed" or "fail" for the "git initial commit" check.
+# The previous behaviour of emitting "warn" is intentional for the case
+# where HEAD is absent; these tests assert the NEW behaviour and will
+# FAIL against the current code until ISSUE-5 is implemented.
+# ---------------------------------------------------------------------------
+
+
+def _unborn_main_mock(*, add_rc=0, commit_rc=0, allow_empty_rc=0):
+    """Factory for subprocess mock: existing .git, unborn main, configurable commit outcome."""
+    def _inner(cmd, **kwargs):
+        m = MagicMock()
+        m.returncode = 0
+        m.stdout = ""
+        m.stderr = ""
+        if not isinstance(cmd, list) or not cmd:
+            return m
+        # git --version
+        if cmd[0] == "git" and len(cmd) >= 2 and cmd[1] == "--version":
+            m.stdout = "git version 2.40.0\n"
+            return m
+        # branch --list main master → empty (no main/master yet)
+        if "branch" in cmd and "--list" in cmd:
+            m.stdout = ""
+            return m
+        # rev-parse --verify HEAD → fails (no commits)
+        if "rev-parse" in cmd and "--verify" in cmd and "HEAD" in cmd:
+            m.returncode = 1
+            return m
+        # symbolic-ref --short HEAD → "main" (unborn main branch)
+        if "symbolic-ref" in cmd:
+            m.stdout = "main\n"
+            return m
+        # git add -A
+        if "add" in cmd and "-A" in cmd:
+            m.returncode = add_rc
+            return m
+        # git commit --allow-empty (fallback — check before plain commit)
+        if "commit" in cmd and "--allow-empty" in cmd:
+            m.returncode = allow_empty_rc
+            return m
+        # git commit -m 'preflight: initial commit'  (first attempt)
+        if "commit" in cmd:
+            m.returncode = commit_rc
+            return m
+        return m
+    return _inner
+
+
+class TestGitUnbornMainCommitAttempt:
+    """ISSUE-5: preflight must attempt a commit for existing repos with no HEAD."""
+
+    def _make_env(self, tmp_path):
+        repo_path = tmp_path / "myproject"
+        repo_path.mkdir()
+        openclaw = _make_openclaw_dir(tmp_path, repo_path)
+        _make_gitignore(repo_path, _full_gitignore_content())
+        _make_git_repo(repo_path)
+        (repo_path / "roadmap.md").write_text(VALID_ROADMAP_SEED)
+        return repo_path, openclaw
+
+    def test_unborn_main_commit_succeeds_reports_fixed(self, tmp_path):
+        """When on unborn main with no commits, a successful commit → 'fixed'."""
+        repo_path, openclaw = self._make_env(tmp_path)
+        with patch("subprocess.run", side_effect=_unborn_main_mock(commit_rc=0)):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
+        init_check = next(
+            (c for c in results if c["check"] == "git initial commit"), None
+        )
+        assert init_check is not None, (
+            "Expected a 'git initial commit' check entry when unborn main has no commits. "
+            "Got: " + str([c["check"] for c in results])
+        )
+        assert init_check["status"] == "fixed", (
+            f"Expected status 'fixed' after successful commit, got {init_check['status']!r}. "
+            "Current code emits 'warn' — ISSUE-5 not yet implemented."
+        )
+
+    def test_unborn_main_all_commits_fail_reports_fail(self, tmp_path):
+        """When on unborn main and all commit attempts fail → 'fail' (not 'warn')."""
+        repo_path, openclaw = self._make_env(tmp_path)
+        with patch("subprocess.run", side_effect=_unborn_main_mock(
+            commit_rc=1, allow_empty_rc=1
+        )):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
+        init_check = next(
+            (c for c in results if c["check"] == "git initial commit"), None
+        )
+        assert init_check is not None, (
+            "Expected a 'git initial commit' check entry when all commits fail. "
+            "Got: " + str([c["check"] for c in results])
+        )
+        assert init_check["status"] == "fail", (
+            f"Expected status 'fail' after all commit attempts fail, got {init_check['status']!r}. "
+            "Current code emits 'warn' — ISSUE-5 not yet implemented."
+        )
+        # The old 'git repo' warn must not also appear — fix replaces it
+        git_repo_warns = [
+            c for c in results
+            if c["check"] == "git repo" and c["status"] == "warn"
+            and "no commits yet" in c.get("message", "")
+        ]
+        assert not git_repo_warns, (
+            "After ISSUE-5 fix the old 'no commits yet' warn should be replaced by "
+            f"the 'git initial commit' fail entry. Still present: {git_repo_warns}"
+        )
+
+    def test_unborn_main_allow_empty_fallback_reports_fixed(self, tmp_path):
+        """Regular commit fails (nothing to add) but --allow-empty succeeds → 'fixed'."""
+        repo_path, openclaw = self._make_env(tmp_path)
+        with patch("subprocess.run", side_effect=_unborn_main_mock(
+            commit_rc=1, allow_empty_rc=0
+        )):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
+        init_check = next(
+            (c for c in results if c["check"] == "git initial commit"), None
+        )
+        assert init_check is not None, (
+            "Expected a 'git initial commit' check when allow-empty commit succeeds."
+        )
+        assert init_check["status"] == "fixed", (
+            f"Expected 'fixed' when allow-empty commit succeeds, got {init_check['status']!r}."
+        )
+
+    def test_repo_with_commits_no_initial_commit_check(self, tmp_path):
+        """When HEAD resolves (repo has commits), no 'git initial commit' check is added."""
+        repo_path, openclaw = self._make_env(tmp_path)
+
+        def has_commits(cmd, **kwargs):
+            m = MagicMock()
+            m.returncode = 0
+            m.stdout = ""
+            m.stderr = ""
+            if not isinstance(cmd, list):
+                return m
+            if "branch" in cmd and "--list" in cmd:
+                m.stdout = "  main\n"
+                return m
+            return m
+
+        with patch("subprocess.run", side_effect=has_commits):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
+        init_checks = [c for c in results if c["check"] == "git initial commit"]
+        assert not init_checks, (
+            "No 'git initial commit' check should be added when HEAD already resolves. "
+            f"Got: {init_checks}"
+        )

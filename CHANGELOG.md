@@ -10,6 +10,28 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ### Added
 
+- **Symlink divergence guard:** `_verify_symlinks_consistent(project_path)` warns `[WARN]` before executor and reviewer webhook calls if either `pipeline-project` symlink has drifted from the active project path. Read-only diagnostic; does not abort the run. See `autodev/pipeline/orchestrator.py`, `autodev/tests/test_orchestrator_symlink_consistency.py`.
+
+- **Dead-session detection:** `_check_session_dead_on_arrival()` escalates immediately when an OpenClaw session records `runtimeMs == 0` + `stopReason == "error"` (provider rejected before any work). Applied to both executor and reviewer. See `autodev/pipeline/orchestrator.py`, `autodev/tests/test_orchestrator_dead_session.py`.
+
+### Changed
+
+- **Reviewer sentinel timeout capped at 3:** Reviewer branch now escalates to `"escalation"` agent after 3 consecutive sentinel timeouts (mirrors planner). `write_failure_context` called on every timeout so operators always see current reviewer failure data. See `autodev/pipeline/orchestrator.py`, `autodev/tests/test_orchestrator_reviewer_timeout_cap.py`.
+
+- **Reviewer idle detection:** Reviewer `poll_for_sentinel_with_idle_detect` now resolves the active session JSONL path from `sessions.json` (previously `None`), sets `idle_threshold=300`, and passes `watch_dirs=[_watch_root_for_idle_detect()]`. See `autodev/pipeline/orchestrator.py`, `autodev/tests/test_orchestrator_reviewer_sentinel.py`.
+
+- **Preflight: repo with no commits now attempts initial commit:** Both fresh-init and existing-repo paths in `_run_preflight_checks` attempt `git add -A && git commit` (falling back to `--allow-empty`) when `HEAD` is absent. Emits `"fixed"` on success, `"fail"` on failure (blocking queue-add). Prevents `ERR_MISSING_BASE_COMMIT` at pipeline start. See `ui/server.py`, `tests/test_api_setup_preflight.py`.
+
+- **Agent ladder: no green dots during terminal halt + escalation:** `getAgentAttemptDotStates` escalation branch now guards `completedLeg()` with `terminalNoBlue.has(ps)`, using `activeRow(x, false)` instead for `HALTED_SILENT` / `BLOCKED` / `STOPPED` / `QUEUE_HALTED` / `PIPELINE_COMPLETE`. Fixes misleading green slots contradicting the INTERVENTION REQUIRED pill. See `ui/index.html`, `tests/test_ui_current_phase_panel.py`.
+
+- **Merge failure reason includes stderr:** Git merge failure now captures `merge_result.stderr` and uses it as the escalation transition reason instead of a static string. See `autodev/pipeline/orchestrator.py`, `autodev/tests/test_orchestrator_merge_stderr.py`.
+
+- **Reviewer model:** Updated from Qwen3.5-27B (llama-server) to MiniMax M2.7 via OpenRouter. See `autodev/agents/reviewer/IDENTITY.md`.
+
+- **Spec drift fixed:** `PIPELINE-SPEC.md` §ERR_UNACCOUNTED_DELETION corrected — `phase_base_commit` absent is fail-closed (`ERR_MISSING_BASE_COMMIT`), not a skipped warning. `CLAUDE.md` operational constants updated: executor sentinel 1200 s, reviewer 600 s, idle threshold 300 s.
+
+### Added
+
 - **Chat UI Milestone 4 (UI-8, UI-9):** **Hover card** — `ReactDOM.createPortal` to `document.body`, **320 ms** show delay, **100 ms** dismiss bridge (row → card), `data-idea-hover-row` + scroll/resize sync for `top`; card shows summary or **“New project — no documentation yet.”** (em dash), **PRD Readiness** bar row (tier-colored bar + `N/10`, or em dash when score null), **PRD** / **Roadmap** rows with outline SVG icons and **✓** / **—** states. **Inline list badges** — `readiness_score` as **`N/10`** (`text-[10px]`, emerald ≥8 / amber 5–7 / red &lt;5), omitted when null. **UI-9:** removed **Assessing…** and header **score** from the Ideas chat header (PRD tab body readiness unchanged). Tests: [`tests/test_ui_hover_card.py`](tests/test_ui_hover_card.py), [`tests/test_ui_chat_header_score.py`](tests/test_ui_chat_header_score.py), [`tests/test_ui_m3_frontend.py`](tests/test_ui_m3_frontend.py). See [`ui/index.html`](ui/index.html), [`plans/Active/chat-ui-enhancement-roadmap.md`](plans/Active/chat-ui-enhancement-roadmap.md).
 
 - **Chat UI Milestone 3 (UI-6, UI-7):** `GET /api/ideas` list items now include **`readiness_score`** (from per-idea `readiness.json`, integer or `null` on missing/malformed), **`has_prd`**, and **`has_roadmap`** (from `session.json` content, non-empty after strip). **Chats rail:** expanded nav column **`w-[240px]`** (was 220px), project list uses **`.sidebar-scroll`** (`overflow-y: overlay` + auto-hide WebKit thumb until hover). Inline list score display ships in **Milestone 4 (UI-8)** on top of this API. Tests: [`tests/test_api_ideas_list.py`](tests/test_api_ideas_list.py), [`tests/test_ui_m3_frontend.py`](tests/test_ui_m3_frontend.py); sidebar mirror updated in [`tests/test_ui_sidebar_collapse.py`](tests/test_ui_sidebar_collapse.py). See [`ui/server.py`](ui/server.py) (`get_ideas`), [`ui/index.html`](ui/index.html), [`plans/Active/chat-ui-enhancement-roadmap.md`](plans/Active/chat-ui-enhancement-roadmap.md).

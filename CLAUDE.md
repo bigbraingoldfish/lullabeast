@@ -458,8 +458,9 @@ These values appear throughout the codebase. Do not change them without understa
 
 | Constant | Value | Where it matters |
 |----------|-------|-----------------|
-| Sentinel timeout | 600 seconds | `poll_for_sentinel_with_idle_detect(timeout=600)` |
-| Idle threshold | 120 seconds | `idle_threshold=120` — with `watch_dirs` active |
+| Executor sentinel timeout | 1200 seconds | `poll_for_sentinel_with_idle_detect(timeout_seconds=1200)` — executor branch |
+| Reviewer sentinel timeout | 600 seconds | `poll_for_sentinel_with_idle_detect(timeout_seconds=600)` — reviewer branch; caps at 3 timeouts then escalates |
+| Idle threshold | 300 seconds | `idle_threshold=300` — both executor and reviewer; `watch_dirs=[_watch_root_for_idle_detect()]` |
 | Heartbeat cron interval | 30 minutes | `cron/jobs.json`, `heartbeat_cron.py` |
 | Pipeline lock file | `pipeline.lock` | `fcntl.flock`, advisory, exclusive |
 | SSE heartbeat | 15 seconds | `/api/events/stream` keep-alive |

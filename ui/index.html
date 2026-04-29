@@ -662,16 +662,22 @@
             if (ca === 'escalation') {
                 if (agentRole === 'planner') {
                     if (p >= 3) return threeRed();
+                    // Terminal halt (HALTED_SILENT, BLOCKED, STOPPED, …) must not emit
+                    // green — use neutral current slot so the ladder reads "interrupted",
+                    // not "successful pass through this agent".
+                    if (terminalNoBlue.has(ps)) return activeRow(p, false);
                     return completedLeg(p);
                 }
                 if (agentRole === 'executor') {
                     if (p >= 3) return slotStates();
                     if (e >= 3) return threeRed();
+                    if (terminalNoBlue.has(ps)) return activeRow(e, false);
                     return completedLeg(e);
                 }
                 if (agentRole === 'reviewer') {
                     if (p >= 3 || e >= 3) return slotStates();
                     if (rev >= 3) return threeRed();
+                    if (terminalNoBlue.has(ps)) return activeRow(rev, false);
                     return completedLeg(rev);
                 }
             }
