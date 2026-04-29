@@ -43,6 +43,62 @@ PHASE_STATE_FILE = os.path.join(PROJECT_ARTIFACTS_DIR, "phase_state.json")
 ORCHESTRATOR_FILENAME = "orchestrator.py"
 
 
+def _watch_root_for_idle_detect() -> str:
+    """Resolved project root for ``sentinel_poller`` file-mtime idle detection.
+
+    ``poll_for_sentinel_with_idle_detect`` uses ``watch_dirs`` to reset the idle
+    clock when the executor writes project files. Watching ``os.path.realpath``
+    of the pipeline-project symlink ensures activity under the real checkout is
+    observed consistently (symlink path alone can miss updates on some setups).
+    """
+    try:
+        if os.path.lexists(SYMLINK_TARGET):
+            return os.path.realpath(SYMLINK_TARGET)
+    except OSError:
+        pass
+    return SYMLINK_TARGET
+
+
+def _verify_symlinks_consistent(project_path: str) -> bool:
+    """Warn if either pipeline-project symlink diverges from project_path.
+
+    Both AUTODEV_PIPELINE_ROOT/pipeline-project (polled by orchestrator for
+    sentinel files) and OPENCLAW_ROOT/pipeline-project (followed by agent
+    workspace symlinks when writing output) must resolve to the same real
+    directory as the active project.  If they diverge — which can happen when
+    an operator manually runs `ln -sfn` during recovery and only updates one —
+    the executor writes sentinels to a different tree than the orchestrator
+    polls, causing infinite retries.
+
+    This function is READ-ONLY: it only logs a warning and returns False.
+    Callers are responsible for keeping symlinks in sync via update_symlink().
+    """
+    target = os.path.abspath(project_path)
+    openclaw_symlink = os.path.join(OPENCLAW_ROOT, "pipeline-project")
+    issues = []
+    for label, path in (
+        ("AUTODEV pipeline-project", SYMLINK_TARGET),
+        ("OPENCLAW pipeline-project", openclaw_symlink),
+    ):
+        try:
+            resolved = os.path.realpath(path) if os.path.lexists(path) else None
+        except OSError as exc:
+            issues.append(f"{label}: OSError resolving {path!r}: {exc}")
+            continue
+        if resolved != target:
+            issues.append(
+                f"{label}: {path!r} → {resolved!r} (expected {target!r})"
+            )
+    if issues:
+        print(
+            "[WARN] Symlink inconsistency detected before agent invocation — "
+            "sentinel files may land in wrong directory:\n"
+            + "\n".join(f"  {i}" for i in issues)
+        )
+        return False
+    return True
+
+
 def _validate_openclaw_root(root: str) -> None:
     """Validate OPENCLAW_ROOT and required workspace directories at startup.
 
@@ -224,6 +280,35 @@ def _detect_base_branch(directory: str) -> str:
         return configured_branch
 
     return "main"
+
+
+def _check_session_dead_on_arrival(sessions_json_path: str, full_key: str):
+    """Return (is_dead, error_message) for an OpenClaw session entry.
+
+    Dead-on-arrival = session exists with runtimeMs == 0 AND stopReason == "error".
+    This pattern occurs when the underlying provider rejects the request before
+    the session does any work (e.g. 402 Payment Required, auth failure). The
+    session is registered, terminates immediately, and waiting for sentinel
+    output would just burn the idle threshold.
+
+    A session with non-zero runtimeMs that ends in error is a real failure and
+    should go through the normal sentinel path so its output (if any) is gated.
+    """
+    try:
+        with open(sessions_json_path, "r") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return False, ""
+
+    entry = data.get(full_key)
+    if not isinstance(entry, dict):
+        return False, ""
+
+    runtime_ms = entry.get("runtimeMs")
+    stop_reason = entry.get("stopReason")
+    if runtime_ms == 0 and stop_reason == "error":
+        return True, str(entry.get("errorMessage", "") or "")
+    return False, ""
 
 
 class Orchestrator:
@@ -2300,6 +2385,7 @@ class Orchestrator:
                     self.state["sentinel_wait_started_at"] = datetime.now(timezone.utc).isoformat()
                     self.transition_state("WAITING_FOR_SENTINEL", f"Invoking Executor ({attempt_label}) - Attempt {retries + 1}")
 
+                    _verify_symlinks_consistent(self.state.get("project_path", ""))
                     webhook_status = invoke_agent_webhook("executor", session_key, token, model=model)
 
                     if webhook_status != "SUCCESS":
@@ -2317,7 +2403,8 @@ class Orchestrator:
                     _jsonl_path = None
                     for _ in range(15):  # up to 30s
                         try:
-                            _sd = json.load(open(_sessions_json))
+                            with open(_sessions_json) as _sf:
+                                _sd = json.load(_sf)
                             _sid = _sd.get(_full_key, {}).get("sessionId")
                             if _sid:
                                 _jsonl_path = os.path.join(_sessions_dir, f"{_sid}.jsonl")
@@ -2326,10 +2413,26 @@ class Orchestrator:
                             pass
                         time.sleep(2)
 
+                    _is_dead, _dead_msg = _check_session_dead_on_arrival(_sessions_json, _full_key)
+                    if _is_dead:
+                        print(f"[ERROR] [EXECUTOR] Session dead on arrival: {_dead_msg}")
+                        _ps_dead = self.read_phase_state()
+                        _ps_dead["last_error_code"] = "ERR_SESSION_DEAD_ON_ARRIVAL"
+                        _ps_dead["escalation_trigger_reason"] = (
+                            f"Executor session terminated immediately (provider rejected): {_dead_msg}"
+                        )
+                        self.write_phase_state_atomic(_ps_dead)
+                        self.state["current_agent"] = "escalation"
+                        self.transition_state(
+                            "RUNNING",
+                            f"ERR_SESSION_DEAD_ON_ARRIVAL: {_dead_msg}",
+                        )
+                        continue
+
                     _stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
                     sentinel_found = poll_for_sentinel_with_idle_detect(
                         sentinel_path, _jsonl_path, timeout_seconds=1200,
-                        watch_dirs=[SYMLINK_TARGET],
+                        watch_dirs=[_watch_root_for_idle_detect()],
                         min_sentinel_mtime=_attempt_start_time,
                         stop_sentinel_path=_stop_file,
                         idle_threshold=300,  # MiniMax M2.7 can take 2-3 min to generate large responses
@@ -2404,6 +2507,7 @@ class Orchestrator:
                     self.state["sentinel_wait_started_at"] = datetime.now(timezone.utc).isoformat()
                     self.transition_state("WAITING_FOR_SENTINEL", f"Invoking Reviewer - Attempt {retries + 1}")
 
+                    _verify_symlinks_consistent(self.state.get("project_path", ""))
                     webhook_status = invoke_agent_webhook("reviewer", session_key, token, model=self._get_agent_model("reviewer"))
 
                     if webhook_status != "SUCCESS":
@@ -2413,18 +2517,74 @@ class Orchestrator:
                         time.sleep(5)
                         continue
 
+                    # Resolve the active reviewer session JSONL for idle detection.
+                    # Mirrors the executor pattern (sessions.json may take a few seconds
+                    # to be updated by the gateway).
+                    _rev_sessions_dir = os.path.join(OPENCLAW_ROOT, "agents", "reviewer", "sessions")
+                    _rev_sessions_json = os.path.join(_rev_sessions_dir, "sessions.json")
+                    _rev_full_key = f"agent:reviewer:{session_key}".lower()
+                    _jsonl_path = None
+                    for _ in range(15):  # up to 30s
+                        try:
+                            with open(_rev_sessions_json) as _sf:
+                                _sd = json.load(_sf)
+                            _sid = _sd.get(_rev_full_key, {}).get("sessionId")
+                            if _sid:
+                                _jsonl_path = os.path.join(_rev_sessions_dir, f"{_sid}.jsonl")
+                                break
+                        except Exception:
+                            pass
+                        time.sleep(2)
+
+                    _is_dead, _dead_msg = _check_session_dead_on_arrival(_rev_sessions_json, _rev_full_key)
+                    if _is_dead:
+                        print(f"[ERROR] [REVIEWER] Session dead on arrival: {_dead_msg}")
+                        _ps_dead = self.read_phase_state()
+                        _ps_dead["last_error_code"] = "ERR_SESSION_DEAD_ON_ARRIVAL"
+                        _ps_dead["escalation_trigger_reason"] = (
+                            f"Reviewer session terminated immediately (provider rejected): {_dead_msg}"
+                        )
+                        self.write_phase_state_atomic(_ps_dead)
+                        self.state["current_agent"] = "escalation"
+                        self.transition_state(
+                            "RUNNING",
+                            f"ERR_SESSION_DEAD_ON_ARRIVAL: {_dead_msg}",
+                        )
+                        continue
+
                     _stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
                     sentinel_found = poll_for_sentinel_with_idle_detect(
-                        sentinel_path, None,
+                        sentinel_path, _jsonl_path,
                         timeout_seconds=600,
-                        watch_dirs=[SYMLINK_TARGET],
+                        watch_dirs=[_watch_root_for_idle_detect()],
                         min_sentinel_mtime=_attempt_start_time,
                         stop_sentinel_path=_stop_file,
+                        idle_threshold=300,  # match executor: long gaps between tool/LLM events
                     )
                     
                     if not sentinel_found:
                         print("[ERROR] Sentinel timeout")
-                        self.increment_reviewer_retries()
+                        _rv_retries = self.increment_reviewer_retries()
+                        # Finding E: write failure context on every timeout so operators
+                        # and the escalation agent see current state, not stale executor data.
+                        # Use _rv_retries (post-increment return value) not state.get() to
+                        # avoid a stale read if state write races with the next loop iteration.
+                        self.write_failure_context(
+                            "reviewer",
+                            _rv_retries,
+                        )
+                        # Finding D: cap at 3 sentinel timeouts → escalation.
+                        # Mirrors the planner's retries >= 3 guard (~line 2220).
+                        # Uses the return value of increment_reviewer_retries() to
+                        # avoid a re-read race with the phase_state write inside that call.
+                        if _rv_retries >= 3:
+                            self.state["current_agent"] = "escalation"
+                            self.transition_state(
+                                "RUNNING",
+                                f"Reviewer sentinel timeout cap reached ({_rv_retries}): "
+                                "reviewer produced no output after 3 attempts",
+                            )
+                            time.sleep(5)
                         continue
 
                     gate_result = self.run_reviewer_output_gate()
@@ -2478,9 +2638,14 @@ class Orchestrator:
                             )
 
                             if merge_result.returncode != 0:
-                                print(f"[ERROR] Merge conflict on phase {phase}.")
+                                _merge_stderr = (merge_result.stderr or b"").decode(errors="replace").strip()
+                                _merge_reason = _merge_stderr or "git merge failed (no stderr)"
+                                print(f"[ERROR] git merge failed on phase {phase}: {_merge_reason}")
                                 self.state["current_agent"] = "escalation"
-                                self.transition_state("RUNNING", f"Merge conflict on Phase {phase}")
+                                self.transition_state(
+                                    "RUNNING",
+                                    f"Phase {phase} merge failed: {_merge_reason}",
+                                )
                                 time.sleep(5)
                                 continue
 

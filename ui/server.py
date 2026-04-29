@@ -5597,6 +5597,59 @@ def _run_preflight_checks(repo_path: str, config: dict | None = None) -> list:
                 "status": "fixed",
                 "message": "Initialized git repository (branch main)",
             })
+            # Fresh init has no objects yet — HEAD does not exist until the first commit.
+            # Executor gate reads phase_base_commit from pipeline_state (filled by orchestrator
+            # from git rev-parse HEAD); without any commit, ERR_MISSING_BASE_COMMIT breaks the
+            # phase. Previously we skipped the HEAD verification block below because
+            # did_fresh_init is True — so preflight could report success with zero commits.
+            _head_ok = subprocess.run(
+                ["git", "-C", repo_path, "rev-parse", "--verify", "HEAD"],
+                capture_output=True,
+                text=True,
+            )
+            if _head_ok.returncode != 0:
+                subprocess.run(
+                    ["git", "-C", repo_path, "add", "-A"],
+                    capture_output=True,
+                    text=True,
+                )
+                _cmt = subprocess.run(
+                    ["git", "-C", repo_path, "commit", "-m", "preflight: initial commit"],
+                    capture_output=True,
+                    text=True,
+                )
+                if _cmt.returncode != 0:
+                    _cmt = subprocess.run(
+                        [
+                            "git",
+                            "-C",
+                            repo_path,
+                            "commit",
+                            "--allow-empty",
+                            "-m",
+                            "preflight: initial empty commit",
+                        ],
+                        capture_output=True,
+                        text=True,
+                    )
+                if _cmt.returncode == 0:
+                    checks.append({
+                        "check": "git initial commit",
+                        "status": "fixed",
+                        "message": (
+                            "Created initial commit so git HEAD exists "
+                            "(required for executor gate / phase_base_commit)."
+                        ),
+                    })
+                else:
+                    checks.append({
+                        "check": "git initial commit",
+                        "status": "fail",
+                        "message": (
+                            "Git repo has no commits; executor gate will fail. "
+                            f"stderr: {(_cmt.stderr or '')[:300]}"
+                        ),
+                    })
         except (subprocess.CalledProcessError, OSError) as exc:
             stderr = getattr(exc, "stderr", None)
             if stderr is not None and isinstance(stderr, bytes):
@@ -5652,12 +5705,45 @@ def _run_preflight_checks(repo_path: str, config: dict | None = None) -> list:
                 )
                 current_branch = (sym.stdout or "").strip()
                 if current_branch in ("main", "master"):
-                    checks.append({"check": "git repo", "status": "warn",
-                                    "message": (
-                                        f"Git repo is on '{current_branch}' but has no commits yet. "
-                                        f"Make an initial commit before launching the pipeline. "
-                                        f"Run: git -C {repo_path} add -A && git -C {repo_path} commit -m 'init'"
-                                    )})
+                    # ISSUE-5: existing repo on main/master but no commits yet.
+                    # Attempt to create an initial commit so HEAD resolves and
+                    # phase_base_commit can be set by the orchestrator on startup.
+                    # Mirrors the fresh-init commit block above.
+                    subprocess.run(
+                        ["git", "-C", repo_path, "add", "-A"],
+                        capture_output=True, text=True,
+                    )
+                    _cmt = subprocess.run(
+                        ["git", "-C", repo_path, "commit",
+                         "-m", "preflight: initial commit"],
+                        capture_output=True, text=True,
+                    )
+                    if _cmt.returncode != 0:
+                        _cmt = subprocess.run(
+                            ["git", "-C", repo_path, "commit",
+                             "--allow-empty",
+                             "-m", "preflight: initial empty commit"],
+                            capture_output=True, text=True,
+                        )
+                    if _cmt.returncode == 0:
+                        checks.append({
+                            "check": "git initial commit",
+                            "status": "fixed",
+                            "message": (
+                                "Created initial commit so git HEAD exists "
+                                "(required for executor gate / phase_base_commit)."
+                            ),
+                        })
+                    else:
+                        checks.append({
+                            "check": "git initial commit",
+                            "status": "fail",
+                            "message": (
+                                "Git repo has no commits and commit attempt failed; "
+                                "executor gate will fail with ERR_MISSING_BASE_COMMIT. "
+                                f"stderr: {(_cmt.stderr or '')[:300]}"
+                            ),
+                        })
                 else:
                     checks.append({"check": "git repo", "status": "fail",
                                     "message": (
