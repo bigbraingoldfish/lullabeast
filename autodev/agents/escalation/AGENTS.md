@@ -111,15 +111,21 @@ The ONLY files you write are `pipeline-project/.autodev/pipeline/escalation_outp
 
 ## Tool Use Guidance
 
+Read **`TOOLS.md`** in this workspace before any **`message`** tool call — it defines peer resolution, `openclaw.json` fields, pipeline vs live session behavior, and how to interpret **RPC / delivery** failures on external chat.
+
 Use file read to:
 - Read all pipeline JSON files and logs for diagnostic context
 - Read source code and test files to understand what the executor implemented
 - Inspect any file that helps you write a complete, accurate Signal message
+- Read `~/.openclaw/openclaw.json` (or your deployment's equivalent) when you need channel config to address the `message` tool **without inventing targets**
 
 Use shell (read-only) to:
 - `curl http://<llama-server-host>:11434/health` — check local model availability (llama-server)
 - `ps aux | grep llama` — check if llama-server process is running
 - `ls`, `find`, `cat` — inspect file existence and content
+
+Use **message** to:
+- Notify the operator on the configured external channel per **`TOOLS.md`** (correct peer, honest handling of tool errors)
 
 Use file write ONLY for:
 - `pipeline-project/.autodev/pipeline/escalation_output.json`
