@@ -856,19 +856,22 @@
         function ElapsedTimer({
             lastActionTimestamp,
             sentinelWaitStartedAt,
+            waitingForHumanAt,
             orchestratorAlive,
             pipeline_status,
         }) {
             const [elapsed, setElapsed] = useState(0);
             const tickAnchor =
-                pipeline_status === "WAITING_FOR_SENTINEL" && sentinelWaitStartedAt
+                pipeline_status === "WAITING_FOR_HUMAN"
+                    ? (waitingForHumanAt || null)
+                    : pipeline_status === "WAITING_FOR_SENTINEL" && sentinelWaitStartedAt
                     ? sentinelWaitStartedAt
                     : lastActionTimestamp;
             const orchestratorDown =
                 orchestratorAlive === false &&
                 (pipeline_status === "RUNNING" || pipeline_status === "WAITING_FOR_SENTINEL");
             useEffect(() => {
-                if (!tickAnchor || pipeline_status === "WAITING_FOR_HUMAN") return;
+                if (!tickAnchor) return;
                 const startTime = new Date(tickAnchor).getTime();
                 const tick = () => setElapsed(Math.floor((Date.now() - startTime) / 1000));
                 tick();
@@ -878,7 +881,6 @@
                 const interval = setInterval(tick, 1000);
                 return () => clearInterval(interval);
             }, [tickAnchor, pipeline_status, orchestratorDown]);
-            if (pipeline_status === "WAITING_FOR_HUMAN") return null;
             if (!tickAnchor) return null;
             const isOverdue = pipeline_status === "WAITING_FOR_SENTINEL" && elapsed > 300;
             const colorClass = isOverdue ? "text-amber-400" : "text-slate-400";
@@ -1781,6 +1783,7 @@
             metricsSummary,
             escalation_resets,
             last_action,
+            waiting_for_human_at,
             onResumeSent,
             onResumeOrchestratorResponse,
         }) {
@@ -1835,6 +1838,7 @@
                         <ElapsedTimer
                             lastActionTimestamp={last_action_timestamp}
                             sentinelWaitStartedAt={sentinel_wait_started_at}
+                            waitingForHumanAt={waiting_for_human_at}
                             orchestratorAlive={orchestrator_alive}
                             pipeline_status={pipeline_status}
                         />
@@ -7373,6 +7377,7 @@
                                 metricsSummary={metricsSummary}
                                 escalation_resets={pState.escalation_resets || 0}
                                 last_action={pState.last_action}
+                                waiting_for_human_at={pState.waiting_for_human_at}
                                 onResumeSent={fetchState}
                                 onResumeOrchestratorResponse={applyResumeOrchestratorClientResult}
                             />
