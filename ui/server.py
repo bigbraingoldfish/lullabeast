@@ -6502,6 +6502,7 @@ def get_queue_entry_snapshot(entry_id: str):
         "name": entry.get("name"),
         "project_path": project_path,
         "state": entry.get("state"),
+        "started_at": entry.get("started_at"),
         "preflight_validated_at": entry.get("preflight_validated_at"),
         "phases_total": phases_total,
         "phases_complete": phases_complete,
