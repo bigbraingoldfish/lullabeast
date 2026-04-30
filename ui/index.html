@@ -1826,6 +1826,11 @@
                             {current_phase_raw_id}
                         </span>
                         <AgentBadge agent={current_agent} />
+                        {escalation_resets > 0 && (
+                            <span className="header-text text-xs px-1.5 py-0.5 rounded bg-orange-900/50 text-orange-300 border border-orange-700/40">
+                                Reset ×{escalation_resets}
+                            </span>
+                        )}
                         <ElapsedTimer
                             lastActionTimestamp={last_action_timestamp}
                             sentinelWaitStartedAt={sentinel_wait_started_at}
