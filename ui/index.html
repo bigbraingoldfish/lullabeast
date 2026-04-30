@@ -6093,6 +6093,14 @@
                             {selected.started_at && <span className="header-text text-xs text-slate-500">Started {relTime(selected.started_at)}</span>}
                             {selected.completed_at && <span className="header-text text-xs text-slate-500">Done {relTime(selected.completed_at)}</span>}
                         </div>
+                        {selected.state === 'DEPENDENCY_HOLD' && (
+                            <p className="header-text text-xs text-slate-400">
+                                Waiting for: {parentEntry ? parentEntry.name : '(parent not found)'}
+                                {parentEntry && (
+                                    <span className="text-slate-500"> — {parentEntry.live_pipeline_status || parentEntry.state}</span>
+                                )}
+                            </p>
+                        )}
                         {selected.skip_count > 0 && (
                             <p className="header-text text-xs text-orange-400">↩ Skipped {selected.skip_count} time{selected.skip_count !== 1 ? 's' : ''}</p>
                         )}
