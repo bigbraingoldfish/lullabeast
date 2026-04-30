@@ -1,13 +1,28 @@
-import time
-import requests
 import logging
+import os
+import time
+
+import requests
 
 # Workspace-relative prefix agents must use for pipeline artifacts (matches PROJECT_ARTIFACTS_DIR /
 # .autodev/pipeline on the resolved pipeline-project symlink target).
 _PIPELINE_ARTIFACTS = "pipeline-project/.autodev/pipeline"
 
+# OpenClaw POST /hooks/agent accepts optional "thinking" (docs.openclaw.ai/webhook). MiniMax on
+# OpenClaw's Anthropic-compatible path defaults to thinking disabled unless set here or in config.
+_PIPELINE_WEBHOOK_AGENTS_THINKING = frozenset({"planner", "executor", "reviewer"})
+DEFAULT_PIPELINE_THINKING_LEVEL = "medium"
 
-def invoke_agent_webhook(agent_id: str, session_key: str, token: str, wake_mode: str = "now", model: str = None, message: str = None):
+
+def invoke_agent_webhook(
+    agent_id: str,
+    session_key: str,
+    token: str,
+    wake_mode: str = "now",
+    model: str = None,
+    message: str = None,
+    thinking: str | None = None,
+):
     # Enqueue-only semantics: OpenClaw returns HTTP 200 when the agent task has been
     # queued, NOT when it has been executed.  Any 2xx after raise_for_status() means
     # "successfully enqueued" — not "successfully completed".  Do not inspect the
@@ -45,7 +60,17 @@ def invoke_agent_webhook(agent_id: str, session_key: str, token: str, wake_mode:
     }
     if model:
         payload["model"] = model
-    
+
+    if thinking is not None:
+        if thinking.strip():
+            payload["thinking"] = thinking.strip()
+    elif agent_id in _PIPELINE_WEBHOOK_AGENTS_THINKING:
+        level = (
+            os.environ.get("AUTODEV_PIPELINE_THINKING", DEFAULT_PIPELINE_THINKING_LEVEL) or ""
+        ).strip()
+        if level:
+            payload["thinking"] = level
+
     # Inner retry loop: 3 attempts, 30s backoff for INFRA failures only
     for attempt in range(1, 4):
         try:

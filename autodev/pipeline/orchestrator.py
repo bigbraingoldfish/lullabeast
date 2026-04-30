@@ -311,6 +311,78 @@ def _check_session_dead_on_arrival(sessions_json_path: str, full_key: str):
     return False, ""
 
 
+def _sum_session_tokens(jsonl_path) -> dict:
+    """W1-G: Sum token usage from an OpenClaw session JSONL file.
+
+    Filters for type=="message", role=="assistant" rows and sums usage fields.
+    Returns a zero dict on any error (None path, missing file, parse failure).
+    Mirrors _check_session_dead_on_arrival() pattern — module-level, independently testable.
+    """
+    zeros = {
+        "input": 0, "output": 0, "cache_read": 0,
+        "cache_write": 0, "total_tokens": 0, "cost_total": 0.0,
+    }
+    if not jsonl_path:
+        print("[W1G] WARN: jsonl_path is None — returning zeros")
+        return dict(zeros)
+    if not os.path.exists(jsonl_path):
+        print(f"[W1G] WARN: session JSONL not found: {jsonl_path}")
+        return dict(zeros)
+    result = dict(zeros)
+    try:
+        with open(jsonl_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                    if row.get("type") == "message" and row.get("role") == "assistant":
+                        u = row.get("usage", {}) or {}
+                        result["input"]        += u.get("input", 0)
+                        result["output"]       += u.get("output", 0)
+                        result["cache_read"]   += u.get("cacheRead", 0)
+                        result["cache_write"]  += u.get("cacheWrite", 0)
+                        result["total_tokens"] += u.get("totalTokens", 0)
+                        cost = u.get("cost", {}) or {}
+                        result["cost_total"]   += cost.get("total", 0.0)
+                except (ValueError, AttributeError):
+                    pass
+    except OSError as e:
+        print(f"[W1G] WARN: could not read {jsonl_path}: {e}")
+    return result
+
+
+def _write_pipeline_event(event_type: str, phase: str, agent: str, detail_dict) -> None:
+    """W1-F: Append one structured event line to AUTODEV_PIPELINE_ROOT/pipeline_events.jsonl.
+
+    Non-blocking: any OSError is printed and swallowed.  The UI SSE stream tails this
+    file when present, making events durable across server restarts with no UI changes.
+    Schema: {"ts", "event", "project", "phase", "agent", "detail"}
+    """
+    try:
+        # Resolve the active project name from the pipeline-project symlink.
+        _project = ""
+        try:
+            if os.path.lexists(SYMLINK_TARGET):
+                _project = os.path.basename(os.path.realpath(SYMLINK_TARGET))
+        except Exception:
+            pass
+        path = os.path.join(AUTODEV_PIPELINE_ROOT, "pipeline_events.jsonl")
+        entry = {
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "event": event_type,
+            "project": _project,
+            "phase": phase,
+            "agent": agent,
+            "detail": detail_dict or {},
+        }
+        with open(path, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError as e:
+        print(f"[WARN] _write_pipeline_event({event_type}): {e}")
+
+
 class Orchestrator:
     def __init__(self):
         self.lock_fd = None
@@ -1749,6 +1821,44 @@ class Orchestrator:
         _record_blame_attribution("impl")
         return {"blame": "impl", "reason": f"[L3] {_r}"}
 
+    def _append_failure_history(self, failure_context_path: str) -> None:
+        """W1-D: Append old failure_context.json content to failure_history.jsonl before overwrite.
+
+        Reads phase_state for last_error_code and escalation_trigger_reason (both optional).
+        Uses O_APPEND — not atomic-rename — since this is an accumulating log, not a
+        single-value file.  Non-blocking: any OSError is printed and swallowed.
+        """
+        if not os.path.exists(failure_context_path):
+            return
+        try:
+            with open(failure_context_path, "r") as f:
+                old_context = json.load(f)
+        except (OSError, ValueError):
+            return
+
+        ps = {}
+        try:
+            if os.path.exists(PHASE_STATE_FILE):
+                with open(PHASE_STATE_FILE, "r") as f:
+                    ps = json.load(f)
+        except (OSError, ValueError):
+            pass
+
+        entry = {
+            **old_context,
+            "last_error_code": ps.get("last_error_code"),
+            "escalation_trigger_reason": ps.get("escalation_trigger_reason"),
+            "appended_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+
+        history_path = os.path.join(PROJECT_ARTIFACTS_DIR, "failure_history.jsonl")
+        try:
+            os.makedirs(PROJECT_ARTIFACTS_DIR, exist_ok=True)
+            with open(history_path, "a") as f:
+                f.write(json.dumps(entry) + "\n")
+        except OSError as e:
+            print(f"[WARN] _append_failure_history: {e}")
+
     def write_failure_context(self, failing_agent: str, attempt_number: int) -> None:
         """Write failure_context.json atomically under PROJECT_ARTIFACTS_DIR.
 
@@ -1872,6 +1982,7 @@ class Orchestrator:
         try:
             with os.fdopen(fd, 'w') as f:
                 json.dump(context, f, indent=2)
+            self._append_failure_history(_failure_context_path)  # W1-D: archive before overwrite
             os.replace(temp_path, _failure_context_path)
             print(
                 f"[INFO] write_failure_context: wrote failure_context.json "
@@ -2109,7 +2220,10 @@ class Orchestrator:
                     cleanup_output_files(PROJECT_ARTIFACTS_DIR, "escalation")
                 _ps = self.read_phase_state()
                 _ps["escalation_trigger_reason"] = failure_context
+                _ps["escalations"] = _ps.get("escalations", 0) + 1  # W1-B
+                _ps["waiting_for_human_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # W1-E
                 self.write_phase_state_atomic(_ps)
+                _write_pipeline_event("escalation_trigger", raw_id, "escalation", {"reason": _ps.get("escalation_trigger_reason")})  # W1-F
                 self.transition_state("WAITING_FOR_HUMAN", "Invoking Escalation Agent: repo init check failed")
                 self._queue_park_active_entry("ESCALATION", "escalation")
                 # Note: park-and-advance is not applied here — the next queued project must pass
@@ -2233,7 +2347,32 @@ class Orchestrator:
 
                     _stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
                     sentinel_found = poll_for_sentinel(sentinel_path, timeout_seconds=600, stop_sentinel_path=_stop_file)
-                    
+
+                    # W1-G: Resolve planner session JSONL path and capture token usage.
+                    # Mirrors executor/reviewer 15-retry lookup pattern — registry may lag sentinel.
+                    _planner_sessions_dir = os.path.join(OPENCLAW_ROOT, "agents", "planner", "sessions")
+                    _planner_sessions_json = os.path.join(_planner_sessions_dir, "sessions.json")
+                    _planner_full_key = f"agent:planner:{session_key}".lower()
+                    _planner_jsonl_path = None
+                    for _ in range(15):
+                        try:
+                            with open(_planner_sessions_json) as _sf:
+                                _sd = json.load(_sf)
+                            _sid = _sd.get(_planner_full_key, {}).get("sessionId")
+                            if _sid:
+                                _planner_jsonl_path = os.path.join(_planner_sessions_dir, f"{_sid}.jsonl")
+                                break
+                        except Exception:
+                            pass
+                        time.sleep(2)
+                    _planner_tokens = _sum_session_tokens(_planner_jsonl_path)
+                    _ps_plan_tok = self.read_phase_state()
+                    _planner_tokens_acc = _ps_plan_tok.get("planner_tokens_acc", {})
+                    for _k, _v in _planner_tokens.items():
+                        _planner_tokens_acc[_k] = _planner_tokens_acc.get(_k, 0) + _v
+                    _ps_plan_tok["planner_tokens_acc"] = _planner_tokens_acc
+                    self.write_phase_state_atomic(_ps_plan_tok)
+
                     if not sentinel_found:
                         print("[ERROR] Sentinel timeout")
                         retries = self.increment_planner_retries()
@@ -2254,6 +2393,7 @@ class Orchestrator:
                             continue
                         else:
                             print("[ERROR] Planner gate failed")
+                            _write_pipeline_event("gate_fail", raw_id, "planner", {"exit_code": 1})  # W1-F
                             self.write_failure_context("planner", self.state.get("planner_retries", 0) + 1)
                             retries = self.increment_planner_retries()
                             
@@ -2308,6 +2448,7 @@ class Orchestrator:
                             except Exception:
                                 pass
                         phase_state["blame_context"] = blame_result.get("reason", "")
+                        phase_state["blame_fires"] = phase_state.get("blame_fires", 0) + 1  # W1-A
                         try:
                             os.makedirs(PROJECT_ARTIFACTS_DIR, exist_ok=True)
                         except OSError:
@@ -2438,6 +2579,15 @@ class Orchestrator:
                         idle_threshold=300,  # MiniMax M2.7 can take 2-3 min to generate large responses
                     )
 
+                    # W1-G: Accumulate executor token usage into phase_state across retry attempts.
+                    _attempt_tokens = _sum_session_tokens(_jsonl_path)
+                    _ps_tok = self.read_phase_state()
+                    _executor_tokens_acc = _ps_tok.get("executor_tokens_acc", {})
+                    for _k, _v in _attempt_tokens.items():
+                        _executor_tokens_acc[_k] = _executor_tokens_acc.get(_k, 0) + _v
+                    _ps_tok["executor_tokens_acc"] = _executor_tokens_acc
+                    self.write_phase_state_atomic(_ps_tok)
+
                     # RR-3 (Phase 3): Classify executor terminal state before deciding action.
                     # executor_output_path is .json counterpart to sentinel_path (.done).
                     executor_output_path = os.path.join(PROJECT_ARTIFACTS_DIR, "executor_output.json")
@@ -2456,6 +2606,7 @@ class Orchestrator:
                             continue
                         else:
                             print("[ERROR] Executor gate failed")
+                            _write_pipeline_event("gate_fail", raw_id, "executor", {"exit_code": 1})  # W1-F
                             self.write_failure_context("executor", self.state.get("executor_retries", 0) + 1)
                             # reset_execution("auto") owns the counter increment.
                             self.reset_execution("auto")
@@ -2562,6 +2713,12 @@ class Orchestrator:
                         idle_threshold=300,  # match executor: long gaps between tool/LLM events
                     )
                     
+                    # W1-G: Capture reviewer token usage from the resolved session JSONL.
+                    _reviewer_tokens = _sum_session_tokens(_jsonl_path)
+                    _ps_rev_tok = self.read_phase_state()
+                    _ps_rev_tok["reviewer_tokens_acc"] = _reviewer_tokens
+                    self.write_phase_state_atomic(_ps_rev_tok)
+
                     if not sentinel_found:
                         print("[ERROR] Sentinel timeout")
                         _rv_retries = self.increment_reviewer_retries()
@@ -2590,9 +2747,11 @@ class Orchestrator:
                     gate_result = self.run_reviewer_output_gate()
 
                     if gate_result != "PASS":
+                        _write_pipeline_event("gate_fail", raw_id, "reviewer", {"gate_result": gate_result})  # W1-F
                         self.write_failure_context("reviewer", self.state.get("reviewer_retries", 0) + 1)
 
                     if gate_result == "PASS":
+                        _write_pipeline_event("gate_pass", raw_id, "reviewer", {})  # W1-F
                         _ps_rv = self.read_phase_state()
                         _ps_rv.pop("last_error_code", None)
                         self.write_phase_state_atomic(_ps_rv)
@@ -2753,6 +2912,16 @@ class Orchestrator:
                             _executor_attempts = self.state.get("executor_retries", 0) + 1
                             _reviewer_passes = self.state.get("reviewer_retries", 0) + 1
 
+                            # W1-A/B/C: Read phase_state for blame_fires, escalations, skill_used.
+                            # phase_state.json is present until step 4 cleanup below.
+                            _ps_m = {}
+                            if os.path.exists(PHASE_STATE_FILE):
+                                try:
+                                    with open(PHASE_STATE_FILE, 'r') as _f_psm:
+                                        _ps_m = json.load(_f_psm)
+                                except Exception:
+                                    pass
+
                             # Read existing metrics, strip rows for this phase, append canonical row.
                             _existing_rows = []
                             if os.path.exists(_metrics_path):
@@ -2768,14 +2937,27 @@ class Orchestrator:
                                         except json.JSONDecodeError:
                                             _existing_rows.append(_line)
 
+                            _planner_tok = _ps_m.get("planner_tokens_acc", {})
+                            _executor_tok = _ps_m.get("executor_tokens_acc", {})
+                            _reviewer_tok = _ps_m.get("reviewer_tokens_acc", {})
                             _canonical_row = json.dumps({
                                 "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                                 "phase": _raw_id_for_metrics,
                                 "goal": _goal_text,
                                 "executor_attempts": _executor_attempts,
                                 "reviewer_passes": _reviewer_passes,
-                                "blame_fires": 0,
-                                "escalations": 0,
+                                "blame_fires": _ps_m.get("blame_fires", 0),   # W1-A
+                                "escalations": _ps_m.get("escalations", 0),   # W1-B
+                                "skill_used": _ps_m.get("skill_injected"),     # W1-C
+                                "planner_tokens": _planner_tok,                # W1-G
+                                "executor_tokens": _executor_tok,              # W1-G
+                                "reviewer_tokens": _reviewer_tok,              # W1-G
+                                "cost_total": round(                           # W1-G
+                                    _planner_tok.get("cost_total", 0.0)
+                                    + _executor_tok.get("cost_total", 0.0)
+                                    + _reviewer_tok.get("cost_total", 0.0),
+                                    6,
+                                ),
                                 "duration_seconds": _duration_seconds,
                             })
 
@@ -2792,6 +2974,10 @@ class Orchestrator:
                                     os.remove(_tmp_m)
                                 raise
 
+                            _write_pipeline_event(  # W1-F
+                                "phase_complete", _raw_id_for_metrics, "reviewer",
+                                {"executor_attempts": _executor_attempts, "blame_fires": _ps_m.get("blame_fires", 0)},
+                            )
                             print(
                                 f"[INFO] Canonical metrics row written for {_raw_id_for_metrics}: "
                                 f"{_executor_attempts} executor attempt(s), "
@@ -3147,7 +3333,10 @@ class Orchestrator:
                         cleanup_output_files(PROJECT_ARTIFACTS_DIR, "escalation")
                         _ps = self.read_phase_state()
                         _ps["escalation_trigger_reason"] = self.state.get("last_action", "escalation triggered")
+                        _ps["escalations"] = _ps.get("escalations", 0) + 1  # W1-B
+                        _ps["waiting_for_human_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # W1-E
                         self.write_phase_state_atomic(_ps)
+                        _write_pipeline_event("escalation_trigger", raw_id, "escalation", {"reason": _ps.get("escalation_trigger_reason")})  # W1-F
                         self.transition_state("WAITING_FOR_HUMAN", "Invoking Escalation Agent")
                         self._queue_park_active_entry("ESCALATION", "escalation")
                         webhook_status = invoke_agent_webhook("escalation", session_key, token)
@@ -3191,11 +3380,13 @@ class Orchestrator:
                                 command = "STOP"
 
                             _summary = self._read_escalation_summary()
+                            _ps = self.read_phase_state()
                             if _summary:
-                                _ps = self.read_phase_state()
                                 _ps["escalation_message"] = _summary
-                                self.write_phase_state_atomic(_ps)
+                            _ps["waiting_for_human_resolved_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # W1-E
+                            self.write_phase_state_atomic(_ps)
 
+                            _write_pipeline_event("escalation_resolve", raw_id, "escalation", {"command": command})  # W1-F
                             print(f"[INFO] Human command received: {command}")
                             _esc_root = os.path.dirname(out_path)
                             cleanup_output_files(_esc_root, "escalation")

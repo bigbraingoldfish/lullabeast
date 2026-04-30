@@ -2038,6 +2038,26 @@
 
         // ─── Activity Feed ────────────────────────────────────────────────────────
 
+        /**
+         * File-backed /api/events uses structured `detail` (reason, gate_result, metrics, {}).
+         * Legacy rows used a string. Never return a plain object — React cannot render it as a child.
+         */
+        function formatPipelineEventDetail(detail) {
+            if (detail == null || detail === "") return "";
+            if (typeof detail === "string") return detail;
+            if (typeof detail === "object") {
+                if (typeof detail.reason === "string") return detail.reason;
+                if (typeof detail.gate_result === "string") return detail.gate_result;
+                try {
+                    const s = JSON.stringify(detail);
+                    return s === "{}" ? "" : s;
+                } catch (_) {
+                    return String(detail);
+                }
+            }
+            return String(detail);
+        }
+
         function EventRow({ event, isExpanded, onToggle, isNew }) {
             if (!event) return null;
             
@@ -2045,9 +2065,9 @@
             const ts = event.ts || event.timestamp;
             const timeOnly = ts ? ts.slice(11, 16) : '--:--';
             
-            const truncatedDetail = event.detail && event.detail.length > 60
-                ? event.detail.slice(0, 60) + '...'
-                : event.detail;
+            const detailStr = formatPipelineEventDetail(event.detail);
+            const truncatedDetail =
+                detailStr.length > 60 ? detailStr.slice(0, 60) + "..." : detailStr;
             
             const attemptDisplay = event.attempt ?? '—';
             const rawType = getEventTypeRaw(event);
@@ -2077,6 +2097,9 @@
                         <span className="text-xs text-slate-300 w-24 flex-shrink-0 truncate">
                             {event.phase || '—'}
                         </span>
+                        <span className="text-xs text-slate-500 w-28 flex-shrink-0 truncate" title={event.project || ''}>
+                            {event.project || ''}
+                        </span>
                         <span className="text-xs text-slate-400 w-12 flex-shrink-0 text-center">
                             {attemptDisplay}
                         </span>
@@ -2084,9 +2107,9 @@
                             {truncatedDetail || '—'}
                         </span>
                     </div>
-                    {isExpanded && event.detail && (
+                    {isExpanded && detailStr && (
                         <div className="mt-2 pl-20 text-xs text-slate-300 bg-[#141618] p-2 rounded">
-                            {event.detail}
+                            {detailStr}
                         </div>
                     )}
                 </div>
@@ -2095,8 +2118,12 @@
 
         function EscalationLogPanel({ events }) {
             function pairEscalations(allEvents) {
-                const triggers = allEvents.filter(e => e.event_type === 'escalation_trigger');
-                const resolves = allEvents.filter(e => e.event_type === 'escalation_resolve');
+                const triggers = allEvents.filter(
+                    (e) => (e.event_type ?? e.event) === "escalation_trigger"
+                );
+                const resolves = allEvents.filter(
+                    (e) => (e.event_type ?? e.event) === "escalation_resolve"
+                );
                 const pairs = [];
                 for (const trigger of triggers) {
                     const phase = trigger.phase;
@@ -2164,12 +2191,16 @@
                                     </div>
                                     <div>
                                         <span className="text-slate-500">Reason:</span>
-                                        <span className="text-slate-300 ml-2">{trigger.detail || '—'}</span>
+                                        <span className="text-slate-300 ml-2">
+                                            {formatPipelineEventDetail(trigger.detail) || "—"}
+                                        </span>
                                     </div>
                                     <div>
                                         <span className="text-slate-500">Command:</span>
                                         <span className="text-slate-300 ml-2">
-                                            {isInProgress ? 'Awaiting command...' : (resolve.detail || '—')}
+                                            {isInProgress
+                                                ? "Awaiting command..."
+                                                : formatPipelineEventDetail(resolve.detail) || "—"}
                                         </span>
                                     </div>
                                     <div>
@@ -2313,9 +2344,10 @@
                 setExpandedEventId(prev => prev === eventId ? null : eventId);
             }
             
-            const escalationEvents = events.filter(e =>
-                e.event_type === 'escalation_trigger' || e.event_type === 'escalation_resolve'
-            );
+            const escalationEvents = events.filter((e) => {
+                const typ = e.event_type ?? e.event;
+                return typ === "escalation_trigger" || typ === "escalation_resolve";
+            });
 
             const TabButton = ({ tab, label, title: tabTitle }) => (
                 <button

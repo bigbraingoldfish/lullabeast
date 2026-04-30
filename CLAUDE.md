@@ -378,13 +378,17 @@ In all cases a `[SKILL]` log line is emitted to stdout with `Status=none_mapped`
 
 **Planner and reviewer** use `_get_agent_model(agent_id)`, which reads `agents.list[].model.primary` from the live `openclaw.json`. Model changes in `openclaw.json` take effect on the next invocation (config is re-read each time).
 
-**Executor** is hardcoded at line 1317 of `orchestrator.py`:
+**Executor** is hardcoded in `orchestrator.py` (search for `minimax-m2.7`):
 
 ```python
 model = "openrouter/minimax/minimax-m2.7"
 ```
 
 This overrides `openclaw.json` for all executor attempts. The current configuration uses OpenRouter MiniMax for all executor runs (no local model or cloud Sonnet fallback — the previous three-attempt-tier architecture was replaced with a single cloud model). Do not remove this hardcode without a deliberate decision and update to the model-selection logic.
+
+### OpenClaw `thinking` on pipeline webhooks
+
+`invoke_agent_webhook` adds `"thinking"` for **planner**, **executor**, and **reviewer** only (default level `"medium"` in `webhook_client.py`), so MiniMax M2.7 gets an explicit OpenClaw thinking level on `POST /hooks/agent`. OpenClaw otherwise defaults MiniMax to `thinking: { type: "disabled" }` on the Anthropic-compatible path. **Escalation** calls omit `thinking` so local models stay on OpenClaw defaults. Set env `AUTODEV_PIPELINE_THINKING` to another OpenClaw level (`low`, `high`, …) or to an empty string to omit the JSON field entirely. Pass `thinking=` to `invoke_agent_webhook` to override or use `thinking=""` for a one-off omit on cloud agents.
 
 ### `apiKey: "no-key"` is mandatory for local providers
 

@@ -116,6 +116,15 @@ def test_get_event_type_raw_coalesces_event_and_event_type(html_content):
     assert "function getEventTypeRaw" in html_content
     assert "event.event_type" in html_content and "event.event" in html_content
 
+
+def test_format_pipeline_event_detail_normalizes_structured_detail(html_content):
+    assert "function formatPipelineEventDetail" in html_content
+    assert "detail.reason" in html_content
+    assert "detail.gate_result" in html_content
+    assert "formatPipelineEventDetail(event.detail)" in html_content
+    # Empty {} detail from file API must not be JSON-rendered as "{}" in the row (use em dash).
+    assert 's === "{}"' in html_content
+
 # SSE and fallback tests
 def test_sse_connection_via_event_source(html_content):
     has_sse = bool(re.search(r"new\s+EventSource\s*\(\s*['\"]\/api\/events\/stream['\"]", html_content))
