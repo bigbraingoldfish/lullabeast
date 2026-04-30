@@ -2875,6 +2875,143 @@ def get_metrics_summary():
     }
 
 
+def _read_runs_index(pipeline_root: str) -> list[dict]:
+    """Read AUTODEV_PIPELINE_ROOT/runs_index.jsonl; skip malformed lines silently."""
+    index_path = os.path.join(pipeline_root, "runs_index.jsonl")
+    if not os.path.exists(index_path):
+        return []
+    entries: list[dict] = []
+    try:
+        with open(index_path, "r", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        return []
+    return entries
+
+
+def _empty_metrics_global() -> dict:
+    return {
+        "projects": [],
+        "cross_project": {
+            "total_runs": 0,
+            "avg_executor_attempts": 0.0,
+            "escalation_rate": 0.0,
+            "skill_injection_rate": 0.0,
+            "skill_vs_no_skill_executor_attempts": {"with_skill": 0.0, "without_skill": 0.0},
+        },
+    }
+
+
+@app.get("/api/metrics-global")
+def get_metrics_global():
+    """Cross-project analytics aggregated from runs_index.jsonl and per-project run_summary.json.
+
+    Reads ``AUTODEV_PIPELINE_ROOT/runs_index.jsonl`` (written by W2-B at every terminal
+    pipeline exit). For each entry, loads ``<project>/.autodev/pipeline/run_summary.json``.
+    Aggregates per-project stats and cross-project totals. Gracefully handles missing or
+    malformed files. No in-release UI consumer (W4-H deferred) — available for operator
+    diagnostics via direct API call.
+    """
+    config = load_config()
+    pipeline_root = config.get("autodev_pipeline_root") or ""
+    if not pipeline_root:
+        return _empty_metrics_global()
+
+    index_entries = _read_runs_index(pipeline_root)
+    if not index_entries:
+        return _empty_metrics_global()
+
+    # Group by project_path — multiple runs for the same project accumulate here.
+    # We read run_summary.json for each index entry individually so that later
+    # analysis tooling can distinguish per-run data; for now we deduplicate by
+    # project_path and sum totals across all matched summaries.
+    by_project: dict[str, list[dict]] = {}
+    for idx_row in index_entries:
+        if not isinstance(idx_row, dict):
+            continue
+        proj_path = idx_row.get("project_path", "")
+        if not proj_path:
+            continue
+        summary_path = os.path.join(_pipeline_artifacts_dir(proj_path), "run_summary.json")
+        summary = _read_json_file(summary_path) if os.path.exists(summary_path) else None
+        if not isinstance(summary, dict):
+            continue
+        by_project.setdefault(proj_path, []).append(summary)
+
+    if not by_project:
+        return _empty_metrics_global()
+
+    projects = []
+    all_phases_with_skill: list[int] = []
+    all_phases_without_skill: list[int] = []
+
+    for proj_path, summaries in by_project.items():
+        runs = len(summaries)
+        total_executor = sum(s.get("executor_attempts_total", 0) or 0 for s in summaries)
+        total_escalations = sum(s.get("escalations_total", 0) or 0 for s in summaries)
+        total_phases = sum(s.get("phases_attempted", 0) or 0 for s in summaries)
+        total_skills = sum(len(s.get("skills_injected", []) or []) for s in summaries)
+
+        # Phase-level skill vs no-skill data for cross-project comparison
+        for s in summaries:
+            for ph in s.get("phases", []) or []:
+                if not isinstance(ph, dict):
+                    continue
+                attempts = ph.get("executor_attempts", 0) or 0
+                if ph.get("skill_used"):
+                    all_phases_with_skill.append(attempts)
+                else:
+                    all_phases_without_skill.append(attempts)
+
+        # Latest run: sort by run_end timestamp; last entry wins for outcome/run_end
+        sorted_sums = sorted(summaries, key=lambda x: x.get("run_end") or "")
+        latest = sorted_sums[-1]
+
+        projects.append({
+            "project_name": latest.get("project_name", ""),
+            "project_path": proj_path,
+            "runs": runs,
+            "last_outcome": latest.get("outcome"),
+            "last_run_end": latest.get("run_end"),
+            "avg_executor_attempts": round(total_executor / runs, 2) if runs else 0.0,
+            "escalation_rate": round(total_escalations / runs, 2) if runs else 0.0,
+            "skill_injection_rate": round(total_skills / total_phases, 2) if total_phases else 0.0,
+            "phases_total": total_phases,
+        })
+
+    total_runs = sum(p["runs"] for p in projects)
+    total_exec_sum = sum(p["avg_executor_attempts"] * p["runs"] for p in projects)
+    total_esc_sum = sum(p["escalation_rate"] * p["runs"] for p in projects)
+    total_skill_phases = sum(p["skill_injection_rate"] * p["phases_total"] for p in projects)
+    total_phases_all = sum(p["phases_total"] for p in projects)
+
+    skill_vs_no_skill = {
+        "with_skill": round(sum(all_phases_with_skill) / len(all_phases_with_skill), 2)
+            if all_phases_with_skill else 0.0,
+        "without_skill": round(sum(all_phases_without_skill) / len(all_phases_without_skill), 2)
+            if all_phases_without_skill else 0.0,
+    }
+
+    return {
+        "projects": projects,
+        "cross_project": {
+            "total_runs": total_runs,
+            "avg_executor_attempts": round(total_exec_sum / total_runs, 2) if total_runs else 0.0,
+            "escalation_rate": round(total_esc_sum / total_runs, 2) if total_runs else 0.0,
+            "skill_injection_rate": round(total_skill_phases / total_phases_all, 2)
+                if total_phases_all else 0.0,
+            "skill_vs_no_skill_executor_attempts": skill_vs_no_skill,
+        },
+    }
+
+
 POLL_TIMEOUT = 180  # seconds; patchable in tests
 POLL_INTERVAL = 2   # seconds between sentinel checks
 
