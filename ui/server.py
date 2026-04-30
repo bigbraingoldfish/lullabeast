@@ -6088,6 +6088,23 @@ def get_queue():
             else:
                 entry["live_pipeline_status"] = None
                 entry["live_current_agent"] = None
+
+        # W3-B: enrich ACTIVE entries with live roadmap phase counts
+        if entry.get("state") == "ACTIVE":
+            _proj = entry.get("project_path", "")
+            if _proj:
+                try:
+                    import glob as _glob_mod
+                    _rm_candidates = _glob_mod.glob(os.path.join(_proj, "*oadmap*.md"))
+                    if _rm_candidates:
+                        with open(_rm_candidates[0], "r", errors="replace") as _rf:
+                            _rc = _rf.read()
+                        _pt, _pc = _roadmap_phase_checkbox_stats(_rc)
+                        entry["phases_total"] = _pt
+                        entry["phases_complete"] = _pc
+                except Exception:
+                    pass  # non-fatal — queue entry returned without phase counts
+
         enriched.append(entry)
 
     return {
