@@ -383,6 +383,238 @@ def _write_pipeline_event(event_type: str, phase: str, agent: str, detail_dict) 
         print(f"[WARN] _write_pipeline_event({event_type}): {e}")
 
 
+def _write_run_manifest(entry: dict) -> None:
+    """W2-A: Write run_manifest.json to PROJECT_ARTIFACTS_DIR at run start.
+
+    Called after the queue entry is committed (started_at written) and the symlink
+    is updated, but before self.state is reset for the new project.  Graceful: any
+    failure is logged and swallowed — it must never abort a queue advance.
+    """
+    try:
+        project_path = entry.get("project_path", "")
+        phase_count = 0
+        subsystem_set = []
+        total_goals_chars = 0
+
+        import glob as _glob
+        import re as _re
+        roadmap_candidates = _glob.glob(os.path.join(project_path, "*oadmap*.md"))
+        if roadmap_candidates:
+            try:
+                with open(roadmap_candidates[0], "r", errors="replace") as _rf:
+                    _content = _rf.read()
+                phase_ids = _re.findall(r'`([A-Z]+-[A-Z0-9]+)`', _content)
+                phase_count = len(phase_ids)
+                subsystem_set = sorted(set(pid.split("-")[0] for pid in phase_ids))
+                for _line in _content.splitlines():
+                    _parts = [p.strip() for p in _line.split("|")]
+                    _non_empty = [p for p in _parts if p]
+                    # Works for both table format (`| `ID` | pri | goal |`) and
+                    # list format (`- [x] `ID` | pri | goal`).
+                    if (len(_non_empty) >= 3
+                            and any(_re.search(r'`[A-Z]+-[A-Z0-9]+`', p) for p in _parts)):
+                        total_goals_chars += len(_non_empty[-1])
+            except Exception as _e:
+                print(f"[W2A] roadmap parse warning: {_e}")
+
+        manifest = {
+            "schema_version": 1,
+            "project_path": project_path,
+            "project_name": entry.get("name", ""),
+            "queue_entry_id": entry.get("id", ""),
+            "idea_id": entry.get("idea_id"),
+            "started_at": entry.get("started_at", ""),
+            "phase_count": phase_count,
+            "subsystem_set": subsystem_set,
+            "total_goals_chars": total_goals_chars,
+        }
+
+        os.makedirs(PROJECT_ARTIFACTS_DIR, exist_ok=True)
+        _fd, _tmp = tempfile.mkstemp(dir=PROJECT_ARTIFACTS_DIR, prefix=".run_manifest_")
+        try:
+            with os.fdopen(_fd, "w") as _f:
+                json.dump(manifest, _f)
+            os.replace(_tmp, os.path.join(PROJECT_ARTIFACTS_DIR, "run_manifest.json"))
+        except Exception:
+            if os.path.exists(_tmp):
+                os.remove(_tmp)
+            raise
+        print(f"[W2A] run_manifest.json written: {phase_count} phases, subsystems={subsystem_set}")
+    except Exception as _e:
+        print(f"[W2A] run_manifest write failed (non-fatal): {_e}")
+
+
+def _write_run_summary(outcome: str, outcome_detail: str) -> None:
+    """W2-B: Write run_summary.json at every terminal pipeline exit.
+
+    Also appends one line to AUTODEV_PIPELINE_ROOT/runs_index.jsonl (O_APPEND) so
+    cross-run history survives projects being removed from the queue.
+    Graceful: any failure is logged and swallowed — must never block a transition_state call.
+    """
+    try:
+        run_end = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # --- Read run_manifest.json for project identity + run_start ---
+        manifest = {}
+        _manifest_path = os.path.join(PROJECT_ARTIFACTS_DIR, "run_manifest.json")
+        if os.path.exists(_manifest_path):
+            try:
+                with open(_manifest_path, "r") as _f:
+                    manifest = json.load(_f)
+            except Exception:
+                pass
+
+        project_path = manifest.get("project_path", "")
+        project_name = manifest.get("project_name", "")
+        idea_id = manifest.get("idea_id")
+        run_start = manifest.get("started_at", "")
+
+        # Fallback: read project_path from STATE_FILE
+        if not project_path and os.path.exists(STATE_FILE):
+            try:
+                with open(STATE_FILE, "r") as _f:
+                    _ps = json.load(_f)
+                project_path = _ps.get("project_path", "")
+                if not run_start:
+                    run_start = _ps.get("last_action_timestamp", "")
+            except Exception:
+                pass
+
+        # --- Compute duration ---
+        total_duration_seconds = None
+        if run_start:
+            try:
+                _start_dt = datetime.fromisoformat(run_start.replace("Z", "+00:00"))
+                _end_dt = datetime.fromisoformat(run_end.replace("Z", "+00:00"))
+                total_duration_seconds = int((_end_dt - _start_dt).total_seconds())
+            except Exception:
+                pass
+
+        # --- Read and deduplicate metrics.jsonl (last row per phase wins) ---
+        _summary_source = os.path.join(PROJECT_ARTIFACTS_DIR, "metrics.jsonl")
+        _seen_phases = {}  # phase_id -> last row dict
+        if os.path.exists(_summary_source):
+            try:
+                with open(_summary_source, "r") as _f:
+                    for _line in _f:
+                        _line = _line.strip()
+                        if not _line:
+                            continue
+                        try:
+                            _row = json.loads(_line)
+                            _pid = _row.get("phase", "")
+                            if _pid:
+                                _seen_phases[_pid] = _row
+                        except json.JSONDecodeError:
+                            pass
+            except Exception:
+                pass
+
+        deduped_rows = list(_seen_phases.values())
+
+        # --- Aggregate counters ---
+        executor_attempts_total = sum(r.get("executor_attempts", 0) for r in deduped_rows)
+        escalations_total = sum(r.get("escalations", 0) for r in deduped_rows)
+        blame_fires_total = sum(r.get("blame_fires", 0) for r in deduped_rows)
+
+        blame_attributions = [
+            {"phase": r["phase"], "blame": r["blame_verdict"]}
+            for r in deduped_rows
+            if r.get("blame_verdict")
+        ]
+        skills_injected = [
+            {"phase": r["phase"], "discipline": r["skill_used"]}
+            for r in deduped_rows
+            if r.get("skill_used")
+        ]
+
+        # --- Token aggregation across all roles and phases ---
+        _tok = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0,
+                "total_tokens": 0, "cost_total": 0.0}
+        for _row in deduped_rows:
+            for _role_key in ("planner_tokens", "executor_tokens", "reviewer_tokens"):
+                _rt = _row.get(_role_key) or {}
+                _tok["input"] += _rt.get("input", 0)
+                _tok["output"] += _rt.get("output", 0)
+                _tok["cache_read"] += _rt.get("cache_read", 0)
+                _tok["cache_write"] += _rt.get("cache_write", 0)
+                _tok["total_tokens"] += _rt.get("total_tokens", 0)
+                _tok["cost_total"] += _rt.get("cost_total", 0.0)
+        _tok["cost_total"] = round(_tok["cost_total"], 6)
+
+        # --- phases array ---
+        phases_list = [
+            {
+                "phase": r.get("phase"),
+                "executor_attempts": r.get("executor_attempts", 0),
+                "blame": r.get("blame_verdict"),
+                "skill_used": r.get("skill_used"),
+                "last_error_code": r.get("last_error_code"),
+                "escalation_trigger_reason": r.get("escalation_trigger_reason"),
+            }
+            for r in deduped_rows
+        ]
+
+        phases_attempted = len(deduped_rows)
+        phases_complete = phases_attempted if outcome == "PIPELINE_COMPLETE" else 0
+
+        summary = {
+            "schema_version": 1,
+            "generated_at": run_end,
+            "outcome": outcome,
+            "outcome_detail": outcome_detail,
+            "project_path": project_path,
+            "project_name": project_name,
+            "idea_id": idea_id,
+            "run_start": run_start,
+            "run_end": run_end,
+            "total_duration_seconds": total_duration_seconds,
+            "phases_attempted": phases_attempted,
+            "phases_complete": phases_complete,
+            "executor_attempts_total": executor_attempts_total,
+            "escalations_total": escalations_total,
+            "blame_fires_total": blame_fires_total,
+            "skills_injected": skills_injected,
+            "blame_attributions": blame_attributions,
+            "token_usage": _tok,
+            "phases": phases_list,
+        }
+
+        # --- Atomic write of run_summary.json ---
+        os.makedirs(PROJECT_ARTIFACTS_DIR, exist_ok=True)
+        _fd, _tmp = tempfile.mkstemp(dir=PROJECT_ARTIFACTS_DIR, prefix=".run_summary_")
+        try:
+            with os.fdopen(_fd, "w") as _f:
+                json.dump(summary, _f)
+            os.replace(_tmp, os.path.join(PROJECT_ARTIFACTS_DIR, "run_summary.json"))
+        except Exception:
+            if os.path.exists(_tmp):
+                os.remove(_tmp)
+            raise
+
+        # --- Append to runs_index.jsonl at AUTODEV_PIPELINE_ROOT ---
+        _index_path = os.path.join(AUTODEV_PIPELINE_ROOT, "runs_index.jsonl")
+        _index_entry = json.dumps({
+            "ts": run_end,
+            "outcome": outcome,
+            "project_path": project_path,
+            "project_name": project_name,
+            "run_start": run_start,
+            "run_end": run_end,
+        })
+        try:
+            os.makedirs(AUTODEV_PIPELINE_ROOT, exist_ok=True)
+            with open(_index_path, "a") as _fi:
+                _fi.write(_index_entry + "\n")
+        except OSError as _e:
+            print(f"[W2B] runs_index.jsonl append failed (non-fatal): {_e}")
+
+        print(f"[W2B] run_summary.json written: outcome={outcome}, "
+              f"phases={phases_attempted}, tokens={_tok['total_tokens']}")
+    except Exception as _e:
+        print(f"[W2B] run_summary write failed (non-fatal): {_e}")
+
+
 class Orchestrator:
     def __init__(self):
         self.lock_fd = None
@@ -787,6 +1019,7 @@ class Orchestrator:
             entry["state"] = "ACTIVE"
             entry["started_at"] = now
             self._write_queue(queue_data)
+            _write_run_manifest(entry)  # W2-A
 
             self.state = {
                 "current_phase": 0,
@@ -2122,6 +2355,7 @@ class Orchestrator:
                     print("[INFO] All roadmap phases already complete. Nothing to do.")
                     self.state["current_phase_raw_id"] = ""
                     self.state["current_agent"] = None
+                    _write_run_summary("PIPELINE_COMPLETE", "Pipeline fully complete on startup")  # W2-B
                     self.transition_state("PIPELINE_COMPLETE", "Pipeline fully complete on startup")
                     self._queue_update_active_entry(
                         "COMPLETED",
@@ -2136,6 +2370,7 @@ class Orchestrator:
                 elif result.returncode == 2 and "BLOCKED" in output:
                     print("[INFO] First pending phase is blocked. Escalating.")
                     _now = datetime.now(timezone.utc).isoformat()
+                    _write_run_summary("BLOCKED", "Roadmap blocked at startup")  # W2-B
                     self.transition_state("BLOCKED", "Roadmap blocked at startup")
                     self._queue_park_active_entry(
                         "BLOCKED",
@@ -2243,6 +2478,7 @@ class Orchestrator:
                             json.dump(error_data, f)
                     except Exception as write_err:
                         print(f"[ERROR] Could not write escalation_failed.json: {write_err}")
+                    _write_run_summary("HALTED_SILENT", "Escalation delivery failed after repo init failure")  # W2-B
                     self.transition_state("HALTED_SILENT", "Escalation delivery failed after repo init failure")
                     self._queue_update_active_entry(
                         "FAILED",
@@ -2291,6 +2527,7 @@ class Orchestrator:
 
                 if self._check_stop_requested():
                     print("[STOP] Stop sentinel detected — halting pipeline cleanly")
+                    _write_run_summary("STOPPED", "Stop sentinel consumed — clean halt requested via UI")  # W2-B
                     self.transition_state("STOPPED", "Stop sentinel consumed — clean halt requested via UI")
                     break
                     
@@ -3092,6 +3329,7 @@ class Orchestrator:
                                 print("[INFO] Pipeline fully complete!")
                                 self.state["current_phase_raw_id"] = ""
                                 self.state["current_agent"] = None
+                                _write_run_summary("PIPELINE_COMPLETE", "Pipeline fully complete")  # W2-B
                                 self.transition_state("PIPELINE_COMPLETE", "Pipeline fully complete")
                                 # Queue integration: mark entry COMPLETED and auto-advance
                                 self._queue_update_active_entry(
@@ -3107,6 +3345,7 @@ class Orchestrator:
                             elif result.returncode == 2 and "BLOCKED" in output:
                                 print(f"[INFO] Roadmap blocked. Halting.")
                                 _blk = datetime.now(timezone.utc).isoformat()
+                                _write_run_summary("BLOCKED", "Roadmap blocked")  # W2-B
                                 self.transition_state("BLOCKED", "Roadmap blocked")
                                 self._queue_park_active_entry(
                                     "BLOCKED",
@@ -3363,6 +3602,7 @@ class Orchestrator:
                                 }
                                 with open(os.path.join(PROJECT_ARTIFACTS_DIR, "escalation_failed.json"), "w") as f:
                                     json.dump(error_data, f)
+                                _write_run_summary("HALTED_SILENT", "Escalation delivery failed")  # W2-B
                                 self.transition_state("HALTED_SILENT", "Escalation delivery failed")
                                 self._queue_update_active_entry(
                                     "FAILED",
@@ -3470,9 +3710,11 @@ class Orchestrator:
                                         _sf.write("")
                                 except OSError as _e:
                                     print(f"[WARN] STOP: could not write stop sentinel: {_e}")
+                                _write_run_summary("STOPPED", "Stop command received via escalation panel")  # W2-B
                                 self.transition_state("STOPPED", "Stop command received via escalation panel")
                                 break
                             else:
+                                _write_run_summary("HALTED_SILENT", f"Unrecognised escalation command: {command}")  # W2-B
                                 self.transition_state("HALTED_SILENT", f"Unrecognised escalation command: {command}")
                                 self._queue_update_active_entry(
                                     "FAILED",
