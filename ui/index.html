@@ -1950,7 +1950,7 @@
 
                     {metricsSummary && metricsSummary.total_phases > 0 && (
                         <p className="header-text text-xs text-slate-500">
-                            Run so far: {metricsSummary.total_phases} phases · {metricsSummary.total_executor_attempts} exec attempts · {formatDuration(metricsSummary.total_duration_seconds)}
+                            Run so far: {metricsSummary.total_phases} phases · {metricsSummary.total_executor_attempts} exec attempts · {formatDuration(metricsSummary.total_duration_seconds)}{metricsSummary.cost_total > 0 ? ` · $${metricsSummary.cost_total.toFixed(2)}` : ''}
                         </p>
                     )}
 
@@ -2032,6 +2032,12 @@
                                                                     <span className="text-slate-500">Skill: </span>
                                                                     <span className="text-slate-300">{phaseMeta.skill_used || '—'}</span>
                                                                 </div>
+                                                                {phaseMeta.cost_total > 0 && (
+                                                                    <div>
+                                                                        <span className="text-slate-500">Cost: </span>
+                                                                        <span className="text-slate-300">${phaseMeta.cost_total.toFixed(2)}</span>
+                                                                    </div>
+                                                                )}
                                                             </div>
                                                         </div>
                                                     ) : (
@@ -6160,6 +6166,9 @@
                             <p className="header-text text-xs text-slate-600 italic">Not the active project — run metrics unavailable</p>
                         )}
 
+                        {snap && snap.cost_total > 0 && (
+                            <p className="header-text text-xs text-slate-500">Cost: ${snap.cost_total.toFixed(2)}</p>
+                        )}
                         {selected.preflight_validated_at && (
                             <p className="header-text text-xs text-slate-500">Validated {relTime(selected.preflight_validated_at)}</p>
                         )}
