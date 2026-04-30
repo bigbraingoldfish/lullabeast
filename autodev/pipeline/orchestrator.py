@@ -2448,6 +2448,7 @@ class Orchestrator:
                             except Exception:
                                 pass
                         phase_state["blame_context"] = blame_result.get("reason", "")
+                        phase_state["blame_verdict"] = blame_result.get("blame", "")  # "plan"|"impl"|"infra"|"unknown"
                         phase_state["blame_fires"] = phase_state.get("blame_fires", 0) + 1  # W1-A
                         try:
                             os.makedirs(PROJECT_ARTIFACTS_DIR, exist_ok=True)
@@ -2949,6 +2950,7 @@ class Orchestrator:
                                 "blame_fires": _ps_m.get("blame_fires", 0),   # W1-A
                                 "escalations": _ps_m.get("escalations", 0),   # W1-B
                                 "skill_used": _ps_m.get("skill_injected"),     # W1-C
+                                "blame_verdict": _ps_m.get("blame_verdict"),   # null when no blame fired
                                 "planner_tokens": _planner_tok,                # W1-G
                                 "executor_tokens": _executor_tok,              # W1-G
                                 "reviewer_tokens": _reviewer_tok,              # W1-G

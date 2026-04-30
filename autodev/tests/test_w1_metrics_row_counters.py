@@ -36,11 +36,13 @@ def test_blame_fires_counter_incremented_after_attribution():
     ]
     assert blame_call_lines, "run_blame_attribution() not found in orchestrator source."
 
-    # Within 10 lines after the call there must be a blame_fires increment.
+    # Within 15 lines after the call there must be a blame_fires increment.
     # Accept both dict-increment form (foo["blame_fires"] = ... + 1) and augmented
     # assignment (blame_fires += 1), since phase_state is a dict requiring .get().
+    # Window is 15 to accommodate any diagnostic fields (e.g. blame_verdict) written
+    # alongside blame_fires in the same phase_state update block.
     for call_lineno in blame_call_lines:
-        window = lines[call_lineno : call_lineno + 10]
+        window = lines[call_lineno : call_lineno + 15]
         increments = [
             l for l in window
             if "blame_fires" in l and ("+=" in l or ("+ 1" in l or "+1" in l))

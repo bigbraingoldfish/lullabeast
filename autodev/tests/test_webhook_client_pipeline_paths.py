@@ -9,28 +9,27 @@ def test_pipeline_artifacts_prefix_constant():
 
 def test_default_messages_use_autodev_pipeline_subdir():
     prefix = ".autodev/pipeline"
-    for agent_id, msg in wc.invoke_agent_webhook.__defaults__:
-        pass
     # Defaults live inside invoke_agent_webhook — inspect closure via introspecting source
     import inspect
 
     src = inspect.getsource(wc.invoke_agent_webhook)
     assert "default_messages" in src
-    # Each role's string must point agents at the relocated artifact tree
-    for sub in (
-        f"/{prefix}/planner_output.json",
-        f"/{prefix}/planner_output.done",
-        f"/{prefix}/executor_output.json",
-        f"/{prefix}/reviewer_output.json",
-        f"/{prefix}/escalation_output.json",
+    # The function builds paths via _PIPELINE_ARTIFACTS — verify the constant is referenced
+    # and each required output file appears. inspect.getsource returns raw source (f-string
+    # templates with {_p}), not evaluated strings, so check file basenames independently.
+    assert "_PIPELINE_ARTIFACTS" in src, (
+        "webhook function must reference _PIPELINE_ARTIFACTS so paths stay in sync"
+    )
+    for filename in (
+        "planner_output.json",
+        "planner_output.done",
+        "executor_output.json",
+        "reviewer_output.json",
+        "escalation_output.json",
     ):
-        assert sub in src, f"expected {sub!r} in webhook default message construction"
+        assert filename in src, f"expected {filename!r} in webhook default message construction"
 
-    # Must not tell agents to write bare root-level sentinels
-    assert "pipeline-project/planner_output.done" not in src.replace(
-        f"pipeline-project/{prefix}/planner_output.done", ""
-    ) or f"pipeline-project/{prefix}/planner_output.done" in src
-    # Stricter: after removing correct path, no orphan bare sentinel path
+    # Must not hard-code bare root-level sentinel paths (they must go through _p / _PIPELINE_ARTIFACTS)
     bare_done = 'pipeline-project/planner_output.done"'
     assert bare_done not in src, "bare planner_output.done path would mislead agents"
 
