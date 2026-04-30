@@ -9,6 +9,7 @@ Tests verify:
 - skill_vs_no_skill comparison uses phase-level executor_attempts
 - Malformed JSON lines skipped silently
 - Missing run_summary.json skipped silently
+- Index rows differing only by trailing slash or symlink merge (realpath grouping)
 """
 import json
 import os
@@ -476,3 +477,52 @@ class TestMalformedData:
         assert resp.status_code == 200
         # Invalid run_summary → project skipped, no crash
         assert resp.json()["projects"] == []
+
+
+# ---------------------------------------------------------------------------
+# Path grouping (realpath) — W3-D
+# ---------------------------------------------------------------------------
+
+
+class TestMetricsGlobalPathGrouping:
+    def test_two_index_spellings_same_realpath_merge(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        proj = tmp_path / "proj"
+        proj.mkdir()
+
+        _write_run_summary(proj, _make_run_summary(proj, executor_attempts_total=5))
+        path_a = str(proj)
+        path_b = str(proj) + "/"
+        _write_runs_index(tmp_path, [
+            _make_index_entry(path_a, run_end=_ts(-100)),
+            _make_index_entry(path_b, run_end=_ts()),
+        ])
+
+        with patch("ui.server.load_config", return_value=cfg):
+            resp = client.get("/api/metrics-global")
+
+        data = resp.json()
+        assert len(data["projects"]) == 1
+        assert data["projects"][0]["runs"] == 2
+        assert os.path.samefile(data["projects"][0]["project_path"], str(proj))
+
+    def test_symlink_and_realpath_in_index_merge(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        real = tmp_path / "real_proj"
+        real.mkdir()
+        sym = tmp_path / "sym_proj"
+        os.symlink(str(real), str(sym))
+
+        _write_run_summary(real, _make_run_summary(real, project_name="merged"))
+        _write_runs_index(tmp_path, [
+            _make_index_entry(str(sym)),
+            _make_index_entry(str(real)),
+        ])
+
+        with patch("ui.server.load_config", return_value=cfg):
+            resp = client.get("/api/metrics-global")
+
+        data = resp.json()
+        assert len(data["projects"]) == 1
+        assert data["projects"][0]["runs"] == 2
+        assert data["projects"][0]["project_path"] == os.path.realpath(str(real))

@@ -15,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import patch
 
-from ui.server import app
+from ui.server import app, _roadmap_phase_checkbox_stats
 
 client = TestClient(app)
 
@@ -268,3 +268,52 @@ def test_only_active_entry_enriched_in_mixed_queue(tmp_path):
     assert active["phases_complete"] == 2
     assert "phases_total" not in ready
     assert "phases_complete" not in ready
+
+
+def test_active_queue_phases_match_roadmap_checkbox_stats(tmp_path):
+    """W3-B: GET /api/queue counts match _roadmap_phase_checkbox_stats on the same file."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    roadmap_path = proj / "roadmap.md"
+    roadmap_path.write_text(ROADMAP_4_PHASES_2_DONE)
+
+    cfg = _make_cfg(tmp_path)
+    eid = str(uuid.uuid4())
+    entry = _make_entry(proj, state="ACTIVE", entry_id=eid)
+    ps = {"project_path": str(proj), "pipeline_status": "RUNNING", "current_agent": "executor"}
+    _write_queue(cfg, [entry], ps=ps)
+
+    with patch("ui.server.load_config", return_value=cfg):
+        resp = client.get("/api/queue")
+
+    assert resp.status_code == 200
+    found = _entry_by_id(resp.json(), eid)
+    with open(roadmap_path, "r", errors="replace") as f:
+        expected_total, expected_complete = _roadmap_phase_checkbox_stats(f.read())
+    assert found["phases_total"] == expected_total
+    assert found["phases_complete"] == expected_complete
+
+
+def test_active_queue_phases_refresh_after_roadmap_edit(tmp_path):
+    """W3-B: No stale cache — second GET reflects roadmap edits on disk."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    roadmap_path = proj / "roadmap.md"
+    roadmap_path.write_text(ROADMAP_4_PHASES_2_DONE)
+
+    cfg = _make_cfg(tmp_path)
+    eid = str(uuid.uuid4())
+    entry = _make_entry(proj, state="ACTIVE", entry_id=eid)
+    ps = {"project_path": str(proj), "pipeline_status": "RUNNING"}
+    _write_queue(cfg, [entry], ps=ps)
+
+    with patch("ui.server.load_config", return_value=cfg):
+        r1 = client.get("/api/queue")
+    assert _entry_by_id(r1.json(), eid)["phases_complete"] == 2
+
+    updated = ROADMAP_4_PHASES_2_DONE.replace("- [ ] `CORE-E3`", "- [x] `CORE-E3`", 1)
+    roadmap_path.write_text(updated)
+
+    with patch("ui.server.load_config", return_value=cfg):
+        r2 = client.get("/api/queue")
+    assert _entry_by_id(r2.json(), eid)["phases_complete"] == 3

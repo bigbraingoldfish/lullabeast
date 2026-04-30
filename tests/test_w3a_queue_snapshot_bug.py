@@ -301,3 +301,31 @@ def test_snapshot_returns_all_pipeline_state_fields_when_active(tmp_path):
     assert data["pipeline_status"] == "RUNNING"
     assert data["current_agent"] == "executor"
     assert data["executor_retries"] == 1
+
+
+def test_snapshot_integration_active_project_started_at_and_phases(tmp_path):
+    """W3-A integration: ACTIVE + matching pipeline_state → is_active, started_at, roadmap counts."""
+    proj = tmp_path / "myproj"
+    proj.mkdir()
+    (proj / "roadmap.md").write_text(ROADMAP_CONTENT)
+
+    cfg = _make_cfg(tmp_path, proj)
+    eid = str(uuid.uuid4())
+    started = "2026-04-30T08:15:00Z"
+    entry = _make_entry(str(proj), entry_id=eid)
+    entry["started_at"] = started
+    _write_queue(cfg, [entry])
+    _write_pipeline_state(cfg, proj, status="RUNNING")
+
+    with patch("ui.server.load_config", return_value=cfg), \
+         patch("ui.server._check_orchestrator_liveness", return_value=True):
+        resp = client.get(f"/api/queue/{eid}/snapshot")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["is_active_project"] is True
+    assert data["started_at"] == started
+    assert data["state"] == "ACTIVE"
+    assert data["phases_total"] == 3
+    assert data["phases_complete"] == 1
+    assert data["pipeline_status"] == "RUNNING"
