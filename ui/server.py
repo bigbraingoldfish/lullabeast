@@ -2915,9 +2915,11 @@ def get_metrics_global():
 
     Reads ``AUTODEV_PIPELINE_ROOT/runs_index.jsonl`` (written by W2-B at every terminal
     pipeline exit). For each entry, loads ``<project>/.autodev/pipeline/run_summary.json``.
-    Aggregates per-project stats and cross-project totals. Gracefully handles missing or
-    malformed files. No in-release UI consumer (W4-H deferred) — available for operator
-    diagnostics via direct API call.
+    Aggregates per-project stats and cross-project totals. Projects are grouped by
+    ``os.path.realpath`` of ``project_path`` so index rows that differ only by trailing
+    slash or symlink spelling merge. Gracefully handles missing or malformed files.
+    No in-release UI consumer (W4-H deferred) — available for operator diagnostics via
+    direct API call.
     """
     config = load_config()
     pipeline_root = config.get("autodev_pipeline_root") or ""
@@ -2928,10 +2930,8 @@ def get_metrics_global():
     if not index_entries:
         return _empty_metrics_global()
 
-    # Group by project_path — multiple runs for the same project accumulate here.
-    # We read run_summary.json for each index entry individually so that later
-    # analysis tooling can distinguish per-run data; for now we deduplicate by
-    # project_path and sum totals across all matched summaries.
+    # Group by canonical project root (realpath) so trailing-slash / symlink spellings
+    # from runs_index.jsonl merge into one row (W3-D).
     by_project: dict[str, list[dict]] = {}
     for idx_row in index_entries:
         if not isinstance(idx_row, dict):
@@ -2939,11 +2939,15 @@ def get_metrics_global():
         proj_path = idx_row.get("project_path", "")
         if not proj_path:
             continue
+        try:
+            group_key = os.path.realpath(os.path.expanduser(str(proj_path)))
+        except OSError:
+            group_key = str(proj_path)
         summary_path = os.path.join(_pipeline_artifacts_dir(proj_path), "run_summary.json")
         summary = _read_json_file(summary_path) if os.path.exists(summary_path) else None
         if not isinstance(summary, dict):
             continue
-        by_project.setdefault(proj_path, []).append(summary)
+        by_project.setdefault(group_key, []).append(summary)
 
     if not by_project:
         return _empty_metrics_global()
