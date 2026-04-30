@@ -346,10 +346,12 @@ def _read_handle_command_block():
 
 
 def _read_escalation_cmds_block():
-    """Extract the ESCALATION_CMDS array source text from index.html."""
+    """Extract the ESCALATION_CMD_DEFS (or legacy ESCALATION_CMDS) array source text."""
     source = INDEX_HTML.read_text(encoding="utf-8")
-    m = re.search(r"const ESCALATION_CMDS\s*=\s*\[(.*?)\];", source, re.DOTALL)
-    assert m, "ESCALATION_CMDS not found in index.html"
+    m = re.search(r"const ESCALATION_CMD_DEFS\s*=\s*\[(.*?)\];", source, re.DOTALL)
+    if not m:
+        m = re.search(r"const ESCALATION_CMDS\s*=\s*\[(.*?)\];", source, re.DOTALL)
+    assert m, "ESCALATION_CMD_DEFS (or ESCALATION_CMDS) not found in index.html"
     return m.group(0)
 
 

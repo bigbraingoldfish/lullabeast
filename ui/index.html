@@ -1109,6 +1109,33 @@
             );
         }
 
+        // ─── ESCALATION_CMD_DEFS ──────────────────────────────────────────────────
+        // Single source of truth for escalation command metadata. Consumed by both
+        // EscalationCommandPanel (monitor, immediate dispatch) and QueueActionHub
+        // (queue, deferred dispatch via target_project_path). No needsConfirm field —
+        // confirmation semantics differ per context and are handled locally.
+        // group: 'recover' | 'advance' | 'stop'
+        const ESCALATION_CMD_DEFS = [
+            { command: 'RESET_PHASE',     label: 'Reset Phase',     group: 'recover',
+              desc:  'Deletes branch · wipes all artifacts · reruns from top.',
+              title: 'Destructive: git reset to pre-phase commit + branch delete + full artifact wipe. Increments reset counter.' },
+            { command: 'RESET_EXECUTION', label: 'Reset Execution', group: 'recover',
+              desc:  'Keeps plan · reruns executor from a clean working tree.',
+              title: 'Destructive: git reset --hard on phase branch + clears executor/reviewer outputs. Planner preserved.' },
+            { command: 'RESET_REVIEWER',  label: 'Re-run Reviewer', group: 'recover',
+              desc:  'Deletes reviewer output only · reruns review.',
+              title: 'Deletes reviewer outputs only. Executor work is preserved. Increments reset counter.' },
+            { command: 'PROCEED',         label: 'Mark Complete',   group: 'advance',
+              desc:  'Merge confirmed · advances pipeline to next phase.',
+              title: 'Marks roadmap [x], force-tags phase complete, advances to next phase. No merge is executed.' },
+            { command: 'SKIP',            label: 'Abandon Phase',   group: 'advance',
+              desc:  'Marks skipped · no git cleanup · branch stays in repo.',
+              title: 'Marks roadmap [-], advances. No branch delete, no file cleanup. Manual git work required.' },
+            { command: 'STOP',            label: 'Stop Pipeline',   group: 'stop',
+              desc:  'Halts all pipeline activity immediately.',
+              title: 'Halts the pipeline. No further phases will run. Current phase state is preserved.' },
+        ];
+
         // ─── InfoGroupLabel ───────────────────────────────────────────────────────
 
         function InfoGroupLabel({ children, hiddenItems = [] }) {
@@ -5559,7 +5586,8 @@
             const [snapshotVersion, setSnapshotVersion] = useState(0);
             const [hubBusy, setHubBusy] = useState(false);
             const [hubError, setHubError] = useState('');
-            const [pendingCommand, setPendingCommand] = useState(null);
+            const [hubModalCommand, setHubModalCommand] = useState(null);
+            const [hubConfirmBusy, setHubConfirmBusy] = useState(false);
             const [revalidateChecks, setRevalidateChecks] = useState(null);
             const [escalationMsg, setEscalationMsg] = useState('');
             const [displayRanks, setDisplayRanks] = useState({});
@@ -5854,17 +5882,19 @@
                     .finally(() => setHubBusy(false));
             };
 
+            // Button click: open the confirmation modal.
             const handleCommand = (cmd) => {
-                if (['RESET_PHASE', 'RESET_REVIEWER', 'SKIP', 'STOP'].includes(cmd)) {
-                    if (pendingCommand === cmd) {
-                        // confirmed — send it
-                        setPendingCommand(null);
-                    } else {
-                        setPendingCommand(cmd);
-                        return;
-                    }
-                }
-                setHubBusy(true);
+                setHubError('');
+                setHubModalCommand(cmd);
+            };
+
+            // Modal confirm: deferred dispatch — adds target_project_path for parked
+            // ESCALATION entries so the server writes pending_escalation_command.json
+            // rather than acting immediately (distinct from the monitor's direct path).
+            const hubModalConfirm = () => {
+                if (!hubModalCommand) return;
+                const cmd = hubModalCommand;
+                setHubConfirmBusy(true);
                 setHubError('');
                 const payload = { command: cmd };
                 if (selected && selected.state === 'ESCALATION' && selected.project_path) {
@@ -5877,10 +5907,16 @@
                 })
                 .then(async r => {
                     if (!r.ok) { const d = await r.json().catch(() => ({})); setHubError(d.detail || 'Command failed'); return; }
+                    setHubModalCommand(null);
                     fetchQueue();
                 })
                 .catch(() => setHubError('Request failed'))
-                .finally(() => setHubBusy(false));
+                .finally(() => { setHubConfirmBusy(false); setHubBusy(false); });
+            };
+
+            const hubModalDismiss = () => {
+                if (hubConfirmBusy) return;
+                setHubModalCommand(null);
             };
 
             // Drag-to-reorder: recursive descendants of a root (by parent_id), matching server group move
@@ -6121,69 +6157,129 @@
                     </button>
                 );
 
-                const ESCALATION_CMDS = [
-                    { command: 'RESET_PHASE',     label: 'Reset Phase',     needsConfirm: true  },
-                    { command: 'RESET_EXECUTION', label: 'Reset Execution', needsConfirm: false },
-                    { command: 'RESET_REVIEWER',  label: 'Re-run Reviewer', needsConfirm: true  },
-                    { command: 'SKIP',            label: 'Abandon Phase',   needsConfirm: true  },
-                    { command: 'PROCEED',         label: 'Mark Complete',   needsConfirm: false },
-                    { command: 'STOP',            label: 'Stop Pipeline',   needsConfirm: true  },
-                ];
-
                 // Phase 2 eligibility fields from the active pipeline snapshot
                 const hubEscalationResets = (snapshot && snapshot.escalation_resets) || 0;
                 const capReached = hubEscalationResets >= 3;
                 const hubExecutorOutputExists = snapshot ? (snapshot.executor_output_exists ?? true) : true;
                 const hubMergeProbePassed = snapshot ? (snapshot.merge_probe_passed ?? false) : false;
 
-                // Recover commands — hidden when cap reached
-                const RECOVER_CMDS = ['RESET_PHASE', 'RESET_EXECUTION', 'RESET_REVIEWER'];
+                const [advisoryExpanded, setAdvisoryExpanded] = React.useState(hubEscalationResets === 0);
+
+                // Render helper: button with label + description. Clicking opens the modal.
+                // group === 'stop' → red label (visually distinct, same component).
+                const renderQueueEscalationButton = ({ command, label, desc, title: cmdTitle, group }) => {
+                    const isStop = group === 'stop';
+                    return (
+                        <button
+                            key={command}
+                            disabled={hubBusy || hubConfirmBusy || reorderDirty}
+                            title={reorderDirty ? 'Save or cancel reorder first' : cmdTitle}
+                            onClick={() => handleCommand(command)}
+                            className="header-text flex flex-col items-start text-left px-3 py-2 rounded w-full bg-[#1a1d21] hover:bg-[#252830] transition-colors disabled:opacity-50">
+                            <span className={`text-sm font-medium ${isStop ? 'text-red-400' : 'text-slate-300'}`}>
+                                {label}
+                            </span>
+                            {desc && <span className="text-xs mt-0.5 leading-snug text-slate-400">{desc}</span>}
+                        </button>
+                    );
+                };
+
+                const hubAdvisoryText = escalationMsg || 'See orchestrator log for details.';
+                const hubHeaderText   = escalationMsg || 'Awaiting escalation command';
+                const hubCounterText  = `Escalation loops: ${hubEscalationResets}/3`;
+
+                const hubRecoverCmds = ESCALATION_CMD_DEFS
+                    .filter(d => d.group === 'recover')
+                    .filter(d => {
+                        if (capReached) return false;
+                        if (d.command === 'RESET_REVIEWER' && !hubExecutorOutputExists) return false;
+                        return true;
+                    });
+                const hubAdvanceCmds = ESCALATION_CMD_DEFS
+                    .filter(d => d.group === 'advance')
+                    .filter(d => !(d.command === 'PROCEED' && !hubMergeProbePassed));
+                const hubStopDef = ESCALATION_CMD_DEFS.find(d => d.group === 'stop');
+
+                const hubHiddenRecoverItems = !hubExecutorOutputExists
+                    ? ['Re-run Reviewer — no executor output to review'] : [];
+                const hubHiddenAdvanceItems = !hubMergeProbePassed
+                    ? ['Mark Complete — phase branch not yet merged into base'] : [];
 
                 if (isEscalationWaiting) {
                     return (
                         <div className="space-y-3">
-                            <div>
-                                <p className="header-text text-xs text-slate-400 font-semibold mb-1">Awaiting escalation command</p>
-                                {escalationMsg && (
-                                    <p className="header-text text-xs text-amber-300 bg-amber-950/30 border border-amber-700/40 rounded p-2 leading-relaxed">{escalationMsg}</p>
+                            {/* 1. Collapsible advisory block */}
+                            <div className="rounded border border-[#2a3040] bg-[#111418]/60">
+                                <button type="button"
+                                    className="w-full flex items-center gap-2 px-3 py-2 text-left"
+                                    onClick={() => setAdvisoryExpanded(v => !v)}
+                                    aria-expanded={advisoryExpanded}>
+                                    <span className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${capReached ? 'bg-red-500' : 'bg-orange-400'}`}
+                                        style={{ animation: 'pulse 2s cubic-bezier(0.4,0,0.6,1) infinite' }} />
+                                    <span className="header-text text-xs text-slate-300 flex-1 leading-snug">{hubHeaderText}</span>
+                                    <span className="text-slate-500 text-xs ml-1 flex-shrink-0">{advisoryExpanded ? '▲' : '▼'}</span>
+                                </button>
+                                {advisoryExpanded && (
+                                    <div className="px-3 pb-3 space-y-1.5 border-t border-[#2a3040]/60">
+                                        <p className="text-slate-500 text-xs pt-2 font-mono">{hubCounterText}</p>
+                                        <p className="text-slate-400 text-xs leading-relaxed">
+                                            <span className="text-sky-400 font-medium">Advisory · </span>{hubAdvisoryText}
+                                        </p>
+                                    </div>
                                 )}
                             </div>
-                            <div className="grid grid-cols-2 gap-1.5">
-                                {ESCALATION_CMDS.filter(({command}) => {
-                                    // Cap reached: hide all recover commands
-                                    if (capReached && RECOVER_CMDS.includes(command)) return false;
-                                    // Re-run Reviewer: hidden when no executor output
-                                    if (command === 'RESET_REVIEWER' && !hubExecutorOutputExists) return false;
-                                    // Mark Complete: hidden when merge probe not passed
-                                    if (command === 'PROCEED' && !hubMergeProbePassed) return false;
-                                    return true;
-                                }).map(({command, label, needsConfirm}) => {
-                                    const confirming = pendingCommand === command;
-                                    return (
-                                        <div key={command}>
-                                            <button
-                                                disabled={hubBusy || reorderDirty}
-                                                title={reorderDirty ? "Save or cancel reorder first" : undefined}
-                                                onClick={() => handleCommand(command)}
-                                                className={`header-text text-xs px-2 py-1.5 rounded w-full text-left disabled:opacity-50 ${
-                                                    confirming ? 'bg-amber-700/60 text-amber-100' : 'bg-[#1a1d21] text-slate-300 hover:bg-[#22252a]'
-                                                }`}>
-                                                {confirming ? `Confirm ${label}?` : label}
-                                            </button>
-                                            {confirming && (
-                                                <button type="button" onClick={() => setPendingCommand(null)}
-                                                    className="header-text text-xs text-slate-500 hover:text-slate-300 mt-0.5 pl-1">cancel</button>
-                                            )}
-                                        </div>
-                                    );
-                                })}
+
+                            {/* 2. Recover group OR cap-reached notice */}
+                            {capReached ? (
+                                <p className="text-amber-500 text-xs px-1">
+                                    Recover unavailable · reset budget of 3 exhausted. Use Abandon Phase or Stop Pipeline to exit.
+                                </p>
+                            ) : (
+                                <div className="space-y-1.5">
+                                    <InfoGroupLabel hiddenItems={hubHiddenRecoverItems}>Recover</InfoGroupLabel>
+                                    {hubRecoverCmds.map(def => renderQueueEscalationButton(def))}
+                                </div>
+                            )}
+
+                            <div className="border-t border-[#2a2d31]" />
+
+                            {/* 3. Advance manually group */}
+                            <div className="space-y-1.5">
+                                <InfoGroupLabel hiddenItems={hubHiddenAdvanceItems}>Advance manually</InfoGroupLabel>
+                                {hubAdvanceCmds.map(def => renderQueueEscalationButton(def))}
                             </div>
+
+                            <div className="border-t border-[#2a2d31]" />
+
+                            {/* 4. Stop Pipeline — standalone, red label via group='stop' in renderQueueEscalationButton */}
+                            {hubStopDef && renderQueueEscalationButton(hubStopDef)}
+
                             {hubError && <p className="header-text text-xs text-red-400">{hubError}</p>}
                             <div className="border-t border-[#2a2d31] pt-3 space-y-3">
                                 {dependsSelect}
                                 {removeBtn}
                                 {monitorBtn}
                             </div>
+
+                            {/* Confirmation modals — same components as monitor; onConfirm
+                                routes through hubModalConfirm which adds target_project_path
+                                for deferred queue dispatch (not the monitor's direct path). */}
+                            {hubModalCommand && hubModalCommand !== 'STOP' && (
+                                <ConfirmationModal
+                                    command={hubModalCommand}
+                                    onConfirm={hubModalConfirm}
+                                    onDismiss={hubModalDismiss}
+                                    busy={hubConfirmBusy}
+                                    escalationResets={hubEscalationResets}
+                                />
+                            )}
+                            {hubModalCommand === 'STOP' && (
+                                <StopConfirmModal
+                                    onConfirm={hubModalConfirm}
+                                    onDismiss={hubModalDismiss}
+                                    pipelineStatus="WAITING_FOR_HUMAN"
+                                />
+                            )}
                         </div>
                     );
                 }
@@ -6517,8 +6613,8 @@
                                             onDragOver={e => handleDragOver(e, entry)}
                                             onDrop={e => handleDrop(e, entry)}
                                             onDragEnd={handleDragEnd}
-                                            onClick={() => { setSelectedId(entry.id); setHubError(''); setRevalidateChecks(null); setPendingCommand(null); }}
-                                            onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelectedId(entry.id); setHubError(''); setRevalidateChecks(null); setPendingCommand(null); } }}
+                                            onClick={() => { setSelectedId(entry.id); setHubError(''); setRevalidateChecks(null); setHubModalCommand(null); }}
+                                            onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelectedId(entry.id); setHubError(''); setRevalidateChecks(null); setHubModalCommand(null); } }}
                                             title={entry.parent_id ? 'Move the parent project to reorder this group' : undefined}
                                             style={{paddingLeft: depth * 16 + 'px', borderLeft: depth > 0 ? '2px solid #312e81' : 'none'}}
                                             className={`flex items-center gap-2 p-2.5 rounded mb-1 cursor-pointer border transition-colors ${
