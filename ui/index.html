@@ -6669,7 +6669,18 @@
                                             {effectiveRanks[entry.id] != null
                                                 ? <span className="header-text text-xs text-slate-500 w-5 text-right flex-shrink-0">{effectiveRanks[entry.id]}</span>
                                                 : <span className="header-text text-xs text-indigo-400 w-5 text-right flex-shrink-0">↳</span>}
-                                            <span className="flex-1 header-text text-xs text-slate-200 truncate">{entry.name}</span>
+                                            <div className="flex-1 min-w-0">
+                                                <span className="header-text text-xs text-slate-200 block truncate">{entry.name}</span>
+                                                {entry.state === 'BLOCKED' && entry.blocked_at && (
+                                                    <span className="header-text text-xs text-slate-500">Blocked {relTime(entry.blocked_at)}</span>
+                                                )}
+                                                {entry.state === 'ACTIVE' && entry.started_at && (
+                                                    <span className="header-text text-xs text-slate-500">Running {relTime(entry.started_at)}</span>
+                                                )}
+                                                {entry.state === 'ACTIVE' && entry.phases_total !== undefined && entry.phases_total > 0 && (
+                                                    <span className="header-text text-xs text-slate-500">{entry.phases_complete}/{entry.phases_total} phases</span>
+                                                )}
+                                            </div>
                                             {entry.skip_count > 0 && <span className="header-text text-xs text-orange-400">↩{entry.skip_count}</span>}
                                             {entry.parent_id && (
                                                 <span
