@@ -1948,6 +1948,12 @@
                         </div>
                     </div>
 
+                    {metricsSummary && metricsSummary.total_phases > 0 && (
+                        <p className="header-text text-xs text-slate-500">
+                            Run so far: {metricsSummary.total_phases} phases · {metricsSummary.total_executor_attempts} exec attempts · {formatDuration(metricsSummary.total_duration_seconds)}
+                        </p>
+                    )}
+
                     {/* Phase list */}
                     <div className="space-y-2">
                         {roadmap.map((phase, index) => {
