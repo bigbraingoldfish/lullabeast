@@ -1780,6 +1780,7 @@
             pipeline_status,
             metricsSummary,
             escalation_resets,
+            last_action,
             onResumeSent,
             onResumeOrchestratorResponse,
         }) {
@@ -1840,6 +1841,11 @@
                     </div>
                     {goal && (
                         <p className="text-slate-400 text-sm leading-relaxed">{goal}</p>
+                    )}
+                    {last_action && (
+                        <p className="text-xs italic text-slate-500 truncate" title={last_action}>
+                            {last_action.slice(0, 80)}
+                        </p>
                     )}
                     <div className="space-y-1">
                         <div className="text-slate-500 text-xs font-medium tracking-wide uppercase mb-0.5" data-testid="agent-attempts-heading">
@@ -7347,6 +7353,7 @@
                                 pipeline_status={status}
                                 metricsSummary={metricsSummary}
                                 escalation_resets={pState.escalation_resets || 0}
+                                last_action={pState.last_action}
                                 onResumeSent={fetchState}
                                 onResumeOrchestratorResponse={applyResumeOrchestratorClientResult}
                             />
