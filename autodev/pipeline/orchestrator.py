@@ -1824,6 +1824,38 @@ class Orchestrator:
         self.state["current_agent"] = "reviewer"
         self.transition_state("RUNNING", "reset_reviewer: reviewer reset, awaiting retry")
 
+    def _ensure_phase_branch(self, branch: str) -> bool:
+        """Guarantee HEAD is on `branch` before any git write or agent invocation.
+
+        Called proactively at three points: executor start, reviewer start, and Phase 10
+        (before git add). After a RESET_PHASE the phase branch is deleted and HEAD lands
+        on main; without this guard git commit in Phase 10 targets main and the subsequent
+        git merge phase/N fails because the branch has no unique commits.
+
+        Returns True if HEAD is on branch (or was successfully corrected).
+        Returns False only if all correction attempts fail — caller should escalate.
+        """
+        try:
+            sym = subprocess.run(
+                ["git", "symbolic-ref", "--short", "HEAD"],
+                cwd=SYMLINK_TARGET, capture_output=True, text=True
+            )
+            if sym.returncode == 0 and sym.stdout.strip() == branch:
+                return True
+            print(f"[WARN] _ensure_phase_branch: HEAD on '{sym.stdout.strip()}', expected '{branch}' — correcting.")
+        except Exception:
+            pass
+        try:
+            subprocess.run(
+                f"git checkout {branch} 2>/dev/null || git checkout -b {branch}",
+                shell=True, cwd=SYMLINK_TARGET, check=True
+            )
+            print(f"[INFO] _ensure_phase_branch: HEAD corrected to '{branch}'.")
+            return True
+        except subprocess.CalledProcessError:
+            print(f"[ERROR] _ensure_phase_branch: could not checkout or create '{branch}'.")
+            return False
+
     def _mark_roadmap_phase(self, raw_id: str, marker: str) -> None:
         """Atomically update the roadmap.md checkbox for raw_id to [marker].
 
@@ -2800,6 +2832,12 @@ class Orchestrator:
                     sentinel_path = os.path.join(PROJECT_ARTIFACTS_DIR, "executor_output.done")
                     token = self.openclaw_config.get("hooks", {}).get("token", "")
 
+                    # Proactive branch guard: after RESET_PHASE the phase branch is deleted
+                    # and HEAD lands on main. Correct before the executor runs so any git
+                    # work it triggers (and Phase 10's commit) targets the right branch.
+                    _ex_branch = f"phase/{raw_id}" if raw_id and raw_id != "unknown" else f"phase/{phase}"
+                    self._ensure_phase_branch(_ex_branch)
+
                     _attempt_start_time = time.time()  # captured before cleanup for stale-sentinel guard
                     cleanup_output_files(PROJECT_ARTIFACTS_DIR, "executor")
                     self.skill_manager.inject_skill(
@@ -2931,7 +2969,14 @@ class Orchestrator:
                     
                     sentinel_path = os.path.join(PROJECT_ARTIFACTS_DIR, "reviewer_output.done")
                     token = self.openclaw_config.get("hooks", {}).get("token", "")
-                    
+
+                    # Proactive branch guard: ensure HEAD is on the phase branch before
+                    # invoking the reviewer. Phase 10 (inside this same block) will hard-
+                    # guard again before git add, but catching drift here avoids the
+                    # reviewer running on the wrong branch entirely.
+                    _rv_branch = f"phase/{raw_id}" if raw_id and raw_id != "unknown" else f"phase/{phase}"
+                    self._ensure_phase_branch(_rv_branch)
+
                     _attempt_start_time = time.time()  # captured before cleanup for stale-sentinel guard
                     cleanup_output_files(PROJECT_ARTIFACTS_DIR, "reviewer")
                     self.skill_manager.inject_skill(
@@ -3048,6 +3093,20 @@ class Orchestrator:
                             configured_base_branch = self.openclaw_config.get("pipeline", {}).get("base_branch", "").strip()
                             base_branch = configured_base_branch if configured_base_branch else _detect_base_branch(SYMLINK_TARGET)
 
+                            # Hard guard: ensure HEAD is on the phase branch before staging.
+                            # This is the authoritative check — commits MUST land on branch,
+                            # not on base. If correction fails, escalate rather than corrupt
+                            # the repository topology.
+                            if not self._ensure_phase_branch(branch):
+                                print(f"[ERROR] Phase {phase}: cannot ensure branch '{branch}' before commit — escalating.")
+                                self.state["current_agent"] = "escalation"
+                                self.transition_state(
+                                    "RUNNING",
+                                    f"Phase {phase} branch integrity failure: cannot checkout '{branch}'",
+                                )
+                                time.sleep(5)
+                                continue
+
                             subprocess.run(["git", "add", "."], cwd=SYMLINK_TARGET, check=True)
 
                             # Check if there are changes to commit
@@ -3083,6 +3142,28 @@ class Orchestrator:
                                 _merge_stderr = (merge_result.stderr or b"").decode(errors="replace").strip()
                                 _merge_reason = _merge_stderr or "git merge failed (no stderr)"
                                 print(f"[ERROR] git merge failed on phase {phase}: {_merge_reason}")
+
+                                # Structured diagnosis: give the escalation agent concrete facts
+                                # rather than only the raw git error string.
+                                _head_sha = subprocess.run(
+                                    ["git", "rev-parse", "HEAD"],
+                                    cwd=SYMLINK_TARGET, capture_output=True, text=True
+                                ).stdout.strip()
+                                _branch_present = subprocess.run(
+                                    ["git", "show-ref", "--verify", f"refs/heads/{branch}"],
+                                    cwd=SYMLINK_TARGET, capture_output=True
+                                ).returncode == 0
+                                _ps_mf = self.read_phase_state()
+                                _ps_mf.update({
+                                    "last_error_code": "ERR_MERGE_FAILED",
+                                    "merge_failure_reason": _merge_reason,
+                                    "merge_failure_branch": branch,
+                                    "merge_failure_branch_exists": _branch_present,
+                                    "merge_failure_last_good_commit": self.state.get("phase_base_commit", "unknown"),
+                                    "merge_failure_head_commit": _head_sha,
+                                })
+                                self.write_phase_state_atomic(_ps_mf)
+
                                 self.state["current_agent"] = "escalation"
                                 self.transition_state(
                                     "RUNNING",
