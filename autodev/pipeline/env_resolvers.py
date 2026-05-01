@@ -17,10 +17,10 @@ Canonical env vars (post hard-cut — no aliases, no legacy flag)
     * default: ``<AUTODEV_REPO_PATH>/.autodev``
 
 Resolution order: canonical env -> built-in default. An empty string is treated
-as "unset". The legacy aliases ``AUTODEV_ROOT`` / ``AUTODEV_RUNTIME_ROOT`` and
-the switch ``AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME`` were removed; setting any of
-them has zero effect. Operators who need pipeline state to live alongside
-OpenClaw should set ``AUTODEV_PIPELINE_ROOT=$OPENCLAW_ROOT`` explicitly.
+as "unset". The legacy alias ``AUTODEV_ROOT`` and the switch
+``AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME`` do not affect pipeline root resolution.
+Operators who need pipeline state to live alongside OpenClaw should set
+``AUTODEV_PIPELINE_ROOT=$OPENCLAW_ROOT`` explicitly.
 """
 
 from __future__ import annotations

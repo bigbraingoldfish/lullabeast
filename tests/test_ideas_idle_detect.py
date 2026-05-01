@@ -105,7 +105,7 @@ class TestPollSentinelWithIdleDetect:
             idle_threshold=120.0,
             startup_grace=2.0,
         ))
-        assert result is True
+        assert result[0] is True
 
     def test_returns_false_on_hard_timeout_without_jsonl(self, tmp_path):
         """With no sessions.json and no sentinel, returns False at startup_grace expiry."""
@@ -122,7 +122,8 @@ class TestPollSentinelWithIdleDetect:
             startup_grace=0.1,
         ))
         elapsed = time.monotonic() - start
-        assert result is False
+        assert result[0] is False
+        assert result[1] == "no_session"
         # Should not have waited much longer than poll_timeout
         assert elapsed < 2.0
 
@@ -152,7 +153,8 @@ class TestPollSentinelWithIdleDetect:
             idle_threshold=0.3,        # short idle threshold for the test
             startup_grace=0.1,
         ))
-        assert result is False  # returned early due to idle, not hard timeout
+        assert result[0] is False  # returned early due to idle, not hard timeout
+        assert result[1] == "idle"
 
     def test_returns_true_when_sentinel_appears_while_jsonl_active(self, tmp_path):
         """Returns True when sentinel appears while JSONL is actively being updated."""
@@ -196,7 +198,7 @@ class TestPollSentinelWithIdleDetect:
             return await result_task
 
         result = asyncio.run(run_with_concurrent_writes())
-        assert result is True
+        assert result[0] is True
         assert write_count[0] > 0
 
     def test_idea_watch_dir_resets_idle_despite_stale_jsonl(self, tmp_path):
@@ -296,9 +298,13 @@ class TestPollSentinelWithIdleDetect:
             return result
 
         # JSONL-only: second tick hits idle after one sleep (do not touch prd)
-        assert asyncio.run(run_poll_jsonl_only()) is False
+        r_jsonl = asyncio.run(run_poll_jsonl_only())
+        assert r_jsonl[0] is False
+        assert r_jsonl[1] == "idle"
         assert len(sleeps) == 1
 
         # With idea dir: simulated activity bump after first sleep resets idle; later tick fails
-        assert asyncio.run(run_poll_with_mocked_idea_workspace_mtime()) is False
+        r_idea = asyncio.run(run_poll_with_mocked_idea_workspace_mtime())
+        assert r_idea[0] is False
+        assert r_idea[1] == "idle"
         assert len(sleeps) == 2

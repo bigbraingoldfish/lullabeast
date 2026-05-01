@@ -352,7 +352,7 @@ def test_late_done_reconciliation_after_poll_false(tmp_path):
             with patch("asyncio.create_task"):
                 with patch(
                     "ui.server._poll_sentinel_with_idle_detect",
-                    AsyncMock(return_value=False),
+                    AsyncMock(return_value=(False, "poll_timeout")),
                 ):
                     with patch("ui.server.time.time", return_value=1000.0):
                         with patch("ui.server.os.path.getmtime", side_effect=fake_gm):
