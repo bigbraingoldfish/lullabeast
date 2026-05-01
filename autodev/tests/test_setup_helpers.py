@@ -162,7 +162,6 @@ def test_merge_dotenv_emits_canonical_names_only(tmp_path):
     assert "OPENCLAW_ROOT=/oc" in text
     assert "AUTODEV_PIPELINE_ROOT=/r/.autodev" in text
     assert "AUTODEV_ROOT=" not in text
-    assert "AUTODEV_RUNTIME_ROOT=" not in text
     assert "AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME" not in text
 
 

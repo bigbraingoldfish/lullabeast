@@ -8,10 +8,13 @@ Pipeline runtime files that were previously defaulted under `~/.openclaw/` now d
 - `pipeline.lock`
 - `pipeline_queue.json`
 - `pipeline_events.jsonl`
-- `ideas/` (idea sessions, PRD drafts, conversion outputs)
 - `pipeline-project` (symlink to the active target project)
 
 Default directory: `<AUTODEV_REPO_PATH>/.autodev/`
+
+Ideas sessions, PRD drafts, and related artifacts default under the OpenClaw hub unless overridden:
+
+- `ideas/` → `<openclaw_root>/ideas/` (UI default when `ideas_dir` is omitted in `ui/config.json`)
 
 OpenClaw-owned files remain under `openclaw_root` (typically `~/.openclaw/`):
 
@@ -42,9 +45,7 @@ environments passed to `orchestrator.py`). If you see them in a stale file, you
 can delete them — nothing reads them.
 
 - `AUTODEV_ROOT` (legacy alias of `OPENCLAW_ROOT`)
-- `AUTODEV_RUNTIME_ROOT` (legacy alias of `AUTODEV_PIPELINE_ROOT`)
 - `AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME` (legacy switch)
-- `autodev_runtime_root` (UI config key alias for `autodev_pipeline_root`)
 - `use_legacy_openclaw_runtime` (UI config key)
 
 ## Pinning the pipeline state directory
@@ -73,9 +74,10 @@ etc.) in `ui/config.json`; explicit keys are never overwritten by defaults.
 
 ## Orchestrator environment
 
-When launched from the UI, the server passes only the canonical names to the
-orchestrator subprocess. Any legacy aliases inherited from the parent
-environment are actively scrubbed before `execve` so they cannot leak through:
+When launched from the UI, the server passes the canonical names to the
+orchestrator subprocess. `AUTODEV_ROOT` and `AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME`
+are not written and are scrubbed from the child environment if present in the
+parent:
 
 - `OPENCLAW_ROOT` — OpenClaw root (config `openclaw_root`)
 - `AUTODEV_REPO_PATH` — repository root

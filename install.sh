@@ -1030,8 +1030,8 @@ import os
 repo_path = os.environ['AUTODEV_REPO_PATH']
 rt = os.path.join(repo_path, '.autodev')
 oc = os.environ['OPENCLAW_ROOT']
-# Canonical names only. The legacy aliases AUTODEV_ROOT / AUTODEV_RUNTIME_ROOT
-# and the AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME switch were removed.
+# Canonical names only. The legacy aliases AUTODEV_ROOT and
+# AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME were removed.
 pairs = {
     'OPENCLAW_ROOT': oc,
     'AUTODEV_REPO_PATH': repo_path,

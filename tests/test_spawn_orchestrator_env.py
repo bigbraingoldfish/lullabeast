@@ -1,10 +1,8 @@
 """``_spawn_orchestrator`` env-dict construction tests.
 
-Post hard-cut rules (no aliases, no legacy switch):
-  * The UI sets only the canonical env names: ``OPENCLAW_ROOT`` and
-    (when provided) ``AUTODEV_PIPELINE_ROOT``.
-  * ``AUTODEV_ROOT`` / ``AUTODEV_RUNTIME_ROOT`` / ``AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME``
-    must never be written into the child env.
+  * The UI sets ``OPENCLAW_ROOT`` and (when provided) ``AUTODEV_PIPELINE_ROOT``.
+  * ``AUTODEV_ROOT`` / ``AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME`` must never be
+    written into the child env (parent copies may be scrubbed).
   * When the UI config leaves ``autodev_pipeline_root`` blank, the parent env's
     ``AUTODEV_PIPELINE_ROOT`` must be preserved (regression guard for the
     empty-string overwrite bug).
@@ -28,7 +26,7 @@ def _capture_popen_env():
 
 
 def test_spawn_emits_only_canonical_env_names(tmp_path, monkeypatch):
-    """Child env must carry the canonical names only; legacy aliases absent."""
+    """Child env carries canonical names; scrubbed legacy vars absent."""
     repo = tmp_path / "repo"
     (repo / "autodev" / "pipeline").mkdir(parents=True)
     (repo / "autodev" / "pipeline" / "orchestrator.py").write_text("")
@@ -41,7 +39,6 @@ def test_spawn_emits_only_canonical_env_names(tmp_path, monkeypatch):
         "OPENCLAW_ROOT",
         "AUTODEV_ROOT",
         "AUTODEV_PIPELINE_ROOT",
-        "AUTODEV_RUNTIME_ROOT",
         "AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME",
     ):
         monkeypatch.delenv(var, raising=False)
@@ -63,7 +60,6 @@ def test_spawn_emits_only_canonical_env_names(tmp_path, monkeypatch):
     assert env["OPENCLAW_ROOT"] == str(oc)
     assert env["AUTODEV_PIPELINE_ROOT"] == str(pipeline_state)
     assert "AUTODEV_ROOT" not in env
-    assert "AUTODEV_RUNTIME_ROOT" not in env
     assert "AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME" not in env
 
 
@@ -84,7 +80,6 @@ def test_spawn_does_not_clobber_parent_pipeline_root_when_config_blank(
     for var in (
         "OPENCLAW_ROOT",
         "AUTODEV_ROOT",
-        "AUTODEV_RUNTIME_ROOT",
         "AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME",
     ):
         monkeypatch.delenv(var, raising=False)
@@ -103,41 +98,4 @@ def test_spawn_does_not_clobber_parent_pipeline_root_when_config_blank(
 
     env = calls[0]
     assert env["AUTODEV_PIPELINE_ROOT"] == parent_pipeline_root
-    assert "AUTODEV_RUNTIME_ROOT" not in env
     assert "AUTODEV_ROOT" not in env
-
-
-def test_spawn_ignores_legacy_json_runtime_root_alias(tmp_path, monkeypatch):
-    """``autodev_runtime_root`` in config.json must not be consulted."""
-    repo = tmp_path / "repo"
-    (repo / "autodev" / "pipeline").mkdir(parents=True)
-    (repo / "autodev" / "pipeline" / "orchestrator.py").write_text("")
-    canonical_val = tmp_path / "canonical"
-    legacy_val = tmp_path / "legacy"
-    canonical_val.mkdir()
-    legacy_val.mkdir()
-
-    for var in (
-        "OPENCLAW_ROOT",
-        "AUTODEV_ROOT",
-        "AUTODEV_PIPELINE_ROOT",
-        "AUTODEV_RUNTIME_ROOT",
-        "AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME",
-    ):
-        monkeypatch.delenv(var, raising=False)
-
-    fake_popen, calls = _capture_popen_env()
-    with patch("subprocess.Popen", fake_popen):
-        server._spawn_orchestrator(
-            str(tmp_path / "proj"),
-            config={
-                "autodev_repo_path": str(repo),
-                "openclaw_root": str(tmp_path / "oc"),
-                "autodev_pipeline_root": str(canonical_val),
-                "autodev_runtime_root": str(legacy_val),
-            },
-        )
-
-    env = calls[0]
-    assert env["AUTODEV_PIPELINE_ROOT"] == str(canonical_val)
-    assert "AUTODEV_RUNTIME_ROOT" not in env

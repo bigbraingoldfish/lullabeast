@@ -510,10 +510,9 @@ def _finalize_autodev_config_paths(config: dict, user_override_keys: set[str]) -
       2. Environment variable ``AUTODEV_PIPELINE_ROOT``.
       3. ``<repo>/.autodev`` default.
 
-    Legacy aliases (``autodev_runtime_root`` JSON key, ``AUTODEV_RUNTIME_ROOT``
-    env var, ``AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME`` switch) are ignored —
-    operators who need pipeline state to live next to OpenClaw set
-    ``AUTODEV_PIPELINE_ROOT`` to the OpenClaw root explicitly.
+    ``ideas_dir`` defaults to ``{openclaw_root}/ideas`` (prd-creator contract) when not set in
+    JSON. Other legacy env/config switches do not affect pipeline root; use
+    ``AUTODEV_PIPELINE_ROOT`` when pipeline state should live next to OpenClaw.
 
     Keys in ``user_override_keys`` (from ui/config.json via ``_user_override_keys``) are never
     overwritten. Empty-string file values are excluded from that set so placeholders match defaults.
@@ -536,20 +535,25 @@ def _finalize_autodev_config_paths(config: dict, user_override_keys: set[str]) -
         runtime_base = resolve_pipeline_root(repo)
 
     config["autodev_pipeline_root"] = runtime_base
-    # Drop any legacy alias key that may have crept in from older config files.
     config.pop("autodev_runtime_root", None)
+
+    # Ideas output matches prd-creator (OPENCLAW_ROOT/ideas), not the pipeline state dir.
+    oc_hub = os.path.expanduser(str(oc))
+    ideas_default = os.path.join(oc_hub, "ideas")
 
     derived = {
         "pipeline_state_path": os.path.join(runtime_base, "pipeline_state.json"),
         "lock_path": os.path.join(runtime_base, "pipeline.lock"),
         "pipeline_queue_path": os.path.join(runtime_base, "pipeline_queue.json"),
         "events_path": os.path.join(runtime_base, "pipeline_events.jsonl"),
-        "ideas_dir": os.path.join(runtime_base, "ideas"),
         "project_dir_path": os.path.join(runtime_base, "pipeline-project"),
     }
     for key, val in derived.items():
         if key not in user_override_keys:
             config[key] = val
+
+    if "ideas_dir" not in user_override_keys:
+        config["ideas_dir"] = ideas_default
 
     pd = config.get("project_dir_path", "")
     if "phase_state_path" not in user_override_keys:
@@ -1468,16 +1472,15 @@ def _validate_queue_entry_ids_order(entries, entry_ids):
 def _spawn_orchestrator(project_path: str, config: dict | None = None) -> dict:
     """Start orchestrator.py with --project-path. Returns {"ok": bool, "error": str|None}.
 
-    Env construction rules (canonical names only — no legacy aliases):
+    Env construction rules:
       * ``OPENCLAW_ROOT`` is always set from ``config["openclaw_root"]``.
       * ``AUTODEV_PIPELINE_ROOT`` is only written when the UI config supplies a
         non-empty value. If the config is blank we **preserve** whatever the
         parent env exported — writing ``""`` over a real value was the original
         bug.
-      * Legacy aliases (``AUTODEV_ROOT``, ``AUTODEV_RUNTIME_ROOT``,
-        ``AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME``) are never emitted. Stale values
-        carried over from the parent env are also scrubbed so downstream readers
-        cannot accidentally resurrect the old layout.
+      * ``AUTODEV_ROOT`` and ``AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME`` are never
+        emitted; stale values from the parent env are scrubbed so they cannot
+        affect the child process.
     """
     import subprocess
     import sys
@@ -1503,7 +1506,6 @@ def _spawn_orchestrator(project_path: str, config: dict | None = None) -> dict:
     # they were inherited from the parent env (e.g. a stale operator shell).
     for legacy in (
         "AUTODEV_ROOT",
-        "AUTODEV_RUNTIME_ROOT",
         "AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME",
     ):
         env.pop(legacy, None)
@@ -3131,6 +3133,24 @@ def _ideas_turn_output_contract_footer(idea_id: str, turn_n: int) -> str:
     )
 
 
+def _ideas_sentinel_poll_failure_detail(
+    reason: str, poll_timeout: float, idle_threshold: float
+) -> str:
+    """Human-readable 408 body for failed sentinel polls."""
+    if reason == "idle":
+        return (
+            f"No agent progress for {int(idle_threshold)}s — output may have stalled."
+        )
+    if reason == "no_session":
+        return (
+            "Agent session did not register within startup grace — check OpenClaw "
+            "and the agent gateway."
+        )
+    return (
+        f"No sentinel after {int(poll_timeout)}s — the model may be slow or the agent stalled."
+    )
+
+
 async def _poll_sentinel_with_idle_detect(
     done_path,
     session_key: str,
@@ -3140,13 +3160,14 @@ async def _poll_sentinel_with_idle_detect(
     idle_threshold: float,
     startup_grace: float,
     idea_watch_dir: Path | None = None,
-) -> bool:
+) -> tuple[bool, str]:
     """Poll for a sentinel file with JSONL-based idle detection.
 
-    Returns True when the sentinel appears.  Returns False when either:
-    - No liveness for ``idle_threshold`` seconds: JSONL mtime stale and (when given)
-      ``idea_watch_dir`` artifact mtimes stale, or
-    - ``poll_timeout`` seconds have elapsed with no sentinel (hard timeout fallback).
+    Returns ``(True, "")`` when the sentinel appears. Otherwise ``(False, reason)`` where
+    ``reason`` is one of:
+    - ``idle`` — no JSONL / idea-dir activity for ``idle_threshold`` seconds
+    - ``poll_timeout`` — ``poll_timeout`` elapsed without sentinel
+    - ``no_session`` — JSONL never registered within ``startup_grace``
 
     During ``startup_grace`` seconds from start, we retry resolving the JSONL path
     from sessions.json on every tick (OpenClaw may not register the session instantly).
@@ -3163,18 +3184,18 @@ async def _poll_sentinel_with_idle_detect(
 
     while True:
         if Path(done_path).exists():
-            return True
+            return True, ""
 
         now = time.monotonic()
         if now >= deadline:
-            return False
+            return False, "poll_timeout"
 
         # Try to resolve JSONL path during startup grace period
         if jsonl_path is None:
             jsonl_path = _resolve_prd_creator_jsonl(session_key, openclaw_root)
             if jsonl_path is None and (now - start) > startup_grace:
                 # Grace expired with no session registered — agent never started; fail now
-                return False
+                return False, "no_session"
 
         # JSONL heartbeat
         if jsonl_path is not None:
@@ -3197,7 +3218,7 @@ async def _poll_sentinel_with_idle_detect(
 
         if jsonl_path is not None and (now - last_activity) >= idle_threshold:
             # No JSONL progress and no fresh idea artifacts for idle_threshold
-            return False
+            return False, "idle"
 
         await asyncio.sleep(poll_interval)
 
@@ -3750,7 +3771,7 @@ async def post_ideas_message(idea_id: str, request: Request):
     md_path = turns_dir / f"{turn_n}.md"
     prd_draft_path = idea_dir / "prd_draft.md"
 
-    sentinel_found = await _poll_sentinel_with_idle_detect(
+    sentinel_found, poll_fail_reason = await _poll_sentinel_with_idle_detect(
         done_path, session_key, openclaw_root,
         poll_timeout, poll_interval, idle_threshold, startup_grace,
         idea_watch_dir=idea_dir,
@@ -3773,7 +3794,9 @@ async def post_ideas_message(idea_id: str, request: Request):
         _atomic_write_json_file(str(session_path), _timeout_data)
         raise HTTPException(
             status_code=408,
-            detail=f"No agent response after {int(poll_timeout)}s — the model may be slow or the agent session may be stalled.",
+            detail=_ideas_sentinel_poll_failure_detail(
+                poll_fail_reason, poll_timeout, idle_threshold
+            ),
         )
 
     # Read agent response
@@ -4626,7 +4649,7 @@ async def _notify_prd_agent(idea_id: str, config: dict, report_content: str, che
         # Poll for turns/{next_turn}.done
         done_path = idea_dir / "turns" / f"{next_turn}.done"
         response_path = idea_dir / "turns" / f"{next_turn}.md"
-        sentinel_found = await _poll_sentinel_with_idle_detect(
+        sentinel_found, _poll_reason = await _poll_sentinel_with_idle_detect(
             done_path, session_key, openclaw_root,
             poll_timeout, poll_interval, idle_threshold, startup_grace,
             idea_watch_dir=idea_dir,

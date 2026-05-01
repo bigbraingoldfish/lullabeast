@@ -219,7 +219,7 @@ def test_snapshot_prd_previous_written_before_agent_overwrites(ideas_dir):
 
     async def fake_poll(*_a, **_k):
         (idea_path / "prd_draft.md").write_text("NEW PRD BODY", encoding="utf-8")
-        return True
+        return True, ""
 
     turns_dir = idea_path / "turns"
     turn_n = 2
@@ -269,7 +269,7 @@ def test_snapshot_skipped_when_no_prd_draft_yet(ideas_dir):
 
     async def fake_poll(*_a, **_k):
         (idea_path / "prd_draft.md").write_text("FIRST", encoding="utf-8")
-        return True
+        return True, ""
 
     turns_dir = idea_path / "turns"
     turn_n = 2

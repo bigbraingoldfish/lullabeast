@@ -1,9 +1,8 @@
 """repo_init_check respects OPENCLAW_ROOT for non-default layouts (e.g. Docker bind mounts).
 
-Post hard-cut rules:
   - Only ``OPENCLAW_ROOT`` is consulted for the OpenClaw hub path.
   - Only ``AUTODEV_PIPELINE_ROOT`` is consulted for the pipeline state path.
-  - The legacy aliases ``AUTODEV_ROOT`` / ``AUTODEV_RUNTIME_ROOT`` are ignored.
+  - The legacy alias ``AUTODEV_ROOT`` is ignored for hub resolution.
 """
 
 import os
@@ -57,9 +56,8 @@ def test_repo_init_check_uses_openclaw_root_custom_path(tmp_path):
     _seed_minimal_openclaw_layout(oc_root, project)
 
     env = os.environ.copy()
-    # Strip legacy aliases to prove they are unused.
+    # Strip legacy AUTODEV_ROOT to prove it is unused where relevant.
     env.pop("AUTODEV_ROOT", None)
-    env.pop("AUTODEV_RUNTIME_ROOT", None)
     env["OPENCLAW_ROOT"] = str(oc_root)
     # Custom OpenClaw tree: pin pipeline state onto the same root so the gate
     # finds pipeline-project under $OPENCLAW_ROOT.
@@ -90,7 +88,6 @@ def test_repo_init_check_custom_root_fails_without_workspace(tmp_path):
 
     env = os.environ.copy()
     env.pop("AUTODEV_ROOT", None)
-    env.pop("AUTODEV_RUNTIME_ROOT", None)
     env["OPENCLAW_ROOT"] = str(oc_root)
     env["AUTODEV_PIPELINE_ROOT"] = str(oc_root)
 
@@ -139,7 +136,6 @@ def test_repo_init_check_repo_local_runtime_pipeline_project(tmp_path):
 
     env = os.environ.copy()
     env.pop("AUTODEV_ROOT", None)
-    env.pop("AUTODEV_RUNTIME_ROOT", None)
     env["OPENCLAW_ROOT"] = str(oc_root)
     env["AUTODEV_REPO_PATH"] = str(fake_repo)
 
@@ -170,7 +166,6 @@ def test_repo_init_check_legacy_autodev_root_is_ignored(tmp_path):
     env = os.environ.copy()
     env.pop("OPENCLAW_ROOT", None)
     env.pop("AUTODEV_PIPELINE_ROOT", None)
-    env.pop("AUTODEV_RUNTIME_ROOT", None)
     # Only legacy alias set — must be ignored.
     env["AUTODEV_ROOT"] = str(bogus_oc_root)
 

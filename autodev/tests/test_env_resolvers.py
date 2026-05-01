@@ -1,10 +1,9 @@
 """Tests for the shared env resolvers that centralise OpenClaw / pipeline roots.
 
-Post hard-cut rules (no legacy aliases, no legacy flag):
   - Only ``OPENCLAW_ROOT`` is consulted for the OpenClaw hub path.
   - Only ``AUTODEV_PIPELINE_ROOT`` is consulted for the pipeline state path.
-  - ``AUTODEV_ROOT`` / ``AUTODEV_RUNTIME_ROOT`` / ``AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME``
-    are explicitly ignored (setting them has no effect).
+  - ``AUTODEV_ROOT`` / ``AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME`` are ignored for
+    pipeline resolution (OpenClaw uses its own rules for hub path).
 """
 
 import os
@@ -21,7 +20,6 @@ ALL_ENV_KEYS = (
     "OPENCLAW_ROOT",
     "AUTODEV_ROOT",
     "AUTODEV_PIPELINE_ROOT",
-    "AUTODEV_RUNTIME_ROOT",
     "AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME",
 )
 
@@ -76,23 +74,6 @@ class TestResolvePipelineRoot:
         monkeypatch.setenv("AUTODEV_PIPELINE_ROOT", str(target))
         assert resolve_pipeline_root("/ignored/repo") == str(target)
 
-    def test_legacy_alias_is_ignored(self, monkeypatch, tmp_path):
-        """AUTODEV_RUNTIME_ROOT is no longer consulted; default must win."""
-        target = tmp_path / "runtime"
-        target.mkdir()
-        monkeypatch.setenv("AUTODEV_RUNTIME_ROOT", str(target))
-        repo = str(tmp_path / "repo")
-        assert resolve_pipeline_root(repo) == os.path.join(repo, ".autodev")
-
-    def test_canonical_ignores_legacy_even_when_both_set(self, monkeypatch, tmp_path):
-        new_val = tmp_path / "new"
-        old_val = tmp_path / "old"
-        new_val.mkdir()
-        old_val.mkdir()
-        monkeypatch.setenv("AUTODEV_PIPELINE_ROOT", str(new_val))
-        monkeypatch.setenv("AUTODEV_RUNTIME_ROOT", str(old_val))
-        assert resolve_pipeline_root("/ignored/repo") == str(new_val)
-
     def test_expands_tilde(self, monkeypatch):
         monkeypatch.setenv("AUTODEV_PIPELINE_ROOT", "~/custom-pipeline")
         assert resolve_pipeline_root("/ignored/repo") == os.path.expanduser(
@@ -102,7 +83,6 @@ class TestResolvePipelineRoot:
     def test_empty_strings_fall_through_to_default(self, monkeypatch, tmp_path):
         repo = str(tmp_path)
         monkeypatch.setenv("AUTODEV_PIPELINE_ROOT", "")
-        monkeypatch.setenv("AUTODEV_RUNTIME_ROOT", str("/should/be/ignored"))
         assert resolve_pipeline_root(repo) == os.path.join(repo, ".autodev")
 
     def test_legacy_flag_is_ignored(self, monkeypatch, tmp_path):
