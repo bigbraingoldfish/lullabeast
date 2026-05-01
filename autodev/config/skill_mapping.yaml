@@ -24,6 +24,7 @@ INTEGRATION: integration-wiring
 TEST: testing-quality
 E2E: testing-quality
 CLI: cli-tooling
+COMPLETE: completion
 
 # INTENTIONALLY UNMAPPED subsystems — run without skills until explicit mappings are
 # validated by the operator and added here:

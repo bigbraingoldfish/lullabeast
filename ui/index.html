@@ -1553,7 +1553,7 @@
 
         // ─── PipelineCompletePanel ────────────────────────────────────────────────
 
-        function PipelineCompletePanel({ roadmap, metricsSummary }) {
+        function PipelineCompletePanel({ roadmap, metricsSummary, completionReport, onGenerateDocs, generateDocsBusy, generateDocsError }) {
             const completeCount = roadmap ? roadmap.filter(p => p.status === 'complete').length : 0;
             const totalCount = roadmap ? roadmap.length : 0;
 
@@ -1606,6 +1606,24 @@
                                 </div>
                             )}
                         </>
+                    )}
+
+                    {/* W5-F: completion doc generation — only shown when completionReport.found is false (pipelineStatus === PIPELINE_COMPLETE required via CurrentPhasePanel) */}
+                    {(!completionReport || !completionReport.found) && (
+                        <div className="mt-4 pt-3 border-t border-[#1a1d21]">
+                            <p className="text-slate-400 text-xs mb-2">Want a summary and next steps for this project?</p>
+                            {generateDocsError && (
+                                <p className="text-red-400 text-xs mb-2">{generateDocsError}</p>
+                            )}
+                            {/* button only visible when completionReport.found is false */}
+                            <button
+                                onClick={onGenerateDocs}
+                                disabled={generateDocsBusy}
+                                className="px-3 py-1.5 text-xs rounded bg-emerald-700 hover:bg-emerald-600 text-white disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                            >
+                                {generateDocsBusy ? 'Generating…' : 'Generate Docs'}
+                            </button>
+                        </div>
                     )}
                 </div>
             );
@@ -1786,9 +1804,20 @@
             waiting_for_human_at,
             onResumeSent,
             onResumeOrchestratorResponse,
+            completionReport,
+            onGenerateDocs,
+            generateDocsBusy,
+            generateDocsError,
         }) {
             if (pipeline_status === 'PIPELINE_COMPLETE') {
-                return <PipelineCompletePanel roadmap={roadmap} metricsSummary={metricsSummary} />;
+                return <PipelineCompletePanel
+                    roadmap={roadmap}
+                    metricsSummary={metricsSummary}
+                    completionReport={completionReport}
+                    onGenerateDocs={onGenerateDocs}
+                    generateDocsBusy={generateDocsBusy}
+                    generateDocsError={generateDocsError}
+                />;
             }
             if (pipeline_status === 'STOPPED') {
                 return (
@@ -1896,7 +1925,7 @@
         // Wrapped in React.memo so it only re-renders when roadmap or metricsSummary
         // props actually change — avoids DOM churn caused by parent pState polling.
 
-        const RoadmapPanel = React.memo(function RoadmapPanel({ roadmap, metricsSummary, pipelineStatus }) {
+        const RoadmapPanel = React.memo(function RoadmapPanel({ roadmap, metricsSummary, pipelineStatus, completionReport, runStartedAt }) {
             const [expandedPhaseId, setExpandedPhaseId] = useState(null);
 
             const handlePhaseClick = (phaseId) => {
@@ -1957,6 +1986,7 @@
                     {/* Phase list */}
                     <div className="space-y-2">
                         {roadmap.map((phase, index) => {
+
                             const isExpanded = expandedPhaseId === phase.id;
                             const phaseMeta = metricsMap[phase.id] || null;
 
@@ -2058,6 +2088,53 @@
                                 </div>
                             );
                         })}
+
+                        {/* W5-D: Synthetic Completion Report phase entry */}
+                        {pipelineStatus === 'PIPELINE_COMPLETE' && completionReport && completionReport.found && (() => {
+                            const isStale = runStartedAt && completionReport.mtime &&
+                                completionReport.mtime < (new Date(runStartedAt).getTime() / 1000);
+                            const isExpanded = expandedPhaseId === '__completion_report__';
+                            return (
+                                <div
+                                    key="__completion_report__"
+                                    role="button"
+                                    tabIndex={0}
+                                    aria-label="Completion Report"
+                                    aria-expanded={isExpanded}
+                                    data-testid="completion-report-phase-row"
+                                    className={`p-3 rounded border border-emerald-700/40 cursor-pointer transition-colors bg-emerald-950/20 hover:bg-emerald-950/40`}
+                                    onClick={() => setExpandedPhaseId(prev => prev === '__completion_report__' ? null : '__completion_report__')}
+                                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setExpandedPhaseId(prev => prev === '__completion_report__' ? null : '__completion_report__'); }}
+                                >
+                                    <div className="flex items-start gap-2">
+                                        <span className="text-lg flex-shrink-0 text-emerald-600">&#9632;</span>
+                                        <div className="flex-1 min-w-0">
+                                            <div className="header-text text-sm font-semibold text-emerald-400 flex items-center gap-2">
+                                                Completion Report
+                                                {isExpanded ? (
+                                                    <span className="text-blue-400 text-xs">▼</span>
+                                                ) : (
+                                                    <span className="text-slate-500 text-xs">▶</span>
+                                                )}
+                                                {isStale && (
+                                                    <span className="text-xs text-amber-500 font-normal">(from previous run)</span>
+                                                )}
+                                            </div>
+                                            <p className="text-sm text-slate-400 mt-1">
+                                                What was built · how to run it · suggested next steps
+                                            </p>
+                                            {isExpanded && (
+                                                <div className="mt-3 pt-2 border-t border-emerald-700/30">
+                                                    <pre className="text-xs text-slate-300 whitespace-pre-wrap font-mono overflow-y-auto max-h-64 leading-relaxed">
+                                                        {completionReport.content}
+                                                    </pre>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            );
+                        })()}
                     </div>
                 </div>
             );
@@ -5100,14 +5177,17 @@
             const roadmapSeedFileRef = useRef(null);
 
             const preflightBtnLabel = preflightChecks ? "Re-run Preflight" : "Run Preflight";
+            const [completionReviewOptIn, setCompletionReviewOptIn] = useState(null);
 
-            const step3Done = !!preflightChecks && !hasFail && !preflightRoadmapAmbiguous;
-            const step3HasError = !!preflightChecks && hasFail;
-            const step3HasWarning = !!preflightChecks && !hasFail && !!preflightRoadmapAmbiguous;
+            const step3Done = completionReviewOptIn !== null;
+            const step4Done = !!preflightChecks && !hasFail && !preflightRoadmapAmbiguous;
+            const step4HasError = !!preflightChecks && hasFail;
+            const step4HasWarning = !!preflightChecks && !hasFail && !!preflightRoadmapAmbiguous;
 
             const firstIncompleteStep = !repoPathLocked ? 1
                 : !roadmapSeedLocked ? 2
                 : !step3Done ? 3
+                : !step4Done ? 4
                 : null;
 
             return (
@@ -5327,18 +5407,53 @@
                                 </p>
                             ) : null}
                         </div>
+                        {/* W5-G: Step 3 — Completion Report (required Yes/No selection) */}
                         <div
                             data-testid="preflight-step-3"
+                            className={`rounded border p-3 space-y-2 ${step3Done ? "border-emerald-600/60" : "border-[#2a2d31]"}`}
+                        >
+                            <div className="flex flex-wrap justify-between items-start gap-2">
+                                <div className="min-w-0 flex-1 space-y-1">
+                                    <p className="header-text text-xs font-semibold text-slate-400">Step 3 — Completion Report</p>
+                                    <p className="text-[11px] text-slate-500 leading-relaxed max-w-prose">
+                                        Automatically generate documentation and next steps when the pipeline completes.
+                                    </p>
+                                </div>
+                                <div className="flex gap-2 shrink-0 self-start mt-1">
+                                    <button
+                                        type="button"
+                                        onClick={() => setCompletionReviewOptIn(true)}
+                                        className={`header-text text-xs px-3 py-1.5 rounded border transition-colors ${
+                                            completionReviewOptIn === true
+                                                ? 'border-emerald-500 text-emerald-400 bg-emerald-950/30'
+                                                : 'border-[#2a2d31] text-slate-400 hover:border-slate-500'
+                                        }`}
+                                    >Yes</button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setCompletionReviewOptIn(false)}
+                                        className={`header-text text-xs px-3 py-1.5 rounded border transition-colors ${
+                                            completionReviewOptIn === false
+                                                ? 'border-emerald-500 text-emerald-400 bg-emerald-950/30'
+                                                : 'border-[#2a2d31] text-slate-400 hover:border-slate-500'
+                                        }`}
+                                    >No</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div
+                            data-testid="preflight-step-4"
                             className={`rounded border p-3 space-y-2 ${
-                                step3HasError ? "border-red-600/60"
-                                    : step3HasWarning ? "border-amber-500/60"
-                                    : step3Done ? "border-emerald-600/60"
+                                step4HasError ? "border-red-600/60"
+                                    : step4HasWarning ? "border-amber-500/60"
+                                    : step4Done ? "border-emerald-600/60"
                                     : "border-[#2a2d31]"
                             }`}
                         >
                             <div className="flex flex-wrap justify-between items-start gap-2">
                                 <div className="min-w-0 flex-1 space-y-1">
-                                    <p className="header-text text-xs font-semibold text-slate-400">Step 3 — Preflight</p>
+                                    <p className="header-text text-xs font-semibold text-slate-400">Step 4 — Preflight</p>
                                     <p className="text-[11px] text-slate-500 leading-relaxed max-w-prose">
                                         Checks symlink, .gitignore, workspace files, and roadmap. Launch adds scaffolding and sets the active project.
                                     </p>
@@ -5397,36 +5512,37 @@
                         </div>
                         <div
                             className={
-                                launchDisabled && !launchLoading && firstIncompleteStep !== null
+                                (launchDisabled || completionReviewOptIn === null) && !launchLoading && firstIncompleteStep !== null
                                     ? "flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-x-4"
                                     : "flex flex-col gap-2"
                             }
                         >
-                            {launchDisabled && !launchLoading && firstIncompleteStep !== null && (
+                            {(launchDisabled || completionReviewOptIn === null) && !launchLoading && firstIncompleteStep !== null && (
                                 <p
                                     data-testid="preflight-launch-blocking-hint"
                                     className="text-xs text-slate-500 min-w-0 sm:max-w-[55%]"
                                 >
                                     {firstIncompleteStep === 1 && "Complete Step 1 — confirm your repository path."}
                                     {firstIncompleteStep === 2 && "Complete Step 2 — validate your roadmap."}
-                                    {firstIncompleteStep === 3 && (
-                                        step3HasError
-                                            ? "Step 3 has failures — fix checks and re-run Preflight."
-                                            : step3HasWarning
-                                                ? "Step 3 — resolve the roadmap ambiguity to continue."
-                                                : "Complete Step 3 — run Preflight."
+                                    {firstIncompleteStep === 3 && "Complete Step 3 — choose your completion report preference."}
+                                    {firstIncompleteStep === 4 && (
+                                        step4HasError
+                                            ? "Step 4 has failures — fix checks and re-run Preflight."
+                                            : step4HasWarning
+                                                ? "Step 4 — resolve the roadmap ambiguity to continue."
+                                                : "Complete Step 4 — run Preflight."
                                     )}
                                 </p>
                             )}
                             <div className="flex gap-2 flex-wrap items-center shrink-0 sm:ml-auto">
-                            <button type="button" onClick={onAddToQueue} disabled={launchDisabled || addToQueueBusy}
+                            <button type="button" onClick={() => onAddToQueue(completionReviewOptIn === true)} disabled={launchDisabled || completionReviewOptIn === null || addToQueueBusy}
                                 className="header-text text-sm px-4 py-2 rounded bg-[#1a1d21] text-[#00b4d8] border border-[#00b4d8]/40 font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:border-[#00b4d8]/70">
                                 {addToQueueBusy ? 'Adding…' : 'Add to Queue'}
                             </button>
                             <button
                                 type="button"
-                                onClick={onLaunch}
-                                disabled={launchDisabled || launchLoading}
+                                onClick={() => onLaunch(completionReviewOptIn === true)}
+                                disabled={launchDisabled || completionReviewOptIn === null || launchLoading}
                                 title={P3_PREFLIGHT_TITLE_LAUNCH_NOW}
                                 className="header-text text-sm px-4 py-2 rounded bg-[#00b4d8] text-[#0d0f12] font-medium disabled:bg-[#2a2d31] disabled:text-slate-600 disabled:cursor-not-allowed"
                             >
@@ -6777,6 +6893,9 @@
             });
             const [roadmap, setRoadmap] = useState(null);
             const [metricsSummary, setMetricsSummary] = useState(null);
+            const [completionReport, setCompletionReport] = useState(null);
+            const [generateDocsBusy, setGenerateDocsBusy] = useState(false);
+            const [generateDocsError, setGenerateDocsError] = useState("");
             const [showStopModal, setShowStopModal] = useState(false);
             const [stopRequested, setStopRequested] = useState(false);
             const [stopError, setStopError] = useState("");
@@ -6856,11 +6975,14 @@
                 fetchState();
                 fetchRoadmap();
                 fetchMetricsSummary();
+                fetchCompletionReport();
                 const stateInterval = setInterval(fetchState, 3000);
                 const roadmapInterval = setInterval(fetchRoadmap, 3000);
+                const reportInterval = setInterval(fetchCompletionReport, 5000);
                 return () => {
                     clearInterval(stateInterval);
                     clearInterval(roadmapInterval);
+                    clearInterval(reportInterval);
                 };
             }, []);
 
@@ -7012,6 +7134,32 @@
                     .then(res => res.json())
                     .then(data => { setMetricsSummary(data); })
                     .catch(() => {});
+            }
+
+            function fetchCompletionReport() {
+                fetch('/api/completion-report')
+                    .then(res => res.json())
+                    .then(data => { setCompletionReport(data); })
+                    .catch(() => {});
+            }
+
+            async function handleGenerateDocs() {
+                setGenerateDocsBusy(true);
+                setGenerateDocsError("");
+                const projectBasename = (pState.project_path || '').split('/').filter(Boolean).pop() || 'project';
+                try {
+                    const r = await fetch(`/api/completion-review/${encodeURIComponent(projectBasename)}`, { method: 'POST' });
+                    const d = await r.json().catch(() => ({}));
+                    if (!r.ok) {
+                        setGenerateDocsError(d.detail || `Generate failed (${r.status})`);
+                    } else {
+                        fetchCompletionReport();
+                    }
+                } catch (e) {
+                    setGenerateDocsError(String(e));
+                } finally {
+                    setGenerateDocsBusy(false);
+                }
             }
 
             const handleStopConfirm = async () => {
@@ -7395,6 +7543,10 @@
                                 waiting_for_human_at={pState.waiting_for_human_at}
                                 onResumeSent={fetchState}
                                 onResumeOrchestratorResponse={applyResumeOrchestratorClientResult}
+                                completionReport={completionReport}
+                                onGenerateDocs={handleGenerateDocs}
+                                generateDocsBusy={generateDocsBusy}
+                                generateDocsError={generateDocsError}
                             />
                             {showRestartOrchestratorButton && (
                                 <div
@@ -7456,7 +7608,13 @@
                         {/* Right: Roadmap */}
                         <div className="right-panel bg-[#141618] rounded-lg border border-[#1a1d21] p-4 overflow-auto">
                             <h2 className="header-text text-lg font-semibold text-slate-300 mb-4">Roadmap</h2>
-                            <RoadmapPanel roadmap={roadmap} metricsSummary={metricsSummary} pipelineStatus={status} />
+                            <RoadmapPanel
+                                roadmap={roadmap}
+                                metricsSummary={metricsSummary}
+                                pipelineStatus={status}
+                                completionReport={completionReport}
+                                runStartedAt={pState.run_started_at || null}
+                            />
                         </div>
                     </main>
 
@@ -8284,7 +8442,7 @@
                     .catch(() => {});
             }, [currentScreen]);
 
-            const onLaunch = async () => {
+            const onLaunch = async (completionReview = false) => {
                 setLaunchError("");
                 setLaunchLoading(true);
                 try {
@@ -8298,7 +8456,7 @@
                         const addR = await fetch('/api/queue/add', {
                             method: 'POST',
                             headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({project_path: repoPath}),
+                            body: JSON.stringify({project_path: repoPath, completion_review: completionReview}),
                         });
                         const addD = await addR.json().catch(() => ({}));
                         if (!addR.ok) {
@@ -8318,7 +8476,7 @@
                         return;
                     }
 
-                    const launchBody = { repo_path: repoPath, roadmap_seed: roadmapSeed };
+                    const launchBody = { repo_path: repoPath, roadmap_seed: roadmapSeed, completion_review: completionReview };
                     if ((launchPrdContent || "").trim()) {
                         launchBody.prd_content = launchPrdContent;
                     }
@@ -8341,14 +8499,14 @@
                 }
             };
 
-            const onAddToQueue = async () => {
+            const onAddToQueue = async (completionReview = false) => {
                 setAddToQueueError('');
                 setAddToQueueBusy(true);
                 try {
                     const r = await fetch('/api/queue/add', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({project_path: repoPath}),
+                        body: JSON.stringify({project_path: repoPath, completion_review: completionReview}),
                     });
                     const d = await r.json().catch(() => ({}));
                     if (!r.ok) {

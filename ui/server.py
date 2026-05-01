@@ -36,6 +36,12 @@ if _AUTODEV_PIPELINE_DIR not in _sys.path:
     _sys.path.insert(0, _AUTODEV_PIPELINE_DIR)
 from autodev.pipeline.queue_semantics import parent_blocks_child
 from env_resolvers import resolve_openclaw_root, resolve_pipeline_root  # noqa: E402
+from skill_manager import SkillManager  # noqa: E402  (W5-E: inline completion reviewer)
+from webhook_client import invoke_agent_webhook  # noqa: E402
+from sentinel_poller import (  # noqa: E402
+    cleanup_output_files,
+    poll_for_sentinel_with_idle_detect,
+)
 
 ORCHESTRATOR_FILENAME = "orchestrator.py"
 WEBHOOK_AGENT_ID = "prd-creator"
@@ -6308,6 +6314,7 @@ async def post_queue_add(request: Request):
     project_path = body.get("project_path", "").strip()
     idea_id = body.get("idea_id")
     parent_id = body.get("parent_id")
+    completion_review = bool(body.get("completion_review", False))
 
     if not project_path:
         raise HTTPException(status_code=422, detail="project_path is required")
@@ -6384,6 +6391,7 @@ async def post_queue_add(request: Request):
         "blocked_at": None,
         "skip_count": 0,
         "preflight_validated_at": now,
+        "completion_review": completion_review,
         "notes": "",
     }
     entries.append(entry)
@@ -7333,13 +7341,14 @@ def _run_init_project(repo_path: str, roadmap_seed: str, prd_content=None) -> di
 async def post_setup_launch(request: Request):
     """Initialize project directory, set symlink, sync pipeline_state.json, spawn orchestrator.
 
-    Body: {"repo_path": str, "roadmap_seed": str, "prd_content": optional}
+    Body: {"repo_path": str, "roadmap_seed": str, "prd_content": optional, "completion_review": bool}
     Returns: {"ok": bool, "error": str|null}; 409 with code orchestrator_running if lock held.
     """
     body = await request.json()
     repo_path = body.get("repo_path", "")
     roadmap_seed = body.get("roadmap_seed", "")
     prd_content = body.get("prd_content")
+    completion_review = bool(body.get("completion_review", False))
     if not repo_path:
         raise HTTPException(status_code=422, detail="repo_path is required")
 
@@ -7388,4 +7397,172 @@ async def post_setup_launch(request: Request):
     except Exception:
         pass
 
+    # W5-G: ensure queue entry exists with completion_review flag.
+    # _queue_mark_matching_entry_active early-returns when the queue is empty
+    # (Launch Now with no prior Add to Queue call), leaving no entry for the
+    # orchestrator to read the flag from. Synthesize a minimal entry in that case.
+    try:
+        import uuid as _uuid_mod
+        from datetime import datetime, timezone as _tz
+        _q = _read_queue_file(config)
+        _entries = _q.get("queue", [])
+        _has_active = any(
+            e.get("state") == "ACTIVE"
+            and os.path.realpath(os.path.expanduser(e.get("project_path", ""))) == project_real
+            for e in _entries
+        )
+        if not _has_active:
+            _now = datetime.now(_tz.utc).isoformat()
+            _synthetic = {
+                "id": str(_uuid_mod.uuid4()),
+                "project_path": project_real,
+                "idea_id": None,
+                "name": os.path.basename(project_real),
+                "state": "ACTIVE",
+                "position": len(_entries) + 1,
+                "parent_id": None,
+                "added_at": _now,
+                "started_at": _now,
+                "completed_at": None,
+                "blocked_at": None,
+                "skip_count": 0,
+                "preflight_validated_at": _now,
+                "completion_review": completion_review,
+                "notes": "",
+            }
+            _entries.append(_synthetic)
+            _q["queue"] = _entries
+            _q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
+            if _q_path:
+                _write_queue_file(_q_path, _q)
+        else:
+            # Entry exists — update the completion_review flag on it
+            _q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
+            if _q_path:
+                for _e in _entries:
+                    if (
+                        _e.get("state") == "ACTIVE"
+                        and os.path.realpath(os.path.expanduser(_e.get("project_path", ""))) == project_real
+                    ):
+                        _e["completion_review"] = completion_review
+                _q["queue"] = _entries
+                _write_queue_file(_q_path, _q)
+    except Exception:
+        pass
+
     return {"ok": True, "error": None}
+
+
+# ---------------------------------------------------------------------------
+# W5-C: GET /api/completion-report
+# ---------------------------------------------------------------------------
+
+@app.get("/api/completion-report")
+async def get_completion_report():
+    """Return the completion_report.md content for the active project.
+
+    Returns {"found": bool, "content": str, "mtime": float|null}.
+    mtime is epoch seconds so the UI can detect "from previous run" staleness.
+    """
+    config = load_config()
+    project_dir = _expand_project_dir_config(config)
+    if not project_dir or not os.path.isdir(project_dir):
+        return {"found": False, "content": "", "mtime": None}
+    report_path = os.path.join(project_dir, "completion_report.md")
+    if not os.path.exists(report_path):
+        return {"found": False, "content": "", "mtime": None}
+    mtime = os.path.getmtime(report_path)
+    try:
+        with open(report_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except OSError:
+        return {"found": False, "content": "", "mtime": None}
+    return {"found": True, "content": content, "mtime": mtime}
+
+
+# ---------------------------------------------------------------------------
+# W5-E: POST /api/completion-review/{project}
+# ---------------------------------------------------------------------------
+
+@app.post("/api/completion-review/{project}")
+async def post_completion_review_trigger(project: str):
+    """On-demand completion review trigger for projects already in PIPELINE_COMPLETE.
+
+    Acquires pipeline.lock before invoking the reviewer to prevent workspace
+    contention with any running orchestrator. Returns 409 if lock held.
+
+    Returns {"triggered": bool, "session_key": str}.
+    """
+    config = load_config()
+
+    # Gate 1: reject if orchestrator is running (lock held)
+    lock_path = _expand_lock_path(config)
+    if lock_path and _check_orchestrator_liveness(lock_path):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "queue_active",
+                "detail": "Stop or drain the queue before generating completion docs.",
+            },
+        )
+
+    # Gate 2: project must be in PIPELINE_COMPLETE state
+    ps_path = config.get("pipeline_state_path")
+    ps_path = os.path.expanduser(ps_path) if ps_path else None
+    pipeline_status = None
+    if ps_path and os.path.exists(ps_path):
+        try:
+            with open(ps_path, "r", encoding="utf-8") as _f:
+                _ps = json.load(_f)
+            pipeline_status = _ps.get("pipeline_status") or _ps.get("status")
+        except Exception:
+            pass
+    if pipeline_status != "PIPELINE_COMPLETE":
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "not_complete",
+                "detail": "Project is not in PIPELINE_COMPLETE state.",
+            },
+        )
+
+    session_key = f"pipeline:completion:{project}:reviewer"
+    project_dir = _expand_project_dir_config(config)
+    openclaw_root = os.path.expanduser(config.get("openclaw_root") or "~/.openclaw")
+
+    # Inline completion reviewer invocation (mirrors _run_completion_review in orchestrator)
+    try:
+        _artifacts_dir = os.path.join(project_dir, ".autodev", "pipeline") if project_dir else ""
+        _sentinel_path = os.path.join(_artifacts_dir, "reviewer_output.done") if _artifacts_dir else ""
+        token = config.get("hooks_token") or os.environ.get("AUTODEV_HOOKS_TOKEN", "")
+
+        _sm = SkillManager(openclaw_root)
+        openclaw_cfg_path = os.path.join(openclaw_root, "openclaw.json")
+        _oc_cfg = {}
+        if os.path.exists(openclaw_cfg_path):
+            try:
+                with open(openclaw_cfg_path, "r", encoding="utf-8") as _f:
+                    _oc_cfg = json.load(_f)
+            except Exception:
+                pass
+
+        _sm.inject_skill("COMPLETE-R0", "reviewer", _oc_cfg)
+        if _artifacts_dir and _sentinel_path:
+            cleanup_output_files(_artifacts_dir, "reviewer")
+
+        invoke_agent_webhook("reviewer", session_key, token)
+
+        if _sentinel_path:
+            _start = time.time()
+            poll_for_sentinel_with_idle_detect(
+                sentinel_path=_sentinel_path,
+                timeout_seconds=120,
+                idle_threshold=60,
+                watch_dirs=[project_dir] if project_dir else [],
+                min_sentinel_mtime=_start,
+            )
+    except Exception as _exc:
+        # Non-fatal: triggered=True but report may not exist yet
+        print(f"[W5-E] Completion review invocation warning: {_exc}")
+
+    return {"triggered": True, "session_key": session_key}

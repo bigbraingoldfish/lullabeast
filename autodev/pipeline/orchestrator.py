@@ -444,6 +444,46 @@ def _write_run_manifest(entry: dict) -> None:
         print(f"[W2A] run_manifest write failed (non-fatal): {_e}")
 
 
+def _run_completion_review(orchestrator, project_basename: str) -> None:
+    """W5-B: Run the completion reviewer as a best-effort post-pipeline documentation pass.
+
+    Called immediately before the PIPELINE_COMPLETE transition when the active
+    queue entry has completion_review: true.
+
+    Hard constraints:
+    - Must never raise — all exceptions are caught and logged.
+    - Must never call transition_state or modify pipeline state in any way.
+    - 120s sentinel timeout, no retry.
+    """
+    try:
+        sentinel_path = os.path.join(PROJECT_ARTIFACTS_DIR, "reviewer_output.done")
+        token = orchestrator.openclaw_config.get("hooks", {}).get("token", "")
+        session_key = f"pipeline:completion:{project_basename}:reviewer"
+
+        orchestrator.skill_manager.inject_skill("COMPLETE-R0", "reviewer", orchestrator.openclaw_config)
+        cleanup_output_files(PROJECT_ARTIFACTS_DIR, "reviewer")
+
+        _attempt_start = time.time()
+        invoke_agent_webhook("reviewer", session_key, token, model=orchestrator._get_agent_model("reviewer"))
+
+        sentinel_found = poll_for_sentinel_with_idle_detect(
+            sentinel_path=sentinel_path,
+            timeout_seconds=120,
+            idle_threshold=60,
+            watch_dirs=[SYMLINK_TARGET],
+            min_sentinel_mtime=_attempt_start,
+        )
+
+        report_path = os.path.join(SYMLINK_TARGET, "completion_report.md")
+        if sentinel_found and os.path.exists(report_path):
+            print(f"[W5-B] Completion report generated: {report_path}")
+        else:
+            print(f"[W5-B] Completion review: sentinel_found={sentinel_found}, "
+                  f"report_exists={os.path.exists(report_path)} — continuing to PIPELINE_COMPLETE")
+    except Exception as _e:
+        print(f"[W5-B] Completion review failed (non-fatal, pipeline will still complete): {_e}")
+
+
 def _write_run_summary(outcome: str, outcome_detail: str) -> None:
     """W2-B: Write run_summary.json at every terminal pipeline exit.
 
@@ -2355,6 +2395,11 @@ class Orchestrator:
                     print("[INFO] All roadmap phases already complete. Nothing to do.")
                     self.state["current_phase_raw_id"] = ""
                     self.state["current_agent"] = None
+                    # W5-B: completion review (opt-in via queue entry flag, never gates PIPELINE_COMPLETE)
+                    _cr_queue = self._read_queue()
+                    _, _cr_entry = self._find_active_queue_entry(_cr_queue)
+                    if _cr_entry and _cr_entry.get("completion_review"):
+                        _run_completion_review(self, project_basename=os.path.basename(SYMLINK_TARGET))
                     _write_run_summary("PIPELINE_COMPLETE", "Pipeline fully complete on startup")  # W2-B
                     self.transition_state("PIPELINE_COMPLETE", "Pipeline fully complete on startup")
                     self._queue_update_active_entry(
@@ -3329,6 +3374,11 @@ class Orchestrator:
                                 print("[INFO] Pipeline fully complete!")
                                 self.state["current_phase_raw_id"] = ""
                                 self.state["current_agent"] = None
+                                # W5-B: completion review (opt-in via queue entry flag, never gates PIPELINE_COMPLETE)
+                                _cr_queue = self._read_queue()
+                                _, _cr_entry = self._find_active_queue_entry(_cr_queue)
+                                if _cr_entry and _cr_entry.get("completion_review"):
+                                    _run_completion_review(self, project_basename=os.path.basename(SYMLINK_TARGET))
                                 _write_run_summary("PIPELINE_COMPLETE", "Pipeline fully complete")  # W2-B
                                 self.transition_state("PIPELINE_COMPLETE", "Pipeline fully complete")
                                 # Queue integration: mark entry COMPLETED and auto-advance
