@@ -87,7 +87,7 @@ class TestApiIdeasAdversarialCheck:
             "85/100 — Pipeline looks solid."
         )
 
-        async def write_sentinel(*args, **kwargs):
+        def write_sentinel(*args, **kwargs):
             (idea_dir / "adversarial_report.md").write_text(report_text)
             (idea_dir / "adversarial_report.done").write_text("")
 
@@ -96,7 +96,7 @@ class TestApiIdeasAdversarialCheck:
              patch("ui.server._inject_converter_skill") as mock_inject, \
              patch("ui.server.asyncio.create_task"), \
              patch("ui.server.ADVERSARIAL_CHECK_POLL_INTERVAL", 0.05), \
-             patch("ui.server.asyncio.sleep", side_effect=write_sentinel):
+             patch("ui.server.asyncio.sleep", AsyncMock(side_effect=write_sentinel)):
             r = client.post("/api/ideas/2/adversarial-check")
 
         assert r.status_code == 200
@@ -116,7 +116,7 @@ class TestApiIdeasAdversarialCheck:
             "75/100 — Moderate confidence."
         )
 
-        async def write_sentinel(*args, **kwargs):
+        def write_sentinel(*args, **kwargs):
             (idea_dir / "adversarial_report.md").write_text(report_text)
             (idea_dir / "adversarial_report.done").write_text("")
 
@@ -125,7 +125,7 @@ class TestApiIdeasAdversarialCheck:
              patch("ui.server._inject_converter_skill"), \
              patch("ui.server.asyncio.create_task"), \
              patch("ui.server.ADVERSARIAL_CHECK_POLL_INTERVAL", 0.05), \
-             patch("ui.server.asyncio.sleep", side_effect=write_sentinel):
+             patch("ui.server.asyncio.sleep", AsyncMock(side_effect=write_sentinel)):
             r = client.post("/api/ideas/3/adversarial-check")
 
         assert r.status_code == 200
@@ -161,7 +161,7 @@ class TestApiIdeasAdversarialCheck:
             "60/100 — Meaningful risk."
         )
 
-        async def write_sentinel(*args, **kwargs):
+        def write_sentinel(*args, **kwargs):
             (idea_dir / "adversarial_report.md").write_text(report_text)
             (idea_dir / "adversarial_report.done").write_text("")
 
@@ -170,7 +170,7 @@ class TestApiIdeasAdversarialCheck:
              patch("ui.server._inject_converter_skill"), \
              patch("ui.server.asyncio.create_task"), \
              patch("ui.server.ADVERSARIAL_CHECK_POLL_INTERVAL", 0.05), \
-             patch("ui.server.asyncio.sleep", side_effect=write_sentinel):
+             patch("ui.server.asyncio.sleep", AsyncMock(side_effect=write_sentinel)):
             r = client.post("/api/ideas/5/adversarial-check")
 
         assert r.status_code == 200
@@ -190,7 +190,7 @@ class TestApiIdeasAdversarialCheck:
             "70/100 — Acceptable."
         )
 
-        async def write_sentinel(*args, **kwargs):
+        def write_sentinel(*args, **kwargs):
             (idea_dir / "adversarial_report.md").write_text(report_text)
             (idea_dir / "adversarial_report.done").write_text("")
 
@@ -199,7 +199,7 @@ class TestApiIdeasAdversarialCheck:
              patch("ui.server._inject_converter_skill"), \
              patch("ui.server.asyncio.create_task"), \
              patch("ui.server.ADVERSARIAL_CHECK_POLL_INTERVAL", 0.05), \
-             patch("ui.server.asyncio.sleep", side_effect=write_sentinel):
+             patch("ui.server.asyncio.sleep", AsyncMock(side_effect=write_sentinel)):
             r = client.post("/api/ideas/6/adversarial-check")
 
         assert r.status_code == 200
@@ -216,7 +216,7 @@ class TestApiIdeasAdversarialCheck:
             "80/100 — Good."
         )
 
-        async def write_sentinel(*args, **kwargs):
+        def write_sentinel(*args, **kwargs):
             (idea_dir / "adversarial_report.md").write_text(report_text)
             (idea_dir / "adversarial_report.done").write_text("")
 
@@ -225,7 +225,7 @@ class TestApiIdeasAdversarialCheck:
              patch("ui.server._inject_converter_skill"), \
              patch("ui.server.asyncio.create_task"), \
              patch("ui.server.ADVERSARIAL_CHECK_POLL_INTERVAL", 0.05), \
-             patch("ui.server.asyncio.sleep", side_effect=write_sentinel):
+             patch("ui.server.asyncio.sleep", AsyncMock(side_effect=write_sentinel)):
             r = client.post("/api/ideas/7/adversarial-check")
 
         assert r.status_code == 200
@@ -243,7 +243,7 @@ class TestApiIdeasAdversarialCheck:
             "90/100 — High confidence."
         )
 
-        async def write_sentinel(*args, **kwargs):
+        def write_sentinel(*args, **kwargs):
             (idea_dir / "adversarial_report.md").write_text(report_text)
             (idea_dir / "adversarial_report.done").write_text("")
 
@@ -253,7 +253,7 @@ class TestApiIdeasAdversarialCheck:
              patch("ui.server._inject_converter_skill"), \
              patch("ui.server.asyncio.create_task", mock_create_task), \
              patch("ui.server.ADVERSARIAL_CHECK_POLL_INTERVAL", 0.05), \
-             patch("ui.server.asyncio.sleep", side_effect=write_sentinel):
+             patch("ui.server.asyncio.sleep", AsyncMock(side_effect=write_sentinel)):
             r = client.post("/api/ideas/8/adversarial-check")
 
         assert r.status_code == 200

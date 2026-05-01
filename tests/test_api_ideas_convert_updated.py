@@ -61,7 +61,7 @@ class TestApiIdeasConvertUpdated:
         roadmap_text = "# Roadmap\n- [ ] `CORE-E1` | LOW | First"
         mock_cls, mock_session = self._make_mock_aiohttp()
 
-        async def write_sentinel(*args, **kwargs):
+        def write_sentinel(*args, **kwargs):
             (idea_dir / "roadmap_draft.md").write_text(roadmap_text)
             (idea_dir / "roadmap_draft.done").write_text("")
 
@@ -85,7 +85,7 @@ class TestApiIdeasConvertUpdated:
         roadmap_text = "# Roadmap\n- [ ] `CORE-E1` | LOW | First"
         mock_cls, _ = self._make_mock_aiohttp()
 
-        async def write_sentinel(*args, **kwargs):
+        def write_sentinel(*args, **kwargs):
             (idea_dir / "roadmap_draft.md").write_text(roadmap_text)
             (idea_dir / "roadmap_draft.done").write_text("")
 
@@ -118,7 +118,7 @@ class TestApiIdeasConvertUpdated:
 
         mock_session.post = record_post
 
-        async def write_sentinel(*args, **kwargs):
+        def write_sentinel(*args, **kwargs):
             (idea_dir / "roadmap_draft.md").write_text(roadmap_text)
             (idea_dir / "roadmap_draft.done").write_text("")
 
@@ -187,7 +187,7 @@ class TestApiIdeasConvertUpdated:
         idea_dir = self._write_session("7", prd_content="## Problem\nContent.")
         mock_cls, mock_session = self._make_mock_aiohttp()
 
-        async def write_sentinel(*args, **kwargs):
+        def write_sentinel(*args, **kwargs):
             (idea_dir / "roadmap_draft.md").write_text("# Roadmap")
             (idea_dir / "roadmap_draft.done").write_text("")
 
