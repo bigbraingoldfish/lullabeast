@@ -80,7 +80,7 @@ class TestApiIdeasAlignmentCheck:
         mock_cls, _ = self._make_mock_aiohttp()
         report_text = "# Alignment Report\n## Material Gaps Addressed\n## Overall Assessment\nAll good."
 
-        async def write_sentinel(*args, **kwargs):
+        def write_sentinel(*args, **kwargs):
             (idea_dir / "alignment_report.md").write_text(report_text)
             (idea_dir / "alignment_report.done").write_text("")
 
@@ -104,7 +104,7 @@ class TestApiIdeasAlignmentCheck:
         mock_cls, mock_session = self._make_mock_aiohttp()
         report_text = "# Alignment Report\n## Overall Assessment\nGood."
 
-        async def write_sentinel(*args, **kwargs):
+        def write_sentinel(*args, **kwargs):
             (idea_dir / "alignment_report.md").write_text(report_text)
             (idea_dir / "alignment_report.done").write_text("")
 
@@ -141,7 +141,7 @@ class TestApiIdeasAlignmentCheck:
         mock_cls, _ = self._make_mock_aiohttp()
         report_text = "# Alignment Report\n## Overall Assessment\nAll phases covered."
 
-        async def write_sentinel(*args, **kwargs):
+        def write_sentinel(*args, **kwargs):
             (idea_dir / "alignment_report.md").write_text(report_text)
             (idea_dir / "alignment_report.done").write_text("")
 
@@ -170,7 +170,7 @@ class TestApiIdeasAlignmentCheck:
         report_text = "# Alignment Report\n## Material Gaps Addressed\n- Gap 1: Add phase.\n## Overall Assessment\nFixed."
         new_roadmap = "# Roadmap\n- [ ] `CORE-E1` | LOW | First\n- [ ] `CORE-E2` | LOW | Added"
 
-        async def write_sentinel(*args, **kwargs):
+        def write_sentinel(*args, **kwargs):
             # Simulate agent updating roadmap then writing sentinels
             time.sleep(0.01)  # ensure mtime changes
             (idea_dir / "roadmap_draft.md").write_text(new_roadmap)
@@ -197,7 +197,7 @@ class TestApiIdeasAlignmentCheck:
         mock_cls, _ = self._make_mock_aiohttp()
         report_text = "# Alignment Report\n## Overall Assessment\nNo gaps found."
 
-        async def write_sentinel(*args, **kwargs):
+        def write_sentinel(*args, **kwargs):
             # Only write report + sentinel, leave roadmap_draft.md untouched
             (idea_dir / "alignment_report.md").write_text(report_text)
             (idea_dir / "alignment_report.done").write_text("")
@@ -221,7 +221,7 @@ class TestApiIdeasAlignmentCheck:
         mock_cls, _ = self._make_mock_aiohttp()
         report_text = "# Alignment Report\n## Overall Assessment\nComplete."
 
-        async def write_sentinel(*args, **kwargs):
+        def write_sentinel(*args, **kwargs):
             (idea_dir / "alignment_report.md").write_text(report_text)
             (idea_dir / "alignment_report.done").write_text("")
 
@@ -247,7 +247,7 @@ class TestApiIdeasAlignmentCheck:
         mock_cls, _ = self._make_mock_aiohttp()
         report_text = "# Alignment Report\n## Overall Assessment\nDone."
 
-        async def write_sentinel(*args, **kwargs):
+        def write_sentinel(*args, **kwargs):
             (idea_dir / "alignment_report.md").write_text(report_text)
             (idea_dir / "alignment_report.done").write_text("")
 

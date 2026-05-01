@@ -112,7 +112,7 @@ class TestApiIdeasConvert:
         roadmap_text = "# Project Roadmap\n\n- [ ] `phase-1` | LOW | First phase"
         mock_cls, _ = self._make_mock_aiohttp()
 
-        async def write_sentinel(*args, **kwargs):
+        def write_sentinel(*args, **kwargs):
             (idea_dir / "roadmap_draft.md").write_text(roadmap_text)
             (idea_dir / "roadmap_draft.done").write_text("")
 
@@ -135,7 +135,7 @@ class TestApiIdeasConvert:
         roadmap_text = "# My Roadmap\n\n- [ ] `phase-1` | LOW | Step one"
         mock_cls, _ = self._make_mock_aiohttp()
 
-        async def write_sentinel(*args, **kwargs):
+        def write_sentinel(*args, **kwargs):
             (idea_dir / "roadmap_draft.md").write_text(roadmap_text)
             (idea_dir / "roadmap_draft.done").write_text("")
 
