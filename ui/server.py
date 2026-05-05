@@ -45,6 +45,7 @@ from sentinel_poller import (  # noqa: E402
 
 ORCHESTRATOR_FILENAME = "orchestrator.py"
 WEBHOOK_AGENT_ID = "prd-creator"
+_ATTACHMENT_MAX_BYTES = 10_000_000  # 10 MB ceiling (generous for base64 overhead from a 5 MB image)
 ROADMAP_CONVERTER_AGENT_ID = "roadmap-converter"
 # ORCHESTRATOR_POLL_TIMEOUT: spawn/orchestrator wait (separate from ideas POLL_TIMEOUT below).
 ORCHESTRATOR_POLL_TIMEOUT = 120
@@ -3544,6 +3545,73 @@ def _build_ideas_sent_context(
     return out
 
 
+_DATA_URI_IMAGE_RE = re.compile(r"^data:image/([a-z0-9.+-]+);base64,(.+)$", re.IGNORECASE | re.DOTALL)
+_FILENAME_IMAGE_EXT_RE = re.compile(r"\.(png|jpg|jpeg|gif|webp)$", re.IGNORECASE)
+_FILENAME_SANITIZE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _save_image_to_openclaw_media(
+    data_uri: str,
+    original_filename: str,
+    openclaw_root: str,
+) -> str | None:
+    """Decode a data:image/...;base64,... URI and save to ``OPENCLAW_ROOT/media/inbound/``.
+
+    Returns the saved media id (filename inside the inbound directory), or None if the
+    input is not a valid base64 data URI for an image.  The returned id is what the caller
+    should embed in the prompt as ``[media attached: media://inbound/<id>]`` so OpenClaw's
+    image-detection pipeline (`detectAndLoadPromptImages`) resolves and forwards it to the
+    model as proper vision input.
+
+    File naming follows OpenClaw's ``buildSavedMediaId`` convention: ``<sanitized>---<uuid>.<ext>``.
+    File mode is ``0o644`` (matches OpenClaw's MEDIA_FILE_MODE = 420).  Directory mode is ``0o700``
+    (matches OpenClaw's directory mode = 448).
+    """
+    import base64
+    import uuid as _uuid
+
+    m = _DATA_URI_IMAGE_RE.match(data_uri or "")
+    if not m:
+        return None
+    mime_subtype = m.group(1).lower()
+    b64_payload = m.group(2)
+    # MIME subtype maps directly to extension for the formats we support.
+    ext_map = {"png": "png", "jpeg": "jpg", "jpg": "jpg", "gif": "gif", "webp": "webp"}
+    ext = ext_map.get(mime_subtype)
+    if ext is None:
+        # Fall back to filename extension if MIME subtype is unrecognised.
+        fn_match = _FILENAME_IMAGE_EXT_RE.search(original_filename or "")
+        if not fn_match:
+            return None
+        ext = fn_match.group(1).lower().replace("jpeg", "jpg")
+
+    try:
+        img_bytes = base64.b64decode(b64_payload, validate=False)
+    except Exception:
+        return None
+
+    # Sanitize the original filename's stem for use as a human-readable prefix.
+    base_stem = ""
+    if original_filename:
+        stem = os.path.splitext(os.path.basename(original_filename))[0]
+        base_stem = _FILENAME_SANITIZE_RE.sub("_", stem).strip("._-")[:64]
+
+    media_uuid = str(_uuid.uuid4())
+    media_id = f"{base_stem}---{media_uuid}.{ext}" if base_stem else f"{media_uuid}.{ext}"
+
+    inbound_dir = os.path.join(os.path.expanduser(openclaw_root), "media", "inbound")
+    os.makedirs(inbound_dir, mode=0o700, exist_ok=True)
+    dest = os.path.join(inbound_dir, media_id)
+
+    # Write atomically to avoid OpenClaw's image-detect picking up a partial file.
+    tmp_dest = dest + ".tmp"
+    with open(tmp_dest, "wb") as fh:
+        fh.write(img_bytes)
+    os.chmod(tmp_dest, 0o644)
+    os.replace(tmp_dest, dest)
+    return media_id
+
+
 def _late_done_valid_for_attempt(done_path: Path | str, attempt_start_wall: float) -> bool:
     """True when the turn sentinel exists and was written at or after this attempt started.
 
@@ -3618,16 +3686,48 @@ async def post_ideas_message(idea_id: str, request: Request):
     if not content or turn_n is None:
         raise HTTPException(status_code=422, detail="Body must contain {content: str, turn: int}")
 
+    if attachment and isinstance(attachment, dict):
+        _fcontent_check = attachment.get("content", "")
+        if isinstance(_fcontent_check, str) and len(_fcontent_check) > _ATTACHMENT_MAX_BYTES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Attachment content exceeds maximum size of {_ATTACHMENT_MAX_BYTES} bytes",
+            )
+
     ideas_dir = Path(config.get("ideas_dir") or "")
     hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
     hooks_token = config.get("hooks_token", "")
 
-    # Prepend attachment context when provided
+    # Prepend attachment context when provided.
+    # Images (data URI content) are saved to OPENCLAW_ROOT/media/inbound/ and referenced
+    # via "[media attached: media://inbound/<id>]" markers — OpenClaw's
+    # detectAndLoadPromptImages picks up these markers, hydrates the file from disk, and
+    # forwards the bytes to the model as proper vision input.  Text files continue to use
+    # the [ATTACHMENT:] block embedded directly in the message.
     message_content = content
     if attachment and isinstance(attachment, dict):
-        fname = attachment.get("filename", "attachment.md")
+        fname = attachment.get("filename", "attachment")
         fcontent = attachment.get("content", "")
-        message_content = f"[ATTACHMENT: {fname}]\n{fcontent}\n[/ATTACHMENT]\n\n{content}"
+        _is_image_attachment = (
+            isinstance(fcontent, str) and fcontent.startswith("data:image/")
+        ) or bool(_FILENAME_IMAGE_EXT_RE.search(fname or ""))
+        if _is_image_attachment and isinstance(fcontent, str) and fcontent.startswith("data:"):
+            _openclaw_root = config.get("openclaw_root") or resolve_openclaw_root()
+            _media_id = _save_image_to_openclaw_media(fcontent, fname, str(_openclaw_root))
+            if _media_id:
+                # Use "[media attached: media://inbound/<id>]" — OpenClaw's prompt scanner
+                # recognises this marker, resolves the file, and forwards it as a vision input.
+                message_content = (
+                    f"[media attached: media://inbound/{_media_id}]\n\n{content}"
+                )
+            else:
+                # Decode failed — fall back to the legacy text wrapper so the AI still sees a
+                # reference, even though it cannot view the image.
+                message_content = (
+                    f"[ATTACHMENT: {fname}]\n(image decode failed)\n[/ATTACHMENT]\n\n{content}"
+                )
+        else:
+            message_content = f"[ATTACHMENT: {fname}]\n{fcontent}\n[/ATTACHMENT]\n\n{content}"
 
     # Load existing session data early — used for annotations and conversation history
     idea_dir = Path(ideas_dir) / idea_id
