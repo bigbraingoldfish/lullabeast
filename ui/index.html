@@ -2959,6 +2959,7 @@
             const [activeIdeaMenuId, setActiveIdeaMenuId] = useState(null);
             const showEmptyPlaceholders = false; // CompactProgress removed; empty sections always hidden
             const [stagedAttachment, setStagedAttachment] = useState(null);
+            const [isDraggingOver, setIsDraggingOver] = useState(false); // drag-and-drop visual state
             const [draftingIndicator, setDraftingIndicator] = useState(null);
             const [answeredFlowIds, setAnsweredFlowIds] = useState(new Set());
             const draftingTimerRef = useRef(null);
@@ -3305,6 +3306,27 @@
                 if (notes.length) sc.notes = notes;
                 if (att && att.filename) sc.attachment = { filename: att.filename };
                 return Object.keys(sc).length ? sc : null;
+            };
+
+            // Shared file-to-attachment processor — used by both the file picker (button)
+            // and the drag-and-drop drop handler so the size-limit + image/text branching
+            // lives in one place.
+            const processAttachmentFile = (f) => {
+                if (!f) return;
+                const MAX_ATTACH = 5 * 1024 * 1024;
+                if (f.size > MAX_ATTACH) {
+                    alert("Attachment too large. Maximum size is 5 MB.");
+                    return;
+                }
+                const isImg = /\.(png|jpg|jpeg|gif|webp)$/i.test(f.name) || (f.type && f.type.startsWith("image/"));
+                const reader = new FileReader();
+                if (isImg) {
+                    reader.onload = (ev) => setStagedAttachment({ filename: f.name, content: ev.target.result, is_image: true });
+                    reader.readAsDataURL(f);
+                } else {
+                    reader.onload = (ev) => setStagedAttachment({ filename: f.name, content: ev.target.result, is_image: false });
+                    reader.readAsText(f);
+                }
             };
 
             const submitMessage = (overrideText) => {
@@ -3753,21 +3775,6 @@
             };
 
             const prdSections = parsePrdSections(prdContent || "");
-            const readinessSectionMap =
-                readinessStatus === "ready" && readinessData && readinessData.sections
-                    ? readinessData.sections
-                    : {};
-            const checklistRows = PRD_SECTION_TITLES.map((title) => {
-                const info = readinessSectionMap[title] || {};
-                const status =
-                    info.status === "complete" || info.status === "partial" ? info.status : "empty";
-                return {
-                    title,
-                    status,
-                    criticality: info.criticality || "",
-                    content: (prdSections[title] || "").trim(),
-                };
-            });
 
             const hasAnyPrdBody = PRD_SECTION_TITLES.some((t) => (prdSections[t] || "").trim().length > 0);
             const hasRemovedInDiff = PRD_SECTION_TITLES.some((t) => {
@@ -4231,12 +4238,20 @@
                                                             ))}
                                                         </div>
                                                     )}
-                                                    {msg.sent_context.attachment && msg.sent_context.attachment.filename ? (
-                                                        <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-[#1a1d21] border border-[#2a2d31] text-xs text-slate-400">
-                                                            <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
-                                                            <span className="truncate max-w-[200px]">{msg.sent_context.attachment.filename}</span>
-                                                        </div>
-                                                    ) : null}
+                                                    {msg.sent_context.attachment && msg.sent_context.attachment.filename ? (() => {
+                                                        const attFname = msg.sent_context.attachment.filename;
+                                                        const isImgAtt = /\.(png|jpg|jpeg|gif|webp)$/i.test(attFname);
+                                                        return (
+                                                            <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-[#1a1d21] border border-[#2a2d31] text-xs text-slate-400">
+                                                                {isImgAtt ? (
+                                                                    <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                                                                ) : (
+                                                                    <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
+                                                                )}
+                                                                <span className="truncate max-w-[200px]">{attFname}</span>
+                                                            </div>
+                                                        );
+                                                    })() : null}
                                                 </div>
                                             ) : null}
                                             {msg.attachment_label && !msg.sent_context ? (
@@ -4329,13 +4344,33 @@
                             ))}
                             <div ref={messagesEndRef} />
                         </div>
-                        <div className="flex-shrink-0 border-t border-[#1a1d21] p-3 space-y-2 bg-[#141618]">
-                            <input ref={attachFileRef} type="file" accept=".md" className="hidden" onChange={(e) => {
-                                const f = e.target.files && e.target.files[0];
-                                if (!f) return;
-                                const reader = new FileReader();
-                                reader.onload = (ev) => setStagedAttachment({ filename: f.name, content: ev.target.result });
-                                reader.readAsText(f);
+                        <div
+                            className={`flex-shrink-0 border-t p-3 space-y-2 bg-[#141618] transition-colors ${isDraggingOver ? "border-cyan-500 bg-cyan-950/20" : "border-[#1a1d21]"}`}
+                            onDragOver={(e) => {
+                                if (!currentIdeaId || isLoading) return;
+                                if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files")) {
+                                    e.preventDefault();
+                                    e.dataTransfer.dropEffect = "copy";
+                                    if (!isDraggingOver) setIsDraggingOver(true);
+                                }
+                            }}
+                            onDragLeave={(e) => {
+                                // Only clear when leaving the composer entirely (not when entering a child)
+                                if (e.currentTarget.contains(e.relatedTarget)) return;
+                                setIsDraggingOver(false);
+                            }}
+                            onDrop={(e) => {
+                                e.preventDefault();
+                                setIsDraggingOver(false);
+                                if (!currentIdeaId || isLoading) return;
+                                const files = e.dataTransfer && e.dataTransfer.files;
+                                if (files && files.length > 0) {
+                                    processAttachmentFile(files[0]);
+                                }
+                            }}
+                        >
+                            <input ref={attachFileRef} type="file" accept=".md,.txt,.rst,.py,.js,.ts,.tsx,.jsx,.go,.rs,.java,.cpp,.c,.sh,.json,.yaml,.yml,.toml,.xml,.csv,.sql,.png,.jpg,.jpeg,.gif,.webp" className="hidden" onChange={(e) => {
+                                processAttachmentFile(e.target.files && e.target.files[0]);
                                 e.target.value = "";
                             }} />
                             {/* Staged attachment pill + annotation pill */}
@@ -4343,7 +4378,11 @@
                                 <div className="flex flex-wrap gap-1.5">
                                     {stagedAttachment && (
                                         <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-[#1a1d21] border border-[#2a2d31] text-xs text-slate-300">
-                                            <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
+                                            {stagedAttachment.is_image ? (
+                                                <img src={stagedAttachment.content} alt="" className="w-6 h-6 object-cover rounded shrink-0" />
+                                            ) : (
+                                                <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
+                                            )}
                                             <span className="max-w-[180px] truncate">{stagedAttachment.filename}</span>
                                             <button type="button" onClick={() => setStagedAttachment(null)} className="text-slate-500 hover:text-slate-200 ml-0.5">✕</button>
                                         </div>
@@ -4372,7 +4411,7 @@
                                         type="button"
                                         disabled={!currentIdeaId || isLoading}
                                         onClick={() => attachFileRef.current && attachFileRef.current.click()}
-                                        title="Attach a .md file to this message"
+                                        title="Attach a file (or drag and drop into the message area)"
                                         className="flex items-center gap-1.5 px-2 py-1.5 rounded border border-[#2a2d31] bg-[#1a1d21] text-slate-400 hover:text-slate-200 hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors text-xs header-text shrink-0"
                                     >
                                         <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
@@ -4457,9 +4496,8 @@
                                             const slug = slugifySectionName(title);
                                             const diffEntry = prdSectionDiff[slug];
                                             const isRemovedDiff = diffEntry && diffEntry.status === "removed";
-                                            const row = checklistRows.find((r) => r.title === title);
-                                            const isEmpty = !row || row.status === "empty";
-                                            if (isEmpty && !showEmptyPlaceholders && !isRemovedDiff) return null;
+                                            const sectionBodyEmpty = !(prdSections[title] || "").trim();
+                                            if (sectionBodyEmpty && !showEmptyPlaceholders && !isRemovedDiff) return null;
                                             const raw = (prdSections[title] || "").trim();
                                             const ghostRaw = isRemovedDiff ? String(diffEntry.previous || "").trim() : "";
                                             const displayRaw = isRemovedDiff ? ghostRaw : raw;

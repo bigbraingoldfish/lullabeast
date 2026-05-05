@@ -712,3 +712,86 @@ class TestApiIdeasMessage:
                 )
 
         assert response.status_code == 200, f"Expected 200 when sentinel present, got {response.status_code}"
+
+    def test_attachment_content_size_limit_returns_422(self):
+        """Attachment content exceeding 10 MB server limit returns 422 before webhook is called."""
+        client = load_server()
+        idea_id = "size_limit_idea"
+        self._write_session(idea_id, {
+            "messages": [], "prd_content": "",
+            "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z",
+        })
+        mock_session = self._make_mock_session(self._make_mock_response())
+        with patch("ui.server.load_config", return_value=self._mock_config()):
+            with patch("ui.server.aiohttp.ClientSession", return_value=mock_session):
+                response = client.post(
+                    f"/api/ideas/{idea_id}/message",
+                    json={
+                        "content": "big file", "turn": 1,
+                        "attachment": {"filename": "huge.png", "content": "A" * 10_000_001},
+                    },
+                )
+        assert response.status_code == 422
+        mock_session.post.assert_not_called()
+
+    def test_image_attachment_saved_to_openclaw_media_and_referenced_in_message(self, tmp_path):
+        """Image attachments are saved to OPENCLAW_ROOT/media/inbound and referenced via [media attached: ...]."""
+        import base64
+        client = load_server()
+        idea_id = "img_attach_idea"
+        all_payloads, mock_session = self._capture_conversation_post()
+        self._write_session(idea_id, {
+            "messages": [], "prd_content": "",
+            "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z",
+        })
+        self._write_turn_files(idea_id, 1, "Acknowledged.", "# PRD\n")
+
+        # Tiny valid PNG (1x1 pixel)
+        png_bytes = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        )
+        data_uri = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+
+        # Mock config points OPENCLAW_ROOT at a temp directory so we can verify the file write
+        oc_root = tmp_path / "openclaw_root"
+        oc_root.mkdir()
+        cfg = self._mock_config()
+        cfg["openclaw_root"] = str(oc_root)
+
+        with patch("ui.server.load_config", return_value=cfg):
+            with patch("ui.server.aiohttp.ClientSession", return_value=mock_session):
+                with patch("asyncio.create_task"):
+                    response = client.post(
+                        f"/api/ideas/{idea_id}/message",
+                        json={
+                            "content": "What do you see?", "turn": 1,
+                            "attachment": {"filename": "screenshot.png", "content": data_uri},
+                        },
+                    )
+        assert response.status_code == 200, response.text
+
+        # Verify the image was saved to OPENCLAW_ROOT/media/inbound/
+        media_inbound = oc_root / "media" / "inbound"
+        assert media_inbound.exists(), "OPENCLAW_ROOT/media/inbound directory should be created"
+        saved_files = list(media_inbound.glob("*.png"))
+        assert len(saved_files) == 1, f"Expected exactly 1 PNG file, found: {saved_files}"
+        assert saved_files[0].read_bytes() == png_bytes, "Saved file bytes must match decoded PNG"
+
+        # Find the conversation turn payload
+        conv_payload = next(
+            (p for p in all_payloads if ":session-" in p.get("sessionKey", "")), None
+        )
+        assert conv_payload is not None, "No conversation webhook payload found"
+
+        msg = conv_payload.get("message", "")
+        # The message must contain the media:// URI marker that OpenClaw resolves
+        media_id = saved_files[0].name
+        expected_marker = f"[media attached: media://inbound/{media_id}]"
+        assert expected_marker in msg, (
+            f"Expected '{expected_marker}' in webhook message; got snippet: "
+            f"{msg[max(0, msg.find('[media') - 50):msg.find('[media') + 200] if '[media' in msg else msg[:300]!r}"
+        )
+        # Raw base64 must NOT be embedded in the message text
+        assert data_uri not in msg, "Base64 data URI should NOT be embedded in message text"
+        # The 'images' field must NOT be on the webhook payload (OpenClaw ignores it)
+        assert "images" not in conv_payload, "Webhook payload must not include 'images' field (OpenClaw ignores it)"

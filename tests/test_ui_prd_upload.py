@@ -108,10 +108,12 @@ class TestChatAttachmentPathPreserved:
     def test_attach_file_input_accept_md(self):
         content = load_index_html()
         assert "attachFileRef" in content
-        assert re.search(
-            r"attachFileRef[\s\S]{0,160}accept=\{?[\"']\.md[\"']\}?",
+        m = re.search(
+            r"attachFileRef[\s\S]{0,300}accept=\{?[\"']([^\"']+)[\"']\}?",
             content,
-        ), "attachFileRef file input should accept .md"
+        )
+        assert m, "attachFileRef file input with accept attribute not found"
+        assert ".md" in m.group(1), "accept must still include .md"
 
     def test_submit_message_includes_attachment_snap(self):
         content = load_index_html()
