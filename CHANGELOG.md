@@ -10,6 +10,37 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ### Added
 
+- **`autodev-pipeline-signals` plugin** (`autodev/plugin/`): OpenClaw TypeScript plugin registering two hooks:
+  - `agent_end` — fires fire-and-forget after every session closes; writes the missing `{agent}_output.done` sentinel when the agent did not write one itself (dead-on-arrival, crash, provider rejection). Unblocks `poll_for_sentinel` immediately rather than waiting for the hard timeout.
+  - `before_agent_finalize` — fires before the harness accepts the agent's final answer; checks `planner_output.json`, `executor_output.json`, and `reviewer_output.json` for structural completeness and returns `{ action: "revise" }` if required fields are absent. Requests a bounded in-context correction pass without burning an orchestrator retry. File-system, git, and subprocess checks remain in the hard gate scripts.
+  - Install: `openclaw plugins install <repo>/autodev/plugin`; `openclaw.json` entry requires `hooks.allowConversationAccess: true`. `install.sh` step 12/14 handles this automatically.
+  - Plugin tests: `autodev/plugin/tests/agent-end.test.ts`, `autodev/plugin/tests/before-finalize.test.ts` (28 tests, node:test with tsx).
+
+- **Heartbeat cron is now a silent self-healer:** `autodev/pipeline/heartbeat_cron.py` no longer sends any Signal notifications. The model-query path (`query_heartbeat_model`, `HEARTBEAT_SYSTEM_PROMPT`, `send_signal_notification`) has been removed entirely. All recovery decisions are now fully deterministic: idle/terminal states (IDLE, PIPELINE_COMPLETE, STOPPED, QUEUE_HALTED, HALTED_SILENT, BLOCKED, WAITING_FOR_HUMAN) cause a log-and-exit with no action; only stale RUNNING/WAITING_FOR_SENTINEL (> 15 min with lock free) triggers an automatic orchestrator restart. The escalation agent remains the sole owner of all human-facing notifications. `requests` import removed.
+
+### Changed
+
+- **`poll_for_sentinel` now accepts `min_sentinel_mtime`:** The stale-sentinel guard previously in `poll_for_sentinel_with_idle_detect` is now a parameter of `poll_for_sentinel`. Capture `time.time()` before `cleanup_output_files()` and pass it as `min_sentinel_mtime=` to discard orphaned sentinels from a prior session that wrote their `.done` file after a reset.
+
+- **Idle detection machinery removed** from `sentinel_poller.py` and `orchestrator.py`:
+  - `_latest_activity_mtime`, `poll_for_sentinel_with_idle_detect` removed from `sentinel_poller.py`.
+  - `_watch_root_for_idle_detect` removed from `orchestrator.py`.
+  - All 4 `poll_for_sentinel_with_idle_detect` call sites (executor, reviewer, completion review × 2) replaced with `poll_for_sentinel`. `ui/server.py` completion review call updated likewise.
+  - `poll_for_sentinel` is now a simple timeout backstop; the `agent_end` plugin hook provides the authoritative completion signal.
+
+- **JSONL session-lookup loops simplified** (orchestrator.py): The 15-retry loops (~30 s) that waited for `sessions.json` to be populated before the sentinel poll have been replaced with a single post-sentinel read. `agent_end` is guaranteed to fire after `sessions.json` is updated, so the retry loop is unnecessary.
+
+- **Dead-session check moved post-sentinel** (orchestrator.py, executor and reviewer branches): `_check_session_dead_on_arrival` now runs after `poll_for_sentinel` returns instead of before it. `sessions.json` is reliably populated by the time `agent_end` unblocks the sentinel poll, so the single-attempt check is always accurate.
+
+- **`install.sh` updated to 14 steps:** Step 12/14 installs the `autodev-pipeline-signals` plugin and patches `openclaw.json` with `allowConversationAccess: true`.
+
+### Removed
+
+- **`autodev/agents/escalation/HEARTBEAT.md`** (repo source and `~/.openclaw/workspace-escalation/HEARTBEAT.md` runtime copy) deleted. The escalation agent's notification behaviour is governed by its `AGENTS.md` and triggered by the orchestrator — no `HEARTBEAT.md` is needed or correct. Planner/executor/reviewer `HEARTBEAT.md` files remain empty — those agents do not send notifications.
+- **`query_heartbeat_model`, `send_signal_notification`, `HEARTBEAT_SYSTEM_PROMPT`, `HEARTBEAT_MODEL_URL`, `HEARTBEAT_MODEL_NAME`** removed from `heartbeat_cron.py`. The model query was the source of false-positive Signal notifications for normal idle states (IDLE, PIPELINE_COMPLETE, STOPPED). Decision logic is now deterministic only.
+- **`poll_for_sentinel_with_idle_detect`** and `_latest_activity_mtime` from `autodev/pipeline/sentinel_poller.py`.
+- **`_watch_root_for_idle_detect`** from `autodev/pipeline/orchestrator.py`.
+
 - **Symlink divergence guard:** `_verify_symlinks_consistent(project_path)` warns `[WARN]` before executor and reviewer webhook calls if either `pipeline-project` symlink has drifted from the active project path. Read-only diagnostic; does not abort the run. See `autodev/pipeline/orchestrator.py`, `autodev/tests/test_orchestrator_symlink_consistency.py`.
 
 - **Dead-session detection:** `_check_session_dead_on_arrival()` escalates immediately when an OpenClaw session records `runtimeMs == 0` + `stopReason == "error"` (provider rejected before any work). Applied to both executor and reviewer. See `autodev/pipeline/orchestrator.py`, `autodev/tests/test_orchestrator_dead_session.py`.
@@ -18,7 +49,7 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 - **Reviewer sentinel timeout capped at 3:** Reviewer branch now escalates to `"escalation"` agent after 3 consecutive sentinel timeouts (mirrors planner). `write_failure_context` called on every timeout so operators always see current reviewer failure data. See `autodev/pipeline/orchestrator.py`, `autodev/tests/test_orchestrator_reviewer_timeout_cap.py`.
 
-- **Reviewer idle detection:** Reviewer `poll_for_sentinel_with_idle_detect` now resolves the active session JSONL path from `sessions.json` (previously `None`), sets `idle_threshold=300`, and passes `watch_dirs=[_watch_root_for_idle_detect()]`. See `autodev/pipeline/orchestrator.py`, `autodev/tests/test_orchestrator_reviewer_sentinel.py`.
+- **Reviewer sentinel** now uses `poll_for_sentinel` (post-agent_end integration). The previous `poll_for_sentinel_with_idle_detect` call and JSONL session-lookup loop have been replaced; see the agent_end entry above. See `autodev/pipeline/orchestrator.py`, `autodev/tests/test_orchestrator_reviewer_sentinel.py`.
 
 - **Preflight: repo with no commits now attempts initial commit:** Both fresh-init and existing-repo paths in `_run_preflight_checks` attempt `git add -A && git commit` (falling back to `--allow-empty`) when `HEAD` is absent. Emits `"fixed"` on success, `"fail"` on failure (blocking queue-add). Prevents `ERR_MISSING_BASE_COMMIT` at pipeline start. See `ui/server.py`, `tests/test_api_setup_preflight.py`.
 

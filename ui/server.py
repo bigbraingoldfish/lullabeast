@@ -40,7 +40,7 @@ from skill_manager import SkillManager  # noqa: E402  (W5-E: inline completion r
 from webhook_client import invoke_agent_webhook  # noqa: E402
 from sentinel_poller import (  # noqa: E402
     cleanup_output_files,
-    poll_for_sentinel_with_idle_detect,
+    poll_for_sentinel,
 )
 
 ORCHESTRATOR_FILENAME = "orchestrator.py"
@@ -7677,11 +7677,9 @@ async def post_completion_review_trigger(project: str):
 
         if _sentinel_path:
             _start = time.time()
-            poll_for_sentinel_with_idle_detect(
+            poll_for_sentinel(
                 sentinel_path=_sentinel_path,
                 timeout_seconds=120,
-                idle_threshold=60,
-                watch_dirs=[project_dir] if project_dir else [],
                 min_sentinel_mtime=_start,
             )
     except Exception as _exc:

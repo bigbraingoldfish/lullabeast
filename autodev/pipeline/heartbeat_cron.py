@@ -2,10 +2,7 @@ import os
 import sys
 import fcntl
 import json
-import time
-import signal
 import subprocess
-import requests
 from datetime import datetime, timezone, timedelta
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -28,18 +25,29 @@ AUTODEV_PIPELINE_ROOT = resolve_pipeline_root(AUTODEV_REPO_PATH)
 
 LOCK_FILE = os.path.join(AUTODEV_PIPELINE_ROOT, "pipeline.lock")
 STATE_FILE = os.path.join(AUTODEV_PIPELINE_ROOT, "pipeline_state.json")
-CONFIG_FILE = os.path.join(OPENCLAW_ROOT, "openclaw.json")
 ORCHESTRATOR_SCRIPT = os.path.join(AUTODEV_REPO_PATH, "autodev", "pipeline", "orchestrator.py")
 LOG_FILE = os.path.join(AUTODEV_PIPELINE_ROOT, "orchestrator.log")
 
-# Local llama-server chat endpoint. Override origin with AUTODEV_LLAMA_BASE (scheme+host+port, no path).
-_LLAMA_ORIGIN = os.environ.get("AUTODEV_LLAMA_BASE", "http://127.0.0.1:11434").rstrip("/")
-HEARTBEAT_MODEL_URL = f"{_LLAMA_ORIGIN}/v1/chat/completions"
-HEARTBEAT_MODEL_NAME = "qwen3.5-27b"
-
 # Stale mid-flight: lock is free (orchestrator dead) but state still claims active work.
-# Stagger 5+ minutes above the planner's 10-minute sentinel poll cap.
-STALE_FLIGHT_THRESHOLD_MINUTES = 15
+# With agent_end writing the .done sentinel immediately when the session closes, the
+# orchestrator can resume from that sentinel on restart without re-running the agent.
+# 3 minutes is enough to confirm the orchestrator process is genuinely gone and not
+# just slow to start. The old 15-minute value was calibrated against the planner's
+# 10-minute poll_for_sentinel cap — that cap is now an infrastructure-failure backstop
+# (hours), not a heuristic bound on agent runtime.
+STALE_FLIGHT_THRESHOLD_MINUTES = 3
+
+# States where no orchestrator process is expected and no action is needed.
+# The pipeline has reached a resting state intentionally.
+_IDLE_STATES = frozenset({
+    "IDLE",
+    "PIPELINE_COMPLETE",
+    "STOPPED",
+    "QUEUE_HALTED",
+    "HALTED_SILENT",
+    "BLOCKED",
+    "WAITING_FOR_HUMAN",
+})
 
 
 def _parse_last_action_utc(last_action_str: str) -> datetime | None:
@@ -57,7 +65,11 @@ def _parse_last_action_utc(last_action_str: str) -> datetime | None:
 
 
 def _is_stale_orphaned_midflight(state: dict) -> bool:
-    """True when state claims RUNNING or WAITING_FOR_SENTINEL but last_action is older than threshold."""
+    """True when state claims active work but last_action is older than the threshold.
+
+    Only applies to RUNNING and WAITING_FOR_SENTINEL — the two states where an
+    orchestrator process is expected to be running and holding the lock.
+    """
     ps = state.get("pipeline_status", "")
     if ps not in ("RUNNING", "WAITING_FOR_SENTINEL"):
         return False
@@ -66,66 +78,14 @@ def _is_stale_orphaned_midflight(state: dict) -> bool:
         return False
     return datetime.now(timezone.utc) - last_action_time > timedelta(minutes=STALE_FLIGHT_THRESHOLD_MINUTES)
 
-HEARTBEAT_SYSTEM_PROMPT = """
-You are a pipeline heartbeat monitor. You will be given the current state of an autonomous development pipeline.
-Your only job is to classify the state and output exactly one of three tokens: RESUME, WAIT, or NOTIFY.
 
-Rules:
-- RESUME: The orchestrator appears dead (lock is free) and the state is safe to resume automatically. Only output RESUME if pipeline_status is RUNNING or WAITING_FOR_SENTINEL and the orchestrator process is confirmed dead.
-- WAIT: The orchestrator is alive, or the pipeline is in WAITING_FOR_HUMAN or HALTED_SILENT state. Do not intervene.
-- NOTIFY: The state does not clearly match RESUME or WAIT. Something is wrong but you cannot safely classify it. Alert the human.
-
-Output exactly one word. No explanation. No punctuation. No other text.
-""".strip()
-
-
-def send_signal_notification(message):
-    """Send a raw Signal notification via the local OpenClaw gateway."""
-    token = ""
-    try:
-        with open(CONFIG_FILE, 'r') as f:
-            config = json.load(f)
-        token = config.get("hooks", {}).get("token", "")
-    except Exception:
-        pass
-    payload = {"channel": "signal", "message": message}
-    try:
-        headers = {"Authorization": f"Bearer {token}"} if token else {}
-        r = requests.post("http://localhost:18789/hooks/agent", json=payload, headers=headers, timeout=10)
-        r.raise_for_status()
-        print(f"[INFO] Signal notification sent.")
-    except Exception as e:
-        print(f"[ERROR] Failed to send signal notification: {e}")
-
-
-def query_heartbeat_model(state_json: str) -> str:
-    """Query local llama-server for RESUME/WAIT/NOTIFY decision.
-    Raises requests.exceptions.ConnectionError if the server is unreachable."""
-    resp = requests.post(
-        HEARTBEAT_MODEL_URL,
-        json={
-            "model": HEARTBEAT_MODEL_NAME,
-            "messages": [
-                {"role": "system", "content": HEARTBEAT_SYSTEM_PROMPT},
-                {"role": "user", "content": f"Pipeline state:\n{state_json}"}
-            ],
-            "temperature": 0.1,
-            "max_tokens": 5,
-            "presence_penalty": 0.0
-        },
-        timeout=30
-    )
-    return resp.json()["choices"][0]["message"]["content"].strip().upper()
-
-
-def start_orchestrator(project_path):
+def start_orchestrator(project_path: str) -> None:
     print("[INFO] Starting orchestrator process...")
     os.makedirs(AUTODEV_PIPELINE_ROOT, exist_ok=True)
     env = os.environ.copy()
     env["OPENCLAW_ROOT"] = OPENCLAW_ROOT
     env["AUTODEV_REPO_PATH"] = AUTODEV_REPO_PATH
     env["AUTODEV_PIPELINE_ROOT"] = AUTODEV_PIPELINE_ROOT
-    # Use Popen to run it in background detached from cron so it keeps running
     with open(LOG_FILE, "a") as log:
         subprocess.Popen(
             [sys.executable, ORCHESTRATOR_SCRIPT, "--project-path", project_path],
@@ -137,71 +97,87 @@ def start_orchestrator(project_path):
         )
 
 
-def run_heartbeat():
+def run_heartbeat() -> None:
+    """Self-healing watchdog. Never sends notifications — the escalation agent owns
+    all human communication.
+
+    Decision tree (fully deterministic, no model query, no SIGTERM):
+
+    Lock HELD (orchestrator alive):
+      → Log status and exit. No intervention.
+
+      Rationale: with the agent_end plugin, poll_for_sentinel unblocks the moment an
+      agent session closes.  poll_for_sentinel also has its own hard timeouts (1200 s
+      executor, 600 s reviewer) as a backstop for truly hung agents.  There is no
+      scenario where the orchestrator can be permanently stuck — it will always either
+      receive the .done sentinel or time out and handle the retry itself.
+
+      The old SIGTERM-on-15-min-WAITING_FOR_SENTINEL check is removed because
+      last_action_timestamp is written once when the orchestrator transitions to
+      WAITING_FOR_SENTINEL (before the webhook fires) and is never updated until the
+      agent finishes.  A complex phase legitimately running for 20+ minutes would
+      trigger the SIGTERM mid-work, burning all retry attempts and forcing manual
+      escalation for work that was completing successfully.
+
+    Lock FREE (orchestrator dead):
+      - No state file → log, exit
+      - State is an idle/terminal state → log "not active, no action", exit
+      - State claims active work AND stale (> 15 min) → restart orchestrator
+      - State claims active work AND fresh (< 15 min) → log "monitoring", exit
+        (will restart on the next cycle once the threshold is reached)
+    """
     lock_fd = None
     try:
-        # We need a file descriptor to attempt locking
         lock_fd = os.open(LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o666)
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            # LOCK IS HELD => Orchestrator is theoretically alive.
-            # Check for stuck sentinel (> 15 mins)
-            if not os.path.exists(STATE_FILE):
-                print("[INFO] State file missing, nothing to check.")
-                return
-
-            with open(STATE_FILE, 'r') as f:
-                state = json.load(f)
-
-            if state.get("pipeline_status") == "WAITING_FOR_SENTINEL":
-                last_action_str = state.get("last_action_timestamp")
-                if last_action_str:
-                    last_action_time = datetime.fromisoformat(last_action_str)
-                    # Use 15 minutes to stagger behind the internal 10-minute timeout
-                    if datetime.now(timezone.utc) - last_action_time > timedelta(minutes=15):
-                        print("[ERROR] Stuck sentinel timeout (>15 mins) exceeded. Orchestrator is deadlocked.")
-                        # Parse PID from lockfile metadata
-                        os.lseek(lock_fd, 0, os.SEEK_SET)
-                        lock_data = os.read(lock_fd, 1024).decode('utf-8')
-                        if lock_data:
-                            try:
-                                metadata = json.loads(lock_data)
-                                pid = metadata.get("pid")
-                                if pid:
-                                    print(f"[INFO] Terminating stuck PID {pid}...")
-                                    os.kill(pid, signal.SIGTERM)
-                                    time.sleep(2) # Give OS time to drop the POSIX lock
-                            except Exception as e:
-                                print(f"[ERROR] Failed to read PID from lockfile: {e}")
-
-                        # Loop back to run_heartbeat to acquire lock and restart
-                        os.close(lock_fd)
-                        return run_heartbeat()
-            print("[INFO] Orchestrator is alive and healthy.")
+            # ── LOCK HELD ─ orchestrator is alive, nothing to do ─────────────
+            if os.path.exists(STATE_FILE):
+                with open(STATE_FILE, "r") as f:
+                    state = json.load(f)
+                print(
+                    f"[INFO] Orchestrator alive. "
+                    f"status={state.get('pipeline_status')!r}"
+                )
+            else:
+                print("[INFO] Orchestrator alive.")
             return
 
-        # IF WE GET HERE => LOCK ACQUIRED => Orchestrator is dead/missing
+        # ── LOCK ACQUIRED ─ orchestrator is dead/missing ──────────────────────
         if not os.path.exists(STATE_FILE):
-            print("[INFO] No state file found, cannot recover. Exiting.")
+            print("[INFO] No state file — pipeline never started or was cleaned up. No action.")
             return
 
-        with open(STATE_FILE, 'r') as f:
+        with open(STATE_FILE, "r") as f:
             state = json.load(f)
 
-        # Deterministic orphan recovery: no live orchestrator (lock free) but state stuck
-        # in active flight with a stale last_action_timestamp — restart without LLM.
+        pipeline_status = state.get("pipeline_status", "")
+
+        # Pipeline is in a known resting state — no orchestrator expected, nothing to do.
+        if pipeline_status in _IDLE_STATES:
+            print(f"[INFO] Pipeline at rest (status={pipeline_status!r}). No action needed.")
+            return
+
+        # Pipeline claims active work (RUNNING / WAITING_FOR_SENTINEL).
         if _is_stale_orphaned_midflight(state):
             project_path = state.get("project_path", "")
             if not project_path:
                 print(
-                    "[ERROR] Heartbeat: stale mid-flight state but project_path missing from "
-                    "pipeline_state.json. Manual intervention required."
+                    "[ERROR] Stale mid-flight state but project_path missing from "
+                    "pipeline_state.json. Cannot auto-restart — check state file manually."
                 )
                 return
+            age_min = int(
+                (
+                    datetime.now(timezone.utc)
+                    - _parse_last_action_utc(state.get("last_action_timestamp") or "")
+                ).total_seconds()
+                // 60
+            )
             print(
-                "[INFO] Stale mid-flight pipeline state (orchestrator dead, lock free). "
-                f"last_action_timestamp exceeds {STALE_FLIGHT_THRESHOLD_MINUTES}m — restarting without model query."
+                f"[INFO] Stale mid-flight: orchestrator dead, status={pipeline_status!r}, "
+                f"last_action {age_min}m ago (>{STALE_FLIGHT_THRESHOLD_MINUTES}m). Restarting."
             )
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             os.close(lock_fd)
@@ -209,55 +185,22 @@ def run_heartbeat():
             start_orchestrator(project_path)
             return
 
-        # Query local model for RESUME / WAIT / NOTIFY decision (B7).
-        # Conservative fallback: if model is unreachable, notify human rather than guessing.
-        # Exception: if the pipeline is not actively running (HALTED_SILENT, WAITING_FOR_HUMAN,
-        # BLOCKED), model unreachability does not block any work in flight.  Suppress the alert
-        # in those cases to avoid false-positive notifications when the model server is simply
-        # restarting while the pipeline is intentionally paused or stopped.
-        pipeline_status = state.get("pipeline_status", "")
-        model_alert_required = pipeline_status in ("RUNNING", "WAITING_FOR_SENTINEL")
-        try:
-            decision = query_heartbeat_model(json.dumps(state))
-        except requests.exceptions.ConnectionError:
-            if model_alert_required:
-                send_signal_notification(
-                    "Heartbeat: local model unreachable. Cannot assess pipeline state. Manual check required."
-                )
-            else:
-                print(f"[INFO] Heartbeat: model unreachable, pipeline is {pipeline_status!r} (not actively running). No alert sent.")
-            return
-        except Exception as e:
-            if model_alert_required:
-                send_signal_notification(
-                    f"Heartbeat: model query failed ({e}). Cannot assess pipeline state. Manual check required."
-                )
-            else:
-                print(f"[INFO] Heartbeat: model query failed ({e}), pipeline is {pipeline_status!r} (not actively running). No alert sent.")
-            return
-
-        if decision == "RESUME":
-            project_path = state.get("project_path", "")
-            if not project_path:
-                print("[ERROR] Heartbeat: cannot restart, project_path missing from pipeline_state.json. Manual intervention required.")
-                return
-            print("[INFO] Stale lock detected (orchestrator dead). Model decision: RESUME. Restarting...")
-            # We have the lock, release it so orchestrator can acquire it
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            os.close(lock_fd)
-            start_orchestrator(project_path)
-        elif decision == "WAIT":
-            print(f"[INFO] Model decision: WAIT. Pipeline healthy or correctly paused ({state.get('pipeline_status')}).")
-        elif decision == "NOTIFY":
-            send_signal_notification(
-                f"Heartbeat: unclassified pipeline state. Manual check required.\n"
-                f"Status: {state.get('pipeline_status')} | Last action: {state.get('last_action')}"
+        # Active state but fresh — orchestrator may have just crashed.
+        # Wait for the next cycle; it will be stale by then and auto-restart will fire.
+        last_action_time = _parse_last_action_utc(state.get("last_action_timestamp") or "")
+        if last_action_time:
+            age_min = int(
+                (datetime.now(timezone.utc) - last_action_time).total_seconds() // 60
+            )
+            print(
+                f"[INFO] Possible recent crash: status={pipeline_status!r}, "
+                f"last_action {age_min}m ago (< {STALE_FLIGHT_THRESHOLD_MINUTES}m threshold). "
+                "Monitoring — will auto-restart next cycle if still stale."
             )
         else:
-            # Model returned something unexpected — conservative: treat as NOTIFY
-            send_signal_notification(
-                f"Heartbeat: model returned unexpected token '{decision}'. Manual check required.\n"
-                f"Status: {state.get('pipeline_status')} | Last action: {state.get('last_action')}"
+            print(
+                f"[INFO] Orchestrator absent, status={pipeline_status!r}, "
+                "no last_action_timestamp. Monitoring."
             )
 
     except Exception as e:
@@ -270,9 +213,8 @@ def run_heartbeat():
             except OSError:
                 pass
 
+
 if __name__ == "__main__":
-    # Self-diagnosis: a single startup line so cron log tails show the
-    # resolved roots (mirrors the line orchestrator.py prints at start).
     print(
         f"[STARTUP] OPENCLAW_ROOT={OPENCLAW_ROOT} "
         f"AUTODEV_PIPELINE_ROOT={AUTODEV_PIPELINE_ROOT} "

@@ -67,17 +67,13 @@ def test_metrics_row_includes_cost_total_field():
 def test_sum_session_tokens_called_after_executor_sentinel():
     """_sum_session_tokens must be called in the executor branch after the sentinel poll."""
     lines = _LINES
-    # Find executor sentinel poll line
+    # Find executor sentinel poll line — after agent_end integration executor uses
+    # poll_for_sentinel with timeout_seconds=1200
     executor_sentinel_linenos = [
         i for i, ln in enumerate(lines, 1)
-        if "poll_for_sentinel_with_idle_detect" in ln
+        if "poll_for_sentinel" in ln and "poll_for_sentinel_with" not in ln
         and "1200" in ln  # executor uses 1200s timeout
     ]
-    sum_tokens_linenos = [
-        i for i, ln in enumerate(lines, 1)
-        if "_sum_session_tokens" in ln and "executor" in ln.lower()
-    ]
-    # Allow broader search: any _sum_session_tokens call after the executor sentinel
     all_sum_linenos = [
         i for i, ln in enumerate(lines, 1)
         if "_sum_session_tokens" in ln
@@ -88,7 +84,7 @@ def test_sum_session_tokens_called_after_executor_sentinel():
         assert calls_after_sentinel, (
             f"No _sum_session_tokens call found after the executor sentinel poll "
             f"(line {executor_sentinel_start}). "
-            "Call _sum_session_tokens(_jsonl_path) after poll_for_sentinel_with_idle_detect() returns."
+            "Call _sum_session_tokens(_jsonl_path) after poll_for_sentinel() returns."
         )
     else:
         assert all_sum_linenos, "_sum_session_tokens never called in orchestrator."
@@ -97,10 +93,10 @@ def test_sum_session_tokens_called_after_executor_sentinel():
 def test_sum_session_tokens_called_after_reviewer_sentinel():
     """_sum_session_tokens must be called in the reviewer branch after the sentinel poll."""
     lines = _LINES
-    # Reviewer sentinel uses 600s timeout
+    # Reviewer sentinel uses 600s timeout — after agent_end integration uses poll_for_sentinel
     reviewer_sentinel_linenos = [
         i for i, ln in enumerate(lines, 1)
-        if "poll_for_sentinel_with_idle_detect" in ln
+        if "poll_for_sentinel" in ln and "poll_for_sentinel_with" not in ln
         and "600" in ln
     ]
     all_sum_linenos = [
@@ -109,22 +105,22 @@ def test_sum_session_tokens_called_after_reviewer_sentinel():
     ]
     if reviewer_sentinel_linenos and all_sum_linenos:
         reviewer_sentinel_start = min(reviewer_sentinel_linenos)
-        # There should be a call between the reviewer sentinel and the reviewer gate call
         calls_after_sentinel = [s for s in all_sum_linenos if s > reviewer_sentinel_start]
         assert calls_after_sentinel, (
             "No _sum_session_tokens call found after the reviewer sentinel poll. "
-            "Call _sum_session_tokens(_jsonl_path) after reviewer poll_for_sentinel_with_idle_detect()."
+            "Call _sum_session_tokens(_jsonl_path) after reviewer poll_for_sentinel()."
         )
 
 
-def test_planner_branch_has_session_lookup_loop():
-    """Planner branch must have a session-JSONL lookup loop (mirroring executor pattern)."""
-    # The planner uses poll_for_sentinel() (not with_idle_detect). After the sentinel,
-    # it must resolve _jsonl_path using the same 15-retry loop as executor.
+def test_planner_branch_has_session_lookup():
+    """Planner branch must have a post-sentinel session-JSONL lookup."""
+    # After the agent_end integration, all three agents use a single post-sentinel
+    # read of sessions.json (no 15-retry loop needed since agent_end guarantees
+    # sessions.json is populated before the sentinel is written).
     # Check for the "agent:planner:" lookup key pattern.
-    assert "agent:planner:" in _SRC or '"planner"' in _SRC and "_jsonl_path" in _SRC, (
+    assert "agent:planner:" in _SRC or ('"planner"' in _SRC and "_jsonl_path" in _SRC), (
         "No planner session lookup found in orchestrator. "
-        "Add a 15-retry lookup loop for the planner JSONL path after poll_for_sentinel()."
+        "Add a post-sentinel sessions.json read for the planner JSONL path after poll_for_sentinel()."
     )
 
 

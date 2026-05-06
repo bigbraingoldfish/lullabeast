@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — AutoDev interactive setup (13 steps)
+# install.sh — AutoDev interactive setup (14 steps)
 # Usage: ./install.sh [--force] [--non-interactive]
 set -euo pipefail
 
@@ -1047,18 +1047,59 @@ case "$ENV_MERGE" in
 esac
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 12/13  MARK SETUP COMPLETE
+# 12/14  INSTALL PIPELINE SIGNALS PLUGIN
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "12/13  Marking setup complete"
+hdr "12/14  Installing autodev-pipeline-signals plugin"
+
+PLUGIN_DIR="$AUTODEV_REPO_PATH/autodev/plugin"
+PLUGIN_INSTALL_STEP="not attempted"
+if command -v openclaw >/dev/null 2>&1; then
+    if openclaw plugins install "$PLUGIN_DIR" >/dev/null 2>&1; then
+        ok "Plugin installed: autodev-pipeline-signals"
+        info "  Restart the OpenClaw gateway to load the plugin."
+        # Ensure allowConversationAccess is set in the installed plugin entry.
+        OC_CFG="$OPENCLAW_ROOT/openclaw.json"
+        if [ -f "$OC_CFG" ]; then
+            # Use python to add allowConversationAccess without disturbing other keys.
+            python3 - "$OC_CFG" <<'PYEOF' 2>/dev/null && ok "openclaw.json: allowConversationAccess set for autodev-pipeline-signals" || warn "Could not patch openclaw.json — set hooks.allowConversationAccess manually for autodev-pipeline-signals"
+import json, sys, os, tempfile
+cfg_path = sys.argv[1]
+with open(cfg_path) as f:
+    cfg = json.load(f)
+plugins = cfg.setdefault("plugins", {}).setdefault("entries", {})
+entry = plugins.setdefault("autodev-pipeline-signals", {})
+entry["hooks"] = entry.get("hooks", {})
+entry["hooks"]["allowConversationAccess"] = True
+tmp = cfg_path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+os.replace(tmp, cfg_path)
+PYEOF
+        fi
+        PLUGIN_INSTALL_STEP="ok"
+    else
+        warn "Plugin install failed — run manually: openclaw plugins install \"$PLUGIN_DIR\""
+        PLUGIN_INSTALL_STEP="warn (see above)"
+    fi
+else
+    warn "openclaw CLI not found — plugin not installed. Run manually after gateway is available: openclaw plugins install \"$PLUGIN_DIR\""
+    PLUGIN_INSTALL_STEP="warn (openclaw not in PATH)"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 13/14  MARK SETUP COMPLETE
+# ─────────────────────────────────────────────────────────────────────────────
+hdr "13/14  Marking setup complete"
 
 date -u +%Y-%m-%dT%H:%M:%SZ > "$SETUP_MARKER"
 ok "Setup marker written to $SETUP_MARKER"
 info "  The AutoDev UI uses this file for first-run detection"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 13/13  SUMMARY
+# 14/14  SUMMARY
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "13/13  Summary"
+hdr "14/14  Summary"
 echo
 printf "  %-32s %s\n" "OS:"                      "$OS_TYPE ($OS_STATUS)"
 printf "  %-32s %s\n" "Python version:"           "$PYTHON_VERSION"
@@ -1072,6 +1113,7 @@ printf "  %-32s %s\n" "OpenClaw hooks (webhook):"   "$HOOKS_STEP"
 printf "  %-32s %s\n" "Webhook secret sync:"      "$WEBHOOK_SYNC_STEP"
 printf "  %-32s %s\n" "OpenClaw tools.profile:"   "$TOOLS_PROFILE_STEP"
 printf "  %-32s %s\n" "OpenClaw agents (register):" "$REGISTER_STATUS_STEP"
+printf "  %-32s %s\n" "Pipeline signals plugin:"    "$PLUGIN_INSTALL_STEP"
 echo   "  Agent files deployed:"
 for agent in planner executor reviewer escalation prd-creator roadmap-converter; do
     printf "    %-24s %s\n" "$agent:" "$(_get_count "$agent")"

@@ -11,7 +11,7 @@ import logging
 import requests
 
 from webhook_client import invoke_agent_webhook
-from sentinel_poller import cleanup_output_files, poll_for_sentinel, poll_for_sentinel_with_idle_detect
+from sentinel_poller import cleanup_output_files, poll_for_sentinel
 from skill_manager import SkillManager
 from queue_semantics import parent_blocks_child
 from env_resolvers import resolve_openclaw_root, resolve_pipeline_root
@@ -42,21 +42,6 @@ PHASE_STATE_FILE = os.path.join(PROJECT_ARTIFACTS_DIR, "phase_state.json")
 
 ORCHESTRATOR_FILENAME = "orchestrator.py"
 
-
-def _watch_root_for_idle_detect() -> str:
-    """Resolved project root for ``sentinel_poller`` file-mtime idle detection.
-
-    ``poll_for_sentinel_with_idle_detect`` uses ``watch_dirs`` to reset the idle
-    clock when the executor writes project files. Watching ``os.path.realpath``
-    of the pipeline-project symlink ensures activity under the real checkout is
-    observed consistently (symlink path alone can miss updates on some setups).
-    """
-    try:
-        if os.path.lexists(SYMLINK_TARGET):
-            return os.path.realpath(SYMLINK_TARGET)
-    except OSError:
-        pass
-    return SYMLINK_TARGET
 
 
 def _verify_symlinks_consistent(project_path: str) -> bool:
@@ -126,7 +111,6 @@ def _validate_openclaw_root(root: str) -> None:
             print(msg)
         sys.exit(1)
 WEBHOOK_AGENT_ID_PRD = "prd-creator"
-ORCHESTRATOR_POLL_TIMEOUT = 120
 
 # Hard cap for gate script subprocess.run — prevents hung gates from stalling the orchestrator.
 GATE_SUBPROCESS_TIMEOUT = 60
@@ -288,11 +272,11 @@ def _check_session_dead_on_arrival(sessions_json_path: str, full_key: str):
     Dead-on-arrival = session exists with runtimeMs == 0 AND stopReason == "error".
     This pattern occurs when the underlying provider rejects the request before
     the session does any work (e.g. 402 Payment Required, auth failure). The
-    session is registered, terminates immediately, and waiting for sentinel
-    output would just burn the idle threshold.
+    session is registered, terminates immediately, and agent_end fires to write
+    the .done sentinel — but the output JSON is absent or malformed.
 
     A session with non-zero runtimeMs that ends in error is a real failure and
-    should go through the normal sentinel path so its output (if any) is gated.
+    should go through the normal gate path so its output (if any) is evaluated.
     """
     try:
         with open(sessions_json_path, "r") as f:
@@ -466,11 +450,11 @@ def _run_completion_review(orchestrator, project_basename: str) -> None:
         _attempt_start = time.time()
         invoke_agent_webhook("reviewer", session_key, token, model=orchestrator._get_agent_model("reviewer"))
 
-        sentinel_found = poll_for_sentinel_with_idle_detect(
+        _stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
+        sentinel_found = poll_for_sentinel(
             sentinel_path=sentinel_path,
-            timeout_seconds=120,
-            idle_threshold=60,
-            watch_dirs=[SYMLINK_TARGET],
+            timeout_seconds=300,  # infrastructure-failure backstop only; agent_end fires immediately on session close
+            stop_sentinel_path=_stop_file,
             min_sentinel_mtime=_attempt_start,
         )
 
@@ -2640,6 +2624,7 @@ class Orchestrator:
                     sentinel_path = os.path.join(PROJECT_ARTIFACTS_DIR, "planner_output.done")
                     token = self.openclaw_config.get("hooks", {}).get("token", "")
 
+                    _attempt_start_time = time.time()  # captured before cleanup for stale-sentinel guard
                     cleanup_output_files(PROJECT_ARTIFACTS_DIR, "planner")
                     self.skill_manager.inject_skill(
                         self.state.get("current_phase_raw_id", ""), "planner", self.openclaw_config
@@ -2651,7 +2636,7 @@ class Orchestrator:
                     webhook_status = invoke_agent_webhook(
                         "planner", session_key, token, model=self._get_agent_model("planner")
                     )
-                    
+
                     if webhook_status != "SUCCESS":
                         self.state["current_agent"] = "escalation"
                         error_reason = "Auth Config Error" if webhook_status == "AUTH_ERROR" else "Webhook infra failure"
@@ -2660,25 +2645,28 @@ class Orchestrator:
                         continue
 
                     _stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
-                    sentinel_found = poll_for_sentinel(sentinel_path, timeout_seconds=600, stop_sentinel_path=_stop_file)
+                    sentinel_found = poll_for_sentinel(
+                        sentinel_path,
+                        timeout_seconds=3600,  # infrastructure-failure backstop only; agent_end fires immediately on session close
+                        stop_sentinel_path=_stop_file,
+                        min_sentinel_mtime=_attempt_start_time,
+                    )
 
-                    # W1-G: Resolve planner session JSONL path and capture token usage.
-                    # Mirrors executor/reviewer 15-retry lookup pattern — registry may lag sentinel.
+                    # W1-G: Resolve planner session JSONL and capture token usage.
+                    # agent_end fires after sessions.json is populated, so a single
+                    # read after the sentinel is sufficient.
                     _planner_sessions_dir = os.path.join(OPENCLAW_ROOT, "agents", "planner", "sessions")
                     _planner_sessions_json = os.path.join(_planner_sessions_dir, "sessions.json")
                     _planner_full_key = f"agent:planner:{session_key}".lower()
                     _planner_jsonl_path = None
-                    for _ in range(15):
-                        try:
-                            with open(_planner_sessions_json) as _sf:
-                                _sd = json.load(_sf)
-                            _sid = _sd.get(_planner_full_key, {}).get("sessionId")
-                            if _sid:
-                                _planner_jsonl_path = os.path.join(_planner_sessions_dir, f"{_sid}.jsonl")
-                                break
-                        except Exception:
-                            pass
-                        time.sleep(2)
+                    try:
+                        with open(_planner_sessions_json) as _sf:
+                            _sd = json.load(_sf)
+                        _sid = _sd.get(_planner_full_key, {}).get("sessionId")
+                        if _sid:
+                            _planner_jsonl_path = os.path.join(_planner_sessions_dir, f"{_sid}.jsonl")
+                    except Exception:
+                        pass
                     _planner_tokens = _sum_session_tokens(_planner_jsonl_path)
                     _ps_plan_tok = self.read_phase_state()
                     _planner_tokens_acc = _ps_plan_tok.get("planner_tokens_acc", {})
@@ -2857,24 +2845,32 @@ class Orchestrator:
                         time.sleep(5)
                         continue
 
-                    # Resolve the active executor session JSONL for idle detection.
-                    # sessions.json may take a few seconds to be updated by the gateway.
+                    _stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
+                    sentinel_found = poll_for_sentinel(
+                        sentinel_path,
+                        timeout_seconds=7200,  # infrastructure-failure backstop only; agent_end fires immediately on session close
+                        stop_sentinel_path=_stop_file,
+                        min_sentinel_mtime=_attempt_start_time,
+                    )
+
+                    # W1-G: Resolve executor session JSONL and capture token usage.
+                    # agent_end fires after sessions.json is populated, so a single
+                    # read after the sentinel is sufficient.
                     _sessions_dir = os.path.join(OPENCLAW_ROOT, "agents", "executor", "sessions")
                     _sessions_json = os.path.join(_sessions_dir, "sessions.json")
                     _full_key = f"agent:executor:{session_key}".lower()  # openclaw normalizes session keys to lowercase
                     _jsonl_path = None
-                    for _ in range(15):  # up to 30s
-                        try:
-                            with open(_sessions_json) as _sf:
-                                _sd = json.load(_sf)
-                            _sid = _sd.get(_full_key, {}).get("sessionId")
-                            if _sid:
-                                _jsonl_path = os.path.join(_sessions_dir, f"{_sid}.jsonl")
-                                break
-                        except Exception:
-                            pass
-                        time.sleep(2)
+                    try:
+                        with open(_sessions_json) as _sf:
+                            _sd = json.load(_sf)
+                        _sid = _sd.get(_full_key, {}).get("sessionId")
+                        if _sid:
+                            _jsonl_path = os.path.join(_sessions_dir, f"{_sid}.jsonl")
+                    except Exception:
+                        pass
 
+                    # Dead-on-arrival check: sessions.json is reliably populated by the time
+                    # agent_end (or the hard timeout) unblocks the sentinel poll.
                     _is_dead, _dead_msg = _check_session_dead_on_arrival(_sessions_json, _full_key)
                     if _is_dead:
                         print(f"[ERROR] [EXECUTOR] Session dead on arrival: {_dead_msg}")
@@ -2891,16 +2887,7 @@ class Orchestrator:
                         )
                         continue
 
-                    _stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
-                    sentinel_found = poll_for_sentinel_with_idle_detect(
-                        sentinel_path, _jsonl_path, timeout_seconds=1200,
-                        watch_dirs=[_watch_root_for_idle_detect()],
-                        min_sentinel_mtime=_attempt_start_time,
-                        stop_sentinel_path=_stop_file,
-                        idle_threshold=300,  # MiniMax M2.7 can take 2-3 min to generate large responses
-                    )
-
-                    # W1-G: Accumulate executor token usage into phase_state across retry attempts.
+                    # Accumulate executor token usage into phase_state across retry attempts.
                     _attempt_tokens = _sum_session_tokens(_jsonl_path)
                     _ps_tok = self.read_phase_state()
                     _executor_tokens_acc = _ps_tok.get("executor_tokens_acc", {})
@@ -2996,25 +2983,32 @@ class Orchestrator:
                         time.sleep(5)
                         continue
 
-                    # Resolve the active reviewer session JSONL for idle detection.
-                    # Mirrors the executor pattern (sessions.json may take a few seconds
-                    # to be updated by the gateway).
+                    _stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
+                    sentinel_found = poll_for_sentinel(
+                        sentinel_path,
+                        timeout_seconds=3600,  # infrastructure-failure backstop only; agent_end fires immediately on session close
+                        stop_sentinel_path=_stop_file,
+                        min_sentinel_mtime=_attempt_start_time,
+                    )
+
+                    # W1-G: Resolve reviewer session JSONL and capture token usage.
+                    # agent_end fires after sessions.json is populated, so a single
+                    # read after the sentinel is sufficient.
                     _rev_sessions_dir = os.path.join(OPENCLAW_ROOT, "agents", "reviewer", "sessions")
                     _rev_sessions_json = os.path.join(_rev_sessions_dir, "sessions.json")
                     _rev_full_key = f"agent:reviewer:{session_key}".lower()
                     _jsonl_path = None
-                    for _ in range(15):  # up to 30s
-                        try:
-                            with open(_rev_sessions_json) as _sf:
-                                _sd = json.load(_sf)
-                            _sid = _sd.get(_rev_full_key, {}).get("sessionId")
-                            if _sid:
-                                _jsonl_path = os.path.join(_rev_sessions_dir, f"{_sid}.jsonl")
-                                break
-                        except Exception:
-                            pass
-                        time.sleep(2)
+                    try:
+                        with open(_rev_sessions_json) as _sf:
+                            _sd = json.load(_sf)
+                        _sid = _sd.get(_rev_full_key, {}).get("sessionId")
+                        if _sid:
+                            _jsonl_path = os.path.join(_rev_sessions_dir, f"{_sid}.jsonl")
+                    except Exception:
+                        pass
 
+                    # Dead-on-arrival check runs after sentinel poll (sessions.json guaranteed
+                    # populated by the time agent_end or the hard timeout fires).
                     _is_dead, _dead_msg = _check_session_dead_on_arrival(_rev_sessions_json, _rev_full_key)
                     if _is_dead:
                         print(f"[ERROR] [REVIEWER] Session dead on arrival: {_dead_msg}")
@@ -3031,17 +3025,7 @@ class Orchestrator:
                         )
                         continue
 
-                    _stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
-                    sentinel_found = poll_for_sentinel_with_idle_detect(
-                        sentinel_path, _jsonl_path,
-                        timeout_seconds=600,
-                        watch_dirs=[_watch_root_for_idle_detect()],
-                        min_sentinel_mtime=_attempt_start_time,
-                        stop_sentinel_path=_stop_file,
-                        idle_threshold=300,  # match executor: long gaps between tool/LLM events
-                    )
-                    
-                    # W1-G: Capture reviewer token usage from the resolved session JSONL.
+                    # Capture reviewer token usage from the resolved session JSONL.
                     _reviewer_tokens = _sum_session_tokens(_jsonl_path)
                     _ps_rev_tok = self.read_phase_state()
                     _ps_rev_tok["reviewer_tokens_acc"] = _reviewer_tokens
