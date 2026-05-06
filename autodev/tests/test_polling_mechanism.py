@@ -179,3 +179,110 @@ class TestPollingMechanism:
         assert result is True, "Must return True when fresh sentinel written after stale one discarded"
         assert elapsed >= 1.5, "Must not return on the stale sentinel — must wait for fresh one"
         assert elapsed < 10.0, f"Should complete quickly after fresh sentinel, took {elapsed:.1f}s"
+
+    # --- Session stall detection (Tier A hooks → activity stamp + poll_for_sentinel) ---
+
+    def test_stall_detection_fires_when_activity_stamp_stale(self, tmp_workspace):
+        """Stall: activity stamp mtime older than threshold → poll returns False immediately."""
+        from sentinel_poller import poll_for_sentinel
+
+        sentinel_path = os.path.join(tmp_workspace, "executor_output.done")
+        stamp_path = os.path.join(tmp_workspace, "executor_activity.stamp")
+        open(stamp_path, "w").close()
+        old = time.time() - 3600
+        os.utime(stamp_path, (old, old))
+
+        start = time.monotonic()
+        result = poll_for_sentinel(
+            sentinel_path=sentinel_path,
+            timeout_seconds=30,
+            stall_detection_path=stamp_path,
+            stall_threshold_seconds=1,
+        )
+        elapsed = time.monotonic() - start
+
+        assert result is False
+        assert elapsed < 3.0, f"stall should short-circuit quickly, took {elapsed:.1f}s"
+
+    def test_stall_detection_does_not_fire_when_stamp_is_fresh(self, tmp_workspace):
+        """Fresh activity stamp → stall check passes; poll succeeds when .done appears."""
+        import threading
+        from sentinel_poller import poll_for_sentinel
+
+        sentinel_path = os.path.join(tmp_workspace, "executor_output.done")
+        stamp_path = os.path.join(tmp_workspace, "executor_activity.stamp")
+        open(stamp_path, "w").close()
+
+        def _write_done():
+            time.sleep(0.3)
+            open(sentinel_path, "w").close()
+
+        t = threading.Thread(target=_write_done, daemon=True)
+        t.start()
+
+        result = poll_for_sentinel(
+            sentinel_path=sentinel_path,
+            timeout_seconds=15,
+            stall_detection_path=stamp_path,
+            stall_threshold_seconds=600,
+        )
+        t.join(timeout=5)
+        assert result is True
+
+    def test_stall_detection_skipped_when_stamp_absent(self, tmp_workspace):
+        """No activity stamp file → stall branch skipped; normal sentinel wait."""
+        import threading
+        from sentinel_poller import poll_for_sentinel
+
+        sentinel_path = os.path.join(tmp_workspace, "executor_output.done")
+        stamp_path = os.path.join(tmp_workspace, "executor_activity.stamp")
+
+        def _write_done():
+            time.sleep(0.3)
+            open(sentinel_path, "w").close()
+
+        t = threading.Thread(target=_write_done, daemon=True)
+        t.start()
+
+        result = poll_for_sentinel(
+            sentinel_path=sentinel_path,
+            timeout_seconds=15,
+            stall_detection_path=stamp_path,
+            stall_threshold_seconds=1,
+        )
+        t.join(timeout=5)
+        assert result is True
+
+    def test_stall_detection_absent_when_params_not_passed(self, tmp_workspace):
+        """Backward compat: omitting stall params preserves original poll behavior."""
+        import threading
+        from sentinel_poller import poll_for_sentinel
+
+        sentinel_path = os.path.join(tmp_workspace, "executor_output.done")
+
+        def _write_done():
+            time.sleep(0.3)
+            open(sentinel_path, "w").close()
+
+        t = threading.Thread(target=_write_done, daemon=True)
+        t.start()
+
+        result = poll_for_sentinel(sentinel_path, timeout_seconds=15)
+        t.join(timeout=5)
+        assert result is True
+
+    def test_cleanup_removes_activity_stamp(self, tmp_workspace):
+        from sentinel_poller import cleanup_output_files
+
+        stamp = os.path.join(tmp_workspace, "executor_activity.stamp")
+        json_p = os.path.join(tmp_workspace, "executor_output.json")
+        done_p = os.path.join(tmp_workspace, "executor_output.done")
+        open(stamp, "w").close()
+        open(json_p, "w").close()
+        open(done_p, "w").close()
+
+        cleanup_output_files(tmp_workspace, "executor")
+
+        assert not os.path.exists(stamp)
+        assert not os.path.exists(json_p)
+        assert not os.path.exists(done_p)

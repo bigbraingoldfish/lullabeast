@@ -1046,6 +1046,19 @@ case "$ENV_MERGE" in
     *) warn ".env merge: $ENV_MERGE" ;;
 esac
 
+ENV_STALL_HINTS=$(
+    cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import ensure_dotenv_stall_timeout_hints
+import os
+print(ensure_dotenv_stall_timeout_hints(os.path.join(os.environ['AUTODEV_REPO_PATH'], '.env')))
+" 2>/dev/null || echo "error:helper"
+)
+case "$ENV_STALL_HINTS" in
+    appended) ok "Added commented AUTODEV_STALL_TIMEOUT_* placeholders to .env (optional overrides; see SETUP.md)" ;;
+    unchanged) : ;;
+    *) warn ".env stall-timeout hint block: $ENV_STALL_HINTS" ;;
+esac
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 12/14  INSTALL PIPELINE SIGNALS PLUGIN
 # ─────────────────────────────────────────────────────────────────────────────

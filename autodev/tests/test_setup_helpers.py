@@ -165,6 +165,21 @@ def test_merge_dotenv_emits_canonical_names_only(tmp_path):
     assert "AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME" not in text
 
 
+def test_ensure_dotenv_stall_timeout_hints_appends_then_idempotent(tmp_path):
+    envp = tmp_path / ".env"
+    envp.write_text("OPENCLAW_ROOT=/a\n")
+    assert setup_helpers.ensure_dotenv_stall_timeout_hints(str(envp)) == "appended"
+    text = envp.read_text()
+    assert setup_helpers.DOTENV_STALL_HINT_MARKER in text
+    assert "# AUTODEV_STALL_TIMEOUT_PLANNER=" in text
+    assert setup_helpers.ensure_dotenv_stall_timeout_hints(str(envp)) == "unchanged"
+
+
+def test_ensure_dotenv_stall_timeout_hints_missing_file(tmp_path):
+    missing = tmp_path / "missing.env"
+    assert setup_helpers.ensure_dotenv_stall_timeout_hints(str(missing)) == "unchanged"
+
+
 def test_read_openclaw_hooks_token_returns_value(tmp_path):
     oc = tmp_path / "openclaw.json"
     oc.write_text(json.dumps({"hooks": {"token": "abc123"}}))

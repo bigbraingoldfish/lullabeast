@@ -47,6 +47,24 @@ export type PluginHookBeforeAgentFinalizeResult = {
   reason?: string;
 };
 
+/** Sanitized provider/model call metadata (observation hooks). */
+export type PluginHookModelCallEvent = {
+  runId?: string;
+  callId?: string;
+  provider?: string;
+  model?: string;
+  durationMs?: number;
+  outcome?: string;
+};
+
+export type PluginHookAfterToolCallEvent = {
+  toolName: string;
+  runId?: string;
+  toolCallId?: string;
+  durationMs?: number;
+  isError?: boolean;
+};
+
 export type OpenClawPluginApi = {
   on(
     hookName: "agent_end",
@@ -65,6 +83,30 @@ export type OpenClawPluginApi = {
       | Promise<PluginHookBeforeAgentFinalizeResult | void>
       | PluginHookBeforeAgentFinalizeResult
       | void,
+    opts?: { priority?: number; timeoutMs?: number },
+  ): void;
+  on(
+    hookName: "model_call_started",
+    handler: (
+      event: PluginHookModelCallEvent,
+      ctx: PluginHookAgentContext,
+    ) => Promise<void> | void,
+    opts?: { priority?: number; timeoutMs?: number },
+  ): void;
+  on(
+    hookName: "model_call_ended",
+    handler: (
+      event: PluginHookModelCallEvent,
+      ctx: PluginHookAgentContext,
+    ) => Promise<void> | void,
+    opts?: { priority?: number; timeoutMs?: number },
+  ): void;
+  on(
+    hookName: "after_tool_call",
+    handler: (
+      event: PluginHookAfterToolCallEvent,
+      ctx: PluginHookAgentContext,
+    ) => Promise<void> | void,
     opts?: { priority?: number; timeoutMs?: number },
   ): void;
 };

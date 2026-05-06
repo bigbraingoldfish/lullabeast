@@ -478,6 +478,9 @@ These values appear throughout the codebase. Do not change them without understa
 | `AUTODEV_LLAMA_BASE` | default `http://127.0.0.1:11434` | Orchestrator `check_traffic_cop_health`, `wait_for_model_stable`, blame L1, and `heartbeat_cron.py` — HTTP origin when `openclaw.json` has no `llama-local` `baseUrl` |
 | `AUTODEV_AUDIT_ARCHIVE_DIR` | unset → `$OPENCLAW_ROOT/pipeline-audit`; empty string → disabled | Phase-complete snapshot copies in `orchestrator.py` |
 | `AUTODEV_HOOKS_TOKEN` | optional | Overrides `hooks_token` from `ui/config.json` / `DEFAULTS` for UI → OpenClaw webhook calls |
+| `AUTODEV_STALL_TIMEOUT_PLANNER` | default `900` (seconds) | Tier A in-poll stall: max silence on `{agent}_activity.stamp` mtime before planner `poll_for_sentinel` returns (orchestrator) |
+| `AUTODEV_STALL_TIMEOUT_EXECUTOR` | default `1800` | Same for executor poll |
+| `AUTODEV_STALL_TIMEOUT_REVIEWER` | default `900` | Same for reviewer poll |
 
 ### `pipeline.lock` locking mechanism
 
@@ -503,7 +506,7 @@ These constraints are defined in `openclaw.json` under `agents.list[].tools` and
 ./install.sh          # Linux and macOS (POSIX fcntl); WSL2 supported
 ```
 
-The script writes `.env` with the canonical names only (`OPENCLAW_ROOT`, `AUTODEV_PIPELINE_ROOT`, `AUTODEV_REPO_PATH`). Legacy aliases (`AUTODEV_ROOT`, `AUTODEV_RUNTIME_ROOT`) have been removed and are ignored at runtime. Source it before running any pipeline code:
+The script writes `.env` with the canonical names only (`OPENCLAW_ROOT`, `AUTODEV_PIPELINE_ROOT`, `AUTODEV_REPO_PATH`). It then appends a **comment-only** Tier A stall block (`AUTODEV_STALL_TIMEOUT_*` placeholders) once per file so operators see those knobs without enabling them. Legacy aliases (`AUTODEV_ROOT`, `AUTODEV_RUNTIME_ROOT`) have been removed and are ignored at runtime. Source it before running any pipeline code:
 
 ```bash
 source .env

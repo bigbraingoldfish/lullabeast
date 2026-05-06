@@ -1,13 +1,14 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { handleAgentEnd } from "./agent-end-handler.ts";
 import { handleBeforeAgentFinalize } from "./before-finalize-handler.ts";
+import { registerStallDetectorHooks } from "./stall-detector.ts";
 
 export default definePluginEntry({
   id: "autodev-pipeline-signals",
   name: "AutoDev Pipeline Signals",
   description:
-    "Writes agent completion sentinels via agent_end and requests structural " +
-    "revision via before_agent_finalize for pipeline: sessions",
+    "Pipeline signals: agent_end sentinels, before_agent_finalize structural revise, " +
+    "and Tier A stall activity stamps (model_call_*, after_tool_call)",
 
   register(api) {
     // Observation-only: fires fire-and-forget after the session closes.
@@ -34,5 +35,7 @@ export default definePluginEntry({
       },
       { priority: 50 },
     );
+
+    registerStallDetectorHooks(api);
   },
 });

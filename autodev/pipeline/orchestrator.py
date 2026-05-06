@@ -26,6 +26,16 @@ def _env_truthy(name: str) -> bool:
     return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _stall_timeout_seconds(env_name: str, default_str: str) -> int:
+    """Parse stall-detection threshold from env; invalid values fall back to default."""
+    raw = (os.environ.get(env_name) or "").strip()
+    try:
+        v = int(raw or default_str)
+    except ValueError:
+        v = int(default_str)
+    return max(1, v)
+
+
 # Pipeline state directory. Resolved via env_resolvers: OPENCLAW_ROOT is the
 # OpenClaw hub, AUTODEV_PIPELINE_ROOT is the pipeline state directory. Operators
 # who want state to live next to OpenClaw set AUTODEV_PIPELINE_ROOT=$OPENCLAW_ROOT
@@ -2650,6 +2660,12 @@ class Orchestrator:
                         timeout_seconds=3600,  # infrastructure-failure backstop only; agent_end fires immediately on session close
                         stop_sentinel_path=_stop_file,
                         min_sentinel_mtime=_attempt_start_time,
+                        stall_detection_path=os.path.join(
+                            PROJECT_ARTIFACTS_DIR, "planner_activity.stamp"
+                        ),
+                        stall_threshold_seconds=_stall_timeout_seconds(
+                            "AUTODEV_STALL_TIMEOUT_PLANNER", "900"
+                        ),
                     )
 
                     # W1-G: Resolve planner session JSONL and capture token usage.
@@ -2851,6 +2867,12 @@ class Orchestrator:
                         timeout_seconds=7200,  # infrastructure-failure backstop only; agent_end fires immediately on session close
                         stop_sentinel_path=_stop_file,
                         min_sentinel_mtime=_attempt_start_time,
+                        stall_detection_path=os.path.join(
+                            PROJECT_ARTIFACTS_DIR, "executor_activity.stamp"
+                        ),
+                        stall_threshold_seconds=_stall_timeout_seconds(
+                            "AUTODEV_STALL_TIMEOUT_EXECUTOR", "1800"
+                        ),
                     )
 
                     # W1-G: Resolve executor session JSONL and capture token usage.
@@ -2989,6 +3011,12 @@ class Orchestrator:
                         timeout_seconds=3600,  # infrastructure-failure backstop only; agent_end fires immediately on session close
                         stop_sentinel_path=_stop_file,
                         min_sentinel_mtime=_attempt_start_time,
+                        stall_detection_path=os.path.join(
+                            PROJECT_ARTIFACTS_DIR, "reviewer_activity.stamp"
+                        ),
+                        stall_threshold_seconds=_stall_timeout_seconds(
+                            "AUTODEV_STALL_TIMEOUT_REVIEWER", "900"
+                        ),
                     )
 
                     # W1-G: Resolve reviewer session JSONL and capture token usage.

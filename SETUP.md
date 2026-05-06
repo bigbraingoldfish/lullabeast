@@ -199,6 +199,16 @@ To collapse the pipeline directory onto the OpenClaw directory, set
 `AUTODEV_PIPELINE_ROOT=$OPENCLAW_ROOT` explicitly. See
 [`docs/RUNTIME-MIGRATION.md`](docs/RUNTIME-MIGRATION.md) for history.
 
+**Optional — in-session stall timeouts (orchestrator).** When the `autodev-pipeline-signals` plugin is installed, Tier A hooks touch `{agent}_activity.stamp` in the pipeline artifacts directory. The orchestrator treats silence longer than these thresholds (seconds) as a failed sentinel poll and uses the normal retry path. Defaults are conservative; override only if you measure false positives or need faster recovery:
+
+| Env | Default (seconds) | Role |
+| --- | ------------------ | ---- |
+| `AUTODEV_STALL_TIMEOUT_PLANNER` | 900 | Planner poll |
+| `AUTODEV_STALL_TIMEOUT_EXECUTOR` | 1800 | Executor poll |
+| `AUTODEV_STALL_TIMEOUT_REVIEWER` | 900 | Reviewer poll |
+
+`install.sh` appends the same three variables to **`.env` as commented placeholders** (once per file; a marker line prevents duplicates). **`.env.example`** contains the same block for new copies. Uncomment a line and set an integer to override.
+
 ---
 
 ## Silent failure modes (four cases)
