@@ -107,10 +107,10 @@ def run_heartbeat() -> None:
       → Log status and exit. No intervention.
 
       Rationale: with the agent_end plugin, poll_for_sentinel unblocks the moment an
-      agent session closes.  poll_for_sentinel also has its own hard timeouts (1200 s
-      executor, 600 s reviewer) as a backstop for truly hung agents.  There is no
-      scenario where the orchestrator can be permanently stuck — it will always either
-      receive the .done sentinel or time out and handle the retry itself.
+      agent session closes.  Long backstop timeouts (planner/reviewer 3600 s, executor
+      7200 s) remain for gateway-down cases.  Mid-session silence is additionally bounded
+      by Tier A stall detection (activity stamp + ``poll_for_sentinel`` stall arguments in
+      orchestrator) before those backstops elapse.
 
       The old SIGTERM-on-15-min-WAITING_FOR_SENTINEL check is removed because
       last_action_timestamp is written once when the orchestrator transitions to
@@ -122,8 +122,8 @@ def run_heartbeat() -> None:
     Lock FREE (orchestrator dead):
       - No state file → log, exit
       - State is an idle/terminal state → log "not active, no action", exit
-      - State claims active work AND stale (> 15 min) → restart orchestrator
-      - State claims active work AND fresh (< 15 min) → log "monitoring", exit
+      - State claims active work AND stale (> STALE_FLIGHT_THRESHOLD_MINUTES) → restart orchestrator
+      - State claims active work AND fresh → log "monitoring", exit
         (will restart on the next cycle once the threshold is reached)
     """
     lock_fd = None

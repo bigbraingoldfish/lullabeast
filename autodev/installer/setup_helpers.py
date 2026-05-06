@@ -216,6 +216,48 @@ def refresh_exec_approvals_gate_paths(exec_approvals_path: str, repo_path: str) 
         return f"error:{e}"
 
 
+# Appended once per .env by install.sh so operators discover stall overrides.
+DOTENV_STALL_HINT_MARKER = "# --- AutoDev: Tier A stall timeouts (optional) ---"
+
+
+def ensure_dotenv_stall_timeout_hints(env_path: str) -> str:
+    """Append a comment-only block about AUTODEV_STALL_TIMEOUT_* if not present.
+
+    Lines are fully commented so they are not live configuration. Idempotent
+    via ``DOTENV_STALL_HINT_MARKER``.
+
+    Returns: appended | unchanged | error:<msg>
+    """
+    path = os.path.abspath(env_path)
+    if not os.path.isfile(path):
+        return "unchanged"
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except OSError as e:
+        return f"error:{e}"
+    if DOTENV_STALL_HINT_MARKER in content:
+        return "unchanged"
+    block = f"""
+{DOTENV_STALL_HINT_MARKER}
+# Orchestrator poll_for_sentinel stall thresholds (seconds). Used when the
+# autodev-pipeline-signals plugin touches *_activity.stamp. Uncomment a line
+# and set an integer to override the built-in default for that agent.
+# Built-in defaults if these stay unset: planner 900, executor 1800, reviewer 900.
+# AUTODEV_STALL_TIMEOUT_PLANNER=
+# AUTODEV_STALL_TIMEOUT_EXECUTOR=
+# AUTODEV_STALL_TIMEOUT_REVIEWER=
+"""
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            if content and not content.endswith("\n"):
+                f.write("\n")
+            f.write(block.lstrip("\n"))
+    except OSError as e:
+        return f"error:{e}"
+    return "appended"
+
+
 def merge_dotenv_missing_keys(env_path: str, pairs: dict[str, str]) -> str:
     """Append KEY=value lines for keys not already present (non-destructive).
 

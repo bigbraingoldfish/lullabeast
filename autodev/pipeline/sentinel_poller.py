@@ -11,23 +11,28 @@ from env_resolvers import resolve_openclaw_root  # noqa: E402
 
 OPENCLAW_ROOT = resolve_openclaw_root()
 
+
 def cleanup_output_files(workspace_dir: str, agent_prefix: str):
-    """Deletes the specific .done and .json output files before a run."""
+    """Deletes agent output JSON, .done sentinel, and activity stamp before a run."""
     base_path = Path(workspace_dir)
     json_path = base_path / f"{agent_prefix}_output.json"
     done_path = base_path / f"{agent_prefix}_output.done"
+    stamp_path = base_path / f"{agent_prefix}_activity.stamp"
 
-    for p in [json_path, done_path]:
+    for p in [json_path, done_path, stamp_path]:
         try:
             p.unlink(missing_ok=True)
         except Exception:
             pass
+
 
 def poll_for_sentinel(
     sentinel_path: str,
     timeout_seconds: int = 600,
     stop_sentinel_path: str | None = None,
     min_sentinel_mtime: float | None = None,
+    stall_detection_path: str | None = None,
+    stall_threshold_seconds: int | None = None,
 ) -> bool:
     """Poll for a sentinel file using a time.sleep loop, strictly avoiding inotify.
 
@@ -42,6 +47,14 @@ def poll_for_sentinel(
     are calibrated for "how long before we declare the gateway permanently down"
     (hours), not "how long we expect the agent to run" (which is irrelevant now
     that we have an authoritative completion signal).
+
+    **In-session stall detection:** When ``stall_detection_path`` and
+    ``stall_threshold_seconds`` are both set, the loop checks on every tick
+    whether ``stall_detection_path`` exists and its mtime is older than
+    ``stall_threshold_seconds`` wall seconds. If so, returns ``False`` immediately
+    (same contract as stop sentinel / timeout) so the orchestrator's existing
+    retry path runs. The plugin touches this file on ``model_call_started``,
+    ``model_call_ended``, and ``after_tool_call`` for pipeline sessions.
 
     Parameters
     ----------
@@ -70,12 +83,30 @@ def poll_for_sentinel(
             cleanup_output_files(...)
             ...
             poll_for_sentinel(..., min_sentinel_mtime=_attempt_start)
+    stall_detection_path:
+        Optional path to ``{agent}_activity.stamp`` updated by the plugin on
+        model/tool activity. When omitted, no stall check runs.
+    stall_threshold_seconds:
+        Seconds of silence (no stamp mtime update) before treating the attempt
+        as stalled. Must be passed together with ``stall_detection_path``.
     """
     start_time = time.monotonic()
 
     while time.monotonic() - start_time < timeout_seconds:
         if stop_sentinel_path and os.path.exists(stop_sentinel_path):
             return False
+        if stall_detection_path is not None and stall_threshold_seconds is not None:
+            if os.path.exists(stall_detection_path):
+                try:
+                    stamp_mtime = os.path.getmtime(stall_detection_path)
+                    if time.time() - stamp_mtime > stall_threshold_seconds:
+                        print(
+                            f"[STALL] No Tier A activity for >{stall_threshold_seconds}s "
+                            f"({stall_detection_path}). Treating as stalled attempt."
+                        )
+                        return False
+                except OSError:
+                    pass
         if os.path.exists(sentinel_path):
             if min_sentinel_mtime is not None:
                 try:

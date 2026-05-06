@@ -10,15 +10,20 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ### Added
 
-- **`autodev-pipeline-signals` plugin** (`autodev/plugin/`): OpenClaw TypeScript plugin registering two hooks:
+- **Stall-timeout env discovery:** `.env.example` includes a commented **Tier A stall timeouts** section (`AUTODEV_STALL_TIMEOUT_*`; no live values). After merging canonical keys, `install.sh` calls `ensure_dotenv_stall_timeout_hints()` so existing `.env` files gain the same commented block once (marker line prevents duplicates). SETUP.md cross-links the behavior.
+
+- **`autodev-pipeline-signals` plugin** (`autodev/plugin/`): OpenClaw TypeScript plugin registering hooks:
   - `agent_end` — fires fire-and-forget after every session closes; writes the missing `{agent}_output.done` sentinel when the agent did not write one itself (dead-on-arrival, crash, provider rejection). Unblocks `poll_for_sentinel` immediately rather than waiting for the hard timeout.
   - `before_agent_finalize` — fires before the harness accepts the agent's final answer; checks `planner_output.json`, `executor_output.json`, and `reviewer_output.json` for structural completeness and returns `{ action: "revise" }` if required fields are absent. Requests a bounded in-context correction pass without burning an orchestrator retry. File-system, git, and subprocess checks remain in the hard gate scripts.
+  - **Tier A stall detection:** `model_call_started`, `model_call_ended`, and `after_tool_call` touch `{agent}_activity.stamp` in the pipeline artifacts directory. `poll_for_sentinel` reads the stamp mtime each tick; if silence exceeds `AUTODEV_STALL_TIMEOUT_PLANNER` (default 900 s), `AUTODEV_STALL_TIMEOUT_EXECUTOR` (1800 s), or `AUTODEV_STALL_TIMEOUT_REVIEWER` (900 s), the poll returns `False` and existing retry paths run. `cleanup_output_files` removes `*_activity.stamp` each attempt.
   - Install: `openclaw plugins install <repo>/autodev/plugin`; `openclaw.json` entry requires `hooks.allowConversationAccess: true`. `install.sh` step 12/14 handles this automatically.
-  - Plugin tests: `autodev/plugin/tests/agent-end.test.ts`, `autodev/plugin/tests/before-finalize.test.ts` (28 tests, node:test with tsx).
+  - Plugin tests: `autodev/plugin/tests/agent-end.test.ts`, `autodev/plugin/tests/before-finalize.test.ts`, `autodev/plugin/tests/stall-detector.test.ts` (35 tests total, node:test with tsx).
 
 - **Heartbeat cron is now a silent self-healer:** `autodev/pipeline/heartbeat_cron.py` no longer sends any Signal notifications. The model-query path (`query_heartbeat_model`, `HEARTBEAT_SYSTEM_PROMPT`, `send_signal_notification`) has been removed entirely. All recovery decisions are now fully deterministic: idle/terminal states (IDLE, PIPELINE_COMPLETE, STOPPED, QUEUE_HALTED, HALTED_SILENT, BLOCKED, WAITING_FOR_HUMAN) cause a log-and-exit with no action; only stale RUNNING/WAITING_FOR_SENTINEL (> 15 min with lock free) triggers an automatic orchestrator restart. The escalation agent remains the sole owner of all human-facing notifications. `requests` import removed.
 
 ### Changed
+
+- **`poll_for_sentinel` stall detection:** optional `stall_detection_path` and `stall_threshold_seconds`; when the activity stamp file exists and its mtime is older than the threshold, returns `False` (same contract as stop/timeout) so planner/executor/reviewer retry paths run. `cleanup_output_files` also deletes `{prefix}_activity.stamp`.
 
 - **`poll_for_sentinel` now accepts `min_sentinel_mtime`:** The stale-sentinel guard previously in `poll_for_sentinel_with_idle_detect` is now a parameter of `poll_for_sentinel`. Capture `time.time()` before `cleanup_output_files()` and pass it as `min_sentinel_mtime=` to discard orphaned sentinels from a prior session that wrote their `.done` file after a reset.
 

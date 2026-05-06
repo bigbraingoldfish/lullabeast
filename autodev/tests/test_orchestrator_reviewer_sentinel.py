@@ -202,6 +202,73 @@ def test_reviewer_sentinel_passes_min_sentinel_mtime():
     )
 
 
+def test_reviewer_poll_includes_stall_detection():
+    """Reviewer poll_for_sentinel must pass stall_detection_path and stall_threshold_seconds."""
+    with open(ORCHESTRATOR_PATH, "r", encoding="utf-8") as f:
+        source = f.read()
+    tree = ast.parse(source)
+
+    calls_ok = []
+    calls_bad = []
+
+    class StallVisitor(ast.NodeVisitor):
+        def __init__(self):
+            self._in_reviewer = False
+
+        def visit_If(self, node):
+            test = node.test
+            is_reviewer = False
+            if isinstance(test, ast.Compare):
+                left = test.left
+                comps = test.comparators
+                ops = test.ops
+                if isinstance(ops[0], ast.Eq) and (
+                    (isinstance(left, ast.Constant) and left.value == "reviewer")
+                    or (
+                        len(comps) == 1
+                        and isinstance(comps[0], ast.Constant)
+                        and comps[0].value == "reviewer"
+                    )
+                ):
+                    is_reviewer = True
+
+            if is_reviewer:
+                prev = self._in_reviewer
+                self._in_reviewer = True
+                for child in ast.walk(node):
+                    if isinstance(child, ast.Call):
+                        self._check_call(child)
+                self._in_reviewer = prev
+            else:
+                self.generic_visit(node)
+
+        def _check_call(self, node):
+            func = node.func
+            if isinstance(func, ast.Name):
+                name = func.id
+            elif isinstance(func, ast.Attribute):
+                name = func.attr
+            else:
+                return
+            if name != "poll_for_sentinel":
+                return
+            kw = {kw.arg for kw in node.keywords}
+            if "stall_detection_path" in kw and "stall_threshold_seconds" in kw:
+                calls_ok.append(node.lineno)
+            else:
+                calls_bad.append(node.lineno)
+
+    StallVisitor().visit(tree)
+
+    assert calls_ok, (
+        "poll_for_sentinel in the reviewer branch must include stall_detection_path "
+        "and stall_threshold_seconds for Tier A stall detection."
+    )
+    assert not calls_bad, (
+        f"poll_for_sentinel at lines {calls_bad} in reviewer branch missing stall kwargs."
+    )
+
+
 def test_reviewer_branch_still_reads_sessions_json():
     """The reviewer branch still reads sessions.json for token accounting.
 

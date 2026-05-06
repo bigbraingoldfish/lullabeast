@@ -82,6 +82,29 @@ export function writeSentinelIfAbsent(donePath: string): boolean {
 }
 
 /**
+ * Touch (create or overwrite) `{agentId}_activity.stamp` in the artifacts directory.
+ * The file is empty; its mtime is the activity clock for in-session stall detection.
+ * No-op if the artifacts directory does not exist yet.
+ */
+export function touchActivityStamp(artifactsDir: string, agentId: string): void {
+  if (!fs.existsSync(artifactsDir)) return;
+
+  const stampPath = path.join(artifactsDir, `${agentId}_activity.stamp`);
+  const tmpPath = `${stampPath}.tmp.${process.pid}`;
+  try {
+    fs.writeFileSync(tmpPath, "", { flag: "w" });
+    fs.renameSync(tmpPath, stampPath);
+  } catch (err: unknown) {
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch {
+      // ignore
+    }
+    throw err;
+  }
+}
+
+/**
  * Safely parse a JSON file.  Returns null on any error (missing file, parse
  * failure, non-object root).
  */
