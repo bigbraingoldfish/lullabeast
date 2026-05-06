@@ -88,7 +88,7 @@ class TestRunCompletionReview:
         mock_orch.openclaw_config = {}
 
         with patch("orchestrator.invoke_agent_webhook", return_value=None), \
-             patch("orchestrator.poll_for_sentinel_with_idle_detect", return_value=False):
+             patch("orchestrator.poll_for_sentinel", return_value=False):
             orc._run_completion_review(mock_orch, project_basename="my-proj")
 
         # No transition_state calls — completion review must not modify pipeline state
@@ -119,7 +119,7 @@ class TestRunCompletionReview:
         mock_orch.openclaw_config = {}
 
         with patch("orchestrator.invoke_agent_webhook", side_effect=fake_webhook), \
-             patch("orchestrator.poll_for_sentinel_with_idle_detect", return_value=True):
+             patch("orchestrator.poll_for_sentinel", return_value=True):
             orc._run_completion_review(mock_orch, project_basename="my-project")
 
         assert captured_args, "invoke_agent_webhook not called"
@@ -135,7 +135,7 @@ class TestRunCompletionReview:
         mock_orch.openclaw_config = {}
 
         with patch("orchestrator.invoke_agent_webhook", return_value=None), \
-             patch("orchestrator.poll_for_sentinel_with_idle_detect", return_value=True):
+             patch("orchestrator.poll_for_sentinel", return_value=True):
             orc._run_completion_review(mock_orch, project_basename="proj")
 
         call_args = mock_orch.skill_manager.inject_skill.call_args
@@ -145,8 +145,13 @@ class TestRunCompletionReview:
         )
         assert call_args[0][1] == "reviewer"
 
-    def test_poll_called_with_tight_timeout(self, monkeypatch):
-        """Sentinel poll must use timeout_seconds=120 — no retry allowed."""
+    def test_poll_called_with_backstop_timeout(self, monkeypatch):
+        """Sentinel poll must use timeout_seconds=300 — infrastructure-failure backstop only.
+
+        Completion review is a single non-retrying pass; if the Gateway is unavailable
+        the poll times out and the pipeline still completes. 300 s is generous enough
+        that no legitimate session close would miss it.
+        """
         import orchestrator as orc
 
         mock_orch = MagicMock()
@@ -159,11 +164,11 @@ class TestRunCompletionReview:
             return True
 
         with patch("orchestrator.invoke_agent_webhook", return_value=None), \
-             patch("orchestrator.poll_for_sentinel_with_idle_detect", side_effect=capture_poll):
+             patch("orchestrator.poll_for_sentinel", side_effect=capture_poll):
             orc._run_completion_review(mock_orch, project_basename="proj")
 
-        assert poll_kwargs.get("timeout_seconds") == 120, (
-            f"Expected timeout_seconds=120, got {poll_kwargs.get('timeout_seconds')}"
+        assert poll_kwargs.get("timeout_seconds") == 300, (
+            f"Expected timeout_seconds=300, got {poll_kwargs.get('timeout_seconds')}"
         )
 
     def test_transition_state_never_called(self, monkeypatch):
@@ -174,7 +179,7 @@ class TestRunCompletionReview:
         mock_orch.openclaw_config = {}
 
         with patch("orchestrator.invoke_agent_webhook", return_value=None), \
-             patch("orchestrator.poll_for_sentinel_with_idle_detect", return_value=True):
+             patch("orchestrator.poll_for_sentinel", return_value=True):
             orc._run_completion_review(mock_orch, project_basename="proj")
 
         mock_orch.transition_state.assert_not_called()

@@ -95,7 +95,7 @@ class TestPostCompletionReviewTrigger:
             patch("ui.server.SkillManager"),
             patch("ui.server.invoke_agent_webhook", return_value=None),
             patch("ui.server.cleanup_output_files", return_value=None),
-            patch("ui.server.poll_for_sentinel_with_idle_detect", return_value=sentinel_return),
+            patch("ui.server.poll_for_sentinel", return_value=sentinel_return),
         )
 
     def test_returns_triggered_true_on_success(self, tmp_path):

@@ -1,14 +1,15 @@
 """Dead-session detection: if the OpenClaw gateway registers a session that
 terminated immediately (runtimeMs == 0, stopReason == "error"), the orchestrator
-must detect this after webhook fire and route to escalation immediately —
-without burning the full sentinel idle threshold and without consuming
-executor_retries / reviewer_retries.
+must detect this after the sentinel poll and route to escalation immediately —
+without consuming executor_retries / reviewer_retries.
 
 Symptom this guards against: a 402-style provider error returns a response
 that OpenClaw records as a session with zero runtime and an errorMessage.
-poll_for_sentinel_with_idle_detect would otherwise wait the full 120s/300s
-idle window before declaring timeout, and the timeout path increments retry
-counters as if this were a code-quality failure.
+Before the agent_end plugin integration, this check ran before the sentinel
+poll and required a 15-retry loop to wait for sessions.json to be populated.
+After the integration, sessions.json is guaranteed populated by the time
+agent_end (or the hard timeout) unblocks poll_for_sentinel, so the check
+runs post-sentinel with a single read — no retry loop needed.
 
 Fix-ID: dead-session-on-arrival
 """
@@ -164,7 +165,7 @@ def test_executor_branch_calls_dead_session_helper():
     calls = _branch_calls("executor")
     assert "_check_session_dead_on_arrival" in calls, (
         "_check_session_dead_on_arrival must be called in the executor branch "
-        "after sessions.json lookup, before poll_for_sentinel_with_idle_detect."
+        "after poll_for_sentinel returns (post-sentinel, sessions.json is populated)."
     )
 
 
@@ -172,7 +173,7 @@ def test_reviewer_branch_calls_dead_session_helper():
     calls = _branch_calls("reviewer")
     assert "_check_session_dead_on_arrival" in calls, (
         "_check_session_dead_on_arrival must be called in the reviewer branch "
-        "after sessions.json lookup, before poll_for_sentinel_with_idle_detect."
+        "after poll_for_sentinel returns (post-sentinel, sessions.json is populated)."
     )
 
 

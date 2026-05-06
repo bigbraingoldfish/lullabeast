@@ -1,11 +1,14 @@
-"""F4: Reviewer branch must use poll_for_sentinel_with_idle_detect, not poll_for_sentinel.
+"""Reviewer branch must use poll_for_sentinel (not poll_for_sentinel_with_idle_detect).
 
-The simpler poll_for_sentinel has no idle detection. When a reviewer session is active
-but writing no JSONL output, poll_for_sentinel will declare timeout at 600s regardless
-of actual activity. poll_for_sentinel_with_idle_detect resets its idle clock on any
-file write in watch_dirs, catching the common case of an active-but-silent session.
+With the autodev-pipeline-signals plugin installed, ``agent_end`` writes the
+sentinel synchronously when the session closes.  ``poll_for_sentinel`` is now
+the correct function for all three pipeline agents — idle detection is no
+longer needed as the authoritative signal comes from the plugin hook.
 
-FIND-ID: F4
+References the implementation-complete state after the agent_end integration.
+
+FIND-ID: F4 (updated — formerly enforced idle-detect requirement, now enforces
+the opposite: plain poll_for_sentinel with min_sentinel_mtime is correct)
 """
 
 import ast
@@ -29,7 +32,7 @@ def _find_reviewer_sentinel_calls():
 
     Returns a dict:
       {
-        "plain_calls": [(lineno, ...),],      # poll_for_sentinel calls
+        "plain_calls": [(lineno, ...),],       # poll_for_sentinel calls
         "idle_detect_calls": [(lineno, ...),], # poll_for_sentinel_with_idle_detect calls
       }
     """
@@ -38,14 +41,12 @@ def _find_reviewer_sentinel_calls():
 
     tree = ast.parse(source)
 
-    # Walk looking for the reviewer elif block
     plain_calls = []
     idle_detect_calls = []
 
     class Visitor(ast.NodeVisitor):
         def __init__(self):
             self._in_reviewer = False
-            self._reviewer_depth = 0
 
         def visit_Call(self, node):
             if self._in_reviewer:
@@ -74,7 +75,11 @@ def _find_reviewer_sentinel_calls():
                     isinstance(ops[0], ast.Eq)
                     and (
                         (isinstance(left, ast.Constant) and left.value == "reviewer")
-                        or (len(comps) == 1 and isinstance(comps[0], ast.Constant) and comps[0].value == "reviewer")
+                        or (
+                            len(comps) == 1
+                            and isinstance(comps[0], ast.Constant)
+                            and comps[0].value == "reviewer"
+                        )
                     )
                 ):
                     is_reviewer = True
@@ -93,49 +98,52 @@ def _find_reviewer_sentinel_calls():
     return {"plain_calls": plain_calls, "idle_detect_calls": idle_detect_calls}
 
 
-def test_reviewer_branch_does_not_call_plain_poll_for_sentinel():
-    """F4: poll_for_sentinel (plain) must NOT appear in the reviewer elif block.
+def test_reviewer_branch_calls_plain_poll_for_sentinel():
+    """post-agent_end: reviewer branch must use poll_for_sentinel.
 
-    The plain poller has no idle detection. Using it for the reviewer means any
-    reviewer session that writes no JSONL output will be declared timed-out after
-    600s even if the session is actively writing project files.
+    The autodev-pipeline-signals plugin delivers the completion signal via
+    agent_end, so idle detection is unnecessary.  poll_for_sentinel with
+    min_sentinel_mtime is the correct call in the reviewer branch.
     """
     result = _find_reviewer_sentinel_calls()
-    assert result["plain_calls"] == [], (
-        f"poll_for_sentinel (plain, no idle detection) is called in the reviewer branch "
-        f"at lines {result['plain_calls']}. Replace with poll_for_sentinel_with_idle_detect "
-        f"to prevent premature idle timeouts."
+    assert result["plain_calls"], (
+        "poll_for_sentinel is NOT called in the reviewer branch. "
+        "After the agent_end plugin integration, the reviewer branch must use "
+        "poll_for_sentinel (not poll_for_sentinel_with_idle_detect)."
     )
 
 
-def test_reviewer_branch_calls_idle_detect_poll():
-    """F4: poll_for_sentinel_with_idle_detect must appear in the reviewer elif block.
+def test_reviewer_branch_does_not_call_idle_detect_poll():
+    """post-agent_end: poll_for_sentinel_with_idle_detect must NOT appear in reviewer branch.
 
-    The reviewer may write project files without writing JSONL output (especially
-    for lightweight reviews). Idle detection via watch_dirs prevents false timeouts.
+    Idle detection was replaced by the agent_end plugin hook.  The idle-detect
+    variant has been removed from sentinel_poller.py; any reference here would
+    be a regression.
     """
     result = _find_reviewer_sentinel_calls()
-    assert result["idle_detect_calls"], (
-        "poll_for_sentinel_with_idle_detect is NOT called in the reviewer branch. "
-        "The reviewer must use the idle-detect variant (with watch_dirs=[SYMLINK_TARGET] "
-        "and min_sentinel_mtime=_attempt_start_time) to match the executor pattern."
+    assert result["idle_detect_calls"] == [], (
+        f"poll_for_sentinel_with_idle_detect is called in the reviewer branch "
+        f"at lines {result['idle_detect_calls']}. "
+        "This function has been removed — replace with poll_for_sentinel "
+        "(the agent_end plugin now writes the .done sentinel authoritatively)."
     )
 
 
-def test_reviewer_sentinel_passes_watch_dirs():
-    """F4: The idle-detect call in the reviewer branch must pass watch_dirs.
+def test_reviewer_sentinel_passes_min_sentinel_mtime():
+    """The poll_for_sentinel call in the reviewer branch must pass min_sentinel_mtime.
 
-    Without watch_dirs the poller can only observe JSONL writes, not file-system
-    activity in the project directory — causing false idle timeouts.
+    This stale-sentinel guard was moved from poll_for_sentinel_with_idle_detect
+    into poll_for_sentinel.  It must be passed so orphaned sentinels from a
+    prior session reset are discarded.
     """
     with open(ORCHESTRATOR_PATH, "r", encoding="utf-8") as f:
         source = f.read()
     tree = ast.parse(source)
 
-    calls_with_watch_dirs = []
-    calls_without_watch_dirs = []
+    calls_with_mtime = []
+    calls_without_mtime = []
 
-    class WatchDirsVisitor(ast.NodeVisitor):
+    class MtimeVisitor(ast.NodeVisitor):
         def __init__(self):
             self._in_reviewer = False
 
@@ -148,7 +156,11 @@ def test_reviewer_sentinel_passes_watch_dirs():
                 ops = test.ops
                 if isinstance(ops[0], ast.Eq) and (
                     (isinstance(left, ast.Constant) and left.value == "reviewer")
-                    or (len(comps) == 1 and isinstance(comps[0], ast.Constant) and comps[0].value == "reviewer")
+                    or (
+                        len(comps) == 1
+                        and isinstance(comps[0], ast.Constant)
+                        and comps[0].value == "reviewer"
+                    )
                 ):
                     is_reviewer = True
 
@@ -170,43 +182,37 @@ def test_reviewer_sentinel_passes_watch_dirs():
                 name = func.attr
             else:
                 return
-            if name != "poll_for_sentinel_with_idle_detect":
+            if name != "poll_for_sentinel":
                 return
             kw_names = {kw.arg for kw in node.keywords}
-            if "watch_dirs" in kw_names:
-                calls_with_watch_dirs.append(node.lineno)
+            if "min_sentinel_mtime" in kw_names:
+                calls_with_mtime.append(node.lineno)
             else:
-                calls_without_watch_dirs.append(node.lineno)
+                calls_without_mtime.append(node.lineno)
 
-    WatchDirsVisitor().visit(tree)
+    MtimeVisitor().visit(tree)
 
-    assert calls_with_watch_dirs, (
-        "poll_for_sentinel_with_idle_detect in the reviewer branch must include "
-        "watch_dirs=[SYMLINK_TARGET] so file-system activity resets the idle clock."
+    assert calls_with_mtime, (
+        "poll_for_sentinel in the reviewer branch must include "
+        "min_sentinel_mtime=_attempt_start_time to discard orphaned prior-session sentinels."
     )
-    assert not calls_without_watch_dirs, (
-        f"poll_for_sentinel_with_idle_detect at lines {calls_without_watch_dirs} "
-        "in the reviewer branch is missing watch_dirs= keyword argument."
+    assert not calls_without_mtime, (
+        f"poll_for_sentinel at lines {calls_without_mtime} in the reviewer branch "
+        "is missing the min_sentinel_mtime= keyword argument."
     )
 
 
-def test_reviewer_branch_resolves_jsonl_path():
-    """The reviewer branch must look up the active session's JSONL file from
-    sessions.json — same pattern as the executor branch — so that
-    poll_for_sentinel_with_idle_detect receives a real jsonl_path (not None)
-    and can use JSONL mtime as a secondary idle signal alongside watch_dirs.
+def test_reviewer_branch_still_reads_sessions_json():
+    """The reviewer branch still reads sessions.json for token accounting.
 
-    Static check: an open of "sessions.json" appears inside the reviewer branch
-    AND the poll_for_sentinel_with_idle_detect call's first positional /
-    second positional argument is NOT a Constant(None).
+    Even though the 15-retry JSONL loop is gone, a single post-sentinel read of
+    sessions.json must remain for token accumulation.
     """
     with open(ORCHESTRATOR_PATH, "r", encoding="utf-8") as f:
         source = f.read()
     tree = ast.parse(source)
 
     sessions_json_referenced = []
-    poll_calls_with_none_jsonl = []
-    poll_calls_with_real_jsonl = []
 
     class V(ast.NodeVisitor):
         def __init__(self):
@@ -221,7 +227,11 @@ def test_reviewer_branch_resolves_jsonl_path():
                 ops = test.ops
                 if isinstance(ops[0], ast.Eq) and (
                     (isinstance(left, ast.Constant) and left.value == "reviewer")
-                    or (len(comps) == 1 and isinstance(comps[0], ast.Constant) and comps[0].value == "reviewer")
+                    or (
+                        len(comps) == 1
+                        and isinstance(comps[0], ast.Constant)
+                        and comps[0].value == "reviewer"
+                    )
                 ):
                     is_reviewer = True
 
@@ -231,27 +241,6 @@ def test_reviewer_branch_resolves_jsonl_path():
                 for child in ast.walk(node):
                     if isinstance(child, ast.Constant) and isinstance(child.value, str) and child.value == "sessions.json":
                         sessions_json_referenced.append(getattr(child, "lineno", -1))
-                    if isinstance(child, ast.Call):
-                        f = child.func
-                        name = f.id if isinstance(f, ast.Name) else (f.attr if isinstance(f, ast.Attribute) else "")
-                        if name == "poll_for_sentinel_with_idle_detect":
-                            # Second positional arg is jsonl_path
-                            args = child.args
-                            if len(args) >= 2:
-                                a = args[1]
-                                if isinstance(a, ast.Constant) and a.value is None:
-                                    poll_calls_with_none_jsonl.append(child.lineno)
-                                else:
-                                    poll_calls_with_real_jsonl.append(child.lineno)
-                            else:
-                                # 1-arg form — jsonl_path must be a kwarg or missing
-                                kwargs = {kw.arg: kw.value for kw in child.keywords}
-                                if "jsonl_path" in kwargs:
-                                    a = kwargs["jsonl_path"]
-                                    if isinstance(a, ast.Constant) and a.value is None:
-                                        poll_calls_with_none_jsonl.append(child.lineno)
-                                    else:
-                                        poll_calls_with_real_jsonl.append(child.lineno)
                 self._in_reviewer = prev
             else:
                 self.generic_visit(node)
@@ -259,16 +248,6 @@ def test_reviewer_branch_resolves_jsonl_path():
     V().visit(tree)
 
     assert sessions_json_referenced, (
-        "The reviewer branch must read the OpenClaw sessions.json to resolve "
-        "the active session's JSONL path. No reference to 'sessions.json' was "
-        "found in the reviewer branch."
-    )
-    assert not poll_calls_with_none_jsonl, (
-        f"poll_for_sentinel_with_idle_detect calls at lines {poll_calls_with_none_jsonl} "
-        "pass None as jsonl_path. Resolve the session JSONL via sessions.json "
-        "(mirroring the executor pattern) and pass it as the second argument."
-    )
-    assert poll_calls_with_real_jsonl, (
-        "poll_for_sentinel_with_idle_detect in the reviewer branch must receive "
-        "a resolved JSONL path variable as its second argument."
+        "The reviewer branch must still read sessions.json for token accounting. "
+        "No reference to 'sessions.json' was found in the reviewer branch."
     )

@@ -1,0 +1,12 @@
+{
+  "id": "autodev-pipeline-signals",
+  "name": "AutoDev Pipeline Signals",
+  "description": "Writes agent completion sentinels via agent_end and requests structural revision via before_agent_finalize for pipeline: sessions",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  }
+}
