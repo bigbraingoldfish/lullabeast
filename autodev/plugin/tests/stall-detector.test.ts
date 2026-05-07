@@ -174,3 +174,64 @@ test("no-op when artifacts dir does not exist", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test("prd-creator writes ideas activity stamp for ideas:session key", () => {
+  const tmpDir = makeTmpDir();
+  const openclawRoot = path.join(tmpDir, "openclaw");
+  const workspaceDir = path.join(openclawRoot, "workspace-prd-creator");
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  const ideaId = "stamp-idea";
+  const stampPath = path.join(openclawRoot, "ideas", ideaId, "prd_creator_activity.stamp");
+
+  try {
+    assert.equal(fs.existsSync(stampPath), false);
+    recordPipelineActivity({
+      agentId: "prd-creator",
+      sessionKey: `ideas:${ideaId}:session-1`,
+      workspaceDir,
+    });
+    assert.equal(fs.existsSync(stampPath), true);
+    assert.equal(fs.readFileSync(stampPath, "utf8"), "");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("prd-creator writes ideas stamp for ideas:convert key shape", () => {
+  const tmpDir = makeTmpDir();
+  const openclawRoot = path.join(tmpDir, "openclaw");
+  const workspaceDir = path.join(openclawRoot, "workspace-prd-creator");
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  const ideaId = "conv-idea";
+  const stampPath = path.join(openclawRoot, "ideas", ideaId, "prd_creator_activity.stamp");
+
+  try {
+    recordPipelineActivity({
+      agentId: "prd-creator",
+      sessionKey: `ideas:${ideaId}:convert-1700000000001`,
+      workspaceDir,
+    });
+    assert.equal(fs.existsSync(stampPath), true);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("non-prd-creator does not write ideas stamp even for ideas session key", () => {
+  const tmpDir = makeTmpDir();
+  const openclawRoot = path.join(tmpDir, "openclaw");
+  const workspaceDir = path.join(openclawRoot, "workspace-roadmap-converter");
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  const stampPath = path.join(openclawRoot, "ideas", "z", "prd_creator_activity.stamp");
+
+  try {
+    recordPipelineActivity({
+      agentId: "roadmap-converter",
+      sessionKey: "ideas:z:convert-1",
+      workspaceDir,
+    });
+    assert.equal(fs.existsSync(stampPath), false);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

@@ -47,8 +47,6 @@ ORCHESTRATOR_FILENAME = "orchestrator.py"
 WEBHOOK_AGENT_ID = "prd-creator"
 _ATTACHMENT_MAX_BYTES = 10_000_000  # 10 MB ceiling (generous for base64 overhead from a 5 MB image)
 ROADMAP_CONVERTER_AGENT_ID = "roadmap-converter"
-# ORCHESTRATOR_POLL_TIMEOUT: spawn/orchestrator wait (separate from ideas POLL_TIMEOUT below).
-ORCHESTRATOR_POLL_TIMEOUT = 120
 # Stdout/stderr from UI-spawned orchestrator (`_spawn_orchestrator`); tail surfaced on /api/state when down mid-flight (B-04).
 ORCHESTRATOR_SPAWN_LOG_PATH = "/tmp/orchestrator.log"
 
@@ -473,7 +471,7 @@ DEFAULTS = {
     "autodev_pipeline_root": "",
     "roadmap_converter_workspace": "~/.openclaw/workspace-roadmap-converter",
     "pipeline_queue_path": "",
-    "poll_timeout": 180,
+    "poll_timeout": 600,
     "poll_interval": 2,
     "ideas_idle_threshold": 120,  # seconds of JSONL silence before declaring agent idle
     "ideas_startup_grace": 30,    # seconds to wait for OpenClaw to register the session
@@ -605,6 +603,20 @@ def load_config(config_path=None):
     _hooks_env = os.environ.get("AUTODEV_HOOKS_TOKEN", "").strip()
     if _hooks_env:
         config["hooks_token"] = _hooks_env
+
+    # Ideas idle knobs: env wins over file (same pattern as hooks_token)
+    _ideas_idle_env = os.environ.get("AUTODEV_IDEAS_IDLE_THRESHOLD", "").strip()
+    if _ideas_idle_env:
+        try:
+            config["ideas_idle_threshold"] = float(_ideas_idle_env)
+        except ValueError:
+            pass
+    _ideas_grace_env = os.environ.get("AUTODEV_IDEAS_STARTUP_GRACE", "").strip()
+    if _ideas_grace_env:
+        try:
+            config["ideas_startup_grace"] = float(_ideas_grace_env)
+        except ValueError:
+            pass
 
     # Expand ~ on all string values (skip port which is int)
     for key, value in list(config.items()):
@@ -3025,8 +3037,13 @@ def get_metrics_global():
     }
 
 
-POLL_TIMEOUT = 180  # seconds; patchable in tests
+POLL_TIMEOUT = 600  # seconds; Ideas + long agent turns (patchable in tests)
 POLL_INTERVAL = 2   # seconds between sentinel checks
+
+# ``.done`` mtime can trail ``time.time()`` (attempt wall clock) by 1–2s on coarse
+# filesystems or in the race where ``idle``/timeout fires in the same tick the tool
+# writes the sentinel. Used by late-done acceptance and session reconcile.
+IDEAS_LATE_DONE_MTIME_SLACK_SEC = 3.0
 
 IDEAS_WEBHOOK_POST_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
@@ -3065,65 +3082,6 @@ async def _post_agent_webhook(hooks_url: str, hooks_token: str, webhook_payload:
         )
 
 
-def _resolve_prd_creator_jsonl(session_key: str, openclaw_root: str) -> str | None:
-    """Resolve the JSONL file path for a prd-creator session.
-
-    Reads {openclaw_root}/agents/prd-creator/sessions/sessions.json, looks up
-    ``agent:prd-creator:{session_key}``, and returns the full path to the
-    corresponding .jsonl file.  Returns None on any error or missing entry.
-    """
-    sessions_json = os.path.join(
-        os.path.expanduser(openclaw_root),
-        "agents", "prd-creator", "sessions", "sessions.json",
-    )
-    try:
-        with open(sessions_json) as f:
-            sessions = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return None
-
-    full_key = f"agent:prd-creator:{session_key}"
-    entry = sessions.get(full_key)
-    if not entry:
-        return None
-
-    session_id = entry.get("sessionId")
-    if not session_id:
-        return None
-
-    return os.path.join(
-        os.path.expanduser(openclaw_root),
-        "agents", "prd-creator", "sessions", f"{session_id}.jsonl",
-    )
-
-
-def _idea_workspace_activity_mtime(idea_dir: Path) -> float | None:
-    """Latest mtime among PRD agent artifacts under an idea directory.
-
-    Watches ``prd_draft.md`` and ``turns/*.md`` only (not ``session.json``), so server
-    writes to session.json do not mask agent idle. Used with Ideas polling when JSONL
-    is quiet but the agent is still writing files.
-    """
-    best: float | None = None
-    prd = idea_dir / "prd_draft.md"
-    if prd.is_file():
-        try:
-            best = os.path.getmtime(prd)
-        except OSError:
-            pass
-    turns = idea_dir / "turns"
-    if turns.is_dir():
-        for p in turns.glob("*.md"):
-            if not p.is_file():
-                continue
-            try:
-                m = os.path.getmtime(p)
-                best = m if best is None else max(best, m)
-            except OSError:
-                pass
-    return best
-
-
 def _ideas_turn_output_contract_footer(idea_id: str, turn_n: int) -> str:
     """Short per-turn reminder appended to Ideas conversational webhook bodies."""
     return (
@@ -3140,12 +3098,12 @@ def _ideas_sentinel_poll_failure_detail(
     """Human-readable 408 body for failed sentinel polls."""
     if reason == "idle":
         return (
-            f"No agent progress for {int(idle_threshold)}s — output may have stalled."
+            f"No model or tool activity for {int(idle_threshold)}s — output may have stalled."
         )
     if reason == "no_session":
         return (
-            "Agent session did not register within startup grace — check OpenClaw "
-            "and the agent gateway."
+            "Agent session did not start within startup grace — no activity stamp from "
+            "the OpenClaw plugin. Check the gateway and that autodev-pipeline-signals is installed."
         )
     return (
         f"No sentinel after {int(poll_timeout)}s — the model may be slow or the agent stalled."
@@ -3153,73 +3111,77 @@ def _ideas_sentinel_poll_failure_detail(
 
 
 async def _poll_sentinel_with_idle_detect(
-    done_path,
-    session_key: str,
-    openclaw_root: str,
+    done_path: Path,
+    activity_stamp_path: Path,
     poll_timeout: float,
     poll_interval: float,
     idle_threshold: float,
     startup_grace: float,
-    idea_watch_dir: Path | None = None,
+    use_stamp_idle: bool = True,
 ) -> tuple[bool, str]:
-    """Poll for a sentinel file with JSONL-based idle detection.
+    """Poll for ``turns/{n}.done`` using ``prd_creator_activity.stamp`` mtime.
 
-    Returns ``(True, "")`` when the sentinel appears. Otherwise ``(False, reason)`` where
-    ``reason`` is one of:
-    - ``idle`` — no JSONL / idea-dir activity for ``idle_threshold`` seconds
+    The autodev-pipeline-signals OpenClaw plugin touches ``prd_creator_activity.stamp``
+    on each ``model_call_started``, ``model_call_ended``, and ``after_tool_call`` for
+    ``prd-creator`` sessions whose keys start with ``ideas:``.  This replaces JSONL
+    mtime and idea-directory scans, which falsely idled when the model thought without
+    streaming JSONL ticks.  Activity is tracked via ``st_mtime_ns`` so rapid touches
+    in the same wall-clock second still advance the idle window.
+
+    When ``use_stamp_idle`` is ``False`` (Ideas ``POST /message`` / ``_notify_prd_agent``),
+    only the hard ``poll_timeout`` and ``.done`` presence are used.  Stamp-based
+    ``no_session`` / ``idle`` exits are skipped because sparse hook traffic and coarse
+    filesystem timestamps produced false 408s while the agent was still healthy.
+
+    Returns ``(True, "")`` when the sentinel exists. Otherwise ``(False, reason)``:
+
+    - ``idle`` — stamp mtime unchanged for ``idle_threshold`` seconds (stamp idle only)
     - ``poll_timeout`` — ``poll_timeout`` elapsed without sentinel
-    - ``no_session`` — JSONL never registered within ``startup_grace``
+    - ``no_session`` — stamp file never appeared within ``startup_grace`` (stamp idle only)
 
-    During ``startup_grace`` seconds from start, we retry resolving the JSONL path
-    from sessions.json on every tick (OpenClaw may not register the session instantly).
-    After startup_grace expires without finding the JSONL, idle detection is disabled
-    and only the hard timeout applies.
+    Before every failure return, ``.done`` is checked again so a concurrent tool
+    write is not missed after an ``idle``/grace/deadline decision in the same loop
+    iteration.
     """
     start = time.monotonic()
     deadline = start + poll_timeout
-
-    jsonl_path: str | None = None
-    last_jsonl_mtime: float | None = None
-    last_idea_mtime: float | None = None
-    last_activity = start  # reset when JSONL or idea artifacts advance
+    last_activity = start
+    # Nanosecond resolution: rapid plugin touches can share the same float-second
+    # ``getmtime`` value; comparing ``st_mtime_ns`` avoids false idle during bursts.
+    last_stamp_mtime_ns: int | None = None
 
     while True:
-        if Path(done_path).exists():
+        # Cross-process race: the agent may write ``.done`` immediately after an idle
+        # or grace check in this same iteration — always re-check before failing.
+        if done_path.exists():
             return True, ""
 
         now = time.monotonic()
         if now >= deadline:
+            if done_path.exists():
+                return True, ""
             return False, "poll_timeout"
 
-        # Try to resolve JSONL path during startup grace period
-        if jsonl_path is None:
-            jsonl_path = _resolve_prd_creator_jsonl(session_key, openclaw_root)
-            if jsonl_path is None and (now - start) > startup_grace:
-                # Grace expired with no session registered — agent never started; fail now
-                return False, "no_session"
-
-        # JSONL heartbeat
-        if jsonl_path is not None:
-            try:
-                jm = os.path.getmtime(jsonl_path)
-            except OSError:
-                jm = None
-            if jm is not None:
-                if last_jsonl_mtime is None or jm > last_jsonl_mtime:
-                    last_jsonl_mtime = jm
-                    last_activity = now
-
-        # Idea-dir file writes (tool output) — recency bias vs JSONL-only idle
-        if idea_watch_dir is not None:
-            im = _idea_workspace_activity_mtime(idea_watch_dir)
-            if im is not None:
-                if last_idea_mtime is None or im > last_idea_mtime:
-                    last_idea_mtime = im
-                    last_activity = now
-
-        if jsonl_path is not None and (now - last_activity) >= idle_threshold:
-            # No JSONL progress and no fresh idea artifacts for idle_threshold
-            return False, "idle"
+        if use_stamp_idle:
+            stamp_exists = activity_stamp_path.is_file()
+            if not stamp_exists:
+                if (now - start) > startup_grace:
+                    if done_path.exists():
+                        return True, ""
+                    return False, "no_session"
+            else:
+                try:
+                    stamp_ns = os.stat(activity_stamp_path).st_mtime_ns
+                except OSError:
+                    stamp_ns = None
+                if stamp_ns is not None:
+                    if last_stamp_mtime_ns is None or stamp_ns > last_stamp_mtime_ns:
+                        last_stamp_mtime_ns = stamp_ns
+                        last_activity = now
+                if last_stamp_mtime_ns is not None and (now - last_activity) >= idle_threshold:
+                    if done_path.exists():
+                        return True, ""
+                    return False, "idle"
 
         await asyncio.sleep(poll_interval)
 
@@ -3347,8 +3309,25 @@ def _rehydrate_session_from_artifacts(idea_dir: Path, session_data: dict) -> tup
 
     has_messages = bool(session_data.get("messages"))
     has_prd = bool((session_data.get("prd_content") or "").strip())
+    has_roadmap = bool((session_data.get("roadmap_content") or "").strip())
+    changed = False
+
+    if not has_roadmap:
+        roadmap_done_path = idea_dir / "roadmap_draft.done"
+        roadmap_path = idea_dir / "roadmap_draft.md"
+        if roadmap_done_path.exists() and roadmap_path.exists():
+            session_data["roadmap_content"] = roadmap_path.read_text()
+            changed = True
+
     if has_messages and has_prd:
-        return session_data, False
+        if changed:
+            ts_candidates = []
+            if roadmap_path.exists():
+                ts_candidates.append(_iso_from_mtime(roadmap_path))
+            latest_ts = max(ts_candidates) if ts_candidates else datetime.utcnow().isoformat() + "Z"
+            if not session_data.get("updated") or str(session_data.get("updated")) < latest_ts:
+                session_data["updated"] = latest_ts
+        return session_data, changed
 
     turns_dir = idea_dir / "turns"
     md_turns = []
@@ -3361,7 +3340,6 @@ def _rehydrate_session_from_artifacts(idea_dir: Path, session_data: dict) -> tup
             md_turns.append((turn_num, md_file))
     md_turns.sort(key=lambda x: x[0])
 
-    changed = False
     if not has_messages and md_turns:
         rebuilt_messages = []
         for _turn_num, md_file in md_turns:
@@ -3389,6 +3367,8 @@ def _rehydrate_session_from_artifacts(idea_dir: Path, session_data: dict) -> tup
             ts_candidates.extend([m.get("ts") for m in session_data["messages"] if m.get("ts")])
         if (idea_dir / "prd_draft.md").exists():
             ts_candidates.append(_iso_from_mtime(idea_dir / "prd_draft.md"))
+        if (idea_dir / "roadmap_draft.md").exists():
+            ts_candidates.append(_iso_from_mtime(idea_dir / "roadmap_draft.md"))
         latest_ts = max(ts_candidates) if ts_candidates else datetime.utcnow().isoformat() + "Z"
         if not session_data.get("updated") or str(session_data.get("updated")) < latest_ts:
             session_data["updated"] = latest_ts
@@ -3454,7 +3434,7 @@ def _reconcile_ideas_session_after_late_done(
         done_mtime = os.path.getmtime(done_path)
     except OSError:
         return session_data, False
-    if done_mtime < attempt_start:
+    if done_mtime < (attempt_start - IDEAS_LATE_DONE_MTIME_SLACK_SEC):
         return session_data, False
 
     agent_response = md_path.read_text() if md_path.exists() else ""
@@ -3613,7 +3593,11 @@ def _save_image_to_openclaw_media(
 
 
 def _late_done_valid_for_attempt(done_path: Path | str, attempt_start_wall: float) -> bool:
-    """True when the turn sentinel exists and was written at or after this attempt started.
+    """True when the turn sentinel exists and plausibly belongs to this attempt.
+
+    ``mtime`` can trail ``attempt_start_wall`` by a few seconds on coarse filesystems
+    or when ``idle`` fires in the same wall-clock second the tool writes ``.done``.
+    ``IDEAS_LATE_DONE_MTIME_SLACK_SEC`` tolerates that without accepting ancient sentinels.
 
     Used after poll timeout to avoid restoring draft annotations when the agent completed
     just after the idle/timeout window (race with late .done write).
@@ -3622,9 +3606,10 @@ def _late_done_valid_for_attempt(done_path: Path | str, attempt_start_wall: floa
     if not p.exists():
         return False
     try:
-        return os.path.getmtime(p) >= attempt_start_wall
+        mt = os.path.getmtime(p)
     except OSError:
         return False
+    return mt >= (attempt_start_wall - IDEAS_LATE_DONE_MTIME_SLACK_SEC)
 
 
 async def _trigger_readiness_assessment(idea_id: str, config: dict) -> None:
@@ -3843,11 +3828,17 @@ async def post_ideas_message(idea_id: str, request: Request):
 
     _snapshot_prd_draft_before_agent_write(idea_dir)
 
+    activity_stamp_path = idea_dir / "prd_creator_activity.stamp"
+    activity_stamp_path.unlink(missing_ok=True)
+
     poll_timeout = float(config.get("poll_timeout", POLL_TIMEOUT))
     poll_interval = float(config.get("poll_interval", POLL_INTERVAL))
     idle_threshold = float(config.get("ideas_idle_threshold", 120))
     startup_grace = float(config.get("ideas_startup_grace", 30))
-    openclaw_root = os.path.expanduser(config.get("openclaw_root", "~/.openclaw"))
+    # Avoid ultra-tight idle windows when the hard poll budget is long (tests keep
+    # sub-180s poll_timeout + low idle_threshold for fast stall cases).
+    if poll_timeout >= 180:
+        idle_threshold = max(idle_threshold, 60.0)
 
     try:
         await _post_agent_webhook(hooks_url, hooks_token, webhook_payload)
@@ -3872,9 +3863,13 @@ async def post_ideas_message(idea_id: str, request: Request):
     prd_draft_path = idea_dir / "prd_draft.md"
 
     sentinel_found, poll_fail_reason = await _poll_sentinel_with_idle_detect(
-        done_path, session_key, openclaw_root,
-        poll_timeout, poll_interval, idle_threshold, startup_grace,
-        idea_watch_dir=idea_dir,
+        done_path,
+        activity_stamp_path,
+        poll_timeout,
+        poll_interval,
+        idle_threshold,
+        startup_grace,
+        use_stamp_idle=False,
     )
     if not sentinel_found and _late_done_valid_for_attempt(done_path, _attempt_start_wall):
         sentinel_found = True
@@ -4729,7 +4724,10 @@ async def _notify_prd_agent(idea_id: str, config: dict, report_content: str, che
         poll_interval = float(config.get("poll_interval", POLL_INTERVAL))
         idle_threshold = float(config.get("ideas_idle_threshold", 120))
         startup_grace = float(config.get("ideas_startup_grace", 30))
-        openclaw_root = os.path.expanduser(config.get("openclaw_root", "~/.openclaw"))
+        if poll_timeout >= 180:
+            idle_threshold = max(idle_threshold, 60.0)
+        activity_stamp_path = idea_dir / "prd_creator_activity.stamp"
+        activity_stamp_path.unlink(missing_ok=True)
         try:
             await _post_agent_webhook(hooks_url, hooks_token, payload)
         except HTTPException as exc:
@@ -4750,9 +4748,13 @@ async def _notify_prd_agent(idea_id: str, config: dict, report_content: str, che
         done_path = idea_dir / "turns" / f"{next_turn}.done"
         response_path = idea_dir / "turns" / f"{next_turn}.md"
         sentinel_found, _poll_reason = await _poll_sentinel_with_idle_detect(
-            done_path, session_key, openclaw_root,
-            poll_timeout, poll_interval, idle_threshold, startup_grace,
-            idea_watch_dir=idea_dir,
+            done_path,
+            activity_stamp_path,
+            poll_timeout,
+            poll_interval,
+            idle_threshold,
+            startup_grace,
+            use_stamp_idle=False,
         )
         if not sentinel_found:
             # Timed out / agent idle — mark the pending placeholder as an error

@@ -275,3 +275,74 @@ test("falls back to OPENCLAW_ROOT env var when workspaceDir absent", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+// ─── Ideas / prd-creator turn sessions ─────────────────────────────────────
+
+test("prd-creator writes ideas turn .done when absent for session-N key", () => {
+  const tmpDir = makeTmpDir();
+  const openclawRoot = path.join(tmpDir, "openclaw");
+  const workspaceDir = path.join(openclawRoot, "workspace-prd-creator");
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  const ideasRoot = path.join(openclawRoot, "ideas");
+  const ideaId = "my-idea-1";
+  const turnsDir = path.join(ideasRoot, ideaId, "turns");
+  fs.mkdirSync(turnsDir, { recursive: true });
+  const donePath = path.join(turnsDir, "3.done");
+
+  try {
+    assert.equal(fs.existsSync(donePath), false);
+    handleAgentEnd(baseEvent, {
+      agentId: "prd-creator",
+      sessionKey: `ideas:${ideaId}:session-3`,
+      workspaceDir,
+    });
+    assert.equal(fs.existsSync(donePath), true);
+    assert.equal(fs.readFileSync(donePath, "utf8"), "done");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("prd-creator ignores non-session ideas keys (e.g. clarity)", () => {
+  const tmpDir = makeTmpDir();
+  const openclawRoot = path.join(tmpDir, "openclaw");
+  const workspaceDir = path.join(openclawRoot, "workspace-prd-creator");
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  const ideasRoot = path.join(openclawRoot, "ideas");
+  const ideaId = "x";
+  const turnsDir = path.join(ideasRoot, ideaId, "turns");
+  fs.mkdirSync(turnsDir, { recursive: true });
+  const donePath = path.join(turnsDir, "1.done");
+
+  try {
+    handleAgentEnd(baseEvent, {
+      agentId: "prd-creator",
+      sessionKey: `ideas:${ideaId}:clarity-1700000000000`,
+      workspaceDir,
+    });
+    assert.equal(fs.existsSync(donePath), false);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("prd-creator is no-op when turns dir missing", () => {
+  const tmpDir = makeTmpDir();
+  const openclawRoot = path.join(tmpDir, "openclaw");
+  const workspaceDir = path.join(openclawRoot, "workspace-prd-creator");
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  const ideasRoot = path.join(openclawRoot, "ideas");
+  fs.mkdirSync(path.join(ideasRoot, "n"), { recursive: true });
+  const donePath = path.join(ideasRoot, "n", "turns", "1.done");
+
+  try {
+    handleAgentEnd(baseEvent, {
+      agentId: "prd-creator",
+      sessionKey: "ideas:n:session-1",
+      workspaceDir,
+    });
+    assert.equal(fs.existsSync(donePath), false);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

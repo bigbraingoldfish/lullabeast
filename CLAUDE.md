@@ -138,7 +138,6 @@ Used for:
 ```python
 ORCHESTRATOR_FILENAME = "orchestrator.py"
 WEBHOOK_AGENT_ID = "prd-creator"
-ORCHESTRATOR_POLL_TIMEOUT = 120
 ```
 
 ---
@@ -148,7 +147,7 @@ ORCHESTRATOR_POLL_TIMEOUT = 120
 The UI server's configuration is a two-layer merge:
 
 1. **`DEFAULTS` dict** (lines 362–375 of `ui/server.py`) — hardcoded fallbacks including all `~/.openclaw/…` path defaults.
-2. **`ui/config.json`** — optional local overrides adjacent to `server.py` (not committed; copy from `ui/config.example.json`). If this file exists, any key it contains overwrites the corresponding DEFAULTS value. **`AUTODEV_HOOKS_TOKEN`** (environment) overrides `hooks_token` when set, so the webhook Bearer secret need not live in the file.
+2. **`ui/config.json`** — optional local overrides adjacent to `server.py` (not committed; copy from `ui/config.example.json`). If this file exists, any key it contains overwrites the corresponding DEFAULTS value. **`AUTODEV_HOOKS_TOKEN`** (environment) overrides `hooks_token` when set, so the webhook Bearer secret need not live in the file. **`AUTODEV_IDEAS_IDLE_THRESHOLD`** and **`AUTODEV_IDEAS_STARTUP_GRACE`** (environment) override `ideas_idle_threshold` and `ideas_startup_grace` when set (Ideas chat sentinel poll).
 
 `load_config()` applies this merge and expands `~` in all path values. Every endpoint that reads a file path calls `load_config()` (or receives the result) rather than referencing DEFAULTS directly.
 
@@ -481,6 +480,8 @@ These values appear throughout the codebase. Do not change them without understa
 | `AUTODEV_STALL_TIMEOUT_PLANNER` | default `900` (seconds) | Tier A in-poll stall: max silence on `{agent}_activity.stamp` mtime before planner `poll_for_sentinel` returns (orchestrator) |
 | `AUTODEV_STALL_TIMEOUT_EXECUTOR` | default `1800` | Same for executor poll |
 | `AUTODEV_STALL_TIMEOUT_REVIEWER` | default `900` | Same for reviewer poll |
+| `AUTODEV_IDEAS_IDLE_THRESHOLD` | default `120` (seconds) | Ideas chat `_poll_sentinel_with_idle_detect`: max silence on `prd_creator_activity.stamp` mtime (`ui/server.py`; plugin touches stamp on model/tool events) |
+| `AUTODEV_IDEAS_STARTUP_GRACE` | default `30` (seconds) | Ideas chat: wait for first stamp before treating missing session as `no_session` |
 
 ### `pipeline.lock` locking mechanism
 

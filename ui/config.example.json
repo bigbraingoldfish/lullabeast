@@ -15,7 +15,7 @@
   "hooks_url": "http://localhost:18789/hooks/agent",
   "hooks_token": "",
   "base_branch": "",
-  "poll_timeout": 180,
+  "poll_timeout": 600,
   "poll_interval": 2,
   "ideas_idle_threshold": 120,
   "ideas_startup_grace": 30,

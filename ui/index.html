@@ -2983,6 +2983,7 @@
             const readinessPollRef = useRef(null);
             const notificationPollRef = useRef(null);
             const lateHealPollRef = useRef(null);
+            const roadmapLateHealPollRef = useRef(null);
             const docPaneRef = useRef(null);
             const [splitPct, setSplitPct] = useState(45);
             const dragRef = useRef({ dragging: false });
@@ -3060,7 +3061,43 @@
                 }
             };
 
-            useEffect(() => () => stopLateHealPoll(), [currentIdeaId]);
+            const stopRoadmapLateHealPoll = () => {
+                if (roadmapLateHealPollRef.current) {
+                    clearInterval(roadmapLateHealPollRef.current);
+                    roadmapLateHealPollRef.current = null;
+                }
+            };
+
+            const startRoadmapLateHealPoll = (healIdeaId) => {
+                stopRoadmapLateHealPoll();
+                if (!healIdeaId) return;
+                const maxHealPolls = 24;
+                let healTicks = 0;
+                roadmapLateHealPollRef.current = setInterval(() => {
+                    healTicks += 1;
+                    if (healTicks > maxHealPolls) {
+                        stopRoadmapLateHealPoll();
+                        return;
+                    }
+                    fetch(`/api/ideas/${healIdeaId}/session`)
+                        .then((r) => r.json())
+                        .then((d) => {
+                            if (!d.roadmap_content) return;
+                            stopRoadmapLateHealPoll();
+                            setRoadmapContent(d.roadmap_content || "");
+                            setConvertError("");
+                            setActiveDocTab("roadmap");
+                            setShowQualityCheckModal(true);
+                            refreshIdeas();
+                        })
+                        .catch(() => {});
+                }, 5000);
+            };
+
+            useEffect(() => () => {
+                stopLateHealPoll();
+                stopRoadmapLateHealPoll();
+            }, [currentIdeaId]);
 
             const startReadinessPoll = (ideaId) => {
                 stopReadinessPoll();
@@ -3089,6 +3126,9 @@
                                         setReadinessData(nextData);
                                         setReadinessTimedOut(false);
                                         if (nextStatus === "ready" && nextData) setHadReadyReadiness(true);
+                                        // Sidebar list shows readiness_score from GET /api/ideas — refresh
+                                        // after async assessment so operators see X/10 without switching ideas.
+                                        refreshIdeas();
                                     })
                                     .catch(() => {});
                             }
@@ -3583,11 +3623,17 @@
             };
 
             const _runConvert = () => {
+                stopRoadmapLateHealPoll();
                 setConvertLoading(true);
                 setConvertError("");
                 fetch(`/api/ideas/${currentIdeaId}/convert`, { method: "POST" })
-                    .then((r) => {
-                        if (!r.ok) return r.text().then((t) => { throw new Error(t); });
+                    .then(async (r) => {
+                        if (!r.ok) {
+                            const text = await r.text();
+                            const err = new Error(text || String(r.status));
+                            err.status = r.status;
+                            throw err;
+                        }
                         return r.json();
                     })
                     .then((d) => {
@@ -3599,6 +3645,11 @@
                     .catch((e) => {
                         setConvertError(String(e.message || e));
                         setConvertLoading(false);
+                        const status = Number(e && e.status) || parseInt(e && e.message, 10);
+                        if (status === 408) {
+                            const healIdeaId = currentIdeaId;
+                            startRoadmapLateHealPoll(healIdeaId);
+                        }
                     });
             };
 

@@ -209,6 +209,15 @@ To collapse the pipeline directory onto the OpenClaw directory, set
 
 `install.sh` appends the same three variables to **`.env` as commented placeholders** (once per file; a marker line prevents duplicates). **`.env.example`** contains the same block for new copies. Uncomment a line and set an integer to override.
 
+**Optional — Ideas chat poll (UI server).** With the same plugin, Project Ideas uses `prd_creator_activity.stamp` for idle detection. Override via environment (wins over `ui/config.json`) or config keys `ideas_idle_threshold` / `ideas_startup_grace`:
+
+| Env | Default (seconds) | Role |
+| --- | ------------------ | ---- |
+| `AUTODEV_IDEAS_IDLE_THRESHOLD` | 120 | Max silence on stamp mtime before the chat request returns **408** stall |
+| `AUTODEV_IDEAS_STARTUP_GRACE` | 30 | Grace before treating a missing stamp as **no session** |
+
+`install.sh` also appends these two as commented placeholders to `.env` (separate marker; idempotent). **`.env.example`** includes the same block.
+
 ---
 
 ## Silent failure modes (four cases)
