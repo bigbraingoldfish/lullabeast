@@ -7,7 +7,7 @@ export default definePluginEntry({
   id: "autodev-pipeline-signals",
   name: "AutoDev Pipeline Signals",
   description:
-    "Pipeline signals: agent_end sentinels, before_agent_finalize structural revise, " +
+    "Pipeline + Ideas signals: agent_end sentinels, before_agent_finalize structural revise, " +
     "and Tier A stall activity stamps (model_call_*, after_tool_call)",
 
   register(api) {

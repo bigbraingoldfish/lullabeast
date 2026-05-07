@@ -219,6 +219,9 @@ def refresh_exec_approvals_gate_paths(exec_approvals_path: str, repo_path: str) 
 # Appended once per .env by install.sh so operators discover stall overrides.
 DOTENV_STALL_HINT_MARKER = "# --- AutoDev: Tier A stall timeouts (optional) ---"
 
+# Appended once per .env by install.sh so operators discover Ideas poll overrides.
+DOTENV_IDEAS_IDLE_HINT_MARKER = "# --- AutoDev: Ideas UI poll thresholds (optional) ---"
+
 
 def ensure_dotenv_stall_timeout_hints(env_path: str) -> str:
     """Append a comment-only block about AUTODEV_STALL_TIMEOUT_* if not present.
@@ -247,6 +250,39 @@ def ensure_dotenv_stall_timeout_hints(env_path: str) -> str:
 # AUTODEV_STALL_TIMEOUT_PLANNER=
 # AUTODEV_STALL_TIMEOUT_EXECUTOR=
 # AUTODEV_STALL_TIMEOUT_REVIEWER=
+"""
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            if content and not content.endswith("\n"):
+                f.write("\n")
+            f.write(block.lstrip("\n"))
+    except OSError as e:
+        return f"error:{e}"
+    return "appended"
+
+
+def ensure_dotenv_ideas_idle_hints(env_path: str) -> str:
+    """Append a comment-only block about AUTODEV_IDEAS_* if not present.
+
+    Returns: appended | unchanged | error:<msg>
+    """
+    path = os.path.abspath(env_path)
+    if not os.path.isfile(path):
+        return "unchanged"
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except OSError as e:
+        return f"error:{e}"
+    if DOTENV_IDEAS_IDLE_HINT_MARKER in content:
+        return "unchanged"
+    block = f"""
+{DOTENV_IDEAS_IDLE_HINT_MARKER}
+# UI server Ideas chat: seconds before declaring stall (no Tier A stamp refresh)
+# and startup grace before requiring the activity stamp. Env overrides win over
+# ui/config.json. Defaults if unset: idle 120, grace 30.
+# AUTODEV_IDEAS_IDLE_THRESHOLD=
+# AUTODEV_IDEAS_STARTUP_GRACE=
 """
     try:
         with open(path, "a", encoding="utf-8") as f:

@@ -278,3 +278,38 @@ class TestApiIdeasSession:
         body = r.json()
         assert body["messages"][-1].get("error") is True
         assert "Should not apply" not in (body["messages"][-1].get("content") or "")
+
+    def test_merge_roadmap_from_draft_when_done_but_session_roadmap_empty(self):
+        """If convert timed out before persisting session, GET session backfills from roadmap_draft.md."""
+        client = load_server()
+        idea_id = "rm-draft-merge"
+        idea_dir = self.ideas_dir / idea_id
+        idea_dir.mkdir(parents=True, exist_ok=True)
+        turns = idea_dir / "turns"
+        turns.mkdir(parents=True, exist_ok=True)
+        (turns / "1.done").write_text("done")
+        (idea_dir / "roadmap_draft.md").write_text("# Roadmap\n\n## Phase A\nGoal.")
+        (idea_dir / "roadmap_draft.done").write_text("done")
+        self._write_session(
+            idea_id,
+            {
+                "name": "Has PRD",
+                "messages": [
+                    {"role": "user", "content": "Hi", "ts": "2026-05-06T10:00:00Z"},
+                    {"role": "assistant", "content": "Hello", "ts": "2026-05-06T10:00:01Z"},
+                ],
+                "prd_content": "# PRD\n\nBody",
+                "roadmap_content": "",
+                "created": "2026-05-06T10:00:00Z",
+                "updated": "2026-05-06T10:00:01Z",
+            },
+        )
+
+        with patch("ui.server.load_config", return_value=self._mock_config()):
+            response = client.get(f"/api/ideas/{idea_id}/session")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert "## Phase A" in (body.get("roadmap_content") or "")
+        saved = json.loads((idea_dir / "session.json").read_text())
+        assert "## Phase A" in (saved.get("roadmap_content") or "")

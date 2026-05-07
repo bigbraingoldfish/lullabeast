@@ -74,11 +74,13 @@ def test_chat_rows_have_kebab_delete_entry():
     assert "Idea actions" in func_body
 
 
-def test_prd_completeness_checklist_present():
+def test_prd_completeness_section_coverage_present():
+    """PRD tab derives section fill state from parsed headings (hasAnyPrdBody), not a separate checklist grid."""
     content = load_index_html()
     func_body = extract_function_body(content, "IdeasScreen")
     assert func_body is not None
-    assert "checklistRows" in func_body
+    assert "hasAnyPrdBody" in func_body
+    assert "PRD_SECTION_TITLES.some" in func_body
     assert "PRD_SECTION_TITLES" in func_body
 
 

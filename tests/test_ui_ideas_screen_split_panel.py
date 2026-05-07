@@ -72,8 +72,11 @@ class TestIdeasScreenSplitPanel:
         assert re.search(r'flex-1\s+overflow-y-auto\s+p-4', func_body), \
             "Messages area should have 'flex-1 overflow-y-auto p-4'"
 
-        assert re.search(r'border-t\s+border-\[#1a1d21\]\s+p-3', func_body), \
-            "Composer area should have 'border-t border-[#1a1d21] p-3'"
+        # M2 UI-5 composer: border-t + p-3; default border color is border-[#1a1d21] (cyan when drag-over)
+        assert re.search(
+            r"flex-shrink-0\s+border-t\s+p-3[\s\S]{0,400}border-\[#1a1d21\]",
+            func_body,
+        ), "Composer area should use border-t, p-3, and border-[#1a1d21] default frame"
 
     def test_right_pane_has_all_prd_headers(self):
         """Right pane has all 12 PRD section headers as h2 elements."""
@@ -108,8 +111,8 @@ class TestIdeasScreenSplitPanel:
         assert func_body is not None
 
         assert "showEmptyPlaceholders" in func_body
-        assert "isEmpty" in func_body and "return null" in func_body
-        assert "checklistRows" in func_body
+        assert "sectionBodyEmpty" in func_body and "return null" in func_body
+        assert "hasAnyPrdBody" in func_body
 
     def test_both_panes_have_flex_flex_col_bg(self):
         """Conversation and PRD columns use flex-col panel styling."""

@@ -611,33 +611,24 @@ class TestApiIdeasMessage:
     # ------------------------------------------------------------------
 
     def _mock_config_with_openclaw(self, openclaw_root):
-        """Config that includes openclaw_root for idle detection tests."""
+        """Config for Ideas sentinel poll tests (short thresholds, fast poll interval)."""
         cfg = self._mock_config()
         cfg["openclaw_root"] = str(openclaw_root)
-        cfg["ideas_idle_threshold"] = 0.3   # very short for tests
-        cfg["ideas_startup_grace"] = 0.2    # very short for tests
+        cfg["ideas_idle_threshold"] = 0.3
+        cfg["ideas_startup_grace"] = 0.2
+        cfg["poll_interval"] = 0.05
         return cfg
 
-    def _write_sessions_json(self, openclaw_root, idea_id, turn_n, session_id):
-        """Write a sessions.json entry mapping the session key to a sessionId."""
-        sessions_dir = Path(openclaw_root) / "agents" / "prd-creator" / "sessions"
-        sessions_dir.mkdir(parents=True, exist_ok=True)
-        key = f"agent:prd-creator:ideas:{idea_id}:session-{turn_n}"
-        data = {key: {"sessionId": session_id, "updatedAt": 1700000001000}}
-        (sessions_dir / "sessions.json").write_text(json.dumps(data))
-        return sessions_dir
+    def test_returns_408_when_sentinel_missing_until_poll_deadline(self):
+        """POST /message returns 408 when ``turns/n.done`` never appears (hard poll only).
 
-    def test_returns_408_when_agent_goes_idle(self):
-        """Returns 408 within idle_threshold + headroom when JSONL stops advancing.
-
-        With idle_threshold=0.3s and startup_grace=0.2s, idle detection should fire in
-        ~0.5s — well before the 30s hard poll_timeout. This distinguishes idle detection
-        from a plain deadline timeout.
+        Ideas disables stamp-based ``idle`` / ``no_session`` early exits on this path
+        (``use_stamp_idle=False``) so only ``poll_timeout`` applies.
         """
         import time as _time
+
         client = load_server()
-        idea_id = "idle_test_idea"
-        session_id = "idle-0000-0000-0000-000000000099"
+        idea_id = "poll_deadline_idea"
 
         self._write_session(idea_id, {
             "messages": [],
@@ -645,43 +636,36 @@ class TestApiIdeasMessage:
             "created": "2026-03-19T10:00:00Z",
             "updated": "2026-03-19T10:00:00Z",
         })
-        # Write JSONL once but do NOT update it further and do NOT write sentinel
-        sessions_dir = self._write_sessions_json(
-            self.ideas_dir.parent / "openclaw_root_idle",
-            idea_id, 1, session_id,
-        )
-        jsonl_path = sessions_dir / f"{session_id}.jsonl"
-        jsonl_path.write_text("line 1\n")
 
         mock_resp = self._make_mock_response()
         mock_session = self._make_mock_session(mock_resp)
 
-        cfg = self._mock_config_with_openclaw(self.ideas_dir.parent / "openclaw_root_idle")
-        cfg["poll_timeout"] = 30         # long hard deadline — idle detection must fire first
-        cfg["ideas_idle_threshold"] = 0.3
-        cfg["ideas_startup_grace"] = 0.2
+        cfg = self._mock_config()
+        cfg["poll_timeout"] = 3
+        cfg["poll_interval"] = 0.05
+
+        async def fake_sleep(_seconds):
+            return None
 
         start = _time.monotonic()
         with patch("ui.server.load_config", return_value=cfg):
             with patch("ui.server.aiohttp.ClientSession", return_value=mock_session):
-                response = client.post(
-                    f"/api/ideas/{idea_id}/message",
-                    json={"content": "test idle", "turn": 1},
-                )
+                with patch("ui.server.asyncio.sleep", side_effect=fake_sleep):
+                    response = client.post(
+                        f"/api/ideas/{idea_id}/message",
+                        json={"content": "deadline test", "turn": 1},
+                    )
         elapsed = _time.monotonic() - start
 
-        assert response.status_code == 408, f"Expected 408 on agent idle, got {response.status_code}"
-        # Key assertion: idle detection fires well before the 30s hard timeout
-        assert elapsed < 5.0, (
-            f"Idle detection should fire within ~0.5s, but took {elapsed:.2f}s — "
-            "likely falling back to hard timeout rather than idle detection"
-        )
+        assert response.status_code == 408, f"Expected 408, got {response.status_code}"
+        detail = (response.json() or {}).get("detail") or ""
+        assert "No sentinel" in detail or "stalled" in detail.lower()
+        assert elapsed < 6.0, f"expected ~3s poll budget, took {elapsed:.2f}s"
 
-    def test_does_not_408_while_jsonl_active(self):
-        """Does not time out when JSONL mtime keeps advancing and sentinel appears."""
+    def test_does_not_408_while_sentinel_present(self):
+        """Returns 200 when turn sentinel exists (agent completed before poll deadline)."""
         client = load_server()
         idea_id = "active_test_idea"
-        session_id = "active-0000-0000-0000-000000000088"
 
         self._write_session(idea_id, {
             "messages": [],
@@ -689,14 +673,6 @@ class TestApiIdeasMessage:
             "created": "2026-03-19T10:00:00Z",
             "updated": "2026-03-19T10:00:00Z",
         })
-        sessions_dir = self._write_sessions_json(
-            self.ideas_dir.parent / "openclaw_root_active",
-            idea_id, 1, session_id,
-        )
-        jsonl_path = sessions_dir / f"{session_id}.jsonl"
-        jsonl_path.write_text("line 1\n")
-
-        # Pre-write the sentinel so the poll succeeds immediately
         self._write_turn_files(idea_id, 1, "Active agent reply", "# PRD\nDraft")
 
         mock_resp = self._make_mock_response()

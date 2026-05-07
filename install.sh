@@ -1059,6 +1059,19 @@ case "$ENV_STALL_HINTS" in
     *) warn ".env stall-timeout hint block: $ENV_STALL_HINTS" ;;
 esac
 
+ENV_IDEAS_HINTS=$(
+    cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import ensure_dotenv_ideas_idle_hints
+import os
+print(ensure_dotenv_ideas_idle_hints(os.path.join(os.environ['AUTODEV_REPO_PATH'], '.env')))
+" 2>/dev/null || echo "error:helper"
+)
+case "$ENV_IDEAS_HINTS" in
+    appended) ok "Added commented AUTODEV_IDEAS_* placeholders to .env (Ideas UI poll; see SETUP.md)" ;;
+    unchanged) : ;;
+    *) warn ".env Ideas idle hint block: $ENV_IDEAS_HINTS" ;;
+esac
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 12/14  INSTALL PIPELINE SIGNALS PLUGIN
 # ─────────────────────────────────────────────────────────────────────────────

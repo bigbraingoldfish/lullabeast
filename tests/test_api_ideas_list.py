@@ -332,6 +332,27 @@ class TestGetIdeasListDocFlags:
         assert response.status_code == 200
         assert response.json()[0]["has_roadmap"] is False
 
+    def test_has_roadmap_true_when_draft_done_but_session_roadmap_empty(self, client, monkeypatch):
+        """Listed idea: roadmap on disk + done sentinel heals session for has_roadmap (convert 408)."""
+        client_obj, ideas_dir = client
+        idea_path = self._create_listed_idea(
+            ideas_dir,
+            "rm-draft-only",
+            {
+                "messages": [],
+                "prd_content": "# T\n\n## Problem Statement\nx.",
+                "roadmap_content": "",
+                "updated": "2026-01-02T00:00:00Z",
+            },
+        )
+        (idea_path / "roadmap_draft.md").write_text("# Roadmap from disk\n")
+        (idea_path / "roadmap_draft.done").write_text("done")
+        response = client_obj.get("/api/ideas")
+        assert response.status_code == 200
+        assert response.json()[0]["has_roadmap"] is True
+        saved = json.loads((idea_path / "session.json").read_text())
+        assert "Roadmap from disk" in (saved.get("roadmap_content") or "")
+
 
 class TestDeleteIdeas:
     def test_delete_nonexistent_returns_404(self, client, monkeypatch):

@@ -5,6 +5,111 @@ import * as os from "node:os";
 /** Pipeline agent IDs handled by this plugin. */
 export const PIPELINE_AGENT_IDS = new Set(["planner", "executor", "reviewer"]);
 
+/** prd-creator agent id for Ideas workflow hooks. */
+export const PRD_CREATOR_AGENT_ID = "prd-creator";
+
+/**
+ * Return true when sessionKey belongs to the Ideas UI workflow (OpenClaw
+ * session keys prefixed with "ideas:").
+ */
+export function isIdeasSession(sessionKey: string | undefined): boolean {
+  return typeof sessionKey === "string" && sessionKey.startsWith("ideas:");
+}
+
+/**
+ * Parse `ideas:{ideaId}:session-{turn}` — turn-by-turn chat only.
+ * Returns null for clarity/convert/alignment keys.
+ */
+export function parseIdeasTurnSession(
+  sessionKey: string,
+): { ideaId: string; turn: number } | null {
+  const m = /^ideas:([^:]+):session-(\d+)$/.exec(sessionKey);
+  if (!m) return null;
+  return { ideaId: m[1], turn: parseInt(m[2], 10) };
+}
+
+/**
+ * Extract idea id from any `ideas:{id}:...` session key (first segment after prefix).
+ */
+export function extractIdeasIdFromSessionKey(sessionKey: string): string | null {
+  const m = /^ideas:([^:]+):/.exec(sessionKey);
+  return m ? m[1] : null;
+}
+
+/**
+ * Resolve `$OPENCLAW_ROOT/ideas` from workspace-prd-creator path or OPENCLAW_ROOT env.
+ */
+export function resolveIdeasRootFromWorkspace(
+  workspaceDir: string | undefined,
+): string | null {
+  let openclawRoot: string | null = null;
+  if (workspaceDir) {
+    openclawRoot = path.dirname(workspaceDir.replace(/\/+$/, ""));
+  } else {
+    const envRoot = process.env["OPENCLAW_ROOT"];
+    if (envRoot) {
+      openclawRoot = path.resolve(envRoot.replace(/^~/, os.homedir()));
+    }
+  }
+  if (!openclawRoot) return null;
+  return path.join(openclawRoot, "ideas");
+}
+
+/**
+ * Write `turns/{n}.done` with body `done` if absent (Ideas output contract).
+ * Returns false if parent `turns/` dir does not exist.
+ */
+export function writeIdeasTurnDoneIfAbsent(donePath: string): boolean {
+  if (fs.existsSync(donePath)) return false;
+  const dir = path.dirname(donePath);
+  if (!fs.existsSync(dir)) return false;
+
+  const tmpPath = `${donePath}.tmp.${process.pid}`;
+  try {
+    fs.writeFileSync(tmpPath, "done", { flag: "wx" });
+    fs.renameSync(tmpPath, donePath);
+    return true;
+  } catch (err: unknown) {
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch {
+      // ignore
+    }
+    if (
+      err instanceof Error &&
+      (err as NodeJS.ErrnoException).code === "EEXIST"
+    ) {
+      return false;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Touch `{ideasRoot}/{ideaId}/prd_creator_activity.stamp` for Ideas stall detection.
+ * Creates `ideaId` directory if needed.
+ */
+export function touchIdeasPrdCreatorActivityStamp(
+  ideasRoot: string,
+  ideaId: string,
+): void {
+  const ideaDir = path.join(ideasRoot, ideaId);
+  fs.mkdirSync(ideaDir, { recursive: true });
+  const stampPath = path.join(ideaDir, "prd_creator_activity.stamp");
+  const tmpPath = `${stampPath}.tmp.${process.pid}`;
+  try {
+    fs.writeFileSync(tmpPath, "", { flag: "w" });
+    fs.renameSync(tmpPath, stampPath);
+  } catch (err: unknown) {
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch {
+      // ignore
+    }
+    throw err;
+  }
+}
+
 /**
  * Return true when sessionKey belongs to an AutoDev pipeline session.
  * All pipeline sessions use the prefix "pipeline:" (enforced by

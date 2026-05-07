@@ -180,6 +180,16 @@ def test_ensure_dotenv_stall_timeout_hints_missing_file(tmp_path):
     assert setup_helpers.ensure_dotenv_stall_timeout_hints(str(missing)) == "unchanged"
 
 
+def test_ensure_dotenv_ideas_idle_hints_appends_then_idempotent(tmp_path):
+    envp = tmp_path / ".env"
+    envp.write_text("OPENCLAW_ROOT=/a\n")
+    assert setup_helpers.ensure_dotenv_ideas_idle_hints(str(envp)) == "appended"
+    text = envp.read_text()
+    assert setup_helpers.DOTENV_IDEAS_IDLE_HINT_MARKER in text
+    assert "# AUTODEV_IDEAS_IDLE_THRESHOLD=" in text
+    assert setup_helpers.ensure_dotenv_ideas_idle_hints(str(envp)) == "unchanged"
+
+
 def test_read_openclaw_hooks_token_returns_value(tmp_path):
     oc = tmp_path / "openclaw.json"
     oc.write_text(json.dumps({"hooks": {"token": "abc123"}}))
