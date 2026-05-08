@@ -3045,7 +3045,27 @@ POLL_INTERVAL = 2   # seconds between sentinel checks
 # writes the sentinel. Used by late-done acceptance and session reconcile.
 IDEAS_LATE_DONE_MTIME_SLACK_SEC = 3.0
 
-IDEAS_WEBHOOK_POST_TIMEOUT = aiohttp.ClientTimeout(total=10)
+IDEAS_WEBHOOK_POST_TIMEOUT = aiohttp.ClientTimeout(total=120)
+
+
+def _rollback_last_turn_pair(session_path: os.PathLike | str) -> None:
+    """Remove the trailing user + pending-assistant pair from session.json (atomic write).
+
+    Used when the Ideas webhook fails with 502/503 before the agent run is confirmed:
+    the pre-saved turn should not remain in persisted history.
+    """
+    sp = os.fspath(session_path)
+    data = _read_json_file(sp) or {}
+    msgs = list(data.get("messages", []))
+    if not msgs:
+        return
+    last = msgs[-1]
+    if last.get("role") == "assistant" and last.get("pending"):
+        msgs.pop()
+        if msgs and msgs[-1].get("role") == "user":
+            msgs.pop()
+    data["messages"] = msgs
+    _atomic_write_json_file(sp, data)
 
 
 def _mark_last_pending_assistant_error(session_path: os.PathLike | str, error_message: str) -> None:
@@ -3486,13 +3506,14 @@ def get_ideas_session(idea_id: str):
     ideas_dir = Path(config.get("ideas_dir") or "")
     idea_dir = Path(ideas_dir) / idea_id
     session_path = idea_dir / "session.json"
+    no_store = {"Cache-Control": "no-store"}
 
     if not session_path.exists():
-        return _default_idea_session()
+        return JSONResponse(content=_default_idea_session(), headers=no_store)
 
     session_data = _read_json_file(str(session_path))
     if session_data is None:
-        return _default_idea_session()
+        return JSONResponse(content=_default_idea_session(), headers=no_store)
     session_data, changed = _rehydrate_session_from_artifacts(idea_dir, session_data)
     if changed:
         _atomic_write_json_file(session_path, session_data)
@@ -3500,7 +3521,7 @@ def get_ideas_session(idea_id: str):
     if late_changed:
         _atomic_write_json_file(session_path, session_data)
     _enrich_assistant_messages_with_parsed(session_data)
-    return session_data
+    return JSONResponse(content=session_data, headers=no_store)
 
 
 def _build_ideas_sent_context(
@@ -3610,6 +3631,33 @@ def _late_done_valid_for_attempt(done_path: Path | str, attempt_start_wall: floa
     except OSError:
         return False
     return mt >= (attempt_start_wall - IDEAS_LATE_DONE_MTIME_SLACK_SEC)
+
+
+def _ideas_scrub_stale_turn_artifacts(
+    idea_dir: Path, turn_n: int, attempt_start_wall: float
+) -> None:
+    """Remove orphan ``turns/{n}.done`` and paired ``turns/{n}.md`` from a prior attempt.
+
+    Without this, :func:`_poll_sentinel_with_idle_detect` can return immediately when a
+    stale ``.done`` remains on disk, and the caller would read stale ``{n}.md`` prose.
+    The cutoff matches :func:`_late_done_valid_for_attempt` (same mtime slack).
+
+    When ``{n}.done`` is absent, ``{n}.md`` is left alone — the agent may be mid-turn.
+    """
+    turns_dir = idea_dir / "turns"
+    tn = int(turn_n)
+    done_path = turns_dir / f"{tn}.done"
+    md_path = turns_dir / f"{tn}.md"
+    if not done_path.exists():
+        return
+    try:
+        done_mt = os.path.getmtime(done_path)
+    except OSError:
+        return
+    cutoff = attempt_start_wall - IDEAS_LATE_DONE_MTIME_SLACK_SEC
+    if done_mt < cutoff:
+        done_path.unlink(missing_ok=True)
+        md_path.unlink(missing_ok=True)
 
 
 async def _trigger_readiness_assessment(idea_id: str, config: dict) -> None:
@@ -3831,6 +3879,8 @@ async def post_ideas_message(idea_id: str, request: Request):
     activity_stamp_path = idea_dir / "prd_creator_activity.stamp"
     activity_stamp_path.unlink(missing_ok=True)
 
+    _ideas_scrub_stale_turn_artifacts(idea_dir, int(turn_n), _attempt_start_wall)
+
     poll_timeout = float(config.get("poll_timeout", POLL_TIMEOUT))
     poll_interval = float(config.get("poll_interval", POLL_INTERVAL))
     idle_threshold = float(config.get("ideas_idle_threshold", 120))
@@ -3843,17 +3893,8 @@ async def post_ideas_message(idea_id: str, request: Request):
     try:
         await _post_agent_webhook(hooks_url, hooks_token, webhook_payload)
     except HTTPException as exc:
-        if exc.status_code == 503:
-            _mark_last_pending_assistant_error(
-                session_path,
-                "Agent gateway unreachable — check OpenClaw is running.",
-            )
-        elif exc.status_code == 502:
-            _status_tail = (str(exc.detail).split()[-1]).rstrip(".")
-            _mark_last_pending_assistant_error(
-                session_path,
-                f"Agent gateway returned HTTP {_status_tail}.",
-            )
+        if exc.status_code in (502, 503):
+            _rollback_last_turn_pair(session_path)
         raise
 
     turns_dir = idea_dir / "turns"
@@ -4208,7 +4249,8 @@ def get_ideas():
 
     Returns:
         JSON array of {id, name, summary, updated, readiness_score, has_prd,
-        has_roadmap} objects, sorted newest-first.
+        has_roadmap} objects, sorted newest-first by ``updated`` then by ``id``
+        (deterministic tie-break). Response includes ``Cache-Control: no-store``.
         Returns [] if ideas_dir is absent or empty.
     """
     config = load_config()
@@ -4216,7 +4258,7 @@ def get_ideas():
     ideas_path = Path(ideas_dir)
 
     if not ideas_path.exists():
-        return []
+        return JSONResponse(content=[], headers={"Cache-Control": "no-store"})
 
     ideas = []
     for subdir in ideas_path.iterdir():
@@ -4270,9 +4312,9 @@ def get_ideas():
             "has_roadmap": has_roadmap,
         })
 
-    # Sort newest first by updated timestamp
-    ideas.sort(key=lambda x: x.get("updated") or "", reverse=True)
-    return ideas
+    # Sort newest first by updated timestamp; secondary key id makes ties deterministic.
+    ideas.sort(key=lambda x: (x.get("updated") or "", x.get("id") or ""), reverse=True)
+    return JSONResponse(content=ideas, headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/ideas")

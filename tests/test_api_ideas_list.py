@@ -85,6 +85,26 @@ class TestGetIdeasList:
         assert data[0]["summary"] == "This is a summary sentence"
         assert data[0]["updated"] == "2026-01-02T00:00:00Z"
 
+    def test_get_ideas_returns_no_store_cache_control(self, client, monkeypatch):
+        """GET /api/ideas must not be served from browser cache (stale list / ghost ideas)."""
+        client_obj, ideas_dir = client
+        idea_id = "cache-header-idea"
+        idea_path = ideas_dir / idea_id
+        idea_path.mkdir()
+        turns = idea_path / "turns"
+        turns.mkdir()
+        (turns / "1.done").write_text("done")
+        session = {
+            "messages": [],
+            "prd_content": "# T\n\n## Problem Statement\nx.",
+            "updated": "2026-01-03T00:00:00Z",
+        }
+        (idea_path / "session.json").write_text(json.dumps(session))
+
+        response = client_obj.get("/api/ideas")
+        assert response.status_code == 200
+        assert response.headers.get("cache-control") == "no-store"
+
     def test_name_falls_back_to_untitled_when_no_heading_or_messages(self, client, monkeypatch):
         """When prd_content has no # heading and no user messages, name is Untitled Idea."""
         client_obj, ideas_dir = client

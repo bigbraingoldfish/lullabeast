@@ -10,7 +10,11 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { recordPipelineActivity } from "../src/stall-detector.ts";
+import {
+  recordPipelineActivity,
+  recordPipelineActivityFromAgentEvent,
+  registerStallDetectorHooks,
+} from "../src/stall-detector.ts";
 import type { PluginHookAgentContext } from "../src/openclaw-types.d.ts";
 
 function makeTmpDir(): string {
@@ -90,6 +94,56 @@ test("writes activity stamp on after_tool_call path (same handler)", () => {
     });
     assert.equal(fs.existsSync(stampPath), true);
   } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("writes activity stamp when hook ctx lacks agentId but event has sessionKey", () => {
+  const tmpDir = makeTmpDir();
+  const artifactsDir = path.join(tmpDir, "pipeline-project", ".autodev", "pipeline");
+  const workspaceDir = path.join(tmpDir, "workspace-executor");
+  const stampPath = path.join(artifactsDir, "executor_activity.stamp");
+  fs.mkdirSync(artifactsDir, { recursive: true });
+  fs.mkdirSync(workspaceDir, { recursive: true });
+
+  try {
+    recordPipelineActivity(
+      { workspaceDir },
+      { sessionKey: "pipeline:phase-4:CORE-E5:executor-attempt-6" },
+    );
+
+    assert.equal(fs.existsSync(stampPath), true);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("writes activity stamp when hook only has runId resolvable from sessions", () => {
+  const tmpDir = makeTmpDir();
+  const openclawRoot = path.join(tmpDir, "openclaw");
+  const artifactsDir = path.join(openclawRoot, "pipeline-project", ".autodev", "pipeline");
+  const sessionsDir = path.join(openclawRoot, "agents", "executor", "sessions");
+  const stampPath = path.join(artifactsDir, "executor_activity.stamp");
+  fs.mkdirSync(artifactsDir, { recursive: true });
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(sessionsDir, "sessions.json"),
+    JSON.stringify({
+      "agent:executor:pipeline:phase-4:core-e5:executor-attempt-6": {
+        sessionId: "run-only-1",
+      },
+    }),
+  );
+  const originalStateDir = process.env["OPENCLAW_STATE_DIR"];
+
+  try {
+    process.env["OPENCLAW_STATE_DIR"] = openclawRoot;
+    recordPipelineActivity({}, { runId: "run-only-1" });
+
+    assert.equal(fs.existsSync(stampPath), true);
+  } finally {
+    if (originalStateDir === undefined) delete process.env["OPENCLAW_STATE_DIR"];
+    else process.env["OPENCLAW_STATE_DIR"] = originalStateDir;
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
@@ -231,6 +285,90 @@ test("non-prd-creator does not write ideas stamp even for ideas session key", ()
       workspaceDir,
     });
     assert.equal(fs.existsSync(stampPath), false);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("registers low-level agent event subscription for runtime activity", () => {
+  const calls: Array<{ method: string; id?: string; name?: string; streams?: string[] }> = [];
+
+  registerStallDetectorHooks({
+    on(name) {
+      calls.push({ method: "on", name });
+    },
+    registerAgentEventSubscription(subscription) {
+      calls.push({
+        method: "registerAgentEventSubscription",
+        id: subscription.id,
+        streams: subscription.streams,
+      });
+    },
+  });
+
+  assert.deepEqual(
+    calls.find((call) => call.method === "registerAgentEventSubscription"),
+    {
+      method: "registerAgentEventSubscription",
+      id: "autodev-pipeline-activity",
+      streams: ["lifecycle", "assistant", "tool", "item", "command_output"],
+    },
+  );
+  assert.ok(calls.some((call) => call.method === "on" && call.name === "after_tool_call"));
+});
+
+test("agent event with sessionKey touches pipeline activity stamp", () => {
+  const tmpDir = makeTmpDir();
+  const pipelineRoot = path.join(tmpDir, "pipeline-root");
+  const artifactsDir = path.join(pipelineRoot, "pipeline-project", ".autodev", "pipeline");
+  const stampPath = path.join(artifactsDir, "executor_activity.stamp");
+  fs.mkdirSync(artifactsDir, { recursive: true });
+
+  try {
+    recordPipelineActivityFromAgentEvent(
+      {
+        runId: "run-1",
+        sessionKey: "pipeline:phase-4:CORE-E5:executor-attempt-3",
+        stream: "tool",
+        data: { phase: "start" },
+      },
+      { AUTODEV_PIPELINE_ROOT: pipelineRoot },
+    );
+
+    assert.equal(fs.existsSync(stampPath), true);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("agent event with runId resolves sessions.json and touches stamp", () => {
+  const tmpDir = makeTmpDir();
+  const openclawRoot = path.join(tmpDir, "openclaw");
+  const artifactsDir = path.join(openclawRoot, "pipeline-project", ".autodev", "pipeline");
+  const sessionsDir = path.join(openclawRoot, "agents", "executor", "sessions");
+  const stampPath = path.join(artifactsDir, "executor_activity.stamp");
+  fs.mkdirSync(artifactsDir, { recursive: true });
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(sessionsDir, "sessions.json"),
+    JSON.stringify({
+      "agent:executor:pipeline:phase-4:core-e5:executor-attempt-3": {
+        sessionId: "run-xyz",
+      },
+    }),
+  );
+
+  try {
+    recordPipelineActivityFromAgentEvent(
+      {
+        runId: "run-xyz",
+        stream: "assistant",
+        data: { text: "working" },
+      },
+      { OPENCLAW_STATE_DIR: openclawRoot },
+    );
+
+    assert.equal(fs.existsSync(stampPath), true);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

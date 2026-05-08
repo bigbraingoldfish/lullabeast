@@ -1,7 +1,7 @@
 {
   "id": "autodev-pipeline-signals",
   "name": "AutoDev Pipeline Signals",
-  "description": "Writes agent completion sentinels via agent_end and requests structural revision via before_agent_finalize for pipeline: sessions",
+  "description": "AutoDev pipeline signals: completion sentinels, structural revise hooks, and Tier A activity stamps for stall detection",
   "activation": {
     "onStartup": true
   },

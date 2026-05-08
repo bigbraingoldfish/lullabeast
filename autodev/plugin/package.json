@@ -1,10 +1,12 @@
 {
   "name": "@autodev/pipeline-signals",
   "version": "1.0.0",
-  "description": "AutoDev pipeline completion hooks: authoritative session-end signals and structural pre-checks via agent_end and before_agent_finalize",
+  "description": "AutoDev pipeline hooks: completion sentinels, structural pre-checks, and Tier A activity stamps for stall detection",
   "type": "module",
   "openclaw": {
-    "extensions": ["./src/index.ts"],
+    "extensions": [
+      "./src/index.ts"
+    ],
     "compat": {
       "pluginApi": ">=2026.3.24",
       "minGatewayVersion": "2026.3.24"
@@ -15,6 +17,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@types/node": "^25.6.0",
     "tsx": "^4.19.2",
     "typescript": "^5.8.3"
   }

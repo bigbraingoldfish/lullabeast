@@ -92,6 +92,8 @@ class TestIdeasScreenWired:
             "IdeasScreen should initialize currentIdeaId with useState(null)"
         assert re.search(r"ideasList\[0\]\.id", func_body), \
             "IdeasScreen should auto-select first idea from list when currentIdeaId is null"
+        assert re.search(r"sessionStorage\.getItem\s*\(\s*LAST_IDEA_KEY\s*\)", func_body), \
+            "IdeasScreen should restore last-selected idea from sessionStorage when valid"
 
     def test_has_use_effect_for_session_restore(self):
         """IdeasScreen has useEffect that calls GET /api/ideas/{id}/session on mount."""

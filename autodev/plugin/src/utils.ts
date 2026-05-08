@@ -150,6 +150,80 @@ export function resolveArtifactsDir(
   return path.join(openclawRoot, "pipeline-project", ".autodev", "pipeline");
 }
 
+/** Resolve OpenClaw's mutable state directory from the gateway environment. */
+export function resolveOpenClawStateDirFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const explicit = env["OPENCLAW_STATE_DIR"] || env["OPENCLAW_ROOT"];
+  if (explicit?.trim()) {
+    return path.resolve(explicit.trim().replace(/^~/, os.homedir()));
+  }
+  return path.join(os.homedir(), ".openclaw");
+}
+
+/** Resolve the AutoDev pipeline artifacts dir from gateway-visible env/path state. */
+export function resolvePipelineArtifactsDirFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const pipelineRoot = env["AUTODEV_PIPELINE_ROOT"];
+  if (pipelineRoot?.trim()) {
+    return path.join(
+      path.resolve(pipelineRoot.trim().replace(/^~/, os.homedir())),
+      "pipeline-project",
+      ".autodev",
+      "pipeline",
+    );
+  }
+  return path.join(
+    resolveOpenClawStateDirFromEnv(env),
+    "pipeline-project",
+    ".autodev",
+    "pipeline",
+  );
+}
+
+export function parsePipelineAgentIdFromSessionKey(
+  sessionKey: string | undefined,
+): string | null {
+  if (!sessionKey || !isPipelineSession(sessionKey)) return null;
+  const m = /:([^:]+)-attempt-\d+$/i.exec(sessionKey);
+  const agentId = m?.[1]?.toLowerCase();
+  return agentId && PIPELINE_AGENT_IDS.has(agentId) ? agentId : null;
+}
+
+export function resolvePipelineSessionFromRunId(
+  runId: string | undefined,
+  stateDir: string = resolveOpenClawStateDirFromEnv(),
+): { sessionKey: string; agentId: string } | null {
+  if (!runId?.trim()) return null;
+
+  for (const agentId of PIPELINE_AGENT_IDS) {
+    const sessionsPath = path.join(
+      stateDir,
+      "agents",
+      agentId,
+      "sessions",
+      "sessions.json",
+    );
+    const sessions = readJsonSafe(sessionsPath);
+    if (!sessions) continue;
+
+    for (const [fullKey, value] of Object.entries(sessions)) {
+      if (typeof value !== "object" || value === null) continue;
+      const sessionId = (value as Record<string, unknown>)["sessionId"];
+      if (sessionId !== runId) continue;
+      const prefix = `agent:${agentId}:`;
+      const sessionKey = fullKey.toLowerCase().startsWith(prefix)
+        ? fullKey.slice(prefix.length)
+        : fullKey;
+      if (!isPipelineSession(sessionKey)) continue;
+      return { sessionKey, agentId };
+    }
+  }
+
+  return null;
+}
+
 /**
  * Write an empty sentinel file at the given path if it does not already exist.
  * Uses an atomic temp-file rename to avoid partial writes being observed.

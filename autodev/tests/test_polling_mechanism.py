@@ -286,3 +286,50 @@ class TestPollingMechanism:
         assert not os.path.exists(stamp)
         assert not os.path.exists(json_p)
         assert not os.path.exists(done_p)
+
+    def test_initialize_activity_stamp_bootstraps_stall_clock(self, tmp_workspace):
+        """Attempt start creates the first activity stamp before hooks fire."""
+        from sentinel_poller import initialize_activity_stamp
+
+        stamp = os.path.join(tmp_workspace, "executor_activity.stamp")
+        assert not os.path.exists(stamp)
+
+        initialize_activity_stamp(tmp_workspace, "executor")
+
+        assert os.path.exists(stamp)
+        assert os.path.getsize(stamp) == 0
+
+    def test_bootstrapped_activity_stamp_catches_missing_first_hook(self, tmp_workspace):
+        """If hooks never emit the first event, the bootstrapped stamp still goes stale."""
+        from sentinel_poller import initialize_activity_stamp, poll_for_sentinel
+
+        sentinel_path = os.path.join(tmp_workspace, "executor_output.done")
+        stamp_path = os.path.join(tmp_workspace, "executor_activity.stamp")
+        initialize_activity_stamp(tmp_workspace, "executor")
+        old = time.time() - 3600
+        os.utime(stamp_path, (old, old))
+
+        start = time.monotonic()
+        result = poll_for_sentinel(
+            sentinel_path=sentinel_path,
+            timeout_seconds=30,
+            stall_detection_path=stamp_path,
+            stall_threshold_seconds=1,
+        )
+        elapsed = time.monotonic() - start
+
+        assert result is False
+        assert elapsed < 3.0, (
+            f"bootstrapped stall should short-circuit quickly, took {elapsed:.1f}s"
+        )
+
+    def test_orchestrator_bootstraps_activity_stamp_for_all_pipeline_agents(self):
+        """Planner/executor/reviewer must seed the stamp after cleanup and before polling."""
+        import inspect
+
+        import orchestrator
+
+        source = inspect.getsource(orchestrator)
+        assert 'initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, "planner")' in source
+        assert 'initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, "executor")' in source
+        assert 'initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, "reviewer")' in source
