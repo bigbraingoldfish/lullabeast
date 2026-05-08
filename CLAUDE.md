@@ -269,23 +269,23 @@ The gate that reads `roadmap.md` and identifies the next pending phase was renam
 
 ## Sentinel Polling Rules
 
-### Use `poll_for_sentinel_with_idle_detect()`, not `poll_for_sentinel()`
+### Use `poll_for_sentinel()` with Tier A stall arguments
 
-The primary function is `poll_for_sentinel_with_idle_detect()` in `sentinel_poller.py` (line 75). The simpler `poll_for_sentinel()` does not handle idle detection and is only used in minimal contexts.
+The primary function is `poll_for_sentinel()` in `sentinel_poller.py`. It watches the `.done` sentinel, the stop sentinel, stale sentinel mtimes, and the Tier A activity stamp.
 
 ### Critical parameters
 
 ```python
-poll_for_sentinel_with_idle_detect(
+poll_for_sentinel(
     sentinel_path=...,
-    timeout=600,                         # 600s hard timeout
-    idle_threshold=120,                  # 120s idle = no recent file activity
-    watch_dirs=[SYMLINK_TARGET],         # project directory, not just the JSONL file
+    timeout_seconds=7200,                # long infrastructure backstop
+    stall_detection_path=...,            # {agent}_activity.stamp
+    stall_threshold_seconds=1800,        # agent-specific silence threshold
     min_sentinel_mtime=time.time(),      # captured BEFORE cleanup_output_files()
 )
 ```
 
-**`watch_dirs`**: Pass `[SYMLINK_TARGET]` (the project directory). Idle detection resets on **any file write** in this directory, not just JSONL writes. This is required because MiniMax batches JSONL writes — an agent can be active for minutes with no JSONL output. Without `watch_dirs`, the poller declares idle too early and burns retry budget. Do not simplify this to JSONL-only detection.
+**Activity stamp bootstrap**: After `cleanup_output_files()` removes stale output and before the webhook is invoked, call `initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, agent)`. The plugin refreshes this stamp on `model_call_started`, `model_call_ended`, and `after_tool_call`; bootstrapping it means a missing first hook still becomes a timed stall instead of waiting for the long sentinel backstop.
 
 **`min_sentinel_mtime`**: Capture `time.time()` **before** calling `cleanup_output_files()`. This timestamp is compared against the mtime of any `.done` file found. If the `.done` file is older than this timestamp, it is treated as orphaned output from a prior session and discarded. Without this guard, an orphaned session writing its `.done` file after the current attempt starts will burn the retry. The pattern in orchestrator.py is:
 
@@ -293,14 +293,18 @@ poll_for_sentinel_with_idle_detect(
 _attempt_start_time = time.time()          # BEFORE cleanup
 cleanup_output_files(SYMLINK_TARGET, "executor")
 self.skill_manager.inject_skill(...)
+initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, "executor")
 self.transition_state("WAITING_FOR_SENTINEL", ...)
 # ... invoke webhook ...
-poll_for_sentinel_with_idle_detect(
-    ..., min_sentinel_mtime=_attempt_start_time
+poll_for_sentinel(
+    ...,
+    min_sentinel_mtime=_attempt_start_time,
+    stall_detection_path=os.path.join(PROJECT_ARTIFACTS_DIR, "executor_activity.stamp"),
+    stall_threshold_seconds=_stall_timeout_seconds("AUTODEV_STALL_TIMEOUT_EXECUTOR", "1800"),
 )
 ```
 
-**`idle_threshold=120`**: Do not raise this to work around JSONL silence. If the agent is truly active but writing no JSONL, fix `watch_dirs`. 120s is calibrated for active execution with file-write monitoring.
+**`AUTODEV_STALL_TIMEOUT_*`**: These are seconds of no Tier A stamp refresh before retry. Do not raise them to work around missing hook writes; if the stamp never refreshes while the model is clearly active, fix the plugin event path.
 
 ---
 
@@ -461,9 +465,9 @@ These values appear throughout the codebase. Do not change them without understa
 
 | Constant | Value | Where it matters |
 |----------|-------|-----------------|
-| Executor sentinel timeout | 1200 seconds | `poll_for_sentinel_with_idle_detect(timeout_seconds=1200)` — executor branch |
-| Reviewer sentinel timeout | 600 seconds | `poll_for_sentinel_with_idle_detect(timeout_seconds=600)` — reviewer branch; caps at 3 timeouts then escalates |
-| Idle threshold | 300 seconds | `idle_threshold=300` — both executor and reviewer; `watch_dirs=[_watch_root_for_idle_detect()]` |
+| Planner sentinel backstop | 3600 seconds | `poll_for_sentinel(timeout_seconds=3600)` — infrastructure-failure backstop; normal completion comes from `agent_end` |
+| Executor sentinel backstop | 7200 seconds | `poll_for_sentinel(timeout_seconds=7200)` — infrastructure-failure backstop; normal completion comes from `agent_end` |
+| Reviewer sentinel backstop | 3600 seconds | `poll_for_sentinel(timeout_seconds=3600)` — infrastructure-failure backstop; caps at 3 failed polls then escalates |
 | Heartbeat cron interval | 30 minutes | `cron/jobs.json`, `heartbeat_cron.py` |
 | Pipeline lock file | `pipeline.lock` | `fcntl.flock`, advisory, exclusive |
 | SSE heartbeat | 15 seconds | `/api/events/stream` keep-alive |

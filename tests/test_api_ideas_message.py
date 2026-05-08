@@ -19,6 +19,64 @@ def load_server():
 class TestApiIdeasMessage:
     """Tests for POST /api/ideas/{id}/message endpoint."""
 
+    def test_ideas_webhook_post_timeout_at_least_sixty_seconds(self):
+        """False 503s from slow gateway reads need a generous client total timeout."""
+        from ui.server import IDEAS_WEBHOOK_POST_TIMEOUT
+
+        assert IDEAS_WEBHOOK_POST_TIMEOUT.total is not None
+        assert IDEAS_WEBHOOK_POST_TIMEOUT.total >= 60
+
+    def test_ideas_scrub_stale_turn_removes_orphan_done_and_md(self):
+        """Stale turns/{n}.done (mtime before this attempt window) is removed with paired .md."""
+        from ui.server import _ideas_scrub_stale_turn_artifacts
+
+        idea_id = "scrub-old"
+        idea_dir = self.ideas_dir / idea_id
+        turns = idea_dir / "turns"
+        turns.mkdir(parents=True)
+        done_p = turns / "1.done"
+        md_p = turns / "1.md"
+        done_p.write_text("done")
+        md_p.write_text("stale prose")
+        os.utime(done_p, (1000, 1000))
+        os.utime(md_p, (1000, 1000))
+        _ideas_scrub_stale_turn_artifacts(idea_dir, 1, 2000.0)
+        assert not done_p.exists()
+        assert not md_p.exists()
+
+    def test_ideas_scrub_stale_turn_preserves_fresh_done(self):
+        """A .done whose mtime is within the slack window of attempt_start_wall is kept."""
+        from ui.server import _ideas_scrub_stale_turn_artifacts
+
+        idea_id = "scrub-fresh"
+        idea_dir = self.ideas_dir / idea_id
+        turns = idea_dir / "turns"
+        turns.mkdir(parents=True)
+        done_p = turns / "1.done"
+        md_p = turns / "1.md"
+        done_p.write_text("done")
+        md_p.write_text("current")
+        attempt = time.time()
+        os.utime(done_p, (attempt, attempt))
+        os.utime(md_p, (attempt, attempt))
+        _ideas_scrub_stale_turn_artifacts(idea_dir, 1, attempt)
+        assert done_p.exists()
+        assert md_p.exists()
+
+    def test_ideas_scrub_stale_turn_noop_when_done_missing(self):
+        """Mid-turn prose without a sentinel must not be deleted."""
+        from ui.server import _ideas_scrub_stale_turn_artifacts
+
+        idea_id = "scrub-md-only"
+        idea_dir = self.ideas_dir / idea_id
+        turns = idea_dir / "turns"
+        turns.mkdir(parents=True)
+        md_p = turns / "2.md"
+        md_p.write_text("partial")
+        os.utime(md_p, (500, 500))
+        _ideas_scrub_stale_turn_artifacts(idea_dir, 2, 2000.0)
+        assert md_p.exists()
+
     @pytest.fixture(autouse=True)
     def setup(self, tmp_path, monkeypatch):
         """Set up per-test temp ideas directory."""
@@ -266,7 +324,7 @@ class TestApiIdeasMessage:
         assert response.status_code == 408, f"Expected 408, got {response.status_code}"
 
     def test_returns_502_on_webhook_bad_status(self):
-        """Returns 502 when hook returns non-2xx; pending assistant marked error in session."""
+        """Returns 502 when hook returns non-2xx; pre-saved turn is rolled back (not persisted)."""
         client = load_server()
         idea_id = "webhook_502"
         self._write_session(idea_id, {
@@ -292,15 +350,10 @@ class TestApiIdeasMessage:
         sess_path = self.ideas_dir / idea_id / "session.json"
         with open(sess_path) as f:
             data = json.load(f)
-        assistants = [m for m in data.get("messages", []) if m.get("role") == "assistant"]
-        assert assistants, "expected assistant message in session"
-        last_a = assistants[-1]
-        assert last_a.get("error") is True
-        assert last_a.get("pending") is False
-        assert "503" in (last_a.get("content") or "") or "gateway" in (last_a.get("content") or "").lower()
+        assert data.get("messages") == [], "gateway failure should not leave user/assistant rows"
 
     def test_returns_503_on_webhook_connection_error(self):
-        """Returns 503 when hook connection fails; pending assistant marked error."""
+        """Returns 503 when hook connection fails; pre-saved turn is rolled back (not persisted)."""
         client = load_server()
         idea_id = "webhook_503"
         self._write_session(idea_id, {
@@ -326,9 +379,7 @@ class TestApiIdeasMessage:
         sess_path = self.ideas_dir / idea_id / "session.json"
         with open(sess_path) as f:
             data = json.load(f)
-        last_a = [m for m in data.get("messages", []) if m.get("role") == "assistant"][-1]
-        assert last_a.get("error") is True
-        assert last_a.get("pending") is False
+        assert data.get("messages") == [], "gateway failure should not leave user/assistant rows"
 
     def test_webhook_sent_with_correct_payload(self):
         """Webhook is POSTed to hooks_url with correct Bearer auth and body."""

@@ -2929,6 +2929,8 @@
             const currentScreen = (ctx && ctx.currentScreen) || "ideas";
             const safeNav = (ctx && ctx.safeNavigate) || (() => {});
             const setSidebarCollapsedCtx = (ctx && ctx.setSidebarCollapsed) || (() => {});
+            /** Persist last-opened idea across full page reload (browser tab). */
+            const LAST_IDEA_KEY = "autodev:lastIdeaId";
             const [messages, setMessages] = useState([]);
             const [prdContent, setPrdContent] = useState("");
             const [roadmapContent, setRoadmapContent] = useState("");
@@ -2983,7 +2985,7 @@
             const readinessPollRef = useRef(null);
             const notificationPollRef = useRef(null);
             const lateHealPollRef = useRef(null);
-            const roadmapLateHealPollRef = useRef(null);
+            const roadmapRecoverPollRef = useRef(null);
             const docPaneRef = useRef(null);
             const [splitPct, setSplitPct] = useState(45);
             const dragRef = useRef({ dragging: false });
@@ -3061,43 +3063,46 @@
                 }
             };
 
-            const stopRoadmapLateHealPoll = () => {
-                if (roadmapLateHealPollRef.current) {
-                    clearInterval(roadmapLateHealPollRef.current);
-                    roadmapLateHealPollRef.current = null;
+            const stopRoadmapRecoverPoll = () => {
+                if (roadmapRecoverPollRef.current) {
+                    clearInterval(roadmapRecoverPollRef.current);
+                    roadmapRecoverPollRef.current = null;
                 }
             };
 
-            const startRoadmapLateHealPoll = (healIdeaId) => {
-                stopRoadmapLateHealPoll();
-                if (!healIdeaId) return;
-                const maxHealPolls = 24;
-                let healTicks = 0;
-                roadmapLateHealPollRef.current = setInterval(() => {
-                    healTicks += 1;
-                    if (healTicks > maxHealPolls) {
-                        stopRoadmapLateHealPoll();
-                        return;
-                    }
-                    fetch(`/api/ideas/${healIdeaId}/session`)
+            const startRoadmapRecoverPoll = (ideaId) => {
+                stopRoadmapRecoverPoll();
+                if (!ideaId) return;
+                const pollOnce = () => {
+                    fetch(`/api/ideas/${ideaId}/session`)
                         .then((r) => r.json())
                         .then((d) => {
-                            if (!d.roadmap_content) return;
-                            stopRoadmapLateHealPoll();
-                            setRoadmapContent(d.roadmap_content || "");
-                            setConvertError("");
-                            setActiveDocTab("roadmap");
-                            setShowQualityCheckModal(true);
-                            refreshIdeas();
+                            const rm = (d.roadmap_content || "").trim();
+                            if (rm) {
+                                setRoadmapContent(d.roadmap_content || "");
+                                setConvertError("");
+                                refreshIdeas();
+                                stopRoadmapRecoverPoll();
+                            }
                         })
                         .catch(() => {});
+                };
+                let ticks = 0;
+                const maxTicks = 36; // 36 × 5s — agent may finish shortly after server-side convert timeout
+                pollOnce();
+                roadmapRecoverPollRef.current = setInterval(() => {
+                    ticks += 1;
+                    if (ticks > maxTicks) {
+                        stopRoadmapRecoverPoll();
+                        return;
+                    }
+                    pollOnce();
                 }, 5000);
             };
 
-            useEffect(() => () => {
-                stopLateHealPoll();
-                stopRoadmapLateHealPoll();
-            }, [currentIdeaId]);
+            useEffect(() => () => stopLateHealPoll(), [currentIdeaId]);
+
+            useEffect(() => () => stopRoadmapRecoverPoll(), [currentIdeaId]);
 
             const startReadinessPoll = (ideaId) => {
                 stopReadinessPoll();
@@ -3171,7 +3176,12 @@
 
             useEffect(() => {
                 if (currentIdeaId === null && ideasList.length > 0) {
-                    setCurrentIdeaId(ideasList[0].id);
+                    const stored = sessionStorage.getItem(LAST_IDEA_KEY);
+                    const valid = stored && ideasList.some((it) => it.id === stored);
+                    setCurrentIdeaId(valid ? stored : ideasList[0].id);
+                    if (!valid && stored) {
+                        sessionStorage.removeItem(LAST_IDEA_KEY);
+                    }
                 }
             }, [ideasList, currentIdeaId]);
 
@@ -3373,7 +3383,8 @@
                 const t = (overrideText !== undefined ? overrideText : inputText).trim();
                 if (!t || isLoading || !currentIdeaId) return;
                 setUserFirstTurnPending(false);
-                const turn = messages.filter((m) => m.role === "user").length + 1;
+                const baseMsgs = messages.filter((m) => !m._gatewayFailed);
+                const turn = baseMsgs.filter((m) => m.role === "user").length + 1;
                 const userMsgId = `u-${Date.now()}`;
                 const assistantPendingId = `a-${Date.now()}`;
                 const nowIso = new Date().toISOString();
@@ -3388,8 +3399,8 @@
                     ...(optimisticSentContext ? { sent_context: optimisticSentContext } : {}),
                 };
                 setHiddenNoteIdsForSend(() => new Set(draftSnap.map((a) => a.id)));
-                setMessages((prev) => [
-                    ...prev,
+                setMessages([
+                    ...baseMsgs,
                     userRow,
                     { id: assistantPendingId, role: "assistant", content: "Working on your request...", ts: nowIso, pending: true },
                 ]);
@@ -3452,23 +3463,31 @@
                             errorMsg = "Network error — check your connection and retry.";
                         }
                         setMessages((prev) =>
-                            prev.map((m) =>
-                                m.id === assistantPendingId
-                                    ? {
-                                          ...m,
-                                          pending: false,
-                                          error: true,
-                                          content: errorMsg,
-                                          ts: new Date().toISOString(),
-                                      }
-                                    : m
-                            )
+                            prev.map((m) => {
+                                if (m.id === assistantPendingId) {
+                                    return {
+                                        ...m,
+                                        pending: false,
+                                        error: true,
+                                        content: errorMsg,
+                                        ts: new Date().toISOString(),
+                                        ...((status === 502 || status === 503) ? { _gatewayFailed: true } : {}),
+                                    };
+                                }
+                                if ((status === 502 || status === 503) && m.id === userMsgId) {
+                                    return { ...m, _gatewayFailed: true };
+                                }
+                                return m;
+                            })
                         );
                         setHiddenNoteIdsForSend(() => new Set());
                         setStagedAttachment(attachmentSnap);
+                        if ((status === 502 || status === 503) && overrideText === undefined) {
+                            setInputText(t);
+                        }
                         setIsLoading(false);
                         isLoadingRef.current = false;
-                        if (status === 408) {
+                        if (status === 408 || status === 502 || status === 503) {
                             stopLateHealPoll();
                             const healIdeaId = currentIdeaId;
                             const maxHealPolls = 24;
@@ -3525,6 +3544,7 @@
                     .then((r) => r.json())
                     .then((d) => {
                         setCurrentIdeaId(d.id);
+                        sessionStorage.setItem(LAST_IDEA_KEY, d.id);
                         setMessages([]);
                         setHiddenNoteIdsForSend(() => new Set());
                         setPrdContent("");
@@ -3546,6 +3566,7 @@
                     setUserFirstTurnPending(false);
                 }
                 setCurrentIdeaId(id);
+                sessionStorage.setItem(LAST_IDEA_KEY, id);
                 setActiveIdeaMenuId(null);
                 setRenamingIdeaId(null);
                 setRenameError("");
@@ -3589,6 +3610,9 @@
                     setDeleteConfirmId(null);
                     refreshIdeas();
                     if (currentIdeaId === id) {
+                        if (sessionStorage.getItem(LAST_IDEA_KEY) === id) {
+                            sessionStorage.removeItem(LAST_IDEA_KEY);
+                        }
                         setMessages([]);
                         setPrdContent("");
                         setReadinessStatus("unavailable");
@@ -3623,17 +3647,13 @@
             };
 
             const _runConvert = () => {
-                stopRoadmapLateHealPoll();
+                const ideaId = currentIdeaId;
                 setConvertLoading(true);
                 setConvertError("");
-                fetch(`/api/ideas/${currentIdeaId}/convert`, { method: "POST" })
-                    .then(async (r) => {
-                        if (!r.ok) {
-                            const text = await r.text();
-                            const err = new Error(text || String(r.status));
-                            err.status = r.status;
-                            throw err;
-                        }
+                stopRoadmapRecoverPoll();
+                fetch(`/api/ideas/${ideaId}/convert`, { method: "POST" })
+                    .then((r) => {
+                        if (!r.ok) return r.text().then((t) => { throw new Error(t); });
                         return r.json();
                     })
                     .then((d) => {
@@ -3643,12 +3663,15 @@
                         setShowQualityCheckModal(true);
                     })
                     .catch((e) => {
-                        setConvertError(String(e.message || e));
+                        const msg = String(e.message || e);
+                        setConvertError(msg);
                         setConvertLoading(false);
-                        const status = Number(e && e.status) || parseInt(e && e.message, 10);
-                        if (status === 408) {
-                            const healIdeaId = currentIdeaId;
-                            startRoadmapLateHealPoll(healIdeaId);
+                        if (
+                            msg.includes("Conversion timed out") ||
+                            msg.includes("timed out") ||
+                            msg.includes("408")
+                        ) {
+                            startRoadmapRecoverPoll(ideaId);
                         }
                     });
             };

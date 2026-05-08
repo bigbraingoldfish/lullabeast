@@ -11,7 +11,7 @@ import logging
 import requests
 
 from webhook_client import invoke_agent_webhook
-from sentinel_poller import cleanup_output_files, poll_for_sentinel
+from sentinel_poller import cleanup_output_files, initialize_activity_stamp, poll_for_sentinel
 from skill_manager import SkillManager
 from queue_semantics import parent_blocks_child
 from env_resolvers import resolve_openclaw_root, resolve_pipeline_root
@@ -2640,6 +2640,7 @@ class Orchestrator:
                         self.state.get("current_phase_raw_id", ""), "planner", self.openclaw_config
                     )
                     self._record_injected_skill("planner")
+                    initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, "planner")
 
                     self.state["sentinel_wait_started_at"] = datetime.now(timezone.utc).isoformat()
                     self.transition_state("WAITING_FOR_SENTINEL", "Invoking Planner via webhook")
@@ -2848,6 +2849,7 @@ class Orchestrator:
                         self.state.get("current_phase_raw_id", ""), "executor", self.openclaw_config
                     )
                     self._record_injected_skill("executor")
+                    initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, "executor")
                     self.state["sentinel_wait_started_at"] = datetime.now(timezone.utc).isoformat()
                     self.transition_state("WAITING_FOR_SENTINEL", f"Invoking Executor ({attempt_label}) - Attempt {retries + 1}")
 
@@ -2992,6 +2994,7 @@ class Orchestrator:
                         self.state.get("current_phase_raw_id", ""), "reviewer", self.openclaw_config
                     )
                     self._record_injected_skill("reviewer")
+                    initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, "reviewer")
                     self.state["sentinel_wait_started_at"] = datetime.now(timezone.utc).isoformat()
                     self.transition_state("WAITING_FOR_SENTINEL", f"Invoking Reviewer - Attempt {retries + 1}")
 

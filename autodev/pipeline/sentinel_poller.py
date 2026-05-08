@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -24,6 +25,38 @@ def cleanup_output_files(workspace_dir: str, agent_prefix: str):
             p.unlink(missing_ok=True)
         except Exception:
             pass
+
+
+def initialize_activity_stamp(workspace_dir: str, agent_prefix: str) -> bool:
+    """Seed ``{agent}_activity.stamp`` so missing first hook events can still stall.
+
+    The OpenClaw plugin refreshes this file on model/tool activity.  Creating it
+    at attempt start gives ``poll_for_sentinel`` a clock even when a provider,
+    browser bridge, or plugin edge case prevents the first hook from firing.
+    """
+    base_path = Path(workspace_dir)
+    if not base_path.exists():
+        return False
+
+    stamp_path = base_path / f"{agent_prefix}_activity.stamp"
+    tmp_path = None
+    try:
+        fd, tmp = tempfile.mkstemp(
+            dir=str(base_path),
+            prefix=f"{agent_prefix}_activity_",
+            suffix=".stamp.tmp",
+        )
+        tmp_path = tmp
+        os.close(fd)
+        os.replace(tmp_path, stamp_path)
+        return True
+    except OSError:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        return False
 
 
 def poll_for_sentinel(

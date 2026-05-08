@@ -1111,20 +1111,21 @@ This handles both first-run and restart cases safely.
 
 ### Sentinel Pattern
 
-1. **Pre-Webhook Cleanup**: Before transitioning state to `WAITING_FOR_SENTINEL` and before POSTing the webhook (including on retries), the orchestrator MUST explicitly delete the target `.done` file and the target `.json` file (`missing_ok=True`). The workspace must be completely clear of prior outputs before the agent is invoked.
-2. Agent writes output JSON first
-3. Agent writes sentinel file (`.done`) as final act
-4. Orchestrator polls for `.done` file — not the JSON itself. Must use a simple `time.sleep()` loop (e.g., checking every 2 seconds).
-5. `JSON present + sentinel present` = safe to read
-6. `JSON present without sentinel` = agent still writing, do not parse
+1. **Pre-Webhook Cleanup**: Before transitioning state to `WAITING_FOR_SENTINEL` and before POSTing the webhook (including on retries), the orchestrator MUST explicitly delete the target `.done`, target `.json`, and target `{agent}_activity.stamp` files (`missing_ok=True`). The workspace must be completely clear of prior outputs before the agent is invoked.
+2. **Activity bootstrap**: The orchestrator immediately writes a fresh empty `{agent}_activity.stamp` for planner, executor, and reviewer attempts. This seed is the first stall clock tick; OpenClaw hooks refresh it on model/tool activity.
+3. Agent writes output JSON first
+4. Agent writes sentinel file (`.done`) as final act
+5. Orchestrator polls for `.done` file — not the JSON itself. Must use a simple `time.sleep()` loop (e.g., checking every 2 seconds).
+6. `JSON present + sentinel present` = safe to read
+7. `JSON present without sentinel` = agent still writing, do not parse
 
-Sentinel is a soft dependency on agent instruction-following — requires careful AGENTS.md guidance. Orchestrator enforces a timeout per agent turn (default: 10 minutes) — if sentinel does not appear within the timeout, treat as failure and increment retry counter.
+Sentinel is a soft dependency on agent instruction-following — requires careful AGENTS.md guidance. Orchestrator enforces long per-agent infrastructure backstop timeouts, but normal completion is driven by the `agent_end` plugin hook writing `.done`.
 
-**Executor idle detection (OB-4 fix, updated 2026-03-14):** For the executor specifically, the orchestrator uses `sentinel_poller.poll_for_sentinel_with_idle_detect()` which monitors two activity signals in parallel: (1) the executor session JSONL mtime, and (2) the mtime of any file in the project directory (`watch_dirs=[SYMLINK_TARGET]`). If ALL sources go quiet for `idle_threshold` seconds with no sentinel, the poll exits early (treated identically to a timeout → `reset_execution("auto")`). The idle clock resets on any JSONL write OR any project file write, so models that write code files between JSONL flushes are never falsely flagged as idle. Current parameters: `startup_grace=90s`, `idle_threshold=120s`, outer `timeout_seconds=600` unchanged.
+**Tier A stall detection (updated 2026-05-07):** For planner, executor, and reviewer, the orchestrator uses `sentinel_poller.poll_for_sentinel()` with `stall_detection_path={agent}_activity.stamp` and an agent-specific `stall_threshold_seconds`. The orchestrator seeds the stamp at attempt start so a missing first OpenClaw hook still becomes detectable; `autodev-pipeline-signals` then refreshes the stamp on `model_call_started`, `model_call_ended`, and `after_tool_call`. If the stamp mtime goes quiet beyond the threshold with no sentinel, the poll exits early (treated identically to timeout/stop → existing retry path). Defaults: planner 900s, executor 1800s, reviewer 900s; override with `AUTODEV_STALL_TIMEOUT_PLANNER`, `AUTODEV_STALL_TIMEOUT_EXECUTOR`, and `AUTODEV_STALL_TIMEOUT_REVIEWER`.
 
-Additionally, the orchestrator records a `min_sentinel_mtime` (wall-clock time captured immediately before `cleanup_output_files()`) and passes it to the poller. If a `.done` sentinel is found with an mtime older than this value, it is discarded as belonging to an orphaned prior session — this prevents stale sentinels from consuming the executor retry budget while the reset-cleaned working tree causes an inevitable gate failure.
+Additionally, the orchestrator records a `min_sentinel_mtime` (wall-clock time captured immediately before `cleanup_output_files()`) and passes it to the poller. If a `.done` sentinel is found with an mtime older than this value, it is discarded as belonging to an orphaned prior session — this prevents stale sentinels from consuming retry budget while the reset-cleaned working tree causes an inevitable gate failure.
 
-Full parameter signature: `poll_for_sentinel_with_idle_detect(sentinel_path, jsonl_path, startup_grace, idle_threshold, timeout_seconds, watch_dirs, min_sentinel_mtime, stop_sentinel_path)`. The `stop_sentinel_path` parameter (also present on the simpler `poll_for_sentinel`) is checked on every loop iteration — if the file exists the poll returns `False` immediately, and the caller's next main-loop iteration calls `_check_stop_requested()` to consume the sentinel and transition to `STOPPED`. Note: `session:end` OpenClaw hook (planned) would be a cleaner trigger — revisit when available.
+The `stop_sentinel_path` parameter is checked on every loop iteration — if the file exists the poll returns `False` immediately, and the caller's next main-loop iteration calls `_check_stop_requested()` to consume the sentinel and transition to `STOPPED`.
 
 **Executor → Reviewer model swap (OB-6 fix):** After the executor gate passes, the orchestrator calls `wait_for_model_stable()` before firing the reviewer webhook. This polls `GET http://<llama-server-host>:11434/v1/models` every 5s until all models report a stable status (`loaded` or `unloaded` — none transitioning). Timeout: 300s (proceeds anyway). Prevents HTTP 500 cascades caused by the traffic cop force-killing qwen3-coder-next mid-eviction if the GPU swap takes >10s. Replaces the prior fixed `time.sleep(60)`. Implemented in `Orchestrator.wait_for_model_stable()` (`orchestrator.py`); URL derived from `openclaw_config["models"]["providers"]["llama-local"]["baseUrl"]`.
 

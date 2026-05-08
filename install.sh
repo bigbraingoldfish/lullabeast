@@ -45,9 +45,9 @@ RECOMMENDED_OC_VERSION="1.2.0"
 SETUP_MARKER="$HOME/.autodev_setup_complete"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1/13  OS CHECK
+# 1/14  OS CHECK
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "1/13  OS check"
+hdr "1/14  OS check"
 
 OS_TYPE=$(uname -s)
 OS_STATUS="ok"
@@ -76,9 +76,9 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2/13  PYTHON VERSION
+# 2/14  PYTHON VERSION
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "2/13  Python version"
+hdr "2/14  Python version"
 
 PYTHON=""
 PYTHON_VERSION=""
@@ -120,9 +120,9 @@ fi
 ok "git available"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3/13  PYTHON DEPENDENCIES
+# 3/14  PYTHON DEPENDENCIES
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "3/13  Python dependencies"
+hdr "3/14  Python dependencies"
 
 # Repo root: if AUTODEV_REPO_PATH is already set in the environment, keep it
 # (canonical path); otherwise use the directory containing this install.sh.
@@ -160,9 +160,9 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4/13  OPENCLAW DETECTION
+# 4/14  OPENCLAW DETECTION
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "4/13  OpenClaw detection"
+hdr "4/14  OpenClaw detection"
 
 # Capture the operator-provided OPENCLAW_ROOT before we reassign.
 _OC_ENV_INPUT="${OPENCLAW_ROOT:-}"
@@ -273,9 +273,9 @@ print('ok')
   || warn "Could not update ui/config.json — copy ui/config.example.json and set paths"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5/13  OPENCLAW VERSION CHECK
+# 5/14  OPENCLAW VERSION CHECK
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "5/13  OpenClaw version check"
+hdr "5/14  OpenClaw version check"
 
 OC_VERSION_STATUS="unknown"
 OC_JSON="$OPENCLAW_ROOT/openclaw.json"
@@ -317,9 +317,9 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6/13  AGENT WORKSPACE PROVISIONING
+# 6/14  AGENT WORKSPACE PROVISIONING
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "6/13  Agent workspace provisioning"
+hdr "6/14  Agent workspace provisioning"
 
 # Each pipeline agent workspace needs pipeline-project → $OPENCLAW_ROOT/pipeline-project
 # (the hub the UI/orchestrator update). OpenClaw sandboxes writes to the workspace root.
@@ -554,9 +554,9 @@ fi
 ensure_workspace_pipeline_project_symlinks
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7/13  EXEC-APPROVALS VALIDATION
+# 7/14  EXEC-APPROVALS VALIDATION
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "7/13  Exec-approvals validation"
+hdr "7/14  Exec-approvals validation"
 
 EXEC_APPROVALS="$OPENCLAW_ROOT/exec-approvals.json"
 APPROVALS_STATUS="missing"
@@ -584,9 +584,9 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 8/13  CRON/JOBS.JSON HEARTBEAT PATH UPDATE
+# 8/14  CRON/JOBS.JSON HEARTBEAT PATH UPDATE
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "8/13  Cron/jobs.json heartbeat path"
+hdr "8/14  Cron/jobs.json heartbeat path"
 
 CRON_FILE="$OPENCLAW_ROOT/cron/jobs.json"
 CRON_STATUS="not found"
@@ -662,9 +662,9 @@ PYEOF
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 9/13  REGISTER AUTODEV AGENTS (OPENCLAW)
+# 9/14  REGISTER AUTODEV AGENTS (OPENCLAW)
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "9/13  Register AutoDev agents in openclaw.json"
+hdr "9/14  Register AutoDev agents in openclaw.json"
 
 REGISTER_STATUS_STEP="not attempted"
 TOOLS_PROFILE_STEP="skipped"
@@ -1004,9 +1004,9 @@ print(set_openclaw_global_tools_profile(sys.argv[1], 'coding'))
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 10/13  CONVERSION PROMPT (repo-bundled)
+# 10/14  CONVERSION PROMPT (repo-bundled)
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "10/13  Conversion prompt"
+hdr "10/14  Conversion prompt"
 
 BUNDLED_PROMPT="$AUTODEV_REPO_PATH/autodev/prompts/prd-to-roadmap-conversion.txt"
 if [ -f "$BUNDLED_PROMPT" ]; then
@@ -1018,9 +1018,9 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 11/13  WRITE .env
+# 11/14  WRITE .env
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "11/13  Writing .env"
+hdr "11/14  Writing .env"
 
 ENV_FILE="$AUTODEV_REPO_PATH/.env"
 ENV_MERGE=$(
@@ -1103,7 +1103,32 @@ with open(tmp, "w") as f:
 os.replace(tmp, cfg_path)
 PYEOF
         fi
-        PLUGIN_INSTALL_STEP="ok"
+        if openclaw plugins inspect autodev-pipeline-signals --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(2)
+plugin = data.get("plugin") or {}
+hooks = {h.get("name") for h in data.get("typedHooks") or [] if isinstance(h, dict)}
+required = {
+    "agent_end",
+    "before_agent_finalize",
+    "model_call_started",
+    "model_call_ended",
+    "after_tool_call",
+}
+if plugin.get("status") == "loaded" and required.issubset(hooks):
+    raise SystemExit(0)
+raise SystemExit(1)
+'; then
+            ok "Plugin validation: required typed hooks are registered"
+            PLUGIN_INSTALL_STEP="ok (validated hooks)"
+        else
+            warn "Plugin validation failed — run: openclaw plugins inspect autodev-pipeline-signals --json"
+            warn "Expected typed hooks: agent_end, before_agent_finalize, model_call_started, model_call_ended, after_tool_call"
+            PLUGIN_INSTALL_STEP="warn (installed; inspect hooks)"
+        fi
     else
         warn "Plugin install failed — run manually: openclaw plugins install \"$PLUGIN_DIR\""
         PLUGIN_INSTALL_STEP="warn (see above)"

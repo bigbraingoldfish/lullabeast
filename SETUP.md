@@ -199,7 +199,7 @@ To collapse the pipeline directory onto the OpenClaw directory, set
 `AUTODEV_PIPELINE_ROOT=$OPENCLAW_ROOT` explicitly. See
 [`docs/RUNTIME-MIGRATION.md`](docs/RUNTIME-MIGRATION.md) for history.
 
-**Optional — in-session stall timeouts (orchestrator).** When the `autodev-pipeline-signals` plugin is installed, Tier A hooks touch `{agent}_activity.stamp` in the pipeline artifacts directory. The orchestrator treats silence longer than these thresholds (seconds) as a failed sentinel poll and uses the normal retry path. Defaults are conservative; override only if you measure false positives or need faster recovery:
+**Optional — in-session stall timeouts (orchestrator).** Before each planner/executor/reviewer webhook, the orchestrator seeds `{agent}_activity.stamp` in the pipeline artifacts directory. The `autodev-pipeline-signals` plugin refreshes that stamp on Tier A hooks (`model_call_started`, `model_call_ended`, `after_tool_call`) and OpenClaw's live agent event stream. The orchestrator treats silence longer than these thresholds (seconds) as a failed sentinel poll and uses the normal retry path. Seeding the stamp means a missing first hook is still caught. Defaults are conservative; override only if you measure false positives or need faster recovery:
 
 | Env | Default (seconds) | Role |
 | --- | ------------------ | ---- |
@@ -208,6 +208,14 @@ To collapse the pipeline directory onto the OpenClaw directory, set
 | `AUTODEV_STALL_TIMEOUT_REVIEWER` | 900 | Reviewer poll |
 
 `install.sh` appends the same three variables to **`.env` as commented placeholders** (once per file; a marker line prevents duplicates). **`.env.example`** contains the same block for new copies. Uncomment a line and set an integer to override.
+
+Verify the plugin registration with:
+
+```bash
+openclaw plugins inspect autodev-pipeline-signals --json
+```
+
+The output should show `status: "loaded"`, `hookCount: 5`, and typed hooks for `agent_end`, `before_agent_finalize`, `model_call_started`, `model_call_ended`, and `after_tool_call`. During a live pipeline run, the active `{agent}_activity.stamp` mtime should advance with the matching session JSONL mtime.
 
 **Optional — Ideas chat poll (UI server).** With the same plugin, Project Ideas uses `prd_creator_activity.stamp` for idle detection. Override via environment (wins over `ui/config.json`) or config keys `ideas_idle_threshold` / `ideas_startup_grace`:
 

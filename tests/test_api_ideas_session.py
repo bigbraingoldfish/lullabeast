@@ -4,6 +4,7 @@ import pytest
 import json
 from pathlib import Path
 from unittest.mock import patch
+from fastapi import HTTPException
 
 
 def load_server():
@@ -313,3 +314,112 @@ class TestApiIdeasSession:
         assert "## Phase A" in (body.get("roadmap_content") or "")
         saved = json.loads((idea_dir / "session.json").read_text())
         assert "## Phase A" in (saved.get("roadmap_content") or "")
+
+    def test_get_ideas_session_returns_no_store_cache_control_populated(self):
+        """GET session must not be cached by intermediaries (PRD/chat can change independently)."""
+        client = load_server()
+        idea_id = "ns-pop"
+        self._write_session(
+            idea_id,
+            {
+                "messages": [{"role": "user", "content": "x", "ts": "2026-05-08T10:00:00Z"}],
+                "prd_content": "",
+                "created": "2026-05-08T10:00:00Z",
+                "updated": "2026-05-08T10:00:00Z",
+            },
+        )
+        with patch("ui.server.load_config", return_value=self._mock_config()):
+            response = client.get(f"/api/ideas/{idea_id}/session")
+        assert response.status_code == 200
+        assert response.headers.get("cache-control") == "no-store"
+
+    def test_get_ideas_session_returns_no_store_when_missing_session(self):
+        """Empty default session for unknown idea also carries no-store (draft-idea vulnerable state)."""
+        client = load_server()
+        with patch("ui.server.load_config", return_value=self._mock_config()):
+            response = client.get("/api/ideas/no-such-idea/session")
+        assert response.status_code == 200
+        assert response.headers.get("cache-control") == "no-store"
+        assert response.json().get("messages") == []
+
+    def test_rollback_last_turn_pair_removes_user_and_pending_assistant(self):
+        """Gateway rollback strips the pre-saved user + pending assistant pair."""
+        from ui.server import _rollback_last_turn_pair
+
+        idea_id = "rb-empty"
+        path = self._write_session(
+            idea_id,
+            {
+                "messages": [
+                    {"role": "user", "content": "u", "ts": "2026-05-08T10:00:00Z", "ideas_turn": 1},
+                    {
+                        "role": "assistant",
+                        "content": "Working on your request...",
+                        "pending": True,
+                        "ts": "2026-05-08T10:00:00Z",
+                    },
+                ],
+                "prd_content": "",
+            },
+        )
+        _rollback_last_turn_pair(path)
+        data = json.loads(path.read_text())
+        assert data.get("messages") == []
+
+    def test_rollback_last_turn_pair_preserves_prior_turns(self):
+        """Rollback only removes the trailing pending pair, not earlier history."""
+        from ui.server import _rollback_last_turn_pair
+
+        idea_id = "rb-prior"
+        prior = [
+            {"role": "user", "content": "first", "ts": "2026-05-08T09:00:00Z"},
+            {"role": "assistant", "content": "done", "ts": "2026-05-08T09:00:01Z"},
+        ]
+        tail = [
+            {"role": "user", "content": "retry", "ts": "2026-05-08T10:00:00Z", "ideas_turn": 2},
+            {
+                "role": "assistant",
+                "content": "Working on your request...",
+                "pending": True,
+                "ts": "2026-05-08T10:00:00Z",
+            },
+        ]
+        path = self._write_session(
+            idea_id,
+            {"messages": prior + tail, "prd_content": "# P"},
+        )
+        _rollback_last_turn_pair(path)
+        data = json.loads(path.read_text())
+        assert data["messages"] == prior
+
+    def test_post_ideas_message_503_rolls_back_session(self):
+        """502/503 after pre-save rolls back so the failed attempt is not persisted."""
+        client = load_server()
+        idea_id = "gw-503-rb"
+        self._write_session(
+            idea_id,
+            {
+                "messages": [],
+                "prd_content": "",
+                "created": "2026-05-08T10:00:00Z",
+                "updated": "2026-05-08T10:00:00Z",
+            },
+        )
+        cfg = {
+            **self._mock_config(),
+            "hooks_url": "http://localhost:18789/hooks/agent",
+            "hooks_token": "test-token",
+        }
+
+        async def boom(*_a, **_kw):
+            raise HTTPException(status_code=503, detail="Webhook connection failed: test")
+
+        with patch("ui.server.load_config", return_value=cfg):
+            with patch("ui.server._post_agent_webhook", side_effect=boom):
+                r = client.post(
+                    f"/api/ideas/{idea_id}/message",
+                    json={"content": "hello gateway", "turn": 1},
+                )
+        assert r.status_code == 503
+        saved = json.loads((self.ideas_dir / idea_id / "session.json").read_text())
+        assert saved.get("messages") == []

@@ -65,6 +65,26 @@ export type PluginHookAfterToolCallEvent = {
   isError?: boolean;
 };
 
+export type PluginAgentEvent = {
+  runId?: string;
+  sessionKey?: string;
+  stream?: string;
+  data?: Record<string, unknown>;
+};
+
+export type PluginAgentEventSubscription = {
+  id: string;
+  streams?: string[];
+  handle: (
+    event: PluginAgentEvent,
+    ctx: {
+      getRunContext?: (namespace: string) => unknown;
+      setRunContext?: (namespace: string, value: unknown) => void;
+      clearRunContext?: (namespace: string) => void;
+    },
+  ) => Promise<void> | void;
+};
+
 export type OpenClawPluginApi = {
   on(
     hookName: "agent_end",
@@ -108,6 +128,9 @@ export type OpenClawPluginApi = {
       ctx: PluginHookAgentContext,
     ) => Promise<void> | void,
     opts?: { priority?: number; timeoutMs?: number },
+  ): void;
+  registerAgentEventSubscription?(
+    subscription: PluginAgentEventSubscription,
   ): void;
 };
 
