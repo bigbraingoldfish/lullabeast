@@ -211,3 +211,57 @@ class TestApiIdeasMessageIntegration:
 
         assert session["updated"] != original_time, \
             f"updated timestamp was not changed: {session['updated']}"
+
+    def test_message_turn_merges_stale_roadmap_from_disk(self):
+        """PRD message save must not persist stale roadmap_content when roadmap_draft.md is newer."""
+        client = load_server()
+        idea_id = "roadmap-rehydrate-msg"
+
+        stale_rm = "# Stale Roadmap\n\n- [ ] `X-E1` | CRITICAL | Old only.\n"
+        fresh_rm = (
+            "# Hello World API Roadmap\n\n"
+            "- [ ] `API-E1` | CRITICAL | Phase one (`phase/api-e1`).\n\n"
+            "  **Done Criteria:**\n"
+            "  - [ ] one\n\n"
+            "- [ ] `API-E2` | CRITICAL | Phase two (`phase/api-e2`).\n\n"
+            "  **Done Criteria:**\n"
+            "  - [ ] two\n"
+        )
+        self.ideas_dir.mkdir(parents=True, exist_ok=True)
+        idea_path = self.ideas_dir / idea_id
+        idea_path.mkdir(parents=True)
+        (idea_path / "roadmap_draft.md").write_text(fresh_rm)
+        (idea_path / "roadmap_draft.done").write_text("")
+
+        self._write_session(idea_id, {
+            "messages": [],
+            "prd_content": "# PRD\n\n> \u2705 PRD CONVERSION-READY\n",
+            "roadmap_content": stale_rm,
+            "created": "2026-03-19T10:00:00Z",
+            "updated": "2026-03-19T10:00:00Z",
+        })
+
+        self._write_turn_files(
+            idea_id,
+            1,
+            "Assistant reply.",
+            "# PRD\n\n> \u2705 PRD CONVERSION-READY\n",
+        )
+
+        mock_resp = self._make_mock_response()
+        mock_session = self._make_mock_session(mock_resp)
+
+        with patch("ui.server.load_config", return_value=self._mock_config()):
+            with patch("ui.server.aiohttp.ClientSession", return_value=mock_session):
+                response = client.post(
+                    f"/api/ideas/{idea_id}/message",
+                    json={"content": "User note", "turn": 1},
+                )
+
+        assert response.status_code == 200, response.text
+        sess_path = self.ideas_dir / idea_id / "session.json"
+        with open(sess_path) as f:
+            session = json.load(f)
+
+        assert "`API-E2`" in session["roadmap_content"], session["roadmap_content"]
+        assert "Stale Roadmap" not in session["roadmap_content"]

@@ -315,6 +315,39 @@ class TestApiIdeasSession:
         saved = json.loads((idea_dir / "session.json").read_text())
         assert "## Phase A" in (saved.get("roadmap_content") or "")
 
+    def test_merge_roadmap_from_draft_when_session_has_stale_roadmap(self):
+        """Regenerate can leave roadmap_draft.md newer than session roadmap_content; GET session must sync."""
+        client = load_server()
+        idea_id = "rm-draft-stale-session"
+        idea_dir = self.ideas_dir / idea_id
+        idea_dir.mkdir(parents=True, exist_ok=True)
+        (idea_dir / "roadmap_draft.md").write_text("# Fresh Roadmap\n\n- [ ] `X-E1` | LOW | New phase.")
+        (idea_dir / "roadmap_draft.done").write_text("done")
+        self._write_session(
+            idea_id,
+            {
+                "name": "Proj",
+                "messages": [
+                    {"role": "user", "content": "Hi", "ts": "2026-05-06T10:00:00Z"},
+                    {"role": "assistant", "content": "Hello", "ts": "2026-05-06T10:00:01Z"},
+                ],
+                "prd_content": "# PRD\n\nBody",
+                "roadmap_content": "# Old Roadmap\n\nStale content.",
+                "created": "2026-05-06T10:00:00Z",
+                "updated": "2026-05-06T10:00:01Z",
+            },
+        )
+
+        with patch("ui.server.load_config", return_value=self._mock_config()):
+            response = client.get(f"/api/ideas/{idea_id}/session")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert "Fresh Roadmap" in (body.get("roadmap_content") or "")
+        assert "Stale content" not in (body.get("roadmap_content") or "")
+        saved = json.loads((idea_dir / "session.json").read_text())
+        assert "Fresh Roadmap" in (saved.get("roadmap_content") or "")
+
     def test_get_ideas_session_returns_no_store_cache_control_populated(self):
         """GET session must not be cached by intermediaries (PRD/chat can change independently)."""
         client = load_server()

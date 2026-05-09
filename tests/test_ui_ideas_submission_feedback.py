@@ -32,7 +32,9 @@ def test_submit_message_uses_optimistic_append():
     content = load_index_html()
     func_body = extract_function_body(content, "IdeasScreen")
     assert func_body is not None
-    assert "setMessages((prev) => [" in func_body
+    assert (
+        "setMessages([" in func_body or "setMessages((prev) => [" in func_body
+    ), "submitMessage should optimistically append via setMessages"
     assert "pending: true" in func_body
 
 

@@ -3315,8 +3315,39 @@ def _iso_from_mtime(path: Path) -> str:
     return datetime.utcfromtimestamp(path.stat().st_mtime).isoformat() + "Z"
 
 
+def _merge_session_roadmap_from_draft_files(idea_dir: Path, session_data: dict) -> tuple[dict, bool]:
+    """If ``roadmap_draft.done`` and ``roadmap_draft.md`` exist, copy disk into ``roadmap_content`` when it differs.
+
+    Used from GET session / list rehydration and from PRD message saves. Does **not** rebuild
+    messages from ``turns/*.md`` (full rehydration is separate).
+    """
+    if not isinstance(session_data, dict):
+        return session_data, False
+    session_data.setdefault("roadmap_content", "")
+    changed = False
+    roadmap_done_path = idea_dir / "roadmap_draft.done"
+    roadmap_path = idea_dir / "roadmap_draft.md"
+    if roadmap_done_path.exists() and roadmap_path.exists():
+        try:
+            disk_rm = roadmap_path.read_text()
+        except OSError:
+            disk_rm = None
+        if disk_rm is not None:
+            sess_rm = session_data.get("roadmap_content") or ""
+            if _normalize_doc_text_for_compare(disk_rm) != _normalize_doc_text_for_compare(sess_rm):
+                session_data["roadmap_content"] = disk_rm
+                changed = True
+    return session_data, changed
+
+
 def _rehydrate_session_from_artifacts(idea_dir: Path, session_data: dict) -> tuple[dict, bool]:
-    """Backfill empty session.json from turns/*.md and prd_draft.md if available."""
+    """Backfill session.json from turns/*.md, prd_draft.md, and roadmap drafts on disk.
+
+    When ``roadmap_draft.done`` exists alongside ``roadmap_draft.md``, the markdown file is the
+    converter's committed output. If its normalized text differs from ``roadmap_content`` (including
+    when session still holds an older roadmap after regenerate), replace session from disk so GET
+    session matches what OpenClaw wrote.
+    """
     if not isinstance(session_data, dict):
         session_data = _default_idea_session()
     else:
@@ -3329,15 +3360,12 @@ def _rehydrate_session_from_artifacts(idea_dir: Path, session_data: dict) -> tup
 
     has_messages = bool(session_data.get("messages"))
     has_prd = bool((session_data.get("prd_content") or "").strip())
-    has_roadmap = bool((session_data.get("roadmap_content") or "").strip())
     changed = False
 
-    if not has_roadmap:
-        roadmap_done_path = idea_dir / "roadmap_draft.done"
-        roadmap_path = idea_dir / "roadmap_draft.md"
-        if roadmap_done_path.exists() and roadmap_path.exists():
-            session_data["roadmap_content"] = roadmap_path.read_text()
-            changed = True
+    session_data, rm_changed = _merge_session_roadmap_from_draft_files(idea_dir, session_data)
+    changed = changed or rm_changed
+
+    roadmap_path = idea_dir / "roadmap_draft.md"
 
     if has_messages and has_prd:
         if changed:
@@ -3522,6 +3550,53 @@ def get_ideas_session(idea_id: str):
         _atomic_write_json_file(session_path, session_data)
     _enrich_assistant_messages_with_parsed(session_data)
     return JSONResponse(content=session_data, headers=no_store)
+
+
+def _idea_draft_sync_payload(idea_dir: Path) -> dict[str, Any]:
+    """Compare PRD vs roadmap draft mtimes for Continue-to-Setup staleness guard.
+
+    ``roadmap_behind_prd`` is True only when both ``prd_draft.md`` and ``roadmap_draft.md``
+    exist and the PRD file was modified strictly after the roadmap file (same-second ties
+    do not warn). Missing files yield False and null mtimes for the absent path.
+    """
+    prd_path = idea_dir / "prd_draft.md"
+    roadmap_path = idea_dir / "roadmap_draft.md"
+    prd_mtime: float | None = None
+    roadmap_mtime: float | None = None
+    try:
+        if prd_path.is_file():
+            prd_mtime = prd_path.stat().st_mtime
+    except OSError:
+        prd_mtime = None
+    try:
+        if roadmap_path.is_file():
+            roadmap_mtime = roadmap_path.stat().st_mtime
+    except OSError:
+        roadmap_mtime = None
+    behind = False
+    if prd_mtime is not None and roadmap_mtime is not None:
+        behind = prd_mtime > roadmap_mtime
+    return {
+        "roadmap_behind_prd": behind,
+        "prd_draft_mtime": prd_mtime,
+        "roadmap_draft_mtime": roadmap_mtime,
+    }
+
+
+@app.get("/api/ideas/{idea_id}/draft-sync-status")
+def get_ideas_draft_sync_status(idea_id: str):
+    """Return PRD vs roadmap draft modification times for staleness detection.
+
+    Used before Continue to Setup to warn when the saved PRD is newer than the saved roadmap.
+    Returns 404 when the idea directory does not exist.
+    """
+    config = load_config()
+    ideas_dir = Path(config.get("ideas_dir") or "")
+    idea_dir = ideas_dir / idea_id
+    if not idea_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Idea not found")
+    payload = _idea_draft_sync_payload(idea_dir)
+    return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
 
 
 def _build_ideas_sent_context(
@@ -3768,6 +3843,10 @@ async def post_ideas_message(idea_id: str, request: Request):
     pre_session: dict = {}
     if session_path_pre.exists():
         pre_session = _read_json_file(str(session_path_pre)) or {}
+    # Merge roadmap_draft.md into roadmap_content when sentinel-backed disk differs (same as GET
+    # session). Without this, pre-save/final-save paths persist stale roadmap_content after a
+    # regenerate wrote only the files on disk (common before another PRD turn).
+    pre_session, _ = _merge_session_roadmap_from_draft_files(idea_dir, pre_session)
 
     # Inject unsubmitted annotations into message context
     pending_annotation_ids: list[str] = []
@@ -4014,6 +4093,8 @@ async def post_ideas_message(idea_id: str, request: Request):
             )
             if first_user.strip():
                 session_data["name"] = first_user.strip()[:40].title()
+
+    session_data, _ = _merge_session_roadmap_from_draft_files(idea_dir, session_data)
 
     _atomic_write_json_file(str(session_path), session_data)
 
@@ -4635,8 +4716,11 @@ async def post_ideas_convert(idea_id: str):
         if resp.status >= 400:
             raise HTTPException(status_code=502, detail=f"Webhook returned {resp.status}")
 
-    # Poll for roadmap_draft.done
     done_path = idea_dir / "roadmap_draft.done"
+    # Remove stale sentinel so polling loop doesn't find an old one (same as format-correction).
+    done_path.unlink(missing_ok=True)
+
+    # Poll for roadmap_draft.done
     deadline = datetime.utcnow().timestamp() + CONVERT_TIMEOUT
 
     while datetime.utcnow().timestamp() < deadline:
@@ -4734,6 +4818,7 @@ async def _notify_prd_agent(idea_id: str, config: dict, report_content: str, che
         # Pre-save user message + pending assistant placeholder BEFORE webhook
         now = datetime.utcnow().isoformat() + "Z"
         pre_save = _read_json_file(str(session_path)) or {}
+        pre_save, _ = _merge_session_roadmap_from_draft_files(idea_dir, pre_save)
         pre_save.setdefault("messages", [])
         pre_save["messages"] = list(pre_save["messages"]) + [
             {
@@ -4843,6 +4928,7 @@ async def _notify_prd_agent(idea_id: str, config: dict, report_content: str, che
                 "parsed": parsed,
             })
         current_session["updated"] = datetime.utcnow().isoformat() + "Z"
+        current_session, _ = _merge_session_roadmap_from_draft_files(idea_dir, current_session)
         _atomic_write_json_file(session_path, current_session)
 
     except Exception as exc:

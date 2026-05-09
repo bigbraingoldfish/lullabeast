@@ -10,6 +10,8 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ### Added
 
+- **Ideas PRD vs roadmap staleness guard:** `GET /api/ideas/{id}/draft-sync-status` returns `roadmap_behind_prd` plus draft file mtimes. Project Ideas **Continue to Setup →** calls it first; when the saved PRD file is newer than the saved roadmap draft, a modal suggests regenerating (with **Continue anyway** persisting a per-mtime **sessionStorage** dismiss under `autodev:roadmapBehindPrdDismissed:<ideaId>`).
+
 - **Stall-timeout env discovery:** `.env.example` includes a commented **Tier A stall timeouts** section (`AUTODEV_STALL_TIMEOUT_*`; no live values). After merging canonical keys, `install.sh` calls `ensure_dotenv_stall_timeout_hints()` so existing `.env` files gain the same commented block once (marker line prevents duplicates). SETUP.md cross-links the behavior.
 
 - **Ideas UI poll env discovery:** `.env.example` includes commented **`AUTODEV_IDEAS_IDLE_THRESHOLD`** and **`AUTODEV_IDEAS_STARTUP_GRACE`** (defaults 120 s / 30 s). `install.sh` calls `ensure_dotenv_ideas_idle_hints()` with the same idempotent marker pattern as stall timeouts.
@@ -23,6 +25,14 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
   - Plugin tests: `autodev/plugin/tests/agent-end.test.ts`, `autodev/plugin/tests/before-finalize.test.ts`, `autodev/plugin/tests/stall-detector.test.ts` (46 tests total, node:test with tsx).
 
 - **Heartbeat cron is now a silent self-healer:** `autodev/pipeline/heartbeat_cron.py` no longer sends any Signal notifications. The model-query path (`query_heartbeat_model`, `HEARTBEAT_SYSTEM_PROMPT`, `send_signal_notification`) has been removed entirely. All recovery decisions are now fully deterministic: idle/terminal states (IDLE, PIPELINE_COMPLETE, STOPPED, QUEUE_HALTED, HALTED_SILENT, BLOCKED, WAITING_FOR_HUMAN) cause a log-and-exit with no action; only stale RUNNING/WAITING_FOR_SENTINEL (> 15 min with lock free) triggers an automatic orchestrator restart. The escalation agent remains the sole owner of all human-facing notifications. `requests` import removed.
+
+### Fixed
+
+- **`GET /api/ideas/{id}/session` stale roadmap:** when `roadmap_draft.done` exists and `roadmap_draft.md` differs from `session.json` `roadmap_content` (regenerate wrote disk but session was not updated), rehydration now replaces session from disk so the Ideas Roadmap tab matches the converter output.
+
+- **`POST /api/ideas/{id}/message` stale roadmap:** loading session for a PRD turn now runs the same roadmap draft merge before pre-save and again before the final write, so sending chat after a regenerate no longer persists outdated `roadmap_content` when only `roadmap_draft.md` was updated.
+
+- **`POST /api/ideas/{id}/convert` stale sentinel:** removes pre-existing `roadmap_draft.done` after the webhook POST and before polling (same behavior as `fix-roadmap-format`), so **Regenerate Roadmap** no longer returns immediately with the previous `roadmap_draft.md` while the new converter run is still in flight.
 
 ### Changed
 
