@@ -74,3 +74,18 @@ def test_low_readiness_guard_predicate():
     body = _ideas_body()
     assert 'readinessStatus === "ready"' in body
     assert "readinessData.score < 8" in body
+
+
+def test_roadmap_behind_prd_modal_testid():
+    assert 'data-testid="ideas-roadmap-behind-prd-modal"' in _ideas_body()
+
+
+def test_draft_sync_status_endpoint_wired():
+    body = _ideas_body()
+    assert "/draft-sync-status" in body
+
+
+def test_roadmap_behind_prd_session_storage_constant_documented():
+    """HTML comment anchors sessionStorage key prefix for dismiss persistence (grep regression)."""
+    html = load_html()
+    assert "autodev:roadmapBehindPrdDismissed" in html

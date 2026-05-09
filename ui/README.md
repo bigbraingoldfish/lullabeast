@@ -19,6 +19,8 @@ FastAPI server (`server.py`) and a single-file React app (`index.html`) for the 
 - **Markdown rendering parity**: conversation assistant bubbles and PRD document pane both use `marked.parse()` + `dangerouslySetInnerHTML` with shared `.msg-md` styling (headers, lists, tables, code blocks).
 - **Submission feedback**: user messages are appended optimistically (input clears immediately), and the UI shows explicit in-progress indicators while the backend/agent turn is running: pending assistant bubble + processing banner + PRD buffering state.
 - **Readiness**: status model is `unavailable` / `updating` / `ready`. `POST /api/ideas/{id}/message` triggers readiness (`ideas:{id}:readiness`) and `/api/ideas/{id}/readiness` reports state based on sentinel + active/recent job window (180s). UI polls `/readiness/poll` every 3s while `updating`, stops after 120s with neutral timeout text, and logs structured `[READINESS]` lifecycle lines to `/tmp/ui-server.log`. When `status` is `ready`, the document strip labels the score **PRD readiness:** … **/ 10** and maps `data.conversion_confidence` to the label **Roadmap confidence:** (the JSON field name is unchanged).
+- **PRD vs roadmap drafts:** `GET /api/ideas/{id}/draft-sync-status` compares `ideas/{id}/prd_draft.md` and `roadmap_draft.md` mtimes. **Continue to Setup →** runs this check first; if the PRD file is strictly newer, a modal (`data-testid="ideas-roadmap-behind-prd-modal"`) offers **Regenerate roadmap** or **Continue anyway**. **Continue anyway** writes `{prd_mtime, roadmap_mtime}` to `sessionStorage` under `autodev:roadmapBehindPrdDismissed:<ideaId>` so the same stale pair does not re-prompt until files change.
+- **Roadmap convert / regenerate:** `POST /api/ideas/{id}/convert` deletes any existing `roadmap_draft.done` after the webhook POST and before polling (same invariant as `POST /api/ideas/{id}/fix-roadmap-format`), so a leftover sentinel cannot fake completion while `roadmap_draft.md` is still from an older run.
 
 ### Setup (Preflight)
 
@@ -43,6 +45,7 @@ FastAPI server (`server.py`) and a single-file React app (`index.html`) for the 
 
 ### Release / verification
 
+- Before merging a change that touches Project Ideas convert/regenerate or the PRD-vs-roadmap modal, run automated tests plus **Phase 6 ATDD** from the PR plan (or equivalent): **cursor-ide-browser** MCP against a live UI + OpenClaw hooks, **Generating…** cleared via `browser_wait_for(textGone=…)` with ≥120s timeout (≥300s on slow hardware), then assert `ideas-roadmap-generated-modal` and (when PRD mtime > roadmap mtime on disk) `ideas-roadmap-behind-prd-modal`. Do not treat POST success alone as proof without UI evidence.
 - Before merging a change that touches setup or the pipeline monitor, run the full test suite and manually exercise Launch, preflight (including multi-roadmap confirm), and the switch-project modal in a browser (backend tests alone may miss UI regressions).
 - **Queue vs monitor consistency (browser):** After seeding or reordering queue rows, wait **2–5 s** after navigation or POST (`browser_wait_for` / sleep) before asserting pills; compare `GET /api/queue` with `GET /api/state` `project_path` if the UI looks split-brain.
 
@@ -79,6 +82,12 @@ From repo root: `pytest tests/ -q`
 ### Session self-heal behavior
 
 If an idea has turn artifacts (`turns/*.md`, `turns/1.done`, `prd_draft.md`) but `session.json` is stale/empty, the backend now rebuilds conversation/PRD payloads on read (`GET /api/ideas/{id}/session` and listing path). This prevents "named idea appears in list but opens blank" regressions after interrupted writes.
+
+When `roadmap_draft.done` exists alongside `roadmap_draft.md`, the same read path compares normalized disk text to `session.json` `roadmap_content`; if they differ (e.g. regenerate wrote the file but did not persist session), `roadmap_content` is replaced from disk so the Ideas Roadmap tab matches the converter output.
+
+The Ideas **PRD message** handler applies that merge when loading session for a turn and before saving after the agent completes, so a chat turn cannot overwrite disk-backed roadmap updates with stale JSON.
+
+Same-session alignment/adversarial notifications merge roadmap drafts before writes as well.
 
 ### Setup: validate-repo-path UI bug (fixed)
 

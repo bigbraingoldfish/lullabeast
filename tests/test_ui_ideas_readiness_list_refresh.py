@@ -40,16 +40,16 @@ def test_convert_timeout_late_heals_roadmap_from_session():
     """If conversion times out but writes later, the active Roadmap tab should self-heal."""
     html = load_index_html()
     assert re.search(
-        r"status\s*===\s*408[\s\S]{0,600}?"
-        r"startRoadmapLateHealPoll\s*\(\s*healIdeaId\s*\)",
+        r"msg\.includes\(\"408\"[\s\S]{0,900}?"
+        r"startRoadmapRecoverPoll\s*\(\s*ideaId\s*\)",
         html,
-    ), "Expected convert 408 path to start roadmap late-heal polling"
+    ), "Expected convert timeout path to start roadmap recover polling"
     assert re.search(
-        r"startRoadmapLateHealPoll[\s\S]{0,2200}?"
-        r"fetch\s*\(\s*`/api/ideas/\$\{healIdeaId\}/session`[\s\S]{0,1200}?"
+        r"startRoadmapRecoverPoll[\s\S]{0,2200}?"
+        r"fetch\s*\(\s*`/api/ideas/\$\{ideaId\}/session`[\s\S]{0,1200}?"
         r"setRoadmapContent\s*\(\s*d\.roadmap_content\s*\|\|\s*\"\"\s*\)",
         html,
     ), (
-        "Expected roadmap late-heal poll to call GET /api/ideas/{id}/session "
+        "Expected roadmap recover poll to call GET /api/ideas/{id}/session "
         "and update roadmapContent when roadmap_draft.done is backfilled"
     )

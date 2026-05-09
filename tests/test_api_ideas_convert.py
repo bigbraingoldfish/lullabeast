@@ -149,3 +149,36 @@ class TestApiIdeasConvert:
         assert r.status_code == 200
         session = json.loads((idea_dir / "session.json").read_text())
         assert session.get("roadmap_content") == roadmap_text
+
+    def test_convert_removes_stale_done_before_poll(self):
+        """Pre-existing roadmap_draft.done must not satisfy the poll before a new run writes it.
+
+        Regression: without unlinking the sentinel after webhook POST, the handler would return
+        immediately with stale roadmap_draft.md content.
+        """
+        client = load_server()
+        idea_dir = self._write_session("6", prd_content="## Problem Statement\nContent.")
+        old_text = "# OLD ROADMAP\n\nstale"
+        new_text = "# NEW ROADMAP\n\n- [ ] `CORE-E1` | LOW | Fresh phase"
+        (idea_dir / "roadmap_draft.md").write_text(old_text)
+        (idea_dir / "roadmap_draft.done").write_text("")
+        mock_cls, _ = self._make_mock_aiohttp()
+
+        def write_fresh_sentinel(*args, **kwargs):
+            (idea_dir / "roadmap_draft.md").write_text(new_text)
+            (idea_dir / "roadmap_draft.done").write_text("")
+
+        with patch("ui.server.load_config", return_value=self._mock_config()), \
+             patch("ui.server.aiohttp.ClientSession", mock_cls), \
+             patch("ui.server._inject_converter_skill"), \
+             patch("ui.server.CONVERT_POLL_INTERVAL", 0.05), \
+             patch("ui.server.CONVERT_TIMEOUT", 5), \
+             patch("ui.server.asyncio.sleep", side_effect=write_fresh_sentinel):
+            r = client.post("/api/ideas/6/convert")
+
+        assert r.status_code == 200
+        body = r.json()
+        assert new_text in body.get("roadmap_content", "")
+        assert old_text not in body.get("roadmap_content", "")
+        session = json.loads((idea_dir / "session.json").read_text())
+        assert session.get("roadmap_content") == new_text
