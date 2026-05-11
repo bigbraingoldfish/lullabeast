@@ -10,15 +10,18 @@ silently diverge them, causing the executor to write sentinels to a different
 directory than the orchestrator polls.
 
 Fix: add _verify_symlinks_consistent(project_path) and call it immediately
-before the executor and reviewer webhook invocations.
+before the executor and reviewer webhook invocations. When a symlink_fixer is
+passed (self.update_symlink), divergence triggers auto-reconcile to project_path.
 
 Fix-ID: symlink-consistency-guard (A)
 """
 
 import ast
 import os
+import subprocess
 import sys
 import tempfile
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -199,26 +202,126 @@ def test_verify_returns_false_when_autodev_symlink_diverges(tmp_path, capsys):
     )
 
 
-def test_verify_does_not_call_update_symlink(tmp_path):
-    """_verify_symlinks_consistent must be read-only — it must not fix divergence."""
-    _, source = _parse_orchestrator()
+def test_verify_does_not_call_fixer_when_already_consistent(tmp_path):
+    """When symlinks already match project_path, fixer must not run."""
+    import orchestrator
 
-    # Find the function body in AST
-    tree = ast.parse(source)
-    fn_body_calls = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "_verify_symlinks_consistent":
-            for child in ast.walk(node):
-                if isinstance(child, ast.Call):
-                    f = child.func
-                    name = (
-                        f.id if isinstance(f, ast.Name)
-                        else (f.attr if isinstance(f, ast.Attribute) else "")
-                    )
-                    fn_body_calls.append(name)
+    project = tmp_path / "myproject"
+    project.mkdir()
+    sl_autodev = tmp_path / "pipeline-project-autodev"
+    sl_autodev.symlink_to(project)
+    oc_dir = tmp_path / ".openclaw"
+    oc_dir.mkdir()
+    (oc_dir / "pipeline-project").symlink_to(project)
 
-    assert "update_symlink" not in fn_body_calls, (
-        "_verify_symlinks_consistent must not call update_symlink — it is a "
-        "read-only diagnostic guard. Callers are responsible for keeping symlinks "
-        f"in sync. Calls found: {fn_body_calls}"
-    )
+    fixer = MagicMock(return_value=True)
+    original_st = orchestrator.SYMLINK_TARGET
+    original_oc = orchestrator.OPENCLAW_ROOT
+    try:
+        orchestrator.SYMLINK_TARGET = str(sl_autodev)
+        orchestrator.OPENCLAW_ROOT = str(oc_dir)
+        result = orchestrator._verify_symlinks_consistent(str(project), fixer)
+    finally:
+        orchestrator.SYMLINK_TARGET = original_st
+        orchestrator.OPENCLAW_ROOT = original_oc
+
+    assert result is True
+    fixer.assert_not_called()
+
+
+def test_verify_reconciles_and_returns_true_when_fixer_succeeds(tmp_path, capsys):
+    """Spy fixer repairs symlinks; verify passes normalized path and returns True."""
+    import orchestrator
+
+    project = tmp_path / "myproject"
+    project.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+
+    sl_autodev = tmp_path / "pipeline-project-autodev"
+    sl_autodev.symlink_to(other)
+    oc_dir = tmp_path / ".openclaw"
+    oc_dir.mkdir()
+    (oc_dir / "pipeline-project").symlink_to(project)
+
+    expected_target = os.path.abspath(str(project))
+    called_with: list[str] = []
+
+    def spy_fixer(p: str) -> bool:
+        called_with.append(p)
+        subprocess.run(["ln", "-sfn", str(project), str(sl_autodev)], check=True)
+        subprocess.run(["ln", "-sfn", str(project), str(oc_dir / "pipeline-project")], check=True)
+        return True
+
+    original_st = orchestrator.SYMLINK_TARGET
+    original_oc = orchestrator.OPENCLAW_ROOT
+    try:
+        orchestrator.SYMLINK_TARGET = str(sl_autodev)
+        orchestrator.OPENCLAW_ROOT = str(oc_dir)
+        result = orchestrator._verify_symlinks_consistent(str(project), spy_fixer)
+    finally:
+        orchestrator.SYMLINK_TARGET = original_st
+        orchestrator.OPENCLAW_ROOT = original_oc
+
+    assert result is True
+    assert called_with == [expected_target]
+    assert os.path.realpath(sl_autodev) == expected_target
+    assert os.path.realpath(oc_dir / "pipeline-project") == expected_target
+    out = capsys.readouterr().out
+    assert "[RECONCILE]" in out
+
+
+def test_verify_returns_false_when_fixer_returns_false(tmp_path, capsys):
+    """When fixer returns False, verify returns False and logs [ERROR]."""
+    import orchestrator
+
+    project = tmp_path / "myproject"
+    project.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+
+    sl_autodev = tmp_path / "pipeline-project-autodev"
+    sl_autodev.symlink_to(other)
+    oc_dir = tmp_path / ".openclaw"
+    oc_dir.mkdir()
+    (oc_dir / "pipeline-project").symlink_to(project)
+
+    original_st = orchestrator.SYMLINK_TARGET
+    original_oc = orchestrator.OPENCLAW_ROOT
+    try:
+        orchestrator.SYMLINK_TARGET = str(sl_autodev)
+        orchestrator.OPENCLAW_ROOT = str(oc_dir)
+        result = orchestrator._verify_symlinks_consistent(
+            str(project), lambda _p: False
+        )
+    finally:
+        orchestrator.SYMLINK_TARGET = original_st
+        orchestrator.OPENCLAW_ROOT = original_oc
+
+    assert result is False
+    captured = capsys.readouterr()
+    assert "[ERROR]" in captured.out or "[ERROR]" in captured.err
+
+
+def test_verify_returns_false_when_project_path_empty(capsys):
+    """Empty project_path must not invoke fixer."""
+    import orchestrator
+
+    fixer = MagicMock(return_value=True)
+    result = orchestrator._verify_symlinks_consistent("", fixer)
+    assert result is False
+    fixer.assert_not_called()
+    captured = capsys.readouterr()
+    assert "[WARN]" in captured.out or "[WARN]" in captured.err
+
+
+def test_verify_returns_false_when_project_path_whitespace_only(capsys):
+    """Whitespace-only project_path must not invoke fixer."""
+    import orchestrator
+
+    fixer = MagicMock(return_value=True)
+    result = orchestrator._verify_symlinks_consistent("   ", fixer)
+    assert result is False
+    fixer.assert_not_called()
+    captured = capsys.readouterr()
+    assert "[WARN]" in captured.out or "[WARN]" in captured.err
