@@ -315,15 +315,15 @@ _INSTALL_SH = _REPO_ROOT / "install.sh"
 
 def _install_sh_step6_section() -> str:
     text = _INSTALL_SH.read_text(encoding="utf-8")
-    start = text.index("6/13  AGENT WORKSPACE PROVISIONING")
-    end = text.index("7/13  EXEC-APPROVALS VALIDATION")
+    start = text.index("6/14  AGENT WORKSPACE PROVISIONING")
+    end = text.index("7/14  EXEC-APPROVALS VALIDATION")
     return text[start:end]
 
 
 def _install_sh_step9_section() -> str:
     text = _INSTALL_SH.read_text(encoding="utf-8")
-    start = text.index("9/13  REGISTER AUTODEV AGENTS")
-    end = text.index("10/13  CONVERSION PROMPT")
+    start = text.index("9/14  REGISTER AUTODEV AGENTS")
+    end = text.index("10/14  CONVERSION PROMPT")
     return text[start:end]
 
 
@@ -371,15 +371,15 @@ class TestStep6WorkspacePipelineSymlinks:
     def test_step6_symlink_helper_before_step7(self):
         text = _INSTALL_SH.read_text(encoding="utf-8")
         assert text.index("ensure_workspace_pipeline_project_symlinks()") < text.index(
-            "7/13  EXEC-APPROVALS VALIDATION"
+            "7/14  EXEC-APPROVALS VALIDATION"
         )
 
 
 def test_step3_respects_autodev_repo_path_from_environment():
     """install.sh must not overwrite AUTODEV_REPO_PATH when already exported."""
     text = _INSTALL_SH.read_text(encoding="utf-8")
-    start = text.index("3/13  PYTHON DEPENDENCIES")
-    end = text.index("4/13  OPENCLAW DETECTION")
+    start = text.index("3/14  PYTHON DEPENDENCIES")
+    end = text.index("4/14  OPENCLAW DETECTION")
     step3 = text[start:end]
     assert "AUTODEV_REPO_PATH:-}" in step3
     assert "Using AUTODEV_REPO_PATH from environment" in step3

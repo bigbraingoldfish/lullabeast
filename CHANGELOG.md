@@ -36,6 +36,10 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ### Changed
 
+- **Project Ideas:** **Generate Roadmap** / **Regenerate Roadmap** stay disabled while a chat reply is in progress (same `isLoading` path as **Send**), with a short inline hint so operators know conversion waits for the latest PRD. `doConvert`, `beginConvertAfterGuards`, and `_runConvert` guard against starting conversion during that window (including low-readiness and regenerate confirm paths).
+
+- **Tests:** `test_installer_register_agent.py` section markers updated to match **`install.sh`** comment headers (`3/14` … `10/14`, `6/14` … `7/14`).
+
 - **Ideas UI poll (`readiness/poll` completion):** after the background readiness job finishes and the client loads ``GET /api/ideas/{id}/readiness``, the UI calls ``refreshIdeas()`` so the sidebar **X/10** badge matches the PRD readiness strip without switching ideas.
 
 - **Ideas roadmap generation timeout recovery:** if ``POST /api/ideas/{id}/convert`` times out but the converter writes ``roadmap_draft.md`` shortly after, the active Roadmap tab now polls ``GET /api/ideas/{id}/session`` and fills ``roadmapContent`` without requiring operators to click away and back.
