@@ -319,6 +319,8 @@ A healthy response contains a JSON object with `pipeline_status`, `current_agent
 
 **First load.** When `pipeline_status` is idle or unknown and no queue row shows a busy live pipeline, the dashboard opens **Project Ideas** by default. Use **Setup & Preflight** to select the repository path, run preflight, and launch. **Pipeline Monitor** is where you watch an active or resumed run.
 
+While Project Ideas is waiting on an assistant reply after you send a chat message, **Generate Roadmap** and **Regenerate Roadmap** stay disabled until that reply finishes, so roadmap conversion uses the PRD returned with that response (not a stale snapshot).
+
 Before opening Project Ideas for the first time, run the POST `/hooks/agent` check in **New User Webhook Checklist** so token mismatches are caught early.
 
 To run as a background service, see `ui/autodev-ui.service` (Linux/WSL2 systemd unit) or `ui/com.autodev.ui.plist` (macOS LaunchAgent). The install script prints OS-specific next steps after setup completes.

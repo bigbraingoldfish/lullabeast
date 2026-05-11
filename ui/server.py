@@ -45,8 +45,9 @@ from sentinel_poller import (  # noqa: E402
 
 ORCHESTRATOR_FILENAME = "orchestrator.py"
 WEBHOOK_AGENT_ID = "prd-creator"
-_ATTACHMENT_MAX_BYTES = 10_000_000  # 10 MB ceiling (generous for base64 overhead from a 5 MB image)
 ROADMAP_CONVERTER_AGENT_ID = "roadmap-converter"
+# ORCHESTRATOR_POLL_TIMEOUT: spawn/orchestrator wait (separate from ideas POLL_TIMEOUT below).
+ORCHESTRATOR_POLL_TIMEOUT = 120
 # Stdout/stderr from UI-spawned orchestrator (`_spawn_orchestrator`); tail surfaced on /api/state when down mid-flight (B-04).
 ORCHESTRATOR_SPAWN_LOG_PATH = "/tmp/orchestrator.log"
 
@@ -471,7 +472,7 @@ DEFAULTS = {
     "autodev_pipeline_root": "",
     "roadmap_converter_workspace": "~/.openclaw/workspace-roadmap-converter",
     "pipeline_queue_path": "",
-    "poll_timeout": 600,
+    "poll_timeout": 180,
     "poll_interval": 2,
     "ideas_idle_threshold": 120,  # seconds of JSONL silence before declaring agent idle
     "ideas_startup_grace": 30,    # seconds to wait for OpenClaw to register the session
@@ -509,9 +510,10 @@ def _finalize_autodev_config_paths(config: dict, user_override_keys: set[str]) -
       2. Environment variable ``AUTODEV_PIPELINE_ROOT``.
       3. ``<repo>/.autodev`` default.
 
-    ``ideas_dir`` defaults to ``{openclaw_root}/ideas`` (prd-creator contract) when not set in
-    JSON. Other legacy env/config switches do not affect pipeline root; use
-    ``AUTODEV_PIPELINE_ROOT`` when pipeline state should live next to OpenClaw.
+    Legacy aliases (``autodev_runtime_root`` JSON key, ``AUTODEV_RUNTIME_ROOT``
+    env var, ``AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME`` switch) are ignored —
+    operators who need pipeline state to live next to OpenClaw set
+    ``AUTODEV_PIPELINE_ROOT`` to the OpenClaw root explicitly.
 
     Keys in ``user_override_keys`` (from ui/config.json via ``_user_override_keys``) are never
     overwritten. Empty-string file values are excluded from that set so placeholders match defaults.
@@ -534,25 +536,20 @@ def _finalize_autodev_config_paths(config: dict, user_override_keys: set[str]) -
         runtime_base = resolve_pipeline_root(repo)
 
     config["autodev_pipeline_root"] = runtime_base
+    # Drop any legacy alias key that may have crept in from older config files.
     config.pop("autodev_runtime_root", None)
-
-    # Ideas output matches prd-creator (OPENCLAW_ROOT/ideas), not the pipeline state dir.
-    oc_hub = os.path.expanduser(str(oc))
-    ideas_default = os.path.join(oc_hub, "ideas")
 
     derived = {
         "pipeline_state_path": os.path.join(runtime_base, "pipeline_state.json"),
         "lock_path": os.path.join(runtime_base, "pipeline.lock"),
         "pipeline_queue_path": os.path.join(runtime_base, "pipeline_queue.json"),
         "events_path": os.path.join(runtime_base, "pipeline_events.jsonl"),
+        "ideas_dir": os.path.join(runtime_base, "ideas"),
         "project_dir_path": os.path.join(runtime_base, "pipeline-project"),
     }
     for key, val in derived.items():
         if key not in user_override_keys:
             config[key] = val
-
-    if "ideas_dir" not in user_override_keys:
-        config["ideas_dir"] = ideas_default
 
     pd = config.get("project_dir_path", "")
     if "phase_state_path" not in user_override_keys:
@@ -603,20 +600,6 @@ def load_config(config_path=None):
     _hooks_env = os.environ.get("AUTODEV_HOOKS_TOKEN", "").strip()
     if _hooks_env:
         config["hooks_token"] = _hooks_env
-
-    # Ideas idle knobs: env wins over file (same pattern as hooks_token)
-    _ideas_idle_env = os.environ.get("AUTODEV_IDEAS_IDLE_THRESHOLD", "").strip()
-    if _ideas_idle_env:
-        try:
-            config["ideas_idle_threshold"] = float(_ideas_idle_env)
-        except ValueError:
-            pass
-    _ideas_grace_env = os.environ.get("AUTODEV_IDEAS_STARTUP_GRACE", "").strip()
-    if _ideas_grace_env:
-        try:
-            config["ideas_startup_grace"] = float(_ideas_grace_env)
-        except ValueError:
-            pass
 
     # Expand ~ on all string values (skip port which is int)
     for key, value in list(config.items()):
@@ -1485,15 +1468,16 @@ def _validate_queue_entry_ids_order(entries, entry_ids):
 def _spawn_orchestrator(project_path: str, config: dict | None = None) -> dict:
     """Start orchestrator.py with --project-path. Returns {"ok": bool, "error": str|None}.
 
-    Env construction rules:
+    Env construction rules (canonical names only — no legacy aliases):
       * ``OPENCLAW_ROOT`` is always set from ``config["openclaw_root"]``.
       * ``AUTODEV_PIPELINE_ROOT`` is only written when the UI config supplies a
         non-empty value. If the config is blank we **preserve** whatever the
         parent env exported — writing ``""`` over a real value was the original
         bug.
-      * ``AUTODEV_ROOT`` and ``AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME`` are never
-        emitted; stale values from the parent env are scrubbed so they cannot
-        affect the child process.
+      * Legacy aliases (``AUTODEV_ROOT``, ``AUTODEV_RUNTIME_ROOT``,
+        ``AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME``) are never emitted. Stale values
+        carried over from the parent env are also scrubbed so downstream readers
+        cannot accidentally resurrect the old layout.
     """
     import subprocess
     import sys
@@ -1519,6 +1503,7 @@ def _spawn_orchestrator(project_path: str, config: dict | None = None) -> dict:
     # they were inherited from the parent env (e.g. a stale operator shell).
     for legacy in (
         "AUTODEV_ROOT",
+        "AUTODEV_RUNTIME_ROOT",
         "AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME",
     ):
         env.pop(legacy, None)
@@ -3037,35 +3022,10 @@ def get_metrics_global():
     }
 
 
-POLL_TIMEOUT = 600  # seconds; Ideas + long agent turns (patchable in tests)
+POLL_TIMEOUT = 180  # seconds; patchable in tests
 POLL_INTERVAL = 2   # seconds between sentinel checks
 
-# ``.done`` mtime can trail ``time.time()`` (attempt wall clock) by 1–2s on coarse
-# filesystems or in the race where ``idle``/timeout fires in the same tick the tool
-# writes the sentinel. Used by late-done acceptance and session reconcile.
-IDEAS_LATE_DONE_MTIME_SLACK_SEC = 3.0
-
-IDEAS_WEBHOOK_POST_TIMEOUT = aiohttp.ClientTimeout(total=120)
-
-
-def _rollback_last_turn_pair(session_path: os.PathLike | str) -> None:
-    """Remove the trailing user + pending-assistant pair from session.json (atomic write).
-
-    Used when the Ideas webhook fails with 502/503 before the agent run is confirmed:
-    the pre-saved turn should not remain in persisted history.
-    """
-    sp = os.fspath(session_path)
-    data = _read_json_file(sp) or {}
-    msgs = list(data.get("messages", []))
-    if not msgs:
-        return
-    last = msgs[-1]
-    if last.get("role") == "assistant" and last.get("pending"):
-        msgs.pop()
-        if msgs and msgs[-1].get("role") == "user":
-            msgs.pop()
-    data["messages"] = msgs
-    _atomic_write_json_file(sp, data)
+IDEAS_WEBHOOK_POST_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
 
 def _mark_last_pending_assistant_error(session_path: os.PathLike | str, error_message: str) -> None:
@@ -3102,6 +3062,65 @@ async def _post_agent_webhook(hooks_url: str, hooks_token: str, webhook_payload:
         )
 
 
+def _resolve_prd_creator_jsonl(session_key: str, openclaw_root: str) -> str | None:
+    """Resolve the JSONL file path for a prd-creator session.
+
+    Reads {openclaw_root}/agents/prd-creator/sessions/sessions.json, looks up
+    ``agent:prd-creator:{session_key}``, and returns the full path to the
+    corresponding .jsonl file.  Returns None on any error or missing entry.
+    """
+    sessions_json = os.path.join(
+        os.path.expanduser(openclaw_root),
+        "agents", "prd-creator", "sessions", "sessions.json",
+    )
+    try:
+        with open(sessions_json) as f:
+            sessions = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    full_key = f"agent:prd-creator:{session_key}"
+    entry = sessions.get(full_key)
+    if not entry:
+        return None
+
+    session_id = entry.get("sessionId")
+    if not session_id:
+        return None
+
+    return os.path.join(
+        os.path.expanduser(openclaw_root),
+        "agents", "prd-creator", "sessions", f"{session_id}.jsonl",
+    )
+
+
+def _idea_workspace_activity_mtime(idea_dir: Path) -> float | None:
+    """Latest mtime among PRD agent artifacts under an idea directory.
+
+    Watches ``prd_draft.md`` and ``turns/*.md`` only (not ``session.json``), so server
+    writes to session.json do not mask agent idle. Used with Ideas polling when JSONL
+    is quiet but the agent is still writing files.
+    """
+    best: float | None = None
+    prd = idea_dir / "prd_draft.md"
+    if prd.is_file():
+        try:
+            best = os.path.getmtime(prd)
+        except OSError:
+            pass
+    turns = idea_dir / "turns"
+    if turns.is_dir():
+        for p in turns.glob("*.md"):
+            if not p.is_file():
+                continue
+            try:
+                m = os.path.getmtime(p)
+                best = m if best is None else max(best, m)
+            except OSError:
+                pass
+    return best
+
+
 def _ideas_turn_output_contract_footer(idea_id: str, turn_n: int) -> str:
     """Short per-turn reminder appended to Ideas conversational webhook bodies."""
     return (
@@ -3112,96 +3131,73 @@ def _ideas_turn_output_contract_footer(idea_id: str, turn_n: int) -> str:
     )
 
 
-def _ideas_sentinel_poll_failure_detail(
-    reason: str, poll_timeout: float, idle_threshold: float
-) -> str:
-    """Human-readable 408 body for failed sentinel polls."""
-    if reason == "idle":
-        return (
-            f"No model or tool activity for {int(idle_threshold)}s — output may have stalled."
-        )
-    if reason == "no_session":
-        return (
-            "Agent session did not start within startup grace — no activity stamp from "
-            "the OpenClaw plugin. Check the gateway and that autodev-pipeline-signals is installed."
-        )
-    return (
-        f"No sentinel after {int(poll_timeout)}s — the model may be slow or the agent stalled."
-    )
-
-
 async def _poll_sentinel_with_idle_detect(
-    done_path: Path,
-    activity_stamp_path: Path,
+    done_path,
+    session_key: str,
+    openclaw_root: str,
     poll_timeout: float,
     poll_interval: float,
     idle_threshold: float,
     startup_grace: float,
-    use_stamp_idle: bool = True,
-) -> tuple[bool, str]:
-    """Poll for ``turns/{n}.done`` using ``prd_creator_activity.stamp`` mtime.
+    idea_watch_dir: Path | None = None,
+) -> bool:
+    """Poll for a sentinel file with JSONL-based idle detection.
 
-    The autodev-pipeline-signals OpenClaw plugin touches ``prd_creator_activity.stamp``
-    on each ``model_call_started``, ``model_call_ended``, and ``after_tool_call`` for
-    ``prd-creator`` sessions whose keys start with ``ideas:``.  This replaces JSONL
-    mtime and idea-directory scans, which falsely idled when the model thought without
-    streaming JSONL ticks.  Activity is tracked via ``st_mtime_ns`` so rapid touches
-    in the same wall-clock second still advance the idle window.
+    Returns True when the sentinel appears.  Returns False when either:
+    - No liveness for ``idle_threshold`` seconds: JSONL mtime stale and (when given)
+      ``idea_watch_dir`` artifact mtimes stale, or
+    - ``poll_timeout`` seconds have elapsed with no sentinel (hard timeout fallback).
 
-    When ``use_stamp_idle`` is ``False`` (Ideas ``POST /message`` / ``_notify_prd_agent``),
-    only the hard ``poll_timeout`` and ``.done`` presence are used.  Stamp-based
-    ``no_session`` / ``idle`` exits are skipped because sparse hook traffic and coarse
-    filesystem timestamps produced false 408s while the agent was still healthy.
-
-    Returns ``(True, "")`` when the sentinel exists. Otherwise ``(False, reason)``:
-
-    - ``idle`` — stamp mtime unchanged for ``idle_threshold`` seconds (stamp idle only)
-    - ``poll_timeout`` — ``poll_timeout`` elapsed without sentinel
-    - ``no_session`` — stamp file never appeared within ``startup_grace`` (stamp idle only)
-
-    Before every failure return, ``.done`` is checked again so a concurrent tool
-    write is not missed after an ``idle``/grace/deadline decision in the same loop
-    iteration.
+    During ``startup_grace`` seconds from start, we retry resolving the JSONL path
+    from sessions.json on every tick (OpenClaw may not register the session instantly).
+    After startup_grace expires without finding the JSONL, idle detection is disabled
+    and only the hard timeout applies.
     """
     start = time.monotonic()
     deadline = start + poll_timeout
-    last_activity = start
-    # Nanosecond resolution: rapid plugin touches can share the same float-second
-    # ``getmtime`` value; comparing ``st_mtime_ns`` avoids false idle during bursts.
-    last_stamp_mtime_ns: int | None = None
+
+    jsonl_path: str | None = None
+    last_jsonl_mtime: float | None = None
+    last_idea_mtime: float | None = None
+    last_activity = start  # reset when JSONL or idea artifacts advance
 
     while True:
-        # Cross-process race: the agent may write ``.done`` immediately after an idle
-        # or grace check in this same iteration — always re-check before failing.
-        if done_path.exists():
-            return True, ""
+        if Path(done_path).exists():
+            return True
 
         now = time.monotonic()
         if now >= deadline:
-            if done_path.exists():
-                return True, ""
-            return False, "poll_timeout"
+            return False
 
-        if use_stamp_idle:
-            stamp_exists = activity_stamp_path.is_file()
-            if not stamp_exists:
-                if (now - start) > startup_grace:
-                    if done_path.exists():
-                        return True, ""
-                    return False, "no_session"
-            else:
-                try:
-                    stamp_ns = os.stat(activity_stamp_path).st_mtime_ns
-                except OSError:
-                    stamp_ns = None
-                if stamp_ns is not None:
-                    if last_stamp_mtime_ns is None or stamp_ns > last_stamp_mtime_ns:
-                        last_stamp_mtime_ns = stamp_ns
-                        last_activity = now
-                if last_stamp_mtime_ns is not None and (now - last_activity) >= idle_threshold:
-                    if done_path.exists():
-                        return True, ""
-                    return False, "idle"
+        # Try to resolve JSONL path during startup grace period
+        if jsonl_path is None:
+            jsonl_path = _resolve_prd_creator_jsonl(session_key, openclaw_root)
+            if jsonl_path is None and (now - start) > startup_grace:
+                # Grace expired with no session registered — agent never started; fail now
+                return False
+
+        # JSONL heartbeat
+        if jsonl_path is not None:
+            try:
+                jm = os.path.getmtime(jsonl_path)
+            except OSError:
+                jm = None
+            if jm is not None:
+                if last_jsonl_mtime is None or jm > last_jsonl_mtime:
+                    last_jsonl_mtime = jm
+                    last_activity = now
+
+        # Idea-dir file writes (tool output) — recency bias vs JSONL-only idle
+        if idea_watch_dir is not None:
+            im = _idea_workspace_activity_mtime(idea_watch_dir)
+            if im is not None:
+                if last_idea_mtime is None or im > last_idea_mtime:
+                    last_idea_mtime = im
+                    last_activity = now
+
+        if jsonl_path is not None and (now - last_activity) >= idle_threshold:
+            # No JSONL progress and no fresh idea artifacts for idle_threshold
+            return False
 
         await asyncio.sleep(poll_interval)
 
@@ -3315,39 +3311,8 @@ def _iso_from_mtime(path: Path) -> str:
     return datetime.utcfromtimestamp(path.stat().st_mtime).isoformat() + "Z"
 
 
-def _merge_session_roadmap_from_draft_files(idea_dir: Path, session_data: dict) -> tuple[dict, bool]:
-    """If ``roadmap_draft.done`` and ``roadmap_draft.md`` exist, copy disk into ``roadmap_content`` when it differs.
-
-    Used from GET session / list rehydration and from PRD message saves. Does **not** rebuild
-    messages from ``turns/*.md`` (full rehydration is separate).
-    """
-    if not isinstance(session_data, dict):
-        return session_data, False
-    session_data.setdefault("roadmap_content", "")
-    changed = False
-    roadmap_done_path = idea_dir / "roadmap_draft.done"
-    roadmap_path = idea_dir / "roadmap_draft.md"
-    if roadmap_done_path.exists() and roadmap_path.exists():
-        try:
-            disk_rm = roadmap_path.read_text()
-        except OSError:
-            disk_rm = None
-        if disk_rm is not None:
-            sess_rm = session_data.get("roadmap_content") or ""
-            if _normalize_doc_text_for_compare(disk_rm) != _normalize_doc_text_for_compare(sess_rm):
-                session_data["roadmap_content"] = disk_rm
-                changed = True
-    return session_data, changed
-
-
 def _rehydrate_session_from_artifacts(idea_dir: Path, session_data: dict) -> tuple[dict, bool]:
-    """Backfill session.json from turns/*.md, prd_draft.md, and roadmap drafts on disk.
-
-    When ``roadmap_draft.done`` exists alongside ``roadmap_draft.md``, the markdown file is the
-    converter's committed output. If its normalized text differs from ``roadmap_content`` (including
-    when session still holds an older roadmap after regenerate), replace session from disk so GET
-    session matches what OpenClaw wrote.
-    """
+    """Backfill empty session.json from turns/*.md and prd_draft.md if available."""
     if not isinstance(session_data, dict):
         session_data = _default_idea_session()
     else:
@@ -3360,22 +3325,8 @@ def _rehydrate_session_from_artifacts(idea_dir: Path, session_data: dict) -> tup
 
     has_messages = bool(session_data.get("messages"))
     has_prd = bool((session_data.get("prd_content") or "").strip())
-    changed = False
-
-    session_data, rm_changed = _merge_session_roadmap_from_draft_files(idea_dir, session_data)
-    changed = changed or rm_changed
-
-    roadmap_path = idea_dir / "roadmap_draft.md"
-
     if has_messages and has_prd:
-        if changed:
-            ts_candidates = []
-            if roadmap_path.exists():
-                ts_candidates.append(_iso_from_mtime(roadmap_path))
-            latest_ts = max(ts_candidates) if ts_candidates else datetime.utcnow().isoformat() + "Z"
-            if not session_data.get("updated") or str(session_data.get("updated")) < latest_ts:
-                session_data["updated"] = latest_ts
-        return session_data, changed
+        return session_data, False
 
     turns_dir = idea_dir / "turns"
     md_turns = []
@@ -3388,6 +3339,7 @@ def _rehydrate_session_from_artifacts(idea_dir: Path, session_data: dict) -> tup
             md_turns.append((turn_num, md_file))
     md_turns.sort(key=lambda x: x[0])
 
+    changed = False
     if not has_messages and md_turns:
         rebuilt_messages = []
         for _turn_num, md_file in md_turns:
@@ -3415,8 +3367,6 @@ def _rehydrate_session_from_artifacts(idea_dir: Path, session_data: dict) -> tup
             ts_candidates.extend([m.get("ts") for m in session_data["messages"] if m.get("ts")])
         if (idea_dir / "prd_draft.md").exists():
             ts_candidates.append(_iso_from_mtime(idea_dir / "prd_draft.md"))
-        if (idea_dir / "roadmap_draft.md").exists():
-            ts_candidates.append(_iso_from_mtime(idea_dir / "roadmap_draft.md"))
         latest_ts = max(ts_candidates) if ts_candidates else datetime.utcnow().isoformat() + "Z"
         if not session_data.get("updated") or str(session_data.get("updated")) < latest_ts:
             session_data["updated"] = latest_ts
@@ -3482,7 +3432,7 @@ def _reconcile_ideas_session_after_late_done(
         done_mtime = os.path.getmtime(done_path)
     except OSError:
         return session_data, False
-    if done_mtime < (attempt_start - IDEAS_LATE_DONE_MTIME_SLACK_SEC):
+    if done_mtime < attempt_start:
         return session_data, False
 
     agent_response = md_path.read_text() if md_path.exists() else ""
@@ -3534,14 +3484,13 @@ def get_ideas_session(idea_id: str):
     ideas_dir = Path(config.get("ideas_dir") or "")
     idea_dir = Path(ideas_dir) / idea_id
     session_path = idea_dir / "session.json"
-    no_store = {"Cache-Control": "no-store"}
 
     if not session_path.exists():
-        return JSONResponse(content=_default_idea_session(), headers=no_store)
+        return _default_idea_session()
 
     session_data = _read_json_file(str(session_path))
     if session_data is None:
-        return JSONResponse(content=_default_idea_session(), headers=no_store)
+        return _default_idea_session()
     session_data, changed = _rehydrate_session_from_artifacts(idea_dir, session_data)
     if changed:
         _atomic_write_json_file(session_path, session_data)
@@ -3549,54 +3498,7 @@ def get_ideas_session(idea_id: str):
     if late_changed:
         _atomic_write_json_file(session_path, session_data)
     _enrich_assistant_messages_with_parsed(session_data)
-    return JSONResponse(content=session_data, headers=no_store)
-
-
-def _idea_draft_sync_payload(idea_dir: Path) -> dict[str, Any]:
-    """Compare PRD vs roadmap draft mtimes for Continue-to-Setup staleness guard.
-
-    ``roadmap_behind_prd`` is True only when both ``prd_draft.md`` and ``roadmap_draft.md``
-    exist and the PRD file was modified strictly after the roadmap file (same-second ties
-    do not warn). Missing files yield False and null mtimes for the absent path.
-    """
-    prd_path = idea_dir / "prd_draft.md"
-    roadmap_path = idea_dir / "roadmap_draft.md"
-    prd_mtime: float | None = None
-    roadmap_mtime: float | None = None
-    try:
-        if prd_path.is_file():
-            prd_mtime = prd_path.stat().st_mtime
-    except OSError:
-        prd_mtime = None
-    try:
-        if roadmap_path.is_file():
-            roadmap_mtime = roadmap_path.stat().st_mtime
-    except OSError:
-        roadmap_mtime = None
-    behind = False
-    if prd_mtime is not None and roadmap_mtime is not None:
-        behind = prd_mtime > roadmap_mtime
-    return {
-        "roadmap_behind_prd": behind,
-        "prd_draft_mtime": prd_mtime,
-        "roadmap_draft_mtime": roadmap_mtime,
-    }
-
-
-@app.get("/api/ideas/{idea_id}/draft-sync-status")
-def get_ideas_draft_sync_status(idea_id: str):
-    """Return PRD vs roadmap draft modification times for staleness detection.
-
-    Used before Continue to Setup to warn when the saved PRD is newer than the saved roadmap.
-    Returns 404 when the idea directory does not exist.
-    """
-    config = load_config()
-    ideas_dir = Path(config.get("ideas_dir") or "")
-    idea_dir = ideas_dir / idea_id
-    if not idea_dir.is_dir():
-        raise HTTPException(status_code=404, detail="Idea not found")
-    payload = _idea_draft_sync_payload(idea_dir)
-    return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
+    return session_data
 
 
 def _build_ideas_sent_context(
@@ -3621,79 +3523,8 @@ def _build_ideas_sent_context(
     return out
 
 
-_DATA_URI_IMAGE_RE = re.compile(r"^data:image/([a-z0-9.+-]+);base64,(.+)$", re.IGNORECASE | re.DOTALL)
-_FILENAME_IMAGE_EXT_RE = re.compile(r"\.(png|jpg|jpeg|gif|webp)$", re.IGNORECASE)
-_FILENAME_SANITIZE_RE = re.compile(r"[^A-Za-z0-9._-]+")
-
-
-def _save_image_to_openclaw_media(
-    data_uri: str,
-    original_filename: str,
-    openclaw_root: str,
-) -> str | None:
-    """Decode a data:image/...;base64,... URI and save to ``OPENCLAW_ROOT/media/inbound/``.
-
-    Returns the saved media id (filename inside the inbound directory), or None if the
-    input is not a valid base64 data URI for an image.  The returned id is what the caller
-    should embed in the prompt as ``[media attached: media://inbound/<id>]`` so OpenClaw's
-    image-detection pipeline (`detectAndLoadPromptImages`) resolves and forwards it to the
-    model as proper vision input.
-
-    File naming follows OpenClaw's ``buildSavedMediaId`` convention: ``<sanitized>---<uuid>.<ext>``.
-    File mode is ``0o644`` (matches OpenClaw's MEDIA_FILE_MODE = 420).  Directory mode is ``0o700``
-    (matches OpenClaw's directory mode = 448).
-    """
-    import base64
-    import uuid as _uuid
-
-    m = _DATA_URI_IMAGE_RE.match(data_uri or "")
-    if not m:
-        return None
-    mime_subtype = m.group(1).lower()
-    b64_payload = m.group(2)
-    # MIME subtype maps directly to extension for the formats we support.
-    ext_map = {"png": "png", "jpeg": "jpg", "jpg": "jpg", "gif": "gif", "webp": "webp"}
-    ext = ext_map.get(mime_subtype)
-    if ext is None:
-        # Fall back to filename extension if MIME subtype is unrecognised.
-        fn_match = _FILENAME_IMAGE_EXT_RE.search(original_filename or "")
-        if not fn_match:
-            return None
-        ext = fn_match.group(1).lower().replace("jpeg", "jpg")
-
-    try:
-        img_bytes = base64.b64decode(b64_payload, validate=False)
-    except Exception:
-        return None
-
-    # Sanitize the original filename's stem for use as a human-readable prefix.
-    base_stem = ""
-    if original_filename:
-        stem = os.path.splitext(os.path.basename(original_filename))[0]
-        base_stem = _FILENAME_SANITIZE_RE.sub("_", stem).strip("._-")[:64]
-
-    media_uuid = str(_uuid.uuid4())
-    media_id = f"{base_stem}---{media_uuid}.{ext}" if base_stem else f"{media_uuid}.{ext}"
-
-    inbound_dir = os.path.join(os.path.expanduser(openclaw_root), "media", "inbound")
-    os.makedirs(inbound_dir, mode=0o700, exist_ok=True)
-    dest = os.path.join(inbound_dir, media_id)
-
-    # Write atomically to avoid OpenClaw's image-detect picking up a partial file.
-    tmp_dest = dest + ".tmp"
-    with open(tmp_dest, "wb") as fh:
-        fh.write(img_bytes)
-    os.chmod(tmp_dest, 0o644)
-    os.replace(tmp_dest, dest)
-    return media_id
-
-
 def _late_done_valid_for_attempt(done_path: Path | str, attempt_start_wall: float) -> bool:
-    """True when the turn sentinel exists and plausibly belongs to this attempt.
-
-    ``mtime`` can trail ``attempt_start_wall`` by a few seconds on coarse filesystems
-    or when ``idle`` fires in the same wall-clock second the tool writes ``.done``.
-    ``IDEAS_LATE_DONE_MTIME_SLACK_SEC`` tolerates that without accepting ancient sentinels.
+    """True when the turn sentinel exists and was written at or after this attempt started.
 
     Used after poll timeout to avoid restoring draft annotations when the agent completed
     just after the idle/timeout window (race with late .done write).
@@ -3702,37 +3533,9 @@ def _late_done_valid_for_attempt(done_path: Path | str, attempt_start_wall: floa
     if not p.exists():
         return False
     try:
-        mt = os.path.getmtime(p)
+        return os.path.getmtime(p) >= attempt_start_wall
     except OSError:
         return False
-    return mt >= (attempt_start_wall - IDEAS_LATE_DONE_MTIME_SLACK_SEC)
-
-
-def _ideas_scrub_stale_turn_artifacts(
-    idea_dir: Path, turn_n: int, attempt_start_wall: float
-) -> None:
-    """Remove orphan ``turns/{n}.done`` and paired ``turns/{n}.md`` from a prior attempt.
-
-    Without this, :func:`_poll_sentinel_with_idle_detect` can return immediately when a
-    stale ``.done`` remains on disk, and the caller would read stale ``{n}.md`` prose.
-    The cutoff matches :func:`_late_done_valid_for_attempt` (same mtime slack).
-
-    When ``{n}.done`` is absent, ``{n}.md`` is left alone — the agent may be mid-turn.
-    """
-    turns_dir = idea_dir / "turns"
-    tn = int(turn_n)
-    done_path = turns_dir / f"{tn}.done"
-    md_path = turns_dir / f"{tn}.md"
-    if not done_path.exists():
-        return
-    try:
-        done_mt = os.path.getmtime(done_path)
-    except OSError:
-        return
-    cutoff = attempt_start_wall - IDEAS_LATE_DONE_MTIME_SLACK_SEC
-    if done_mt < cutoff:
-        done_path.unlink(missing_ok=True)
-        md_path.unlink(missing_ok=True)
 
 
 async def _trigger_readiness_assessment(idea_id: str, config: dict) -> None:
@@ -3794,48 +3597,16 @@ async def post_ideas_message(idea_id: str, request: Request):
     if not content or turn_n is None:
         raise HTTPException(status_code=422, detail="Body must contain {content: str, turn: int}")
 
-    if attachment and isinstance(attachment, dict):
-        _fcontent_check = attachment.get("content", "")
-        if isinstance(_fcontent_check, str) and len(_fcontent_check) > _ATTACHMENT_MAX_BYTES:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Attachment content exceeds maximum size of {_ATTACHMENT_MAX_BYTES} bytes",
-            )
-
     ideas_dir = Path(config.get("ideas_dir") or "")
     hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
     hooks_token = config.get("hooks_token", "")
 
-    # Prepend attachment context when provided.
-    # Images (data URI content) are saved to OPENCLAW_ROOT/media/inbound/ and referenced
-    # via "[media attached: media://inbound/<id>]" markers — OpenClaw's
-    # detectAndLoadPromptImages picks up these markers, hydrates the file from disk, and
-    # forwards the bytes to the model as proper vision input.  Text files continue to use
-    # the [ATTACHMENT:] block embedded directly in the message.
+    # Prepend attachment context when provided
     message_content = content
     if attachment and isinstance(attachment, dict):
-        fname = attachment.get("filename", "attachment")
+        fname = attachment.get("filename", "attachment.md")
         fcontent = attachment.get("content", "")
-        _is_image_attachment = (
-            isinstance(fcontent, str) and fcontent.startswith("data:image/")
-        ) or bool(_FILENAME_IMAGE_EXT_RE.search(fname or ""))
-        if _is_image_attachment and isinstance(fcontent, str) and fcontent.startswith("data:"):
-            _openclaw_root = config.get("openclaw_root") or resolve_openclaw_root()
-            _media_id = _save_image_to_openclaw_media(fcontent, fname, str(_openclaw_root))
-            if _media_id:
-                # Use "[media attached: media://inbound/<id>]" — OpenClaw's prompt scanner
-                # recognises this marker, resolves the file, and forwards it as a vision input.
-                message_content = (
-                    f"[media attached: media://inbound/{_media_id}]\n\n{content}"
-                )
-            else:
-                # Decode failed — fall back to the legacy text wrapper so the AI still sees a
-                # reference, even though it cannot view the image.
-                message_content = (
-                    f"[ATTACHMENT: {fname}]\n(image decode failed)\n[/ATTACHMENT]\n\n{content}"
-                )
-        else:
-            message_content = f"[ATTACHMENT: {fname}]\n{fcontent}\n[/ATTACHMENT]\n\n{content}"
+        message_content = f"[ATTACHMENT: {fname}]\n{fcontent}\n[/ATTACHMENT]\n\n{content}"
 
     # Load existing session data early — used for annotations and conversation history
     idea_dir = Path(ideas_dir) / idea_id
@@ -3843,10 +3614,6 @@ async def post_ideas_message(idea_id: str, request: Request):
     pre_session: dict = {}
     if session_path_pre.exists():
         pre_session = _read_json_file(str(session_path_pre)) or {}
-    # Merge roadmap_draft.md into roadmap_content when sentinel-backed disk differs (same as GET
-    # session). Without this, pre-save/final-save paths persist stale roadmap_content after a
-    # regenerate wrote only the files on disk (common before another PRD turn).
-    pre_session, _ = _merge_session_roadmap_from_draft_files(idea_dir, pre_session)
 
     # Inject unsubmitted annotations into message context
     pending_annotation_ids: list[str] = []
@@ -3955,25 +3722,26 @@ async def post_ideas_message(idea_id: str, request: Request):
 
     _snapshot_prd_draft_before_agent_write(idea_dir)
 
-    activity_stamp_path = idea_dir / "prd_creator_activity.stamp"
-    activity_stamp_path.unlink(missing_ok=True)
-
-    _ideas_scrub_stale_turn_artifacts(idea_dir, int(turn_n), _attempt_start_wall)
-
     poll_timeout = float(config.get("poll_timeout", POLL_TIMEOUT))
     poll_interval = float(config.get("poll_interval", POLL_INTERVAL))
     idle_threshold = float(config.get("ideas_idle_threshold", 120))
     startup_grace = float(config.get("ideas_startup_grace", 30))
-    # Avoid ultra-tight idle windows when the hard poll budget is long (tests keep
-    # sub-180s poll_timeout + low idle_threshold for fast stall cases).
-    if poll_timeout >= 180:
-        idle_threshold = max(idle_threshold, 60.0)
+    openclaw_root = os.path.expanduser(config.get("openclaw_root", "~/.openclaw"))
 
     try:
         await _post_agent_webhook(hooks_url, hooks_token, webhook_payload)
     except HTTPException as exc:
-        if exc.status_code in (502, 503):
-            _rollback_last_turn_pair(session_path)
+        if exc.status_code == 503:
+            _mark_last_pending_assistant_error(
+                session_path,
+                "Agent gateway unreachable — check OpenClaw is running.",
+            )
+        elif exc.status_code == 502:
+            _status_tail = (str(exc.detail).split()[-1]).rstrip(".")
+            _mark_last_pending_assistant_error(
+                session_path,
+                f"Agent gateway returned HTTP {_status_tail}.",
+            )
         raise
 
     turns_dir = idea_dir / "turns"
@@ -3982,14 +3750,10 @@ async def post_ideas_message(idea_id: str, request: Request):
     md_path = turns_dir / f"{turn_n}.md"
     prd_draft_path = idea_dir / "prd_draft.md"
 
-    sentinel_found, poll_fail_reason = await _poll_sentinel_with_idle_detect(
-        done_path,
-        activity_stamp_path,
-        poll_timeout,
-        poll_interval,
-        idle_threshold,
-        startup_grace,
-        use_stamp_idle=False,
+    sentinel_found = await _poll_sentinel_with_idle_detect(
+        done_path, session_key, openclaw_root,
+        poll_timeout, poll_interval, idle_threshold, startup_grace,
+        idea_watch_dir=idea_dir,
     )
     if not sentinel_found and _late_done_valid_for_attempt(done_path, _attempt_start_wall):
         sentinel_found = True
@@ -4009,9 +3773,7 @@ async def post_ideas_message(idea_id: str, request: Request):
         _atomic_write_json_file(str(session_path), _timeout_data)
         raise HTTPException(
             status_code=408,
-            detail=_ideas_sentinel_poll_failure_detail(
-                poll_fail_reason, poll_timeout, idle_threshold
-            ),
+            detail=f"No agent response after {int(poll_timeout)}s — the model may be slow or the agent session may be stalled.",
         )
 
     # Read agent response
@@ -4093,8 +3855,6 @@ async def post_ideas_message(idea_id: str, request: Request):
             )
             if first_user.strip():
                 session_data["name"] = first_user.strip()[:40].title()
-
-    session_data, _ = _merge_session_roadmap_from_draft_files(idea_dir, session_data)
 
     _atomic_write_json_file(str(session_path), session_data)
 
@@ -4330,8 +4090,7 @@ def get_ideas():
 
     Returns:
         JSON array of {id, name, summary, updated, readiness_score, has_prd,
-        has_roadmap} objects, sorted newest-first by ``updated`` then by ``id``
-        (deterministic tie-break). Response includes ``Cache-Control: no-store``.
+        has_roadmap} objects, sorted newest-first.
         Returns [] if ideas_dir is absent or empty.
     """
     config = load_config()
@@ -4339,7 +4098,7 @@ def get_ideas():
     ideas_path = Path(ideas_dir)
 
     if not ideas_path.exists():
-        return JSONResponse(content=[], headers={"Cache-Control": "no-store"})
+        return []
 
     ideas = []
     for subdir in ideas_path.iterdir():
@@ -4393,9 +4152,9 @@ def get_ideas():
             "has_roadmap": has_roadmap,
         })
 
-    # Sort newest first by updated timestamp; secondary key id makes ties deterministic.
-    ideas.sort(key=lambda x: (x.get("updated") or "", x.get("id") or ""), reverse=True)
-    return JSONResponse(content=ideas, headers={"Cache-Control": "no-store"})
+    # Sort newest first by updated timestamp
+    ideas.sort(key=lambda x: x.get("updated") or "", reverse=True)
+    return ideas
 
 
 @app.post("/api/ideas")
@@ -4596,9 +4355,9 @@ async def post_ideas_clarity_check(idea_id: str):
     return result_data
 
 
-CONVERT_TIMEOUT = 180   # seconds; patchable in tests
+CONVERT_TIMEOUT = 300   # seconds; patchable in tests
 CONVERT_POLL_INTERVAL = 2  # seconds between sentinel checks
-FORMAT_CORRECTION_TIMEOUT = 120  # seconds; patchable in tests
+FORMAT_CORRECTION_TIMEOUT = 180  # seconds; patchable in tests
 FORMAT_CORRECTION_POLL_INTERVAL = 2  # seconds between sentinel checks
 
 
@@ -4661,9 +4420,9 @@ async def post_ideas_convert(idea_id: str):
     """Trigger PRD-to-roadmap conversion.
 
     Injects the roadmap-generation skill, then sends a webhook to the
-    roadmap-converter agent, polls for roadmap_draft.done (2s interval, 180s
-    timeout), then atomically stores the resulting roadmap_content in
-    session.json and returns it.
+    roadmap-converter agent, polls for roadmap_draft.done (``CONVERT_POLL_INTERVAL`` s
+    interval, up to ``CONVERT_TIMEOUT`` s), then atomically stores the resulting
+    roadmap_content in session.json and returns it.
 
     Returns 404 if the idea is not found.
     Returns 422 if prd_content is empty.
@@ -4716,11 +4475,8 @@ async def post_ideas_convert(idea_id: str):
         if resp.status >= 400:
             raise HTTPException(status_code=502, detail=f"Webhook returned {resp.status}")
 
-    done_path = idea_dir / "roadmap_draft.done"
-    # Remove stale sentinel so polling loop doesn't find an old one (same as format-correction).
-    done_path.unlink(missing_ok=True)
-
     # Poll for roadmap_draft.done
+    done_path = idea_dir / "roadmap_draft.done"
     deadline = datetime.utcnow().timestamp() + CONVERT_TIMEOUT
 
     while datetime.utcnow().timestamp() < deadline:
@@ -4818,7 +4574,6 @@ async def _notify_prd_agent(idea_id: str, config: dict, report_content: str, che
         # Pre-save user message + pending assistant placeholder BEFORE webhook
         now = datetime.utcnow().isoformat() + "Z"
         pre_save = _read_json_file(str(session_path)) or {}
-        pre_save, _ = _merge_session_roadmap_from_draft_files(idea_dir, pre_save)
         pre_save.setdefault("messages", [])
         pre_save["messages"] = list(pre_save["messages"]) + [
             {
@@ -4851,10 +4606,7 @@ async def _notify_prd_agent(idea_id: str, config: dict, report_content: str, che
         poll_interval = float(config.get("poll_interval", POLL_INTERVAL))
         idle_threshold = float(config.get("ideas_idle_threshold", 120))
         startup_grace = float(config.get("ideas_startup_grace", 30))
-        if poll_timeout >= 180:
-            idle_threshold = max(idle_threshold, 60.0)
-        activity_stamp_path = idea_dir / "prd_creator_activity.stamp"
-        activity_stamp_path.unlink(missing_ok=True)
+        openclaw_root = os.path.expanduser(config.get("openclaw_root", "~/.openclaw"))
         try:
             await _post_agent_webhook(hooks_url, hooks_token, payload)
         except HTTPException as exc:
@@ -4874,14 +4626,10 @@ async def _notify_prd_agent(idea_id: str, config: dict, report_content: str, che
         # Poll for turns/{next_turn}.done
         done_path = idea_dir / "turns" / f"{next_turn}.done"
         response_path = idea_dir / "turns" / f"{next_turn}.md"
-        sentinel_found, _poll_reason = await _poll_sentinel_with_idle_detect(
-            done_path,
-            activity_stamp_path,
-            poll_timeout,
-            poll_interval,
-            idle_threshold,
-            startup_grace,
-            use_stamp_idle=False,
+        sentinel_found = await _poll_sentinel_with_idle_detect(
+            done_path, session_key, openclaw_root,
+            poll_timeout, poll_interval, idle_threshold, startup_grace,
+            idea_watch_dir=idea_dir,
         )
         if not sentinel_found:
             # Timed out / agent idle — mark the pending placeholder as an error
@@ -4928,7 +4676,6 @@ async def _notify_prd_agent(idea_id: str, config: dict, report_content: str, che
                 "parsed": parsed,
             })
         current_session["updated"] = datetime.utcnow().isoformat() + "Z"
-        current_session, _ = _merge_session_roadmap_from_draft_files(idea_dir, current_session)
         _atomic_write_json_file(session_path, current_session)
 
     except Exception as exc:
@@ -5246,8 +4993,9 @@ async def post_ideas_fix_roadmap_format(idea_id: str, body: FixRoadmapFormatRequ
     where content is passed directly). Falls back to session.json roadmap_content.
 
     Injects the format-correction skill, sends a webhook to the roadmap-converter
-    agent, polls for roadmap_draft.done (2s interval, 120s timeout), reads the
-    corrected content, stores it in session.json, and returns it.
+    agent, polls for roadmap_draft.done (``FORMAT_CORRECTION_POLL_INTERVAL`` s
+    interval, up to ``FORMAT_CORRECTION_TIMEOUT`` s), reads the corrected content,
+    stores it in session.json, and returns it.
 
     Returns 404 if the idea is not found or session.json is missing.
     Returns 422 if no roadmap content is available to correct.
@@ -7800,17 +7548,20 @@ async def post_completion_review_trigger(project: str):
                 pass
 
         _sm.inject_skill("COMPLETE-R0", "reviewer", _oc_cfg)
+        _attempt_start = None
         if _artifacts_dir and _sentinel_path:
+            _attempt_start = time.time()
             cleanup_output_files(_artifacts_dir, "reviewer")
 
         invoke_agent_webhook("reviewer", session_key, token)
 
-        if _sentinel_path:
-            _start = time.time()
+        if _sentinel_path and _attempt_start is not None:
+            _stop_file = os.path.join(_artifacts_dir, "pipeline_stop_requested")
             poll_for_sentinel(
                 sentinel_path=_sentinel_path,
-                timeout_seconds=120,
-                min_sentinel_mtime=_start,
+                timeout_seconds=300,
+                stop_sentinel_path=_stop_file,
+                min_sentinel_mtime=_attempt_start,
             )
     except Exception as _exc:
         # Non-fatal: triggered=True but report may not exist yet

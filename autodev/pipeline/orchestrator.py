@@ -305,6 +305,59 @@ def _check_session_dead_on_arrival(sessions_json_path: str, full_key: str):
     return False, ""
 
 
+def _session_jsonl_last_assistant_error_message(jsonl_path: str | None) -> str:
+    """Return the last assistant ``errorMessage`` from an OpenClaw session JSONL.
+
+    OpenRouter/OpenAI-style quota failures often appear as ``stopReason == "error"``
+    on the assistant row while ``sessions.json`` still shows non-zero ``runtimeMs``,
+    so :func:`_check_session_dead_on_arrival` does not classify them as dead-on-arrival.
+    """
+    if not jsonl_path or not os.path.exists(jsonl_path):
+        return ""
+    last_err = ""
+    try:
+        with open(jsonl_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if row.get("type") != "message":
+                    continue
+                inner = row.get("message")
+                if not isinstance(inner, dict):
+                    continue
+                if inner.get("role") != "assistant":
+                    continue
+                if inner.get("stopReason") != "error":
+                    continue
+                em = str(inner.get("errorMessage") or "").strip()
+                if em:
+                    last_err = em
+    except OSError:
+        return ""
+    return last_err
+
+
+def _is_provider_quota_or_billing_error(msg: str) -> bool:
+    """Heuristic: provider rejected the request for quota, billing, or affordability."""
+    if not msg:
+        return False
+    lower = msg.lower()
+    if "402" in msg or "payment required" in lower:
+        return True
+    if "more credits" in lower or "can only afford" in lower or "monthly limit" in lower:
+        return True
+    if "insufficient" in lower and ("credit" in lower or "fund" in lower or "balance" in lower):
+        return True
+    if "429" in msg or "rate limit" in lower:
+        return True
+    return False
+
+
 def _sum_session_tokens(jsonl_path) -> dict:
     """W1-G: Sum token usage from an OpenClaw session JSONL file.
 
@@ -1464,6 +1517,31 @@ class Orchestrator:
         if os.path.exists(output_path):
             return "executor_preempted"
         return "executor_crashed"
+
+    def _escalate_if_jsonl_quota_error(self, jsonl_path: str | None, role_label: str) -> bool:
+        """If the OpenClaw session JSONL ends with a quota/billing provider error, escalate.
+
+        Returns True when escalation was triggered (caller should ``continue`` the
+        main loop). Covers OpenRouter 402 / insufficient-credit cases where
+        ``sessions.json`` shows non-zero ``runtimeMs`` so :func:`_check_session_dead_on_arrival`
+        does not fire.
+        """
+        msg = _session_jsonl_last_assistant_error_message(jsonl_path)
+        if not msg or not _is_provider_quota_or_billing_error(msg):
+            return False
+        print(f"[ERROR] [{role_label}] Provider quota/billing error: {msg[:240]}")
+        _ps = self.read_phase_state()
+        _ps["last_error_code"] = "ERR_PROVIDER_QUOTA"
+        _ps["escalation_trigger_reason"] = (
+            f"{role_label} blocked by provider quota or billing: {msg[:900]}"
+        )
+        self.write_phase_state_atomic(_ps)
+        self.state["current_agent"] = "escalation"
+        self.transition_state(
+            "RUNNING",
+            f"ERR_PROVIDER_QUOTA ({role_label}): {msg[:240]}",
+        )
+        return True
 
     # -----------------------------------------------------------------------
     # FIND-PLANNER-PRESERVE: check if valid planner output already exists on disk.
@@ -2692,7 +2770,14 @@ class Orchestrator:
                     _ps_plan_tok["planner_tokens_acc"] = _planner_tokens_acc
                     self.write_phase_state_atomic(_ps_plan_tok)
 
+                    if self._escalate_if_jsonl_quota_error(_planner_jsonl_path, "Planner"):
+                        time.sleep(5)
+                        continue
+
                     if not sentinel_found:
+                        if self._escalate_if_jsonl_quota_error(_planner_jsonl_path, "Planner"):
+                            time.sleep(5)
+                            continue
                         print("[ERROR] Sentinel timeout")
                         retries = self.increment_planner_retries()
                     else:
@@ -2911,6 +2996,10 @@ class Orchestrator:
                         )
                         continue
 
+                    if self._escalate_if_jsonl_quota_error(_jsonl_path, "Executor"):
+                        time.sleep(5)
+                        continue
+
                     # Accumulate executor token usage into phase_state across retry attempts.
                     _attempt_tokens = _sum_session_tokens(_jsonl_path)
                     _ps_tok = self.read_phase_state()
@@ -2940,6 +3029,9 @@ class Orchestrator:
                             print("[ERROR] Executor gate failed")
                             _write_pipeline_event("gate_fail", raw_id, "executor", {"exit_code": 1})  # W1-F
                             self.write_failure_context("executor", self.state.get("executor_retries", 0) + 1)
+                            if self._escalate_if_jsonl_quota_error(_jsonl_path, "Executor"):
+                                time.sleep(5)
+                                continue
                             # reset_execution("auto") owns the counter increment.
                             self.reset_execution("auto")
 
@@ -2969,6 +3061,9 @@ class Orchestrator:
 
                     else:  # executor_crashed
                         print("[ERROR] Executor sentinel timeout — classified as executor_crashed.")
+                        if self._escalate_if_jsonl_quota_error(_jsonl_path, "Executor"):
+                            time.sleep(5)
+                            continue
                         # reset_execution("auto") owns the counter increment — do not call
                         # increment_executor_retries() separately. Single code path for auto retry.
                         self.reset_execution("auto")

@@ -3019,6 +3019,11 @@
                 (a) => !a.submitted && !hiddenNoteIdsForSend.has(a.id)
             );
 
+            // Roadmap generate/regenerate must stay aligned with Send: lock while submitMessage awaits reply.
+            const roadmapActionsLockedByReply = isLoading;
+            const ROADMAP_GENERATE_LOCKED_HINT =
+                "Finish the assistant's reply before generating a roadmap so it matches the latest PRD.";
+
             const stopReadinessPoll = () => {
                 if (readinessPollRef.current) {
                     clearInterval(readinessPollRef.current);
@@ -3642,6 +3647,7 @@
                 readinessData.score < 8;
 
             const beginConvertAfterGuards = () => {
+                if (isLoading || isLoadingRef.current) return;
                 if (_needsLowReadinessConvertGuard()) {
                     setShowLowReadinessGenerateConfirm(true);
                     return;
@@ -3650,6 +3656,7 @@
             };
 
             const _runConvert = () => {
+                if (isLoading || isLoadingRef.current) return;
                 const ideaId = currentIdeaId;
                 const seq = ++convertRequestSeqRef.current;
                 const startedAt = Date.now();
@@ -3695,6 +3702,7 @@
 
             const doConvert = () => {
                 if (!currentIdeaId || !prdContent.trim()) return;
+                if (isLoading) return;
                 if (roadmapContent) {
                     setShowRegenerateConfirm(true);
                     return;
@@ -4935,45 +4943,40 @@
                             <div style={{flex:1, display:'flex', flexDirection:'column', overflow:'hidden'}}>
                                 <div style={{flex:1, overflowY:'auto', padding:'24px'}}>
                                     {!roadmapContent ? (
-                                        <div style={{display:'flex', justifyContent:'center', alignItems:'center', height:'100%'}}>
+                                        <div style={{display:'flex', flexDirection:'column', justifyContent:'center', alignItems:'center', height:'100%', gap:'12px'}}>
                                             <button
                                                 className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-[#0d0f11] border border-[#00b4d8]/60 font-semibold disabled:opacity-40"
                                                 onClick={doConvert}
-                                                disabled={convertLoading}
+                                                disabled={convertLoading || roadmapActionsLockedByReply}
+                                                title={roadmapActionsLockedByReply && !convertLoading ? ROADMAP_GENERATE_LOCKED_HINT : undefined}
                                             >
                                                 {convertLoading ? `Generating... (${_opEstimate("roadmap_generation")})` : "Generate Roadmap"}
                                             </button>
+                                            {roadmapActionsLockedByReply && !convertLoading && (
+                                                <p className="text-xs text-slate-500 text-center max-w-sm px-2">{ROADMAP_GENERATE_LOCKED_HINT}</p>
+                                            )}
                                         </div>
                                     ) : (
                                         <div className="msg-md" dangerouslySetInnerHTML={{__html: marked.parse(roadmapContent)}}/>
                                     )}
                                 </div>
                                 {roadmapContent && (
-                                    <div className="flex-shrink-0 border-t border-[#1a1d21] px-4 py-2 flex justify-between items-center">
+                                    <div className="flex-shrink-0 border-t border-[#1a1d21] px-4 py-2 flex justify-end items-center gap-2">
                                         <button
-                                            className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500 disabled:opacity-40"
-                                            onClick={doConvert}
-                                            disabled={convertLoading}
+                                            className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500"
+                                            onClick={() => navigator.clipboard.writeText(roadmapContent)}
                                         >
-                                            Regenerate Roadmap
+                                            Copy
                                         </button>
-                                        <div className="flex gap-2">
-                                            <button
+                                        {currentIdeaId && (
+                                            <a
+                                                href={`/api/ideas/${currentIdeaId}/download-roadmap`}
+                                                download
                                                 className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500"
-                                                onClick={() => navigator.clipboard.writeText(roadmapContent)}
                                             >
-                                                Copy
-                                            </button>
-                                            {currentIdeaId && (
-                                                <a
-                                                    href={`/api/ideas/${currentIdeaId}/download-roadmap`}
-                                                    download
-                                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500"
-                                                >
-                                                    Download Roadmap
-                                                </a>
-                                            )}
-                                        </div>
+                                                Download Roadmap
+                                            </a>
+                                        )}
                                     </div>
                                 )}
                             </div>
@@ -5151,17 +5154,22 @@
                                 {convertError && <div className="text-xs text-red-400">{convertError}</div>}
                                     </React.Fragment>
                                 )}
+                                {roadmapActionsLockedByReply && !convertLoading && (
+                                    <p className="text-xs text-slate-500">{ROADMAP_GENERATE_LOCKED_HINT}</p>
+                                )}
                                 <div className="flex flex-wrap gap-2 justify-end items-center">
                                     <button
                                         type="button"
-                                        disabled={convertLoading}
+                                        disabled={convertLoading || roadmapActionsLockedByReply}
                                         title={
-                                            readinessData &&
-                                            readinessData.overall_status &&
-                                            readinessData.overall_status !== "ready" &&
-                                            typeof readinessData.score === "number"
-                                                ? `Readiness score is ${readinessData.score}/10 — roadmap quality may be low.`
-                                                : undefined
+                                            roadmapActionsLockedByReply && !convertLoading
+                                                ? ROADMAP_GENERATE_LOCKED_HINT
+                                                : readinessData &&
+                                                  readinessData.overall_status &&
+                                                  readinessData.overall_status !== "ready" &&
+                                                  typeof readinessData.score === "number"
+                                                    ? `Readiness score is ${readinessData.score}/10 — roadmap quality may be low.`
+                                                    : undefined
                                         }
                                         onClick={doConvert}
                                         className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-[#0d0f11] border border-[#00b4d8]/60 font-semibold disabled:opacity-40"
