@@ -6,6 +6,7 @@ import time
 import tempfile
 import subprocess
 import traceback
+from collections.abc import Callable
 from datetime import datetime, timezone
 import logging
 import requests
@@ -53,44 +54,91 @@ PHASE_STATE_FILE = os.path.join(PROJECT_ARTIFACTS_DIR, "phase_state.json")
 ORCHESTRATOR_FILENAME = "orchestrator.py"
 
 
+def _verify_symlinks_consistent(
+    project_path: str,
+    symlink_fixer: Callable[[str], bool] | None = None,
+) -> bool:
+    """Verify that both pipeline-project symlinks resolve to project_path.
 
-def _verify_symlinks_consistent(project_path: str) -> bool:
-    """Warn if either pipeline-project symlink diverges from project_path.
-
-    Both AUTODEV_PIPELINE_ROOT/pipeline-project (polled by orchestrator for
+    Both AUTODEV_PIPELINE_ROOT/pipeline-project (polled by the orchestrator for
     sentinel files) and OPENCLAW_ROOT/pipeline-project (followed by agent
     workspace symlinks when writing output) must resolve to the same real
-    directory as the active project.  If they diverge — which can happen when
-    an operator manually runs `ln -sfn` during recovery and only updates one —
-    the executor writes sentinels to a different tree than the orchestrator
-    polls, causing infinite retries.
+    directory as the active project. Divergence causes the executor or reviewer
+    to write sentinels to a different tree than the orchestrator polls, producing
+    infinite retries.
 
-    This function is READ-ONLY: it only logs a warning and returns False.
-    Callers are responsible for keeping symlinks in sync via update_symlink().
+    When symlink_fixer is provided (pass self.update_symlink at call sites), any
+    detected divergence triggers an automatic reconcile attempt before the
+    function returns. On a successful fix the function re-verifies both paths
+    and returns True if they now agree. If project_path is empty or whitespace,
+    or if the fix fails, returns False without proceeding further.
+
+    Args:
+        project_path: Absolute path to the active project directory (from
+            pipeline_state["project_path"]).
+        symlink_fixer: Optional callable with signature (target: str) -> bool
+            that rewrites both symlinks to target. Typically self.update_symlink.
+
+    Returns:
+        True if both symlinks resolve to project_path (after reconcile if needed).
+        False if project_path is empty, symlinks diverge and no fixer is
+        provided, or fixer fails or post-fix re-verification still finds
+        divergence.
     """
-    target = os.path.abspath(project_path)
+    if not project_path.strip():
+        print(
+            "[WARN] _verify_symlinks_consistent: project_path is empty — cannot reconcile."
+        )
+        return False
+
+    target = os.path.abspath(os.path.expanduser(project_path.strip()))
     openclaw_symlink = os.path.join(OPENCLAW_ROOT, "pipeline-project")
-    issues = []
-    for label, path in (
-        ("AUTODEV pipeline-project", SYMLINK_TARGET),
-        ("OPENCLAW pipeline-project", openclaw_symlink),
-    ):
-        try:
-            resolved = os.path.realpath(path) if os.path.lexists(path) else None
-        except OSError as exc:
-            issues.append(f"{label}: OSError resolving {path!r}: {exc}")
-            continue
-        if resolved != target:
-            issues.append(
-                f"{label}: {path!r} → {resolved!r} (expected {target!r})"
-            )
-    if issues:
+
+    def _check() -> list[str]:
+        problems: list[str] = []
+        for label, p in (
+            ("AUTODEV pipeline-project", SYMLINK_TARGET),
+            ("OPENCLAW pipeline-project", openclaw_symlink),
+        ):
+            try:
+                resolved = os.path.realpath(p) if os.path.lexists(p) else None
+            except OSError as exc:
+                problems.append(f"{label}: OSError resolving {p!r}: {exc}")
+                continue
+            if resolved != target:
+                problems.append(f"{label}: {p!r} → {resolved!r} (expected {target!r})")
+        return problems
+
+    issues = _check()
+    if not issues:
+        return True
+
+    if symlink_fixer is None:
         print(
             "[WARN] Symlink inconsistency detected before agent invocation — "
             "sentinel files may land in wrong directory:\n"
             + "\n".join(f"  {i}" for i in issues)
         )
         return False
+
+    print(
+        f"[RECONCILE] Symlink divergence detected — attempting auto-reconcile to {target}"
+    )
+    if not symlink_fixer(target):
+        print(
+            f"[ERROR] _verify_symlinks_consistent: auto-reconcile failed for {target!r}"
+        )
+        return False
+
+    remaining = _check()
+    if remaining:
+        print(
+            "[WARN] Symlink inconsistency persists after reconcile attempt:\n"
+            + "\n".join(f"  {i}" for i in remaining)
+        )
+        return False
+
+    print(f"[RECONCILE] Both symlinks confirmed resolved to {target}")
     return True
 
 
@@ -2945,7 +2993,9 @@ class Orchestrator:
                     self.state["sentinel_wait_started_at"] = datetime.now(timezone.utc).isoformat()
                     self.transition_state("WAITING_FOR_SENTINEL", f"Invoking Executor ({attempt_label}) - Attempt {retries + 1}")
 
-                    _verify_symlinks_consistent(self.state.get("project_path", ""))
+                    _verify_symlinks_consistent(
+                        self.state.get("project_path", ""), self.update_symlink
+                    )
                     webhook_status = invoke_agent_webhook("executor", session_key, token, model=model)
 
                     if webhook_status != "SUCCESS":
@@ -3100,7 +3150,9 @@ class Orchestrator:
                     self.state["sentinel_wait_started_at"] = datetime.now(timezone.utc).isoformat()
                     self.transition_state("WAITING_FOR_SENTINEL", f"Invoking Reviewer - Attempt {retries + 1}")
 
-                    _verify_symlinks_consistent(self.state.get("project_path", ""))
+                    _verify_symlinks_consistent(
+                        self.state.get("project_path", ""), self.update_symlink
+                    )
                     webhook_status = invoke_agent_webhook("reviewer", session_key, token, model=self._get_agent_model("reviewer"))
 
                     if webhook_status != "SUCCESS":

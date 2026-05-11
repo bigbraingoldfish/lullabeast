@@ -77,11 +77,11 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 - **`poll_for_sentinel_with_idle_detect`** and `_latest_activity_mtime` from `autodev/pipeline/sentinel_poller.py`.
 - **`_watch_root_for_idle_detect`** from `autodev/pipeline/orchestrator.py`.
 
-- **Symlink divergence guard:** `_verify_symlinks_consistent(project_path)` warns `[WARN]` before executor and reviewer webhook calls if either `pipeline-project` symlink has drifted from the active project path. Read-only diagnostic; does not abort the run. See `autodev/pipeline/orchestrator.py`, `autodev/tests/test_orchestrator_symlink_consistency.py`.
-
 - **Dead-session detection:** `_check_session_dead_on_arrival()` escalates immediately when an OpenClaw session records `runtimeMs == 0` + `stopReason == "error"` (provider rejected before any work). Applied to both executor and reviewer. See `autodev/pipeline/orchestrator.py`, `autodev/tests/test_orchestrator_dead_session.py`.
 
 ### Changed
+
+- **Symlink pre-webhook auto-reconcile:** Before executor and reviewer webhooks, `_verify_symlinks_consistent(project_path, self.update_symlink)` detects when `AUTODEV_PIPELINE_ROOT/pipeline-project` and `OPENCLAW_ROOT/pipeline-project` disagree with `pipeline_state["project_path"]`. On divergence it invokes `update_symlink` to repoint both symlinks (Policy A — state wins), logs `[RECONCILE]`, and re-verifies; logs `[WARN]` / `[ERROR]` and returns `False` if `project_path` is empty, reconciliation fails, or divergence persists. With no `symlink_fixer` argument the function remains warn-only. The return value does not gate webhook invocation. See `autodev/pipeline/orchestrator.py`, `autodev/tests/test_orchestrator_symlink_consistency.py`.
 
 - **Reviewer sentinel timeout capped at 3:** Reviewer branch now escalates to `"escalation"` agent after 3 consecutive sentinel timeouts (mirrors planner). `write_failure_context` called on every timeout so operators always see current reviewer failure data. See `autodev/pipeline/orchestrator.py`, `autodev/tests/test_orchestrator_reviewer_timeout_cap.py`.
 

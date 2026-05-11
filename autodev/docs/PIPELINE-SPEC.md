@@ -1080,6 +1080,8 @@ The outer symlink `~/.openclaw/pipeline-project` resolves to the actual project 
 
 Agent `AGENTS.md` files instruct agents to use the workspace-relative symlink `pipeline-project/` to reach the target repo. **Pipeline state and sentinels** (`planner_output.*`, `phase_state.json`, `*_output.done`, `phases/`, `metrics.jsonl`, etc.) are under `pipeline-project/.autodev/pipeline/`, not the project root. Do not use the absolute path `~/.openclaw/pipeline-project/` in agent write instructions.
 
+**Orchestrator symlink reconcile (executor and reviewer):** Immediately before each executor and reviewer webhook, the orchestrator calls `_verify_symlinks_consistent(pipeline_state["project_path"], self.update_symlink)`. If both outer `pipeline-project` symlinks (under `AUTODEV_PIPELINE_ROOT` and `OPENCLAW_ROOT`) already resolve to `project_path`, the call is a no-op. If they diverge, it invokes `update_symlink` to repoint both to `project_path` (same **Policy A — state wins** model as `POST /api/resume-orchestrator`), logs `[RECONCILE]` on the attempt and on successful confirmation, and re-verifies. Empty `project_path`, failed `update_symlink`, or persistent mismatch yields `[WARN]` or `[ERROR]` and `False`; the main loop still proceeds to the webhook (the reconcile is best-effort; operators should treat persistent `[WARN]` after `[RECONCILE]` as a signal to inspect symlinks and disk permissions).
+
 ### Git Operations
 
 **Strict timing rule:** No git operations during planner, executor, or reviewer turns — agents write only to shared workspace.
