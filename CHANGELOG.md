@@ -38,6 +38,8 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ### Changed
 
+- **Project Queue header:** Removed the aggregate summary line (ready / blocked / on-hold / complete counts). **Progression** (Auto / Manual) and **Run next project** (manual mode) sit in a right-aligned cluster with `data-testid="queue-header-trailing"`; fetch errors stay with the primary left group (title, add, reorder).
+
 - **Project Ideas:** **Generate Roadmap** / **Regenerate Roadmap** stay disabled while a chat reply is in progress (same `isLoading` path as **Send**), with a short inline hint so operators know conversion waits for the latest PRD. `doConvert`, `beginConvertAfterGuards`, and `_runConvert` guard against starting conversion during that window (including low-readiness and regenerate confirm paths).
 
 - **Tests:** `test_installer_register_agent.py` section markers updated to match **`install.sh`** comment headers (`3/14` … `10/14`, `6/14` … `7/14`).

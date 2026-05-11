@@ -6133,6 +6133,14 @@
 
         // ─── Queue Screen ─────────────────────────────────────────────────────────
 
+        /**
+         * Project Queue: three-column list / snapshot / action hub, plus a two-region
+         * top bar — primary controls (title, add/reorder, queue fetch error) in a
+         * flex-1 row on the left; progression mode, optional Run next, and trigger
+         * feedback in a right-aligned cluster (wrapper carries `ml-auto` and the
+         * queue-header-trailing test id).
+         */
+
         function QueueScreen() {
             const { pipelineStatus, setUnsavedQueueOrder, safeNavigate } = useContext(AppCtx);
             const [queue, setQueue] = useState([]);
@@ -6552,16 +6560,6 @@
                 }
                 return `Depends on: ${parentEntry.name}`;
             };
-
-            const readyCt = queue.filter(e => e.state === 'READY').length;
-            const blockedCt = queue.filter(e => e.state === 'BLOCKED').length;
-            const holdCt = queue.filter(e => e.state === 'DEPENDENCY_HOLD').length;
-            const completedCt = queue.filter(e => e.state === 'COMPLETED').length;
-            const dependentSoftCt = queue.filter(e => {
-                if (!e.parent_id || e.state === 'DEPENDENCY_HOLD') return false;
-                const p = queue.find(x => x.id === e.parent_id);
-                return p && p.state !== 'COMPLETED';
-            }).length;
 
             function relTime(iso) {
                 if (!iso) return null;
@@ -7083,73 +7081,74 @@
 
             return (
                 <div className="flex flex-col h-full overflow-hidden">
-                    {/* Top bar */}
+                    {/* Top bar: primary (left) + progression / run-next (right, ml-auto) */}
                     <div className="bg-[#141618] border-b border-[#1a1d21] px-6 py-3 flex items-center gap-4 flex-shrink-0">
-                        <h1 className="header-text text-base font-semibold text-slate-200">Project Queue</h1>
-                        <button onClick={() => setShowAddModal(true)}
-                            disabled={reorderDirty}
-                            title={reorderDirty ? "Save or cancel reorder first" : undefined}
-                            className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-slate-900 font-semibold hover:bg-[#00c8f0] disabled:opacity-40">
-                            + Add Project
-                        </button>
-                        {!reorderMode ? (
-                            <button type="button" onClick={beginReorder} disabled={loading || queue.length < 2}
-                                title="Drag root rows to change order, then Save order"
-                                className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:bg-[#22252a] disabled:opacity-40">
-                                Reorder
+                        <div className="flex items-center gap-4 min-w-0 flex-1">
+                            <h1 className="header-text text-base font-semibold text-slate-200">Project Queue</h1>
+                            <button onClick={() => setShowAddModal(true)}
+                                disabled={reorderDirty}
+                                title={reorderDirty ? "Save or cancel reorder first" : undefined}
+                                className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-slate-900 font-semibold hover:bg-[#00c8f0] disabled:opacity-40">
+                                + Add Project
                             </button>
-                        ) : (
-                            <>
-                                <button type="button" onClick={saveReorder} disabled={reorderSaveBusy || !reorderDirty}
-                                    title={reorderDirty ? "Write this order to the server" : "Change the order first"}
-                                    className="header-text text-xs px-3 py-1.5 rounded bg-emerald-800 text-white hover:bg-emerald-700 disabled:opacity-40">
-                                    {reorderSaveBusy ? "Saving…" : "Save order"}
+                            {!reorderMode ? (
+                                <button type="button" onClick={beginReorder} disabled={loading || queue.length < 2}
+                                    title="Drag root rows to change order, then Save order"
+                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:bg-[#22252a] disabled:opacity-40">
+                                    Reorder
                                 </button>
-                                <button type="button" onClick={cancelReorder} disabled={reorderSaveBusy}
-                                    title="Discard changes and reload queue from server"
-                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-300 border border-[#2a2d31] hover:bg-[#22252a] disabled:opacity-40">
-                                    Cancel
-                                </button>
-                                {reorderDirty && (
-                                    <span className="header-text text-[10px] uppercase tracking-wide text-slate-500">Unsaved</span>
-                                )}
-                            </>
-                        )}
-                        {reorderError && <span className="header-text text-xs text-red-400 max-w-xs">{reorderError}</span>}
-                        <div className="flex items-center gap-2">
-                            <span
-                                data-testid="queue-progression-label"
-                                className="header-text text-xs uppercase tracking-wide text-white"
-                                title="Auto advances the queue when eligible; Manual requires Run next project.">
-                                Progression
-                            </span>
-                            <div className="flex items-center gap-1 rounded-full bg-[#1a1d21] p-0.5 border border-[#2a2d31]">
-                                {['auto', 'manual'].map(m => (
-                                    <button key={m} onClick={handleModeToggle}
-                                        disabled={reorderDirty}
-                                        title={reorderDirty ? "Save or cancel reorder first" : undefined}
-                                        className={`header-text text-xs px-3 py-1 rounded-full transition-colors disabled:opacity-40 ${
-                                            queueMode === m ? 'bg-[#00b4d8] text-slate-900 font-semibold' : 'text-slate-400 hover:text-slate-200'
-                                        }`}>{m === 'auto' ? 'Auto' : 'Manual'}</button>
-                                ))}
-                            </div>
+                            ) : (
+                                <>
+                                    <button type="button" onClick={saveReorder} disabled={reorderSaveBusy || !reorderDirty}
+                                        title={reorderDirty ? "Write this order to the server" : "Change the order first"}
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-emerald-800 text-white hover:bg-emerald-700 disabled:opacity-40">
+                                        {reorderSaveBusy ? "Saving…" : "Save order"}
+                                    </button>
+                                    <button type="button" onClick={cancelReorder} disabled={reorderSaveBusy}
+                                        title="Discard changes and reload queue from server"
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-300 border border-[#2a2d31] hover:bg-[#22252a] disabled:opacity-40">
+                                        Cancel
+                                    </button>
+                                    {reorderDirty && (
+                                        <span className="header-text text-[10px] uppercase tracking-wide text-slate-500">Unsaved</span>
+                                    )}
+                                </>
+                            )}
+                            {reorderError && <span className="header-text text-xs text-red-400 max-w-xs">{reorderError}</span>}
+                            {error && <span className="header-text text-xs text-red-400">{error}</span>}
                         </div>
-                        {queueMode === 'manual' && (
-                            <button
-                                type="button"
-                                data-testid="queue-trigger-next"
-                                onClick={handleTriggerNext}
-                                disabled={runNextProjectDisabled}
-                                title={getRunNextProjectDisabledReason() ?? undefined}
-                                className={`header-text text-xs px-3 py-1.5 rounded bg-emerald-700 text-white hover:bg-emerald-600 disabled:opacity-50${!runNextProjectDisabled ? ' run-pulse' : ''}`}>
-                                {triggerBusy ? 'Starting…' : 'Run next project'}
-                            </button>
-                        )}
-                        {triggerMsg && <span className="header-text text-xs text-amber-400">{triggerMsg}</span>}
-                        {error && <span className="header-text text-xs text-red-400">{error}</span>}
-                        <span className="header-text text-xs text-slate-500 ml-auto">
-                            {queue.length} project{queue.length !== 1 ? 's' : ''} — {readyCt} ready, {blockedCt} blocked, {holdCt} on hold (blocked parent){dependentSoftCt > 0 ? `, ${dependentSoftCt} dependent` : ''}, {completedCt} complete
-                        </span>
+                        <div data-testid="queue-header-trailing" className="flex items-center gap-2 ml-auto flex-shrink-0">
+                            <div className="flex items-center gap-2">
+                                <span
+                                    data-testid="queue-progression-label"
+                                    className="header-text text-xs uppercase tracking-wide text-white"
+                                    title="Auto advances the queue when eligible; Manual requires Run next project.">
+                                    Progression
+                                </span>
+                                <div className="flex items-center gap-1 rounded-full bg-[#1a1d21] p-0.5 border border-[#2a2d31]">
+                                    {['auto', 'manual'].map(m => (
+                                        <button key={m} onClick={handleModeToggle}
+                                            disabled={reorderDirty}
+                                            title={reorderDirty ? "Save or cancel reorder first" : undefined}
+                                            className={`header-text text-xs px-3 py-1 rounded-full transition-colors disabled:opacity-40 ${
+                                                queueMode === m ? 'bg-[#00b4d8] text-slate-900 font-semibold' : 'text-slate-400 hover:text-slate-200'
+                                            }`}>{m === 'auto' ? 'Auto' : 'Manual'}</button>
+                                    ))}
+                                </div>
+                            </div>
+                            {queueMode === 'manual' && (
+                                <button
+                                    type="button"
+                                    data-testid="queue-trigger-next"
+                                    onClick={handleTriggerNext}
+                                    disabled={runNextProjectDisabled}
+                                    title={getRunNextProjectDisabledReason() ?? undefined}
+                                    className={`header-text text-xs px-3 py-1.5 rounded bg-emerald-700 text-white hover:bg-emerald-600 disabled:opacity-50${!runNextProjectDisabled ? ' run-pulse' : ''}`}>
+                                    {triggerBusy ? 'Starting…' : 'Run next project'}
+                                </button>
+                            )}
+                            {triggerMsg && <span className="header-text text-xs text-amber-400">{triggerMsg}</span>}
+                        </div>
                     </div>
 
                     {/* Three-column body */}
