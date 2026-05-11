@@ -336,6 +336,10 @@
                 "Executor Error: a required Git check could not run in the project. Action required: fix Git in the working tree (corrupt repo, lock, or permissions) — the pipeline will not get past this step until Git commands succeed. Automatic retries alone will not fix a broken repository.",
             ERR_INFRA_FAILURE:
                 "Reviewer output error: missing or unreadable review file. Retrying or recovering automatically.",
+            ERR_PROVIDER_REJECTED:
+                "Inference provider rejected the request \u2014 check your API key, credits, or rate limits, then restart the pipeline.",
+            ERR_SESSION_DEAD_ON_ARRIVAL:
+                "Inference provider rejected the session before it started \u2014 check your API key and provider status.",
         };
 
         function getLastErrorCodeTitle(errorCode, currentAgent) {

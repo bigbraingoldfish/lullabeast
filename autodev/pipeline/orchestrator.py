@@ -342,11 +342,15 @@ def _session_jsonl_last_assistant_error_message(jsonl_path: str | None) -> str:
     return last_err
 
 
-def _is_provider_quota_or_billing_error(msg: str) -> bool:
-    """Heuristic: provider rejected the request for quota, billing, or affordability."""
+def _is_provider_rejected_error(msg: str) -> bool:
+    """Heuristic: returns True if the provider rejected the request for billing, rate-limit, or auth reasons."""
     if not msg:
         return False
     lower = msg.lower()
+    if "401" in msg or "unauthorized" in lower:
+        return True
+    if "invalid api key" in lower or "incorrect api key" in lower:
+        return True
     if "402" in msg or "payment required" in lower:
         return True
     if "more credits" in lower or "can only afford" in lower or "monthly limit" in lower:
@@ -1518,28 +1522,28 @@ class Orchestrator:
             return "executor_preempted"
         return "executor_crashed"
 
-    def _escalate_if_jsonl_quota_error(self, jsonl_path: str | None, role_label: str) -> bool:
-        """If the OpenClaw session JSONL ends with a quota/billing provider error, escalate.
+    def _escalate_if_provider_rejected(self, jsonl_path: str | None, role_label: str) -> bool:
+        """If the session JSONL ends with a provider-rejection error (billing, rate-limit, or auth),
+        set last_error_code=ERR_PROVIDER_REJECTED, fill escalation_trigger_reason with the provider
+        message, and route to escalation.
 
-        Returns True when escalation was triggered (caller should ``continue`` the
-        main loop). Covers OpenRouter 402 / insufficient-credit cases where
-        ``sessions.json`` shows non-zero ``runtimeMs`` so :func:`_check_session_dead_on_arrival`
-        does not fire.
+        Returns True when escalation was triggered (caller must ``continue`` the main loop). May be
+        called more than once per attempt (post-poll and post-gate) to absorb JSONL flush ordering.
         """
         msg = _session_jsonl_last_assistant_error_message(jsonl_path)
-        if not msg or not _is_provider_quota_or_billing_error(msg):
+        if not msg or not _is_provider_rejected_error(msg):
             return False
-        print(f"[ERROR] [{role_label}] Provider quota/billing error: {msg[:240]}")
+        print(f"[ERROR] [{role_label}] Provider rejected request: {msg[:240]}")
         _ps = self.read_phase_state()
-        _ps["last_error_code"] = "ERR_PROVIDER_QUOTA"
+        _ps["last_error_code"] = "ERR_PROVIDER_REJECTED"
         _ps["escalation_trigger_reason"] = (
-            f"{role_label} blocked by provider quota or billing: {msg[:900]}"
+            f"{role_label} blocked — inference provider rejected the request: {msg[:900]}"
         )
         self.write_phase_state_atomic(_ps)
         self.state["current_agent"] = "escalation"
         self.transition_state(
             "RUNNING",
-            f"ERR_PROVIDER_QUOTA ({role_label}): {msg[:240]}",
+            f"ERR_PROVIDER_REJECTED ({role_label}): {msg[:240]}",
         )
         return True
 
@@ -2770,12 +2774,12 @@ class Orchestrator:
                     _ps_plan_tok["planner_tokens_acc"] = _planner_tokens_acc
                     self.write_phase_state_atomic(_ps_plan_tok)
 
-                    if self._escalate_if_jsonl_quota_error(_planner_jsonl_path, "Planner"):
+                    if self._escalate_if_provider_rejected(_planner_jsonl_path, "Planner"):
                         time.sleep(5)
                         continue
 
                     if not sentinel_found:
-                        if self._escalate_if_jsonl_quota_error(_planner_jsonl_path, "Planner"):
+                        if self._escalate_if_provider_rejected(_planner_jsonl_path, "Planner"):
                             time.sleep(5)
                             continue
                         print("[ERROR] Sentinel timeout")
@@ -2796,6 +2800,9 @@ class Orchestrator:
                             time.sleep(5)
                             continue
                         else:
+                            if self._escalate_if_provider_rejected(_planner_jsonl_path, "Planner"):
+                                time.sleep(5)
+                                continue
                             print("[ERROR] Planner gate failed")
                             _write_pipeline_event("gate_fail", raw_id, "planner", {"exit_code": 1})  # W1-F
                             self.write_failure_context("planner", self.state.get("planner_retries", 0) + 1)
@@ -2996,7 +3003,7 @@ class Orchestrator:
                         )
                         continue
 
-                    if self._escalate_if_jsonl_quota_error(_jsonl_path, "Executor"):
+                    if self._escalate_if_provider_rejected(_jsonl_path, "Executor"):
                         time.sleep(5)
                         continue
 
@@ -3029,7 +3036,7 @@ class Orchestrator:
                             print("[ERROR] Executor gate failed")
                             _write_pipeline_event("gate_fail", raw_id, "executor", {"exit_code": 1})  # W1-F
                             self.write_failure_context("executor", self.state.get("executor_retries", 0) + 1)
-                            if self._escalate_if_jsonl_quota_error(_jsonl_path, "Executor"):
+                            if self._escalate_if_provider_rejected(_jsonl_path, "Executor"):
                                 time.sleep(5)
                                 continue
                             # reset_execution("auto") owns the counter increment.
@@ -3061,7 +3068,7 @@ class Orchestrator:
 
                     else:  # executor_crashed
                         print("[ERROR] Executor sentinel timeout — classified as executor_crashed.")
-                        if self._escalate_if_jsonl_quota_error(_jsonl_path, "Executor"):
+                        if self._escalate_if_provider_rejected(_jsonl_path, "Executor"):
                             time.sleep(5)
                             continue
                         # reset_execution("auto") owns the counter increment — do not call
@@ -3157,7 +3164,14 @@ class Orchestrator:
                     _ps_rev_tok["reviewer_tokens_acc"] = _reviewer_tokens
                     self.write_phase_state_atomic(_ps_rev_tok)
 
+                    if self._escalate_if_provider_rejected(_jsonl_path, "Reviewer"):
+                        time.sleep(5)
+                        continue
+
                     if not sentinel_found:
+                        if self._escalate_if_provider_rejected(_jsonl_path, "Reviewer"):
+                            time.sleep(5)
+                            continue
                         print("[ERROR] Sentinel timeout")
                         _rv_retries = self.increment_reviewer_retries()
                         # Finding E: write failure context on every timeout so operators
@@ -3186,6 +3200,9 @@ class Orchestrator:
 
                     if gate_result != "PASS":
                         _write_pipeline_event("gate_fail", raw_id, "reviewer", {"gate_result": gate_result})  # W1-F
+                        if self._escalate_if_provider_rejected(_jsonl_path, "Reviewer"):
+                            time.sleep(5)
+                            continue
                         self.write_failure_context("reviewer", self.state.get("reviewer_retries", 0) + 1)
 
                     if gate_result == "PASS":
