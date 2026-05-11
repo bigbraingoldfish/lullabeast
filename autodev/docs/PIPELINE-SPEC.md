@@ -1303,6 +1303,12 @@ The `invoke_agent_webhook` function returns one of three structured string statu
 - Parse error type logged to `phase_state.json` with distinct error code so audit trail distinguishes parse failures from structural validation failures
 - Gate script always wraps JSON load in `try/except` — unhandled parse exception must never crash the orchestrator
 
+### Inference provider session rejections (`ERR_PROVIDER_REJECTED`)
+
+When the OpenClaw session JSONL for planner, executor, or reviewer ends with an assistant `errorMessage` that matches the orchestrator's provider-rejection heuristic (HTTP 402 billing/credits, HTTP 429 rate limit, HTTP 401 / unauthorized / invalid API key, and common OpenRouter affordability strings), the orchestrator sets `last_error_code` to **`ERR_PROVIDER_REJECTED`**, writes `escalation_trigger_reason` with the truncated provider message, sets `current_agent` to **`escalation`**, and transitions to `RUNNING` pending escalation — **without** incrementing that agent's retry counter for that turn. The heuristic may be evaluated more than once per attempt (post-poll and post-gate) so errors flushed to JSONL after the first read are still detected.
+
+For sessions that terminate immediately (`runtimeMs == 0`, `stopReason == "error"`), the orchestrator continues to use **`ERR_SESSION_DEAD_ON_ARRIVAL`** (distinct from `ERR_PROVIDER_REJECTED` when the session never meaningfully started).
+
 ### Roadmap Checkbox States
 
 | Checkbox | Meaning | Orchestrator Behavior |

@@ -143,6 +143,13 @@ H23_ERR_INFRA = (
     "Reviewer output error: missing or unreadable review file. "
     "Retrying or recovering automatically."
 )
+H23_ERR_PROVIDER_REJECTED = (
+    "Inference provider rejected the request \\u2014 check your API key, credits, or rate limits, "
+    "then restart the pipeline."
+)
+H23_ERR_SESSION_DEAD_ON_ARRIVAL = (
+    "Inference provider rejected the session before it started \\u2014 check your API key and provider status."
+)
 H23_V_PLANNER = "Planner Error: output didn’t pass validation. Retrying if attempts remain."
 H23_V_REVIEWER = (
     "Reviewer Error: checks or review output didn’t pass. "
@@ -157,6 +164,8 @@ def test_last_error_code_titles_h23(html_content):
     assert H23_ERR_TESTS in html_content
     assert H23_ERR_GIT_DIFF in html_content
     assert H23_ERR_INFRA in html_content
+    assert H23_ERR_PROVIDER_REJECTED in html_content
+    assert H23_ERR_SESSION_DEAD_ON_ARRIVAL in html_content
     assert H23_V_PLANNER in html_content
     assert H23_V_REVIEWER in html_content
     assert H23_V_FALLBACK in html_content
