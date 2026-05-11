@@ -511,6 +511,12 @@
             const phase = roadmap.find(p => p.id === phaseId);
             return phase ? phase.goal : null;
         }
+
+        function isRoadmapPhaseComplete(phaseId, roadmap) {
+            if (!phaseId || !roadmap || !Array.isArray(roadmap)) return false;
+            const phase = roadmap.find(p => p.id === phaseId);
+            return !!(phase && phase.status === 'complete');
+        }
         
         function getStatusIcon(status) {
             switch (status) {
@@ -538,36 +544,68 @@
             switch (raw) {
                 case 'gate_pass': return 'bg-green-600 text-white';
                 case 'gate_fail': return 'bg-amber-600 text-white';
-                case 'retry': return 'bg-amber-600 text-white';
                 case 'escalation_trigger': return 'bg-orange-600 text-white';
                 case 'escalation_resolve': return 'bg-blue-600 text-white';
-                case 'phase_complete': return 'bg-lime-600 text-white';
+                case 'phase_complete': return 'bg-green-600 text-white';
                 case 'status_changed': return 'bg-slate-600 text-white';
                 default: return 'bg-[#1a1d21] text-white';
             }
         }
 
-        /** Canonical jsonl / synthetic event type → operator-facing label (L-31). */
         const EVENT_TYPE_DISPLAY = {
-            gate_pass: 'Gate pass',
-            gate_fail: 'Gate fail',
-            retry: 'Retry',
-            escalation_trigger: 'Escalation trigger',
-            escalation_resolve: 'Escalation resolve',
-            phase_complete: 'Phase complete',
-            status_changed: 'Status changed',
-            phase_skip: 'Phase skip',
-            skill_inject: 'Skill inject',
-            pipeline_start: 'Pipeline start',
-            pipeline_complete: 'Pipeline complete',
-            orchestrator_crash: 'Orchestrator crash',
-            heartbeat_resume: 'Heartbeat resume',
-            phase_start: 'Phase start',
-            gate_verdict: 'Gate verdict',
-            agent_retry: 'Agent retry',
-            webhook_invoke: 'Webhook invoke',
-            state_transition: 'State transition',
+            gate_pass: 'Passed',
+            gate_fail: 'Failed',
+            escalation_trigger: 'Escalated',
+            escalation_resolve: 'Resolved',
+            phase_complete: 'Complete',
+            status_changed: 'Updated',
         };
+
+        function humanizeSummary(event) {
+            const type = event.event || event.event_type || '';
+            const d = event.detail || {};
+            switch (type) {
+                case 'gate_pass':
+                    return 'Review passed — phase advancing';
+                case 'gate_fail': {
+                    if (d.gate_result === 'ROUTE_EXECUTOR') return 'Review found issues — sending back to executor';
+                    if (d.gate_result === 'ROUTE_ESCALATE') return 'Review failed repeatedly — escalating for human input';
+                    if (d.gate_result === 'MISSING_ARTIFACTS') return 'Required output files missing — cannot review';
+                    if (d.exit_code != null) return `Agent output rejected (exit code ${d.exit_code})`;
+                    return 'Gate check failed';
+                }
+                case 'phase_complete': {
+                    const a = d.executor_attempts;
+                    const b = d.blame_fires;
+                    if (a === 1 && !b) return 'Completed on first attempt';
+                    if (a > 1 && !b) return `Completed after ${a} executor attempts`;
+                    if (b > 0) return `Completed after ${a} executor attempts (${b} blame cycle${b > 1 ? 's' : ''})`;
+                    return 'Phase completed';
+                }
+                case 'escalation_trigger': {
+                    const r = typeof d.reason === 'string' ? d.reason : '';
+                    if (r.startsWith('Planner retries')) return 'Planner ran out of retries — needs human decision';
+                    if (r.startsWith('Impl blame cap')) return 'Implementation blame cap hit — needs human decision';
+                    if (r.startsWith('Reviewer ROUTE_ESCALATE')) return 'Reviewer requested escalation — needs human decision';
+                    if (r.startsWith('Reviewer sentinel timeout')) return 'Reviewer timed out — needs human decision';
+                    if (r.includes('merge failed')) return 'Git merge conflict — needs human decision';
+                    return r ? r.slice(0, 100) : 'Escalation triggered';
+                }
+                case 'escalation_resolve': {
+                    const cmds = {
+                        RETRY: 'Human chose: retry current agent',
+                        RESET_PHASE: 'Human chose: restart entire phase',
+                        RESET_REVIEWER: 'Human chose: restart review step',
+                        STOP: 'Human chose: stop pipeline',
+                    };
+                    return cmds[d.command] || `Human chose: ${d.command || 'unknown'}`;
+                }
+                case 'status_changed':
+                    return 'Pipeline state updated';
+                default:
+                    return formatPipelineEventDetail(d) || type;
+            }
+        }
 
         function humanizeSnakeCase(s) {
             if (!s || typeof s !== 'string') return 'Unknown';
@@ -2146,6 +2184,12 @@
 
         // ─── Activity Feed ────────────────────────────────────────────────────────
 
+        function ensureEventId(event) {
+            if (event.id) return event;
+            const key = (event.ts || '') + '|' + (event.event || event.event_type || '') + '|' + (event.phase || '');
+            return { ...event, id: 'fe_' + key };
+        }
+
         /**
          * File-backed /api/events uses structured `detail` (reason, gate_result, metrics, {}).
          * Legacy rows used a string. Never return a plain object — React cannot render it as a child.
@@ -2168,63 +2212,102 @@
 
         function EventRow({ event, isExpanded, onToggle, isNew }) {
             if (!event) return null;
-            
-            // Phase 2b fix: server writes "ts", not "timestamp". Support both.
+
             const ts = event.ts || event.timestamp;
             const timeOnly = ts ? ts.slice(11, 16) : '--:--';
-            
-            const detailStr = formatPipelineEventDetail(event.detail);
-            const truncatedDetail =
-                detailStr.length > 60 ? detailStr.slice(0, 60) + "..." : detailStr;
-            
-            const attemptDisplay = event.attempt ?? '—';
+            const fullTime = ts || '—';
             const rawType = getEventTypeRaw(event);
             const labelText = rawType ? formatActivityEventTypeLabel(rawType) : 'Unknown';
             const badgeColor = getEventBadgeColor(rawType);
-            const machineTitle = `Machine id: ${rawType || 'unknown'}`;
+            const summary = humanizeSummary(event);
+
+            const isDimmed = rawType === 'gate_pass' || rawType === 'phase_complete' || rawType === 'status_changed';
+
+            const phaseLabel = event.project && event.phase
+                ? `${event.project} / ${event.phase}`
+                : event.phase || '—';
+            const phaseTitle = phaseLabel;
+
+            const detail = event.detail || {};
+            const rawPairs = typeof detail === 'object' && detail !== null
+                ? Object.entries(detail).filter(([, v]) => v != null && v !== '')
+                : [];
 
             return (
                 <div
-                    className={"event-row p-2 border-b border-[#1a1d21] cursor-pointer rounded" + (isNew ? " event-row-fade-in" : "")}
+                    className={
+                        "event-row p-2 border-b border-[#1a1d21] cursor-pointer rounded" +
+                        (isDimmed ? ' opacity-70' : '') +
+                        (isNew ? " event-row-fade-in" : "")
+                    }
                     onClick={onToggle}
                 >
                     <div className="flex items-center gap-3">
                         <span className="font-mono text-xs text-slate-400 w-14 flex-shrink-0">
                             {timeOnly}
                         </span>
-                        <span
-                            data-event-type={rawType || 'unknown'}
-                            title={machineTitle}
-                            className={`px-2 py-0.5 rounded text-xs font-medium ${badgeColor} flex-shrink-0`}
-                        >
-                            {labelText}
+                        <span className="text-xs text-slate-300 w-40 flex-shrink-0 truncate" title={phaseTitle}>
+                            {phaseLabel}
                         </span>
-                        <span className="text-xs text-slate-300 w-20 flex-shrink-0 truncate">
-                            {event.agent || '—'}
+                        <span className="w-20 flex-shrink-0 flex items-center">
+                            <span
+                                data-event-type={rawType || 'unknown'}
+                                className={`px-2 py-0.5 rounded text-xs font-medium ${badgeColor}`}
+                            >
+                                {labelText}
+                            </span>
                         </span>
-                        <span className="text-xs text-slate-300 w-24 flex-shrink-0 truncate">
-                            {event.phase || '—'}
-                        </span>
-                        <span className="text-xs text-slate-500 w-28 flex-shrink-0 truncate" title={event.project || ''}>
-                            {event.project || ''}
-                        </span>
-                        <span className="text-xs text-slate-400 w-12 flex-shrink-0 text-center">
-                            {attemptDisplay}
-                        </span>
-                        <span className="text-xs text-slate-400 flex-1 truncate">
-                            {truncatedDetail || '—'}
+                        <span className="text-xs text-slate-300 flex-1" style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+                            {summary || '—'}
                         </span>
                     </div>
-                    {isExpanded && detailStr && (
-                        <div className="mt-2 pl-20 text-xs text-slate-300 bg-[#141618] p-2 rounded">
-                            {detailStr}
+                    {isExpanded && (
+                        <div className="mt-2 ml-14 text-xs bg-[#141618] p-3 rounded border border-[#1a1d21]">
+                            <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+                                <span className="text-slate-500">Type</span>
+                                <span className="text-slate-300">{labelText} ({rawType})</span>
+                                <span className="text-slate-500">Phase</span>
+                                <span className="text-slate-300">{event.phase || '—'}</span>
+                                <span className="text-slate-500">Agent</span>
+                                <span className="text-slate-300">{event.agent || '—'}</span>
+                                <span className="text-slate-500">Time</span>
+                                <span className="font-mono text-slate-300">{fullTime}</span>
+                                {event.project && <>
+                                    <span className="text-slate-500">Project</span>
+                                    <span className="text-slate-300">{event.project}</span>
+                                </>}
+                            </div>
+                            {summary && (
+                                <div className="mt-2 pt-2 border-t border-[#1a1d21]">
+                                    <div className="text-slate-500 mb-1">Detail</div>
+                                    <div className="text-slate-300 whitespace-pre-wrap">{summary}</div>
+                                </div>
+                            )}
+                            {rawPairs.length > 0 && (
+                                <div className="mt-2 pt-2 border-t border-[#1a1d21]">
+                                    <div className="text-slate-500 mb-1">Raw data</div>
+                                    <div className="font-mono text-[11px] text-slate-500">
+                                        {rawPairs.map(([k, v]) => (
+                                            <div key={k}>{k}: {typeof v === 'object' ? JSON.stringify(v) : String(v)}</div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
                         </div>
                     )}
                 </div>
             );
         }
 
-        function EscalationLogPanel({ events }) {
+        const COMMAND_LABELS = {
+            RETRY: 'Retry current agent',
+            RESET_PHASE: 'Restart entire phase',
+            RESET_REVIEWER: 'Restart review step',
+            RESET_EXECUTION: 'Restart execution step',
+            STOP: 'Stop pipeline',
+        };
+
+        function EscalationLogPanel({ events, roadmap }) {
             function pairEscalations(allEvents) {
                 const triggers = allEvents.filter(
                     (e) => (e.event_type ?? e.event) === "escalation_trigger"
@@ -2279,14 +2362,18 @@
                     {pairedEscalations.map((pair, index) => {
                         const trigger = pair.trigger;
                         const resolve = pair.resolve;
-                        const isInProgress = !resolve;
+                        const phaseId = pair.phase || trigger.phase;
+                        const manualResolved = !resolve && isRoadmapPhaseComplete(phaseId, roadmap);
+                        const isInProgress = !resolve && !manualResolved;
                         return (
                             <div key={index} className="p-3 bg-[#141618] rounded border border-[#1a1d21]">
                                 <div className="flex items-center gap-3 mb-2">
                                     <span className="header-text text-sm font-semibold text-slate-300">
                                         {pair.phase || '—'}
                                     </span>
-                                    {isInProgress ? (
+                                    {manualResolved ? (
+                                        <span className="px-2 py-0.5 rounded text-xs font-medium bg-green-600 text-white">Manually resolved</span>
+                                    ) : isInProgress ? (
                                         <span className="px-2 py-0.5 rounded text-xs font-medium bg-orange-600 text-white">In Progress</span>
                                     ) : (
                                         <span className="px-2 py-0.5 rounded text-xs font-medium bg-green-600 text-white">Resolved</span>
@@ -2306,21 +2393,23 @@
                                     <div>
                                         <span className="text-slate-500">Command:</span>
                                         <span className="text-slate-300 ml-2">
-                                            {isInProgress
-                                                ? "Awaiting command..."
-                                                : formatPipelineEventDetail(resolve.detail) || "—"}
+                                            {manualResolved
+                                                ? "Manually resolved (roadmap)"
+                                                : isInProgress
+                                                    ? "Awaiting command..."
+                                                    : (resolve.detail?.command ? (COMMAND_LABELS[resolve.detail.command] || resolve.detail.command) : "—")}
                                         </span>
                                     </div>
                                     <div>
                                         <span className="text-slate-500">Resolved:</span>
                                         <span className="font-mono text-slate-300 ml-2">
-                                            {isInProgress ? 'Awaiting command...' : formatTime(resolve)}
+                                            {manualResolved ? '—' : isInProgress ? 'Awaiting command...' : formatTime(resolve)}
                                         </span>
                                     </div>
                                     <div className="col-span-2">
                                         <span className="text-slate-500">Duration:</span>
                                         <span className="text-slate-300 ml-2">
-                                            {isInProgress ? 'In progress...' : calculateDuration(trigger.ts || trigger.timestamp, resolve.ts || resolve.timestamp)}
+                                            {manualResolved ? '—' : isInProgress ? 'In progress...' : calculateDuration(trigger.ts || trigger.timestamp, resolve.ts || resolve.timestamp)}
                                         </span>
                                     </div>
                                 </div>
@@ -2331,7 +2420,7 @@
             );
         }
 
-        function ActivityFeedPanel() {
+        function ActivityFeedPanel({ roadmap }) {
             const [events, setEvents] = useState([]);
             const [expandedEventId, setExpandedEventId] = useState(null);
             const [newEventIds, setNewEventIds] = useState(new Set());
@@ -2356,9 +2445,10 @@
                     eventSource.onmessage = (event) => {
                         if (event.type === 'heartbeat' || !event.data || event.data === '{}') return;
                         try {
-                            const newEvent = JSON.parse(event.data);
+                            const parsed = JSON.parse(event.data);
+                            const newEvent = ensureEventId(parsed);
                             const eventTs = newEvent.ts || newEvent.timestamp;
-                            if (newEvent && newEvent.id) {
+                            if (newEvent && (newEvent.ts || newEvent.timestamp)) {
                                 setEvents(prevEvents => {
                                     const isDuplicate = prevEvents.some(e => {
                                         const existingTs = e.ts || e.timestamp;
@@ -2412,7 +2502,7 @@
                 fetch('/api/events?limit=30')
                     .then(res => res.json())
                     .then(data => {
-                        if (data.events && Array.isArray(data.events)) setEvents(data.events);
+                        if (data.events && Array.isArray(data.events)) setEvents(data.events.map(ensureEventId));
                     })
                     .catch(() => {});
             }
@@ -2424,7 +2514,7 @@
                         if (data.events && Array.isArray(data.events)) {
                             setEvents(prevEvents => {
                                 const existingTs = new Set(prevEvents.map(e => e.ts || e.timestamp));
-                                const newEvents = data.events.filter(e => {
+                                const newEvents = data.events.map(ensureEventId).filter(e => {
                                     const ts = e.ts || e.timestamp;
                                     if (existingTs.has(ts)) return false;
                                     existingTs.add(ts);
@@ -2480,11 +2570,17 @@
                     </div>
                     <div className="flex-1 min-h-0 overflow-y-auto">
                         {activityTab === 'escalation' ? (
-                            <EscalationLogPanel events={escalationEvents} />
+                            <EscalationLogPanel events={escalationEvents} roadmap={roadmap} />
                         ) : events.length === 0 ? (
                             <div className="text-slate-500 italic text-sm">No events yet. Events appear here as the pipeline runs.</div>
                         ) : (
                             <div className="space-y-1">
+                                <div className="sticky top-0 z-10 bg-[#141618] flex items-center gap-3 px-2 pt-1 pb-1 mb-1 text-[10px] text-slate-600 uppercase tracking-wider select-none border-b border-[#1a1d21]">
+                                    <span className="w-14 flex-shrink-0">Time</span>
+                                    <span className="w-40 flex-shrink-0">Project / Phase</span>
+                                    <span className="w-20 flex-shrink-0">Event</span>
+                                    <span className="flex-1">What happened</span>
+                                </div>
                                 {events.map((event, index) => (
                                     <EventRow
                                         key={event.id || index}
@@ -7188,6 +7284,7 @@
             const [completionReport, setCompletionReport] = useState(null);
             const [generateDocsBusy, setGenerateDocsBusy] = useState(false);
             const [generateDocsError, setGenerateDocsError] = useState("");
+            const [feedCollapsed, setFeedCollapsed] = useState(false);
             const [showStopModal, setShowStopModal] = useState(false);
             const [stopRequested, setStopRequested] = useState(false);
             const [stopError, setStopError] = useState("");
@@ -7638,7 +7735,7 @@
             }
 
             return (
-                <div className="grid grid-rows-[auto_minmax(0,1fr)_minmax(0,25vh)] h-full overflow-hidden">
+                <div className={`grid ${feedCollapsed ? 'grid-rows-[auto_minmax(0,1fr)_auto]' : 'grid-rows-[auto_minmax(0,1fr)_minmax(0,25vh)]'} h-full overflow-hidden`}>
                     {/* Header bar */}
                     <header className="bg-[#141618] border-b border-[#1a1d21] px-6 py-4 flex-shrink-0">
                         <div className="flex items-center justify-between">
@@ -7911,11 +8008,19 @@
                     </main>
 
                     {/* Activity Feed */}
-                    <div className="bg-[#141618] border-t border-[#1a1d21] px-4 pt-3 pb-2 flex flex-col min-h-0 overflow-hidden">
-                        <h2 className="header-text text-sm font-semibold text-slate-400 mb-2 flex-shrink-0">Activity Feed</h2>
-                        <div className="flex-1 min-h-0 flex flex-col">
-                            <ActivityFeedPanel />
+                    <div className={`bg-[#141618] border-t border-[#1a1d21] px-4 pt-3 pb-2 flex flex-col ${feedCollapsed ? '' : 'min-h-0 overflow-hidden'}`}>
+                        <div
+                            className="flex items-center gap-2 cursor-pointer select-none mb-2 flex-shrink-0"
+                            onClick={() => setFeedCollapsed(prev => !prev)}
+                        >
+                            <span className="text-slate-500 text-xs">{feedCollapsed ? '▸' : '▾'}</span>
+                            <h2 className="header-text text-sm font-semibold text-slate-400">Activity Feed</h2>
                         </div>
+                        {!feedCollapsed && (
+                            <div className="flex-1 min-h-0 flex flex-col">
+                                <ActivityFeedPanel roadmap={roadmap} />
+                            </div>
+                        )}
                     </div>
 
                     {/* Stop confirmation modal */}
