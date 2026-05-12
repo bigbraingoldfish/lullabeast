@@ -68,3 +68,27 @@ class TestPipelineCompleteMetricsBlock:
             "Tagline text ('Want a summary', 'summary and next steps', etc.) "
             "not found near Generate Docs button — W5-F tagline not implemented"
         )
+
+    def test_generate_docs_handler_calls_post_method(self):
+        """handleGenerateDocs must use POST method when calling the completion-review endpoint."""
+        html = load_html()
+        idx = html.find("/api/completion-review/")
+        assert idx != -1, "/api/completion-review/ not found in index.html"
+        context = html[max(0, idx - 200): idx + 200]
+        assert "POST" in context or "post" in context, (
+            "completion-review fetch call must use method: 'POST'"
+        )
+
+    def test_completion_report_polled_after_trigger(self):
+        """After successful trigger, UI must poll for the completion report."""
+        html = load_html()
+        idx = html.find("handleGenerateDocs")
+        assert idx != -1
+        func_end = html.find("\n            }", idx + 1)
+        if func_end == -1:
+            func_end = idx + 800
+        body = html[idx:func_end]
+        assert "fetchCompletionReport" in body, (
+            "handleGenerateDocs must call fetchCompletionReport after successful POST "
+            "so the UI picks up the generated report"
+        )

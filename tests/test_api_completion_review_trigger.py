@@ -87,7 +87,7 @@ class TestPostCompletionReviewTrigger:
         data = resp.json()
         assert data.get("error") == "not_complete"
 
-    def _success_patches(self, config, sentinel_return=True):
+    def _success_patches(self, config):
         """Common patch context for successful completion review trigger."""
         return (
             patch("ui.server.load_config", return_value=config),
@@ -95,16 +95,15 @@ class TestPostCompletionReviewTrigger:
             patch("ui.server.SkillManager"),
             patch("ui.server.invoke_agent_webhook", return_value=None),
             patch("ui.server.cleanup_output_files", return_value=None),
-            patch("ui.server.poll_for_sentinel", return_value=sentinel_return),
         )
 
     def test_returns_triggered_true_on_success(self, tmp_path):
-        """Lock free + PIPELINE_COMPLETE + mocked skill/webhook/poll → triggered:true."""
+        """Lock free + PIPELINE_COMPLETE + mocked skill/webhook → triggered:true."""
         config = _base_config(tmp_path, pipeline_status="PIPELINE_COMPLETE")
         client = load_client()
 
         patches = self._success_patches(config)
-        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             resp = client.post("/api/completion-review/my-project")
 
         assert resp.status_code == 200
@@ -117,7 +116,7 @@ class TestPostCompletionReviewTrigger:
         client = load_client()
 
         patches = self._success_patches(config)
-        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             resp = client.post("/api/completion-review/my-project")
 
         data = resp.json()
@@ -126,13 +125,13 @@ class TestPostCompletionReviewTrigger:
         assert "my-project" in data["session_key"]
         assert "reviewer" in data["session_key"]
 
-    def test_missing_report_after_trigger_does_not_cause_5xx(self, tmp_path):
-        """Sentinel found=False (report not written) must return 200, not 5xx."""
+    def test_returns_200_even_if_report_not_written_yet(self, tmp_path):
+        """Fire-and-forget: endpoint returns 200 immediately, report appears later."""
         config = _base_config(tmp_path, pipeline_status="PIPELINE_COMPLETE")
         client = load_client()
 
-        patches = self._success_patches(config, sentinel_return=False)
-        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+        patches = self._success_patches(config)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             resp = client.post("/api/completion-review/my-project")
 
         assert resp.status_code == 200
@@ -149,3 +148,84 @@ class TestPostCompletionReviewTrigger:
         data = resp.json()
         assert "detail" in data
         assert len(data["detail"]) > 10
+
+    def test_webhook_receives_completion_message(self, tmp_path):
+        """invoke_agent_webhook must receive a message= kwarg with completion-specific instructions."""
+        config = _base_config(tmp_path, pipeline_status="PIPELINE_COMPLETE")
+        client = load_client()
+
+        with patch("ui.server.load_config", return_value=config), \
+             patch("ui.server._check_orchestrator_liveness", return_value=False), \
+             patch("ui.server.SkillManager"), \
+             patch("ui.server.invoke_agent_webhook", return_value=None) as mock_webhook, \
+             patch("ui.server.cleanup_output_files", return_value=None):
+            resp = client.post("/api/completion-review/my-project")
+
+        assert resp.status_code == 200
+        mock_webhook.assert_called_once()
+        call_kwargs = mock_webhook.call_args
+        # Must pass a custom message kwarg — not rely on webhook_client default
+        msg = call_kwargs.kwargs.get("message") or (call_kwargs.args[5] if len(call_kwargs.args) > 5 else None)
+        assert msg is not None, (
+            "invoke_agent_webhook must receive an explicit message= kwarg — "
+            "without it, the default reviewer message tells the agent to do code review"
+        )
+        assert "completion" in msg.lower(), (
+            "Webhook message must mention 'completion' — the agent needs to know "
+            "this is a documentation pass, not a code review"
+        )
+
+    def test_webhook_message_mentions_completion_report(self, tmp_path):
+        """The custom message must instruct the agent to write completion_report.md."""
+        config = _base_config(tmp_path, pipeline_status="PIPELINE_COMPLETE")
+        client = load_client()
+
+        with patch("ui.server.load_config", return_value=config), \
+             patch("ui.server._check_orchestrator_liveness", return_value=False), \
+             patch("ui.server.SkillManager"), \
+             patch("ui.server.invoke_agent_webhook", return_value=None) as mock_webhook, \
+             patch("ui.server.cleanup_output_files", return_value=None):
+            resp = client.post("/api/completion-review/my-project")
+
+        assert resp.status_code == 200
+        call_kwargs = mock_webhook.call_args
+        all_args = call_kwargs.args + tuple(call_kwargs.kwargs.values())
+        msg_str = " ".join(str(a) for a in all_args)
+        assert "completion_report" in msg_str, (
+            "Webhook message must mention completion_report.md so the agent knows what to produce"
+        )
+
+    def test_endpoint_does_not_block_on_sentinel(self, tmp_path):
+        """Endpoint must not call poll_for_sentinel synchronously (blocks the event loop).
+
+        The fix is fire-and-forget: trigger webhook and return immediately.
+        The UI polls GET /api/completion-report to detect when the report appears.
+        """
+        import inspect
+        from ui.server import post_completion_review_trigger
+        source = inspect.getsource(post_completion_review_trigger)
+        assert "poll_for_sentinel" not in source, (
+            "post_completion_review_trigger must not call poll_for_sentinel — "
+            "it blocks the async event loop for up to 300s. Use fire-and-forget instead."
+        )
+
+    def test_returns_immediately_without_waiting(self, tmp_path):
+        """Endpoint should return quickly (fire-and-forget), not block for sentinel."""
+        import time as _time
+        config = _base_config(tmp_path, pipeline_status="PIPELINE_COMPLETE")
+        client = load_client()
+
+        with patch("ui.server.load_config", return_value=config), \
+             patch("ui.server._check_orchestrator_liveness", return_value=False), \
+             patch("ui.server.SkillManager"), \
+             patch("ui.server.invoke_agent_webhook", return_value=None), \
+             patch("ui.server.cleanup_output_files", return_value=None):
+            t0 = _time.monotonic()
+            resp = client.post("/api/completion-review/my-project")
+            elapsed = _time.monotonic() - t0
+
+        assert resp.status_code == 200
+        assert elapsed < 5.0, (
+            f"Endpoint took {elapsed:.1f}s — must return immediately after triggering webhook, "
+            "not block waiting for sentinel"
+        )

@@ -38,10 +38,7 @@ from autodev.pipeline.queue_semantics import parent_blocks_child
 from env_resolvers import resolve_openclaw_root, resolve_pipeline_root  # noqa: E402
 from skill_manager import SkillManager  # noqa: E402  (W5-E: inline completion reviewer)
 from webhook_client import invoke_agent_webhook  # noqa: E402
-from sentinel_poller import (  # noqa: E402
-    cleanup_output_files,
-    poll_for_sentinel,
-)
+from sentinel_poller import cleanup_output_files  # noqa: E402
 
 ORCHESTRATOR_FILENAME = "orchestrator.py"
 WEBHOOK_AGENT_ID = "prd-creator"
@@ -7083,10 +7080,16 @@ async def post_completion_review_trigger(project: str):
     project_dir = _expand_project_dir_config(config)
     openclaw_root = os.path.expanduser(config.get("openclaw_root") or "~/.openclaw")
 
-    # Inline completion reviewer invocation (mirrors _run_completion_review in orchestrator)
+    # Fire-and-forget: inject skill, clean workspace, trigger webhook, return immediately.
+    # The UI polls GET /api/completion-report on an interval to detect when the report appears.
+    _p = "pipeline-project/.autodev/pipeline"
+    _completion_message = (
+        f"Begin completion documentation. Read the project source and git diff to understand "
+        f"what was built. Produce README.md updates, a CHANGELOG.md entry, and "
+        f"completion_report.md at the project root. Then write {_p}/reviewer_output.done."
+    )
     try:
         _artifacts_dir = os.path.join(project_dir, ".autodev", "pipeline") if project_dir else ""
-        _sentinel_path = os.path.join(_artifacts_dir, "reviewer_output.done") if _artifacts_dir else ""
         token = config.get("hooks_token") or os.environ.get("AUTODEV_HOOKS_TOKEN", "")
 
         _sm = SkillManager(openclaw_root)
@@ -7100,23 +7103,11 @@ async def post_completion_review_trigger(project: str):
                 pass
 
         _sm.inject_skill("COMPLETE-R0", "reviewer", _oc_cfg)
-        _attempt_start = None
-        if _artifacts_dir and _sentinel_path:
-            _attempt_start = time.time()
+        if _artifacts_dir:
             cleanup_output_files(_artifacts_dir, "reviewer")
 
-        invoke_agent_webhook("reviewer", session_key, token)
-
-        if _sentinel_path and _attempt_start is not None:
-            _stop_file = os.path.join(_artifacts_dir, "pipeline_stop_requested")
-            poll_for_sentinel(
-                sentinel_path=_sentinel_path,
-                timeout_seconds=300,
-                stop_sentinel_path=_stop_file,
-                min_sentinel_mtime=_attempt_start,
-            )
+        invoke_agent_webhook("reviewer", session_key, token, message=_completion_message)
     except Exception as _exc:
-        # Non-fatal: triggered=True but report may not exist yet
         print(f"[W5-E] Completion review invocation warning: {_exc}")
 
     return {"triggered": True, "session_key": session_key}
