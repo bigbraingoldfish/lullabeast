@@ -4,7 +4,7 @@
   - Only ``AUTODEV_PIPELINE_ROOT`` is consulted for the pipeline state path.
   - The legacy env var ``AUTODEV_ROOT`` and the removed switch
     ``AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME`` are ignored.
-  - Default ``ideas_dir`` is ``{openclaw_root}/ideas`` (optional override in JSON).
+  - Default ``ideas_dir`` is ``{autodev_pipeline_root}/ideas`` (optional override in JSON).
   - ``_spawn_orchestrator`` must preserve a parent-env ``AUTODEV_PIPELINE_ROOT``
     when the UI config omits the key (regression guard for the empty-string
     overwrite bug).
@@ -51,7 +51,7 @@ def test_default_runtime_under_dot_autodev(monkeypatch, tmp_path):
     assert cfg["pipeline_state_path"] == os.path.join(rt, "pipeline_state.json")
     assert cfg["lock_path"] == os.path.join(rt, "pipeline.lock")
     assert cfg["pipeline_queue_path"] == os.path.join(rt, "pipeline_queue.json")
-    assert cfg["ideas_dir"] == os.path.join(os.path.expanduser("~/.openclaw"), "ideas")
+    assert cfg["ideas_dir"] == os.path.join(rt, "ideas")
     assert cfg["project_dir_path"] == os.path.join(rt, "pipeline-project")
     assert cfg["phase_state_path"] == os.path.join(
         rt, "pipeline-project", ".autodev", "pipeline", "phase_state.json"
@@ -214,7 +214,7 @@ def test_config_example_empty_path_placeholders_still_derive(monkeypatch, tmp_pa
     assert cfg["lock_path"] == os.path.join(rt, "pipeline.lock")
     assert cfg["pipeline_queue_path"] == os.path.join(rt, "pipeline_queue.json")
     assert cfg["events_path"] == os.path.join(rt, "pipeline_events.jsonl")
-    assert cfg["ideas_dir"] == os.path.join(str(oc), "ideas")
+    assert cfg["ideas_dir"] == os.path.join(rt, "ideas")
     assert cfg["conversion_prompt_path"] == os.path.join(
         str(repo), "autodev", "prompts", "prd-to-roadmap-conversion.txt"
     )

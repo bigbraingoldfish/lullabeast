@@ -32,6 +32,8 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ### Fixed
 
+- **`_ideas_scrub_stale_turn_artifacts` tolerance gap:** The scrub now uses the same `IDEAS_LATE_DONE_MTIME_SLACK_SEC` (2 s) boundary as `_late_done_valid_for_attempt` when deciding whether to delete a prior `turns/{n}.done` sentinel. Previously, a `.done` written just before `attempt_start_wall` could be removed after the webhook POST but before the poll, causing spurious `408` responses from `POST /api/ideas/{id}/message`.
+
 - **Inference provider rejections (`ERR_PROVIDER_REJECTED`):** Renamed `ERR_PROVIDER_QUOTA` to `ERR_PROVIDER_REJECTED` for clearer operator-facing semantics. The orchestrator now re-reads session JSONL after planner and reviewer gate failures (in addition to post-poll paths) so late-flushed OpenRouter-style billing/auth errors escalate immediately without burning agent retry budget; reviewer paths now call the same detection as planner/executor. The dashboard `LastErrorCode` chip shows an explicit title for `ERR_PROVIDER_REJECTED` and `ERR_SESSION_DEAD_ON_ARRIVAL`.
 
 - **`GET /api/ideas/{id}/session` stale roadmap:** when `roadmap_draft.done` exists and `roadmap_draft.md` differs from `session.json` `roadmap_content` (regenerate wrote disk but session was not updated), rehydration now replaces session from disk so the Ideas Roadmap tab matches the converter output.

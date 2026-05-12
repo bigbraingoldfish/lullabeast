@@ -1,6 +1,12 @@
-"""Unit tests for stamp-based ``_poll_sentinel_with_idle_detect`` (Ideas workflow)."""
+"""Unit tests for JSONL-based ``_poll_sentinel_with_idle_detect`` (Ideas workflow).
+
+The function polls for a ``.done`` sentinel file while monitoring a session JSONL
+file for liveness.  It returns ``True`` when the sentinel appears, ``False`` on
+timeout, idle detection, or no-session (startup grace expired without JSONL found).
+"""
 
 import asyncio
+import json
 import os
 import time
 from pathlib import Path
@@ -14,38 +20,56 @@ def _get_poll():
     return _poll_sentinel_with_idle_detect
 
 
+def _setup_sessions_json(openclaw_root: Path, session_key: str, jsonl_path: str):
+    """Write a sessions.json that maps session_key → jsonl_path."""
+    sessions_dir = openclaw_root / "agents" / "prd-creator" / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    full_key = f"agent:prd-creator:{session_key}"
+    sessions = {full_key: {"sessionId": "sess-001"}}
+    (sessions_dir / "sessions.json").write_text(json.dumps(sessions))
+    # Write the JSONL file so it exists with a current mtime
+    Path(jsonl_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(jsonl_path).write_text("")
+    return str(sessions_dir / "sess-001.jsonl")
+
+
 class TestPollSentinelStampDetect:
-    """Tests for async _poll_sentinel_with_idle_detect (activity stamp + .done)."""
+    """Tests for async _poll_sentinel_with_idle_detect (JSONL liveness + .done)."""
 
     def _run(self, coro):
         return asyncio.run(coro)
 
     def test_returns_true_when_sentinel_found_immediately(self, tmp_path):
         poll = _get_poll()
-        stamp = tmp_path / "prd_creator_activity.stamp"
         done = tmp_path / "1.done"
         done.write_text("done")
+        oc = tmp_path / "oc"
+        oc.mkdir()
         result = self._run(
             poll(
                 done_path=done,
-                activity_stamp_path=stamp,
+                session_key="ideas:42:session-1",
+                openclaw_root=str(oc),
                 poll_timeout=5.0,
                 poll_interval=0.05,
                 idle_threshold=120.0,
                 startup_grace=2.0,
             )
         )
-        assert result == (True, "")
+        assert result is True
 
-    def test_returns_false_no_session_when_stamp_never_appears(self, tmp_path):
+    def test_returns_false_when_no_session_registered(self, tmp_path):
+        """Startup grace expires with no sessions.json entry → False."""
         poll = _get_poll()
-        stamp = tmp_path / "prd_creator_activity.stamp"
         done = tmp_path / "1.done"
+        oc = tmp_path / "oc"
+        oc.mkdir()
         start = time.monotonic()
         result = self._run(
             poll(
                 done_path=done,
-                activity_stamp_path=stamp,
+                session_key="ideas:42:session-1",
+                openclaw_root=str(oc),
                 poll_timeout=30.0,
                 poll_interval=0.05,
                 idle_threshold=120.0,
@@ -53,17 +77,26 @@ class TestPollSentinelStampDetect:
             )
         )
         elapsed = time.monotonic() - start
-        assert result == (False, "no_session")
+        assert result is False
         assert elapsed < 2.0
 
-    def test_returns_false_idle_when_stamp_mtime_stale(self, tmp_path):
+    def test_returns_false_idle_when_jsonl_mtime_stale(self, tmp_path):
+        """JSONL exists but mtime never advances → idle detection fires."""
         poll = _get_poll()
-        stamp = tmp_path / "prd_creator_activity.stamp"
-        stamp.parent.mkdir(parents=True, exist_ok=True)
-        stamp.write_text("")
-        os.utime(stamp, (1000, 1000))
         done = tmp_path / "1.done"
+        oc = tmp_path / "oc"
+        session_key = "ideas:42:session-1"
+        sessions_dir = oc / "agents" / "prd-creator" / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        jsonl_path = sessions_dir / "sess-001.jsonl"
+        jsonl_path.write_text("")
+        os.utime(jsonl_path, (1000, 1000))  # very old mtime
+        full_key = f"agent:prd-creator:{session_key}"
+        (sessions_dir / "sessions.json").write_text(
+            json.dumps({full_key: {"sessionId": "sess-001"}})
+        )
 
+        # Use fake monotonic to simulate time passing
         mono_seq = [0.0, 125.0, 250.0]
         tick = [0]
 
@@ -81,34 +114,44 @@ class TestPollSentinelStampDetect:
                 result = asyncio.run(
                     poll(
                         done_path=done,
-                        activity_stamp_path=stamp,
+                        session_key=session_key,
+                        openclaw_root=str(oc),
                         poll_timeout=900.0,
                         poll_interval=0.01,
                         idle_threshold=120.0,
                         startup_grace=0.05,
                     )
                 )
-        assert result == (False, "idle")
+        assert result is False
 
-    def test_returns_true_when_stamp_refreshed_then_done_written(self, tmp_path):
+    def test_returns_true_when_jsonl_refreshed_then_done_written(self, tmp_path):
+        """JSONL mtime advances (agent active) and .done appears → True."""
         poll = _get_poll()
-        stamp = tmp_path / "prd_creator_activity.stamp"
         done = tmp_path / "1.done"
+        oc = tmp_path / "oc"
+        session_key = "ideas:42:session-1"
+        sessions_dir = oc / "agents" / "prd-creator" / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        jsonl_path = sessions_dir / "sess-001.jsonl"
+        full_key = f"agent:prd-creator:{session_key}"
+        (sessions_dir / "sessions.json").write_text(
+            json.dumps({full_key: {"sessionId": "sess-001"}})
+        )
 
         async def run_with_writer():
-            async def bump_stamp_then_done():
+            async def bump_jsonl_then_done():
                 await asyncio.sleep(0.08)
-                stamp.parent.mkdir(parents=True, exist_ok=True)
-                stamp.write_text("")
+                jsonl_path.write_text("{}\n")
                 await asyncio.sleep(0.08)
-                stamp.write_text("")
+                jsonl_path.write_text("{}\n{}\n")
                 await asyncio.sleep(0.08)
                 done.write_text("done")
 
-            t = asyncio.create_task(bump_stamp_then_done())
+            t = asyncio.create_task(bump_jsonl_then_done())
             r = await poll(
                 done_path=done,
-                activity_stamp_path=stamp,
+                session_key=session_key,
+                openclaw_root=str(oc),
                 poll_timeout=10.0,
                 poll_interval=0.05,
                 idle_threshold=2.0,
@@ -117,7 +160,7 @@ class TestPollSentinelStampDetect:
             await t
             return r
 
-        assert asyncio.run(run_with_writer()) == (True, "")
+        assert asyncio.run(run_with_writer()) is True
 
 
 def test_load_config_ideas_env_overrides(monkeypatch, tmp_path):

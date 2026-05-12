@@ -1776,6 +1776,47 @@ class Orchestrator:
         """
         return phase_state.get("executor_succeeded") is True
 
+    def reviewer_sentinel_ready_from_prior_wait(self) -> bool:
+        """True when reviewer already wrote output during a prior sentinel wait (restart).
+
+        The reviewer branch always calls ``cleanup_output_files(..., "reviewer")`` before
+        each webhook.  If the orchestrator process exits while ``poll_for_sentinel`` is
+        blocked (or never resumes the loop), ``pipeline_status`` remains
+        ``WAITING_FOR_SENTINEL`` but ``reviewer_output.{json,done}`` already exist.  On
+        restart, cleaning those up would discard a completed review and force a duplicate
+        reviewer attempt.  When this method returns True, skip cleanup/webhook/poll and
+        treat the sentinel as found.
+
+        The done-file mtime must be >= ``sentinel_wait_started_at`` so an orphaned
+        sentinel from an older attempt cannot short-circuit a fresh invocation.
+        """
+        if self.state.get("pipeline_status") != "WAITING_FOR_SENTINEL":
+            return False
+        done_path = os.path.join(PROJECT_ARTIFACTS_DIR, "reviewer_output.done")
+        json_path = os.path.join(PROJECT_ARTIFACTS_DIR, "reviewer_output.json")
+        if not (os.path.isfile(done_path) and os.path.isfile(json_path)):
+            return False
+        sw_raw = (self.state.get("sentinel_wait_started_at") or "").strip()
+        if not sw_raw:
+            return False
+        try:
+            if sw_raw.endswith("Z") and "+" not in sw_raw:
+                sw_dt = datetime.fromisoformat(sw_raw.replace("Z", "+00:00"))
+            else:
+                sw_dt = datetime.fromisoformat(sw_raw)
+            if sw_dt.tzinfo is None:
+                sw_dt = sw_dt.replace(tzinfo=timezone.utc)
+            sw_ts = sw_dt.timestamp()
+        except Exception:
+            return False
+        try:
+            done_ts = os.path.getmtime(done_path)
+        except OSError:
+            return False
+        if done_ts + 1.0 < sw_ts:
+            return False
+        return True
+
     def reset_working_tree(self):
         try:
             subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=SYMLINK_TARGET, check=True)
@@ -3312,41 +3353,49 @@ class Orchestrator:
                     _rv_branch = f"phase/{raw_id}" if raw_id and raw_id != "unknown" else f"phase/{phase}"
                     self._ensure_phase_branch(_rv_branch)
 
-                    _attempt_start_time = time.time()  # captured before cleanup for stale-sentinel guard
-                    cleanup_output_files(PROJECT_ARTIFACTS_DIR, "reviewer")
-                    self.skill_manager.inject_skill(
-                        self.state.get("current_phase_raw_id", ""), "reviewer", self.openclaw_config
-                    )
-                    self._record_injected_skill("reviewer")
-                    initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, "reviewer")
-                    self.state["sentinel_wait_started_at"] = datetime.now(timezone.utc).isoformat()
-                    self.transition_state("WAITING_FOR_SENTINEL", f"Invoking Reviewer - Attempt {retries + 1}")
+                    resume_reviewer = self.reviewer_sentinel_ready_from_prior_wait()
+                    if resume_reviewer:
+                        print(
+                            "[INFO] [REVIEWER] Reviewer sentinel already present for this wait — "
+                            "skipping cleanup and re-invocation (crash recovery)."
+                        )
+                        sentinel_found = True
+                    else:
+                        _attempt_start_time = time.time()  # captured before cleanup for stale-sentinel guard
+                        cleanup_output_files(PROJECT_ARTIFACTS_DIR, "reviewer")
+                        self.skill_manager.inject_skill(
+                            self.state.get("current_phase_raw_id", ""), "reviewer", self.openclaw_config
+                        )
+                        self._record_injected_skill("reviewer")
+                        initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, "reviewer")
+                        self.state["sentinel_wait_started_at"] = datetime.now(timezone.utc).isoformat()
+                        self.transition_state("WAITING_FOR_SENTINEL", f"Invoking Reviewer - Attempt {retries + 1}")
 
-                    _verify_symlinks_consistent(
-                        self.state.get("project_path", ""), self.update_symlink
-                    )
-                    webhook_status = invoke_agent_webhook("reviewer", session_key, token, model=self._get_agent_model("reviewer"))
+                        _verify_symlinks_consistent(
+                            self.state.get("project_path", ""), self.update_symlink
+                        )
+                        webhook_status = invoke_agent_webhook("reviewer", session_key, token, model=self._get_agent_model("reviewer"))
 
-                    if webhook_status != "SUCCESS":
-                        self.state["current_agent"] = "escalation"
-                        error_reason = "Auth Config Error" if webhook_status == "AUTH_ERROR" else "Webhook infra failure"
-                        self.transition_state("RUNNING", error_reason)
-                        time.sleep(5)
-                        continue
+                        if webhook_status != "SUCCESS":
+                            self.state["current_agent"] = "escalation"
+                            error_reason = "Auth Config Error" if webhook_status == "AUTH_ERROR" else "Webhook infra failure"
+                            self.transition_state("RUNNING", error_reason)
+                            time.sleep(5)
+                            continue
 
-                    _stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
-                    sentinel_found = poll_for_sentinel(
-                        sentinel_path,
-                        timeout_seconds=3600,  # infrastructure-failure backstop only; agent_end fires immediately on session close
-                        stop_sentinel_path=_stop_file,
-                        min_sentinel_mtime=_attempt_start_time,
-                        stall_detection_path=os.path.join(
-                            PROJECT_ARTIFACTS_DIR, "reviewer_activity.stamp"
-                        ),
-                        stall_threshold_seconds=_stall_timeout_seconds(
-                            "AUTODEV_STALL_TIMEOUT_REVIEWER", "900"
-                        ),
-                    )
+                        _stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
+                        sentinel_found = poll_for_sentinel(
+                            sentinel_path,
+                            timeout_seconds=3600,  # infrastructure-failure backstop only; agent_end fires immediately on session close
+                            stop_sentinel_path=_stop_file,
+                            min_sentinel_mtime=_attempt_start_time,
+                            stall_detection_path=os.path.join(
+                                PROJECT_ARTIFACTS_DIR, "reviewer_activity.stamp"
+                            ),
+                            stall_threshold_seconds=_stall_timeout_seconds(
+                                "AUTODEV_STALL_TIMEOUT_REVIEWER", "900"
+                            ),
+                        )
 
                     # W1-G: Resolve reviewer session JSONL and capture token usage.
                     # agent_end fires after sessions.json is populated, so a single
