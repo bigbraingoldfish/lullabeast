@@ -77,6 +77,27 @@ class TestApiIdeasMessage:
         _ideas_scrub_stale_turn_artifacts(idea_dir, 2, 2000.0)
         assert md_p.exists()
 
+    def test_ideas_scrub_stale_turn_preserves_within_slack(self):
+        """Scrub must NOT delete a sentinel whose mtime is within IDEAS_LATE_DONE_MTIME_SLACK_SEC."""
+        from ui.server import IDEAS_LATE_DONE_MTIME_SLACK_SEC, _ideas_scrub_stale_turn_artifacts
+
+        idea_id = "scrub-slack"
+        idea_dir = self.ideas_dir / idea_id
+        turns = idea_dir / "turns"
+        turns.mkdir(parents=True)
+        done_p = turns / "1.done"
+        md_p = turns / "1.md"
+        done_p.write_text("done")
+        md_p.write_text("prose")
+        # mtime is (slack - 0.5) seconds behind attempt_start_wall — inside the tolerance window
+        attempt = time.time()
+        mtime = attempt - (IDEAS_LATE_DONE_MTIME_SLACK_SEC - 0.5)
+        os.utime(done_p, (mtime, mtime))
+        os.utime(md_p, (mtime, mtime))
+        _ideas_scrub_stale_turn_artifacts(idea_dir, 1, attempt)
+        assert done_p.exists(), "sentinel within slack window must not be scrubbed"
+        assert md_p.exists()
+
     @pytest.fixture(autouse=True)
     def setup(self, tmp_path, monkeypatch):
         """Set up per-test temp ideas directory."""

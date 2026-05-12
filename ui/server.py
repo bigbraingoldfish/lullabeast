@@ -1,4 +1,6 @@
 """UI server module."""
+import base64
+import binascii
 import aiohttp
 import fcntl
 import hashlib
@@ -597,6 +599,20 @@ def load_config(config_path=None):
     _hooks_env = os.environ.get("AUTODEV_HOOKS_TOKEN", "").strip()
     if _hooks_env:
         config["hooks_token"] = _hooks_env
+
+    # Ideas sentinel polling: env wins over file (same pattern as hooks token)
+    _idle_env = os.environ.get("AUTODEV_IDEAS_IDLE_THRESHOLD", "").strip()
+    if _idle_env:
+        try:
+            config["ideas_idle_threshold"] = float(_idle_env)
+        except ValueError:
+            pass
+    _grace_env = os.environ.get("AUTODEV_IDEAS_STARTUP_GRACE", "").strip()
+    if _grace_env:
+        try:
+            config["ideas_startup_grace"] = float(_grace_env)
+        except ValueError:
+            pass
 
     # Expand ~ on all string values (skip port which is int)
     for key, value in list(config.items()):
@@ -3024,7 +3040,18 @@ def get_metrics_global():
 POLL_TIMEOUT = 180  # seconds; patchable in tests
 POLL_INTERVAL = 2   # seconds between sentinel checks
 
-IDEAS_WEBHOOK_POST_TIMEOUT = aiohttp.ClientTimeout(total=10)
+# Tolerance when comparing .done mtime against attempt_start_wall.
+# Some filesystems (NFS, FAT32) have coarse mtime resolution (1–2 seconds);
+# a sentinel written at the same wall-clock instant as attempt start can have
+# an mtime that is a fraction of a second behind.  2 seconds covers all known
+# filesystem granularity without masking genuinely stale sentinels.
+IDEAS_LATE_DONE_MTIME_SLACK_SEC: float = 2.0
+
+# Ideas → OpenClaw webhook POST must tolerate slow gateways (false 503 on short timeouts).
+IDEAS_WEBHOOK_POST_TIMEOUT = aiohttp.ClientTimeout(total=120)
+
+# Max raw attachment string length (data URI or text) for POST /api/ideas/{id}/message.
+IDEAS_ATTACHMENT_MAX_BYTES = 10_000_000
 
 
 def _mark_last_pending_assistant_error(session_path: os.PathLike | str, error_message: str) -> None:
@@ -3040,6 +3067,94 @@ def _mark_last_pending_assistant_error(session_path: os.PathLike | str, error_me
             break
     data["messages"] = msgs
     _atomic_write_json_file(sp, data)
+
+
+def _rollback_last_turn_pair(session_path: os.PathLike | str) -> None:
+    """Remove the trailing user + pending-assistant pair from a session file.
+
+    Called when the webhook POST fails (502/503) after pre-save.  Strips the
+    last two messages only when they match the pre-save shape: user (with
+    ``ideas_turn``) followed by a pending assistant placeholder.  If the shape
+    doesn't match, the file is left unchanged (defensive — don't corrupt
+    earlier history).
+    """
+    sp = os.fspath(session_path)
+    data = _read_json_file(sp) or {}
+    msgs = data.get("messages", [])
+    if len(msgs) >= 2:
+        asst = msgs[-1]
+        user = msgs[-2]
+        if (
+            asst.get("role") == "assistant"
+            and asst.get("pending")
+            and user.get("role") == "user"
+        ):
+            data["messages"] = msgs[:-2]
+            _atomic_write_json_file(sp, data)
+
+
+def _ideas_scrub_stale_turn_artifacts(idea_dir: Path, turn_n: int, attempt_start_wall: float) -> None:
+    """Remove ``turns/{n}.done`` (+ paired ``{n}.md``) when the sentinel predates this attempt.
+
+    Removes the sentinel only when its mtime predates ``attempt_start_wall`` by more than
+    ``IDEAS_LATE_DONE_MTIME_SLACK_SEC`` (same boundary as ``_late_done_valid_for_attempt``).
+    When ``{n}.done`` is missing, leaves ``{n}.md`` intact (in-flight prose without sentinel).
+    """
+    turns_dir = idea_dir / "turns"
+    if not turns_dir.is_dir():
+        return
+    done_p = turns_dir / f"{turn_n}.done"
+    md_p = turns_dir / f"{turn_n}.md"
+    if not done_p.exists():
+        return
+    try:
+        done_mtime = os.path.getmtime(done_p)
+    except OSError:
+        return
+    if done_mtime < (attempt_start_wall - IDEAS_LATE_DONE_MTIME_SLACK_SEC):
+        try:
+            done_p.unlink(missing_ok=True)
+            md_p.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _merge_roadmap_draft_into_session_data(idea_dir: Path, session_data: dict) -> bool:
+    """If ``roadmap_draft.md`` + ``roadmap_draft.done`` exist and disk text differs from session, sync."""
+    roadmap_draft_path = idea_dir / "roadmap_draft.md"
+    roadmap_done_path = idea_dir / "roadmap_draft.done"
+    if not (roadmap_draft_path.exists() and roadmap_done_path.exists()):
+        return False
+    disk_roadmap = roadmap_draft_path.read_text()
+    session_roadmap = session_data.get("roadmap_content") or ""
+    if disk_roadmap.strip() and disk_roadmap.strip() != session_roadmap.strip():
+        session_data["roadmap_content"] = disk_roadmap
+        return True
+    return False
+
+
+def _ideas_persist_data_image_to_inbound(openclaw_root: str, data_uri: str, _orig_filename: str) -> str:
+    """Decode ``data:image/...;base64,...``, write under ``media/inbound``, return marker line."""
+    if ";base64," not in data_uri:
+        raise ValueError("expected base64 data URI")
+    b64 = data_uri.split(";base64,", 1)[1].strip()
+    raw = base64.b64decode(b64, validate=True)
+    root = Path(os.path.expanduser(openclaw_root))
+    dest_dir = root / "media" / "inbound"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    ext = ".png"
+    m = re.match(r"data:image/([^;]+);", data_uri, re.I)
+    if m:
+        subtype = m.group(1).lower()
+        if subtype in ("jpeg", "pjpeg"):
+            ext = ".jpg"
+        elif subtype == "gif":
+            ext = ".gif"
+        elif subtype == "webp":
+            ext = ".webp"
+    fname = f"{uuid.uuid4().hex}{ext}"
+    (dest_dir / fname).write_bytes(raw)
+    return f"[media attached: media://inbound/{fname}]"
 
 
 async def _post_agent_webhook(hooks_url: str, hooks_token: str, webhook_payload: dict) -> None:
@@ -3476,30 +3591,76 @@ def _reconcile_ideas_session_after_late_done(
     return session_data, True
 
 
+@app.get("/api/ideas/{idea_id}/draft-sync-status")
+def get_ideas_draft_sync_status(idea_id: str):
+    """Compare PRD vs roadmap draft mtimes for staleness hints (``roadmap_behind_prd``)."""
+    config = load_config()
+    ideas_dir = Path(config.get("ideas_dir") or "")
+    idea_dir = ideas_dir / idea_id
+    if not idea_dir.exists():
+        raise HTTPException(status_code=404, detail="Idea not found")
+
+    prd_p = idea_dir / "prd_draft.md"
+    rm_p = idea_dir / "roadmap_draft.md"
+    prd_mtime = None
+    rm_mtime = None
+    if prd_p.exists():
+        try:
+            prd_mtime = os.path.getmtime(prd_p)
+        except OSError:
+            prd_mtime = None
+    if rm_p.exists():
+        try:
+            rm_mtime = os.path.getmtime(rm_p)
+        except OSError:
+            rm_mtime = None
+
+    behind = bool(
+        prd_mtime is not None
+        and rm_mtime is not None
+        and prd_mtime > rm_mtime
+    )
+    body = {
+        "roadmap_behind_prd": behind,
+        "prd_draft_mtime": prd_mtime,
+        "roadmap_draft_mtime": rm_mtime,
+    }
+    return JSONResponse(content=body, headers={"Cache-Control": "no-store"})
+
+
 @app.get("/api/ideas/{idea_id}/session")
 def get_ideas_session(idea_id: str):
-    """Return the full session.json for an idea, or empty schema if not found."""
+    """Return the full session.json for an idea, or empty schema if not found.
+
+    Sets ``Cache-Control: no-store`` — PRD/roadmap content can change independently
+    of the chat (agent file writes, roadmap conversion sentinel) so caching would
+    show stale data.
+    """
     config = load_config()
     ideas_dir = Path(config.get("ideas_dir") or "")
     idea_dir = Path(ideas_dir) / idea_id
     session_path = idea_dir / "session.json"
 
     if not session_path.exists():
-        return _default_idea_session()
+        return JSONResponse(content=_default_idea_session(), headers={"Cache-Control": "no-store"})
 
     session_data = _read_json_file(str(session_path))
     if session_data is None:
-        return _default_idea_session()
+        return JSONResponse(content=_default_idea_session(), headers={"Cache-Control": "no-store"})
     session_data, changed = _rehydrate_session_from_artifacts(idea_dir, session_data)
     if changed:
         _atomic_write_json_file(session_path, session_data)
     session_data, late_changed = _reconcile_ideas_session_after_late_done(idea_dir, session_data)
     if late_changed:
         _atomic_write_json_file(session_path, session_data)
+
+    if _merge_roadmap_draft_into_session_data(idea_dir, session_data):
+        _atomic_write_json_file(session_path, session_data)
+
     _enrich_assistant_messages_with_parsed(session_data)
     session_data.pop("alignment_report", None)
     session_data.pop("adversarial_report", None)
-    return session_data
+    return JSONResponse(content=session_data, headers={"Cache-Control": "no-store"})
 
 
 def _build_ideas_sent_context(
@@ -3527,6 +3688,9 @@ def _build_ideas_sent_context(
 def _late_done_valid_for_attempt(done_path: Path | str, attempt_start_wall: float) -> bool:
     """True when the turn sentinel exists and was written at or after this attempt started.
 
+    Uses ``IDEAS_LATE_DONE_MTIME_SLACK_SEC`` tolerance so coarse-grained filesystems
+    (NFS, FAT32) don't reject a sentinel written at the same wall-clock instant.
+
     Used after poll timeout to avoid restoring draft annotations when the agent completed
     just after the idle/timeout window (race with late .done write).
     """
@@ -3534,7 +3698,7 @@ def _late_done_valid_for_attempt(done_path: Path | str, attempt_start_wall: floa
     if not p.exists():
         return False
     try:
-        return os.path.getmtime(p) >= attempt_start_wall
+        return os.path.getmtime(p) >= (attempt_start_wall - IDEAS_LATE_DONE_MTIME_SLACK_SEC)
     except OSError:
         return False
 
@@ -3599,18 +3763,35 @@ async def post_ideas_message(idea_id: str, request: Request):
         raise HTTPException(status_code=422, detail="Body must contain {content: str, turn: int}")
 
     ideas_dir = Path(config.get("ideas_dir") or "")
+    idea_dir = Path(ideas_dir) / idea_id
     hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
     hooks_token = config.get("hooks_token", "")
+    openclaw_root = os.path.expanduser(config.get("openclaw_root", "~/.openclaw"))
 
-    # Prepend attachment context when provided
+    # Optional attachment: size cap; data:image URIs → OPENCLAW_ROOT/media/inbound + marker
     message_content = content
     if attachment and isinstance(attachment, dict):
-        fname = attachment.get("filename", "attachment.md")
-        fcontent = attachment.get("content", "")
-        message_content = f"[ATTACHMENT: {fname}]\n{fcontent}\n[/ATTACHMENT]\n\n{content}"
+        fcontent = attachment.get("content", "") or ""
+        if not isinstance(fcontent, str):
+            fcontent = str(fcontent)
+        if len(fcontent) > IDEAS_ATTACHMENT_MAX_BYTES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Attachment exceeds {IDEAS_ATTACHMENT_MAX_BYTES} byte limit",
+            )
+        ft = fcontent.strip()
+        if ft.startswith("data:image/") and ";base64," in ft:
+            try:
+                orig_fn = attachment.get("filename", "image.png") or "image.png"
+                marker = _ideas_persist_data_image_to_inbound(openclaw_root, ft, orig_fn)
+                message_content = f"{marker}\n\n{content}"
+            except (ValueError, OSError, binascii.Error):
+                raise HTTPException(status_code=422, detail="Invalid image attachment") from None
+        else:
+            fname = attachment.get("filename", "attachment.md")
+            message_content = f"[ATTACHMENT: {fname}]\n{fcontent}\n[/ATTACHMENT]\n\n{content}"
 
     # Load existing session data early — used for annotations and conversation history
-    idea_dir = Path(ideas_dir) / idea_id
     session_path_pre = idea_dir / "session.json"
     pre_session: dict = {}
     if session_path_pre.exists():
@@ -3727,23 +3908,18 @@ async def post_ideas_message(idea_id: str, request: Request):
     poll_interval = float(config.get("poll_interval", POLL_INTERVAL))
     idle_threshold = float(config.get("ideas_idle_threshold", 120))
     startup_grace = float(config.get("ideas_startup_grace", 30))
-    openclaw_root = os.path.expanduser(config.get("openclaw_root", "~/.openclaw"))
 
     try:
         await _post_agent_webhook(hooks_url, hooks_token, webhook_payload)
     except HTTPException as exc:
-        if exc.status_code == 503:
-            _mark_last_pending_assistant_error(
-                session_path,
-                "Agent gateway unreachable — check OpenClaw is running.",
-            )
-        elif exc.status_code == 502:
-            _status_tail = (str(exc.detail).split()[-1]).rstrip(".")
-            _mark_last_pending_assistant_error(
-                session_path,
-                f"Agent gateway returned HTTP {_status_tail}.",
-            )
+        # Webhook failed before the agent saw the message — roll back the
+        # pre-saved user + pending-assistant pair so the session stays clean.
+        # The user can retry without a ghost "Working on your request..." row.
+        if exc.status_code in (502, 503):
+            _rollback_last_turn_pair(session_path)
         raise
+
+    _ideas_scrub_stale_turn_artifacts(idea_dir, int(turn_n), _attempt_start_wall)
 
     turns_dir = idea_dir / "turns"
     # Sentinel paths per ~/.openclaw/workspace-prd-creator/AGENTS.md: turns/{n}.md / turns/{n}.done
@@ -3856,6 +4032,8 @@ async def post_ideas_message(idea_id: str, request: Request):
             )
             if first_user.strip():
                 session_data["name"] = first_user.strip()[:40].title()
+
+    _merge_roadmap_draft_into_session_data(idea_dir, session_data)
 
     _atomic_write_json_file(str(session_path), session_data)
 
@@ -4099,7 +4277,7 @@ def get_ideas():
     ideas_path = Path(ideas_dir)
 
     if not ideas_path.exists():
-        return []
+        return JSONResponse(content=[], headers={"Cache-Control": "no-store"})
 
     ideas = []
     for subdir in ideas_path.iterdir():
@@ -4113,6 +4291,8 @@ def get_ideas():
         session_data = _read_json_file(str(session_path)) if session_path.exists() else _default_idea_session()
         session_data, changed = _rehydrate_session_from_artifacts(subdir, session_data)
         if changed:
+            _atomic_write_json_file(session_path, session_data)
+        if _merge_roadmap_draft_into_session_data(subdir, session_data):
             _atomic_write_json_file(session_path, session_data)
         prd_content = session_data.get("prd_content", "") or ""
 
@@ -4155,7 +4335,7 @@ def get_ideas():
 
     # Sort newest first by updated timestamp
     ideas.sort(key=lambda x: x.get("updated") or "", reverse=True)
-    return ideas
+    return JSONResponse(content=ideas, headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/ideas")
@@ -4476,8 +4656,10 @@ async def post_ideas_convert(idea_id: str):
         if resp.status >= 400:
             raise HTTPException(status_code=502, detail=f"Webhook returned {resp.status}")
 
-    # Poll for roadmap_draft.done
     done_path = idea_dir / "roadmap_draft.done"
+    done_path.unlink(missing_ok=True)
+
+    # Poll for roadmap_draft.done (must not latch onto a stale sentinel from a prior run)
     deadline = datetime.utcnow().timestamp() + CONVERT_TIMEOUT
 
     while datetime.utcnow().timestamp() < deadline:
