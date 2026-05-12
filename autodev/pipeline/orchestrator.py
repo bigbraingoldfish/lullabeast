@@ -1434,6 +1434,139 @@ class Orchestrator:
             print(f"[ESCALATION] Could not read escalation_summary.json: {e}")
             return None
 
+    def _read_escalation_advisory(self):
+        """Read escalation agent's full advisory (summary + recommended_action).
+
+        Supersedes _read_escalation_summary() at the post-resolution call site.
+        Returns {"summary": str, "recommended_action": str} or None.
+        Never raises — all failures are caught, logged, and return None.
+        """
+        try:
+            path = os.path.join(PROJECT_ARTIFACTS_DIR, "escalation_summary.json")
+            if not os.path.isfile(path):
+                return None
+            with open(path, "r") as f:
+                data = json.load(f)
+            summary = data.get("summary", "")
+            if not isinstance(summary, str) or not summary.strip():
+                return None
+            action = data.get("recommended_action", "")
+            return {
+                "summary": summary.strip()[:200],
+                "recommended_action": action.strip()[:200] if isinstance(action, str) else "",
+            }
+        except Exception as e:
+            print(f"[ADVISORY] Could not read escalation_summary.json: {e}")
+            return None
+
+    def _generate_escalation_advisory(self):
+        """Call qwen3.5-27b to produce a plain-English advisory before the escalation webhook.
+
+        Reads failure_context.json and phase_state.json, calls the local LLM, and
+        returns {"summary": str, "recommended_action": str} on success, None on any
+        failure.  Never raises — all exceptions are caught and logged with [ADVISORY].
+
+        The result should be written to phase_state.json as escalation_message and
+        escalation_recommended_action BEFORE invoke_agent_webhook is called, so the
+        UI and the webhook message both carry the human-readable context.
+        """
+        failure_context_path = os.path.join(PROJECT_ARTIFACTS_DIR, "failure_context.json")
+        if not os.path.isfile(failure_context_path):
+            print("[ADVISORY] No failure_context.json — skipping advisory generation")
+            return None
+
+        try:
+            with open(failure_context_path, "r") as f:
+                failure_context_data = json.load(f)
+        except Exception as e:
+            print(f"[ADVISORY] Could not read failure_context.json: {e}")
+            return None
+
+        # Read phase_state for additional context (retry counts, blame history,
+        # escalation trigger reason, and available recovery commands)
+        _ps = {}
+        try:
+            _ps = self.read_phase_state()
+        except Exception:
+            pass
+
+        _resets = _ps.get("escalation_resets", 0)
+        _available_commands = (
+            ["Reset Phase", "Reset Execution", "Re-run Reviewer", "Abandon Phase", "Stop Pipeline"]
+            if _resets < 3
+            else ["Abandon Phase", "Stop Pipeline"]
+        )
+
+        _system_prompt = (
+            "You are the AutoDev Escalation Reviewer. An automated software development pipeline "
+            "has stopped and requires operator attention. Your task is to review the current "
+            "pipeline state and produce a concise, plain-English advisory that helps the operator "
+            "understand what is happening and what to do next.\n\n"
+            "Analyze the failure context provided and respond with a JSON object containing "
+            "exactly two fields:\n\n"
+            "- \"summary\": In 1-2 sentences: (1) what the error is, and (2) what is actually "
+            "happening in the pipeline — these do not always match one-to-one. Write for an "
+            "operator who is not actively watching a terminal. Technical terms (error codes, "
+            "agent names, gate names) are acceptable where they add real clarity. Variable or "
+            "file names may be referenced when they are the essential detail, but prefer "
+            "describing the concept over naming internal specifics where possible.\n\n"
+            "- \"recommended_action\": The single most appropriate recovery action as one direct "
+            "imperative sentence. Use only the recovery commands listed as available in the "
+            "context — do not recommend commands that are not available for the current phase "
+            "state.\n\n"
+            "Maximum 200 characters per field. Be direct. No hedging, no filler phrases."
+        )
+
+        _user_message = json.dumps({
+            "failure_context": failure_context_data,
+            "escalation_trigger_reason": _ps.get("escalation_trigger_reason", ""),
+            "prior_blame_attributions": _ps.get("prior_blame_attributions", []),
+            "executor_retries": _ps.get("executor_retries", 0),
+            "reviewer_retries": _ps.get("reviewer_retries", 0),
+            "available_recovery_commands": _available_commands,
+        })
+
+        _payload = {
+            "model": "qwen3.5-27b",
+            "messages": [
+                {"role": "system", "content": _system_prompt},
+                {"role": "user", "content": _user_message},
+            ],
+            "response_format": {"type": "json_object"},
+        }
+
+        _llama_chat_base = (
+            self.openclaw_config.get("models", {})
+            .get("providers", {})
+            .get("llama-local", {})
+            .get("baseUrl", f"{_LLAMA_ORIGIN}/v1")
+            .rstrip("/")
+        )
+        _chat_url = f"{_llama_chat_base}/chat/completions"
+
+        try:
+            _resp = requests.post(_chat_url, json=_payload, timeout=30)
+            _resp.raise_for_status()
+            _raw = _resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+            if not _raw.strip():
+                raise ValueError("[ADVISORY] Empty response from LLM")
+            _parsed = json.loads(_raw)
+            _summary = _parsed.get("summary", "")
+            _action = _parsed.get("recommended_action", "")
+            if not isinstance(_summary, str) or not _summary.strip():
+                print("[ADVISORY] LLM returned empty summary — skipping")
+                return None
+            return {
+                "summary": _summary.strip()[:200],
+                "recommended_action": _action.strip()[:200] if isinstance(_action, str) else "",
+            }
+        except json.JSONDecodeError as _e:
+            print(f"[ADVISORY] Malformed JSON from LLM: {_e}")
+            return None
+        except Exception as _e:
+            print(f"[ADVISORY] Advisory generation failed: {_e}")
+            return None
+
     def _check_stop_requested(self) -> bool:
         """Check for the stop sentinel file written by the UI server.
 
@@ -2668,13 +2801,36 @@ class Orchestrator:
                 _ps["escalation_trigger_reason"] = failure_context
                 _ps["escalations"] = _ps.get("escalations", 0) + 1  # W1-B
                 _ps["waiting_for_human_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # W1-E
+                _ps["escalation_advisory_status"] = "generating"
                 self.write_phase_state_atomic(_ps)
+
+                _advisory = self._generate_escalation_advisory()
+                if _advisory:
+                    _ps["escalation_message"] = _advisory["summary"]
+                    _ps["escalation_recommended_action"] = _advisory["recommended_action"]
+                    _ps["escalation_advisory_status"] = "ready"
+                else:
+                    _ps["escalation_advisory_status"] = "fallback"
+                self.write_phase_state_atomic(_ps)
+
                 _write_pipeline_event("escalation_trigger", raw_id, "escalation", {"reason": _ps.get("escalation_trigger_reason")})  # W1-F
                 self.transition_state("WAITING_FOR_HUMAN", "Invoking Escalation Agent: repo init check failed")
                 self._queue_park_active_entry("ESCALATION", "escalation")
                 # Note: park-and-advance is not applied here — the next queued project must pass
                 # repo init on a fresh orchestrator run; advancing without re-check would be unsafe.
-                webhook_status = invoke_agent_webhook("escalation", session_key, token)
+                _p = _PIPELINE_ARTIFACTS
+                _ri_webhook_msg = (
+                    f"Pipeline needs operator attention.\n\n"
+                    f"Advisory: {_advisory['summary']}\n"
+                    f"Suggested action: {_advisory.get('recommended_action', 'See dashboard.')}\n\n"
+                    f"Read {_p}/phase_state.json and relevant output files for full context. "
+                    f"Send a notification to the operator via your configured channel including "
+                    f"the advisory above, then write your assessment to "
+                    f"{_p}/escalation_output.json and {_p}/escalation_output.done."
+                ) if _advisory else None
+                webhook_status = invoke_agent_webhook(
+                    "escalation", session_key, token, message=_ri_webhook_msg
+                )
                 if webhook_status != "SUCCESS":
                     print("[ERROR] Escalation webhook failed after repo init failure.")
                     fallback_dir = _atomic_temp_dir_for_project_writes()
@@ -3902,11 +4058,44 @@ class Orchestrator:
                         _ps["escalation_trigger_reason"] = self.state.get("last_action", "escalation triggered")
                         _ps["escalations"] = _ps.get("escalations", 0) + 1  # W1-B
                         _ps["waiting_for_human_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # W1-E
+
+                        # Signal "generating" so the UI can show a spinner immediately
+                        _ps["escalation_advisory_status"] = "generating"
                         self.write_phase_state_atomic(_ps)
+
+                        # Generate LLM advisory before the webhook fires so the UI and
+                        # the agent's outbound notification both carry human-readable context
+                        _advisory = self._generate_escalation_advisory()
+                        if _advisory:
+                            _ps["escalation_message"] = _advisory["summary"]
+                            _ps["escalation_recommended_action"] = _advisory["recommended_action"]
+                            _ps["escalation_advisory_status"] = "ready"
+                        else:
+                            _ps["escalation_advisory_status"] = "fallback"
+                        self.write_phase_state_atomic(_ps)
+
                         _write_pipeline_event("escalation_trigger", raw_id, "escalation", {"reason": _ps.get("escalation_trigger_reason")})  # W1-F
                         self.transition_state("WAITING_FOR_HUMAN", "Invoking Escalation Agent")
                         self._queue_park_active_entry("ESCALATION", "escalation")
-                        webhook_status = invoke_agent_webhook("escalation", session_key, token)
+
+                        # Build webhook message — include advisory so the escalation agent
+                        # can relay it via the operator's configured notification channel
+                        _p = _PIPELINE_ARTIFACTS
+                        if _advisory:
+                            _webhook_msg = (
+                                f"Pipeline needs operator attention.\n\n"
+                                f"Advisory: {_advisory['summary']}\n"
+                                f"Suggested action: {_advisory.get('recommended_action', 'See dashboard.')}\n\n"
+                                f"Read {_p}/phase_state.json and relevant output files for full context. "
+                                f"Send a notification to the operator via your configured channel including "
+                                f"the advisory above, then write your assessment to "
+                                f"{_p}/escalation_output.json and {_p}/escalation_output.done."
+                            )
+                        else:
+                            _webhook_msg = None  # falls through to default in webhook_client.py
+                        webhook_status = invoke_agent_webhook(
+                            "escalation", session_key, token, message=_webhook_msg
+                        )
 
                         if webhook_status != "SUCCESS":
                             print("[ERROR] Escalation agent webhook failed. Attempting raw signal.")
@@ -3947,10 +4136,14 @@ class Orchestrator:
                             except Exception:
                                 command = "STOP"
 
-                            _summary = self._read_escalation_summary()
+                            # If the escalation agent wrote a better summary during its
+                            # interactive session, let it overwrite the pre-generated advisory
+                            _advisory_resolved = self._read_escalation_advisory()
                             _ps = self.read_phase_state()
-                            if _summary:
-                                _ps["escalation_message"] = _summary
+                            if _advisory_resolved:
+                                _ps["escalation_message"] = _advisory_resolved["summary"]
+                                _ps["escalation_recommended_action"] = _advisory_resolved["recommended_action"]
+                                _ps["escalation_advisory_status"] = "ready"
                             _ps["waiting_for_human_resolved_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # W1-E
                             self.write_phase_state_atomic(_ps)
 
@@ -4069,6 +4262,15 @@ class Orchestrator:
                 if webhook_status == "SUCCESS":
                     _ps = self.read_phase_state()
                     _ps["escalation_trigger_reason"] = f"Escalated after unhandled exception: {exc_description}"
+                    # Advisory generated AFTER webhook in the crash handler — the webhook
+                    # must not be delayed by an LLM call in this last-resort path
+                    _exc_advisory = self._generate_escalation_advisory()
+                    if _exc_advisory:
+                        _ps["escalation_message"] = _exc_advisory["summary"]
+                        _ps["escalation_recommended_action"] = _exc_advisory["recommended_action"]
+                        _ps["escalation_advisory_status"] = "ready"
+                    else:
+                        _ps["escalation_advisory_status"] = "fallback"
                     self.write_phase_state_atomic(_ps)
                     self.transition_state(
                         "WAITING_FOR_HUMAN",

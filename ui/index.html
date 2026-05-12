@@ -1211,6 +1211,8 @@
             pipeline_status,
             escalation_trigger_reason,
             escalation_message,
+            escalation_recommended_action,
+            escalation_advisory_status,
             last_action,
             escalation_resets,
             orchestrator_alive,
@@ -1360,11 +1362,10 @@
                 ? ["Mark Complete — phase branch not yet merged into base"]
                 : [];
 
-            // Advisory text fallback chain
-            const advisoryText = escalation_message
-                || escalation_trigger_reason
-                || last_action
-                || "See orchestrator log for details.";
+            // advisoryText is only used in the ready state; generating/fallback states
+            // render their own distinct UI. Do NOT fall back to escalation_trigger_reason
+            // here — that's already in the header and duplicating it is what we're fixing.
+            const advisoryText = escalation_message || null;
 
             // Counter strip
             const counterText = `Escalation loops: ${escalation_resets}/3`;
@@ -1502,10 +1503,32 @@
                                         <p className="text-slate-500 text-xs pt-2 font-mono">
                                             {counterText}
                                         </p>
-                                        <p className="text-slate-400 text-xs leading-relaxed">
-                                            <span className="text-sky-400 font-medium">Advisory · </span>
-                                            {advisoryText}
-                                        </p>
+                                        {escalation_advisory_status === "generating" ? (
+                                            <p className="text-slate-400 text-xs leading-relaxed flex items-center gap-2">
+                                                <span className="inline-block w-3 h-3 border-2 border-sky-400 border-t-transparent rounded-full flex-shrink-0"
+                                                    style={{ animation: 'spin 1s linear infinite' }} />
+                                                <span className="text-sky-400 font-medium">Reviewing escalation...</span>
+                                            </p>
+                                        ) : escalation_advisory_status === "ready" && advisoryText ? (
+                                            <div className="space-y-1.5">
+                                                <p className="text-slate-400 text-xs leading-relaxed">
+                                                    <span className="text-sky-400 font-medium">Advisory · </span>
+                                                    {advisoryText}
+                                                </p>
+                                                {escalation_recommended_action && (
+                                                    <p className="text-slate-400 text-xs leading-relaxed">
+                                                        <span className="text-emerald-400 font-medium">Suggested action · </span>
+                                                        {escalation_recommended_action}
+                                                    </p>
+                                                )}
+                                            </div>
+                                        ) : (
+                                            <p className="text-slate-500 text-xs leading-relaxed italic">
+                                                {escalation_advisory_status === "fallback"
+                                                    ? "Automated review unavailable — the analysis could not be generated. See Pipeline log for full context."
+                                                    : "See Pipeline log for details."}
+                                            </p>
+                                        )}
                                     </div>
                                 )}
                             </div>
@@ -5947,6 +5970,8 @@
             const [hubConfirmBusy, setHubConfirmBusy] = useState(false);
             const [revalidateChecks, setRevalidateChecks] = useState(null);
             const [escalationMsg, setEscalationMsg] = useState('');
+            const [hubAdvisoryStatus, setHubAdvisoryStatus] = useState(null);
+            const [hubRecommendedAction, setHubRecommendedAction] = useState('');
             const [displayRanks, setDisplayRanks] = useState({});
             const [reorderMode, setReorderMode] = useState(false);
             const [reorderSaveBusy, setReorderSaveBusy] = useState(false);
@@ -6111,6 +6136,8 @@
                 const entryHuman = selectedLiveForEscalationMsg === "WAITING_FOR_HUMAN";
                 if (!snapHuman && !entryHuman) {
                     setEscalationMsg("");
+                    setHubAdvisoryStatus(null);
+                    setHubRecommendedAction('');
                     return;
                 }
                 let cancelled = false;
@@ -6121,6 +6148,8 @@
                             setEscalationMsg(
                                 d.escalation_message || d.escalation_trigger_reason || ""
                             );
+                            setHubAdvisoryStatus(d.escalation_advisory_status || null);
+                            setHubRecommendedAction(d.escalation_recommended_action || '');
                         }
                     })
                     .catch(() => {});
@@ -6575,7 +6604,7 @@
                     );
                 };
 
-                const hubAdvisoryText = escalationMsg || 'See orchestrator log for details.';
+                const hubAdvisoryText = escalationMsg || null;
                 const hubHeaderText   = escalationMsg || 'Awaiting escalation command';
                 const hubCounterText  = `Escalation loops: ${hubEscalationResets}/3`;
 
@@ -6613,9 +6642,30 @@
                                 {advisoryExpanded && (
                                     <div className="px-3 pb-3 space-y-1.5 border-t border-[#2a3040]/60">
                                         <p className="text-slate-500 text-xs pt-2 font-mono">{hubCounterText}</p>
-                                        <p className="text-slate-400 text-xs leading-relaxed">
-                                            <span className="text-sky-400 font-medium">Advisory · </span>{hubAdvisoryText}
-                                        </p>
+                                        {hubAdvisoryStatus === "generating" ? (
+                                            <p className="text-slate-400 text-xs leading-relaxed flex items-center gap-2">
+                                                <span className="inline-block w-3 h-3 border-2 border-sky-400 border-t-transparent rounded-full flex-shrink-0"
+                                                    style={{ animation: 'spin 1s linear infinite' }} />
+                                                <span className="text-sky-400 font-medium">Reviewing escalation...</span>
+                                            </p>
+                                        ) : hubAdvisoryStatus === "ready" && hubAdvisoryText ? (
+                                            <div className="space-y-1.5">
+                                                <p className="text-slate-400 text-xs leading-relaxed">
+                                                    <span className="text-sky-400 font-medium">Advisory · </span>{hubAdvisoryText}
+                                                </p>
+                                                {hubRecommendedAction && (
+                                                    <p className="text-slate-400 text-xs leading-relaxed">
+                                                        <span className="text-emerald-400 font-medium">Suggested action · </span>{hubRecommendedAction}
+                                                    </p>
+                                                )}
+                                            </div>
+                                        ) : (
+                                            <p className="text-slate-500 text-xs leading-relaxed italic">
+                                                {hubAdvisoryStatus === "fallback"
+                                                    ? "Automated review unavailable. Open Pipeline Monitor for full context and recovery options."
+                                                    : "Open Pipeline Monitor for full context and recovery options."}
+                                            </p>
+                                        )}
                                     </div>
                                 )}
                             </div>
@@ -7816,6 +7866,8 @@
                                 pipeline_status={status}
                                 escalation_trigger_reason={pState.escalation_trigger_reason}
                                 escalation_message={pState.escalation_message}
+                                escalation_recommended_action={pState.escalation_recommended_action}
+                                escalation_advisory_status={pState.escalation_advisory_status}
                                 last_action={pState.last_action}
                                 escalation_resets={pState.escalation_resets || 0}
                                 orchestrator_alive={alive}

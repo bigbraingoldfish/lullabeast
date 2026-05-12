@@ -2050,6 +2050,12 @@ def get_state():
             # Enforce max length — never pass raw agent output through uncapped
             if "escalation_message" in response and isinstance(response["escalation_message"], str):
                 response["escalation_message"] = response["escalation_message"][:500]
+            # Advisory status and recommended action — new fields from pre-alert LLM review
+            if "escalation_advisory_status" in phase_state:
+                response["escalation_advisory_status"] = phase_state["escalation_advisory_status"]
+            if "escalation_recommended_action" in phase_state:
+                _ra = phase_state["escalation_recommended_action"]
+                response["escalation_recommended_action"] = _ra[:200] if isinstance(_ra, str) else _ra
 
     # Humanize queue-halted escalation reasons in monitor text.
     # Keep pipeline_state.queue_halted_reason as the machine token.
