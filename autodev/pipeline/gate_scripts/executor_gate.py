@@ -1,5 +1,6 @@
 import json
 import os
+import re as _re
 import subprocess
 import sys
 import tempfile
@@ -15,6 +16,28 @@ from utils import (
     PHASE_STATE_FILE,
     WORKSPACE_DIR,
 )
+
+# Vite content-hash pattern: dist/assets/<name>-<6-12 alphanum chars>.<js|css>
+# Only files matching this pattern are eligible for build-artifact rotation auto-accounting.
+_VITE_CONTENT_HASH_RE = _re.compile(
+    r"^dist/assets/[^/]+-[A-Za-z0-9_-]{6,12}\.(js|css)$"
+)
+
+
+def _is_build_artifact_rotation(path: str, workspace_dir: str) -> bool:
+    """Return True iff path is a vite content-hashed bundle replaced by a new hash.
+
+    Conditions: path matches _VITE_CONTENT_HASH_RE AND the parent directory still
+    contains at least one file with the same extension (proving rotation, not wipe).
+    """
+    if not _VITE_CONTENT_HASH_RE.match(path):
+        return False
+    parent = os.path.join(workspace_dir.rstrip(os.sep), os.path.dirname(path))
+    if not os.path.isdir(parent):
+        return False
+    ext = os.path.splitext(path)[1]
+    return any(f.endswith(ext) for f in os.listdir(parent))
+
 
 EXECUTOR_GATE_DETAIL_JSON = "executor_gate_detail.json"
 
@@ -165,10 +188,24 @@ def evaluate_executor(output_path=None):
                 # files_deleted is an optional array; absent/null treated as empty.
                 _files_deleted_set = set(data.get("files_deleted") or [])
 
-                _unaccounted = [
+                _unaccounted_all = [
                     f for f in _deleted_at_base
                     if f not in _file_manifest_set and f not in _files_deleted_set
                 ]
+                _build_rotations = [
+                    f for f in _unaccounted_all
+                    if _is_build_artifact_rotation(f, WORKSPACE_DIR)
+                ]
+                _unaccounted = [f for f in _unaccounted_all if f not in _build_rotations]
+
+                if _build_rotations:
+                    print(
+                        f"[GATE WARN] Build artifact rotation auto-accounted: "
+                        f"{sorted(_build_rotations)}. "
+                        "Add these to `files_deleted` in executor_output.json to suppress this warning.",
+                        file=sys.stderr,
+                    )
+
                 if _unaccounted:
                     _sorted_unaccounted = sorted(set(_unaccounted))
                     _write_executor_gate_detail(

@@ -2859,7 +2859,7 @@ class Orchestrator:
                 self._queue_park_active_entry("ESCALATION", "escalation")
                 # Note: park-and-advance is not applied here — the next queued project must pass
                 # repo init on a fresh orchestrator run; advancing without re-check would be unsafe.
-                _p = _PIPELINE_ARTIFACTS
+                _p = PROJECT_ARTIFACTS_DIR
                 _ri_webhook_msg = (
                     f"Pipeline needs operator attention.\n\n"
                     f"Advisory: {_advisory['summary']}\n"
@@ -4129,7 +4129,7 @@ class Orchestrator:
 
                         # Build webhook message — include advisory so the escalation agent
                         # can relay it via the operator's configured notification channel
-                        _p = _PIPELINE_ARTIFACTS
+                        _p = PROJECT_ARTIFACTS_DIR
                         if _advisory:
                             _webhook_msg = (
                                 f"Pipeline needs operator attention.\n\n"
