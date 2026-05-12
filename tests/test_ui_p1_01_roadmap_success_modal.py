@@ -1,4 +1,4 @@
-"""Static contract tests for P1-01: post-roadmap success modal + low-readiness generate guard (ui/index.html)."""
+"""Static contract tests for P1-01: low-readiness generate guard + roadmap-behind-prd modal (ui/index.html)."""
 
 import re
 
@@ -41,26 +41,6 @@ def _ideas_body():
     body = extract_function_body(html, "IdeasScreen")
     assert body is not None, "IdeasScreen function not found"
     return body
-
-
-def test_roadmap_generated_modal_testid():
-    assert 'data-testid="ideas-roadmap-generated-modal"' in _ideas_body()
-
-
-def test_success_modal_action_copy():
-    body = _ideas_body()
-    # JSX in HTML uses entity for ampersand in text nodes
-    assert "Setup &amp; Preflight" in body or "Setup & Preflight" in body
-    assert "Continue to Setup" in body
-    assert "Alignment" in body
-    assert "Adversarial" in body
-
-
-def test_success_modal_readiness_below_eight_conditional():
-    body = _ideas_body()
-    assert "readinessData.score" in body
-    assert "readinessData.score < 8" in body
-    assert "showQualityCheckModal" in body
 
 
 def test_low_readiness_generate_confirm_present():

@@ -298,11 +298,7 @@
         const P3_PREFLIGHT_TITLE_LAUNCH_NOW =
             'Creates phase branch and starts the orchestrator. Use Stop Pipeline to halt.';
 
-        /** P3 PRD agent — alignment / adversarial / readiness strip (H-13–H-16). */
-        const P3_PRD_TITLE_ALIGNMENT_CHECK =
-            '~30–90s. Checks PRD vs. roadmap consistency. Produces commentary in the thread, does not edit the PRD.';
-        const P3_PRD_TITLE_ADVERSARIAL_REVIEW =
-            '~30–90s. Stress-tests the PRD for edge cases and missing assumptions. Produces commentary only.';
+        /** P3 PRD agent — readiness strip (H-15–H-16). */
         const P3_PRD_TITLE_READINESS_SCORE = 'PRD-agent score. 8+ recommended before Generate Roadmap.';
         const P3_PRD_TITLE_ROADMAP_CONFIDENCE = 'Agent confidence before roadmap generation.';
 
@@ -3091,17 +3087,10 @@
             const [splitPct, setSplitPct] = useState(45);
             const dragRef = useRef({ dragging: false });
             const containerRef = useRef(null);
-            const [showQualityCheckModal, setShowQualityCheckModal] = useState(false);
-            const [alignmentLoading, setAlignmentLoading] = useState(false);
-            const [adversarialLoading, setAdversarialLoading] = useState(false);
             const [showRegenerateConfirm, setShowRegenerateConfirm] = useState(false);
             const [showLowReadinessGenerateConfirm, setShowLowReadinessGenerateConfirm] = useState(false);
-            const [alignmentReport, setAlignmentReport] = useState(null);
-            const [adversarialReport, setAdversarialReport] = useState(null);
             const [showFormatInvalidModal, setShowFormatInvalidModal] = useState(false);
             const [activeDocTab, setActiveDocTab] = useState("prd");
-            const [showAlignmentRegenConfirm, setShowAlignmentRegenConfirm] = useState(false);
-            const [showAdversarialRegenConfirm, setShowAdversarialRegenConfirm] = useState(false);
             const [formatInvalidDetail, setFormatInvalidDetail] = useState("");
             const [fixFormatLoading, setFixFormatLoading] = useState(false);
             const [showRoadmapBehindPrdModal, setShowRoadmapBehindPrdModal] = useState(false);
@@ -3378,8 +3367,9 @@
                         );
                         setPrdContent(d.prd_content || "");
                         setRoadmapContent(d.roadmap_content || "");
-                        setAlignmentReport(d.alignment_report || null);
-                        setAdversarialReport(d.adversarial_report || null);
+                        setActiveDocTab(prev =>
+                            (prev === 'alignment' || prev === 'adversarial') ? 'prd' : prev
+                        );
                         if (!isLoadingRef.current) {
                             fetchPrdSectionDiff(currentIdeaId);
                         }
@@ -3775,7 +3765,6 @@
                             setRoadmapContent(d.roadmap_content || "");
                             setConvertLoading(false);
                             setActiveDocTab("roadmap");
-                            setShowQualityCheckModal(true);
                         };
                         const elapsed = Date.now() - startedAt;
                         const pad = MIN_ROADMAP_GENERATING_UI_MS - elapsed;
@@ -3808,49 +3797,6 @@
                     return;
                 }
                 beginConvertAfterGuards();
-            };
-
-            const doAlignmentCheck = () => {
-                if (!currentIdeaId) return;
-                setShowQualityCheckModal(false);
-                setAlignmentLoading(true);
-                fetch(`/api/ideas/${currentIdeaId}/alignment-check`, { method: "POST" })
-                    .then((r) => {
-                        if (!r.ok) return r.text().then((t) => { throw new Error(t); });
-                        return r.json();
-                    })
-                    .then((d) => {
-                        setAlignmentLoading(false);
-                        if (d.roadmap_updated && d.roadmap_content) {
-                            setRoadmapContent(d.roadmap_content);
-                        }
-                        setAlignmentReport(d.alignment_report || null);
-                        setActiveDocTab("alignment");
-                        startNotificationPoll(currentIdeaId);
-                    })
-                    .catch((e) => {
-                        setAlignmentLoading(false);
-                    });
-            };
-
-            const doAdversarialCheck = () => {
-                if (!currentIdeaId) return;
-                setShowQualityCheckModal(false);
-                setAdversarialLoading(true);
-                fetch(`/api/ideas/${currentIdeaId}/adversarial-check`, { method: "POST" })
-                    .then((r) => {
-                        if (!r.ok) return r.text().then((t) => { throw new Error(t); });
-                        return r.json();
-                    })
-                    .then((d) => {
-                        setAdversarialLoading(false);
-                        setAdversarialReport(d.adversarial_report || null);
-                        setActiveDocTab("adversarial");
-                        startNotificationPoll(currentIdeaId);
-                    })
-                    .catch((e) => {
-                        setAdversarialLoading(false);
-                    });
             };
 
             const ROADMAP_BEHIND_PRD_DISMISS_PREFIX = "autodev:roadmapBehindPrdDismissed:";
@@ -4719,32 +4665,23 @@
                             {[
                                 {id:'prd', label:'PRD'},
                                 {id:'roadmap', label:'Roadmap'},
-                                {id:'alignment', label:'Alignment', badge: !!alignmentReport},
-                                {id:'adversarial', label:'Adversarial', badge: !!adversarialReport},
-                            ].map(tab => {
-                                const disabled = (tab.id === 'alignment' || tab.id === 'adversarial') && !roadmapContent;
-                                return (
-                                    <button
-                                        key={tab.id}
-                                        onClick={() => !disabled && setActiveDocTab(tab.id)}
-                                        style={{
-                                            padding:'8px 16px', fontSize:'13px',
-                                            fontWeight: activeDocTab === tab.id ? 600 : 400,
-                                            color: disabled ? '#4b5563' : activeDocTab === tab.id ? '#fff' : '#94a3b8',
-                                            borderBottom: activeDocTab === tab.id ? '2px solid #00b4d8' : '2px solid transparent',
-                                            background:'transparent', border:'none',
-                                            cursor: disabled ? 'not-allowed' : 'pointer',
-                                            display:'flex', alignItems:'center', gap:'6px',
-                                        }}
-                                        disabled={disabled}
-                                    >
-                                        {tab.label}
-                                        {tab.badge && (
-                                            <span style={{width:7, height:7, borderRadius:'50%', background:'#00b4d8', display:'inline-block'}}/>
-                                        )}
-                                    </button>
-                                );
-                            })}
+                            ].map(tab => (
+                                <button
+                                    key={tab.id}
+                                    onClick={() => setActiveDocTab(tab.id)}
+                                    style={{
+                                        padding:'8px 16px', fontSize:'13px',
+                                        fontWeight: activeDocTab === tab.id ? 600 : 400,
+                                        color: activeDocTab === tab.id ? '#fff' : '#94a3b8',
+                                        borderBottom: activeDocTab === tab.id ? '2px solid #00b4d8' : '2px solid transparent',
+                                        background:'transparent', border:'none',
+                                        cursor: 'pointer',
+                                        display:'flex', alignItems:'center', gap:'6px',
+                                    }}
+                                >
+                                    {tab.label}
+                                </button>
+                            ))}
                         </div>
                         {activeDocTab === 'prd' && <div ref={docPaneRef} className={`flex-1 overflow-y-auto px-6 py-4 bg-[#141618] min-h-0 ${isLoading && !prdContent.trim() ? "flex flex-col" : ""}`}>
                             {isLoading && !prdContent.trim() ? (
@@ -5081,116 +5018,6 @@
                                 )}
                             </div>
                         )}
-                        {activeDocTab === 'alignment' && (
-                            <div style={{flex:1, display:'flex', flexDirection:'column', overflow:'hidden'}}>
-                                <div style={{flex:1, overflowY:'auto', padding:'24px'}}>
-                                    {!alignmentReport ? (
-                                        <div style={{display:'flex', justifyContent:'center', alignItems:'center', height:'100%'}}>
-                                            <button
-                                                className="header-text text-xs px-3 py-2 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500 disabled:opacity-40"
-                                                onClick={doAlignmentCheck}
-                                                disabled={alignmentLoading}
-                                                title={P3_PRD_TITLE_ALIGNMENT_CHECK}
-                                            >
-                                                {alignmentLoading ? `Running alignment check... (${_opEstimate("alignment_check")})` : "Run Alignment Check"}
-                                            </button>
-                                        </div>
-                                    ) : (
-                                        <div className="msg-md" dangerouslySetInnerHTML={{__html: marked.parse(alignmentReport)}}/>
-                                    )}
-                                </div>
-                                {alignmentReport && (
-                                    <div className="flex-shrink-0 border-t border-[#1a1d21] px-4 py-2 flex justify-between items-center">
-                                        {!showAlignmentRegenConfirm ? (
-                                            <button
-                                                className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500 disabled:opacity-40"
-                                                onClick={() => setShowAlignmentRegenConfirm(true)}
-                                                disabled={alignmentLoading}
-                                            >
-                                                Regenerate
-                                            </button>
-                                        ) : (
-                                            <div className="flex items-center gap-2">
-                                                <span className="header-text text-xs text-slate-400">This will overwrite the previous alignment report.</span>
-                                                <button
-                                                    className="header-text text-xs px-2 py-1 rounded bg-[#00b4d8] text-[#0d0f11] font-semibold"
-                                                    onClick={() => { setShowAlignmentRegenConfirm(false); doAlignmentCheck(); }}
-                                                >
-                                                    Confirm
-                                                </button>
-                                                <button
-                                                    className="header-text text-xs px-2 py-1 rounded text-slate-400 hover:text-slate-200"
-                                                    onClick={() => setShowAlignmentRegenConfirm(false)}
-                                                >
-                                                    Cancel
-                                                </button>
-                                            </div>
-                                        )}
-                                        <button
-                                            className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500"
-                                            onClick={() => navigator.clipboard.writeText(alignmentReport)}
-                                        >
-                                            Copy
-                                        </button>
-                                    </div>
-                                )}
-                            </div>
-                        )}
-                        {activeDocTab === 'adversarial' && (
-                            <div style={{flex:1, display:'flex', flexDirection:'column', overflow:'hidden'}}>
-                                <div style={{flex:1, overflowY:'auto', padding:'24px'}}>
-                                    {!adversarialReport ? (
-                                        <div style={{display:'flex', justifyContent:'center', alignItems:'center', height:'100%'}}>
-                                            <button
-                                                className="header-text text-xs px-3 py-2 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500 disabled:opacity-40"
-                                                onClick={doAdversarialCheck}
-                                                disabled={adversarialLoading}
-                                                title={P3_PRD_TITLE_ADVERSARIAL_REVIEW}
-                                            >
-                                                {adversarialLoading ? `Running adversarial review... (${_opEstimate("adversarial_check")})` : "Run Adversarial Review"}
-                                            </button>
-                                        </div>
-                                    ) : (
-                                        <div className="msg-md" dangerouslySetInnerHTML={{__html: marked.parse(adversarialReport)}}/>
-                                    )}
-                                </div>
-                                {adversarialReport && (
-                                    <div className="flex-shrink-0 border-t border-[#1a1d21] px-4 py-2 flex justify-between items-center">
-                                        {!showAdversarialRegenConfirm ? (
-                                            <button
-                                                className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500 disabled:opacity-40"
-                                                onClick={() => setShowAdversarialRegenConfirm(true)}
-                                                disabled={adversarialLoading}
-                                            >
-                                                Regenerate
-                                            </button>
-                                        ) : (
-                                            <div className="flex items-center gap-2">
-                                                <span className="header-text text-xs text-slate-400">This will overwrite the previous adversarial report.</span>
-                                                <button
-                                                    className="header-text text-xs px-2 py-1 rounded bg-[#00b4d8] text-[#0d0f11] font-semibold"
-                                                    onClick={() => { setShowAdversarialRegenConfirm(false); doAdversarialCheck(); }}
-                                                >
-                                                    Confirm
-                                                </button>
-                                                <button
-                                                    className="header-text text-xs px-2 py-1 rounded text-slate-400 hover:text-slate-200"
-                                                    onClick={() => setShowAdversarialRegenConfirm(false)}
-                                                >
-                                                    Cancel
-                                                </button>
-                                            </div>
-                                        )}
-                                        <button
-                                            className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500"
-                                            onClick={() => navigator.clipboard.writeText(adversarialReport)}
-                                        >
-                                            Copy
-                                        </button>
-                                    </div>
-                                )}
-                            </div>
-                        )}
                         {/* ── Sticky action bar ─────────────────────────────────────────── */}
                         {prdContent.trim().length > 0 && (
                             <div className="flex-shrink-0 border-t border-[#1a1d21] px-4 py-2 bg-[#0d0f11] space-y-2">
@@ -5298,7 +5125,7 @@
                             <div className="bg-[#141618] border border-[#2a2d31] rounded p-6 max-w-sm w-full space-y-4" onClick={(e) => e.stopPropagation()}>
                                 <div className="header-text text-sm text-slate-300">Regenerate Roadmap?</div>
                                 <div className="text-xs text-slate-400">
-                                    This will overwrite the existing roadmap. Any alignment or adversarial reports will remain but the roadmap content will be permanently replaced.
+                                    This will overwrite the existing roadmap. The roadmap content will be permanently replaced.
                                 </div>
                                 <div className="flex gap-2 justify-end">
                                     <button
@@ -5458,47 +5285,6 @@
                                         className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-[#0d0f11] font-semibold"
                                     >
                                         Generate anyway
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Post-roadmap quality check modal */}
-                    {showQualityCheckModal && (
-                        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setShowQualityCheckModal(false)}>
-                            <div
-                                className="bg-[#141618] border border-[#2a2d31] rounded p-6 max-w-sm w-full space-y-4"
-                                data-testid="ideas-roadmap-generated-modal"
-                                onClick={(e) => e.stopPropagation()}
-                            >
-                                <div className="header-text text-sm text-slate-300">Roadmap generated</div>
-                                <div className="text-xs text-slate-400 space-y-2.5">
-                                    <p className="text-slate-300">Your roadmap is ready.</p>
-                                    <p>
-                                        Open <span className="text-slate-200 font-semibold">Setup &amp; Preflight</span> from the sidebar, or tap{" "}
-                                        <span className="text-slate-200 font-semibold">Continue to Setup →</span> in the bar below after you close this.
-                                    </p>
-                                    <p>
-                                        Optional: use the <span className="text-slate-200 font-semibold">Alignment</span> or{" "}
-                                        <span className="text-slate-200 font-semibold">Adversarial</span> tabs first.
-                                    </p>
-                                    {readinessStatus === "ready" &&
-                                        readinessData &&
-                                        typeof readinessData.score === "number" &&
-                                        readinessData.score < 8 && (
-                                            <p className="text-amber-200/90 pt-2 border-t border-amber-700/30">
-                                                Readiness is {readinessData.score}/10 — you can proceed; open the <span className="font-semibold">PRD</span> tab for details if you want to strengthen the doc first.
-                                            </p>
-                                        )}
-                                </div>
-                                <div className="flex justify-end">
-                                    <button
-                                        type="button"
-                                        onClick={() => setShowQualityCheckModal(false)}
-                                        className="header-text text-xs px-3 py-2 rounded bg-[#00b4d8] text-[#0d0f11] font-semibold"
-                                    >
-                                        Got it
                                     </button>
                                 </div>
                             </div>
