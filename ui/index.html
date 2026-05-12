@@ -6357,6 +6357,14 @@
             }
 
             // ── Column 2: Project Snapshot ──────────────────────────────────────────
+
+            const AGENT_ACTIVITY_LABELS = {
+                planner: "Planning implementation",
+                executor: "Writing code",
+                reviewer: "Reviewing code changes",
+                escalation: "Escalated — waiting for input",
+            };
+
             function QueueProjectSnapshot() {
                 if (!selected) return (
                     <p className="header-text text-xs text-slate-500 text-center mt-8">Select a project to view details</p>
@@ -6375,7 +6383,8 @@
                 const selDisp = queueRowDisplay(selected);
                 const parentEntry = selected.parent_id ? queue.find((e) => e.id === selected.parent_id) : null;
                 return (
-                    <div className="space-y-3">
+                    <div className="space-y-4">
+                        {/* Section A: Project Identity */}
                         <div>
                             <p className="header-text text-base text-slate-200 font-semibold leading-tight">{selected.name}</p>
                             <p className="header-text text-xs text-slate-500 font-mono mt-0.5 break-all">{selected.project_path}</p>
@@ -6395,7 +6404,7 @@
                             >{selDisp.label}</span>
                             {selected.blocked_at && <span className="header-text text-xs text-slate-500">Blocked {relTime(selected.blocked_at)}</span>}
                             {selected.started_at && <span className="header-text text-xs text-slate-500">Started {relTime(selected.started_at)}</span>}
-                            {selected.completed_at && <span className="header-text text-xs text-slate-500">Done {relTime(selected.completed_at)}</span>}
+                            {selected.completed_at && <span className="header-text text-xs text-slate-500">Completed {relTime(selected.completed_at)}</span>}
                         </div>
                         {selected.state === 'DEPENDENCY_HOLD' && (
                             <p className="header-text text-xs text-slate-400">
@@ -6409,57 +6418,81 @@
                             <p className="header-text text-xs text-orange-400">↩ Skipped {selected.skip_count} time{selected.skip_count !== 1 ? 's' : ''}</p>
                         )}
 
-                        {/* Phase progress */}
+                        {/* Section B: Current Activity (active projects only) */}
+                        {hasRunData && snap.current_phase_raw_id ? (
+                            <div className="border border-[#1a1d21] rounded-md p-3 bg-[#141618]/50">
+                                <div className="flex items-center justify-between mb-0.5">
+                                    <span className="header-text text-xs text-slate-500 uppercase tracking-wide">Current Activity</span>
+                                </div>
+                                <div className="flex items-center justify-between mt-1.5">
+                                    <span
+                                        className="header-text text-sm text-slate-200 font-mono font-semibold"
+                                        title={P3_PIPELINE_PHASE_RAW_ID_TITLE}
+                                    >
+                                        {snap.current_phase_raw_id}
+                                    </span>
+                                    <ElapsedTimer
+                                        lastActionTimestamp={snap.last_action_timestamp}
+                                        sentinelWaitStartedAt={snap.sentinel_wait_started_at}
+                                        waitingForHumanAt={snap.waiting_for_human_at}
+                                        orchestratorAlive={snap.orchestrator_alive}
+                                        pipeline_status={snap.pipeline_status}
+                                    />
+                                </div>
+                                {snap.current_phase_desc && (
+                                    <p className="text-sm text-slate-400 leading-relaxed mt-1">{snap.current_phase_desc}</p>
+                                )}
+                                <div className="mt-2.5 space-y-1">
+                                    {snap.current_agent && (
+                                        <p className="header-text text-xs text-slate-300">
+                                            {AGENT_ACTIVITY_LABELS[snap.current_agent] || snap.current_agent}
+                                            {agentRetries !== null && agentRetries > 0 && (
+                                                <span className="text-slate-500"> — attempt {agentRetries + 1}</span>
+                                            )}
+                                        </p>
+                                    )}
+                                    {snap.last_action && (
+                                        <p className="header-text text-xs text-slate-500" title={snap.last_action}>
+                                            Last: {snap.last_action.length > 80 ? snap.last_action.slice(0, 80) + '…' : snap.last_action}
+                                            {snap.last_action_timestamp && ` — ${relTime(snap.last_action_timestamp)}`}
+                                        </p>
+                                    )}
+                                    {!snap.last_action && snap.last_action_timestamp && (
+                                        <p className="header-text text-xs text-slate-500">Last activity: {relTime(snap.last_action_timestamp)}</p>
+                                    )}
+                                </div>
+                            </div>
+                        ) : null}
+
+                        {/* Section C: Progress */}
                         {snap && snap.phases_total > 0 ? (
                             <div>
                                 <div className="flex items-center justify-between mb-1">
-                                    <span className="header-text text-xs text-slate-400">Phases</span>
-                                    <span className="header-text text-xs text-slate-300">{snap.phases_complete} / {snap.phases_total} complete</span>
+                                    <span className="header-text text-xs text-slate-500 uppercase tracking-wide">Progress</span>
+                                    <span className="header-text text-xs text-slate-300">{snap.phases_complete} / {snap.phases_total}</span>
                                 </div>
                                 <div className="h-1.5 rounded-full bg-[#1a1d21] overflow-hidden">
                                     <div className="h-full rounded-full bg-emerald-600 transition-all"
                                         style={{width: `${Math.round((snap.phases_complete / snap.phases_total) * 100)}%`}}/>
                                 </div>
+                                {hasRunData && snap.current_phase != null && (
+                                    <p className="header-text text-xs text-slate-500 mt-1">Phase {snap.current_phase + 1} of {snap.phases_total}</p>
+                                )}
                             </div>
                         ) : null}
 
-                        {/* Run metrics */}
-                        {hasRunData ? (
-                            <div className="space-y-1.5">
-                                {snap.current_phase_raw_id && (
-                                    <div>
-                                        <span className="header-text text-xs text-slate-500">Current phase: </span>
-                                        <span
-                                            className="header-text text-xs text-slate-300 font-mono"
-                                            title={P3_PIPELINE_PHASE_RAW_ID_TITLE}
-                                        >
-                                            {snap.current_phase_raw_id}
-                                        </span>
-                                        {snap.current_phase_desc && (
-                                            <span className="header-text text-xs text-slate-500"> — {snap.current_phase_desc}</span>
-                                        )}
-                                    </div>
-                                )}
-                                {snap.current_agent && (
-                                    <p className="header-text text-xs text-slate-400">
-                                        {snap.current_agent.charAt(0).toUpperCase() + snap.current_agent.slice(1)}
-                                        {agentRetries !== null && agentRetries > 0 && ` — attempt ${agentRetries + 1}`}
-                                    </p>
-                                )}
-                                {snap.last_action_timestamp && (
-                                    <p className="header-text text-xs text-slate-500">Last action: {relTime(snap.last_action_timestamp)}</p>
-                                )}
-                            </div>
-                        ) : (
-                            <p className="header-text text-xs text-slate-600 italic">Not the active project — run metrics unavailable</p>
-                        )}
-
-                        {snap && snap.cost_total > 0 && (
-                            <p className="header-text text-xs text-slate-500">Cost: ${snap.cost_total.toFixed(2)}</p>
-                        )}
-                        {selected.preflight_validated_at && (
-                            <p className="header-text text-xs text-slate-500">Validated {relTime(selected.preflight_validated_at)}</p>
-                        )}
+                        {/* Section E: Background Details */}
+                        <div className="space-y-1">
+                            {snap && snap.cost_total > 0 && (
+                                <p className="header-text text-xs text-slate-500">Cost: ${snap.cost_total.toFixed(2)}</p>
+                            )}
+                            {hasRunData && snap.skill_injected && snap.skill_agent && (
+                                <p className="header-text text-xs text-slate-500">Skill: {snap.skill_injected} / {snap.skill_agent}</p>
+                            )}
+                            {selected.preflight_validated_at && (
+                                <p className="header-text text-xs text-slate-500" title="When this project last passed preflight checks (symlink, gitignore, workspace files, roadmap format)">Preflight passed {relTime(selected.preflight_validated_at)}</p>
+                            )}
+                        </div>
                     </div>
                 );
             }
