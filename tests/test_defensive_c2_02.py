@@ -5,8 +5,6 @@ not silently fall through to a poll timeout minutes later.
 Covered endpoints:
   - POST /api/ideas/{id}/clarity-check
   - POST /api/ideas/{id}/convert
-  - POST /api/ideas/{id}/alignment-check
-  - POST /api/ideas/{id}/adversarial-check
   - POST /api/ideas/{id}/format-correction
 """
 import json
@@ -122,52 +120,6 @@ class TestC202Convert:
 
         assert resp.status_code != 408, (
             "Got convert timeout (408) — webhook 401 was not caught before poll loop (C2-02 unfixed)"
-        )
-        assert resp.status_code == 502, f"Expected 502, got {resp.status_code}: {resp.text}"
-
-
-# ---------------------------------------------------------------------------
-# alignment-check
-# ---------------------------------------------------------------------------
-
-class TestC202AlignmentCheck:
-    def test_401_from_webhook_raises_502_not_timeout(self, tmp_path):
-        """401 from gateway must return 502, not eventually return 408."""
-        idea_id = "idea-alignment"
-        _make_idea(tmp_path, idea_id)
-
-        with patch("ui.server.load_config", return_value=_base_config(tmp_path)), \
-             patch("ui.server.asyncio.sleep", new_callable=AsyncMock), \
-             patch("ui.server.datetime", _make_fast_expire_datetime()), \
-             patch("ui.server._inject_converter_skill"), \
-             patch("aiohttp.ClientSession.post", new=_mock_post_401):
-            resp = client.post(f"/api/ideas/{idea_id}/alignment-check")
-
-        assert resp.status_code != 408, (
-            "Got alignment timeout (408) — webhook 401 was not caught before poll loop (C2-02 unfixed)"
-        )
-        assert resp.status_code == 502, f"Expected 502, got {resp.status_code}: {resp.text}"
-
-
-# ---------------------------------------------------------------------------
-# adversarial-check
-# ---------------------------------------------------------------------------
-
-class TestC202AdversarialCheck:
-    def test_401_from_webhook_raises_502_not_timeout(self, tmp_path):
-        """401 from gateway must return 502, not eventually return 408."""
-        idea_id = "idea-adversarial"
-        _make_idea(tmp_path, idea_id)
-
-        with patch("ui.server.load_config", return_value=_base_config(tmp_path)), \
-             patch("ui.server.asyncio.sleep", new_callable=AsyncMock), \
-             patch("ui.server.datetime", _make_fast_expire_datetime()), \
-             patch("ui.server._inject_converter_skill"), \
-             patch("aiohttp.ClientSession.post", new=_mock_post_401):
-            resp = client.post(f"/api/ideas/{idea_id}/adversarial-check")
-
-        assert resp.status_code != 408, (
-            "Got adversarial timeout (408) — webhook 401 was not caught before poll loop (C2-02 unfixed)"
         )
         assert resp.status_code == 502, f"Expected 502, got {resp.status_code}: {resp.text}"
 

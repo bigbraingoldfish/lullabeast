@@ -77,7 +77,7 @@ def test_do_convert_bails_out_when_reply_in_flight():
     func_body = extract_function_body(content, "IdeasScreen")
     assert func_body is not None
     do_slice = _slice_const_arrow_function(
-        func_body, "doConvert", "const doAlignmentCheck = () => {"
+        func_body, "doConvert", "const ROADMAP_BEHIND_PRD_DISMISS_PREFIX"
     )
     assert do_slice is not None, "doConvert block not found"
     assert re.search(

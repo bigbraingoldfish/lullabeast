@@ -26,6 +26,10 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 - **Heartbeat cron is now a silent self-healer:** `autodev/pipeline/heartbeat_cron.py` no longer sends any Signal notifications. The model-query path (`query_heartbeat_model`, `HEARTBEAT_SYSTEM_PROMPT`, `send_signal_notification`) has been removed entirely. All recovery decisions are now fully deterministic: idle/terminal states (IDLE, PIPELINE_COMPLETE, STOPPED, QUEUE_HALTED, HALTED_SILENT, BLOCKED, WAITING_FOR_HUMAN) cause a log-and-exit with no action; only stale RUNNING/WAITING_FOR_SENTINEL (> 15 min with lock free) triggers an automatic orchestrator restart. The escalation agent remains the sole owner of all human-facing notifications. `requests` import removed.
 
+### Removed
+
+- **Alignment and adversarial secondary checks (MVP cleanup):** `POST /api/ideas/{id}/alignment-check` and `POST /api/ideas/{id}/adversarial-check` endpoints removed with all associated helpers (`_notify_prd_agent`, `_count_alignment_gaps`, `_extract_adversarial_confidence`, `_extract_adversarial_top_risk`) and timeout constants. The Ideas screen Alignment and Adversarial document tabs, the post-roadmap quality check modal (`ideas-roadmap-generated-modal`), and all related React state are removed. `alignment_report` and `adversarial_report` are filtered from `GET /api/ideas/{id}/session` responses; existing stored values are preserved on disk. Alignment and adversarial skill SKILL.md files are retained in `autodev/skill-library/`.
+
 ### Fixed
 
 - **Inference provider rejections (`ERR_PROVIDER_REJECTED`):** Renamed `ERR_PROVIDER_QUOTA` to `ERR_PROVIDER_REJECTED` for clearer operator-facing semantics. The orchestrator now re-reads session JSONL after planner and reviewer gate failures (in addition to post-poll paths) so late-flushed OpenRouter-style billing/auth errors escalate immediately without burning agent retry budget; reviewer paths now call the same detection as planner/executor. The dashboard `LastErrorCode` chip shows an explicit title for `ERR_PROVIDER_REJECTED` and `ERR_SESSION_DEAD_ON_ARRIVAL`.

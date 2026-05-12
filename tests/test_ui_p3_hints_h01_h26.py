@@ -19,14 +19,6 @@ H12 = (
     "Runs the full preflight (symlink, .gitignore, workspace files, roadmap). "
     "Not the same as the lightweight queue check."
 )
-H13 = (
-    "~30–90s. Checks PRD vs. roadmap consistency. "
-    "Produces commentary in the thread, does not edit the PRD."
-)
-H14 = (
-    "~30–90s. Stress-tests the PRD for edge cases and missing assumptions. "
-    "Produces commentary only."
-)
 H15 = "PRD-agent score. 8+ recommended before Generate Roadmap."
 H16 = "Agent confidence before roadmap generation."
 H17_PLACEHOLDER = "/absolute/path/to/existing/git/repo"
@@ -77,13 +69,6 @@ def test_preflight_button_titles_h07_h08_h09_h12(html_content):
     assert "title={P3_PREFLIGHT_TITLE_LAUNCH_NOW}" in html_content
     assert "P3_PREFLIGHT_TITLE_RERUN_PREFLIGHT" in html_content
     assert "P3_PREFLIGHT_TITLE_RUN_PREFLIGHT" in html_content
-
-
-def test_alignment_adversarial_titles_h13_h14(html_content):
-    assert H13 in html_content
-    assert H14 in html_content
-    assert "title={P3_PRD_TITLE_ALIGNMENT_CHECK}" in html_content
-    assert "title={P3_PRD_TITLE_ADVERSARIAL_REVIEW}" in html_content
 
 
 def test_readiness_strip_titles_h15_h16(html_content):
