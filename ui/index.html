@@ -7359,7 +7359,23 @@
                     const d = await r.json().catch(() => ({}));
                     if (!r.ok) {
                         setGenerateDocsError(d.detail || `Generate failed (${r.status})`);
-                    } else {
+                        setGenerateDocsBusy(false);
+                        return;
+                    }
+                    // Webhook triggered — poll for the report to appear (agent writes it async)
+                    let found = false;
+                    for (let i = 0; i < 60; i++) {
+                        await new Promise(ok => setTimeout(ok, 5000));
+                        try {
+                            const cr = await fetch('/api/completion-report').then(x => x.json());
+                            if (cr && cr.found) {
+                                setCompletionReport(cr);
+                                found = true;
+                                break;
+                            }
+                        } catch (_) {}
+                    }
+                    if (!found) {
                         fetchCompletionReport();
                     }
                 } catch (e) {

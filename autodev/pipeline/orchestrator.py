@@ -562,8 +562,18 @@ def _run_completion_review(orchestrator, project_basename: str) -> None:
         orchestrator.skill_manager.inject_skill("COMPLETE-R0", "reviewer", orchestrator.openclaw_config)
         cleanup_output_files(PROJECT_ARTIFACTS_DIR, "reviewer")
 
+        _p = "pipeline-project/.autodev/pipeline"
+        _completion_message = (
+            f"Begin completion documentation. Read the project source and git diff to understand "
+            f"what was built. Produce README.md updates, a CHANGELOG.md entry, and "
+            f"completion_report.md at the project root. Then write {_p}/reviewer_output.done."
+        )
         _attempt_start = time.time()
-        invoke_agent_webhook("reviewer", session_key, token, model=orchestrator._get_agent_model("reviewer"))
+        invoke_agent_webhook(
+            "reviewer", session_key, token,
+            model=orchestrator._get_agent_model("reviewer"),
+            message=_completion_message,
+        )
 
         _stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
         sentinel_found = poll_for_sentinel(
@@ -2969,8 +2979,14 @@ class Orchestrator:
                         time.sleep(2)
                         continue
 
-                    # Target Selection — OpenRouter minimax for all executor attempts
-                    model = "openrouter/minimax/minimax-m2.7"
+                    # Executor model: AUTODEV_EXECUTOR_MODEL overrides; else openclaw.json
+                    # agents.list executor model.primary; legacy MiniMax fallback if unset.
+                    _exec_env = (os.environ.get("AUTODEV_EXECUTOR_MODEL") or "").strip()
+                    model = (
+                        _exec_env
+                        or self._get_agent_model("executor")
+                        or "openrouter/minimax/minimax-m2.7"
+                    )
                     session_key = f"pipeline:phase-{phase}:{raw_id}:executor-attempt-{retries + 1}"
                     attempt_label = "Cloud"
 
