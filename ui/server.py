@@ -6136,6 +6136,8 @@ def get_queue_entry_snapshot(entry_id: str):
     executor_retries = None
     reviewer_retries = None
     last_action_timestamp = None
+    last_action = None
+    sentinel_wait_started_at = None
     is_active_project = False
 
     ps_path = os.path.expanduser(config.get("pipeline_state_path") or "")
@@ -6150,6 +6152,8 @@ def get_queue_entry_snapshot(entry_id: str):
         executor_retries = ps.get("executor_retries", 0)
         reviewer_retries = ps.get("reviewer_retries", 0)
         last_action_timestamp = ps.get("last_action_timestamp")
+        last_action = ps.get("last_action")
+        sentinel_wait_started_at = ps.get("sentinel_wait_started_at")
 
     # Orchestrator liveness
     lock_path = _expand_lock_path(config)
@@ -6179,17 +6183,30 @@ def get_queue_entry_snapshot(entry_id: str):
                         parts = line.split(" | ")
                         if len(parts) >= 3:
                             desc = parts[-1].strip()
-                            current_phase_desc = desc[:60] + ("…" if len(desc) > 60 else "")
+                            current_phase_desc = desc
                         break
         except Exception:
             pass
 
     escalation_resets = None
+    last_error_code = None
+    escalation_message = None
+    escalation_trigger_reason = None
+    skill_injected = None
+    skill_agent = None
+    waiting_for_human_at = None
     if is_active_project and project_path:
         psp = os.path.join(_pipeline_artifacts_dir(project_path), "phase_state.json")
         ph = _read_json_file(psp) if os.path.exists(psp) else {}
         if isinstance(ph, dict):
             escalation_resets = ph.get("escalation_resets", 0)
+            last_error_code = ph.get("last_error_code")
+            raw_esc_msg = ph.get("escalation_message")
+            escalation_message = raw_esc_msg[:500] if isinstance(raw_esc_msg, str) and len(raw_esc_msg) > 500 else raw_esc_msg
+            escalation_trigger_reason = ph.get("escalation_trigger_reason")
+            skill_injected = ph.get("skill_injected")
+            skill_agent = ph.get("skill_agent")
+            waiting_for_human_at = ph.get("waiting_for_human_at")
 
     return {
         "id": entry["id"],
@@ -6208,10 +6225,18 @@ def get_queue_entry_snapshot(entry_id: str):
         "executor_retries": executor_retries,
         "reviewer_retries": reviewer_retries,
         "last_action_timestamp": last_action_timestamp,
+        "last_action": last_action,
+        "sentinel_wait_started_at": sentinel_wait_started_at,
         "pipeline_status": pipeline_status,
         "orchestrator_alive": orchestrator_alive,
         "is_active_project": is_active_project,
         "escalation_resets": escalation_resets,
+        "last_error_code": last_error_code,
+        "escalation_message": escalation_message,
+        "escalation_trigger_reason": escalation_trigger_reason,
+        "skill_injected": skill_injected,
+        "skill_agent": skill_agent,
+        "waiting_for_human_at": waiting_for_human_at,
     }
 
 
