@@ -24,7 +24,7 @@ H16 = "Agent confidence before roadmap generation."
 H17_PLACEHOLDER = "/absolute/path/to/existing/git/repo"
 H22 = "Continues from the current agent in the current phase."
 H25 = "Phase ID from roadmap.md."
-H26_ACTIVITY = "Orchestrator + gate + webhook events on Activity tab; escalation-only on Escalation tab."
+H26_ACTIVITY = "Orchestrator + gate + webhook events on Activity tab; escalation-only on Escalation tab; live orchestrator log on Pipeline log tab."
 
 
 @pytest.fixture
