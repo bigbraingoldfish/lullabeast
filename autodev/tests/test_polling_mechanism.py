@@ -469,3 +469,46 @@ class TestPollingMechanism:
         )
         t.join(timeout=5)
         assert result is True
+
+    def test_poll_survives_symlink_repoint_mid_poll(self, tmp_workspace):
+        """poll_for_sentinel must detect .done even when pipeline-project symlink is
+        repointed mid-poll (e.g. _run_preflight_checks called for another project).
+
+        The sentinel_path is constructed to pass through a symlink. After the sentinel
+        is written to the real location, the symlink is repointed away. poll must
+        still return True because it resolves paths at call time via os.path.realpath().
+        """
+        import threading
+        import tempfile
+        from sentinel_poller import poll_for_sentinel
+
+        # Set up: link → dir_a; dir_b is a second project (the "other" preflight target)
+        dir_a = os.path.join(tmp_workspace, "project_a")
+        dir_b = os.path.join(tmp_workspace, "project_b")
+        os.makedirs(dir_a, exist_ok=True)
+        os.makedirs(dir_b, exist_ok=True)
+
+        link = os.path.join(tmp_workspace, "pipeline-project")
+        os.symlink(dir_a, link)
+
+        # sentinel_path contains the symlink as a path component (mirrors real usage)
+        sentinel_path = os.path.join(link, "executor_output.done")
+
+        def _write_then_repoint():
+            time.sleep(0.3)
+            # Plugin writes .done to the real directory (via its own symlink resolution)
+            open(os.path.join(dir_a, "executor_output.done"), "w").close()
+            time.sleep(0.1)
+            # Preflight repoints the symlink to a different project (the bug scenario)
+            os.unlink(link)
+            os.symlink(dir_b, link)
+
+        t = threading.Thread(target=_write_then_repoint, daemon=True)
+        t.start()
+
+        result = poll_for_sentinel(sentinel_path, timeout_seconds=5)
+        t.join(timeout=5)
+
+        assert result is True, (
+            "poll_for_sentinel failed to detect .done after symlink was repointed mid-poll"
+        )

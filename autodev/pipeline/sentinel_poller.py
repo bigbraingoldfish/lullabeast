@@ -123,6 +123,16 @@ def poll_for_sentinel(
         Seconds of silence (no stamp mtime update) before treating the attempt
         as stalled. Must be passed together with ``stall_detection_path``.
     """
+    # Resolve symlink components once at call time.  If _run_preflight_checks (or
+    # any other caller) repoints the pipeline-project symlink mid-poll, we keep
+    # watching the original real directory rather than silently following the new
+    # target and losing the .done file.
+    sentinel_path = os.path.realpath(sentinel_path)
+    if stall_detection_path is not None:
+        stall_detection_path = os.path.realpath(stall_detection_path)
+    if stop_sentinel_path is not None:
+        stop_sentinel_path = os.path.realpath(stop_sentinel_path)
+
     start_time = time.monotonic()
     _bootstrap_stamp_mtime: float | None = None
     _agent_has_checked_in = False

@@ -5420,14 +5420,39 @@ def _run_preflight_checks(repo_path: str, config: dict | None = None) -> list:
                 "message": f"Symlink points to {repo_path}",
             })
         else:
-            if os.path.lexists(symlink_path):
-                os.remove(symlink_path)
-            os.symlink(repo_path, symlink_path)
-            checks.append({
-                "check": "symlink",
-                "status": "fixed",
-                "message": f"Symlink created → {repo_path}",
-            })
+            # Guard: don't repoint if the orchestrator is mid-run on a DIFFERENT project.
+            # Repointing during an active poll redirects the sentinel path and breaks
+            # completion detection (the .done file ends up in the wrong directory).
+            _lock_path = _expand_lock_path(config)
+            _orch_running = bool(_lock_path and _check_orchestrator_liveness(_lock_path))
+            _running_project = None
+            if _orch_running:
+                _ps_path = config.get("pipeline_state_path")
+                if _ps_path:
+                    try:
+                        _ps = _read_json_file(os.path.expanduser(_ps_path))
+                        _pp = (_ps or {}).get("project_path", "")
+                        _running_project = os.path.realpath(_pp) if _pp else None
+                    except Exception:
+                        pass
+            if _orch_running and _running_project and _running_project != repo_path:
+                checks.append({
+                    "check": "symlink",
+                    "status": "warn",
+                    "message": (
+                        f"Symlink points to {_running_project!r} (active run). "
+                        f"Not repointing to {repo_path!r} while orchestrator holds the lock."
+                    ),
+                })
+            else:
+                if os.path.lexists(symlink_path):
+                    os.remove(symlink_path)
+                os.symlink(repo_path, symlink_path)
+                checks.append({
+                    "check": "symlink",
+                    "status": "fixed",
+                    "message": f"Symlink created → {repo_path}",
+                })
     except OSError as exc:
         checks.append({
             "check": "symlink",
