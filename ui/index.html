@@ -304,7 +304,7 @@
 
         const P3_PIPELINE_PHASE_RAW_ID_TITLE = 'Phase ID from roadmap.md.';
         const P3_ACTIVITY_TAB_TITLE =
-            'Orchestrator + gate + webhook events on Activity tab; escalation-only on Escalation tab.';
+            'Orchestrator + gate + webhook events on Activity tab; escalation-only on Escalation tab; live orchestrator log on Pipeline log tab.';
         const P3_STOPPED_RESUME_TITLE = 'Continues from the current agent in the current phase.';
         const P3_QUEUE_ADD_PATH_PLACEHOLDER = '/absolute/path/to/existing/git/repo';
 
@@ -2586,9 +2586,12 @@
                     <div className="flex gap-2 mb-3 flex-shrink-0">
                         <TabButton tab="activity" label="Activity" title={P3_ACTIVITY_TAB_TITLE} />
                         <TabButton tab="escalation" label="Escalation" title={P3_ACTIVITY_TAB_TITLE} />
+                        <TabButton tab="log" label="Pipeline log" title="Live tail of orchestrator.log — updates every 3 s." />
                     </div>
-                    <div className="flex-1 min-h-0 overflow-y-auto">
-                        {activityTab === 'escalation' ? (
+                    <div className={`flex-1 min-h-0 ${activityTab === 'log' ? 'flex flex-col' : 'overflow-y-auto'}`}>
+                        {activityTab === 'log' ? (
+                            <PipelineLogPanel />
+                        ) : activityTab === 'escalation' ? (
                             <EscalationLogPanel events={escalationEvents} roadmap={roadmap} />
                         ) : events.length === 0 ? (
                             <div className="text-slate-500 italic text-sm">No events yet. Events appear here as the pipeline runs.</div>
@@ -2612,6 +2615,70 @@
                             </div>
                         )}
                     </div>
+                </div>
+            );
+        }
+
+        // ─── Pipeline Log Panel — shown on the Pipeline log tab of the Activity Feed ───
+
+        function PipelineLogPanel() {
+            const [lines, setLines] = React.useState([]);
+            const [userScrolledUp, setUserScrolledUp] = React.useState(false);
+            const scrollRef = React.useRef(null);
+            const intervalRef = React.useRef(null);
+
+            React.useEffect(() => {
+                fetchLog();
+                intervalRef.current = setInterval(fetchLog, 3000);
+                return () => clearInterval(intervalRef.current);
+            }, []);
+
+            // Auto-scroll to bottom when lines update, unless user scrolled up.
+            React.useEffect(() => {
+                if (!userScrolledUp && scrollRef.current) {
+                    scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+                }
+            }, [lines, userScrolledUp]);
+
+            function fetchLog() {
+                fetch('/api/log/tail?lines=500')
+                    .then(r => r.json())
+                    .then(data => { if (Array.isArray(data.lines)) setLines(data.lines); })
+                    .catch(() => {});
+            }
+
+            function handleScroll() {
+                if (!scrollRef.current) return;
+                const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
+                setUserScrolledUp(scrollHeight - scrollTop - clientHeight >= 8);
+            }
+
+            function scrollToBottom() {
+                if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+                setUserScrolledUp(false);
+            }
+
+            return (
+                <div className="flex flex-col h-full min-h-0 relative">
+                    <div
+                        ref={scrollRef}
+                        onScroll={handleScroll}
+                        className="flex-1 min-h-0 overflow-y-auto font-mono text-xs text-slate-300 whitespace-pre-wrap"
+                    >
+                        {lines.length === 0
+                            ? <span className="text-slate-500 italic">No log content — orchestrator.log not found or empty.</span>
+                            : lines.map((line, i) => <div key={i} className="leading-5">{line}</div>)
+                        }
+                    </div>
+                    {userScrolledUp && (
+                        <button
+                            type="button"
+                            onClick={scrollToBottom}
+                            className="absolute bottom-2 right-2 px-2 py-1 text-xs bg-blue-600 text-white rounded shadow"
+                        >
+                            ↓ Scroll to bottom
+                        </button>
+                    )}
                 </div>
             );
         }
@@ -7153,6 +7220,39 @@
             const [generateDocsBusy, setGenerateDocsBusy] = useState(false);
             const [generateDocsError, setGenerateDocsError] = useState("");
             const [feedCollapsed, setFeedCollapsed] = useState(false);
+            const [feedHeight, setFeedHeight] = useState(() => Math.round(window.innerHeight * 0.25));
+            const feedHeightRef = useRef(Math.round(window.innerHeight * 0.25));
+            const dragStartYRef = useRef(0);
+            const dragStartHeightRef = useRef(0);
+
+            const handleResizeMouseMove = useCallback((e) => {
+                const delta = dragStartYRef.current - e.clientY; // drag up = bigger feed
+                const minH = 80;
+                const maxH = Math.round(window.innerHeight * 0.5);
+                const next = Math.min(maxH, Math.max(minH, dragStartHeightRef.current + delta));
+                feedHeightRef.current = next;
+                setFeedHeight(next);
+            }, []);
+
+            const handleResizeMouseUp = useCallback(() => {
+                document.removeEventListener('mousemove', handleResizeMouseMove);
+                document.removeEventListener('mouseup', handleResizeMouseUp);
+            }, [handleResizeMouseMove]);
+
+            function handleResizeMouseDown(e) {
+                e.preventDefault();
+                dragStartYRef.current = e.clientY;
+                dragStartHeightRef.current = feedHeightRef.current;
+                document.addEventListener('mousemove', handleResizeMouseMove);
+                document.addEventListener('mouseup', handleResizeMouseUp);
+            }
+
+            useEffect(() => {
+                return () => {
+                    document.removeEventListener('mousemove', handleResizeMouseMove);
+                    document.removeEventListener('mouseup', handleResizeMouseUp);
+                };
+            }, [handleResizeMouseMove, handleResizeMouseUp]);
             const [showStopModal, setShowStopModal] = useState(false);
             const [stopRequested, setStopRequested] = useState(false);
             const [stopError, setStopError] = useState("");
@@ -7619,7 +7719,10 @@
             }
 
             return (
-                <div className={`grid ${feedCollapsed ? 'grid-rows-[auto_minmax(0,1fr)_auto]' : 'grid-rows-[auto_minmax(0,1fr)_minmax(0,25vh)]'} h-full overflow-hidden`}>
+                <div
+                    className="grid grid-rows-[auto_minmax(0,1fr)_auto] h-full overflow-hidden"
+                    style={feedCollapsed ? {} : { gridTemplateRows: `auto 1fr ${feedHeight}px` }}
+                >
                     {/* Header bar */}
                     <header className="bg-[#141618] border-b border-[#1a1d21] px-6 py-4 flex-shrink-0">
                         <div className="flex items-center justify-between">
@@ -7895,6 +7998,12 @@
 
                     {/* Activity Feed */}
                     <div className={`bg-[#141618] border-t border-[#1a1d21] px-4 pt-3 pb-2 flex flex-col ${feedCollapsed ? '' : 'min-h-0 overflow-hidden'}`}>
+                        {/* Resize handle — drag up to expand feed, down to shrink */}
+                        <div
+                            data-testid="feed-resize-handle"
+                            className="h-1 w-full cursor-row-resize bg-transparent hover:bg-blue-600/30 flex-shrink-0 -mt-3 mb-2"
+                            onMouseDown={handleResizeMouseDown}
+                        />
                         <div
                             className="flex items-center gap-2 cursor-pointer select-none mb-2 flex-shrink-0"
                             onClick={() => setFeedCollapsed(prev => !prev)}

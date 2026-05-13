@@ -53,6 +53,10 @@ ORCHESTRATOR_SPAWN_LOG_PATH = "/tmp/orchestrator.log"
 # Ring buffer for synthetic events (max 50 entries)
 _ring_buffer = deque(maxlen=50)
 
+# How far into pipeline_events.jsonl the polling loop has read.
+# -1 = not yet initialised; set to current EOF on first call to avoid replaying history.
+_events_file_offset: int = -1
+
 # Polling state - tracks previous values to detect changes
 _polling_state = {
     "pipeline_status": None,
@@ -164,6 +168,64 @@ def _create_synthetic_event(event_type, agent=None, phase=None, detail=None):
     }
 
 
+def _poll_pipeline_events_file(path: str) -> list[dict]:
+    """Read lines appended to the events JSONL file since the last call.
+
+    Distinct from the async _tail_events_file generator (per-client SSE streaming).
+    This function is called by _polling_loop to push new orchestrator events
+    (gate_pass, gate_fail, escalation_trigger, etc.) to all connected SSE clients.
+
+    On the first call (_events_file_offset == -1), parks at the current EOF so
+    that historical events are not replayed into already-connected SSE clients.
+    Detects file rotation / truncation (size < offset) and resets the offset.
+
+    Returns a list of event dicts with the same shape as _create_synthetic_event
+    output (id, ts, event_type, agent, phase, detail).  Non-JSON lines and OS
+    errors are silently skipped.
+    """
+    global _events_file_offset
+    if not path:
+        return []
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return []
+    # First call: park at EOF — do not replay existing history.
+    if _events_file_offset < 0:
+        _events_file_offset = size
+        return []
+    # File was truncated or rotated.
+    if size < _events_file_offset:
+        _events_file_offset = 0
+    # Nothing new written since last check.
+    if size == _events_file_offset:
+        return []
+    events = []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            f.seek(_events_file_offset)
+            for line in f:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    raw = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                events.append({
+                    "id":         raw.get("id") or str(uuid.uuid4()),
+                    "ts":         raw.get("ts") or raw.get("timestamp", ""),
+                    "event_type": raw.get("event_type") or raw.get("event", "status_changed"),
+                    "agent":      raw.get("agent"),
+                    "phase":      raw.get("phase"),
+                    "detail":     raw.get("detail"),
+                })
+            _events_file_offset = f.tell()
+    except OSError:
+        pass
+    return events
+
+
 async def _poll_state(prev_state):
     """Read pipeline_state.json, track previous values, and detect changes.
     
@@ -254,15 +316,17 @@ async def _polling_loop():
                 except Exception:
                     pass
             
-            # Check if events file exists
+            # Tail pipeline_events.jsonl for new events written by the orchestrator.
+            # Delivers gate_pass, gate_fail, escalation_trigger, etc. to connected
+            # SSE clients without requiring a page refresh.
             try:
                 config = load_config()
-                events_path = config.get('events_path')
+                events_path = config.get("events_path")
                 if events_path:
                     events_path = os.path.expanduser(events_path)
-                    if Path(events_path).exists():
-                        # File exists - API will serve from file
-                        pass
+                    for evt in _poll_pipeline_events_file(events_path):
+                        _ring_buffer.append(evt)
+                        await _notify_sse_clients(evt)
             except Exception:
                 pass
             
@@ -1048,7 +1112,7 @@ def _check_orchestrator_liveness(lock_path):
         return True
 
 
-def _read_log_tail_lines(path: str, max_lines: int = 5) -> list[str]:
+def _read_log_tail_lines(path: str, max_lines: int = 5, max_bytes: int = 65536) -> list[str]:
     """Return up to the last ``max_lines`` complete lines from a text file (bounded read from EOF).
 
     Used for B-04 diagnostics when the orchestrator exits while pipeline_state still shows
@@ -1056,7 +1120,7 @@ def _read_log_tail_lines(path: str, max_lines: int = 5) -> list[str]:
     """
     if not path or max_lines <= 0:
         return []
-    max_chunk = 65536
+    max_chunk = max_bytes
     try:
         with open(path, "rb") as f:
             try:
@@ -1979,6 +2043,27 @@ async def events_stream():
         cleanup_wrapper(),
         media_type="text/event-stream"
     )
+
+
+@app.get("/api/log/tail")
+def get_log_tail(lines: int = 500):
+    """Return the last ``lines`` lines of the orchestrator pipeline log.
+
+    The pipeline log lives at {autodev_pipeline_root}/orchestrator.spawn.log and
+    captures stdout/stderr from the orchestrator process spawned by the UI.
+    This is distinct from ORCHESTRATOR_SPAWN_LOG_PATH (/tmp/orchestrator.log),
+    which is only used when no pipeline root is configured.
+
+    Returns {"lines": [...], "path": "<absolute_path_or_empty>"}.
+    Missing or empty files return lines=[].
+    """
+    config = load_config()
+    pipeline_root = (config.get("autodev_pipeline_root") or "").strip()
+    if not pipeline_root:
+        return {"lines": [], "path": ""}
+    log_path = os.path.join(pipeline_root, "orchestrator.spawn.log")
+    result = _read_log_tail_lines(log_path, max_lines=lines, max_bytes=524288)
+    return {"lines": result, "path": log_path}
 
 
 @app.get("/api/state")
