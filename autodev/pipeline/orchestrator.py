@@ -2995,14 +2995,14 @@ class Orchestrator:
                     _stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
                     sentinel_found = poll_for_sentinel(
                         sentinel_path,
-                        timeout_seconds=3600,  # infrastructure-failure backstop only; agent_end fires immediately on session close
+                        timeout_seconds=2700,
                         stop_sentinel_path=_stop_file,
                         min_sentinel_mtime=_attempt_start_time,
                         stall_detection_path=os.path.join(
                             PROJECT_ARTIFACTS_DIR, "planner_activity.stamp"
                         ),
                         stall_threshold_seconds=_stall_timeout_seconds(
-                            "AUTODEV_STALL_TIMEOUT_PLANNER", "900"
+                            "AUTODEV_STALL_TIMEOUT_PLANNER", "300"
                         ),
                     )
 
@@ -3221,14 +3221,14 @@ class Orchestrator:
                     _stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
                     sentinel_found = poll_for_sentinel(
                         sentinel_path,
-                        timeout_seconds=7200,  # infrastructure-failure backstop only; agent_end fires immediately on session close
+                        timeout_seconds=2700,
                         stop_sentinel_path=_stop_file,
                         min_sentinel_mtime=_attempt_start_time,
                         stall_detection_path=os.path.join(
                             PROJECT_ARTIFACTS_DIR, "executor_activity.stamp"
                         ),
                         stall_threshold_seconds=_stall_timeout_seconds(
-                            "AUTODEV_STALL_TIMEOUT_EXECUTOR", "1800"
+                            "AUTODEV_STALL_TIMEOUT_EXECUTOR", "300"
                         ),
                     )
 
@@ -3386,14 +3386,14 @@ class Orchestrator:
                         _stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
                         sentinel_found = poll_for_sentinel(
                             sentinel_path,
-                            timeout_seconds=3600,  # infrastructure-failure backstop only; agent_end fires immediately on session close
+                            timeout_seconds=2700,
                             stop_sentinel_path=_stop_file,
                             min_sentinel_mtime=_attempt_start_time,
                             stall_detection_path=os.path.join(
                                 PROJECT_ARTIFACTS_DIR, "reviewer_activity.stamp"
                             ),
                             stall_threshold_seconds=_stall_timeout_seconds(
-                                "AUTODEV_STALL_TIMEOUT_REVIEWER", "900"
+                                "AUTODEV_STALL_TIMEOUT_REVIEWER", "300"
                             ),
                         )
 

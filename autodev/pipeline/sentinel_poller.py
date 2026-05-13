@@ -124,6 +124,8 @@ def poll_for_sentinel(
         as stalled. Must be passed together with ``stall_detection_path``.
     """
     start_time = time.monotonic()
+    _bootstrap_stamp_mtime: float | None = None
+    _agent_has_checked_in = False
 
     while time.monotonic() - start_time < timeout_seconds:
         if stop_sentinel_path and os.path.exists(stop_sentinel_path):
@@ -132,12 +134,17 @@ def poll_for_sentinel(
             if os.path.exists(stall_detection_path):
                 try:
                     stamp_mtime = os.path.getmtime(stall_detection_path)
-                    if time.time() - stamp_mtime > stall_threshold_seconds:
-                        print(
-                            f"[STALL] No Tier A activity for >{stall_threshold_seconds}s "
-                            f"({stall_detection_path}). Treating as stalled attempt."
-                        )
-                        return False
+                    if _bootstrap_stamp_mtime is None:
+                        _bootstrap_stamp_mtime = stamp_mtime
+                    if not _agent_has_checked_in and stamp_mtime > _bootstrap_stamp_mtime:
+                        _agent_has_checked_in = True
+                    if _agent_has_checked_in:
+                        if time.time() - stamp_mtime > stall_threshold_seconds:
+                            print(
+                                f"[STALL] No Tier A activity for >{stall_threshold_seconds}s "
+                                f"({stall_detection_path}). Treating as stalled attempt."
+                            )
+                            return False
                 except OSError:
                     pass
         if os.path.exists(sentinel_path):

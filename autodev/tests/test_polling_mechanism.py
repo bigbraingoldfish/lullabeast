@@ -183,14 +183,31 @@ class TestPollingMechanism:
     # --- Session stall detection (Tier A hooks → activity stamp + poll_for_sentinel) ---
 
     def test_stall_detection_fires_when_activity_stamp_stale(self, tmp_workspace):
-        """Stall: activity stamp mtime older than threshold → poll returns False immediately."""
+        """Stall: stamp advanced once (agent checked in) then went silent → poll returns False."""
+        import threading
         from sentinel_poller import poll_for_sentinel
 
         sentinel_path = os.path.join(tmp_workspace, "executor_output.done")
         stamp_path = os.path.join(tmp_workspace, "executor_activity.stamp")
+
+        # Bootstrap stamp
         open(stamp_path, "w").close()
-        old = time.time() - 3600
-        os.utime(stamp_path, (old, old))
+        bootstrap = time.time() - 20
+        os.utime(stamp_path, (bootstrap, bootstrap))
+
+        def _advance_then_stale():
+            # Simulate first hook firing (advances past bootstrap)
+            time.sleep(0.5)
+            now = time.time()
+            os.utime(stamp_path, (now, now))
+            # Let the poll observe the advance
+            time.sleep(3)
+            # Agent goes silent
+            stale = time.time() - 3600
+            os.utime(stamp_path, (stale, stale))
+
+        t = threading.Thread(target=_advance_then_stale, daemon=True)
+        t.start()
 
         start = time.monotonic()
         result = poll_for_sentinel(
@@ -200,9 +217,10 @@ class TestPollingMechanism:
             stall_threshold_seconds=1,
         )
         elapsed = time.monotonic() - start
+        t.join(timeout=5)
 
         assert result is False
-        assert elapsed < 3.0, f"stall should short-circuit quickly, took {elapsed:.1f}s"
+        assert elapsed < 8.0, f"stall should fire shortly after stamp goes stale, took {elapsed:.1f}s"
 
     def test_stall_detection_does_not_fire_when_stamp_is_fresh(self, tmp_workspace):
         """Fresh activity stamp → stall check passes; poll succeeds when .done appears."""
@@ -300,7 +318,12 @@ class TestPollingMechanism:
         assert os.path.getsize(stamp) == 0
 
     def test_bootstrapped_activity_stamp_catches_missing_first_hook(self, tmp_workspace):
-        """If hooks never emit the first event, the bootstrapped stamp still goes stale."""
+        """If hooks never fire, the firm timeout (timeout_seconds) catches it.
+
+        With the bootstrap guard, the stall threshold is dormant until the
+        stamp has advanced at least once.  When hooks never fire, the stamp
+        never advances, so timeout_seconds is the backstop.
+        """
         from sentinel_poller import initialize_activity_stamp, poll_for_sentinel
 
         sentinel_path = os.path.join(tmp_workspace, "executor_output.done")
@@ -312,16 +335,15 @@ class TestPollingMechanism:
         start = time.monotonic()
         result = poll_for_sentinel(
             sentinel_path=sentinel_path,
-            timeout_seconds=30,
+            timeout_seconds=3,
             stall_detection_path=stamp_path,
             stall_threshold_seconds=1,
         )
         elapsed = time.monotonic() - start
 
         assert result is False
-        assert elapsed < 3.0, (
-            f"bootstrapped stall should short-circuit quickly, took {elapsed:.1f}s"
-        )
+        assert elapsed >= 3.0, "Should wait for timeout_seconds, not stall-short-circuit"
+        assert elapsed < 6.0, f"Should not overshoot timeout by much, took {elapsed:.1f}s"
 
     def test_orchestrator_bootstraps_activity_stamp_for_all_pipeline_agents(self):
         """Planner/executor/reviewer must seed the stamp after cleanup and before polling."""
@@ -333,3 +355,117 @@ class TestPollingMechanism:
         assert 'initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, "planner")' in source
         assert 'initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, "executor")' in source
         assert 'initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, "reviewer")' in source
+
+    # --- Bootstrap guard: stall check must wait for first hook before firing ---
+
+    def test_stall_threshold_skipped_until_stamp_advances(self, tmp_workspace):
+        """Bootstrap guard: stall check must NOT fire on the initial bootstrapped stamp.
+
+        When the stall threshold is aggressive (e.g. 300s) and the first API
+        response is slow, the bootstrapped stamp goes stale before any hook
+        fires.  The stall check must wait until the stamp has advanced at least
+        once (proving the agent is alive) before enforcing the threshold.
+        """
+        import threading
+        from sentinel_poller import initialize_activity_stamp, poll_for_sentinel
+
+        sentinel_path = os.path.join(tmp_workspace, "executor_output.done")
+        stamp_path = os.path.join(tmp_workspace, "executor_activity.stamp")
+
+        initialize_activity_stamp(tmp_workspace, "executor")
+        # Backdate the bootstrapped stamp so it looks stale
+        old = time.time() - 600
+        os.utime(stamp_path, (old, old))
+
+        # Write the .done sentinel after 1.5s (simulates agent completing)
+        def _write_done():
+            time.sleep(1.5)
+            open(sentinel_path, "w").close()
+
+        t = threading.Thread(target=_write_done, daemon=True)
+        t.start()
+
+        start = time.monotonic()
+        result = poll_for_sentinel(
+            sentinel_path=sentinel_path,
+            timeout_seconds=15,
+            stall_detection_path=stamp_path,
+            stall_threshold_seconds=1,  # very aggressive — would false-fire without guard
+        )
+        elapsed = time.monotonic() - start
+        t.join(timeout=5)
+
+        assert result is True, (
+            "Stall check must NOT fire on a bootstrapped stamp that has never "
+            "advanced.  The poll should wait for the sentinel."
+        )
+        assert elapsed >= 1.5, "Must have waited for the fresh sentinel, not short-circuited"
+
+    def test_stall_fires_after_stamp_has_advanced_then_goes_stale(self, tmp_workspace):
+        """After the stamp advances once (hook fired), stall detection activates normally."""
+        import threading
+        from sentinel_poller import poll_for_sentinel
+
+        sentinel_path = os.path.join(tmp_workspace, "executor_output.done")
+        stamp_path = os.path.join(tmp_workspace, "executor_activity.stamp")
+
+        # Bootstrap stamp with an old mtime
+        open(stamp_path, "w").close()
+        bootstrap_time = time.time() - 10
+        os.utime(stamp_path, (bootstrap_time, bootstrap_time))
+
+        def _advance_then_stale():
+            # Wait for poll to start and record bootstrap mtime
+            time.sleep(0.5)
+            # Advance the stamp (simulates first hook firing)
+            now = time.time()
+            os.utime(stamp_path, (now, now))
+            # Wait long enough for poll to observe the advance (poll sleeps 2s)
+            time.sleep(3)
+            # Backdate it (simulates agent going silent after activity)
+            stale = time.time() - 3600
+            os.utime(stamp_path, (stale, stale))
+
+        t = threading.Thread(target=_advance_then_stale, daemon=True)
+        t.start()
+
+        start = time.monotonic()
+        result = poll_for_sentinel(
+            sentinel_path=sentinel_path,
+            timeout_seconds=30,
+            stall_detection_path=stamp_path,
+            stall_threshold_seconds=1,
+        )
+        elapsed = time.monotonic() - start
+        t.join(timeout=5)
+
+        assert result is False, "Stall must fire after stamp advanced then went stale"
+        assert elapsed < 5.0, f"Stall should fire shortly after stamp goes stale, took {elapsed:.1f}s"
+
+    def test_stall_does_not_fire_on_fresh_bootstrapped_stamp(self, tmp_workspace):
+        """Backward compat: a fresh bootstrapped stamp with a large threshold never fires."""
+        import threading
+        from sentinel_poller import initialize_activity_stamp, poll_for_sentinel
+
+        sentinel_path = os.path.join(tmp_workspace, "executor_output.done")
+        stamp_path = os.path.join(tmp_workspace, "executor_activity.stamp")
+
+        initialize_activity_stamp(tmp_workspace, "executor")
+        # Stamp is fresh (just created) — even without the bootstrap guard,
+        # a 1800s threshold would not fire on a seconds-old stamp.
+
+        def _write_done():
+            time.sleep(0.3)
+            open(sentinel_path, "w").close()
+
+        t = threading.Thread(target=_write_done, daemon=True)
+        t.start()
+
+        result = poll_for_sentinel(
+            sentinel_path=sentinel_path,
+            timeout_seconds=15,
+            stall_detection_path=stamp_path,
+            stall_threshold_seconds=1800,
+        )
+        t.join(timeout=5)
+        assert result is True

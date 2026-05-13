@@ -246,7 +246,7 @@ def ensure_dotenv_stall_timeout_hints(env_path: str) -> str:
 # Orchestrator poll_for_sentinel stall thresholds (seconds). Used when the
 # autodev-pipeline-signals plugin touches *_activity.stamp. Uncomment a line
 # and set an integer to override the built-in default for that agent.
-# Built-in defaults if these stay unset: planner 900, executor 1800, reviewer 900.
+# Built-in defaults if these stay unset: planner 300, executor 300, reviewer 300.
 # AUTODEV_STALL_TIMEOUT_PLANNER=
 # AUTODEV_STALL_TIMEOUT_EXECUTOR=
 # AUTODEV_STALL_TIMEOUT_REVIEWER=
