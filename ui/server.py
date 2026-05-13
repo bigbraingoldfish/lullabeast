@@ -1,4 +1,5 @@
 """UI server module."""
+import base64
 import aiohttp
 import fcntl
 import hashlib
@@ -3045,7 +3046,73 @@ POLL_INTERVAL = 2   # seconds between sentinel checks
 # filesystem granularity without masking genuinely stale sentinels.
 IDEAS_LATE_DONE_MTIME_SLACK_SEC: float = 2.0
 
-IDEAS_WEBHOOK_POST_TIMEOUT = aiohttp.ClientTimeout(total=10)
+IDEAS_WEBHOOK_POST_TIMEOUT = aiohttp.ClientTimeout(total=120)
+
+IDEAS_ATTACHMENT_MAX_BYTES = 10_000_000
+
+
+def _ideas_scrub_stale_turn_artifacts(idea_dir: Path, turn_n: int, attempt_start_wall: float) -> None:
+    """Remove ``turns/{n}.done`` (+ paired ``{n}.md``) when the sentinel predates this attempt.
+
+    Removes the sentinel only when its mtime predates ``attempt_start_wall`` by more than
+    ``IDEAS_LATE_DONE_MTIME_SLACK_SEC`` (same boundary as ``_late_done_valid_for_attempt``).
+    When ``{n}.done`` is missing, leaves ``{n}.md`` intact (in-flight prose without sentinel).
+    """
+    turns_dir = idea_dir / "turns"
+    if not turns_dir.is_dir():
+        return
+    done_p = turns_dir / f"{turn_n}.done"
+    md_p = turns_dir / f"{turn_n}.md"
+    if not done_p.exists():
+        return
+    try:
+        done_mtime = os.path.getmtime(done_p)
+    except OSError:
+        return
+    if done_mtime < (attempt_start_wall - IDEAS_LATE_DONE_MTIME_SLACK_SEC):
+        try:
+            done_p.unlink(missing_ok=True)
+            md_p.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _merge_roadmap_draft_into_session_data(idea_dir: Path, session_data: dict) -> bool:
+    """If ``roadmap_draft.md`` + ``roadmap_draft.done`` exist and disk text differs from session, sync."""
+    roadmap_draft_path = idea_dir / "roadmap_draft.md"
+    roadmap_done_path = idea_dir / "roadmap_draft.done"
+    if not (roadmap_draft_path.exists() and roadmap_done_path.exists()):
+        return False
+    disk_roadmap = roadmap_draft_path.read_text()
+    session_roadmap = session_data.get("roadmap_content") or ""
+    if disk_roadmap.strip() and disk_roadmap.strip() != session_roadmap.strip():
+        session_data["roadmap_content"] = disk_roadmap
+        return True
+    return False
+
+
+def _ideas_persist_data_image_to_inbound(openclaw_root: str, data_uri: str, _orig_filename: str) -> str:
+    """Decode ``data:image/...;base64,...``, write under ``media/inbound``, return marker line."""
+    if ";base64," not in data_uri:
+        raise ValueError("expected base64 data URI")
+    b64 = data_uri.split(";base64,", 1)[1].strip()
+    raw = base64.b64decode(b64, validate=True)
+    root = Path(os.path.expanduser(openclaw_root))
+    dest_dir = root / "media" / "inbound"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    ext = ".png"
+    m = re.match(r"data:image/([^;]+);", data_uri, re.I)
+    if m:
+        subtype = m.group(1).lower()
+        if subtype in ("jpeg", "pjpeg"):
+            ext = ".jpg"
+        elif subtype == "gif":
+            ext = ".gif"
+        elif subtype == "webp":
+            ext = ".webp"
+    fname = f"{uuid.uuid4().hex}{ext}"
+    (dest_dir / fname).write_bytes(raw)
+    return f"[media attached: media://inbound/{fname}]"
 
 
 def _mark_last_pending_assistant_error(session_path: os.PathLike | str, error_message: str) -> None:
@@ -3519,6 +3586,43 @@ def _reconcile_ideas_session_after_late_done(
                 session_data["name"] = first_user.strip()[:40].title()
 
     return session_data, True
+
+
+@app.get("/api/ideas/{idea_id}/draft-sync-status")
+def get_ideas_draft_sync_status(idea_id: str):
+    """Compare PRD vs roadmap draft mtimes for staleness hints (``roadmap_behind_prd``)."""
+    config = load_config()
+    ideas_dir = Path(config.get("ideas_dir") or "")
+    idea_dir = ideas_dir / idea_id
+    if not idea_dir.exists():
+        raise HTTPException(status_code=404, detail="Idea not found")
+
+    prd_p = idea_dir / "prd_draft.md"
+    rm_p = idea_dir / "roadmap_draft.md"
+    prd_mtime = None
+    rm_mtime = None
+    if prd_p.exists():
+        try:
+            prd_mtime = os.path.getmtime(prd_p)
+        except OSError:
+            prd_mtime = None
+    if rm_p.exists():
+        try:
+            rm_mtime = os.path.getmtime(rm_p)
+        except OSError:
+            rm_mtime = None
+
+    behind = bool(
+        prd_mtime is not None
+        and rm_mtime is not None
+        and prd_mtime > rm_mtime
+    )
+    body = {
+        "roadmap_behind_prd": behind,
+        "prd_draft_mtime": prd_mtime,
+        "roadmap_draft_mtime": rm_mtime,
+    }
+    return JSONResponse(content=body, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/ideas/{idea_id}/session")
