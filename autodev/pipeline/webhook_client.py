@@ -1,8 +1,10 @@
+import json
 import logging
 import os
 import time
 
 import requests
+import websocket
 
 # Workspace-relative prefix agents must use for pipeline artifacts (matches PROJECT_ARTIFACTS_DIR /
 # .autodev/pipeline on the resolved pipeline-project symlink target).
@@ -101,3 +103,110 @@ def invoke_agent_webhook(
                 logging.error("Exhausted webhook infra retries.")
                 return "INFRA_ERROR"
     return "INFRA_ERROR"
+
+
+def abort_agent_session(
+    session_key: str,
+    gateway_ws_url: str,
+    gateway_token: str,
+    timeout_seconds: int = 8,
+) -> bool:
+    """Send ``sessions.abort`` to the OpenClaw gateway for the given session key.
+
+    Uses the gateway WebSocket control plane (not the ``/hooks/agent`` HTTP endpoint).
+    Best-effort: any failure returns ``False`` and logs a warning; callers must not
+    treat ``False`` as a hard failure that blocks retries.
+
+    Parameters
+    ----------
+    session_key:
+        Full OpenClaw session key (lowercase), e.g.
+        ``agent:executor:pipeline:phase-1:core-e1:executor-attempt-1``.
+    gateway_ws_url:
+        WebSocket URL, e.g. ``ws://127.0.0.1:18789/__openclaw__/ws``.
+    gateway_token:
+        Shared-secret gateway token (``gateway.auth.token`` in ``openclaw.json``).
+        Distinct from the hooks Bearer token used by ``invoke_agent_webhook``.
+    timeout_seconds:
+        Socket timeout in seconds; kept short so a dead gateway does not stall retries.
+
+    Returns
+    -------
+    bool
+        ``True`` if the gateway reported ``aborted`` or ``no-active-run``;
+        ``False`` on handshake failure, transport error, or unexpected response.
+    """
+    try:
+        ws = websocket.WebSocket()
+        ws.settimeout(timeout_seconds)
+        # The gateway validates the token on the HTTP WebSocket upgrade request,
+        # not inside the protocol frame.  Pass it as Authorization: Bearer here so
+        # the handshake is accepted before any frames are sent.
+        ws.connect(gateway_ws_url, header={"Authorization": f"Bearer {gateway_token}"})
+
+        connect_frame = json.dumps(
+            {
+                "type": "req",
+                "id": "1",
+                "method": "connect",
+                "params": {
+                    "minProtocol": 3,
+                    "maxProtocol": 4,
+                    "client": {
+                        "id": "autodev-pipeline",
+                        "version": "1.0.0",
+                        "platform": "linux",
+                        "mode": "operator",
+                    },
+                    "role": "operator",
+                    "scopes": ["operator.write"],
+                    "caps": [],
+                    "commands": [],
+                    "permissions": {},
+                    "auth": {"token": gateway_token},
+                    "locale": "en-US",
+                    "userAgent": "autodev-pipeline/orchestrator",
+                },
+            }
+        )
+        ws.send(connect_frame)
+        hello = json.loads(ws.recv())
+        if not (hello.get("ok") and hello.get("payload", {}).get("type") == "hello-ok"):
+            logging.warning(
+                "[ABORT] Gateway handshake rejected for %s: %s", session_key, hello
+            )
+            ws.close()
+            return False
+
+        abort_frame = json.dumps(
+            {
+                "type": "req",
+                "id": "2",
+                "method": "sessions.abort",
+                "params": {"key": session_key},
+            }
+        )
+        ws.send(abort_frame)
+        resp = json.loads(ws.recv())
+        ws.close()
+
+        status = resp.get("payload", {}).get("status")
+        if resp.get("ok") and status in ("aborted", "no-active-run"):
+            logging.info(
+                "[ABORT] sessions.abort for %s: status=%s", session_key, status
+            )
+            return True
+
+        logging.warning(
+            "[ABORT] sessions.abort unexpected response for %s: %s", session_key, resp
+        )
+        return False
+
+    except Exception as exc:
+        logging.warning(
+            "[ABORT] best-effort abort failed for %s (%s: %s)",
+            session_key,
+            type(exc).__name__,
+            exc,
+        )
+        return False

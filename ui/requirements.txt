@@ -4,3 +4,4 @@ uvicorn[standard]==0.42.0
 python-multipart==0.0.22
 aiohttp==3.13.4
 requests==2.33.0
+websocket-client==1.2.3
