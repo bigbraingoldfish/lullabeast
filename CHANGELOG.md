@@ -10,6 +10,8 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ### Added
 
+- **Executor session abort on retry:** Before each executor webhook for attempt N+1 (`executor_retries` > 0), `orchestrator.py` calls `abort_agent_session()` in `webhook_client.py`, which opens the OpenClaw Gateway WebSocket (`/__openclaw__/ws`), handshakes with `gateway.auth.token`, and sends RPC `sessions.abort` for the previous session key (`…executor-attempt-N`). This is best-effort (logs and continues on failure). `load_config()` now exposes `gateway_token` and `gateway_ws_url` from `openclaw.json` (`gateway.port` default 18789). `websocket-client==1.2.3` is pinned in `ui/requirements.txt`.
+
 - **Ideas PRD vs roadmap staleness guard:** `GET /api/ideas/{id}/draft-sync-status` returns `roadmap_behind_prd` plus draft file mtimes. Project Ideas **Continue to Setup →** calls it first; when the saved PRD file is newer than the saved roadmap draft, a modal suggests regenerating (with **Continue anyway** persisting a per-mtime **sessionStorage** dismiss under `autodev:roadmapBehindPrdDismissed:<ideaId>`).
 
 - **Stall-timeout env discovery:** `.env.example` includes a commented **Tier A stall timeouts** section (`AUTODEV_STALL_TIMEOUT_*`; no live values). After merging canonical keys, `install.sh` calls `ensure_dotenv_stall_timeout_hints()` so existing `.env` files gain the same commented block once (marker line prevents duplicates). SETUP.md cross-links the behavior.

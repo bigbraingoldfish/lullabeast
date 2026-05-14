@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 import logging
 import requests
 
-from webhook_client import invoke_agent_webhook
+from webhook_client import abort_agent_session, invoke_agent_webhook
 from sentinel_poller import cleanup_output_files, initialize_activity_stamp, poll_for_sentinel
 from skill_manager import SkillManager
 from queue_semantics import parent_blocks_child
@@ -783,6 +783,14 @@ class Orchestrator:
         self.skill_manager = SkillManager(OPENCLAW_ROOT)
 
     def load_config(self):
+        """Parse ``openclaw.json`` and return the config dict with normalized keys.
+
+        Adds ``hooks_token``, ``hooks_url`` (for ``POST /hooks/agent``),
+        ``gateway_token`` (``gateway.auth.token``), and ``gateway_ws_url``
+        (WebSocket URL for Gateway RPC such as ``sessions.abort``).
+        Exits the process if the config file is missing, invalid JSON, or
+        the hooks bearer token is absent.
+        """
         if not os.path.exists(CONFIG_FILE):
             print(f"[ERROR] openclaw.json not found at {CONFIG_FILE}")
             sys.exit(1)
@@ -813,6 +821,16 @@ class Orchestrator:
             hooks_url = f"http://127.0.0.1:{port}/hooks/agent"
         config["hooks_token"] = token
         config["hooks_url"] = hooks_url
+        # Gateway WebSocket auth — used by abort_agent_session for session control.
+        # Distinct from hooks_token which is for /hooks/agent HTTP calls.
+        gw = config.get("gateway") or {}
+        gw_port = 18789
+        try:
+            gw_port = int(gw.get("port") or 18789)
+        except (TypeError, ValueError):
+            pass
+        config["gateway_token"] = (gw.get("auth") or {}).get("token", "")
+        config["gateway_ws_url"] = f"ws://127.0.0.1:{gw_port}/__openclaw__/ws"
         return config
 
     def acquire_lock(self):
@@ -3190,6 +3208,20 @@ class Orchestrator:
                     sentinel_path = os.path.join(PROJECT_ARTIFACTS_DIR, "executor_output.done")
                     token = self.openclaw_config.get("hooks", {}).get("token", "")
 
+                    # Abort the previous executor session before invoking the next attempt.
+                    # Best-effort: stops the prior run from consuming tokens and from
+                    # refreshing executor_activity.stamp (which can suppress stall detection).
+                    if retries > 0:
+                        _prev_session_key = (
+                            f"agent:executor:pipeline:phase-{phase}:{raw_id}"
+                            f":executor-attempt-{retries}"
+                        ).lower()
+                        _gw_token = self.openclaw_config.get("gateway_token", "")
+                        _gw_ws_url = self.openclaw_config.get(
+                            "gateway_ws_url", "ws://127.0.0.1:18789/__openclaw__/ws"
+                        )
+                        abort_agent_session(_prev_session_key, _gw_ws_url, _gw_token)
+
                     # Proactive branch guard: after RESET_PHASE the phase branch is deleted
                     # and HEAD lands on main. Correct before the executor runs so any git
                     # work it triggers (and Phase 10's commit) targets the right branch.
@@ -3777,6 +3809,7 @@ class Orchestrator:
                                     "planner_output.json",
                                     "executor_output.json",
                                     "reviewer_output.json",
+                                    "metrics.jsonl",
                                 ]
                                 for filename in files_to_archive:
                                     src = os.path.join(PROJECT_ARTIFACTS_DIR, filename)

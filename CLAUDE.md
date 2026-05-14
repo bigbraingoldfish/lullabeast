@@ -417,6 +417,8 @@ Qwen3.5-27B and Qwen3-Coder-Next both require specific llama-server flags to sup
 
 **Do not remove or weaken this check.** It is the only automated defence against the model silently destroying project state. If `executor_gate.py`'s git diff check is removed, MiniMax will occasionally leave the project repository in an irreparable state mid-pipeline.
 
+**Executor retry and OpenClaw:** When `executor_retries` > 0 and the orchestrator is about to invoke attempt N+1, it first calls `abort_agent_session()` (best-effort) to stop attempt N in the OpenClaw gateway via WebSocket `sessions.abort`, so the prior run does not keep streaming or refreshing `executor_activity.stamp` after the orchestrator has moved on.
+
 ---
 
 ## Session and State Management Rules
@@ -476,6 +478,7 @@ These values appear throughout the codebase. Do not change them without understa
 | Session TTL | 30 days | `session_cleanup.py`; escalation sessions are exempt |
 | UI server port | 18790 | `DEFAULTS["port"]`; OpenClaw gateway is on 18789 |
 | Webhook endpoint | `http://localhost:18789/hooks/agent` | `DEFAULTS["hooks_url"]`; requires Bearer token |
+| `gateway_token` / `gateway_ws_url` | from `openclaw.json` → `gateway.auth.token` and `gateway.port` | Orchestrator `load_config()`; used by `abort_agent_session()` to authenticate Gateway WebSocket `sessions.abort` before a new executor attempt. Distinct from `hooks.token` (Bearer for `/hooks/agent`). |
 | Base branch override | optional `base_branch` config key (empty = auto-detect) | Used by orchestrator git checkout/reset paths, `/api/pipeline/git-recover`, and `GET /api/state` field **`git_recover_suggested_branch`** (UI prefills the recover dialog). **`git-recover`** stashes (including untracked) then **`git checkout`** — it does not run **`git reset`**. |
 | `prd-creator` agent ID | `"prd-creator"` | `WEBHOOK_AGENT_ID` in `ui/server.py` — used in all idea-to-PRD webhook calls |
 | `AUTODEV_LLAMA_BASE` | default `http://127.0.0.1:11434` | Orchestrator `check_traffic_cop_health`, `wait_for_model_stable`, blame L1, and `heartbeat_cron.py` — HTTP origin when `openclaw.json` has no `llama-local` `baseUrl` |
