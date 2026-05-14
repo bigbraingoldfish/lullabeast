@@ -570,8 +570,9 @@ def _run_completion_review(orchestrator, project_basename: str) -> None:
         )
         _attempt_start = time.time()
         invoke_agent_webhook(
-            "reviewer", session_key, token,
-            model=orchestrator._get_agent_model("reviewer"),
+            "reviewer",
+            session_key,
+            token,
             message=_completion_message,
         )
 
@@ -2999,9 +3000,7 @@ class Orchestrator:
 
                     self.state["sentinel_wait_started_at"] = datetime.now(timezone.utc).isoformat()
                     self.transition_state("WAITING_FOR_SENTINEL", "Invoking Planner via webhook")
-                    webhook_status = invoke_agent_webhook(
-                        "planner", session_key, token, model=self._get_agent_model("planner")
-                    )
+                    webhook_status = invoke_agent_webhook("planner", session_key, token)
 
                     if webhook_status != "SUCCESS":
                         self.state["current_agent"] = "escalation"
@@ -3194,14 +3193,6 @@ class Orchestrator:
                         time.sleep(2)
                         continue
 
-                    # Executor model: AUTODEV_EXECUTOR_MODEL overrides; else openclaw.json
-                    # agents.list executor model.primary; legacy MiniMax fallback if unset.
-                    _exec_env = (os.environ.get("AUTODEV_EXECUTOR_MODEL") or "").strip()
-                    model = (
-                        _exec_env
-                        or self._get_agent_model("executor")
-                        or "openrouter/minimax/minimax-m2.7"
-                    )
                     session_key = f"pipeline:phase-{phase}:{raw_id}:executor-attempt-{retries + 1}"
                     attempt_label = "Cloud"
 
@@ -3241,7 +3232,7 @@ class Orchestrator:
                     _verify_symlinks_consistent(
                         self.state.get("project_path", ""), self.update_symlink
                     )
-                    webhook_status = invoke_agent_webhook("executor", session_key, token, model=model)
+                    webhook_status = invoke_agent_webhook("executor", session_key, token)
 
                     if webhook_status != "SUCCESS":
                         self.state["current_agent"] = "escalation"
@@ -3406,7 +3397,7 @@ class Orchestrator:
                         _verify_symlinks_consistent(
                             self.state.get("project_path", ""), self.update_symlink
                         )
-                        webhook_status = invoke_agent_webhook("reviewer", session_key, token, model=self._get_agent_model("reviewer"))
+                        webhook_status = invoke_agent_webhook("reviewer", session_key, token)
 
                         if webhook_status != "SUCCESS":
                             self.state["current_agent"] = "escalation"

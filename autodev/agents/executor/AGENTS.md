@@ -26,6 +26,10 @@ Write your output to: `pipeline-project/.autodev/pipeline/executor_output.json`
   "file_manifest": ["src/feature.py", "src/utils.py"],
   "files_deleted": ["src/old_module.py"],
   "lint_passing": true,
+  "visual_smoke_artifacts": [
+    {"path": ".autodev/pipeline/visual-smoke/{phase_raw_id}-{state}.png",
+     "description": "<one-sentence summary of what the user sees in this state and which Done Criteria language it covers>"}
+  ],
   "failure_reason": "Only if status != complete. Include raw stderr, tracebacks, specific error names.",
   "troubleshooting_attempts": ["What you tried before giving up"],
   "lessons_appended": false
@@ -49,6 +53,7 @@ The gate script validates these fields strictly. Imprecise output wastes a retry
   - **CRITICAL: NEVER prefix paths with `pipeline-project/` in `file_manifest`, `tests_written`, or `files_deleted`.** The gate resolves paths as `~/.openclaw/pipeline-project/<path>`. Using `pipeline-project/ui/server.py` creates a double-prefix (`~/.openclaw/pipeline-project/pipeline-project/ui/server.py`) that does not exist and causes `ERR_MANIFEST_FILE_MISSING`. The `pipeline-project/` prefix is only for accessing files from your workspace (e.g. reading `pipeline-project/.autodev/pipeline/planner_output.json`). Report output paths without it: `ui/server.py`, `tests/test_foo.py`, not `pipeline-project/ui/server.py`.
 - **`failure_reason`** — If `status != "complete"`, this field MUST contain specific error text: raw stderr output, traceback text, specific error class names (e.g., `AttributeError`, `TypeError`, `ModuleNotFoundError`). Vague descriptions like "tests failed" are not acceptable — the reviewer and escalation agents use this field for diagnosis.
 - **`troubleshooting_attempts`** — What you tried before giving up. Prevents repeated dead ends on retry.
+- **`visual_smoke_artifacts`** — REQUIRED on visual phases (UI-\*, INT-\*, or any ID in `AUTODEV_VISUAL_PHASE_RAW_IDS`). Array of `{"path": "...", "description": "..."}` for Playwright MCP screenshots saved under `pipeline-project/.autodev/pipeline/visual-smoke/`. Capture default state + one per significant interactive state. Missing paths → `ERR_VISUAL_UNVERIFIED`. Omit on non-visual phases.
 
 ## Sentinel Pattern
 
@@ -70,10 +75,11 @@ Execute in this order:
 6. Run tests with minimal verbosity: `pytest -q`, `npm test -- --silent`, `cargo test --quiet`
 7. Fix failures. Re-run. Repeat until all tests pass.
 8. Final confirmation run: you may use verbose output here to confirm all results
-9. Write `executor_output.json` with accurate results
-10. Write the **phase archive** to `pipeline-project/.autodev/pipeline/phases/{phase_raw_id}.md` (see format below)
-11. Append the **metrics row** to `pipeline-project/.autodev/pipeline/metrics.jsonl` (see format below)
-12. Write `executor_output.done` as the absolute last action
+9. **On visual phases (UI-\*, INT-\*, or any ID in `AUTODEV_VISUAL_PHASE_RAW_IDS`):** start the dev server, screenshot via Playwright MCP into `pipeline-project/.autodev/pipeline/visual-smoke/{phase_raw_id}-{state}.png`, list in `visual_smoke_artifacts`. If dev server fails, `status: "failed"` — do not skip.
+10. Write `executor_output.json`
+11. Write **phase archive** to `pipeline-project/.autodev/pipeline/phases/{phase_raw_id}.md`
+12. Append **metrics row** to `pipeline-project/.autodev/pipeline/metrics.jsonl`
+13. Write `executor_output.done` last
 
 ### Phase Archive Format (`phases/{phase_raw_id}.md`)
 

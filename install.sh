@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# install.sh — AutoDev interactive setup (14 steps)
-# Usage: ./install.sh [--force] [--non-interactive]
+# install.sh — AutoDev interactive setup (15 steps)
+# Usage: ./install.sh [--force] [--non-interactive] [--skip-playwright]
 set -euo pipefail
 
 # ── Colour helpers ────────────────────────────────────────────────────────────
@@ -21,9 +21,11 @@ hdr()  { echo; echo "${BOLD}$*${RESET}"; }
 
 FORCE=0
 NON_INTERACTIVE=0
+SKIP_PLAYWRIGHT=0
 for arg in "$@"; do
     [ "$arg" = "--force" ] && FORCE=1
     [ "$arg" = "--non-interactive" ] || [ "$arg" = "--ci" ] && NON_INTERACTIVE=1
+    [ "$arg" = "--skip-playwright" ] && SKIP_PLAYWRIGHT=1
 done
 
 # Helper: prompt with default answer (skipped in non-interactive mode)
@@ -45,9 +47,9 @@ RECOMMENDED_OC_VERSION="1.2.0"
 SETUP_MARKER="$HOME/.autodev_setup_complete"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1/14  OS CHECK
+# 1/15  OS CHECK
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "1/14  OS check"
+hdr "1/15  OS check"
 
 OS_TYPE=$(uname -s)
 OS_STATUS="ok"
@@ -76,9 +78,9 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2/14  PYTHON VERSION
+# 2/15  PYTHON VERSION
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "2/14  Python version"
+hdr "2/15  Python version"
 
 PYTHON=""
 PYTHON_VERSION=""
@@ -120,9 +122,9 @@ fi
 ok "git available"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3/14  PYTHON DEPENDENCIES
+# 3/15  PYTHON DEPENDENCIES
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "3/14  Python dependencies"
+hdr "3/15  Python dependencies"
 
 # Repo root: if AUTODEV_REPO_PATH is already set in the environment, keep it
 # (canonical path); otherwise use the directory containing this install.sh.
@@ -160,9 +162,9 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4/14  OPENCLAW DETECTION
+# 4/15  OPENCLAW DETECTION
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "4/14  OpenClaw detection"
+hdr "4/15  OpenClaw detection"
 
 # Capture the operator-provided OPENCLAW_ROOT before we reassign.
 _OC_ENV_INPUT="${OPENCLAW_ROOT:-}"
@@ -273,9 +275,9 @@ print('ok')
   || warn "Could not update ui/config.json — copy ui/config.example.json and set paths"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5/14  OPENCLAW VERSION CHECK
+# 5/15  OPENCLAW VERSION CHECK
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "5/14  OpenClaw version check"
+hdr "5/15  OpenClaw version check"
 
 OC_VERSION_STATUS="unknown"
 OC_JSON="$OPENCLAW_ROOT/openclaw.json"
@@ -317,9 +319,9 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6/14  AGENT WORKSPACE PROVISIONING
+# 6/15  AGENT WORKSPACE PROVISIONING
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "6/14  Agent workspace provisioning"
+hdr "6/15  Agent workspace provisioning"
 
 # Each pipeline agent workspace needs pipeline-project → $OPENCLAW_ROOT/pipeline-project
 # (the hub the UI/orchestrator update). OpenClaw sandboxes writes to the workspace root.
@@ -554,9 +556,9 @@ fi
 ensure_workspace_pipeline_project_symlinks
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7/14  EXEC-APPROVALS VALIDATION
+# 7/15  EXEC-APPROVALS VALIDATION
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "7/14  Exec-approvals validation"
+hdr "7/15  Exec-approvals validation"
 
 EXEC_APPROVALS="$OPENCLAW_ROOT/exec-approvals.json"
 APPROVALS_STATUS="missing"
@@ -584,9 +586,9 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 8/14  CRON/JOBS.JSON HEARTBEAT PATH UPDATE
+# 8/15  CRON PATH MIGRATION (cron/jobs.json + user crontab)
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "8/14  Cron/jobs.json heartbeat path"
+hdr "8/15  Cron paths (jobs.json + user crontab)"
 
 CRON_FILE="$OPENCLAW_ROOT/cron/jobs.json"
 CRON_STATUS="not found"
@@ -661,10 +663,130 @@ PYEOF
     fi
 fi
 
+# ── User crontab migration (heartbeat_cron.py + session_cleanup.py) ──────────
+# Repoints any system-cron lines that still reference the legacy
+# $OPENCLAW_ROOT/{heartbeat_cron,session_cleanup}.py to the repo's copies.
+# Only migrates EXISTING lines — never installs new entries on machines that
+# don't already have them (avoids surprise scheduled tasks for fresh users).
+USER_CRON_STATUS="not checked"
+
+if ! command -v crontab >/dev/null 2>&1; then
+    info "User crontab: 'crontab' not available — skipping"
+    USER_CRON_STATUS="crontab missing"
+elif ! crontab -l >/dev/null 2>&1; then
+    info "User crontab: empty or unreadable — nothing to migrate"
+    USER_CRON_STATUS="empty"
+else
+    CRON_MIGRATE_RESULT=$("$PYTHON" - \
+        "$OPENCLAW_ROOT" "$AUTODEV_REPO_PATH" <<'PYEOF'
+import os, subprocess, sys, tempfile
+openclaw_root = sys.argv[1].rstrip("/")
+repo_path     = sys.argv[2].rstrip("/")
+
+OLD_HB  = f"{openclaw_root}/heartbeat_cron.py"
+NEW_HB  = f"{repo_path}/autodev/pipeline/heartbeat_cron.py"
+OLD_SC  = f"{openclaw_root}/session_cleanup.py"
+NEW_SC  = f"{repo_path}/autodev/pipeline/session_cleanup.py"
+
+try:
+    current = subprocess.check_output(["crontab", "-l"], stderr=subprocess.DEVNULL).decode()
+except subprocess.CalledProcessError:
+    print("empty")
+    sys.exit(0)
+
+needs_hb = OLD_HB in current and NEW_HB not in current
+needs_sc = OLD_SC in current and NEW_SC not in current
+
+if not needs_hb and not needs_sc:
+    print("already_correct")
+    sys.exit(0)
+
+print(f"needs:{'hb' if needs_hb else ''}{'+sc' if needs_hb and needs_sc else ('sc' if needs_sc else '')}")
+PYEOF
+    )
+
+    case "$CRON_MIGRATE_RESULT" in
+        already_correct)
+            ok "User crontab already references repo cron scripts (or has no legacy entries)"
+            USER_CRON_STATUS="already correct"
+            ;;
+        empty)
+            info "User crontab empty — nothing to migrate"
+            USER_CRON_STATUS="empty"
+            ;;
+        needs:*)
+            info "User crontab references legacy OpenClaw cron scripts:"
+            [[ "$CRON_MIGRATE_RESULT" == *"hb"* ]] && info "  - heartbeat_cron.py → $AUTODEV_REPO_PATH/autodev/pipeline/heartbeat_cron.py"
+            [[ "$CRON_MIGRATE_RESULT" == *"sc"* ]] && info "  - session_cleanup.py → $AUTODEV_REPO_PATH/autodev/pipeline/session_cleanup.py"
+            if prompt_yn "Repoint user crontab to the repo copies? [Y/n]" "Y"; then
+                CRON_BACKUP="/tmp/crontab.backup.$(date +%s)"
+                crontab -l > "$CRON_BACKUP" 2>/dev/null || true
+                info "Backup saved to $CRON_BACKUP"
+
+                APPLY_RESULT=$("$PYTHON" - \
+                    "$OPENCLAW_ROOT" "$AUTODEV_REPO_PATH" <<'PYEOF'
+import os, subprocess, sys, tempfile
+openclaw_root = sys.argv[1].rstrip("/")
+repo_path     = sys.argv[2].rstrip("/")
+
+OLD_HB = f"{openclaw_root}/heartbeat_cron.py"
+NEW_HB = f"{repo_path}/autodev/pipeline/heartbeat_cron.py"
+OLD_SC = f"{openclaw_root}/session_cleanup.py"
+NEW_SC = f"{repo_path}/autodev/pipeline/session_cleanup.py"
+
+current = subprocess.check_output(["crontab", "-l"]).decode()
+updated = current.replace(OLD_HB, NEW_HB).replace(OLD_SC, NEW_SC)
+
+if updated == current:
+    print("no_change")
+    sys.exit(0)
+
+fd, tmp = tempfile.mkstemp(prefix="autodev_cron_")
+with os.fdopen(fd, "w") as f:
+    f.write(updated)
+res = subprocess.run(["crontab", tmp], capture_output=True, text=True)
+os.unlink(tmp)
+if res.returncode == 0:
+    print("updated")
+else:
+    print(f"error:{res.stderr.strip()}")
+PYEOF
+                )
+                case "$APPLY_RESULT" in
+                    updated)
+                        ok "User crontab repointed to repo cron scripts"
+                        USER_CRON_STATUS="updated"
+                        ;;
+                    no_change)
+                        info "User crontab: no substitution applied (paths already current)"
+                        USER_CRON_STATUS="no change"
+                        ;;
+                    error:*)
+                        warn "User crontab update failed: ${APPLY_RESULT#error:}"
+                        warn "Backup remains at $CRON_BACKUP"
+                        USER_CRON_STATUS="update failed"
+                        ;;
+                    *)
+                        warn "User crontab update returned unexpected result: '$APPLY_RESULT'"
+                        USER_CRON_STATUS="update uncertain"
+                        ;;
+                esac
+            else
+                warn "User crontab repoint skipped — legacy cron lines will keep firing the old scripts"
+                USER_CRON_STATUS="skipped"
+            fi
+            ;;
+        *)
+            warn "User crontab check returned unexpected result: '$CRON_MIGRATE_RESULT'"
+            USER_CRON_STATUS="check uncertain"
+            ;;
+    esac
+fi
+
 # ─────────────────────────────────────────────────────────────────────────────
-# 9/14  REGISTER AUTODEV AGENTS (OPENCLAW)
+# 9/15  REGISTER AUTODEV AGENTS (OPENCLAW)
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "9/14  Register AutoDev agents in openclaw.json"
+hdr "9/15  Register AutoDev agents in openclaw.json"
 
 REGISTER_STATUS_STEP="not attempted"
 TOOLS_PROFILE_STEP="skipped"
@@ -1004,9 +1126,9 @@ print(set_openclaw_global_tools_profile(sys.argv[1], 'coding'))
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 10/14  CONVERSION PROMPT (repo-bundled)
+# 10/15  CONVERSION PROMPT (repo-bundled)
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "10/14  Conversion prompt"
+hdr "10/15  Conversion prompt"
 
 BUNDLED_PROMPT="$AUTODEV_REPO_PATH/autodev/prompts/prd-to-roadmap-conversion.txt"
 if [ -f "$BUNDLED_PROMPT" ]; then
@@ -1018,9 +1140,9 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 11/14  WRITE .env
+# 11/15  WRITE .env
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "11/14  Writing .env"
+hdr "11/15  Writing .env"
 
 ENV_FILE="$AUTODEV_REPO_PATH/.env"
 ENV_MERGE=$(
@@ -1073,9 +1195,9 @@ case "$ENV_IDEAS_HINTS" in
 esac
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 12/14  INSTALL PIPELINE SIGNALS PLUGIN
+# 12/15  INSTALL PIPELINE SIGNALS PLUGIN
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "12/14  Installing autodev-pipeline-signals plugin"
+hdr "12/15  Installing autodev-pipeline-signals plugin"
 
 PLUGIN_DIR="$AUTODEV_REPO_PATH/autodev/plugin"
 PLUGIN_INSTALL_STEP="not attempted"
@@ -1139,18 +1261,132 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 13/14  MARK SETUP COMPLETE
+# 13/15  INSTALL PLAYWRIGHT MCP (visual review for UI/INT phases)
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "13/14  Marking setup complete"
+hdr "13/15  Installing Playwright MCP for visual review"
+
+PLAYWRIGHT_STEP="not attempted"
+
+# Why: pipeline executors capture screenshots after tests pass on UI/INT phases;
+# the multimodal reviewer reads them. Without Playwright the reviewer gate's
+# ERR_VISUAL_UNVERIFIED check rejects every UI/INT phase. Pass --skip-playwright
+# (or answer N at the prompt) to opt out; the gate still rejects but at least
+# no time is wasted on dependency install.
+
+if [ "$SKIP_PLAYWRIGHT" -eq 1 ]; then
+    warn "Playwright install skipped (--skip-playwright flag)"
+    warn "  UI/INT phases will fail at the reviewer gate (ERR_VISUAL_UNVERIFIED)"
+    warn "  Re-run without --skip-playwright to enable visual review"
+    PLAYWRIGHT_STEP="skipped (--skip-playwright)"
+elif ! prompt_yn "Install Playwright MCP for screenshot-based visual review on UI phases? [Y/n]" "Y"; then
+    warn "Playwright install declined by user"
+    warn "  UI/INT phases will fail at the reviewer gate (ERR_VISUAL_UNVERIFIED)"
+    PLAYWRIGHT_STEP="skipped (user declined)"
+else
+    # Prerequisite: node + npx
+    if ! command -v npx >/dev/null 2>&1; then
+        warn "npx not found — Node.js is required for Playwright MCP"
+        if [ "$OS_TYPE" = "Darwin" ]; then
+            warn "  Install Node.js:  brew install node"
+        elif [ "$IS_WSL2" -eq 1 ] || [ "$OS_TYPE" = "Linux" ]; then
+            warn "  Install Node.js:  curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - && sudo apt install -y nodejs"
+        fi
+        warn "  Then re-run install.sh to provision Playwright"
+        PLAYWRIGHT_STEP="failed (node missing)"
+    else
+        NODE_VER=$(node --version 2>/dev/null || echo "?")
+        info "Node detected: $NODE_VER"
+
+        # Fetch the @playwright/mcp package once so subsequent npx invocations are fast.
+        info "Fetching @playwright/mcp@0.0.40 (this may take a minute on first install)..."
+        if npx -y --package=@playwright/mcp@0.0.40 -- node -e "console.log('ok')" >/dev/null 2>&1; then
+            ok "@playwright/mcp@0.0.40 fetched"
+        else
+            warn "Could not fetch @playwright/mcp via npx — check network and re-run"
+            PLAYWRIGHT_STEP="failed (npx fetch error)"
+        fi
+
+        # Install the chromium browser binary used by Playwright (idempotent).
+        info "Installing Chromium browser for Playwright (cached at \$HOME/.cache/ms-playwright)..."
+        if npx -y --package=playwright@1 -- playwright install --with-deps chromium >/tmp/playwright-install.log 2>&1; then
+            ok "Chromium browser installed for Playwright"
+            PLAYWRIGHT_BROWSER_OK="yes"
+        else
+            # Fall back to install without --with-deps if user lacks sudo for system libs.
+            if npx -y --package=playwright@1 -- playwright install chromium >>/tmp/playwright-install.log 2>&1; then
+                ok "Chromium browser installed (without system deps — install libnss3 etc manually if launch fails)"
+                PLAYWRIGHT_BROWSER_OK="yes (deps not installed)"
+            else
+                warn "Chromium install failed — see /tmp/playwright-install.log"
+                PLAYWRIGHT_BROWSER_OK="no"
+            fi
+        fi
+
+        # Register the Playwright MCP server in openclaw.json. OpenClaw 1.2+ may
+        # consume `mcp.servers` natively; if not, this entry is harmless and the
+        # user can re-route to whatever shape OpenClaw expects without losing
+        # the command/args.
+        if [ -f "$OPENCLAW_ROOT/openclaw.json" ]; then
+            MCP_REG=$("$PYTHON" - "$OPENCLAW_ROOT/openclaw.json" <<'PYEOF' 2>/dev/null || echo "error"
+import json, os, sys, tempfile
+path = sys.argv[1]
+with open(path) as f:
+    cfg = json.load(f)
+mcp = cfg.setdefault("mcp", {})
+servers = mcp.setdefault("servers", {})
+existing = servers.get("playwright") or {}
+desired = {
+    "command": "npx",
+    "args": ["-y", "@playwright/mcp@0.0.40", "--headless"],
+}
+if existing == desired:
+    print("unchanged")
+    sys.exit(0)
+servers["playwright"] = desired
+d = os.path.dirname(path)
+fd, tmp = tempfile.mkstemp(dir=d, prefix="openclaw_", suffix=".json")
+with os.fdopen(fd, "w") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+os.replace(tmp, path)
+print("updated")
+PYEOF
+)
+            case "$MCP_REG" in
+                updated)  ok "openclaw.json: mcp.servers.playwright registered"
+                          PLAYWRIGHT_STEP="ok (mcp registered, browser ${PLAYWRIGHT_BROWSER_OK:-?})" ;;
+                unchanged) ok "openclaw.json: mcp.servers.playwright already registered"
+                          PLAYWRIGHT_STEP="ok (already registered)" ;;
+                *) warn "Could not update openclaw.json for Playwright MCP — register manually"
+                   PLAYWRIGHT_STEP="warn (manual registration needed)" ;;
+            esac
+        else
+            warn "openclaw.json not present — cannot register Playwright MCP"
+            PLAYWRIGHT_STEP="failed (no openclaw.json)"
+        fi
+
+        # Final hint about the OpenClaw browser-tool grant. The pipeline agents
+        # need browser access — install step 9 registers them, but if the user
+        # already has agents present with empty tools, ensure the executor and
+        # reviewer can use browser.
+        info "Pipeline executors + reviewers must have 'browser' in their tools.allow list."
+        info "  Re-running step 9 (Register AutoDev agents) ensures this."
+    fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 14/15  MARK SETUP COMPLETE
+# ─────────────────────────────────────────────────────────────────────────────
+hdr "14/15  Marking setup complete"
 
 date -u +%Y-%m-%dT%H:%M:%SZ > "$SETUP_MARKER"
 ok "Setup marker written to $SETUP_MARKER"
 info "  The AutoDev UI uses this file for first-run detection"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 14/14  SUMMARY
+# 15/15  SUMMARY
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "14/14  Summary"
+hdr "15/15  Summary"
 echo
 printf "  %-32s %s\n" "OS:"                      "$OS_TYPE ($OS_STATUS)"
 printf "  %-32s %s\n" "Python version:"           "$PYTHON_VERSION"
@@ -1159,12 +1395,14 @@ printf "  %-32s %s\n" "OPENCLAW_ROOT:"            "$OPENCLAW_ROOT"
 printf "  %-32s %s\n" "OpenClaw version:"         "$OC_VERSION_STATUS"
 printf "  %-32s %s\n" "Conversion prompt:"        "$PROMPT_FOUND"
 printf "  %-32s %s\n" "Exec-approvals:"           "$APPROVALS_STATUS"
-printf "  %-32s %s\n" "Cron path:"                "$CRON_STATUS"
+printf "  %-32s %s\n" "Cron path (jobs.json):"     "$CRON_STATUS"
+printf "  %-32s %s\n" "Cron path (user crontab):" "$USER_CRON_STATUS"
 printf "  %-32s %s\n" "OpenClaw hooks (webhook):"   "$HOOKS_STEP"
 printf "  %-32s %s\n" "Webhook secret sync:"      "$WEBHOOK_SYNC_STEP"
 printf "  %-32s %s\n" "OpenClaw tools.profile:"   "$TOOLS_PROFILE_STEP"
 printf "  %-32s %s\n" "OpenClaw agents (register):" "$REGISTER_STATUS_STEP"
 printf "  %-32s %s\n" "Pipeline signals plugin:"    "$PLUGIN_INSTALL_STEP"
+printf "  %-32s %s\n" "Playwright MCP (visual):"   "$PLAYWRIGHT_STEP"
 echo   "  Agent files deployed:"
 for agent in planner executor reviewer escalation prd-creator roadmap-converter; do
     printf "    %-24s %s\n" "$agent:" "$(_get_count "$agent")"
