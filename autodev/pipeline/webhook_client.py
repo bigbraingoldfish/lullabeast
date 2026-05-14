@@ -6,6 +6,54 @@ import time
 import requests
 import websocket
 
+
+def verify_session_stopped(stamp_path: str, settle_seconds: float = 5.0) -> bool:
+    """Confirm a just-aborted agent session is no longer touching its activity stamp.
+
+    The OpenClaw gateway can acknowledge ``sessions.abort`` with ``ok=true``
+    yet leave the underlying agent process streaming (observed live during
+    CORE-E6: attempt #2 wrote 69,152 tokens after attempt #3 had already
+    been launched).  Callers use this helper *after* a successful abort to
+    distinguish "session truly stopped" from "abort acknowledged but
+    session still active" so we can escalate to ``HALTED_SILENT`` rather
+    than silently launch the next attempt on top of a running one.
+
+    Implementation: read the stamp's mtime, sleep ``settle_seconds``, read
+    again.  If mtime did not advance, the plugin is no longer touching it
+    and the session is genuinely stopped.
+
+    Parameters
+    ----------
+    stamp_path:
+        Absolute path to the agent's ``{agent}_activity.stamp`` file.
+    settle_seconds:
+        How long to observe before deciding.  Must be longer than the
+        plugin's stamp-refresh cadence (typically every model_call or
+        tool_call event, so a few hundred ms during active inference).
+        5 s is the default — long enough to be confident, short enough
+        to not noticeably delay retry start.
+
+    Returns
+    -------
+    bool
+        ``True`` if the stamp mtime did not advance (or the stamp does not
+        exist — a missing stamp cannot be 'active').
+        ``False`` if the stamp mtime advanced during the settle window —
+        the session is still streaming despite the abort acknowledgement.
+    """
+    try:
+        before = os.path.getmtime(stamp_path)
+    except OSError:
+        # Missing stamp cannot be active.  Treat as stopped so callers do
+        # not get a false "still active" signal that would block retries.
+        return True
+    time.sleep(settle_seconds)
+    try:
+        after = os.path.getmtime(stamp_path)
+    except OSError:
+        return True
+    return after == before
+
 # Workspace-relative prefix agents must use for pipeline artifacts (matches PROJECT_ARTIFACTS_DIR /
 # .autodev/pipeline on the resolved pipeline-project symlink target).
 _PIPELINE_ARTIFACTS = "pipeline-project/.autodev/pipeline"

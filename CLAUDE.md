@@ -278,14 +278,30 @@ The primary function is `poll_for_sentinel()` in `sentinel_poller.py`. It watche
 ```python
 poll_for_sentinel(
     sentinel_path=...,
-    timeout_seconds=7200,                # long infrastructure backstop
+    timeout_seconds=2700,                # infrastructure backstop (gateway-dead failsafe)
     stall_detection_path=...,            # {agent}_activity.stamp
-    stall_threshold_seconds=1800,        # agent-specific silence threshold
+    stall_threshold_seconds=300,         # post-first-hook silence → "stalled"
+    startup_grace_seconds=600,           # pre-first-hook wait → "no_first_activity"
     min_sentinel_mtime=time.time(),      # captured BEFORE cleanup_output_files()
 )
 ```
 
-**Activity stamp bootstrap**: After `cleanup_output_files()` removes stale output and before the webhook is invoked, call `initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, agent)`. The plugin refreshes this stamp on `model_call_started`, `model_call_ended`, and `after_tool_call`; bootstrapping it means a missing first hook still becomes a timed stall instead of waiting for the long sentinel backstop.
+Returns a structured `PollResult` (truthy on success, `__bool__` delegates to `.success` for backwards-compat with existing `if sentinel_found:` callers). Inspect `.reason` to distinguish outcomes:
+
+- `"succeeded"` — `.done` observed
+- `"stalled"` — stamp advanced once then went silent > `stall_threshold_seconds`
+- `"no_first_activity"` — `startup_grace_seconds` exceeded without any stamp advance
+- `"stopped"` — operator wrote the stop sentinel
+- `"timeout"` — infrastructure backstop fired (gateway unreachable)
+
+**Two-knob design (Section 1 of can-you-look-at-generic-thunder).** A single threshold previously had to cover both legitimate slow OpenClaw boots (3–10 min) and mid-turn silence detection (3–5 min). Splitting into `startup_grace_seconds` (pre-first-hook) and `stall_threshold_seconds` (post-first-hook) lets each be tuned independently. The CORE-E6 incident pattern — agent runs for ~5 min then goes quiet — fires `"stalled"` within ~5 min of last activity rather than waiting the old 30-min threshold.
+
+**Inline abort on stall/no_first_activity.** When `poll_for_sentinel` returns `PollResult` with `reason in {"stalled", "no_first_activity"}`, the orchestrator calls `_handle_stall_outcome(...)` which:
+1. Invokes `abort_agent_session` against the *current* attempt's session key.
+2. Captures the return value and logs `[ABORT] result=ok|FAILED ...`.
+3. On a successful abort, calls `verify_session_stopped` to confirm the agent stopped streaming. If it has not (gateway acknowledged abort but stamp still advancing — the live CORE-E6 attempt-#2 failure mode), transitions to `HALTED_SILENT` rather than launching attempt N+1 on top of a still-streaming attempt N.
+
+**Activity stamp bootstrap**: After `cleanup_output_files()` removes stale output and before the webhook is invoked, call `_init_activity_stamp_or_halt(agent)`. The return value is checked — a False result (workspace dir unwritable) transitions the orchestrator to `HALTED_SILENT` rather than silently disabling stall detection. The plugin refreshes this stamp on `model_call_started`, `model_call_ended`, and `after_tool_call`.
 
 **`min_sentinel_mtime`**: Capture `time.time()` **before** calling `cleanup_output_files()`. This timestamp is compared against the mtime of any `.done` file found. If the `.done` file is older than this timestamp, it is treated as orphaned output from a prior session and discarded. Without this guard, an orphaned session writing its `.done` file after the current attempt starts will burn the retry. The pattern in orchestrator.py is:
 
@@ -293,18 +309,25 @@ poll_for_sentinel(
 _attempt_start_time = time.time()          # BEFORE cleanup
 cleanup_output_files(SYMLINK_TARGET, "executor")
 self.skill_manager.inject_skill(...)
-initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, "executor")
+if not self._init_activity_stamp_or_halt("executor"):
+    return  # workspace unwritable — HALTED_SILENT already set
 self.transition_state("WAITING_FOR_SENTINEL", ...)
-# ... invoke webhook ...
-poll_for_sentinel(
+# ... [POLL][CONFIG] log line + invoke webhook ...
+sentinel_found = poll_for_sentinel(
     ...,
     min_sentinel_mtime=_attempt_start_time,
-    stall_detection_path=os.path.join(PROJECT_ARTIFACTS_DIR, "executor_activity.stamp"),
-    stall_threshold_seconds=_stall_timeout_seconds("AUTODEV_STALL_TIMEOUT_EXECUTOR", "1800"),
+    stall_detection_path=_executor_stamp,
+    stall_threshold_seconds=_stall_timeout_seconds("AUTODEV_STALL_TIMEOUT_EXECUTOR", "300"),
+    startup_grace_seconds=_startup_grace_seconds("AUTODEV_STARTUP_GRACE_EXECUTOR", "600"),
 )
+if getattr(sentinel_found, "reason", None) in ("stalled", "no_first_activity"):
+    if not self._handle_stall_outcome("executor", session_key, _executor_stamp, sentinel_found.reason):
+        return  # verify failed — HALTED_SILENT already set
 ```
 
-**`AUTODEV_STALL_TIMEOUT_*`**: These are seconds of no Tier A stamp refresh before retry. Do not raise them to work around missing hook writes; if the stamp never refreshes while the model is clearly active, fix the plugin event path.
+**`AUTODEV_STALL_TIMEOUT_*`** (default `300`s): seconds of no Tier A stamp refresh **after first activity** before retry. Tighter values catch mid-turn deaths sooner; the bootstrap guard ensures pre-first-hook silence does not trigger here. Do not raise them to work around missing hook writes — fix the plugin event path instead.
+
+**`AUTODEV_STARTUP_GRACE_*`** (default `600`s): seconds to wait for the **first** stamp advance before declaring `"no_first_activity"`. Tune this for cold OpenClaw session creation time, not for in-session model latency.
 
 ---
 
@@ -478,9 +501,12 @@ These values appear throughout the codebase. Do not change them without understa
 | `AUTODEV_LLAMA_BASE` | default `http://127.0.0.1:11434` | Orchestrator `check_traffic_cop_health`, `wait_for_model_stable`, blame L1, and `heartbeat_cron.py` — HTTP origin when `openclaw.json` has no `llama-local` `baseUrl` |
 | `AUTODEV_AUDIT_ARCHIVE_DIR` | unset → `$OPENCLAW_ROOT/pipeline-audit`; empty string → disabled | Phase-complete snapshot copies in `orchestrator.py` |
 | `AUTODEV_HOOKS_TOKEN` | optional | Overrides `hooks_token` from `ui/config.json` / `DEFAULTS` for UI → OpenClaw webhook calls |
-| `AUTODEV_STALL_TIMEOUT_PLANNER` | default `900` (seconds) | Tier A in-poll stall: max silence on `{agent}_activity.stamp` mtime before planner `poll_for_sentinel` returns (orchestrator) |
-| `AUTODEV_STALL_TIMEOUT_EXECUTOR` | default `1800` | Same for executor poll |
-| `AUTODEV_STALL_TIMEOUT_REVIEWER` | default `900` | Same for reviewer poll |
+| `AUTODEV_STALL_TIMEOUT_PLANNER` | default `300` (seconds) | **Post-first-hook** silence: max silence on `planner_activity.stamp` mtime *after* the plugin has touched it at least once, before `poll_for_sentinel` returns `PollResult(False, "stalled")`. Catches mid-turn model deaths. Independent of startup grace below. |
+| `AUTODEV_STALL_TIMEOUT_EXECUTOR` | default `300` | Same for executor poll. Was `1800` before the two-knob split; the longer value (which forced 30 min to also cover slow boots) caused the CORE-E6 mid-turn-silence-undetected pattern. |
+| `AUTODEV_STALL_TIMEOUT_REVIEWER` | default `300` | Same for reviewer poll. |
+| `AUTODEV_STARTUP_GRACE_PLANNER` | default `600` (seconds) | **Pre-first-hook** wait: how long `poll_for_sentinel` tolerates a non-advancing stamp before declaring `PollResult(False, "no_first_activity")`. Catches OpenClaw session-creation hangs and provider-auth failures distinct from mid-turn stalls. |
+| `AUTODEV_STARTUP_GRACE_EXECUTOR` | default `600` | Same for executor poll. |
+| `AUTODEV_STARTUP_GRACE_REVIEWER` | default `600` | Same for reviewer poll. |
 | `AUTODEV_IDEAS_IDLE_THRESHOLD` | default `120` (seconds) | Ideas chat `_poll_sentinel_with_idle_detect`: max silence on `prd_creator_activity.stamp` mtime (`ui/server.py`; plugin touches stamp on model/tool events) |
 | `AUTODEV_IDEAS_STARTUP_GRACE` | default `30` (seconds) | Ideas chat: wait for first stamp before treating missing session as `no_session` |
 

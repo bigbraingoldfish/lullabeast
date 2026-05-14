@@ -92,7 +92,7 @@ class TestDoneFileLogic:
 
         # With a zero timeout, poll immediately returns False
         result = poll_for_sentinel(sentinel_path, timeout_seconds=0)
-        assert result is False, (
+        assert bool(result) is False, (
             "poll_for_sentinel must return False when .done file is absent — "
             "orchestrator must not advance past sentinel poll without the file."
         )
@@ -100,7 +100,7 @@ class TestDoneFileLogic:
         # Now create the sentinel
         open(sentinel_path, "w").close()
         result2 = poll_for_sentinel(sentinel_path, timeout_seconds=1)
-        assert result2 is True, "poll_for_sentinel must return True when .done file exists."
+        assert bool(result2) is True, "poll_for_sentinel must return True when .done file exists."
 
     def test_executor_success_state_preserved_when_reviewer_fails(self, tmp_workspace,
                                                                     valid_planner_output,
