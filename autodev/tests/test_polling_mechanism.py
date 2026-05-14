@@ -101,7 +101,7 @@ class TestPollingMechanism:
         result = poll_for_sentinel(sentinel_path, timeout_seconds=30)
         elapsed = time.monotonic() - start
 
-        assert result is True
+        assert bool(result) is True
         # Should return almost immediately (well under the 30s timeout)
         assert elapsed < 5.0, (
             f"poll_for_sentinel took {elapsed:.1f}s to detect an immediately-present file. "
@@ -176,7 +176,7 @@ class TestPollingMechanism:
         elapsed = time.monotonic() - start
         t.join(timeout=5)
 
-        assert result is True, "Must return True when fresh sentinel written after stale one discarded"
+        assert bool(result) is True, "Must return True when fresh sentinel written after stale one discarded"
         assert elapsed >= 1.5, "Must not return on the stale sentinel — must wait for fresh one"
         assert elapsed < 10.0, f"Should complete quickly after fresh sentinel, took {elapsed:.1f}s"
 
@@ -219,7 +219,7 @@ class TestPollingMechanism:
         elapsed = time.monotonic() - start
         t.join(timeout=5)
 
-        assert result is False
+        assert bool(result) is False
         assert elapsed < 8.0, f"stall should fire shortly after stamp goes stale, took {elapsed:.1f}s"
 
     def test_stall_detection_does_not_fire_when_stamp_is_fresh(self, tmp_workspace):
@@ -245,7 +245,7 @@ class TestPollingMechanism:
             stall_threshold_seconds=600,
         )
         t.join(timeout=5)
-        assert result is True
+        assert bool(result) is True
 
     def test_stall_detection_skipped_when_stamp_absent(self, tmp_workspace):
         """No activity stamp file → stall branch skipped; normal sentinel wait."""
@@ -269,7 +269,7 @@ class TestPollingMechanism:
             stall_threshold_seconds=1,
         )
         t.join(timeout=5)
-        assert result is True
+        assert bool(result) is True
 
     def test_stall_detection_absent_when_params_not_passed(self, tmp_workspace):
         """Backward compat: omitting stall params preserves original poll behavior."""
@@ -287,7 +287,7 @@ class TestPollingMechanism:
 
         result = poll_for_sentinel(sentinel_path, timeout_seconds=15)
         t.join(timeout=5)
-        assert result is True
+        assert bool(result) is True
 
     def test_cleanup_removes_activity_stamp(self, tmp_workspace):
         from sentinel_poller import cleanup_output_files
@@ -341,20 +341,33 @@ class TestPollingMechanism:
         )
         elapsed = time.monotonic() - start
 
-        assert result is False
+        assert bool(result) is False
         assert elapsed >= 3.0, "Should wait for timeout_seconds, not stall-short-circuit"
         assert elapsed < 6.0, f"Should not overshoot timeout by much, took {elapsed:.1f}s"
 
     def test_orchestrator_bootstraps_activity_stamp_for_all_pipeline_agents(self):
-        """Planner/executor/reviewer must seed the stamp after cleanup and before polling."""
+        """Planner/executor/reviewer must seed the stamp after cleanup and before polling.
+
+        Section 5a routed the seeding through ``_init_activity_stamp_or_halt``
+        so the False return value is honoured (the helper still calls
+        ``initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, agent_role)``
+        internally).  Accept either the direct call or the helper call.
+        """
         import inspect
 
         import orchestrator
 
         source = inspect.getsource(orchestrator)
-        assert 'initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, "planner")' in source
-        assert 'initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, "executor")' in source
-        assert 'initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, "reviewer")' in source
+        for agent in ("planner", "executor", "reviewer"):
+            direct = f'initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, "{agent}")'
+            via_helper = f'_init_activity_stamp_or_halt("{agent}")'
+            assert direct in source or via_helper in source, (
+                f"orchestrator must seed the {agent} activity stamp via either "
+                f"the direct call or _init_activity_stamp_or_halt(...)"
+            )
+        # Helper itself must still call the underlying initializer so the
+        # actual workspace write happens.
+        assert 'initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, agent_role)' in source
 
     # --- Bootstrap guard: stall check must wait for first hook before firing ---
 
@@ -395,7 +408,7 @@ class TestPollingMechanism:
         elapsed = time.monotonic() - start
         t.join(timeout=5)
 
-        assert result is True, (
+        assert bool(result) is True, (
             "Stall check must NOT fire on a bootstrapped stamp that has never "
             "advanced.  The poll should wait for the sentinel."
         )
@@ -439,7 +452,7 @@ class TestPollingMechanism:
         elapsed = time.monotonic() - start
         t.join(timeout=5)
 
-        assert result is False, "Stall must fire after stamp advanced then went stale"
+        assert bool(result) is False, "Stall must fire after stamp advanced then went stale"
         assert elapsed < 5.0, f"Stall should fire shortly after stamp goes stale, took {elapsed:.1f}s"
 
     def test_stall_does_not_fire_on_fresh_bootstrapped_stamp(self, tmp_workspace):
@@ -468,7 +481,7 @@ class TestPollingMechanism:
             stall_threshold_seconds=1800,
         )
         t.join(timeout=5)
-        assert result is True
+        assert bool(result) is True
 
     def test_poll_survives_symlink_repoint_mid_poll(self, tmp_workspace):
         """poll_for_sentinel must detect .done even when pipeline-project symlink is
@@ -509,6 +522,6 @@ class TestPollingMechanism:
         result = poll_for_sentinel(sentinel_path, timeout_seconds=5)
         t.join(timeout=5)
 
-        assert result is True, (
+        assert bool(result) is True, (
             "poll_for_sentinel failed to detect .done after symlink was repointed mid-poll"
         )

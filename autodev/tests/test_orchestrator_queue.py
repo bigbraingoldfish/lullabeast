@@ -689,7 +689,7 @@ class TestApplyCliProjectPath:
         proj_b = tmp_path / "proj_b"
         proj_a.mkdir()
         proj_b.mkdir()
-        (tmp_path / "openclaw.json").write_text('{"hooks_url": "http://localhost:18789/hooks/agent", "hooks_token": "test-token"}')
+        (tmp_path / "openclaw.json").write_text('{"hooks_url": "http://localhost:18789/hooks/agent", "hooks_token": "test-token", "gateway": {"port": 18789, "auth": {"token": "gw-test-token"}}}')
         for _role in ("planner", "executor", "reviewer"):
             (tmp_path / f"workspace-{_role}").mkdir()
 
@@ -749,7 +749,7 @@ class TestMainLoopStaleCompleteSyncsQueue:
 
         queue_file = tmp_path / "pipeline_queue.json"
         state_file = tmp_path / "pipeline_state.json"
-        (tmp_path / "openclaw.json").write_text('{"hooks_url": "http://localhost:18789/hooks/agent", "hooks_token": "test-token"}')
+        (tmp_path / "openclaw.json").write_text('{"hooks_url": "http://localhost:18789/hooks/agent", "hooks_token": "test-token", "gateway": {"port": 18789, "auth": {"token": "gw-test-token"}}}')
         for _role in ("planner", "executor", "reviewer"):
             (tmp_path / f"workspace-{_role}").mkdir(exist_ok=True)
 
@@ -943,7 +943,7 @@ class TestQueueRestoreParkedEntryToActive:
 
         queue_file = tmp_path / "pipeline_queue.json"
         state_file = tmp_path / "pipeline_state.json"
-        (tmp_path / "openclaw.json").write_text('{"hooks_url": "http://localhost:18789/hooks/agent", "hooks_token": "test-token"}')
+        (tmp_path / "openclaw.json").write_text('{"hooks_url": "http://localhost:18789/hooks/agent", "hooks_token": "test-token", "gateway": {"port": 18789, "auth": {"token": "gw-test-token"}}}')
         for _role in ("planner", "executor", "reviewer"):
             (tmp_path / f"workspace-{_role}").mkdir(exist_ok=True)
 

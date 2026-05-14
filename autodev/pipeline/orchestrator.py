@@ -11,11 +11,49 @@ from datetime import datetime, timezone
 import logging
 import requests
 
-from webhook_client import abort_agent_session, invoke_agent_webhook
+from webhook_client import (
+    abort_agent_session,
+    invoke_agent_webhook,
+    verify_session_stopped,
+)
 from sentinel_poller import cleanup_output_files, initialize_activity_stamp, poll_for_sentinel
 from skill_manager import SkillManager
 from queue_semantics import parent_blocks_child
 from env_resolvers import resolve_openclaw_root, resolve_pipeline_root
+
+# Route module-level logging.* calls (including those from webhook_client —
+# notably abort_agent_session's success/failure lines) to stdout so they land
+# in the same operator-facing stream as the orchestrator's print() output.
+# Without this, logging defaults to stderr without a configured handler and
+# abort outcomes disappear from /tmp/orchestrator.log.  Idempotent — only
+# attaches a handler if no stdout-bound INFO handler is already present
+# (so tests that pre-configure logging are not clobbered).
+def _ensure_stdout_logging() -> None:
+    """Attach an INFO-level StreamHandler to the root logger bound to the
+    *current* ``sys.stdout``.
+
+    Idempotent in production (a no-op if a handler already targets the
+    current stdout).  Safe to re-invoke if ``sys.stdout`` is swapped
+    (e.g. pytest capsys) — it will attach a fresh handler bound to the
+    new stream so log lines remain visible.
+    """
+    root = logging.getLogger()
+    for h in root.handlers:
+        if (
+            isinstance(h, logging.StreamHandler)
+            and getattr(h, "stream", None) is sys.stdout
+            and h.level <= logging.INFO
+        ):
+            return
+    handler = logging.StreamHandler(stream=sys.stdout)
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    root.addHandler(handler)
+    if root.level == logging.WARNING or root.level > logging.INFO:
+        root.setLevel(logging.INFO)
+
+
+_ensure_stdout_logging()
 
 OPENCLAW_ROOT = resolve_openclaw_root()
 AUTODEV_REPO_PATH = os.environ.get(
@@ -28,7 +66,34 @@ def _env_truthy(name: str) -> bool:
 
 
 def _stall_timeout_seconds(env_name: str, default_str: str) -> int:
-    """Parse stall-detection threshold from env; invalid values fall back to default."""
+    """Parse stall-detection threshold from env; invalid values fall back to default.
+
+    Governs **post-first-hook** silence: once the plugin has touched the
+    activity stamp at least once, any subsequent gap exceeding this
+    threshold treats the attempt as stalled.  Independent from startup
+    grace — see :func:`_startup_grace_seconds`.
+    """
+    raw = (os.environ.get(env_name) or "").strip()
+    try:
+        v = int(raw or default_str)
+    except ValueError:
+        v = int(default_str)
+    return max(1, v)
+
+
+def _startup_grace_seconds(env_name: str, default_str: str) -> int:
+    """Parse startup grace from env; invalid values fall back to default.
+
+    Governs the **pre-first-hook** wait: how long :func:`poll_for_sentinel`
+    tolerates a non-advancing activity stamp before declaring
+    ``no_first_activity``.  Separate from the post-activity stall
+    threshold so operators can tune slow OpenClaw boots independently
+    from mid-turn silence detection.
+
+    Parsing semantics mirror :func:`_stall_timeout_seconds` exactly:
+    invalid strings fall back to ``default_str``, and the minimum is
+    clamped to 1 second (a 0 value would race poll-tick cadence).
+    """
     raw = (os.environ.get(env_name) or "").strip()
     try:
         v = int(raw or default_str)
@@ -832,6 +897,27 @@ class Orchestrator:
             pass
         config["gateway_token"] = (gw.get("auth") or {}).get("token", "")
         config["gateway_ws_url"] = f"ws://127.0.0.1:{gw_port}/__openclaw__/ws"
+        # Fail fast: abort_agent_session is invoked at every executor/planner/
+        # reviewer retry boundary and on every detected stall.  An empty
+        # gateway token or unreachable WS URL turns those into silent no-ops
+        # (returns False with a swallowed exception) — meaning a stalled
+        # session keeps streaming while the orchestrator launches attempt
+        # N+1 against it.  Discover the misconfiguration here, before a
+        # phase starts, not the first time an abort fires.
+        if not config["gateway_token"]:
+            print(
+                "[ERROR] openclaw.json has no gateway token (gateway.auth.token). "
+                "Without it abort_agent_session cannot stop stalled sessions, "
+                "leaving them streaming under retried attempts. Refusing to start."
+            )
+            sys.exit(1)
+        if not config["gateway_ws_url"]:
+            print(
+                "[ERROR] openclaw.json has no gateway WebSocket URL. "
+                "abort_agent_session needs gateway.port to construct the WS "
+                "endpoint for sessions.abort. Refusing to start."
+            )
+            sys.exit(1)
         return config
 
     def acquire_lock(self):
@@ -1732,6 +1818,125 @@ class Orchestrator:
             return "executor_preempted"
         return "executor_crashed"
 
+    def _init_activity_stamp_or_halt(self, agent_role: str) -> bool:
+        """Seed the agent activity stamp; escalate loudly on failure.
+
+        ``initialize_activity_stamp`` returns ``False`` when the workspace
+        directory is missing or unwritable.  Silently discarding that
+        return value (the pre-existing bug at the three orchestrator
+        call sites) means ``poll_for_sentinel`` will subsequently call
+        ``os.path.exists(stall_detection_path)`` against a file that
+        never gets created — the stall branch is skipped on every poll
+        iteration and a hung agent is invisible until the infrastructure
+        backstop fires.  Loud halt is strictly better than silent stall
+        blindness.
+
+        Returns
+        -------
+        bool
+            ``True`` if the stamp was successfully seeded — caller may
+            proceed into ``poll_for_sentinel``.  ``False`` if the helper
+            escalated to ``HALTED_SILENT`` — caller MUST short-circuit
+            (``return``) to avoid running with stall detection broken.
+        """
+        ok = initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, agent_role)
+        if ok:
+            return True
+        stamp_path = os.path.join(
+            PROJECT_ARTIFACTS_DIR, f"{agent_role}_activity.stamp"
+        )
+        print(
+            f"[FATAL] activity stamp init failed for {agent_role} at {stamp_path}. "
+            f"Workspace directory missing or unwritable — stall detection would "
+            f"be silently disabled.  Refusing to proceed."
+        )
+        self.transition_state(
+            "HALTED_SILENT",
+            f"activity stamp init failed for {agent_role}",
+        )
+        return False
+
+    def _handle_stall_outcome(
+        self,
+        agent_role: str,
+        session_key: str,
+        stamp_path: str,
+        reason: str,
+    ) -> bool:
+        """Abort and verify the just-detected stalled / startup-timeout session.
+
+        Called by all three pipeline-agent poll sites (planner / executor /
+        reviewer) when ``poll_for_sentinel`` returns ``PollResult`` with
+        ``reason in {"stalled", "no_first_activity"}``.  Centralising the
+        logic avoids the three-way divergence that the original CORE-E6
+        bug exploited (one site silently fire-and-forgot the abort).
+
+        Behaviour:
+
+        1. Build the OpenClaw-namespaced abort key from ``agent_role`` and
+           ``session_key`` (OpenClaw normalises session keys to lowercase
+           and prefixes ``agent:{role}:``).
+        2. Call ``abort_agent_session`` and log ``[ABORT] result=ok|FAILED ...``
+           — return value MUST be captured (silent fire-and-forget was the
+           original bug).
+        3. If abort succeeded, call ``verify_session_stopped`` to confirm
+           the agent really stopped streaming.  A False there is the
+           signature live-CORE-E6 failure: gateway acknowledged
+           ``sessions.abort`` but the agent kept writing tokens.  Escalate
+           to ``HALTED_SILENT`` rather than launch attempt N+1 on top of
+           it.
+        4. If abort returned False (network error, transient gateway
+           issue, session not found), do **not** call verify and do not
+           escalate — abort is best-effort and a False there is logged
+           but not fatal.  The orchestrator's existing retry/cleanup
+           paths still own that case.
+
+        Returns
+        -------
+        bool
+            ``True`` if it is safe for the caller to proceed with the
+            normal retry/increment flow.  ``False`` if the helper
+            escalated to ``HALTED_SILENT`` — the caller MUST short-circuit
+            (``return`` from its main loop) to avoid invoking attempt N+1.
+        """
+        # Build the OpenClaw-namespaced key.  Callers pass the
+        # pipeline-internal key (``pipeline:phase-…``); OpenClaw prefixes
+        # ``agent:{role}:`` and lowercases the whole thing internally.
+        full_key = session_key
+        if not full_key.startswith(f"agent:{agent_role}:"):
+            full_key = f"agent:{agent_role}:{session_key}"
+        full_key = full_key.lower()
+
+        gw_token = self.openclaw_config.get("gateway_token", "")
+        gw_ws_url = self.openclaw_config.get(
+            "gateway_ws_url", "ws://127.0.0.1:18789/__openclaw__/ws"
+        )
+        aborted = abort_agent_session(full_key, gw_ws_url, gw_token)
+        print(
+            f"[ABORT] result={'ok' if aborted else 'FAILED'} "
+            f"session_key={full_key} reason={reason} agent={agent_role}"
+        )
+        if not aborted:
+            # Best-effort contract: abort failure is logged but does not
+            # block the retry flow.  The orchestrator's pre-existing
+            # next-attempt cleanup still owns the recovery path.
+            return True
+
+        if not verify_session_stopped(stamp_path, settle_seconds=5.0):
+            print(
+                f"[ABORT][VERIFY_FAILED] session_key={full_key} "
+                f"stamp_path={stamp_path} reason={reason} — gateway acknowledged "
+                f"abort but stamp is still being refreshed.  Refusing to launch "
+                f"next attempt on top of a still-streaming session."
+            )
+            self.transition_state(
+                "HALTED_SILENT",
+                f"Abort verification failed for {full_key} (reason={reason})",
+            )
+            return False
+
+        return True
+
     def _escalate_if_provider_rejected(self, jsonl_path: str | None, role_label: str) -> bool:
         """If the session JSONL ends with a provider-rejection error (billing, rate-limit, or auth),
         set last_error_code=ERR_PROVIDER_REJECTED, fill escalation_trigger_reason with the provider
@@ -2088,6 +2293,13 @@ class Orchestrator:
         phase_state["reviewer_retries"] = 0
         phase_state["reviewer_rejected"] = False
         phase_state.pop("executor_succeeded", None)
+        # State-sync invariant: ``phase_state`` and ``self.state`` track the
+        # same retry counters from different read paths.  Forgetting to update
+        # both was the bug behind reviewer_retries drifting across retries —
+        # the gate makes pass-routing decisions off phase_state while session
+        # keys are built off self.state, and the two diverging produced the
+        # confusing reviewer-attempt numbering observed live on CORE-E6.
+        self.state["reviewer_retries"] = 0
 
         # Increment the correct counter — never both.
         if caller == "auto":
@@ -2628,6 +2840,86 @@ class Orchestrator:
             except Exception:
                 pass
 
+    def _write_reviewer_failure_context(
+        self,
+        blocking_issues: list,
+        reviewer_summary: str | None = None,
+        reviewer_pass: int | None = None,
+    ) -> None:
+        """Atomically augment ``failure_context.json`` with reviewer-handoff metadata.
+
+        Called from the ROUTE_EXECUTOR branch of the reviewer-gate
+        dispatch so the next executor pass sees an explicit
+        ``source="reviewer"`` marker plus the canonical blocking-issue
+        list.  ``write_failure_context`` (called earlier in the
+        reviewer-gate consumption flow) already captures the
+        comprehensive context including blocking issues; this helper
+        layers reviewer-specific metadata on top so consumers can
+        distinguish a reviewer-driven handoff from a generic gate fail.
+
+        The merge is non-destructive: any existing fields are preserved,
+        and only the focused-schema fields below are written/overwritten.
+        Atomic via ``tempfile.mkstemp`` + ``os.replace``.
+
+        Schema fields written:
+
+        * ``source`` — always ``"reviewer"``.
+        * ``phase_id`` — current phase raw id (e.g. ``"CORE-E6"``).
+        * ``reviewer_pass`` — 1-indexed pass number when supplied.
+        * ``blocking_issues`` — canonical list, overwrites any prior value
+          to guarantee the executor sees the latest reviewer verdict.
+        * ``reviewer_summary`` — short human-readable rationale when supplied.
+        * ``written_at`` — ISO-8601 UTC timestamp of this write.
+
+        Errors are logged and swallowed so a write failure never crashes
+        the pipeline (same contract as ``write_failure_context``).
+        """
+        fc_path = os.path.join(PROJECT_ARTIFACTS_DIR, "failure_context.json")
+        existing: dict = {}
+        if os.path.exists(fc_path):
+            try:
+                with open(fc_path, "r") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    existing = loaded
+            except Exception:
+                # Treat unreadable / non-dict file as missing — the focused
+                # reviewer fields are more important than legacy content.
+                existing = {}
+
+        existing["source"] = "reviewer"
+        existing["phase_id"] = self.state.get("current_phase_raw_id", "")
+        existing["blocking_issues"] = list(blocking_issues)
+        if reviewer_pass is not None:
+            existing["reviewer_pass"] = int(reviewer_pass)
+        if reviewer_summary is not None:
+            existing["reviewer_summary"] = str(reviewer_summary)
+        existing["written_at"] = datetime.now(timezone.utc).isoformat()
+
+        try:
+            os.makedirs(PROJECT_ARTIFACTS_DIR, exist_ok=True)
+        except OSError:
+            pass
+        try:
+            fd, tmp_path = tempfile.mkstemp(
+                dir=PROJECT_ARTIFACTS_DIR, prefix="failure_context_"
+            )
+            with os.fdopen(fd, "w") as f:
+                json.dump(existing, f, indent=2)
+            os.replace(tmp_path, fc_path)
+            print(
+                f"[REVIEWER_GATE] failure_context augmented "
+                f"(phase={existing['phase_id']}, "
+                f"blocking_issues={len(existing['blocking_issues'])})"
+            )
+        except Exception as e:
+            print(f"[ERROR] _write_reviewer_failure_context failed: {e}")
+            try:
+                if "tmp_path" in locals() and os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+
     def set_reviewer_rejected(self):
         phase_state = {}
         if os.path.exists(PHASE_STATE_FILE):
@@ -2996,7 +3288,9 @@ class Orchestrator:
                         self.state.get("current_phase_raw_id", ""), "planner", self.openclaw_config
                     )
                     self._record_injected_skill("planner")
-                    initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, "planner")
+                    _stamp_ok = self._init_activity_stamp_or_halt("planner")
+                    if not _stamp_ok:
+                        return
 
                     self.state["sentinel_wait_started_at"] = datetime.now(timezone.utc).isoformat()
                     self.transition_state("WAITING_FOR_SENTINEL", "Invoking Planner via webhook")
@@ -3010,18 +3304,42 @@ class Orchestrator:
                         continue
 
                     _stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
+                    _planner_stamp = os.path.join(
+                        PROJECT_ARTIFACTS_DIR, "planner_activity.stamp"
+                    )
+                    _planner_stall = _stall_timeout_seconds(
+                        "AUTODEV_STALL_TIMEOUT_PLANNER", "300"
+                    )
+                    _planner_grace = _startup_grace_seconds(
+                        "AUTODEV_STARTUP_GRACE_PLANNER", "600"
+                    )
+                    _planner_backstop = 2700
+                    print(
+                        f"[POLL][CONFIG] agent=planner "
+                        f"startup_grace={_planner_grace}s "
+                        f"stall_threshold={_planner_stall}s "
+                        f"infra_backstop={_planner_backstop}s"
+                    )
                     sentinel_found = poll_for_sentinel(
                         sentinel_path,
-                        timeout_seconds=2700,
+                        timeout_seconds=_planner_backstop,
                         stop_sentinel_path=_stop_file,
                         min_sentinel_mtime=_attempt_start_time,
-                        stall_detection_path=os.path.join(
-                            PROJECT_ARTIFACTS_DIR, "planner_activity.stamp"
-                        ),
-                        stall_threshold_seconds=_stall_timeout_seconds(
-                            "AUTODEV_STALL_TIMEOUT_PLANNER", "300"
-                        ),
+                        stall_detection_path=_planner_stamp,
+                        stall_threshold_seconds=_planner_stall,
+                        startup_grace_seconds=_planner_grace,
                     )
+                    if getattr(sentinel_found, "reason", None) in (
+                        "stalled",
+                        "no_first_activity",
+                    ):
+                        if not self._handle_stall_outcome(
+                            agent_role="planner",
+                            session_key=session_key,
+                            stamp_path=_planner_stamp,
+                            reason=sentinel_found.reason,
+                        ):
+                            return
 
                     # W1-G: Resolve planner session JSONL and capture token usage.
                     # agent_end fires after sessions.json is populated, so a single
@@ -3200,8 +3518,18 @@ class Orchestrator:
                     token = self.openclaw_config.get("hooks", {}).get("token", "")
 
                     # Abort the previous executor session before invoking the next attempt.
-                    # Best-effort: stops the prior run from consuming tokens and from
-                    # refreshing executor_activity.stamp (which can suppress stall detection).
+                    # Stops the prior run from consuming tokens and from refreshing
+                    # executor_activity.stamp (which can suppress stall detection).
+                    #
+                    # Observability invariant: the return value MUST be captured and
+                    # logged.  A silent fire-and-forget call was the original CORE-E6
+                    # bug — attempt #2 wrote 69,152 tokens while attempt #3 was
+                    # already running because nobody knew the abort had failed.
+                    # Equally, an acknowledged abort (ok=true) is not sufficient
+                    # proof the session stopped — verify_session_stopped confirms
+                    # the plugin is no longer touching the activity stamp.  If it
+                    # still is, escalate to HALTED_SILENT rather than stack
+                    # attempt N+1 on top of a running attempt N.
                     if retries > 0:
                         _prev_session_key = (
                             f"agent:executor:pipeline:phase-{phase}:{raw_id}"
@@ -3211,7 +3539,29 @@ class Orchestrator:
                         _gw_ws_url = self.openclaw_config.get(
                             "gateway_ws_url", "ws://127.0.0.1:18789/__openclaw__/ws"
                         )
-                        abort_agent_session(_prev_session_key, _gw_ws_url, _gw_token)
+                        aborted = abort_agent_session(
+                            _prev_session_key, _gw_ws_url, _gw_token
+                        )
+                        print(
+                            f"[ABORT] result={'ok' if aborted else 'FAILED'} "
+                            f"session_key={_prev_session_key} prior_attempt={retries}"
+                        )
+                        if aborted:
+                            _prev_stamp = os.path.join(
+                                PROJECT_ARTIFACTS_DIR, "executor_activity.stamp"
+                            )
+                            if not verify_session_stopped(_prev_stamp, settle_seconds=5.0):
+                                print(
+                                    f"[ABORT][VERIFY_FAILED] session_key={_prev_session_key} "
+                                    f"stamp_path={_prev_stamp} — gateway acknowledged abort "
+                                    f"but stamp is still being refreshed.  Refusing to launch "
+                                    f"attempt {retries + 1} on top of a still-streaming session."
+                                )
+                                self.transition_state(
+                                    "HALTED_SILENT",
+                                    f"Abort verification failed for {_prev_session_key}",
+                                )
+                                return
 
                     # Proactive branch guard: after RESET_PHASE the phase branch is deleted
                     # and HEAD lands on main. Correct before the executor runs so any git
@@ -3225,7 +3575,9 @@ class Orchestrator:
                         self.state.get("current_phase_raw_id", ""), "executor", self.openclaw_config
                     )
                     self._record_injected_skill("executor")
-                    initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, "executor")
+                    _stamp_ok = self._init_activity_stamp_or_halt("executor")
+                    if not _stamp_ok:
+                        return
                     self.state["sentinel_wait_started_at"] = datetime.now(timezone.utc).isoformat()
                     self.transition_state("WAITING_FOR_SENTINEL", f"Invoking Executor ({attempt_label}) - Attempt {retries + 1}")
 
@@ -3242,18 +3594,42 @@ class Orchestrator:
                         continue
 
                     _stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
+                    _executor_stamp = os.path.join(
+                        PROJECT_ARTIFACTS_DIR, "executor_activity.stamp"
+                    )
+                    _executor_stall = _stall_timeout_seconds(
+                        "AUTODEV_STALL_TIMEOUT_EXECUTOR", "300"
+                    )
+                    _executor_grace = _startup_grace_seconds(
+                        "AUTODEV_STARTUP_GRACE_EXECUTOR", "600"
+                    )
+                    _executor_backstop = 2700
+                    print(
+                        f"[POLL][CONFIG] agent=executor "
+                        f"startup_grace={_executor_grace}s "
+                        f"stall_threshold={_executor_stall}s "
+                        f"infra_backstop={_executor_backstop}s"
+                    )
                     sentinel_found = poll_for_sentinel(
                         sentinel_path,
-                        timeout_seconds=2700,
+                        timeout_seconds=_executor_backstop,
                         stop_sentinel_path=_stop_file,
                         min_sentinel_mtime=_attempt_start_time,
-                        stall_detection_path=os.path.join(
-                            PROJECT_ARTIFACTS_DIR, "executor_activity.stamp"
-                        ),
-                        stall_threshold_seconds=_stall_timeout_seconds(
-                            "AUTODEV_STALL_TIMEOUT_EXECUTOR", "300"
-                        ),
+                        stall_detection_path=_executor_stamp,
+                        stall_threshold_seconds=_executor_stall,
+                        startup_grace_seconds=_executor_grace,
                     )
+                    if getattr(sentinel_found, "reason", None) in (
+                        "stalled",
+                        "no_first_activity",
+                    ):
+                        if not self._handle_stall_outcome(
+                            agent_role="executor",
+                            session_key=session_key,
+                            stamp_path=_executor_stamp,
+                            reason=sentinel_found.reason,
+                        ):
+                            return
 
                     # W1-G: Resolve executor session JSONL and capture token usage.
                     # agent_end fires after sessions.json is populated, so a single
@@ -3390,7 +3766,9 @@ class Orchestrator:
                             self.state.get("current_phase_raw_id", ""), "reviewer", self.openclaw_config
                         )
                         self._record_injected_skill("reviewer")
-                        initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, "reviewer")
+                        _stamp_ok = self._init_activity_stamp_or_halt("reviewer")
+                        if not _stamp_ok:
+                            return
                         self.state["sentinel_wait_started_at"] = datetime.now(timezone.utc).isoformat()
                         self.transition_state("WAITING_FOR_SENTINEL", f"Invoking Reviewer - Attempt {retries + 1}")
 
@@ -3407,18 +3785,42 @@ class Orchestrator:
                             continue
 
                         _stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
+                        _reviewer_stamp = os.path.join(
+                            PROJECT_ARTIFACTS_DIR, "reviewer_activity.stamp"
+                        )
+                        _reviewer_stall = _stall_timeout_seconds(
+                            "AUTODEV_STALL_TIMEOUT_REVIEWER", "300"
+                        )
+                        _reviewer_grace = _startup_grace_seconds(
+                            "AUTODEV_STARTUP_GRACE_REVIEWER", "600"
+                        )
+                        _reviewer_backstop = 2700
+                        print(
+                            f"[POLL][CONFIG] agent=reviewer "
+                            f"startup_grace={_reviewer_grace}s "
+                            f"stall_threshold={_reviewer_stall}s "
+                            f"infra_backstop={_reviewer_backstop}s"
+                        )
                         sentinel_found = poll_for_sentinel(
                             sentinel_path,
-                            timeout_seconds=2700,
+                            timeout_seconds=_reviewer_backstop,
                             stop_sentinel_path=_stop_file,
                             min_sentinel_mtime=_attempt_start_time,
-                            stall_detection_path=os.path.join(
-                                PROJECT_ARTIFACTS_DIR, "reviewer_activity.stamp"
-                            ),
-                            stall_threshold_seconds=_stall_timeout_seconds(
-                                "AUTODEV_STALL_TIMEOUT_REVIEWER", "300"
-                            ),
+                            stall_detection_path=_reviewer_stamp,
+                            stall_threshold_seconds=_reviewer_stall,
+                            startup_grace_seconds=_reviewer_grace,
                         )
+                        if getattr(sentinel_found, "reason", None) in (
+                            "stalled",
+                            "no_first_activity",
+                        ):
+                            if not self._handle_stall_outcome(
+                                agent_role="reviewer",
+                                session_key=session_key,
+                                stamp_path=_reviewer_stamp,
+                                reason=sentinel_found.reason,
+                            ):
+                                return
 
                     # W1-G: Resolve reviewer session JSONL and capture token usage.
                     # agent_end fires after sessions.json is populated, so a single
@@ -3493,6 +3895,24 @@ class Orchestrator:
                         continue
 
                     gate_result = self.run_reviewer_output_gate()
+                    # Diagnostic: log every reviewer-gate verdict so operators
+                    # can reconstruct routing from /tmp/orchestrator.log without
+                    # reading state files.  Field shape is locked so future
+                    # tooling can rely on it.
+                    _rev_pass = self.state.get("reviewer_retries", 0) + 1
+                    _rev_next = {
+                        "PASS": "phase_advance",
+                        "ROUTE_EXECUTOR": "executor",
+                        "ROUTE_PLANNER": "planner",
+                        "ROUTE_ESCALATE": "escalation",
+                        "MISSING_ARTIFACTS": "executor",
+                        "INFRA_FAILURE": "reviewer",
+                        "VISUAL_UNVERIFIED": "reviewer",
+                    }.get(gate_result, "halted")
+                    print(
+                        f"[REVIEWER_GATE] verdict={gate_result} "
+                        f"pass={_rev_pass} next_agent={_rev_next}"
+                    )
 
                     if gate_result != "PASS":
                         _write_pipeline_event("gate_fail", raw_id, "reviewer", {"gate_result": gate_result})  # W1-F
@@ -3916,6 +4336,29 @@ class Orchestrator:
                         break
                     elif gate_result == "ROUTE_EXECUTOR":
                         self.set_reviewer_rejected()
+                        # Augment failure_context.json with reviewer-handoff
+                        # metadata so the next executor pass can distinguish
+                        # a reviewer-driven retry from a generic gate fail
+                        # and see the canonical blocking-issue list with
+                        # ``source="reviewer"``.  The general
+                        # write_failure_context above already wrote the
+                        # comprehensive context including blocking_issues —
+                        # this layers the focused-schema fields on top.
+                        _rv_out = {}
+                        _rv_out_path = os.path.join(
+                            PROJECT_ARTIFACTS_DIR, "reviewer_output.json"
+                        )
+                        if os.path.exists(_rv_out_path):
+                            try:
+                                with open(_rv_out_path) as _rvf:
+                                    _rv_out = json.load(_rvf) or {}
+                            except Exception:
+                                _rv_out = {}
+                        self._write_reviewer_failure_context(
+                            blocking_issues=_rv_out.get("blocking_issues") or [],
+                            reviewer_summary=_rv_out.get("summary"),
+                            reviewer_pass=self.state.get("reviewer_retries", 0) + 1,
+                        )
                         self.increment_reviewer_retries()
                         self.state["current_agent"] = "executor"
                         self.state["executor_retries"] = 0
@@ -4118,6 +4561,75 @@ class Orchestrator:
 
                                 time.sleep(5)
                                 continue
+
+                    elif gate_result == "VISUAL_UNVERIFIED":
+                        # Reviewer flagged a visual phase for missing
+                        # ``visual_verification`` / ``screenshot_paths`` artifacts.
+                        # Re-invoke the reviewer with an explicit instruction
+                        # in failure_context.json so it knows what to produce
+                        # (analogous to the MISSING_ARTIFACTS handler — same
+                        # shape, different remediation).  Does NOT consume
+                        # reviewer_retries; uses a separate counter so a
+                        # legitimate ROUTE_EXECUTOR can still occur on the
+                        # following pass.
+                        _ps_vu = self.read_phase_state()
+                        _vu_retries = _ps_vu.get("reviewer_visual_retries", 0) + 1
+                        _ps_vu["reviewer_visual_retries"] = _vu_retries
+                        _ps_vu["visual_instruction"] = (
+                            "VISUAL VERIFICATION REQUIRED: Before writing "
+                            "reviewer_output.done, you MUST attach screenshot "
+                            "paths and a visual_verification block to "
+                            "reviewer_output.json per your AGENTS.md.  A "
+                            "phase that touches UI cannot pass without this."
+                        )
+                        self.write_phase_state_atomic(_ps_vu)
+                        print(
+                            f"[WARN] Reviewer gate: VISUAL_UNVERIFIED "
+                            f"(visual_retries={_vu_retries}/2)."
+                        )
+                        if _vu_retries >= 2:
+                            print(
+                                "[WARN] VISUAL_UNVERIFIED retry cap reached — "
+                                "escalating."
+                            )
+                            self.state["current_agent"] = "escalation"
+                            self.transition_state(
+                                "RUNNING",
+                                f"Reviewer VISUAL_UNVERIFIED: visual retry cap "
+                                f"reached ({_vu_retries})",
+                            )
+                        else:
+                            self.state["current_agent"] = "reviewer"
+                            self.transition_state(
+                                "RUNNING",
+                                f"Reviewer VISUAL_UNVERIFIED: re-invoking "
+                                f"reviewer to provide visual artifacts "
+                                f"(attempt {_vu_retries}/2)",
+                            )
+                        time.sleep(5)
+                        continue
+
+                    else:
+                        # Unknown / unrecognised reviewer-gate verdict.  The
+                        # previous open-elif chain silently fell through here,
+                        # leaving ``current_agent`` as "reviewer" — the next
+                        # loop iteration would re-invoke the reviewer in a
+                        # fresh session, producing the CORE-E6 reviewer→
+                        # reviewer loop symptom.  Fail loudly instead so an
+                        # operator sees the problem in /tmp/orchestrator.log
+                        # and a future-added gate verdict cannot regress to
+                        # a silent loop.
+                        print(
+                            f"[FATAL] Unknown reviewer-gate verdict "
+                            f"{gate_result!r}.  Refusing to silently re-invoke "
+                            f"the reviewer.  Escalating to HALTED_SILENT so "
+                            f"an operator can add the missing handler."
+                        )
+                        self.transition_state(
+                            "HALTED_SILENT",
+                            f"Unknown reviewer-gate verdict: {gate_result!r}",
+                        )
+                        return
 
                 elif current_agent == "escalation":
                     if self._should_invoke_escalation_agent():

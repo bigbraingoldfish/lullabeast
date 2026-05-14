@@ -22,8 +22,18 @@ for _p in [PIPELINE_DIR, REPO_ROOT]:
 
 
 def _minimal_valid_config():
-    """Minimum config that passes the required-key check."""
-    return {"hooks_url": "http://localhost:18789/hooks/agent", "hooks_token": "test-token"}
+    """Minimum config that passes the required-key check.
+
+    Includes a gateway token because load_config() requires it — without
+    one, abort_agent_session would silently no-op on every retry, so
+    refusing to start is the correct behaviour and tests that exercise
+    other validation paths must still supply a token.
+    """
+    return {
+        "hooks_url": "http://localhost:18789/hooks/agent",
+        "hooks_token": "test-token",
+        "gateway": {"port": 18789, "auth": {"token": "gw-test-token"}},
+    }
 
 
 class TestC702LoadConfigFailFast:
@@ -37,7 +47,12 @@ class TestC702LoadConfigFailFast:
         importlib.reload(orch_mod)
 
         (tmp_path / "openclaw.json").write_text(
-            json.dumps({"hooks_token": "secret", "gateway": {"port": 18789}})
+            json.dumps(
+                {
+                    "hooks_token": "secret",
+                    "gateway": {"port": 18789, "auth": {"token": "gw-tok"}},
+                }
+            )
         )
 
         inst = orch_mod.Orchestrator.__new__(orch_mod.Orchestrator)
@@ -55,7 +70,12 @@ class TestC702LoadConfigFailFast:
         importlib.reload(orch_mod)
 
         (tmp_path / "openclaw.json").write_text(
-            json.dumps({"hooks": {"token": "nested-secret"}, "gateway": {"port": 9999}})
+            json.dumps(
+                {
+                    "hooks": {"token": "nested-secret"},
+                    "gateway": {"port": 9999, "auth": {"token": "gw-tok"}},
+                }
+            )
         )
 
         inst = orch_mod.Orchestrator.__new__(orch_mod.Orchestrator)
