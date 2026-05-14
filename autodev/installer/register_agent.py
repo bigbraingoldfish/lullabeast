@@ -54,8 +54,21 @@ ESCALATION_TOOLS = {
     "deny": ["edit", "apply_patch", "exec", "process", "browser"],
 }
 
+# Executor and reviewer need the browser tool for Playwright MCP — they capture
+# (executor) and inspect (reviewer) screenshots on UI/INT phases. Without this,
+# the reviewer gate's ERR_VISUAL_UNVERIFIED check rejects every UI phase.
+EXECUTOR_TOOLS = {
+    "allow": ["read", "write", "edit", "exec", "process", "browser"],
+}
+REVIEWER_TOOLS = {
+    "allow": ["read", "write", "exec", "process", "browser"],
+}
+
+# Planner does not need browser access; it only writes plans. prd-creator is
+# explicit about its tools elsewhere. Other coding agents inherit the global
+# tools.profile via an absent `tools` key.
 _CODING_WITHOUT_EXPLICIT_TOOLS = frozenset(
-    {"planner", "executor", "reviewer", "prd-creator"}
+    {"planner", "prd-creator"}
 )
 
 
@@ -189,6 +202,10 @@ def _build_new_entry(
                 "verify model.primary if the human escalation loop misbehaves.",
                 stderr,
             )
+    elif agent_id == "executor":
+        entry["tools"] = copy.deepcopy(EXECUTOR_TOOLS)
+    elif agent_id == "reviewer":
+        entry["tools"] = copy.deepcopy(REVIEWER_TOOLS)
     elif agent_id == "roadmap-converter":
         prd = _find_prd_creator(working_list)
         if prd is not None and isinstance(prd.get("tools"), dict):

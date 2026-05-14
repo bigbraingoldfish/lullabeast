@@ -1,5 +1,6 @@
 """Tests for POST /api/ideas/{id}/convert endpoint."""
 import json
+import os
 import pytest
 from pathlib import Path
 from unittest.mock import patch, AsyncMock, MagicMock
@@ -112,7 +113,7 @@ class TestApiIdeasConvert:
         roadmap_text = "# Project Roadmap\n\n- [ ] `phase-1` | LOW | First phase"
         mock_cls, _ = self._make_mock_aiohttp()
 
-        def write_sentinel(*args, **kwargs):
+        async def write_sentinel(*args, **kwargs):
             (idea_dir / "roadmap_draft.md").write_text(roadmap_text)
             (idea_dir / "roadmap_draft.done").write_text("")
 
@@ -120,7 +121,7 @@ class TestApiIdeasConvert:
              patch("ui.server.aiohttp.ClientSession", mock_cls), \
              patch("ui.server._inject_converter_skill"), \
              patch("ui.server.CONVERT_POLL_INTERVAL", 0.05), \
-             patch("ui.server.asyncio.sleep", side_effect=write_sentinel):
+             patch("ui.server.asyncio.sleep", new=write_sentinel):
             r = client.post("/api/ideas/4/convert")
 
         assert r.status_code == 200
@@ -135,7 +136,7 @@ class TestApiIdeasConvert:
         roadmap_text = "# My Roadmap\n\n- [ ] `phase-1` | LOW | Step one"
         mock_cls, _ = self._make_mock_aiohttp()
 
-        def write_sentinel(*args, **kwargs):
+        async def write_sentinel(*args, **kwargs):
             (idea_dir / "roadmap_draft.md").write_text(roadmap_text)
             (idea_dir / "roadmap_draft.done").write_text("")
 
@@ -143,7 +144,7 @@ class TestApiIdeasConvert:
              patch("ui.server.aiohttp.ClientSession", mock_cls), \
              patch("ui.server._inject_converter_skill"), \
              patch("ui.server.CONVERT_POLL_INTERVAL", 0.05), \
-             patch("ui.server.asyncio.sleep", side_effect=write_sentinel):
+             patch("ui.server.asyncio.sleep", new=write_sentinel):
             r = client.post("/api/ideas/5/convert")
 
         assert r.status_code == 200
@@ -162,9 +163,14 @@ class TestApiIdeasConvert:
         new_text = "# NEW ROADMAP\n\n- [ ] `CORE-E1` | LOW | Fresh phase"
         (idea_dir / "roadmap_draft.md").write_text(old_text)
         (idea_dir / "roadmap_draft.done").write_text("")
+        # Force mtimes far in the past so no poll_started/slack window can treat this
+        # sentinel as belonging to the current conversion attempt (deflakes full-suite runs).
+        _old = 1.0
+        os.utime(idea_dir / "roadmap_draft.md", (_old, _old))
+        os.utime(idea_dir / "roadmap_draft.done", (_old, _old))
         mock_cls, _ = self._make_mock_aiohttp()
 
-        def write_fresh_sentinel(*args, **kwargs):
+        async def write_fresh_sentinel(*args, **kwargs):
             (idea_dir / "roadmap_draft.md").write_text(new_text)
             (idea_dir / "roadmap_draft.done").write_text("")
 
@@ -173,7 +179,7 @@ class TestApiIdeasConvert:
              patch("ui.server._inject_converter_skill"), \
              patch("ui.server.CONVERT_POLL_INTERVAL", 0.05), \
              patch("ui.server.CONVERT_TIMEOUT", 5), \
-             patch("ui.server.asyncio.sleep", side_effect=write_fresh_sentinel):
+             patch("ui.server.asyncio.sleep", new=write_fresh_sentinel):
             r = client.post("/api/ideas/6/convert")
 
         assert r.status_code == 200

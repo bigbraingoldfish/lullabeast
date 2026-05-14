@@ -61,7 +61,7 @@ class TestApiIdeasConvertUpdated:
         roadmap_text = "# Roadmap\n- [ ] `CORE-E1` | LOW | First"
         mock_cls, mock_session = self._make_mock_aiohttp()
 
-        def write_sentinel(*args, **kwargs):
+        async def write_sentinel(*args, **kwargs):
             (idea_dir / "roadmap_draft.md").write_text(roadmap_text)
             (idea_dir / "roadmap_draft.done").write_text("")
 
@@ -69,7 +69,7 @@ class TestApiIdeasConvertUpdated:
              patch("ui.server.aiohttp.ClientSession", mock_cls), \
              patch("ui.server._inject_converter_skill"), \
              patch("ui.server.CONVERT_POLL_INTERVAL", 0.05), \
-             patch("ui.server.asyncio.sleep", side_effect=write_sentinel):
+             patch("ui.server.asyncio.sleep", new=write_sentinel):
             r = client.post("/api/ideas/1/convert")
 
         assert r.status_code == 200
@@ -85,7 +85,7 @@ class TestApiIdeasConvertUpdated:
         roadmap_text = "# Roadmap\n- [ ] `CORE-E1` | LOW | First"
         mock_cls, _ = self._make_mock_aiohttp()
 
-        def write_sentinel(*args, **kwargs):
+        async def write_sentinel(*args, **kwargs):
             (idea_dir / "roadmap_draft.md").write_text(roadmap_text)
             (idea_dir / "roadmap_draft.done").write_text("")
 
@@ -93,7 +93,7 @@ class TestApiIdeasConvertUpdated:
              patch("ui.server.aiohttp.ClientSession", mock_cls), \
              patch("ui.server._inject_converter_skill") as mock_inject, \
              patch("ui.server.CONVERT_POLL_INTERVAL", 0.05), \
-             patch("ui.server.asyncio.sleep", side_effect=write_sentinel):
+             patch("ui.server.asyncio.sleep", new=write_sentinel):
             r = client.post("/api/ideas/2/convert")
 
         assert r.status_code == 200
@@ -118,7 +118,7 @@ class TestApiIdeasConvertUpdated:
 
         mock_session.post = record_post
 
-        def write_sentinel(*args, **kwargs):
+        async def write_sentinel(*args, **kwargs):
             (idea_dir / "roadmap_draft.md").write_text(roadmap_text)
             (idea_dir / "roadmap_draft.done").write_text("")
 
@@ -126,7 +126,7 @@ class TestApiIdeasConvertUpdated:
              patch("ui.server.aiohttp.ClientSession", mock_cls), \
              patch("ui.server._inject_converter_skill", side_effect=record_inject), \
              patch("ui.server.CONVERT_POLL_INTERVAL", 0.05), \
-             patch("ui.server.asyncio.sleep", side_effect=write_sentinel):
+             patch("ui.server.asyncio.sleep", new=write_sentinel):
             r = client.post("/api/ideas/3/convert")
 
         assert r.status_code == 200
@@ -187,7 +187,7 @@ class TestApiIdeasConvertUpdated:
         idea_dir = self._write_session("7", prd_content="## Problem\nContent.")
         mock_cls, mock_session = self._make_mock_aiohttp()
 
-        def write_sentinel(*args, **kwargs):
+        async def write_sentinel(*args, **kwargs):
             (idea_dir / "roadmap_draft.md").write_text("# Roadmap")
             (idea_dir / "roadmap_draft.done").write_text("")
 
@@ -195,7 +195,7 @@ class TestApiIdeasConvertUpdated:
              patch("ui.server.aiohttp.ClientSession", mock_cls), \
              patch("ui.server._inject_converter_skill"), \
              patch("ui.server.CONVERT_POLL_INTERVAL", 0.05), \
-             patch("ui.server.asyncio.sleep", side_effect=write_sentinel):
+             patch("ui.server.asyncio.sleep", new=write_sentinel):
             r = client.post("/api/ideas/7/convert")
 
         assert r.status_code == 200

@@ -14,6 +14,81 @@ from utils import (
     WORKSPACE_DIR,
 )
 
+# Phases that produce user-visible output and therefore require a screenshot
+# artifact + a reviewer visual_verification verdict. Identified by roadmap
+# subsystem prefix. Convention used across AutoDev roadmaps:
+#   UI-*   — surfaces visible to the end user (rendered UI, styling, themes)
+#   INT-*  — final integration: full system end-to-end (always rendered if UI exists)
+#
+# Operators with project-specific phases that produce rendered output under a
+# non-UI/INT prefix can extend coverage via AUTODEV_VISUAL_PHASE_RAW_IDS
+# (comma-separated list of raw phase IDs, e.g. "CORE-E4,SETUP-E2"). This keeps
+# the default rule generic while allowing per-project tightening without
+# editing the gate.
+import os as _os
+_VISUAL_PHASE_PREFIXES = {"UI", "INT"}
+
+
+def _extra_visual_raw_ids() -> set:
+    raw = (_os.environ.get("AUTODEV_VISUAL_PHASE_RAW_IDS") or "").strip()
+    if not raw:
+        return set()
+    return {item.strip().upper() for item in raw.split(",") if item.strip()}
+
+
+def _is_visual_phase(phase_raw_id):
+    """Return True if this phase produces user-visible output and requires
+    a visual-verification artifact from the reviewer.
+
+    Default: any phase whose subsystem prefix is UI or INT.
+    Override: set AUTODEV_VISUAL_PHASE_RAW_IDS env var to extend the set with
+    project-specific raw phase IDs.
+    """
+    if not phase_raw_id:
+        return False
+    raw = str(phase_raw_id).upper()
+    if raw in _extra_visual_raw_ids():
+        return True
+    prefix = raw.split("-", 1)[0]
+    return prefix in _VISUAL_PHASE_PREFIXES
+
+
+def _check_visual_verification(data):
+    """Return a list of problems with the reviewer's visual_verification +
+    visual_smoke_artifacts fields, or [] if all present and valid.
+
+    Required shape on visual phases:
+      - visual_verification: one of "pass", "fail", "cannot_verify"
+      - visual_smoke_artifacts: list with ≥1 entry when verification == "pass".
+        Each entry must be a dict with a `path` key resolvable on disk under
+        the workspace.
+
+    A "fail" or "cannot_verify" verdict is not treated as a gate-script-level
+    problem here — it flows through the existing blocking_issues path in
+    evaluate_reviewer. This function only validates the *contract shape*.
+    """
+    verdict = data.get("visual_verification")
+    if verdict not in ("pass", "fail", "cannot_verify"):
+        return [
+            f"visual_verification must be one of pass|fail|cannot_verify, got {verdict!r}"
+        ]
+
+    artifacts = data.get("visual_smoke_artifacts") or []
+    if verdict == "pass":
+        if not isinstance(artifacts, list) or len(artifacts) == 0:
+            return ["visual_smoke_artifacts must be a non-empty list when visual_verification='pass'"]
+        for i, entry in enumerate(artifacts):
+            if not isinstance(entry, dict):
+                return [f"visual_smoke_artifacts[{i}] must be an object"]
+            path = entry.get("path")
+            if not path or not isinstance(path, str):
+                return [f"visual_smoke_artifacts[{i}] missing path"]
+            abs_path = path if os.path.isabs(path) else os.path.join(WORKSPACE_DIR, path)
+            if not os.path.exists(abs_path):
+                return [f"visual_smoke_artifacts[{i}] path does not exist on disk: {path}"]
+    return []
+
+
 def evaluate_reviewer(output_path=None):
     if output_path is None:
         output_path = os.path.join(ARTIFACTS_DIR, "reviewer_output.json")
@@ -43,13 +118,40 @@ def evaluate_reviewer(output_path=None):
         record_error_code_only("reviewer", "ERR_INFRA_FAILURE")
         return "INFRA_FAILURE"
 
+    # ------------------------------------------------------------------
+    # FIND-VISUAL-VERIFICATION: On phases that produce user-visible output,
+    # the reviewer must include a visual_verification verdict and the
+    # screenshot artifact(s) they inspected. Missing or malformed → re-invoke
+    # the reviewer with a specific instruction. Does NOT consume
+    # reviewer_retries (this is a contract-shape failure, not a code-quality
+    # rejection — the reviewer never produced the visual judgment we need).
+    # ------------------------------------------------------------------
+    if _is_visual_phase(_current_phase_raw_id):
+        visual_problems = _check_visual_verification(data)
+        if visual_problems:
+            record_error_code_only("reviewer", "ERR_VISUAL_UNVERIFIED")
+            print(
+                f"[GATE] VISUAL_UNVERIFIED ({_current_phase_raw_id}): {visual_problems}",
+                file=sys.stderr,
+            )
+            return "VISUAL_UNVERIFIED"
+
     blocking_issues = data.get("blocking_issues")
     if blocking_issues is None:
         blocking_issues = []
 
+    # A visual_verification of "fail" or "cannot_verify" is itself a blocking
+    # issue even if the reviewer didn't add an entry to blocking_issues.
+    visual_verdict = data.get("visual_verification")
+    visual_rejection = (
+        _is_visual_phase(_current_phase_raw_id)
+        and visual_verdict in ("fail", "cannot_verify")
+    )
+
     if (len(blocking_issues) > 0 or
         not data.get("integration_tests_passing") or
-        not data.get("phase_intent_validated")):
+        not data.get("phase_intent_validated") or
+        visual_rejection):
 
         record_error_code_only("reviewer", "ERR_VALIDATION_FAILED")
         return apply_reviewer_routing(data)

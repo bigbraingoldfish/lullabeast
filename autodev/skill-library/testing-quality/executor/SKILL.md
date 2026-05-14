@@ -31,3 +31,6 @@ Tests must fail if the system is broken. No "it runs" checks.
 
 ## Flake avoidance
 Never add sleep() to "fix" flake. Use framework-native waits. If intermittent: reproduce, identify unstable dependency, fix root cause.
+
+## Browser perf benchmarks (web UI projects)
+Performance benchmarks for browser UI — animation frame rate, drag input latency, layout shift, paint timing — MUST run in a real browser, not jsdom. jsdom does not implement `requestAnimationFrame` fidelity, CSS layout, paint, or composited animation. A jsdom-based "60fps benchmark" is a number generator unrelated to user experience. Use Playwright (or equivalent) to drive a real Chromium and measure via `performance.now()` / `performance.getEntriesByType("paint")`. If you cannot run a real browser in the test environment, mark the perf benchmark as skipped and report it in `failure_reason` rather than producing a meaningless jsdom number.

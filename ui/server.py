@@ -3131,6 +3131,24 @@ POLL_INTERVAL = 2   # seconds between sentinel checks
 # filesystem granularity without masking genuinely stale sentinels.
 IDEAS_LATE_DONE_MTIME_SLACK_SEC: float = 2.0
 
+
+def _idea_roadmap_done_sentinel_fresh(
+    done_path: Path, not_before_wall: float, slack_sec: float = IDEAS_LATE_DONE_MTIME_SLACK_SEC
+) -> bool:
+    """True if ``done_path`` exists and its mtime is at/after ``not_before_wall`` (minus slack).
+
+    Used after unlinking a stale ``roadmap_draft.done`` so the poll loop cannot ``break`` on a
+    sentinel left from a prior run or another race (same idea as orchestrator ``min_sentinel_mtime``).
+    """
+    if not done_path.exists():
+        return False
+    try:
+        mt = os.path.getmtime(done_path)
+    except OSError:
+        return False
+    return mt >= not_before_wall - slack_sec
+
+
 IDEAS_WEBHOOK_POST_TIMEOUT = aiohttp.ClientTimeout(total=120)
 
 IDEAS_ATTACHMENT_MAX_BYTES = 10_000_000
@@ -4749,11 +4767,13 @@ async def post_ideas_convert(idea_id: str):
     done_path = idea_dir / "roadmap_draft.done"
     done_path.unlink(missing_ok=True)
 
-    # Poll for roadmap_draft.done (must not latch onto a stale sentinel from a prior run)
-    deadline = datetime.utcnow().timestamp() + CONVERT_TIMEOUT
+    # Poll for roadmap_draft.done (must not latch onto a stale sentinel from a prior run).
+    # ``not_before`` is captured after unlink so only a sentinel touched this attempt counts.
+    poll_started = time.time()
+    deadline = poll_started + CONVERT_TIMEOUT
 
-    while datetime.utcnow().timestamp() < deadline:
-        if done_path.exists():
+    while time.time() < deadline:
+        if _idea_roadmap_done_sentinel_fresh(done_path, poll_started):
             break
         await asyncio.sleep(CONVERT_POLL_INTERVAL)
     else:
@@ -4870,11 +4890,12 @@ async def post_ideas_fix_roadmap_format(idea_id: str, body: FixRoadmapFormatRequ
         if resp.status >= 400:
             raise HTTPException(status_code=502, detail=f"Webhook returned {resp.status}")
 
-    # Poll for roadmap_draft.done
-    deadline = datetime.utcnow().timestamp() + FORMAT_CORRECTION_TIMEOUT
+    # Poll for roadmap_draft.done (mtime must be from this attempt — same as PRD convert).
+    poll_started = time.time()
+    deadline = poll_started + FORMAT_CORRECTION_TIMEOUT
 
-    while datetime.utcnow().timestamp() < deadline:
-        if done_path.exists():
+    while time.time() < deadline:
+        if _idea_roadmap_done_sentinel_fresh(done_path, poll_started):
             break
         await asyncio.sleep(FORMAT_CORRECTION_POLL_INTERVAL)
     else:

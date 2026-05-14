@@ -29,6 +29,11 @@ Write your output to: `pipeline-project/.autodev/pipeline/reviewer_output.json`
   "suggestions": ["Non-blocking improvement suggestion 1"],
   "integration_tests_passing": true,
   "phase_intent_validated": true,
+  "visual_verification": "pass",
+  "visual_smoke_artifacts": [
+    {"path": ".autodev/pipeline/visual-smoke/UI-E1-default.png",
+     "description": "<one-sentence summary of what the rendered screenshot shows that matches the phase Done Criteria>"}
+  ],
   "failure_analysis": {
     "prior_failure_addressed": true,
     "evidence": "One sentence describing what in the current implementation addresses the prior blocking issue.",
@@ -51,6 +56,8 @@ Gate validation rules:
 - `attribution` — THIS FIELD DRIVES AUTOMATED ROUTING. Use `"plan"` if the problem stems from an ambiguous or incorrect planner spec. Use `"impl"` if the plan was clear but the executor implemented it incorrectly. Be accurate — wrong attribution sends the fix to the wrong agent and wastes a full retry cycle.
 - `integration_tests_passing` — must be `true` for gate pass. You determine this by running the tests yourself, not by trusting the executor's self-report.
 - `phase_intent_validated` — must be `true` for gate pass. Verify the implementation actually satisfies the phase goal described in `current_phase.json`.
+- `visual_verification` — **REQUIRED on visual phases** (subsystem prefix `UI` or `INT`, or any phase ID listed in `AUTODEV_VISUAL_PHASE_RAW_IDS`). One of `"pass"`, `"fail"`, `"cannot_verify"`. You produce this by reading the screenshot files in `executor_output.visual_smoke_artifacts` (you are multimodal — load the images directly) and comparing them against the roadmap Done Criteria and the PRD's described experience. The gate enforces this: a missing or malformed verdict triggers `ERR_VISUAL_UNVERIFIED` (re-invocation, no retry consumed). `fail` or `cannot_verify` causes a normal rejection (consumes a retry, routes per pass number). Omit the field entirely on non-visual phases.
+- `visual_smoke_artifacts` — **REQUIRED on visual phases when `visual_verification = "pass"`**. Array of `{"path": "<workspace-relative path>", "description": "<one-sentence judgment>"}`. List the screenshots you actually inspected. The gate verifies each path exists on disk; a path that does not exist triggers `ERR_VISUAL_UNVERIFIED`.
 
 ## Sentinel Pattern
 
@@ -77,6 +84,7 @@ Do NOT trust executor self-reports. Verify independently:
 3. **Check tests_written.** Open the test files. Verify they test meaningful behavior with real assertions, not just imports or `assert True`.
 4. **Cross-reference pass_criteria.** For each condition in `planner_output.json` → `pass_criteria`, verify the implementation satisfies it.
 5. **Look for common failure modes:** hardcoded values where config should be used, missing error handling on edge cases, functions that silently return `None` instead of raising, incomplete logic paths, unreachable code.
+6. **On visual phases (UI-\*, INT-\*, or any ID in `AUTODEV_VISUAL_PHASE_RAW_IDS`): inspect the executor's screenshots.** Read the file path(s) from `executor_output.visual_smoke_artifacts`. Use the file-read tool to load each PNG directly — you are multimodal and can interpret image content. For each screenshot ask: does what I see match the roadmap Done Criteria language? Does it match the PRD's described experience? Specifically check: are the named layout zones from the roadmap (panels, sections, columns, modals, menus, controls) visibly distinct and positioned as described? Are logical tokens rendered as styled glyphs/icons/images, or as raw concatenated text? Are overlays positioned as modals (with backdrop, fixed positioning) when the design calls for it? Are empty zones visible at rest? If something looks broken, set `visual_verification: "fail"` and add a blocking issue describing what you see. If the executor produced no screenshots or you cannot load them, set `visual_verification: "cannot_verify"` with attribution to `impl` — it is the executor's job to produce the artifact. Tests passing in jsdom does not substitute for visual review: jsdom does not implement CSS layout, computed style, or paint.
 
 ## Behavioral Constraints
 

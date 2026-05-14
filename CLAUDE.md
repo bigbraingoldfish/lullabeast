@@ -379,15 +379,9 @@ In all cases a `[SKILL]` log line is emitted to stdout with `Status=none_mapped`
 
 ### How models are resolved
 
-**Planner and reviewer** use `_get_agent_model(agent_id)`, which reads `agents.list[].model.primary` from the live `openclaw.json`. Model changes in `openclaw.json` take effect on the next invocation (config is re-read each time).
+**Planner, executor, and reviewer** do not receive a `model` field on `POST /hooks/agent`. OpenClaw uses each agent’s `agents.list[].model.primary` from the live `openclaw.json` (same as the Ideas agent path). The orchestrator still implements `_get_agent_model(agent_id)` for any code paths that need to read the configured model string from disk; it is not passed into the webhook payload. Model changes in `openclaw.json` take effect on the next invocation (config is re-read each time).
 
-**Executor** is hardcoded in `orchestrator.py` (search for `minimax-m2.7`):
-
-```python
-model = "openrouter/minimax/minimax-m2.7"
-```
-
-This overrides `openclaw.json` for all executor attempts. The current configuration uses OpenRouter MiniMax for all executor runs (no local model or cloud Sonnet fallback — the previous three-attempt-tier architecture was replaced with a single cloud model). Do not remove this hardcode without a deliberate decision and update to the model-selection logic.
+To change which model runs for a pipeline role, update that agent’s entry in `openclaw.json`. Remember that **session model is baked at session creation** — existing sessions keep their model until removed (see below).
 
 ### OpenClaw `thinking` on pipeline webhooks
 

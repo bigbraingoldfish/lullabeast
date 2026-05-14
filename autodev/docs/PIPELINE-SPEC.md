@@ -47,12 +47,12 @@ Current production configuration (updated 2026-03-18 after E2E validation run):
 
 | Agent | Model | Provider | Inference | Config Source |
 |---|---|---|---|---|
-| Planner | MiniMax M2.5 (`openrouter/minimax/minimax-m2.5`) | OpenRouter | Cloud | `openclaw.json` default |
-| Executor | MiniMax M2.5 (`openrouter/minimax/minimax-m2.5`) | OpenRouter | Cloud | **Hardcoded in `orchestrator.py`** — overrides `openclaw.json` |
-| Reviewer | MiniMax M2.5 (`openrouter/minimax/minimax-m2.5`) | OpenRouter | Cloud | `openclaw.json` default |
+| Planner | (example) MiniMax M2.5 via OpenRouter | OpenRouter | Cloud | `openclaw.json` → `agents.list[]` for `planner` (`model.primary`) |
+| Executor | (example) same pattern | OpenRouter or local | Cloud or local | `openclaw.json` → `agents.list[]` for `executor` |
+| Reviewer | (example) same pattern | OpenRouter or local | Cloud or local | `openclaw.json` → `agents.list[]` for `reviewer` |
 | Escalation | Qwen3.5-27B (Q6_K) | llama-local (llama-server :11434) | Local | `openclaw.json` per-agent |
 
-> ⚠️ **Config inconsistency:** The `openclaw.json` template in §9 shows executor → `llama-local/qwen3-coder-next` and reviewer → `llama-local/qwen3.5-27b`. These entries are **ignored** — `orchestrator.py` hardcodes the model string `"openrouter/minimax/minimax-m2.5"` in the executor invocation path (line ~1268) and passes it directly in the webhook `sessionKey`. The `openclaw.json` per-agent model field is not read at runtime for planner, executor, or reviewer. If the model needs to be changed, update `orchestrator.py` directly. The §9 template should be treated as reference config, not as the runtime source of truth for cloud agent models.
+> **Webhook model field:** The orchestrator does **not** send a `model` field on `POST /hooks/agent` for planner, executor, or reviewer. OpenClaw therefore uses each agent’s configured model from `openclaw.json` (same semantics as the Ideas / prd-creator webhook path). To change inference for pipeline agents, edit `agents.list[].model` in `openclaw.json` and restart the gateway if needed so new sessions pick up changes (see also § Session model is baked at creation time in operator docs).
 
 OpenRouter is the inference provider for all cloud agents. An OpenRouter API key is required in the `openrouter` provider entry in `openclaw.json`.
 
