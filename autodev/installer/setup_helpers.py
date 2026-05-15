@@ -243,13 +243,21 @@ def ensure_dotenv_stall_timeout_hints(env_path: str) -> str:
         return "unchanged"
     block = f"""
 {DOTENV_STALL_HINT_MARKER}
-# Orchestrator poll_for_sentinel stall thresholds (seconds). Used when the
-# autodev-pipeline-signals plugin touches *_activity.stamp. Uncomment a line
-# and set an integer to override the built-in default for that agent.
-# Built-in defaults if these stay unset: planner 300, executor 300, reviewer 300.
+# Two-knob stall detection (autodev/pipeline/sentinel_poller.py:poll_for_sentinel).
+# STARTUP_GRACE bounds the pre-first-hook wait; STALL_TIMEOUT bounds the
+# post-first-hook silence.  They are independent — tune cold OpenClaw boot
+# time with STARTUP_GRACE and mid-turn-silence detection with STALL_TIMEOUT.
+# Uncomment a line and set an integer to override the built-in default.
+#
+# Built-in defaults if these stay unset:
+#   STALL_TIMEOUT_*  (post-first-hook silence)  — planner/executor/reviewer = 300 s
+#   STARTUP_GRACE_*  (pre-first-hook wait)      — planner/executor/reviewer = 600 s
 # AUTODEV_STALL_TIMEOUT_PLANNER=
 # AUTODEV_STALL_TIMEOUT_EXECUTOR=
 # AUTODEV_STALL_TIMEOUT_REVIEWER=
+# AUTODEV_STARTUP_GRACE_PLANNER=
+# AUTODEV_STARTUP_GRACE_EXECUTOR=
+# AUTODEV_STARTUP_GRACE_REVIEWER=
 """
     try:
         with open(path, "a", encoding="utf-8") as f:

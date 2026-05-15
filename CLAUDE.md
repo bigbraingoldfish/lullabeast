@@ -331,6 +331,61 @@ if getattr(sentinel_found, "reason", None) in ("stalled", "no_first_activity"):
 
 ---
 
+## Pipeline Events (`pipeline_events.jsonl`)
+
+The orchestrator emits structured events via `_write_pipeline_event(event_type, phase, agent, detail)` (defined at `orchestrator.py:520`). Each call appends one JSONL line to `<AUTODEV_PIPELINE_ROOT>/pipeline_events.jsonl`:
+
+```json
+{"ts": "<ISO8601 UTC>", "event": "<name>", "project": "<name>", "phase": "<raw_id>", "agent": "<role>", "detail": {...}}
+```
+
+The UI server tails this file via `_poll_pipeline_events_file()` (`ui/server.py:171`) and streams new lines through SSE (`/api/events/stream`); the activity tab renders events from that stream in real time. An in-memory ring buffer (50 entries, `_ring_buffer` in `ui/server.py:54`) serves as a synthetic fallback when the file is missing.
+
+### Event catalogue
+
+| Event name                 | Where emitted                                                     | Key `detail` fields                                                                                  | Section |
+|----------------------------|-------------------------------------------------------------------|------------------------------------------------------------------------------------------------------|---------|
+| `gate_pass`                | Reviewer gate returns `PASS`                                      | `{}`                                                                                                 | pre-existing |
+| `gate_fail`                | Planner/executor/reviewer gate returns non-`PASS`                  | `{exit_code}` / `{gate_result}`                                                                      | pre-existing |
+| `escalation_trigger`       | Escalation agent invoked                                          | `{reason}`                                                                                           | pre-existing |
+| `escalation_resolve`       | Operator resume command consumed                                  | `{command}`                                                                                          | pre-existing |
+| `phase_complete`           | Canonical metrics row written (post-merge)                        | `{executor_attempts, blame_fires}`                                                                   | pre-existing |
+| **`poll_start`**           | Before each `poll_for_sentinel()` invocation (3 sites)             | `{startup_grace, stall_threshold, infra_backstop, session_key, attempt}`                              | 6.1.a |
+| **`poll_outcome`**         | After `poll_for_sentinel()` returns (3 sites)                      | `{reason, stamp_mtime, duration_s, session_key, attempt}`                                            | 6.1.a |
+| **`attempt_end`**          | Companion to `[ATTEMPT_END]` dense print (3 sites)                  | `{reason, duration_s, attempt, session_key}`                                                          | 6.3 |
+| **`abort_attempted`**      | After every `abort_agent_session()` call (retry-start + inline)    | `{session_key, result, agent_role, reason, source}`                                                   | 6.1.b |
+| **`abort_verify_failed`**  | When `verify_session_stopped()` returns `False`                    | `{session_key, stamp_path, agent_role, reason}`                                                       | 6.1.b |
+| **`reviewer_verdict`**     | On every reviewer-gate consumption                                 | `{verdict, pass_number, next_agent}`                                                                  | 6.1.c |
+| **`stamp_init_failed`**    | When `_init_activity_stamp_or_halt` returns False                  | `{agent_role, stamp_path, reason}`                                                                    | 6.1.d |
+
+The bold entries are Section 6 additions; existing UI consumers handle them transparently because the JSONL schema is additive.
+
+### Phase-state outcome fields (Section 6.4)
+
+`phase_state.json` now also persists the latest poll/abort outcome so a restarted orchestrator and the dashboard can render "what happened last" without scraping logs. Written by `_record_phase_outcome(**fields)` (defined near `write_phase_state_atomic`):
+
+| Field                  | Values                                                                |
+|------------------------|-----------------------------------------------------------------------|
+| `last_poll_reason`     | `succeeded` / `stalled` / `no_first_activity` / `stopped` / `timeout` |
+| `last_abort_result`    | `ok` / `FAILED` / `verify_failed`                                     |
+| `last_attempt_summary` | Dense one-line string mirroring the `[ATTEMPT_END]` log line          |
+
+### In-poll heartbeat (Section 6.2)
+
+`poll_for_sentinel()` accepts `heartbeat_interval_seconds` (60 s in the three orchestrator call sites). During a long wait it prints one line per interval:
+
+```
+[POLL][HEARTBEAT] elapsed=120s stamp_age=12s checked_in=True
+```
+
+This distinguishes "alive, agent making progress" from "alive, agent stopped" from "orchestrator hung" — the three states that were indistinguishable in the pre-Section-6 logs.
+
+### Metrics history file (Section 6.0)
+
+`metrics.jsonl` write history is preserved in an orchestrator-private append-only file at `$AUTODEV_PIPELINE_ROOT/metrics_history/<project_name>.jsonl`, written by `_write_canonical_metrics_row()`. The agent cannot reach this directory; even if the executor overwrites the project's `metrics.jsonl` to a single row, the orchestrator rebuilds the full history on the next phase completion. On first deploy the file is bootstrapped from the live `metrics.jsonl` so existing history is preserved across the upgrade.
+
+---
+
 ## Skill Injection — End-to-End
 
 ### What happens per agent invocation

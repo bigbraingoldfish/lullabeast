@@ -2,6 +2,7 @@ import os
 import sys
 import fcntl
 import json
+import shutil
 import time
 import tempfile
 import subprocess
@@ -1850,6 +1851,16 @@ class Orchestrator:
             f"Workspace directory missing or unwritable — stall detection would "
             f"be silently disabled.  Refusing to proceed."
         )
+        _write_pipeline_event(
+            "stamp_init_failed",
+            self.state.get("current_phase_raw_id", ""),
+            agent_role,
+            {
+                "agent_role": agent_role,
+                "stamp_path": stamp_path,
+                "reason": "workspace_unwritable_or_missing",
+            },
+        )
         self.transition_state(
             "HALTED_SILENT",
             f"activity stamp init failed for {agent_role}",
@@ -1916,10 +1927,24 @@ class Orchestrator:
             f"[ABORT] result={'ok' if aborted else 'FAILED'} "
             f"session_key={full_key} reason={reason} agent={agent_role}"
         )
+        _phase_for_event = self.state.get("current_phase_raw_id", "")
+        _write_pipeline_event(
+            "abort_attempted",
+            _phase_for_event,
+            agent_role,
+            {
+                "session_key": full_key,
+                "result": "ok" if aborted else "FAILED",
+                "reason": reason,
+                "agent_role": agent_role,
+                "source": "inline_stall",
+            },
+        )
         if not aborted:
             # Best-effort contract: abort failure is logged but does not
             # block the retry flow.  The orchestrator's pre-existing
             # next-attempt cleanup still owns the recovery path.
+            self._record_phase_outcome(last_abort_result="FAILED")
             return True
 
         if not verify_session_stopped(stamp_path, settle_seconds=5.0):
@@ -1929,12 +1954,25 @@ class Orchestrator:
                 f"abort but stamp is still being refreshed.  Refusing to launch "
                 f"next attempt on top of a still-streaming session."
             )
+            _write_pipeline_event(
+                "abort_verify_failed",
+                _phase_for_event,
+                agent_role,
+                {
+                    "session_key": full_key,
+                    "stamp_path": stamp_path,
+                    "agent_role": agent_role,
+                    "reason": reason,
+                },
+            )
+            self._record_phase_outcome(last_abort_result="verify_failed")
             self.transition_state(
                 "HALTED_SILENT",
                 f"Abort verification failed for {full_key} (reason={reason})",
             )
             return False
 
+        self._record_phase_outcome(last_abort_result="ok")
         return True
 
     def _escalate_if_provider_rejected(self, jsonl_path: str | None, role_label: str) -> bool:
@@ -2090,6 +2128,38 @@ class Orchestrator:
             print(f"[ERROR] Failed to write phase_state: {e}")
             if os.path.exists(temp_path):
                 os.remove(temp_path)
+
+    def _record_phase_outcome(self, **fields) -> None:
+        """Atomically merge outcome fields into ``phase_state.json``.
+
+        Used by Section 6.4 to persist the last poll outcome, abort
+        result, and attempt summary so a restarted orchestrator (or the
+        dashboard, which already reads ``phase_state.json``) can render
+        "what happened last" without scraping ``/tmp/orchestrator.log``.
+
+        Merge semantics: existing fields are preserved; only the supplied
+        keyword arguments are written/overwritten.  Repeated calls form
+        a last-write-wins per field, which is the contract the call
+        sites rely on (e.g. one poll-site call sets ``last_poll_reason``,
+        a later ``_handle_stall_outcome`` call adds ``last_abort_result``;
+        both end up in the file).
+
+        Best-effort: errors are logged and swallowed so a phase-state
+        write failure never crashes the pipeline.
+        """
+        if not fields:
+            return
+        try:
+            phase_state = self.read_phase_state() if hasattr(self, "read_phase_state") else {}
+        except Exception as e:
+            print(f"[WARN] _record_phase_outcome: read_phase_state failed: {e}")
+            phase_state = {}
+        for key, value in fields.items():
+            phase_state[key] = value
+        try:
+            self.write_phase_state_atomic(phase_state)
+        except Exception as e:
+            print(f"[WARN] _record_phase_outcome: write failed: {e}")
 
     def _record_injected_skill(self, agent_role: str) -> None:
         """Write skill_injected and skill_agent to phase_state.json after inject_skill().
@@ -2359,6 +2429,15 @@ class Orchestrator:
         print(f"[INFO] reset_reviewer: escalation_resets now {new_count}, reason={reason!r}.")
         self.write_phase_state_atomic(phase_state)
 
+        # State-sync invariant (mirror of the fix in reset_execution):
+        # ``phase_state`` and ``self.state`` track the same counter from
+        # different read paths.  ``transition_state`` writes self.state to
+        # ``pipeline_state.json``, which the UI's agent-attempts panel
+        # reads (ui/server.py:6474).  Without this line a RESET_REVIEWER
+        # leaves the stale ``reviewer_retries`` in pipeline_state — the
+        # UI keeps showing 3/3 red ×'s even though the reviewer has been
+        # reset.  Observed live on UI-E1 for 30+ hours.
+        self.state["reviewer_retries"] = 0
         # Set state so main loop routes to reviewer on next iteration
         self.state["current_agent"] = "reviewer"
         self.transition_state("RUNNING", "reset_reviewer: reviewer reset, awaiting retry")
@@ -2920,6 +2999,206 @@ class Orchestrator:
             except Exception:
                 pass
 
+    def _write_canonical_metrics_row(self) -> None:
+        """Write the canonical metrics row for the just-completed phase.
+
+        Maintains an orchestrator-private append-only history file at
+        ``$AUTODEV_PIPELINE_ROOT/metrics_history/<project_name>.jsonl``
+        that the executor cannot reach, then mirrors the full deduped
+        history into the project's ``metrics.jsonl`` (which the
+        reviewer-gate ``MISSING_ARTIFACTS`` check and the UI's
+        ``/api/metrics`` endpoint both read).
+
+        Background: the executor's ``AGENTS.md`` instructs it to *append*
+        a metrics row at sentinel time, but agents driven by LLM file
+        tools sometimes overwrite the file instead.  The previous
+        orchestrator-side dedup logic read the live ``metrics.jsonl`` to
+        get "existing rows," filtered out the current-phase row, and
+        wrote them back — so when the executor overwrote the file down
+        to a single row the writer ended up with ``existing_rows == []``
+        and silently produced a truncated metrics.jsonl.  Observed live
+        on the ``solitaire`` project, where 9 prior phases of history
+        were lost between the CORE-E4 and CORE-E6 audit snapshots.
+
+        The history file lives at ``$AUTODEV_PIPELINE_ROOT/metrics_history/``
+        which is outside the agent workspace; the agent cannot reach it.
+        On first run after this fix is deployed, the writer bootstraps
+        history from the live ``metrics.jsonl`` so existing rows are
+        preserved across the upgrade.
+
+        Idempotent within a phase: if called repeatedly for the same
+        ``current_phase_raw_id`` the file ends up with exactly one row
+        per phase (the latest canonical version).
+        """
+        raw_id = self.state.get("current_phase_raw_id", "")
+        if not raw_id:
+            print(
+                "[WARN] _write_canonical_metrics_row: no current_phase_raw_id, "
+                "skipping"
+            )
+            return
+
+        # --- Compose the canonical row (schema preserved from inline writer) ---
+        duration_seconds = None
+        phase_start_time = self.state.get("phase_start_time")
+        if phase_start_time:
+            try:
+                start_dt = datetime.fromisoformat(phase_start_time)
+                duration_seconds = int(time.time() - start_dt.timestamp())
+            except Exception:
+                pass
+
+        goal_text = ""
+        cp_path = os.path.join(PROJECT_ARTIFACTS_DIR, "current_phase.json")
+        if os.path.exists(cp_path):
+            try:
+                with open(cp_path) as f:
+                    cp_data = json.load(f)
+                goal_text = cp_data.get("detail", "")
+            except Exception:
+                pass
+
+        executor_attempts = self.state.get("executor_retries", 0) + 1
+        reviewer_passes = self.state.get("reviewer_retries", 0) + 1
+
+        ps_m = {}
+        if os.path.exists(PHASE_STATE_FILE):
+            try:
+                with open(PHASE_STATE_FILE) as f:
+                    ps_m = json.load(f)
+            except Exception:
+                pass
+
+        planner_tok = ps_m.get("planner_tokens_acc", {}) or {}
+        executor_tok = ps_m.get("executor_tokens_acc", {}) or {}
+        reviewer_tok = ps_m.get("reviewer_tokens_acc", {}) or {}
+        canonical_row = json.dumps({
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "phase": raw_id,
+            "goal": goal_text,
+            "executor_attempts": executor_attempts,
+            "reviewer_passes": reviewer_passes,
+            "blame_fires": ps_m.get("blame_fires", 0),    # W1-A
+            "escalations": ps_m.get("escalations", 0),    # W1-B
+            "skill_used": ps_m.get("skill_injected"),      # W1-C
+            "blame_verdict": ps_m.get("blame_verdict"),    # null when no blame fired
+            "planner_tokens": planner_tok,                 # W1-G
+            "executor_tokens": executor_tok,               # W1-G
+            "reviewer_tokens": reviewer_tok,               # W1-G
+            "cost_total": round(                            # W1-G
+                planner_tok.get("cost_total", 0.0)
+                + executor_tok.get("cost_total", 0.0)
+                + reviewer_tok.get("cost_total", 0.0),
+                6,
+            ),
+            "duration_seconds": duration_seconds,
+        })
+
+        # --- Resolve paths.  Two files:
+        #   history_path → orchestrator-private, append-only history (source of truth)
+        #   metrics_path → project-visible, mirrors history (reviewer-gate + UI read this)
+        project_name = (
+            os.path.basename(os.path.realpath(SYMLINK_TARGET))
+            if os.path.exists(SYMLINK_TARGET)
+            else "unknown-project"
+        )
+        history_dir = os.path.join(AUTODEV_PIPELINE_ROOT, "metrics_history")
+        history_path = os.path.join(history_dir, f"{project_name}.jsonl")
+        metrics_path = os.path.join(PROJECT_ARTIFACTS_DIR, "metrics.jsonl")
+
+        try:
+            os.makedirs(history_dir, exist_ok=True)
+        except OSError as e:
+            print(
+                f"[ERROR] Could not create metrics_history dir "
+                f"{history_dir}: {e}"
+            )
+            return
+
+        # First-run bootstrap: if history is empty but live metrics has rows,
+        # seed history from live so prior history survives the upgrade.
+        if not os.path.exists(history_path) and os.path.exists(metrics_path):
+            try:
+                shutil.copy2(metrics_path, history_path)
+                print(
+                    f"[INFO] metrics history bootstrapped from "
+                    f"{metrics_path} → {history_path}"
+                )
+            except OSError as e:
+                print(f"[WARN] metrics history bootstrap failed: {e}")
+
+        # Read existing rows from the authoritative history file.  Falls
+        # back to live metrics only if history is missing AND live exists
+        # (defensive — should not normally happen after bootstrap).
+        read_source = (
+            history_path if os.path.exists(history_path) else metrics_path
+        )
+        existing_rows = []
+        if os.path.exists(read_source):
+            try:
+                with open(read_source) as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            row = json.loads(line)
+                            if row.get("phase") != raw_id:
+                                existing_rows.append(line)
+                        except json.JSONDecodeError:
+                            # Preserve unparseable lines (e.g. agent-written
+                            # rows missing a newline before the next row).
+                            existing_rows.append(line)
+            except OSError as e:
+                print(
+                    f"[WARN] Could not read existing metrics from "
+                    f"{read_source}: {e}"
+                )
+
+        # Compose the new content.  Trailing newline matters — both the
+        # reviewer-gate and the UI parser rely on line-based reading.
+        full_content = "\n".join(existing_rows + [canonical_row]) + "\n"
+
+        # Atomic-write to both targets.  Each target gets its own
+        # ``mkstemp + os.replace`` so a crash mid-write to one file does
+        # not corrupt the other.
+        for target in (history_path, metrics_path):
+            tmpdir = os.path.dirname(target) or "."
+            tmp_path = None
+            try:
+                os.makedirs(tmpdir, exist_ok=True)
+                fd, tmp_path = tempfile.mkstemp(dir=tmpdir, prefix=".metrics_")
+                with os.fdopen(fd, "w") as f:
+                    f.write(full_content)
+                os.replace(tmp_path, target)
+                tmp_path = None  # consumed by replace
+            except Exception as e:
+                print(
+                    f"[ERROR] Failed to write canonical metrics to "
+                    f"{target}: {e}"
+                )
+                if tmp_path and os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+
+        _write_pipeline_event(  # W1-F
+            "phase_complete",
+            raw_id,
+            "reviewer",
+            {
+                "executor_attempts": executor_attempts,
+                "blame_fires": ps_m.get("blame_fires", 0),
+            },
+        )
+        print(
+            f"[INFO] Canonical metrics row written for {raw_id}: "
+            f"{executor_attempts} executor attempt(s), "
+            f"{reviewer_passes} reviewer pass(es), "
+            f"{duration_seconds}s duration"
+        )
+
     def set_reviewer_rejected(self):
         phase_state = {}
         if os.path.exists(PHASE_STATE_FILE):
@@ -3320,6 +3599,16 @@ class Orchestrator:
                         f"stall_threshold={_planner_stall}s "
                         f"infra_backstop={_planner_backstop}s"
                     )
+                    _write_pipeline_event(
+                        "poll_start", raw_id, "planner",
+                        {
+                            "startup_grace": _planner_grace,
+                            "stall_threshold": _planner_stall,
+                            "infra_backstop": _planner_backstop,
+                            "session_key": session_key,
+                            "attempt": retries + 1,
+                        },
+                    )
                     sentinel_found = poll_for_sentinel(
                         sentinel_path,
                         timeout_seconds=_planner_backstop,
@@ -3328,6 +3617,42 @@ class Orchestrator:
                         stall_detection_path=_planner_stamp,
                         stall_threshold_seconds=_planner_stall,
                         startup_grace_seconds=_planner_grace,
+                        heartbeat_interval_seconds=60,
+                    )
+                    _planner_attempt_reason = getattr(sentinel_found, "reason", "unknown")
+                    _planner_attempt_duration = int(time.time() - _attempt_start_time)
+                    _write_pipeline_event(
+                        "poll_outcome", raw_id, "planner",
+                        {
+                            "reason": _planner_attempt_reason,
+                            "stamp_mtime": getattr(sentinel_found, "stamp_mtime", None),
+                            "duration_s": _planner_attempt_duration,
+                            "session_key": session_key,
+                            "attempt": retries + 1,
+                        },
+                    )
+                    print(
+                        f"[ATTEMPT_END] phase={raw_id} agent=planner "
+                        f"attempt={retries + 1} reason={_planner_attempt_reason} "
+                        f"duration={_planner_attempt_duration}s "
+                        f"session_key={session_key}"
+                    )
+                    _write_pipeline_event(
+                        "attempt_end", raw_id, "planner",
+                        {
+                            "reason": _planner_attempt_reason,
+                            "duration_s": _planner_attempt_duration,
+                            "attempt": retries + 1,
+                            "session_key": session_key,
+                        },
+                    )
+                    self._record_phase_outcome(
+                        last_poll_reason=_planner_attempt_reason,
+                        last_attempt_summary=(
+                            f"phase={raw_id} agent=planner attempt={retries + 1} "
+                            f"reason={_planner_attempt_reason} "
+                            f"duration={_planner_attempt_duration}s"
+                        ),
                     )
                     if getattr(sentinel_found, "reason", None) in (
                         "stalled",
@@ -3546,6 +3871,16 @@ class Orchestrator:
                             f"[ABORT] result={'ok' if aborted else 'FAILED'} "
                             f"session_key={_prev_session_key} prior_attempt={retries}"
                         )
+                        _write_pipeline_event(
+                            "abort_attempted", raw_id, "executor",
+                            {
+                                "session_key": _prev_session_key,
+                                "result": "ok" if aborted else "FAILED",
+                                "agent_role": "executor",
+                                "source": "retry_start",
+                                "prior_attempt": retries,
+                            },
+                        )
                         if aborted:
                             _prev_stamp = os.path.join(
                                 PROJECT_ARTIFACTS_DIR, "executor_activity.stamp"
@@ -3556,6 +3891,16 @@ class Orchestrator:
                                     f"stamp_path={_prev_stamp} — gateway acknowledged abort "
                                     f"but stamp is still being refreshed.  Refusing to launch "
                                     f"attempt {retries + 1} on top of a still-streaming session."
+                                )
+                                _write_pipeline_event(
+                                    "abort_verify_failed", raw_id, "executor",
+                                    {
+                                        "session_key": _prev_session_key,
+                                        "stamp_path": _prev_stamp,
+                                        "agent_role": "executor",
+                                        "source": "retry_start",
+                                        "prior_attempt": retries,
+                                    },
                                 )
                                 self.transition_state(
                                     "HALTED_SILENT",
@@ -3610,6 +3955,16 @@ class Orchestrator:
                         f"stall_threshold={_executor_stall}s "
                         f"infra_backstop={_executor_backstop}s"
                     )
+                    _write_pipeline_event(
+                        "poll_start", raw_id, "executor",
+                        {
+                            "startup_grace": _executor_grace,
+                            "stall_threshold": _executor_stall,
+                            "infra_backstop": _executor_backstop,
+                            "session_key": session_key,
+                            "attempt": retries + 1,
+                        },
+                    )
                     sentinel_found = poll_for_sentinel(
                         sentinel_path,
                         timeout_seconds=_executor_backstop,
@@ -3618,6 +3973,42 @@ class Orchestrator:
                         stall_detection_path=_executor_stamp,
                         stall_threshold_seconds=_executor_stall,
                         startup_grace_seconds=_executor_grace,
+                        heartbeat_interval_seconds=60,
+                    )
+                    _executor_attempt_reason = getattr(sentinel_found, "reason", "unknown")
+                    _executor_attempt_duration = int(time.time() - _attempt_start_time)
+                    _write_pipeline_event(
+                        "poll_outcome", raw_id, "executor",
+                        {
+                            "reason": _executor_attempt_reason,
+                            "stamp_mtime": getattr(sentinel_found, "stamp_mtime", None),
+                            "duration_s": _executor_attempt_duration,
+                            "session_key": session_key,
+                            "attempt": retries + 1,
+                        },
+                    )
+                    print(
+                        f"[ATTEMPT_END] phase={raw_id} agent=executor "
+                        f"attempt={retries + 1} reason={_executor_attempt_reason} "
+                        f"duration={_executor_attempt_duration}s "
+                        f"session_key={session_key}"
+                    )
+                    _write_pipeline_event(
+                        "attempt_end", raw_id, "executor",
+                        {
+                            "reason": _executor_attempt_reason,
+                            "duration_s": _executor_attempt_duration,
+                            "attempt": retries + 1,
+                            "session_key": session_key,
+                        },
+                    )
+                    self._record_phase_outcome(
+                        last_poll_reason=_executor_attempt_reason,
+                        last_attempt_summary=(
+                            f"phase={raw_id} agent=executor attempt={retries + 1} "
+                            f"reason={_executor_attempt_reason} "
+                            f"duration={_executor_attempt_duration}s"
+                        ),
                     )
                     if getattr(sentinel_found, "reason", None) in (
                         "stalled",
@@ -3801,6 +4192,16 @@ class Orchestrator:
                             f"stall_threshold={_reviewer_stall}s "
                             f"infra_backstop={_reviewer_backstop}s"
                         )
+                        _write_pipeline_event(
+                            "poll_start", raw_id, "reviewer",
+                            {
+                                "startup_grace": _reviewer_grace,
+                                "stall_threshold": _reviewer_stall,
+                                "infra_backstop": _reviewer_backstop,
+                                "session_key": session_key,
+                                "attempt": retries + 1,
+                            },
+                        )
                         sentinel_found = poll_for_sentinel(
                             sentinel_path,
                             timeout_seconds=_reviewer_backstop,
@@ -3809,6 +4210,43 @@ class Orchestrator:
                             stall_detection_path=_reviewer_stamp,
                             stall_threshold_seconds=_reviewer_stall,
                             startup_grace_seconds=_reviewer_grace,
+                            heartbeat_interval_seconds=60,
+                        )
+                        _reviewer_attempt_reason = getattr(sentinel_found, "reason", "unknown")
+                        _reviewer_attempt_duration = int(time.time() - _attempt_start_time)
+                        _write_pipeline_event(
+                            "poll_outcome", raw_id, "reviewer",
+                            {
+                                "reason": _reviewer_attempt_reason,
+                                "stamp_mtime": getattr(sentinel_found, "stamp_mtime", None),
+                                "duration_s": _reviewer_attempt_duration,
+                                "session_key": session_key,
+                                "attempt": retries + 1,
+                            },
+                        )
+                        print(
+                            f"[ATTEMPT_END] phase={raw_id} agent=reviewer "
+                            f"attempt={retries + 1} reason={_reviewer_attempt_reason} "
+                            f"duration={_reviewer_attempt_duration}s "
+                            f"session_key={session_key}"
+                        )
+                        _write_pipeline_event(
+                            "attempt_end", raw_id, "reviewer",
+                            {
+                                "reason": _reviewer_attempt_reason,
+                                "duration_s": _reviewer_attempt_duration,
+                                "attempt": retries + 1,
+                                "session_key": session_key,
+                            },
+                        )
+                        self._record_phase_outcome(
+                            last_poll_reason=_reviewer_attempt_reason,
+                            last_attempt_summary=(
+                                f"phase={raw_id} agent=reviewer "
+                                f"attempt={retries + 1} "
+                                f"reason={_reviewer_attempt_reason} "
+                                f"duration={_reviewer_attempt_duration}s"
+                            ),
                         )
                         if getattr(sentinel_found, "reason", None) in (
                             "stalled",
@@ -3912,6 +4350,14 @@ class Orchestrator:
                     print(
                         f"[REVIEWER_GATE] verdict={gate_result} "
                         f"pass={_rev_pass} next_agent={_rev_next}"
+                    )
+                    _write_pipeline_event(
+                        "reviewer_verdict", raw_id, "reviewer",
+                        {
+                            "verdict": gate_result,
+                            "pass_number": _rev_pass,
+                            "next_agent": _rev_next,
+                        },
                     )
 
                     if gate_result != "PASS":
@@ -4087,113 +4533,17 @@ class Orchestrator:
                             except Exception as e:
                                 print(f"[ERROR] Failed to append suggestions: {e}")
                                 
-                        # 3.1 Canonical metrics row — deduplicate and write one authoritative row
-                        # after the merge so that reviewer-rejection retries (which cause the
-                        # executor to append extra rows) produce exactly one row per phase.
-                        _metrics_path = os.path.join(PROJECT_ARTIFACTS_DIR, "metrics.jsonl")
-                        _raw_id_for_metrics = self.state.get("current_phase_raw_id", "")
+                        # 3.1 Canonical metrics row — see _write_canonical_metrics_row
+                        # for full rationale.  Extracted to a method so the history-
+                        # preservation logic is testable in isolation and the writer is
+                        # not exposed to symbol drift inside the deep reviewer-PASS block.
                         try:
-                            # Compute duration_seconds from phase_start_time written at phase start.
-                            _duration_seconds = None
-                            _phase_start_time = self.state.get("phase_start_time")
-                            if _phase_start_time:
-                                try:
-                                    _start_dt = datetime.fromisoformat(_phase_start_time)
-                                    _duration_seconds = int(time.time() - _start_dt.timestamp())
-                                except Exception:
-                                    pass
-
-                            # Read goal from current_phase.json (still present before step 4 cleanup).
-                            # detail already contains "Phase X: ..." prefix so use it directly.
-                            _goal_text = ""
-                            _cp_path_m = os.path.join(PROJECT_ARTIFACTS_DIR, "current_phase.json")
-                            if os.path.exists(_cp_path_m):
-                                try:
-                                    with open(_cp_path_m, 'r') as _f_m:
-                                        _cp_data = json.load(_f_m)
-                                    _goal_text = _cp_data.get('detail', '')
-                                except Exception:
-                                    pass
-
-                            # Final retry counts come from pipeline_state (not phase_state which was cleared).
-                            _executor_attempts = self.state.get("executor_retries", 0) + 1
-                            _reviewer_passes = self.state.get("reviewer_retries", 0) + 1
-
-                            # W1-A/B/C: Read phase_state for blame_fires, escalations, skill_used.
-                            # phase_state.json is present until step 4 cleanup below.
-                            _ps_m = {}
-                            if os.path.exists(PHASE_STATE_FILE):
-                                try:
-                                    with open(PHASE_STATE_FILE, 'r') as _f_psm:
-                                        _ps_m = json.load(_f_psm)
-                                except Exception:
-                                    pass
-
-                            # Read existing metrics, strip rows for this phase, append canonical row.
-                            _existing_rows = []
-                            if os.path.exists(_metrics_path):
-                                with open(_metrics_path, 'r') as _f_m:
-                                    for _line in _f_m:
-                                        _line = _line.strip()
-                                        if not _line:
-                                            continue
-                                        try:
-                                            _row = json.loads(_line)
-                                            if _row.get("phase") != _raw_id_for_metrics:
-                                                _existing_rows.append(_line)
-                                        except json.JSONDecodeError:
-                                            _existing_rows.append(_line)
-
-                            _planner_tok = _ps_m.get("planner_tokens_acc", {})
-                            _executor_tok = _ps_m.get("executor_tokens_acc", {})
-                            _reviewer_tok = _ps_m.get("reviewer_tokens_acc", {})
-                            _canonical_row = json.dumps({
-                                "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                                "phase": _raw_id_for_metrics,
-                                "goal": _goal_text,
-                                "executor_attempts": _executor_attempts,
-                                "reviewer_passes": _reviewer_passes,
-                                "blame_fires": _ps_m.get("blame_fires", 0),   # W1-A
-                                "escalations": _ps_m.get("escalations", 0),   # W1-B
-                                "skill_used": _ps_m.get("skill_injected"),     # W1-C
-                                "blame_verdict": _ps_m.get("blame_verdict"),   # null when no blame fired
-                                "planner_tokens": _planner_tok,                # W1-G
-                                "executor_tokens": _executor_tok,              # W1-G
-                                "reviewer_tokens": _reviewer_tok,              # W1-G
-                                "cost_total": round(                           # W1-G
-                                    _planner_tok.get("cost_total", 0.0)
-                                    + _executor_tok.get("cost_total", 0.0)
-                                    + _reviewer_tok.get("cost_total", 0.0),
-                                    6,
-                                ),
-                                "duration_seconds": _duration_seconds,
-                            })
-
-                            _metrics_dir = os.path.dirname(_metrics_path) or PROJECT_ARTIFACTS_DIR
-                            _fd_m, _tmp_m = tempfile.mkstemp(dir=_metrics_dir, prefix=".metrics_")
-                            try:
-                                with os.fdopen(_fd_m, 'w') as _f_m:
-                                    for _row_line in _existing_rows:
-                                        _f_m.write(_row_line + '\n')
-                                    _f_m.write(_canonical_row + '\n')
-                                os.replace(_tmp_m, _metrics_path)
-                            except Exception:
-                                if os.path.exists(_tmp_m):
-                                    os.remove(_tmp_m)
-                                raise
-
-                            _write_pipeline_event(  # W1-F
-                                "phase_complete", _raw_id_for_metrics, "reviewer",
-                                {"executor_attempts": _executor_attempts, "blame_fires": _ps_m.get("blame_fires", 0)},
-                            )
-                            print(
-                                f"[INFO] Canonical metrics row written for {_raw_id_for_metrics}: "
-                                f"{_executor_attempts} executor attempt(s), "
-                                f"{_reviewer_passes} reviewer pass(es), "
-                                f"{_duration_seconds}s duration"
-                            )
+                            self._write_canonical_metrics_row()
                         except Exception as _metrics_err:
-                            print(f"[ERROR] Failed to write canonical metrics row: {_metrics_err}")
+                            print(
+                                f"[ERROR] Failed to write canonical metrics row: "
+                                f"{_metrics_err}"
+                            )
 
                         # 3.5 Audit Archive
                         import shutil
@@ -4359,6 +4709,20 @@ class Orchestrator:
                             reviewer_summary=_rv_out.get("summary"),
                             reviewer_pass=self.state.get("reviewer_retries", 0) + 1,
                         )
+                        # Clear the stale ``executor_succeeded`` flag.  If left
+                        # set, the crash-recovery skip guard (~line 3823) sees
+                        # ``retries == 0`` and ``executor_succeeded == True``,
+                        # short-circuits to "advance to reviewer", and never
+                        # actually invokes the executor — the reviewer then
+                        # reviews the same rejected output, rejects again, and
+                        # the loop continues until ROUTE_ESCALATE fires.  Live
+                        # regression observed on UI-E1 (3 ROUTE_EXECUTORs, 0
+                        # executor invocations).  The reviewer rejecting the
+                        # work means the prior executor output is no longer
+                        # considered "succeeded" for crash-recovery purposes.
+                        _ps_re = self.read_phase_state()
+                        _ps_re.pop("executor_succeeded", None)
+                        self.write_phase_state_atomic(_ps_re)
                         self.increment_reviewer_retries()
                         self.state["current_agent"] = "executor"
                         self.state["executor_retries"] = 0

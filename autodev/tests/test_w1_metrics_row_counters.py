@@ -155,24 +155,40 @@ def test_skill_used_sourced_from_skill_injected():
 
 
 def test_phase_state_read_at_metrics_write_site():
-    """A phase_state read must occur in the canonical metrics block for W1-A/B/C."""
+    """A phase_state read must occur in the canonical metrics block for W1-A/B/C.
+
+    Section 6.0 extracted the inline writer into
+    ``Orchestrator._write_canonical_metrics_row``.  The block start is now
+    that method definition (``metrics_path = os.path.join(...)`` inside),
+    not the inline ``_metrics_path = ...`` assignment that no longer
+    exists.  Accept either spelling so this test pins behaviour rather
+    than implementation detail.
+    """
     lines = _SRC.splitlines()
-    # Find the metrics.jsonl write block (look for _metrics_path and _canonical_row)
     metrics_block_start = None
     for i, ln in enumerate(lines):
-        if "_metrics_path = os.path.join(PROJECT_ARTIFACTS_DIR" in ln:
+        # Either the old inline assignment OR the new method's path-resolve line.
+        if (
+            "_metrics_path = os.path.join(PROJECT_ARTIFACTS_DIR" in ln
+            or "metrics_path = os.path.join(PROJECT_ARTIFACTS_DIR" in ln
+            or "def _write_canonical_metrics_row" in ln
+        ):
             metrics_block_start = i
             break
-    assert metrics_block_start is not None, "_metrics_path assignment not found in orchestrator."
+    assert metrics_block_start is not None, (
+        "Could not locate metrics writer (neither inline _metrics_path "
+        "assignment nor _write_canonical_metrics_row method) in orchestrator."
+    )
 
-    # Within 80 lines of the metrics block start, there must be a phase_state read
-    block = lines[metrics_block_start : metrics_block_start + 80]
+    # Within 100 lines of the writer's start, there must be a phase_state read.
+    # (Method is larger than the old inline block, so search window widened.)
+    block = lines[metrics_block_start : metrics_block_start + 120]
     phase_state_reads = [
         ln for ln in block
         if ("phase_state" in ln or "read_phase_state" in ln or "PHASE_STATE_FILE" in ln)
         and ("open(" in ln or "read_phase_state()" in ln or ".get(" in ln)
     ]
     assert phase_state_reads, (
-        "No phase_state read found within 80 lines of the metrics.jsonl write block. "
+        "No phase_state read found within 120 lines of the metrics writer. "
         "Add a phase_state read to source blame_fires, escalations, and skill_used."
     )

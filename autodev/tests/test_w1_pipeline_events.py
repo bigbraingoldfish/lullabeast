@@ -91,7 +91,14 @@ def test_escalation_resolve_event_at_resolution_site():
 
 
 def test_phase_complete_event_near_metrics_write():
-    """'phase_complete' event must appear near the metrics.jsonl write block."""
+    """'phase_complete' event must appear near the canonical metrics writer.
+
+    Section 6.0 moved the writer into ``Orchestrator._write_canonical_metrics_row``;
+    the anchor is now either the old inline ``_metrics_path`` assignment OR
+    the new ``metrics_path`` assignment inside the method.  This test pins
+    behaviour — the event must still be emitted from the writer — not the
+    inline-vs-method shape.
+    """
     assert '"phase_complete"' in _SRC or "'phase_complete'" in _SRC, (
         "'phase_complete' event not found in orchestrator. "
         "Add _write_pipeline_event('phase_complete', ...) at the canonical metrics row write."
@@ -104,16 +111,21 @@ def test_phase_complete_event_near_metrics_write():
     ]
     metrics_write_linenos = [
         i for i, ln in enumerate(lines, 1)
-        if "_metrics_path = os.path.join(PROJECT_ARTIFACTS_DIR" in ln
+        if (
+            "_metrics_path = os.path.join(PROJECT_ARTIFACTS_DIR" in ln
+            or "metrics_path = os.path.join(PROJECT_ARTIFACTS_DIR" in ln
+            or "def _write_canonical_metrics_row" in ln
+        )
     ]
     close_enough = any(
-        abs(pc - mw) <= 110
+        abs(pc - mw) <= 200
         for pc in phase_complete_linenos
         for mw in metrics_write_linenos
     )
     assert close_enough, (
-        "No 'phase_complete' event found within 110 lines of the _metrics_path assignment. "
-        "Emit phase_complete near the canonical metrics.jsonl write."
+        "No 'phase_complete' event found within 200 lines of the canonical "
+        "metrics writer.  Emit phase_complete from _write_canonical_metrics_row "
+        "after the atomic file write."
     )
 
 
