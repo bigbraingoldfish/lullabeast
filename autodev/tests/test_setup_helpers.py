@@ -171,7 +171,14 @@ def test_ensure_dotenv_stall_timeout_hints_appends_then_idempotent(tmp_path):
     assert setup_helpers.ensure_dotenv_stall_timeout_hints(str(envp)) == "appended"
     text = envp.read_text()
     assert setup_helpers.DOTENV_STALL_HINT_MARKER in text
+    # Both knobs of the two-knob design must be present so fresh installs
+    # discover both via the same comment block.
     assert "# AUTODEV_STALL_TIMEOUT_PLANNER=" in text
+    assert "# AUTODEV_STALL_TIMEOUT_EXECUTOR=" in text
+    assert "# AUTODEV_STALL_TIMEOUT_REVIEWER=" in text
+    assert "# AUTODEV_STARTUP_GRACE_PLANNER=" in text
+    assert "# AUTODEV_STARTUP_GRACE_EXECUTOR=" in text
+    assert "# AUTODEV_STARTUP_GRACE_REVIEWER=" in text
     assert setup_helpers.ensure_dotenv_stall_timeout_hints(str(envp)) == "unchanged"
 
 

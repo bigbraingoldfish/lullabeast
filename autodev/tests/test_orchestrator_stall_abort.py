@@ -256,8 +256,10 @@ class TestPollSiteWiring:
         """
         block = self._agent_block(agent)
         # Match either explicit return or continue-on-False patterns.
+        # Window widened (Section 6.4 added _record_phase_outcome calls
+        # between the helper invocation and the short-circuit return).
         pat = re.compile(
-            r"_handle_stall_outcome\([^)]*\)[\s\S]{0,400}?\b(?:return|continue)\b"
+            r"_handle_stall_outcome\([^)]*\)[\s\S]{0,800}?\b(?:return|continue)\b"
         )
         assert pat.search(block), (
             f"{agent} poll site must short-circuit (return or continue) "

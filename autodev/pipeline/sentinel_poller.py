@@ -127,6 +127,7 @@ def poll_for_sentinel(
     stall_detection_path: str | None = None,
     stall_threshold_seconds: int | None = None,
     startup_grace_seconds: int | None = None,
+    heartbeat_interval_seconds: float | None = None,
 ) -> PollResult:
     """Poll for a sentinel file using a time.sleep loop, strictly avoiding inotify.
 
@@ -202,6 +203,14 @@ def poll_for_sentinel(
         When ``None`` the pre-existing bootstrap-guard behaviour is used
         (stall stays dormant until first advance; pre-first-hook silence
         only times out at ``timeout_seconds``).
+    heartbeat_interval_seconds:
+        Wall-clock seconds between ``[POLL][HEARTBEAT]`` log lines during
+        a long wait.  When set, the loop prints one heartbeat per
+        interval carrying ``elapsed=Ns`` and ``stamp_age=Ns`` so
+        operators reading ``/tmp/orchestrator.log`` can distinguish a
+        hung orchestrator from a healthy long wait at a glance.  When
+        ``None`` (default), no heartbeats fire — preserves existing
+        silence for callers that have not opted in.
 
     Returns
     -------
@@ -225,10 +234,35 @@ def poll_for_sentinel(
     _bootstrap_stamp_mtime: float | None = None
     _agent_has_checked_in = False
     _last_stamp_mtime: float | None = None
+    # Heartbeat bookkeeping — see ``heartbeat_interval_seconds`` doc above.
+    _last_heartbeat = time.monotonic()
 
     while time.monotonic() - start_time < timeout_seconds:
         if stop_sentinel_path and os.path.exists(stop_sentinel_path):
             return PollResult(False, "stopped", _last_stamp_mtime)
+
+        # Periodic heartbeat so a long wait does not look identical to a
+        # hung orchestrator.  Coarse cadence (~60 s in prod) so the line
+        # rate stays low; emitted independently of stall/grace state so
+        # operators see proof of life even before the first hook.
+        if heartbeat_interval_seconds is not None:
+            _now = time.monotonic()
+            if _now - _last_heartbeat >= heartbeat_interval_seconds:
+                _elapsed = int(_now - start_time)
+                _stamp_age = (
+                    int(time.time() - _last_stamp_mtime)
+                    if _last_stamp_mtime is not None
+                    else None
+                )
+                _stamp_age_str = (
+                    f"{_stamp_age}s" if _stamp_age is not None else "never"
+                )
+                print(
+                    f"[POLL][HEARTBEAT] elapsed={_elapsed}s "
+                    f"stamp_age={_stamp_age_str} "
+                    f"checked_in={_agent_has_checked_in}"
+                )
+                _last_heartbeat = _now
         if stall_detection_path is not None and stall_threshold_seconds is not None:
             if os.path.exists(stall_detection_path):
                 try:

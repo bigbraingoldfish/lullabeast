@@ -544,6 +544,17 @@
                 case 'escalation_resolve': return 'bg-blue-600 text-white';
                 case 'phase_complete': return 'bg-green-600 text-white';
                 case 'status_changed': return 'bg-slate-600 text-white';
+                // Section 6 diagnostic event family — operator-specified
+                // purple so poll / abort / verdict / setup events read as
+                // one cohesive group in the Activity Feed.
+                case 'poll_start':
+                case 'poll_outcome':
+                case 'attempt_end':
+                case 'abort_attempted':
+                case 'abort_verify_failed':
+                case 'reviewer_verdict':
+                case 'stamp_init_failed':
+                    return 'bg-[#764cc5] text-white';
                 default: return 'bg-[#1a1d21] text-white';
             }
         }
@@ -555,7 +566,42 @@
             escalation_resolve: 'Resolved',
             phase_complete: 'Complete',
             status_changed: 'Updated',
+            // Section 6 diagnostic events — purple family, single-word labels so
+            // the badge column stays one line.  Hover descriptions in
+            // EVENT_TYPE_DESCRIPTION below explain each one.
+            poll_start: 'Watching',
+            poll_outcome: 'Poll End',
+            attempt_end: 'Attempt',
+            abort_attempted: 'Abort',
+            abort_verify_failed: 'Verify Fail',
+            reviewer_verdict: 'Verdict',
+            stamp_init_failed: 'Setup Fail',
         };
+
+        // Hover descriptions for each event type (rendered as the badge
+        // ``title=`` tooltip).  Section 6 diagnostic events have full
+        // descriptions because their short labels ("Attempt", "Verdict") are
+        // intentionally compact and need context on hover.
+        const EVENT_TYPE_DESCRIPTION = {
+            gate_pass: 'A gate (reviewer) passed and the phase is advancing.',
+            gate_fail: 'A gate rejected an agent\'s output — see detail for the routing decision.',
+            escalation_trigger: 'Pipeline halted for human intervention. See escalation panel.',
+            escalation_resolve: 'A human operator resolved the escalation with a resume command.',
+            phase_complete: 'Phase merged to base and the canonical metrics row was written.',
+            status_changed: 'The pipeline state file was updated (status / agent / phase transition).',
+            poll_start: 'Orchestrator began polling for this agent\'s completion sentinel. Detail lists the active stall threshold and startup grace.',
+            poll_outcome: 'Polling ended. Detail.reason is one of succeeded / stalled / no_first_activity / stopped / timeout.',
+            attempt_end: 'One agent attempt finished. Dense summary mirroring the [ATTEMPT_END] log line.',
+            abort_attempted: 'Orchestrator called abort_agent_session on the prior session. Detail.result is "ok" or "FAILED".',
+            abort_verify_failed: 'Gateway acknowledged the abort but the agent kept refreshing its activity stamp. Pipeline halts rather than launch the next attempt on top of a still-streaming session.',
+            reviewer_verdict: 'The reviewer-gate dispatch decision. Detail.verdict is PASS / ROUTE_EXECUTOR / ROUTE_PLANNER / ROUTE_ESCALATE / MISSING_ARTIFACTS / INFRA_FAILURE / VISUAL_UNVERIFIED.',
+            stamp_init_failed: 'Could not seed the agent activity stamp — workspace dir is missing or unwritable. Stall detection would be silently disabled; pipeline halts loudly instead.',
+        };
+
+        function getEventDescription(eventType) {
+            const key = (eventType || '').toLowerCase();
+            return EVENT_TYPE_DESCRIPTION[key] || '';
+        }
 
         function humanizeSummary(event) {
             const type = event.event || event.event_type || '';
@@ -598,6 +644,66 @@
                 }
                 case 'status_changed':
                     return 'Pipeline state updated';
+
+                // ─── Section 6 diagnostic events — readable prose instead of raw JSON ───
+                case 'poll_start': {
+                    const agent = event.agent || 'agent';
+                    const n = d.attempt;
+                    const grace = d.startup_grace;
+                    const stall = d.stall_threshold;
+                    const tail = (grace != null && stall != null)
+                        ? ` (${grace}s grace, ${stall}s stall threshold)`
+                        : '';
+                    return n != null
+                        ? `Watching ${agent} attempt ${n} for output${tail}`
+                        : `Watching ${agent} for output${tail}`;
+                }
+                case 'poll_outcome':
+                case 'attempt_end': {
+                    const agent = event.agent || 'agent';
+                    const n = d.attempt;
+                    const dur = d.duration_s;
+                    const reason = typeof d.reason === 'string' ? d.reason : '';
+                    const prefix = n != null
+                        ? `${agent[0].toUpperCase() + agent.slice(1)} attempt ${n}`
+                        : `${agent[0].toUpperCase() + agent.slice(1)}`;
+                    const durStr = dur != null ? ` (${dur}s)` : '';
+                    if (reason === 'succeeded') return `${prefix} succeeded${durStr}`;
+                    if (reason === 'stalled') return `${prefix} stalled — no activity past the stall threshold${durStr}`;
+                    if (reason === 'no_first_activity') return `${prefix} never started — no first hook within the startup grace`;
+                    if (reason === 'timeout') return `${prefix} timed out — infrastructure backstop hit (gateway unreachable)${durStr}`;
+                    if (reason === 'stopped') return `${prefix} stopped by operator`;
+                    return reason ? `${prefix} ended — reason=${reason}${durStr}` : `${prefix} ended${durStr}`;
+                }
+                case 'abort_attempted': {
+                    const role = d.agent_role || event.agent || 'agent';
+                    const source = d.source === 'retry_start' ? 'before next retry' : 'on stall';
+                    if (d.result === 'ok') return `Aborted prior ${role} session ${source}`;
+                    if (d.result === 'FAILED') return `Could not abort prior ${role} session ${source} — best-effort retry continues`;
+                    return `Abort attempted on ${role} session`;
+                }
+                case 'abort_verify_failed': {
+                    const role = d.agent_role || event.agent || 'agent';
+                    return `⚠ ${role[0].toUpperCase() + role.slice(1)} kept streaming after abort — pipeline halted to avoid stacking attempts`;
+                }
+                case 'reviewer_verdict': {
+                    const v = d.verdict;
+                    const pass = d.pass_number;
+                    const passStr = pass != null ? `Pass ${pass} — ` : '';
+                    if (v === 'PASS') return `${passStr}Review passed, advancing phase`;
+                    if (v === 'ROUTE_EXECUTOR') return `${passStr}Sending back to executor with blocking issues`;
+                    if (v === 'ROUTE_PLANNER') return `${passStr}Sending back to planner (attribution: plan)`;
+                    if (v === 'ROUTE_ESCALATE') return `${passStr}Escalating to human after repeated rejections`;
+                    if (v === 'MISSING_ARTIFACTS') return `${passStr}Required output files missing — re-running executor`;
+                    if (v === 'INFRA_FAILURE') return `${passStr}Reviewer infrastructure failure — retrying`;
+                    if (v === 'VISUAL_UNVERIFIED') return `${passStr}Visual verification artifacts missing — re-running reviewer`;
+                    return v ? `${passStr}Verdict: ${v}` : `${passStr}Verdict recorded`;
+                }
+                case 'stamp_init_failed': {
+                    const role = d.agent_role || event.agent || 'agent';
+                    return `Could not initialize ${role} activity stamp — workspace dir missing or unwritable`;
+                }
+
                 default:
                     return formatPipelineEventDetail(d) || type;
             }
@@ -2268,10 +2374,11 @@
                         <span className="text-xs text-slate-300 w-40 flex-shrink-0 truncate" title={phaseTitle}>
                             {phaseLabel}
                         </span>
-                        <span className="w-20 flex-shrink-0 flex items-center">
+                        <span className="w-28 flex-shrink-0 flex items-center">
                             <span
                                 data-event-type={rawType || 'unknown'}
-                                className={`px-2 py-0.5 rounded text-xs font-medium ${badgeColor}`}
+                                title={getEventDescription(rawType) || labelText}
+                                className={`px-2 py-0.5 rounded text-xs font-medium whitespace-nowrap ${badgeColor}`}
                             >
                                 {labelText}
                             </span>
