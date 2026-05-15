@@ -3719,7 +3719,16 @@ class Orchestrator:
                                 time.sleep(5)
                                 continue
                             print("[ERROR] Planner gate failed")
-                            _write_pipeline_event("gate_fail", raw_id, "planner", {"exit_code": 1})  # W1-F
+                            # gate_fail detail carries last_error_code for activity feed (H-23 prose); gate wrote phase_state before emit.
+                            _write_pipeline_event(
+                                "gate_fail",
+                                raw_id,
+                                "planner",
+                                {
+                                    "exit_code": 1,
+                                    "last_error_code": self.read_phase_state().get("last_error_code"),
+                                },
+                            )  # W1-F
                             self.write_failure_context("planner", self.state.get("planner_retries", 0) + 1)
                             retries = self.increment_planner_retries()
                             
@@ -4087,7 +4096,15 @@ class Orchestrator:
                             continue
                         else:
                             print("[ERROR] Executor gate failed")
-                            _write_pipeline_event("gate_fail", raw_id, "executor", {"exit_code": 1})  # W1-F
+                            _write_pipeline_event(
+                                "gate_fail",
+                                raw_id,
+                                "executor",
+                                {
+                                    "exit_code": 1,
+                                    "last_error_code": self.read_phase_state().get("last_error_code"),
+                                },
+                            )  # W1-F
                             self.write_failure_context("executor", self.state.get("executor_retries", 0) + 1)
                             if self._escalate_if_provider_rejected(_jsonl_path, "Executor"):
                                 time.sleep(5)
@@ -4361,7 +4378,15 @@ class Orchestrator:
                     )
 
                     if gate_result != "PASS":
-                        _write_pipeline_event("gate_fail", raw_id, "reviewer", {"gate_result": gate_result})  # W1-F
+                        _write_pipeline_event(
+                            "gate_fail",
+                            raw_id,
+                            "reviewer",
+                            {
+                                "gate_result": gate_result,
+                                "last_error_code": self.read_phase_state().get("last_error_code"),
+                            },
+                        )  # W1-F
                         if self._escalate_if_provider_rejected(_jsonl_path, "Reviewer"):
                             time.sleep(5)
                             continue

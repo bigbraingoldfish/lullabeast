@@ -296,35 +296,38 @@ def test_app_state_includes_retry_counts(html_content):
     assert "planner_retries" in html_content and "executor_retries" in html_content and "reviewer_retries" in html_content
 
 
-# Tests for LastErrorCode component
-
-def test_last_error_code_component_exists(html_content):
-    """LastErrorCode React component exists and displays error in monospace."""
-    has_component = bool(re.search(r'function\s+LastErrorCode|LastErrorCode\s*=', html_content))
-    assert has_component, "LastErrorCode component not found"
-    
-    has_monospace = bool(re.search(r'font-mono', html_content))
-    assert has_monospace, "LastErrorCode should use monospace font"
-    
-    has_red = bool(re.search(r'text-red-\d+|text-red-', html_content))
-    assert has_red, "LastErrorCode should use red color"
+# LastErrorCode chip removed from Current Phase; H-23 titles reused in activity feed (humanizeSummary).
 
 
-def test_last_error_code_renders_conditionally(html_content):
-    """LastErrorCode returns null when errorCode is not present."""
-    has_conditional = bool(re.search(r'!errorCode.*return\s+null|errorCode\s*===\s*null.*return\s+null', html_content))
-    assert has_conditional, "LastErrorCode should return null when errorCode is absent"
+def test_last_error_code_chip_removed_from_sidebar(html_content):
+    """Current Phase no longer renders LastErrorCode chip (confusing vs resolved history)."""
+    assert not re.search(r"function\s+LastErrorCode", html_content), "LastErrorCode component must be removed"
+    assert "<LastErrorCode" not in html_content
+    assert 'data-testid="last-error-code"' not in html_content
 
 
-def test_current_phase_panel_renders_last_error_code(html_content):
-    """CurrentPhasePanel renders LastErrorCode component."""
-    has_render = bool(re.search(r'<LastErrorCode', html_content))
-    assert has_render, "LastErrorCode not rendered in CurrentPhasePanel"
+def test_humanize_summary_gate_fail_wires_h23_titles(html_content):
+    """gate_fail branch uses phase last_error_code + getLastErrorCodeTitle for feed copy."""
+    assert "function getLastErrorCodeTitle" in html_content
+    hs = html_content.find("function humanizeSummary(event)")
+    assert hs != -1, "humanizeSummary not found"
+    gf = html_content.find("case 'gate_fail': {", hs)
+    assert gf != -1, "humanizeSummary gate_fail case block not found"
+    block = html_content[gf : gf + 1200]
+    assert "d.last_error_code" in block and "getLastErrorCodeTitle" in block, (
+        "gate_fail summary must reference d.last_error_code and getLastErrorCodeTitle"
+    )
 
 
-def test_app_state_includes_last_error_code(html_content):
-    """Pipeline screen state includes last_error_code."""
-    assert "last_error_code" in html_content and "PipelineScreen" in html_content
+def test_app_state_includes_last_error_code_via_api(html_content):
+    """GET /api/state still exposes last_error_code from phase_state (sidebar no longer reads it)."""
+    assert "PipelineScreen" in html_content
+    server_path = Path(__file__).parent.parent / "ui" / "server.py"
+    assert server_path.exists()
+    server_code = server_path.read_text()
+    assert bool(
+        re.search(r"last_error_code.*phase_state|phase_state.*last_error_code", server_code)
+    ), "server.py should still map last_error_code from phase_state for /api/state"
 
 
 # Tests for ElapsedTimer component
@@ -342,8 +345,8 @@ def test_elapsed_timer_uses_useeffect(html_content):
     """ElapsedTimer uses useEffect to manage the timer interval."""
     start = html_content.find("function ElapsedTimer")
     assert start != -1, "ElapsedTimer function not found"
-    end = html_content.find("function SkillInjected", start)
-    assert end != -1, "SkillInjected boundary not found after ElapsedTimer"
+    end = html_content.find("function splitApiDetail", start)
+    assert end != -1, "splitApiDetail boundary not found after ElapsedTimer"
     timer_block = html_content[start:end]
     assert "useEffect" in timer_block, "ElapsedTimer should use useEffect"
 
@@ -375,33 +378,19 @@ def test_app_state_includes_last_action_timestamp(html_content):
     """Pipeline screen state includes last_action_timestamp."""
     assert "last_action_timestamp" in html_content and "PipelineScreen" in html_content
 
-# Tests for SkillInjected component
-
-def test_skill_injected_component_exists(html_content):
-    """SkillInjected React component exists and displays discipline / agent."""
-    has_component = bool(re.search(r'function\s+SkillInjected|SkillInjected\s*=', html_content))
-    assert has_component, "SkillInjected component not found"
-    
-    # Check for muted text (slate-500)
-    has_muted = bool(re.search(r'text-slate-500', html_content))
-    assert has_muted, "SkillInjected should use muted text color"
+# SkillInjected line removed from Current Phase (queue / metrics still show skill).
 
 
-def test_skill_injected_renders_conditionally(html_content):
-    """SkillInjected returns null when skill_injected or skill_agent is not present."""
-    has_conditional = bool(re.search(r'!skillInjected.*return\s+null|!skillAgent.*return\s+null', html_content))
-    assert has_conditional, "SkillInjected should return null when skill_injected or skill_agent is absent"
+def test_skill_injected_removed_from_current_phase(html_content):
+    """Discipline/agent line no longer duplicated under Agent attempts."""
+    assert not re.search(r"function\s+SkillInjected", html_content), "SkillInjected helper must be removed"
+    assert "<SkillInjected" not in html_content
 
 
-def test_current_phase_panel_renders_skill_injected(html_content):
-    """CurrentPhasePanel renders SkillInjected component."""
-    has_render = bool(re.search(r'<SkillInjected', html_content))
-    assert has_render, "SkillInjected not rendered in CurrentPhasePanel"
-
-
-def test_app_state_includes_skill_fields(html_content):
-    """Pipeline screen state includes skill_injected and skill_agent."""
-    assert "skill_injected" in html_content and "skill_agent" in html_content and "PipelineScreen" in html_content
+def test_queue_or_metrics_still_surfaces_skill_fields(html_content):
+    """skill_injected / skill_agent remain in bundle for queue snapshot / API consumers."""
+    assert "PipelineScreen" in html_content
+    assert "skill_injected" in html_content and "skill_agent" in html_content
 
 
 # Tests for API endpoint

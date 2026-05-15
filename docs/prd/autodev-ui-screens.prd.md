@@ -198,11 +198,11 @@ Responsive: on narrow screens, stack vertically (header → phase → roadmap �
 
 **Attempt counters** — Planner / Executor / Reviewer **`AgentAttemptRow`** lines: three boxed cells (icons / digits) plus neutral **`n/3`** fraction; `getAgentAttemptDotStates` + `computeAgentAttemptFractionN`.
 
-**Last error code** — When present, monospace; optional expand.
+**Gate errors** — Not a monospace `last_error_code` chip under **Agent attempts**; use the **Activity** feed (`gate_fail.detail.last_error_code` + H-23 prose in row summary / hover). `last_error_code` stays on **`GET /api/state`**.
 
 **Elapsed in current state** — Live timer from `last_action_timestamp`; **amber** emphasis if stuck in `WAITING_FOR_SENTINEL` beyond ~5 minutes.
 
-**Skill injected** — When `skill_injected` + `skill_agent` present: small muted line.
+**Skill context** — No duplicate "discipline / agent" line under **Agent attempts**; queue detail / metrics still use `skill_injected` + `skill_agent` from state when present.
 
 **Empty phase** — `IDLE` / `UNKNOWN` + no `current_phase_raw_id`: **No pipeline running.** + steer to Ideas / Setup / queue (`data-testid="current-phase-empty-idle"`). Else: **No active phase**.
 

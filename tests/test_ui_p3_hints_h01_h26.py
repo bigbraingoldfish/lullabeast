@@ -112,7 +112,7 @@ def test_server_path_input_accepts_placeholder_prop(html_content):
     assert 'placeholder = "/path/to/your-project/my-app"' in block
 
 
-# H-23: LastErrorCode / getLastErrorCodeTitle — native titles for gate last_error_code (top 5 + validation split)
+# H-23: getLastErrorCodeTitle — long-form copy for gate last_error_code (activity feed gate_fail + tooltips)
 
 H23_ERR_UNACCOUNTED = (
     "Executor Error: files were removed that weren’t part of the phase’s declared work. "
@@ -145,6 +145,7 @@ H23_DEFAULT = "Something in the last pipeline step failed. See orchestrator or g
 
 
 def test_last_error_code_titles_h23(html_content):
+    """H-23 string corpus + title map remain; chip removed; feed gate_fail uses titles."""
     assert H23_ERR_UNACCOUNTED in html_content
     assert H23_ERR_TESTS in html_content
     assert H23_ERR_GIT_DIFF in html_content
@@ -157,9 +158,13 @@ def test_last_error_code_titles_h23(html_content):
     assert H23_DEFAULT in html_content
     assert "function getLastErrorCodeTitle" in html_content
     assert "P3_LAST_ERROR_CODE_DEFAULT_TITLE" in html_content
-    assert 'data-testid="last-error-code"' in html_content
-    assert "title={getLastErrorCodeTitle(errorCode, currentAgent)}" in html_content
-    assert (
-        "<LastErrorCode errorCode={last_error_code} currentAgent={current_agent} />"
-        in html_content
-    )
+    assert 'data-testid="last-error-code"' not in html_content
+    assert "<LastErrorCode" not in html_content
+    gf = html_content.find("function humanizeSummary(event)")
+    assert gf != -1
+    block = html_content[gf : gf + 3500]
+    assert "case 'gate_fail': {" in block
+    gf_case = block.index("case 'gate_fail': {")
+    sub = block[gf_case : gf_case + 2000]
+    assert "d.last_error_code" in sub or "d['last_error_code']" in sub
+    assert "getLastErrorCodeTitle" in sub

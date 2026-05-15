@@ -11,7 +11,7 @@ def _html() -> str:
 
 def _elapsed_timer_body(html: str) -> str:
     start = html.index("function ElapsedTimer(")
-    end = html.index("function SkillInjected(", start)
+    end = html.index("function splitApiDetail(", start)
     return html[start:end]
 
 

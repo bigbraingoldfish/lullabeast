@@ -203,11 +203,11 @@ Responsive: on narrow screens, stack vertically (phase → roadmap → feed).
 
 **Agent attempts** — Section heading plus three rows (`Planner` / `Executor` / `Reviewer`). Each row shows **three boxed attempt cells** and a neutral **`n/3`** fraction (`computeAgentAttemptFractionN` + `getAgentAttemptDotStates` in `ui/index.html`). **Pending** = slate + index digit; **in-flight** = blue `#3b82f6` with optional subtle cell pulse (distinct from pipeline teal and success lime); **success** = lime `#2DEB1E` + check; **failure** = red `#dc2626` + X. **`AgentAttemptRow`**; cell **`title`** from `AGENT_ATTEMPT_DOT_TITLES`; fills use `AGENT_ATTEMPT_DOT_HEX`. (Orchestrator may reset `executor_retries` on `ROUTE_EXECUTOR`.)
 
-**Last error code** — Only shown if the last gate failed. Direct read of `last_error_code` from `phase_state.json`. Displayed as-is in monospace (e.g., `ERR_MANIFEST_FILE_MISSING`, `ERR_TESTS_FAILING`). If `phase_state.json` is absent or the field is missing, show nothing.
+**Gate errors (human-readable)** — The Current Phase strip does **not** show a monospace `last_error_code` chip (that read as an active failure and duplicated the Activity feed). Operators see gate failures in the **Activity** tab: `gate_fail` events carry `last_error_code` in `detail` (orchestrator snapshots `phase_state` at emit time), and the feed renders routing text plus the same long-form H-23 explanations as before (`getLastErrorCodeTitle` in `humanizeSummary`). `last_error_code` remains on **`GET /api/state`** for APIs and tooling.
 
 **Elapsed in current state** — How long the pipeline has been in its current state. Updates live. Turns amber if WAITING_FOR_SENTINEL exceeds 5 minutes (useful for spotting a hung agent before the heartbeat cron catches it).
 
-**Skill injected** — If a skill was injected for the current phase/agent, show the discipline name in small text. "infra-config / executor" for example. If no skill, show nothing. *Requires PATCH-1 (see Pre-Implementation Orchestrator Patches): the orchestrator must write `skill_injected` and `skill_agent` to `phase_state.json` at each injection call site. Without this patch, this field has no data source and must show nothing.*
+**Skill context** — The Current Phase strip does **not** show a separate "discipline / agent" line under **Agent attempts** (queue project detail and roadmap/metrics still surface skill when needed). *PATCH-1 (orchestrator writes `skill_injected` / `skill_agent` to `phase_state.json`) remains the data source for those surfaces.*
 
 **Empty phase (no `current_phase_raw_id`)** — When `pipeline_status` is **`IDLE`** or **`UNKNOWN`**, show **No pipeline running.** and steering copy to Project Ideas / Setup & Preflight / queue (`data-testid="current-phase-empty-idle"`). Other statuses: single **No active phase** line.
 
@@ -399,7 +399,7 @@ The server must handle the orchestrator not running — all endpoints return gra
 The following changes to `orchestrator.py` must be completed before **UI-PHASE** begins. These are orchestrator tasks, not UI phases — commit them separately before the UI roadmap starts.
 
 **PATCH-1 (required): `skill_injected` write**
-At each `skill_manager.inject_skill()` call site in `orchestrator.py`, write `{"skill_injected": "<discipline>", "skill_agent": "<role>"}` to `phase_state.json`. This is the data source for the "Skill injected" display in the Current Phase Panel. Without this patch, that field has no data source and shows nothing.
+At each `skill_manager.inject_skill()` call site in `orchestrator.py`, write `{"skill_injected": "<discipline>", "skill_agent": "<role>"}` to `phase_state.json`. This is the data source for queue snapshots, metrics, and any UI that still reads skill fields from state. Without this patch, those surfaces have no skill data.
 
 **PATCH-2 (recommended): `escalation_trigger_reason` write**
 When the orchestrator transitions to `WAITING_FOR_HUMAN`, write the trigger reason string (e.g., `"executor retries exhausted"`, `"reviewer retries exhausted"`, `"reset cap reached"`) to `phase_state.json` under the key `escalation_trigger_reason`. The command panel header falls back to `last_action` from `pipeline_state.json` if this field is absent — so PATCH-2 is an improvement, not a blocker.

@@ -8,6 +8,10 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Changed
+
+- **Pipeline Monitor Current Phase:** Removed the monospace **`last_error_code`** chip and the **skill / agent** line under **Agent attempts** (they read as live failures and duplicated queue/metrics). **`last_error_code`** and **`skill_*`** remain on **`GET /api/state`** and in queue snapshots. **`gate_fail`** lines in **`pipeline_events.jsonl`** now include **`last_error_code`** from **`phase_state`** at emit time; the Activity feed **`humanizeSummary`** path appends the existing H-23 long titles via **`getLastErrorCodeTitle`**, with the same text on the row **`title`** when present. See **`autodev/tests/test_gate_fail_event_last_error_code.py`**.
+
 ### Added
 
 - **Executor session abort on retry:** Before each executor webhook for attempt N+1 (`executor_retries` > 0), `orchestrator.py` calls `abort_agent_session()` in `webhook_client.py`, which opens the OpenClaw Gateway WebSocket (`/__openclaw__/ws`), handshakes with `gateway.auth.token`, and sends RPC `sessions.abort` for the previous session key (`…executor-attempt-N`). This is best-effort (logs and continues on failure). `load_config()` now exposes `gateway_token` and `gateway_ws_url` from `openclaw.json` (`gateway.port` default 18789). `websocket-client==1.2.3` is pinned in `ui/requirements.txt`.
