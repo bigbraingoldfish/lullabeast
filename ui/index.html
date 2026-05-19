@@ -2074,12 +2074,105 @@
             );
         }
 
+        // Renders completion-report markdown to HTML via the shared `marked` library
+        // (already loaded at the top of the file). The code-block renderer is
+        // overridden so each fenced block gets a per-block Copy button.
+        //
+        // The Copy click is handled via event delegation in renderCompletionReport
+        // below — the renderer output is inert HTML inserted via
+        // dangerouslySetInnerHTML, so React click handlers cannot be attached
+        // directly.
+        function makeCompletionRenderer() {
+            if (typeof marked === "undefined" || !marked.Renderer) return null;
+            const renderer = new marked.Renderer();
+            // marked v4 signature: code(code, infostring, escaped)
+            // marked v5+ token signature: code({ text, lang })
+            renderer.code = function(code, infostring) {
+                let body, lang;
+                if (typeof code === 'object' && code !== null) {
+                    body = code.text || '';
+                    lang = (code.lang || '').trim();
+                } else {
+                    body = String(code || '');
+                    lang = String(infostring || '').trim();
+                }
+                const escapedHtml = body
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;');
+                return (
+                    '<div class="completion-code-wrap relative my-2">' +
+                        '<button type="button" data-testid="completion-report-copy-button" ' +
+                        'class="completion-copy-btn absolute top-1 right-1 px-2 py-0.5 text-[10px] rounded ' +
+                        'bg-[#181a1c] hover:bg-slate-700 text-slate-200 border border-slate-600 z-10" ' +
+                        'aria-label="Copy to clipboard">Copy</button>' +
+                        '<pre class="pr-14"><code' + (lang ? ' class="language-' + lang + '"' : '') + '>' +
+                        escapedHtml +
+                        '</code></pre>' +
+                    '</div>'
+                );
+            };
+            return renderer;
+        }
+
+        function renderCompletionMarkdown(content) {
+            if (!content) return '';
+            if (typeof marked === "undefined" || !marked.parse) {
+                return String(content).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+            }
+            const renderer = makeCompletionRenderer();
+            const opts = { breaks: true };
+            if (renderer) opts.renderer = renderer;
+            try {
+                return marked.parse(content, opts);
+            } catch (err) {
+                return String(content).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+            }
+        }
+
         // ─── RoadmapPanel ─────────────────────────────────────────────────────────
         // Wrapped in React.memo so it only re-renders when roadmap or metricsSummary
         // props actually change — avoids DOM churn caused by parent pState polling.
 
         const RoadmapPanel = React.memo(function RoadmapPanel({ roadmap, metricsSummary, pipelineStatus, completionReport, runStartedAt }) {
             const [expandedPhaseId, setExpandedPhaseId] = useState(null);
+            const lastScrolledMtimeRef = useRef(null);
+            const completionContentRef = useRef(null);
+
+            useEffect(() => {
+                if (pipelineStatus !== 'PIPELINE_COMPLETE') return;
+                if (!completionReport || !completionReport.found) return;
+                if (lastScrolledMtimeRef.current === completionReport.mtime) return;
+                lastScrolledMtimeRef.current = completionReport.mtime;
+                // Defer a frame so the synthetic row has rendered before we scroll.
+                requestAnimationFrame(() => {
+                    const el = document.querySelector('[data-testid="completion-report-phase-row"]');
+                    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                });
+            }, [pipelineStatus, completionReport && completionReport.found, completionReport && completionReport.mtime]);
+
+            // Event delegation for Copy buttons inside the markdown-rendered code blocks.
+            // The buttons are inert HTML (dangerouslySetInnerHTML output), so React's
+            // onClick won't fire on them. Instead we listen on the container.
+            useEffect(() => {
+                const node = completionContentRef.current;
+                if (!node) return;
+                const onClick = (e) => {
+                    const btn = e.target.closest('.completion-copy-btn');
+                    if (!btn || !node.contains(btn)) return;
+                    e.stopPropagation();
+                    const codeEl = btn.parentElement && btn.parentElement.querySelector('pre code');
+                    const text = codeEl ? codeEl.textContent : '';
+                    try {
+                        navigator.clipboard.writeText(text);
+                        const original = btn.textContent;
+                        btn.textContent = 'Copied';
+                        setTimeout(() => { if (btn) btn.textContent = original || 'Copy'; }, 1500);
+                    } catch (err) { /* clipboard blocked — no-op */ }
+                };
+                node.addEventListener('click', onClick);
+                return () => node.removeEventListener('click', onClick);
+            }, [completionReport && completionReport.mtime]);
 
             const handlePhaseClick = (phaseId) => {
                 setExpandedPhaseId(prev => prev === phaseId ? null : phaseId);
@@ -2242,33 +2335,23 @@
                             );
                         })}
 
-                        {/* W5-D: Synthetic Completion Report phase entry */}
+                        {/* W5-D: Synthetic completion-report row — always expanded so drag-
+                            selecting CLI commands inside cannot collapse the section mid-copy. */}
                         {pipelineStatus === 'PIPELINE_COMPLETE' && completionReport && completionReport.found && (() => {
                             const isStale = runStartedAt && completionReport.mtime &&
                                 completionReport.mtime < (new Date(runStartedAt).getTime() / 1000);
-                            const isExpanded = expandedPhaseId === '__completion_report__';
                             return (
                                 <div
                                     key="__completion_report__"
-                                    role="button"
-                                    tabIndex={0}
                                     aria-label="Completion Report"
-                                    aria-expanded={isExpanded}
                                     data-testid="completion-report-phase-row"
-                                    className={`p-3 rounded border border-emerald-700/40 cursor-pointer transition-colors bg-emerald-950/20 hover:bg-emerald-950/40`}
-                                    onClick={() => setExpandedPhaseId(prev => prev === '__completion_report__' ? null : '__completion_report__')}
-                                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setExpandedPhaseId(prev => prev === '__completion_report__' ? null : '__completion_report__'); }}
+                                    className="p-3 rounded border border-emerald-700/40 bg-emerald-950/20"
                                 >
                                     <div className="flex items-start gap-2">
                                         <span className="text-lg flex-shrink-0 text-emerald-600">&#9632;</span>
                                         <div className="flex-1 min-w-0">
                                             <div className="header-text text-sm font-semibold text-emerald-400 flex items-center gap-2">
                                                 Completion Report
-                                                {isExpanded ? (
-                                                    <span className="text-blue-400 text-xs">▼</span>
-                                                ) : (
-                                                    <span className="text-slate-500 text-xs">▶</span>
-                                                )}
                                                 {isStale && (
                                                     <span className="text-xs text-amber-500 font-normal">(from previous run)</span>
                                                 )}
@@ -2276,13 +2359,11 @@
                                             <p className="text-sm text-slate-400 mt-1">
                                                 What was built · how to run it · suggested next steps
                                             </p>
-                                            {isExpanded && (
-                                                <div className="mt-3 pt-2 border-t border-emerald-700/30">
-                                                    <pre className="text-xs text-slate-300 whitespace-pre-wrap font-mono overflow-y-auto max-h-64 leading-relaxed">
-                                                        {completionReport.content}
-                                                    </pre>
-                                                </div>
-                                            )}
+                                            <div
+                                                ref={completionContentRef}
+                                                className="msg-md mt-3 pt-2 border-t border-emerald-700/30 overflow-y-auto max-h-[75vh] text-sm"
+                                                dangerouslySetInnerHTML={{ __html: renderCompletionMarkdown(completionReport.content) }}
+                                            />
                                         </div>
                                     </div>
                                 </div>

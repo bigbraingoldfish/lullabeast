@@ -229,3 +229,61 @@ class TestPostCompletionReviewTrigger:
             f"Endpoint took {elapsed:.1f}s — must return immediately after triggering webhook, "
             "not block waiting for sentinel"
         )
+
+
+class TestCompletionMessageWalkthroughStructure:
+    """The on-demand UI trigger and the auto-end-of-pipeline trigger must produce
+    identically-structured completion_report.md walkthroughs. See plan §2.
+
+    These assertions mirror autodev/tests/test_orchestrator_completion_review.py's
+    TestCompletionMessageContent so the two code paths stay in sync.
+    """
+
+    def _capture_message(self, tmp_path):
+        config = _base_config(tmp_path, pipeline_status="PIPELINE_COMPLETE")
+        client = load_client()
+        with patch("ui.server.load_config", return_value=config), \
+             patch("ui.server._check_orchestrator_liveness", return_value=False), \
+             patch("ui.server.SkillManager"), \
+             patch("ui.server.invoke_agent_webhook", return_value=None) as mock_webhook, \
+             patch("ui.server.cleanup_output_files", return_value=None):
+            resp = client.post("/api/completion-review/my-project")
+        assert resp.status_code == 200
+        kwargs = mock_webhook.call_args.kwargs
+        return kwargs.get("message", ""), config["project_dir_path"]
+
+    def test_message_includes_open_terminal_step(self, tmp_path):
+        msg, _ = self._capture_message(tmp_path)
+        assert "Open Terminal" in msg or "Open a terminal" in msg, (
+            "UI trigger prompt must begin the run instructions with 'Open Terminal'"
+        )
+
+    def test_message_includes_cd_to_project_path(self, tmp_path):
+        msg, project_dir = self._capture_message(tmp_path)
+        assert "cd " in msg, "UI trigger prompt must include a `cd ` step"
+        assert project_dir in msg, (
+            f"UI trigger prompt must interpolate the absolute project path "
+            f"({project_dir!r}) — so the agent writes `cd /actual/path`, not `cd <your-path>`"
+        )
+
+    def test_message_uses_fresh_terminal_framing(self, tmp_path):
+        msg, _ = self._capture_message(tmp_path)
+        framing = msg.lower()
+        assert "fresh terminal" in framing or "no prior context" in framing, (
+            "UI trigger prompt must frame the audience as a fresh-terminal reader"
+        )
+
+    def test_message_requires_per_command_fenced_blocks(self, tmp_path):
+        msg, _ = self._capture_message(tmp_path)
+        lower = msg.lower()
+        assert "fenced" in lower or "```" in msg, (
+            "UI trigger prompt must require fenced code blocks"
+        )
+        assert "each" in lower or "one fenced" in lower or "own" in lower, (
+            "UI trigger prompt must require ONE fenced block per command"
+        )
+
+    def test_message_contains_no_placeholder_literals(self, tmp_path):
+        msg, _ = self._capture_message(tmp_path)
+        assert "<your-path>" not in msg, "prompt must not contain a placeholder literal"
+        assert "<project>" not in msg, "prompt must not contain a placeholder literal"
