@@ -44,7 +44,7 @@ _ROADMAP_CONVERTER_ENTRY = {
 
 
 def _full_agents_list(openclaw: Path) -> list:
-    """Six pipeline agents as install.sh step 9 would register (for default openclaw.json)."""
+    """Six pipeline agents as install.sh step 8 would register (for default openclaw.json)."""
     m = {"primary": "openrouter/minimax/minimax-m2.7", "fallbacks": []}
     root = str(openclaw)
     esc_tools = {"allow": ["read", "write"], "deny": ["edit", "apply_patch", "exec"]}

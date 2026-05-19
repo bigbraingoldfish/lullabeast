@@ -65,7 +65,7 @@ autodev-ui/
 │   ├── autodev-ui.service          # systemd unit file (Linux / WSL2)
 │   └── com.autodev.ui.plist        # macOS LaunchAgent — mirrors the systemd unit
 ├── tests/                          # UI server tests (~50 pytest files)
-├── install.sh                      # Deployment script (10 steps, see SETUP.md)
+├── install.sh                      # Deployment script (14 steps, see SETUP.md)
 ├── SETUP.md                        # Human-facing setup guide
 └── .env                            # Local path config (gitignored, written by install.sh)
 ```

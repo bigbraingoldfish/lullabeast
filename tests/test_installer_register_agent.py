@@ -306,7 +306,7 @@ class TestErrorHandling:
 
 
 # ---------------------------------------------------------------------------
-# install.sh Step 6 — roadmap-converter workspace (contract + source files)
+# install.sh Step 5 — roadmap-converter workspace (contract + source files)
 # ---------------------------------------------------------------------------
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -315,29 +315,29 @@ _INSTALL_SH = _REPO_ROOT / "install.sh"
 
 def _install_sh_step6_section() -> str:
     text = _INSTALL_SH.read_text(encoding="utf-8")
-    start = text.index("6/15  AGENT WORKSPACE PROVISIONING")
-    end = text.index("7/15  EXEC-APPROVALS VALIDATION")
+    start = text.index("5/14  AGENT WORKSPACE PROVISIONING")
+    end = text.index("6/14  EXEC-APPROVALS VALIDATION")
     return text[start:end]
 
 
-def _install_sh_step9_section() -> str:
+def _install_sh_step8_register_section() -> str:
     text = _INSTALL_SH.read_text(encoding="utf-8")
-    start = text.index("9/15  REGISTER AUTODEV AGENTS")
-    end = text.index("10/15  CONVERSION PROMPT")
+    start = text.index("8/14  REGISTER AUTODEV AGENTS")
+    end = text.index("9/14  CONVERSION PROMPT")
     return text[start:end]
 
 
-class TestStep6RoadmapConverterWorkspace:
+class TestStep5RoadmapConverterWorkspace:
     def test_roadmap_converter_workspace_files_match_source(self):
         rc = _REPO_ROOT / "autodev" / "agents" / "roadmap-converter"
         for name in ("IDENTITY.md", "SOUL.md", "TOOLS.md", "AGENTS.md", "USER.md"):
             assert (rc / name).is_file(), f"missing {name}"
         assert not (rc / "HEARTBEAT.md").exists()
 
-    def test_step6_provisions_roadmap_converter(self):
+    def test_step5_provisions_roadmap_converter(self):
         step6 = _install_sh_step6_section()
         loops = list(re.finditer(r"for agent in ([^;]+);\s*do", step6))
-        assert len(loops) == 4, f"expected 4 'for agent in' loops in step 6, got {len(loops)}"
+        assert len(loops) == 4, f"expected 4 'for agent in' loops in step 5, got {len(loops)}"
         for m in loops:
             agents = " ".join(m.group(1).split())
             assert "roadmap-converter" in agents, f"missing roadmap-converter in: {agents!r}"
@@ -346,51 +346,51 @@ class TestStep6RoadmapConverterWorkspace:
         assert step6.count('mkdir -p "$dst_dir/skills"') >= 1
 
 
-class TestStep6WorkspacePipelineSymlinks:
-    """Contract: install.sh step 6 wires pipeline agents to the shared hub symlink."""
+class TestStep5WorkspacePipelineSymlinks:
+    """Contract: install.sh step 5 wires pipeline agents to the shared hub symlink."""
 
-    def test_step6_defines_and_calls_symlink_helper(self):
+    def test_step5_defines_and_calls_symlink_helper(self):
         step6 = _install_sh_step6_section()
         assert "ensure_workspace_pipeline_project_symlinks" in step6
         # Called at least once (definition + invocation)
         assert step6.count("ensure_workspace_pipeline_project_symlinks") >= 2
 
-    def test_step6_symlink_uses_hub_and_ln_sfn(self):
+    def test_step5_symlink_uses_hub_and_ln_sfn(self):
         step6 = _install_sh_step6_section()
         assert 'local hub="$OPENCLAW_ROOT/pipeline-project"' in step6
         assert 'ln -sfn "$hub" "$link"' in step6
 
-    def test_step6_symlink_covers_four_pipeline_agents(self):
+    def test_step5_symlink_covers_four_pipeline_agents(self):
         step6 = _install_sh_step6_section()
         assert "planner executor reviewer escalation" in step6.replace("\n", " ")
 
-    def test_step6_skips_pipeline_project_when_not_symlink(self):
+    def test_step5_skips_pipeline_project_when_not_symlink(self):
         step6 = _install_sh_step6_section()
         assert '[ ! -L "$link" ]' in step6
 
-    def test_step6_symlink_helper_before_step7(self):
+    def test_step5_symlink_helper_before_step6_exec_approvals(self):
         text = _INSTALL_SH.read_text(encoding="utf-8")
         assert text.index("ensure_workspace_pipeline_project_symlinks()") < text.index(
-            "7/15  EXEC-APPROVALS VALIDATION"
+            "6/14  EXEC-APPROVALS VALIDATION"
         )
 
 
 def test_step3_respects_autodev_repo_path_from_environment():
     """install.sh must not overwrite AUTODEV_REPO_PATH when already exported."""
     text = _INSTALL_SH.read_text(encoding="utf-8")
-    start = text.index("3/15  PYTHON DEPENDENCIES")
-    end = text.index("4/15  OPENCLAW DETECTION")
+    start = text.index("3/14  PYTHON DEPENDENCIES")
+    end = text.index("4/14  OPENCLAW DETECTION")
     step3 = text[start:end]
     assert "AUTODEV_REPO_PATH:-}" in step3
     assert "Using AUTODEV_REPO_PATH from environment" in step3
 
 
-class TestStep9HooksPreflight:
-    def test_step9_audits_and_patches_hooks_before_tools_profile(self):
-        step9 = _install_sh_step9_section()
-        assert "openclaw_hooks_issues" in step9
-        assert "patch_openclaw_hooks_baseline" in step9
-        assert step9.index("openclaw_hooks_issues") < step9.index("TOOLS_PROFILE=")
+class TestStep8HooksPreflight:
+    def test_step8_audits_and_patches_hooks_before_tools_profile(self):
+        step8 = _install_sh_step8_register_section()
+        assert "openclaw_hooks_issues" in step8
+        assert "patch_openclaw_hooks_baseline" in step8
+        assert step8.index("openclaw_hooks_issues") < step8.index("TOOLS_PROFILE=")
 
     def test_install_summary_includes_hooks_line(self):
         text = _INSTALL_SH.read_text(encoding="utf-8")

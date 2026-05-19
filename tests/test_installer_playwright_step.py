@@ -1,8 +1,8 @@
 """
-Tests for install.sh step 13 (Playwright MCP provisioning).
+Tests for install.sh step 12 (Playwright MCP provisioning).
 
 The step must:
-  - Be present in the install script with the correct numbering (13/15).
+  - Be present in the install script with the correct numbering (12/14).
   - Accept --skip-playwright as a top-level CLI flag and honor it.
   - Prompt the user with a default-yes answer.
   - Attempt to install @playwright/mcp via npx and chromium via playwright install.
@@ -40,11 +40,11 @@ class TestPlaywrightCliFlag:
         assert "[--skip-playwright]" in text, "usage line must document --skip-playwright"
 
 
-class TestStep13PlaywrightSection:
+class TestStep12PlaywrightSection:
     def _section(self) -> str:
         text = _read_install_sh()
-        start = text.index("13/15  INSTALL PLAYWRIGHT MCP")
-        end = text.index("14/15  MARK SETUP COMPLETE")
+        start = text.index("12/14  INSTALL PLAYWRIGHT MCP")
+        end = text.index("13/14  MARK SETUP COMPLETE")
         return text[start:end]
 
     def test_step_exists_and_is_numbered_13(self):
@@ -53,8 +53,8 @@ class TestStep13PlaywrightSection:
 
     def test_step_runs_before_setup_marker(self):
         text = _read_install_sh()
-        assert text.index("13/15  INSTALL PLAYWRIGHT MCP") < text.index(
-            "14/15  MARK SETUP COMPLETE"
+        assert text.index("12/14  INSTALL PLAYWRIGHT MCP") < text.index(
+            "13/14  MARK SETUP COMPLETE"
         ), "Playwright provisioning must complete before the setup-complete marker"
 
     def test_step_honors_skip_flag(self):

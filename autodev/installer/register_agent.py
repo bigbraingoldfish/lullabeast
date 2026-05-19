@@ -3,7 +3,7 @@
 
 Ensures planner, executor, reviewer, escalation, prd-creator, and roadmap-converter
 each have an ``agents.list`` entry and appear in ``hooks.allowedAgentIds``. Called by
-install.sh (step 9). Importable for testing.
+install.sh (step 8). Importable for testing.
 
 CLI usage:
     python register_agent.py <openclaw_json_path> <autodev_root> [--dry-run|--apply]

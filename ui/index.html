@@ -8409,7 +8409,7 @@
                 }
                 if (item.startsWith("openclaw_agent_")) {
                     const slug = item.slice("openclaw_agent_".length).replace(/_/g, "-");
-                    return `Agent "${slug}" not listed in openclaw.json (run install.sh step 9)`;
+                    return `Agent "${slug}" not listed in openclaw.json (run install.sh step 8)`;
                 }
                 return itemLabels[item] || item;
             };

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — AutoDev interactive setup (15 steps)
+# install.sh — AutoDev interactive setup (14 steps)
 # Usage: ./install.sh [--force] [--non-interactive] [--skip-playwright]
 set -euo pipefail
 
@@ -43,13 +43,12 @@ prompt_yn() {
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
-RECOMMENDED_OC_VERSION="1.2.0"
 SETUP_MARKER="$HOME/.autodev_setup_complete"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1/15  OS CHECK
+# 1/14  OS CHECK
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "1/15  OS check"
+hdr "1/14  OS check"
 
 OS_TYPE=$(uname -s)
 OS_STATUS="ok"
@@ -78,9 +77,9 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2/15  PYTHON VERSION
+# 2/14  PYTHON VERSION
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "2/15  Python version"
+hdr "2/14  Python version"
 
 PYTHON=""
 PYTHON_VERSION=""
@@ -122,9 +121,9 @@ fi
 ok "git available"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3/15  PYTHON DEPENDENCIES
+# 3/14  PYTHON DEPENDENCIES
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "3/15  Python dependencies"
+hdr "3/14  Python dependencies"
 
 # Repo root: if AUTODEV_REPO_PATH is already set in the environment, keep it
 # (canonical path); otherwise use the directory containing this install.sh.
@@ -162,9 +161,9 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4/15  OPENCLAW DETECTION
+# 4/14  OPENCLAW DETECTION
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "4/15  OpenClaw detection"
+hdr "4/14  OpenClaw detection"
 
 # Capture the operator-provided OPENCLAW_ROOT before we reassign.
 _OC_ENV_INPUT="${OPENCLAW_ROOT:-}"
@@ -275,53 +274,9 @@ print('ok')
   || warn "Could not update ui/config.json — copy ui/config.example.json and set paths"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5/15  OPENCLAW VERSION CHECK
+# 5/14  AGENT WORKSPACE PROVISIONING
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "5/15  OpenClaw version check"
-
-OC_VERSION_STATUS="unknown"
-OC_JSON="$OPENCLAW_ROOT/openclaw.json"
-
-if [ -f "$OC_JSON" ]; then
-    OC_VERSION=$("$PYTHON" -c "
-import json, sys
-try:
-    with open('$OC_JSON') as f:
-        d = json.load(f)
-    print(d.get('version', ''))
-except Exception:
-    print('')
-" 2>/dev/null)
-
-    if [ -z "$OC_VERSION" ]; then
-        warn "openclaw.json does not contain a version field — cannot verify version"
-        OC_VERSION_STATUS="missing field"
-    else
-        # Simple version comparison: split on dot, compare numerically
-        IFS='.' read -r rec_maj rec_min rec_pat <<< "$RECOMMENDED_OC_VERSION"
-        IFS='.' read -r oc_maj oc_min oc_pat <<< "${OC_VERSION%%[^0-9.]*}"
-        oc_maj=${oc_maj:-0}; oc_min=${oc_min:-0}; oc_pat=${oc_pat:-0}
-
-        if [ "$oc_maj" -gt "$rec_maj" ] || \
-           ([ "$oc_maj" -eq "$rec_maj" ] && [ "$oc_min" -gt "$rec_min" ]) || \
-           ([ "$oc_maj" -eq "$rec_maj" ] && [ "$oc_min" -eq "$rec_min" ] && [ "$oc_pat" -ge "$rec_pat" ]); then
-            ok "OpenClaw version $OC_VERSION (recommended ≥ $RECOMMENDED_OC_VERSION)"
-            OC_VERSION_STATUS="ok ($OC_VERSION)"
-        else
-            warn "OpenClaw version $OC_VERSION is below recommended $RECOMMENDED_OC_VERSION"
-            warn "  Update OpenClaw for best compatibility with this release"
-            OC_VERSION_STATUS="below recommended ($OC_VERSION)"
-        fi
-    fi
-else
-    info "Skipping version check (openclaw.json not found)"
-    OC_VERSION_STATUS="skipped (no openclaw.json)"
-fi
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 6/15  AGENT WORKSPACE PROVISIONING
-# ─────────────────────────────────────────────────────────────────────────────
-hdr "6/15  Agent workspace provisioning"
+hdr "5/14  Agent workspace provisioning"
 
 # Each pipeline agent workspace needs pipeline-project → $OPENCLAW_ROOT/pipeline-project
 # (the hub the UI/orchestrator update). OpenClaw sandboxes writes to the workspace root.
@@ -556,9 +511,9 @@ fi
 ensure_workspace_pipeline_project_symlinks
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7/15  EXEC-APPROVALS VALIDATION
+# 6/14  EXEC-APPROVALS VALIDATION
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "7/15  Exec-approvals validation"
+hdr "6/14  Exec-approvals validation"
 
 EXEC_APPROVALS="$OPENCLAW_ROOT/exec-approvals.json"
 APPROVALS_STATUS="missing"
@@ -586,9 +541,9 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 8/15  CRON PATH MIGRATION (cron/jobs.json + user crontab)
+# 7/14  CRON PATH MIGRATION (cron/jobs.json + user crontab)
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "8/15  Cron paths (jobs.json + user crontab)"
+hdr "7/14  Cron paths (jobs.json + user crontab)"
 
 CRON_FILE="$OPENCLAW_ROOT/cron/jobs.json"
 CRON_STATUS="not found"
@@ -784,9 +739,9 @@ PYEOF
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 9/15  REGISTER AUTODEV AGENTS (OPENCLAW)
+# 8/14  REGISTER AUTODEV AGENTS (OPENCLAW)
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "9/15  Register AutoDev agents in openclaw.json"
+hdr "8/14  Register AutoDev agents in openclaw.json"
 
 REGISTER_STATUS_STEP="not attempted"
 TOOLS_PROFILE_STEP="skipped"
@@ -1126,9 +1081,9 @@ print(set_openclaw_global_tools_profile(sys.argv[1], 'coding'))
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 10/15  CONVERSION PROMPT (repo-bundled)
+# 9/14  CONVERSION PROMPT (repo-bundled)
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "10/15  Conversion prompt"
+hdr "9/14  Conversion prompt"
 
 BUNDLED_PROMPT="$AUTODEV_REPO_PATH/autodev/prompts/prd-to-roadmap-conversion.txt"
 if [ -f "$BUNDLED_PROMPT" ]; then
@@ -1140,9 +1095,9 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 11/15  WRITE .env
+# 10/14  WRITE .env
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "11/15  Writing .env"
+hdr "10/14  Writing .env"
 
 ENV_FILE="$AUTODEV_REPO_PATH/.env"
 ENV_MERGE=$(
@@ -1195,9 +1150,9 @@ case "$ENV_IDEAS_HINTS" in
 esac
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 12/15  INSTALL PIPELINE SIGNALS PLUGIN
+# 11/14  INSTALL PIPELINE SIGNALS PLUGIN
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "12/15  Installing autodev-pipeline-signals plugin"
+hdr "11/14  Installing autodev-pipeline-signals plugin"
 
 PLUGIN_DIR="$AUTODEV_REPO_PATH/autodev/plugin"
 PLUGIN_INSTALL_STEP="not attempted"
@@ -1261,9 +1216,9 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 13/15  INSTALL PLAYWRIGHT MCP (visual review for UI/INT phases)
+# 12/14  INSTALL PLAYWRIGHT MCP (visual review for UI/INT phases)
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "13/15  Installing Playwright MCP for visual review"
+hdr "12/14  Installing Playwright MCP for visual review"
 
 PLAYWRIGHT_STEP="not attempted"
 
@@ -1366,33 +1321,32 @@ PYEOF
         fi
 
         # Final hint about the OpenClaw browser-tool grant. The pipeline agents
-        # need browser access — install step 9 registers them, but if the user
+        # need browser access — install step 8 registers them, but if the user
         # already has agents present with empty tools, ensure the executor and
         # reviewer can use browser.
         info "Pipeline executors + reviewers must have 'browser' in their tools.allow list."
-        info "  Re-running step 9 (Register AutoDev agents) ensures this."
+        info "  Re-running step 8 (Register AutoDev agents) ensures this."
     fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 14/15  MARK SETUP COMPLETE
+# 13/14  MARK SETUP COMPLETE
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "14/15  Marking setup complete"
+hdr "13/14  Marking setup complete"
 
 date -u +%Y-%m-%dT%H:%M:%SZ > "$SETUP_MARKER"
 ok "Setup marker written to $SETUP_MARKER"
 info "  The AutoDev UI uses this file for first-run detection"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 15/15  SUMMARY
+# 14/14  SUMMARY
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "15/15  Summary"
+hdr "14/14  Summary"
 echo
 printf "  %-32s %s\n" "OS:"                      "$OS_TYPE ($OS_STATUS)"
 printf "  %-32s %s\n" "Python version:"           "$PYTHON_VERSION"
 printf "  %-32s %s\n" "Pip packages installed:"   "$PIP_INSTALLED"
 printf "  %-32s %s\n" "OPENCLAW_ROOT:"            "$OPENCLAW_ROOT"
-printf "  %-32s %s\n" "OpenClaw version:"         "$OC_VERSION_STATUS"
 printf "  %-32s %s\n" "Conversion prompt:"        "$PROMPT_FOUND"
 printf "  %-32s %s\n" "Exec-approvals:"           "$APPROVALS_STATUS"
 printf "  %-32s %s\n" "Cron path (jobs.json):"     "$CRON_STATUS"
