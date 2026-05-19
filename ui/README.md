@@ -6,7 +6,7 @@ FastAPI server (`server.py`) and a single-file React app (`index.html`) for the 
 
 | File | Purpose |
 |------|---------|
-| `server.py` | API routes, OpenClaw webhook helpers, setup/preflight/launch; on startup, optional **auto sync** of `autodev/agents/*` into `OPENCLAW_ROOT/workspace-*` (see `auto_sync_agent_workspaces` in `config.json` / `DEFAULTS` in `server.py`, same mtime rules as `install.sh` step 6) |
+| `server.py` | API routes, OpenClaw webhook helpers, setup/preflight/launch; on startup, optional **auto sync** of `autodev/agents/*` into `OPENCLAW_ROOT/workspace-*` (see `auto_sync_agent_workspaces` in `config.json` / `DEFAULTS` in `server.py`, same mtime rules as `install.sh` step 5) |
 | `index.html` | Inline Babel/React UI (all screens in one file) |
 | `_build_screens.py` | Optional splice helper for `MIDDLE` → `index.html` — **may lag** `index.html`; treat `index.html` as source of truth for Ideas/Preflight until regenerated |
 

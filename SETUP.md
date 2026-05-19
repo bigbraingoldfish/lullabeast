@@ -62,9 +62,9 @@ cd autodev-ui
 ./install.sh
 ```
 
-**Upgrading:** after `git pull`, restart the AutoDev UI service. The server automatically syncs updated agent workspace guidance into `OPENCLAW_ROOT/workspace-*` on startup (same mtime rules as step 6 of `install.sh`). To manage those files only yourself—for example you maintain custom agent instructions—set `"auto_sync_agent_workspaces": false` in `ui/config.json` and re-run `./install.sh` after each update when you want upstream guidance copied.
+**Upgrading:** after `git pull`, restart the AutoDev UI service. The server automatically syncs updated agent workspace guidance into `OPENCLAW_ROOT/workspace-*` on startup (same mtime rules as step 5 of `install.sh`). To manage those files only yourself—for example you maintain custom agent instructions—set `"auto_sync_agent_workspaces": false` in `ui/config.json` and re-run `./install.sh` after each update when you want upstream guidance copied.
 
-`install.sh` works through thirteen steps in order. You will see colored output for each step. Early steps exit on failure when prerequisites are missing; later steps often warn and continue, collecting issues for the final summary.
+`install.sh` works through **14** steps in order. You will see colored output for each step. Early steps exit on failure when prerequisites are missing; later steps often warn and continue, collecting issues for the final summary.
 
 What the script does (summary):
 
@@ -72,15 +72,16 @@ What the script does (summary):
 2. Python 3.9+ and pip availability.
 3. `pip install -r ui/requirements.txt` (interactive confirm unless `--non-interactive`).
 4. OpenClaw detection: resolves `OPENCLAW_ROOT`, **requires** `openclaw.json`, creates **`$AUTODEV_REPO_PATH/.autodev/`**, updates **`ui/config.json`** paths from `config.example.json` when needed.
-5. OpenClaw version check (warning-only if below recommended).
-6. **Creates** missing `workspace-{agent}/` directories under OpenClaw and deploys agent identity files (skipping any destination file that is already newer).
-7. **Refreshes** stale `gate_scripts` paths inside `exec-approvals.json` when possible (atomic rewrite).
-8. Updates `cron/jobs.json` heartbeat script path when applicable.
-9. **Hooks preflight** — audits `hooks.enabled`, `hooks.token`, `hooks.allowRequestSessionKey`, and `hooks.allowedSessionKeyPrefixes` (`pipeline:`, `ideas:`). Optionally patches them atomically (preserves an existing `hooks.token`); if `hooks.token` is still empty, can generate one and append **`AUTODEV_HOOKS_TOKEN`** to `.env` when that key is not already set. Then warns if `tools.profile` is not `coding` or `full` (optional prompt to set `coding`), and registers **planner, executor, reviewer, escalation, prd-creator, and roadmap-converter** in `agents.list` / `hooks.allowedAgentIds`.
-10. Confirms bundled PRD→roadmap instructions at `autodev/prompts/prd-to-roadmap-conversion.txt`.
-11. **Merges** `.env` non-destructively. Writes only the canonical names (`OPENCLAW_ROOT`, `AUTODEV_PIPELINE_ROOT`, `AUTODEV_REPO_PATH`) plus any keys added in step 9. Legacy names `AUTODEV_ROOT` and `AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME` are ignored at runtime.
-12. Writes setup-complete marker.
-13. Prints summary.
+5. **Creates** missing `workspace-{agent}/` directories under OpenClaw and deploys agent identity files (skipping any destination file that is already newer).
+6. **Refreshes** stale `gate_scripts` paths inside `exec-approvals.json` when possible (atomic rewrite).
+7. Updates `cron/jobs.json` heartbeat script path when applicable, and migrates **user crontab** lines that still reference legacy `heartbeat_cron.py` / `session_cleanup.py` under `OPENCLAW_ROOT` to the repo copies (only if such lines already exist).
+8. **Hooks preflight** — audits `hooks.enabled`, `hooks.token`, `hooks.allowRequestSessionKey`, and `hooks.allowedSessionKeyPrefixes` (`pipeline:`, `ideas:`). Optionally patches them atomically (preserves an existing `hooks.token`); if `hooks.token` is still empty, can generate one and append **`AUTODEV_HOOKS_TOKEN`** to `.env` when that key is not already set. Then warns if `tools.profile` is not `coding` or `full` (optional prompt to set `coding`), and registers **planner, executor, reviewer, escalation, prd-creator, and roadmap-converter** in `agents.list` / `hooks.allowedAgentIds`.
+9. Confirms bundled PRD→roadmap instructions at `autodev/prompts/prd-to-roadmap-conversion.txt`.
+10. **Merges** `.env` non-destructively. Writes only the canonical names (`OPENCLAW_ROOT`, `AUTODEV_PIPELINE_ROOT`, `AUTODEV_REPO_PATH`) plus any keys added in step 8. Legacy names `AUTODEV_ROOT` and `AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME` are ignored at runtime.
+11. Installs the **`autodev-pipeline-signals`** OpenClaw plugin and sets `plugins.entries.autodev-pipeline-signals.hooks.allowConversationAccess=true` when the `openclaw` CLI is available.
+12. Optionally installs **Playwright MCP** and Chromium for UI/INT visual review (skippable with `--skip-playwright` or declining the prompt).
+13. Writes the setup-complete marker (`~/.autodev_setup_complete`).
+14. Prints summary.
 
 If install.sh exits cleanly with no warnings, the system is ready. If it exits with warnings, read each warning — most require a one-line manual fix.
 
@@ -269,7 +270,7 @@ If `ui/config.json` exists and contains an `autodev_repo_path` key, that value t
 
 **What's happening.** When converting a PRD draft to a roadmap, the server reads a prompt template from `~/.openclaw/deployment-package/Updates/PRD to Roadmap*.txt`. If this file does not exist, the endpoint raises an unhandled exception.
 
-**Where to put it.** The file must be in `~/.openclaw/deployment-package/Updates/` and its filename must match `PRD to Roadmap*.txt`. The exact filename does not matter beyond the prefix — the server takes the first match. `install.sh` step 10 checks for this file and warns if it is missing.
+**Where to put it.** The file must be in `~/.openclaw/deployment-package/Updates/` and its filename must match `PRD to Roadmap*.txt`. The exact filename does not matter beyond the prefix — the server takes the first match. `install.sh` step 9 checks for this file and warns if it is missing.
 
 ### 4. `pipeline-project` symlink out of sync with `pipeline_state.json`
 
@@ -337,7 +338,7 @@ The fields AutoDev reads from `pipeline_state.json` are: `pipeline_status`, `sta
 
 ## `openclaw.json` Requirements
 
-AutoDev reads the following keys from `~/.openclaw/openclaw.json`. The **orchestrator and UI** treat this file as read-only. **`install.sh` step 9** may update it atomically when you confirm the prompts: normalize the **`hooks`** block for webhook calls (`enabled`, `token`, `allowRequestSessionKey`, `allowedSessionKeyPrefixes`), optionally set `tools.profile` to `coding`, and add any missing pipeline agent entries plus `hooks.allowedAgentIds` for those IDs. Other keys are preserved.
+AutoDev reads the following keys from `~/.openclaw/openclaw.json`. The **orchestrator and UI** treat this file as read-only. **`install.sh` step 8** may update it atomically when you confirm the prompts: normalize the **`hooks`** block for webhook calls (`enabled`, `token`, `allowRequestSessionKey`, `allowedSessionKeyPrefixes`), optionally set `tools.profile` to `coding`, and add any missing pipeline agent entries plus `hooks.allowedAgentIds` for those IDs. Other keys are preserved.
 
 ### `agents.list` and pipeline agents
 
@@ -403,7 +404,7 @@ OpenClaw maintains an `exec-approvals.json` file at `~/.openclaw/exec-approvals.
 
 **Why paths changed.** Before this migration, gate scripts lived at `~/.openclaw/gate_scripts/`. They now live at `<repo>/autodev/pipeline/gate_scripts/`. If you previously approved gate scripts from the old location, `exec-approvals.json` still contains the old absolute paths. The orchestrator will attempt to execute scripts at the new paths, which OpenClaw will not recognise as approved.
 
-**How to detect this.** `install.sh` step 7 greps `exec-approvals.json` for gate_scripts entries that do not match your `AUTODEV_REPO_PATH`. If stale entries are found, it prints them and warns you to re-approve.
+**How to detect this.** `install.sh` step 6 greps `exec-approvals.json` for gate_scripts entries that do not match your `AUTODEV_REPO_PATH`. If stale entries are found, it prints them and warns you to re-approve.
 
 **How to re-approve.** Open the OpenClaw UI, navigate to the exec-approvals section (Settings → Execution Approvals or equivalent in your version), and approve each gate script at its new path:
 

@@ -6790,7 +6790,7 @@ def _check_installer_status(config: dict) -> dict:
     if not os.path.isfile(openclaw_json_path):
         missing_items.append("openclaw_json")
     else:
-        # 3. Pipeline agents in openclaw.json (install.sh step 9 registers these)
+        # 3. Pipeline agents in openclaw.json (install.sh step 8 registers these)
         _pipeline_agent_ids = (
             "planner",
             "executor",

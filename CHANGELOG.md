@@ -10,6 +10,8 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ### Changed
 
+- **Install (`install.sh`):** Removed the OpenClaw `openclaw.json` **version** advisory check and the matching summary row. The script is **14 steps** (steps renumbered); behavior of all other steps is unchanged.
+
 - **Pipeline Monitor Current Phase:** Removed the monospace **`last_error_code`** chip and the **skill / agent** line under **Agent attempts** (they read as live failures and duplicated queue/metrics). **`last_error_code`** and **`skill_*`** remain on **`GET /api/state`** and in queue snapshots. **`gate_fail`** lines in **`pipeline_events.jsonl`** now include **`last_error_code`** from **`phase_state`** at emit time; the Activity feed **`humanizeSummary`** path appends the existing H-23 long titles via **`getLastErrorCodeTitle`**, with the same text on the row **`title`** when present. See **`autodev/tests/test_gate_fail_event_last_error_code.py`**.
 
 ### Added
@@ -27,7 +29,7 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
   - `before_agent_finalize` — fires before the harness accepts the agent's final answer; checks `planner_output.json`, `executor_output.json`, and `reviewer_output.json` for structural completeness and returns `{ action: "revise" }` if required fields are absent. Requests a bounded in-context correction pass without burning an orchestrator retry. File-system, git, and subprocess checks remain in the hard gate scripts.
   - **Tier A stall detection:** the orchestrator seeds `{agent}_activity.stamp` before each planner/executor/reviewer webhook, then `model_call_started`, `model_call_ended`, and `after_tool_call` refresh it in the pipeline artifacts directory. The plugin also subscribes to OpenClaw's live agent event stream so activity is recorded even when typed hook context omits `agentId`, `sessionKey`, or `workspaceDir`. `poll_for_sentinel` reads the stamp mtime each tick; if silence exceeds `AUTODEV_STALL_TIMEOUT_PLANNER` (default 900 s), `AUTODEV_STALL_TIMEOUT_EXECUTOR` (1800 s), or `AUTODEV_STALL_TIMEOUT_REVIEWER` (900 s), the poll returns `False` and existing retry paths run. `cleanup_output_files` removes `*_activity.stamp` each attempt.
   - **Ideas (`prd-creator`):** same hooks touch **`{OPENCLAW_ROOT}/ideas/{ideaId}/prd_creator_activity.stamp`** for any `ideas:` session key; `agent_end` for **`ideas:{id}:session-{n}`** writes **`turns/{n}.done`** when missing so the UI sentinel poll unblocks without waiting for JSONL ticks. The UI server deletes the stamp before each Ideas webhook (mirrors pipeline stamp cleanup) and polls using stamp ``st_mtime_ns`` (`tests/test_ideas_stamp_detect.py`).
-  - Install: `openclaw plugins install <repo>/autodev/plugin`; `openclaw.json` entry requires `hooks.allowConversationAccess: true`. `install.sh` step 12/14 handles this automatically and validates the installed hooks with `openclaw plugins inspect autodev-pipeline-signals --json`.
+  - Install: `openclaw plugins install <repo>/autodev/plugin`; `openclaw.json` entry requires `hooks.allowConversationAccess: true`. `install.sh` step 11/14 handles this automatically and validates the installed hooks with `openclaw plugins inspect autodev-pipeline-signals --json`.
   - Plugin tests: `autodev/plugin/tests/agent-end.test.ts`, `autodev/plugin/tests/before-finalize.test.ts`, `autodev/plugin/tests/stall-detector.test.ts` (46 tests total, node:test with tsx).
 
 - **Heartbeat cron is now a silent self-healer:** `autodev/pipeline/heartbeat_cron.py` no longer sends any Signal notifications. The model-query path (`query_heartbeat_model`, `HEARTBEAT_SYSTEM_PROMPT`, `send_signal_notification`) has been removed entirely. All recovery decisions are now fully deterministic: idle/terminal states (IDLE, PIPELINE_COMPLETE, STOPPED, QUEUE_HALTED, HALTED_SILENT, BLOCKED, WAITING_FOR_HUMAN) cause a log-and-exit with no action; only stale RUNNING/WAITING_FOR_SENTINEL (> 15 min with lock free) triggers an automatic orchestrator restart. The escalation agent remains the sole owner of all human-facing notifications. `requests` import removed.
@@ -58,7 +60,7 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 - **Project Ideas:** **Generate Roadmap** / **Regenerate Roadmap** stay disabled while a chat reply is in progress (same `isLoading` path as **Send**), with a short inline hint so operators know conversion waits for the latest PRD. `doConvert`, `beginConvertAfterGuards`, and `_runConvert` guard against starting conversion during that window (including low-readiness and regenerate confirm paths).
 
-- **Tests:** `test_installer_register_agent.py` section markers updated to match **`install.sh`** comment headers (`3/14` … `10/14`, `6/14` … `7/14`).
+- **Tests:** `test_installer_register_agent.py` section markers updated to match **`install.sh`** comment headers (`3/14` … `4/14`, `5/14` … `6/14`, `8/14` … `9/14`).
 
 - **Ideas UI poll (`readiness/poll` completion):** after the background readiness job finishes and the client loads ``GET /api/ideas/{id}/readiness``, the UI calls ``refreshIdeas()`` so the sidebar **X/10** badge matches the PRD readiness strip without switching ideas.
 
@@ -85,8 +87,6 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 - **JSONL session-lookup loops simplified** (orchestrator.py): The 15-retry loops (~30 s) that waited for `sessions.json` to be populated before the sentinel poll have been replaced with a single post-sentinel read. `agent_end` is guaranteed to fire after `sessions.json` is updated, so the retry loop is unnecessary.
 
 - **Dead-session check moved post-sentinel** (orchestrator.py, executor and reviewer branches): `_check_session_dead_on_arrival` now runs after `poll_for_sentinel` returns instead of before it. `sessions.json` is reliably populated by the time `agent_end` unblocks the sentinel poll, so the single-attempt check is always accurate.
-
-- **`install.sh` updated to 14 steps:** Step 12/14 installs the `autodev-pipeline-signals` plugin and patches `openclaw.json` with `allowConversationAccess: true`.
 
 ### Removed
 
