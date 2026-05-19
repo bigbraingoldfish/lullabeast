@@ -2904,8 +2904,121 @@ def _empty_metrics_summary():
         "total_reviewer_passes": 0,
         "total_blame_fires": 0,
         "total_escalations": 0,
-        "phases": []
+        "total_cost": 0.0,
+        "planner_cost_total": 0.0,
+        "executor_cost_total": 0.0,
+        "reviewer_cost_total": 0.0,
+        "total_hold_seconds": 0,
+        "total_active_seconds": 0,
+        "phases": [],
     }
+
+
+def _parse_event_ts(ts_str: str) -> float | None:
+    """Parse an ISO-8601 timestamp from pipeline_events.jsonl (UTC).
+
+    Accepts the orchestrator's canonical ``YYYY-MM-DDTHH:MM:SSZ`` shape and
+    common variants with fractional seconds or explicit ``+00:00`` offsets.
+    """
+    if not ts_str or not isinstance(ts_str, str):
+        return None
+    s = ts_str.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(s).timestamp()
+    except ValueError:
+        return None
+
+
+def _derive_hold_seconds_per_phase(events_path: str, project_name: str) -> dict[str, int]:
+    """Pair escalation_trigger → escalation_resolve events in pipeline_events.jsonl.
+
+    Returns ``{phase_id: hold_seconds}`` for the named project. Hold time is the
+    elapsed seconds between an ``escalation_trigger`` and its matching
+    ``escalation_resolve`` for the same phase. Multiple pairs for the same phase
+    are summed.
+
+    Unpaired triggers (no subsequent resolve before another trigger or EOF) are
+    skipped with a warning log. Rows missing a ``project`` field are skipped —
+    only rows whose ``project`` matches ``project_name`` (case-sensitive,
+    matching the orchestrator's symlink resolution) are considered.
+
+    Best-effort: an unreadable file returns an empty dict. The plan documents
+    that escalation paths bypassing _write_pipeline_event will be missing here.
+    """
+    holds: dict[str, int] = {}
+    if not project_name or not events_path or not os.path.exists(events_path):
+        return holds
+    pending: dict[str, float] = {}  # phase -> trigger timestamp
+    try:
+        with open(events_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    evt = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if evt.get("project") != project_name:
+                    continue
+                event_name = evt.get("event")
+                if event_name not in ("escalation_trigger", "escalation_resolve"):
+                    continue
+                phase = evt.get("phase") or ""
+                if not phase:
+                    continue
+                ts = _parse_event_ts(evt.get("ts", ""))
+                if ts is None:
+                    continue
+                if event_name == "escalation_trigger":
+                    if phase in pending:
+                        print(
+                            f"[WARN] _derive_hold_seconds_per_phase: unpaired "
+                            f"escalation_trigger for {project_name}/{phase} "
+                            f"superseded by a new trigger"
+                        )
+                    pending[phase] = ts
+                else:  # escalation_resolve
+                    start = pending.pop(phase, None)
+                    if start is None:
+                        continue
+                    delta = int(round(ts - start))
+                    if delta > 0:
+                        holds[phase] = holds.get(phase, 0) + delta
+    except OSError as e:
+        print(f"[WARN] _derive_hold_seconds_per_phase: read failed: {e}")
+        return holds
+    for phase in pending:
+        print(
+            f"[WARN] _derive_hold_seconds_per_phase: unpaired "
+            f"escalation_trigger for {project_name}/{phase} (no resolve event)"
+        )
+    return holds
+
+
+def _read_run_summary_duration(project_dir_path: str) -> int | None:
+    """Read total_duration_seconds from <project>/.autodev/pipeline/run_summary.json.
+
+    Returns None when the file is missing, unreadable, or lacks the field.
+    Wall-clock (manifest start → terminal run_end) is preferred over a sum of
+    per-phase durations when available.
+    """
+    if not project_dir_path:
+        return None
+    path = os.path.join(_pipeline_artifacts_dir(project_dir_path), "run_summary.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    val = data.get("total_duration_seconds")
+    if isinstance(val, (int, float)) and val >= 0:
+        return int(val)
+    return None
 
 
 @app.get("/api/metrics-summary")
@@ -2951,11 +3064,49 @@ def get_metrics_summary():
 
     phases = list(seen.values())
 
-    total_duration = sum((p.get("duration_seconds") or 0) for p in phases)
+    total_duration_summed = sum((p.get("duration_seconds") or 0) for p in phases)
     total_executor = sum((p.get("executor_attempts") or 0) for p in phases)
     total_reviewer = sum((p.get("reviewer_passes") or 0) for p in phases)
     total_blame = sum((p.get("blame_fires") or 0) for p in phases)
     total_escalations = sum((p.get("escalations") or 0) for p in phases)
+
+    # Prefer whichever of (sum of phase durations, run_summary wall-clock) is
+    # larger.  Per-phase ``duration_seconds`` already include in-phase holds and
+    # are the most reliable cumulative figure.  ``run_summary.json`` is rewritten
+    # every time the orchestrator boots — a "complete on startup" no-op shrinks
+    # ``total_duration_seconds`` to the boot window (e.g. 106s) and clobbers the
+    # true run wall-clock.  Taking max() keeps the honest number visible.
+    run_summary_duration = _read_run_summary_duration(project_dir_path) or 0
+    total_duration = max(total_duration_summed, run_summary_duration)
+
+    def _role_cost(p: dict, role_key: str) -> float:
+        role_obj = p.get(role_key) or {}
+        if not isinstance(role_obj, dict):
+            return 0.0
+        try:
+            return float(role_obj.get("cost_total", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _phase_cost(p: dict) -> float:
+        v = p.get("cost_total", 0.0)
+        try:
+            return float(v or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    total_cost = round(sum(_phase_cost(p) for p in phases), 6)
+    planner_cost_total = round(sum(_role_cost(p, "planner_tokens") for p in phases), 6)
+    executor_cost_total = round(sum(_role_cost(p, "executor_tokens") for p in phases), 6)
+    reviewer_cost_total = round(sum(_role_cost(p, "reviewer_tokens") for p in phases), 6)
+
+    # Hold time: pair escalation_trigger/escalation_resolve events from the
+    # pipeline-root events log, filtered by project name.
+    events_path = config.get("events_path") or ""
+    project_name = os.path.basename(os.path.realpath(project_dir_path)) if project_dir_path else ""
+    hold_per_phase = _derive_hold_seconds_per_phase(events_path, project_name)
+    total_hold_seconds = sum(hold_per_phase.values())
+    total_active_seconds = max(0, total_duration - total_hold_seconds)
 
     return {
         "total_phases": len(phases),
@@ -2964,6 +3115,12 @@ def get_metrics_summary():
         "total_reviewer_passes": total_reviewer,
         "total_blame_fires": total_blame,
         "total_escalations": total_escalations,
+        "total_cost": total_cost,
+        "planner_cost_total": planner_cost_total,
+        "executor_cost_total": executor_cost_total,
+        "reviewer_cost_total": reviewer_cost_total,
+        "total_hold_seconds": total_hold_seconds,
+        "total_active_seconds": total_active_seconds,
         "phases": [
             {
                 "phase": p.get("phase"),
@@ -2974,6 +3131,11 @@ def get_metrics_summary():
                 "blame_fires": p.get("blame_fires", 0),
                 "escalations": p.get("escalations", 0),
                 "skill_used": p.get("skill_used"),
+                "cost_total": _phase_cost(p),
+                "planner_cost": _role_cost(p, "planner_tokens"),
+                "executor_cost": _role_cost(p, "executor_tokens"),
+                "reviewer_cost": _role_cost(p, "reviewer_tokens"),
+                "hold_seconds": hold_per_phase.get(p.get("phase"), 0),
             }
             for p in phases
         ],

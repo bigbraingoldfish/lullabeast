@@ -261,3 +261,58 @@ def test_sum_session_tokens_result_keys(sum_fn):
     assert set(result.keys()) == required_keys, (
         f"Unexpected keys in result: {set(result.keys())} vs expected {required_keys}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Real OpenClaw schema: role + usage are nested under row["message"]
+# ---------------------------------------------------------------------------
+
+def _make_openclaw_row(inp=100, out=50, cache_read=10, cache_write=0, total=160, cost=0.001, role="assistant"):
+    """Mirror the actual OpenClaw session JSONL row shape."""
+    return json.dumps({
+        "id": "msg_abc",
+        "type": "message",
+        "parentId": "msg_prev",
+        "timestamp": "2026-05-19T00:00:00Z",
+        "message": {
+            "role": role,
+            "usage": {
+                "input": inp, "output": out,
+                "cacheRead": cache_read, "cacheWrite": cache_write,
+                "totalTokens": total,
+                "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": cost},
+            },
+        },
+    })
+
+
+def test_sum_session_tokens_reads_openclaw_nested_message_shape(sum_fn, tmp_path):
+    """The real OpenClaw row nests role + usage under message{}. Must sum these."""
+    jsonl = tmp_path / "session.jsonl"
+    rows = [
+        _make_openclaw_row(inp=100, out=50, cache_read=10, cache_write=0, total=160, cost=0.001),
+        _make_openclaw_row(inp=200, out=80, cache_read=0, cache_write=5, total=285, cost=0.002),
+    ]
+    jsonl.write_text("\n".join(rows) + "\n")
+
+    result = sum_fn(str(jsonl))
+    assert result["input"] == 300
+    assert result["output"] == 130
+    assert result["cache_read"] == 10
+    assert result["cache_write"] == 5
+    assert result["total_tokens"] == 445
+    assert abs(result["cost_total"] - 0.003) < 1e-9
+
+
+def test_sum_session_tokens_skips_openclaw_non_assistant_rows(sum_fn, tmp_path):
+    """Nested-message rows with role != 'assistant' must be skipped."""
+    jsonl = tmp_path / "session.jsonl"
+    rows = [
+        _make_openclaw_row(inp=999, role="user"),
+        _make_openclaw_row(inp=100, out=50, total=150, cost=0.001, role="assistant"),
+    ]
+    jsonl.write_text("\n".join(rows) + "\n")
+
+    result = sum_fn(str(jsonl))
+    assert result["input"] == 100
+    assert result["total_tokens"] == 150

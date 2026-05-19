@@ -479,9 +479,27 @@ def _is_provider_rejected_error(msg: str) -> bool:
 def _sum_session_tokens(jsonl_path) -> dict:
     """W1-G: Sum token usage from an OpenClaw session JSONL file.
 
-    Filters for type=="message", role=="assistant" rows and sums usage fields.
+    OpenClaw session row shape (real, verified against live sessions):
+        {"id", "type": "message", "parentId", "timestamp",
+         "message": {"role": "assistant", "usage": {...}, ...}}
+
+    The ``role`` and ``usage`` fields live *inside* the nested ``message``
+    object, not at the top level of the row.  ``usage`` uses camelCase
+    keys (``cacheRead``/``cacheWrite``/``totalTokens``) and a nested
+    ``cost`` sub-object with ``cost.total``.
+
+    Field mapping (OpenClaw JSONL → accumulator):
+        message.usage.input        → input
+        message.usage.output       → output
+        message.usage.cacheRead    → cache_read
+        message.usage.cacheWrite   → cache_write
+        message.usage.totalTokens  → total_tokens
+        message.usage.cost.total   → cost_total
+
+    A legacy flat shape (``usage``/``role`` at the row top level) is also
+    accepted for backwards compatibility with synthetic test fixtures.
+
     Returns a zero dict on any error (None path, missing file, parse failure).
-    Mirrors _check_session_dead_on_arrival() pattern — module-level, independently testable.
     """
     zeros = {
         "input": 0, "output": 0, "cache_read": 0,
@@ -502,15 +520,29 @@ def _sum_session_tokens(jsonl_path) -> dict:
                     continue
                 try:
                     row = json.loads(line)
-                    if row.get("type") == "message" and row.get("role") == "assistant":
-                        u = row.get("usage", {}) or {}
-                        result["input"]        += u.get("input", 0)
-                        result["output"]       += u.get("output", 0)
-                        result["cache_read"]   += u.get("cacheRead", 0)
-                        result["cache_write"]  += u.get("cacheWrite", 0)
-                        result["total_tokens"] += u.get("totalTokens", 0)
-                        cost = u.get("cost", {}) or {}
-                        result["cost_total"]   += cost.get("total", 0.0)
+                    if row.get("type") != "message":
+                        continue
+                    # Real OpenClaw shape: role and usage are nested under
+                    # row["message"].  Legacy flat shape (top-level role/usage)
+                    # is accepted as a fallback for synthetic fixtures.
+                    inner = row.get("message")
+                    if isinstance(inner, dict):
+                        role = inner.get("role")
+                        u = inner.get("usage")
+                    else:
+                        role = row.get("role")
+                        u = row.get("usage")
+                    if role != "assistant":
+                        continue
+                    if not isinstance(u, dict):
+                        continue
+                    result["input"]        += u.get("input", 0)
+                    result["output"]       += u.get("output", 0)
+                    result["cache_read"]   += u.get("cacheRead", 0)
+                    result["cache_write"]  += u.get("cacheWrite", 0)
+                    result["total_tokens"] += u.get("totalTokens", 0)
+                    cost = u.get("cost", {}) or {}
+                    result["cost_total"]   += cost.get("total", 0.0)
                 except (ValueError, AttributeError):
                     pass
     except OSError as e:
