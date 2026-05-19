@@ -7406,11 +7406,32 @@ async def post_completion_review_trigger(project: str):
 
     # Fire-and-forget: inject skill, clean workspace, trigger webhook, return immediately.
     # The UI polls GET /api/completion-report on an interval to detect when the report appears.
+    #
+    # Walkthrough structure must stay in sync with orchestrator._run_completion_review
+    # (autodev/pipeline/orchestrator.py). Both code paths are guarded by tests asserting
+    # Open-Terminal / cd / fresh-terminal / per-command-fenced-block requirements.
     _p = "pipeline-project/.autodev/pipeline"
+    _project_abs_path = os.path.realpath(project_dir) if project_dir else ""
     _completion_message = (
         f"Begin completion documentation. Read the project source and git diff to understand "
-        f"what was built. Produce README.md updates, a CHANGELOG.md entry, and "
-        f"completion_report.md at the project root. Then write {_p}/reviewer_output.done."
+        f"what was built. Produce three artifacts at the project root: README.md updates, "
+        f"a CHANGELOG.md entry, and completion_report.md.\n\n"
+        f"completion_report.md must walk a non-technical user through running the project "
+        f"from a fresh terminal with no prior context — assume they have not opened a shell "
+        f"yet and are not in any particular directory. Structure it as:\n"
+        f"  1. What was built (one short paragraph).\n"
+        f"  2. How to run it — write this as numbered steps. Step 1 must be: "
+        f"'Open Terminal (macOS/Linux) or PowerShell (Windows)'. Step 2 must be the command "
+        f"`cd {_project_abs_path}` in its own fenced ``` code block (use the literal absolute "
+        f"path shown — never substitute a generic placeholder for the real path). "
+        f"Then one fenced code block per command: install dependencies, build, run, test. "
+        f"Reference the actual scripts present in package.json / Makefile / pyproject.toml / "
+        f"etc. — only commands a user can paste verbatim.\n"
+        f"  3. Files changed (brief list).\n"
+        f"  4. Suggested next steps (2–4 bullets).\n\n"
+        f"Every shell command must live in its own ``` fenced code block so the UI can render "
+        f"one Copy button per command. Do not group multiple commands in one block.\n\n"
+        f"Then write {_p}/reviewer_output.done."
     )
     try:
         _artifacts_dir = os.path.join(project_dir, ".autodev", "pipeline") if project_dir else ""

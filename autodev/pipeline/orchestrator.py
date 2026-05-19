@@ -629,10 +629,27 @@ def _run_completion_review(orchestrator, project_basename: str) -> None:
         cleanup_output_files(PROJECT_ARTIFACTS_DIR, "reviewer")
 
         _p = "pipeline-project/.autodev/pipeline"
+        _project_abs_path = os.path.realpath(SYMLINK_TARGET)
         _completion_message = (
             f"Begin completion documentation. Read the project source and git diff to understand "
-            f"what was built. Produce README.md updates, a CHANGELOG.md entry, and "
-            f"completion_report.md at the project root. Then write {_p}/reviewer_output.done."
+            f"what was built. Produce three artifacts at the project root: README.md updates, "
+            f"a CHANGELOG.md entry, and completion_report.md.\n\n"
+            f"completion_report.md must walk a non-technical user through running the project "
+            f"from a fresh terminal with no prior context — assume they have not opened a shell "
+            f"yet and are not in any particular directory. Structure it as:\n"
+            f"  1. What was built (one short paragraph).\n"
+            f"  2. How to run it — write this as numbered steps. Step 1 must be: "
+            f"'Open Terminal (macOS/Linux) or PowerShell (Windows)'. Step 2 must be the command "
+            f"`cd {_project_abs_path}` in its own fenced ``` code block (use the literal absolute "
+            f"path shown — never substitute a generic placeholder for the real path). "
+            f"Then one fenced code block per command: install dependencies, build, run, test. "
+            f"Reference the actual scripts present in package.json / Makefile / pyproject.toml / "
+            f"etc. — only commands a user can paste verbatim.\n"
+            f"  3. Files changed (brief list).\n"
+            f"  4. Suggested next steps (2–4 bullets).\n\n"
+            f"Every shell command must live in its own ``` fenced code block so the UI can render "
+            f"one Copy button per command. Do not group multiple commands in one block.\n\n"
+            f"Then write {_p}/reviewer_output.done."
         )
         _attempt_start = time.time()
         invoke_agent_webhook(

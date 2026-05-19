@@ -229,3 +229,84 @@ class TestCompletionReviewGating:
         entry = _make_queue_entry(completion_review=True)
         called = self._get_queue_branch_flag(entry, monkeypatch)
         assert called == ["proj"], "Completion review must run when flag is True"
+
+
+# ---------------------------------------------------------------------------
+# Tests for the prompt content (fresh-terminal walkthrough requirements)
+# ---------------------------------------------------------------------------
+
+class TestCompletionMessageContent:
+    """The completion-review webhook message must instruct the agent to write a
+    fresh-terminal walkthrough: 'Open Terminal' first, then `cd <abs path>`, then
+    one fenced code block per command. See plan section 2."""
+
+    def _capture_message(self, monkeypatch, fake_symlink_target="/tmp/fake-completion-target"):
+        """Invoke _run_completion_review with mocks and return the kwarg `message`."""
+        import orchestrator as orc
+
+        monkeypatch.setattr(orc, "SYMLINK_TARGET", fake_symlink_target)
+        monkeypatch.setattr(
+            orc, "PROJECT_ARTIFACTS_DIR",
+            os.path.join(fake_symlink_target, ".autodev", "pipeline"),
+        )
+
+        captured = {}
+
+        def fake_webhook(agent_id, session_key, token, **kwargs):
+            captured.update(kwargs)
+
+        mock_orch = MagicMock()
+        mock_orch.skill_manager.inject_skill.return_value = None
+        mock_orch.openclaw_config = {}
+
+        with patch("orchestrator.invoke_agent_webhook", side_effect=fake_webhook), \
+             patch("orchestrator.poll_for_sentinel", return_value=True):
+            orc._run_completion_review(mock_orch, project_basename="proj")
+
+        assert "message" in captured, "invoke_agent_webhook was not given a message kwarg"
+        return captured["message"]
+
+    def test_message_includes_open_terminal_step(self, monkeypatch):
+        msg = self._capture_message(monkeypatch)
+        assert "Open Terminal" in msg or "Open a terminal" in msg, (
+            "Completion prompt must instruct the agent to begin with an 'Open Terminal' step"
+        )
+
+    def test_message_includes_cd_to_project_path(self, monkeypatch):
+        msg = self._capture_message(monkeypatch, fake_symlink_target="/tmp/fake-completion-target")
+        assert "cd " in msg, (
+            "Completion prompt must reference a `cd ` step"
+        )
+        assert "/tmp/fake-completion-target" in msg, (
+            "Completion prompt must interpolate the absolute project path (so the agent "
+            "writes `cd /actual/path` instead of `cd <your-path>`)"
+        )
+
+    def test_message_uses_fresh_terminal_framing(self, monkeypatch):
+        msg = self._capture_message(monkeypatch)
+        framing = msg.lower()
+        assert "fresh terminal" in framing or "no prior context" in framing, (
+            "Completion prompt must frame the audience as a user opening a fresh terminal "
+            "with no prior context, so the agent does not skip the cd/open-terminal preamble"
+        )
+
+    def test_message_requires_per_command_fenced_blocks(self, monkeypatch):
+        msg = self._capture_message(monkeypatch).lower()
+        assert "fenced" in msg or "```" in msg, (
+            "Completion prompt must mention fenced code blocks so the UI can render "
+            "per-command Copy buttons"
+        )
+        assert "each" in msg or "one fenced" in msg or "own" in msg, (
+            "Completion prompt must require ONE fenced block per command (not grouped)"
+        )
+
+    def test_message_resolves_symlink_to_real_path(self, monkeypatch, tmp_path):
+        """If SYMLINK_TARGET is a symlink, the prompt should still embed a usable path.
+
+        We don't require os.path.realpath here — embedding the symlink path is acceptable
+        because it resolves on the user's machine — but the embedded path must NOT be a
+        placeholder like <your-path> or {project}.
+        """
+        msg = self._capture_message(monkeypatch, fake_symlink_target="/tmp/fake-completion-target")
+        assert "<your-path>" not in msg, "prompt must not contain a placeholder literal"
+        assert "<project>" not in msg, "prompt must not contain a placeholder literal"
