@@ -1715,6 +1715,24 @@
             const completeCount = roadmap ? roadmap.filter(p => p.status === 'complete').length : 0;
             const totalCount = roadmap ? roadmap.length : 0;
 
+            const totalCost = metricsSummary && Number(metricsSummary.total_cost) || 0;
+            const totalHold = metricsSummary && Number(metricsSummary.total_hold_seconds) || 0;
+            const totalActive = metricsSummary && Number(metricsSummary.total_active_seconds) || 0;
+            const totalEscalations = metricsSummary && Number(metricsSummary.total_escalations) || 0;
+            const phases = (metricsSummary && Array.isArray(metricsSummary.phases)) ? metricsSummary.phases : [];
+            const hasCostColumn = phases.some(p => Number(p.cost_total) > 0);
+
+            const outcomeBadge = (phase) => {
+                const ex = Number(phase.executor_attempts) || 0;
+                const esc = Number(phase.escalations) || 0;
+                if (esc > 0 && ex >= 2) return { label: 'escalated + retried', accent: true };
+                if (esc > 0) return { label: 'escalated', accent: true };
+                if (ex >= 2) return { label: 'retried', accent: false, muted: true };
+                return { label: 'clean', accent: false };
+            };
+
+            const fmtUSD = (v) => `$${(Number(v) || 0).toFixed(2)}`;
+
             return (
                 <div className="space-y-4">
                     <div className="flex items-center gap-3">
@@ -1727,37 +1745,71 @@
 
                     {metricsSummary && (
                         <>
-                            <div className="grid grid-cols-2 gap-2 pt-1">
+                            <div className={totalCost > 0 ? "grid grid-cols-2 gap-2 pt-1" : "pt-1"}>
                                 <div className="bg-[#1a1d21] rounded p-2">
-                                    <div className="text-slate-500 text-xs mb-0.5">Phases</div>
-                                    <div className="header-text text-lg font-semibold text-slate-200">{metricsSummary.total_phases}</div>
+                                    <div className="text-slate-500 text-xs mb-0.5 header-text uppercase tracking-wide">Total Time</div>
+                                    <div className="header-text text-lg font-semibold text-slate-200 font-mono">{formatDuration(metricsSummary.total_duration_seconds)}</div>
+                                    {totalHold > 0 && (
+                                        <div className="mt-1 space-y-0.5 text-xs">
+                                            <div className="flex justify-between text-slate-400"><span>Active</span><span className="font-mono">{formatDuration(totalActive)}</span></div>
+                                            <div className="flex justify-between text-slate-400"><span>Hold</span><span className="font-mono">{formatDuration(totalHold)}</span></div>
+                                        </div>
+                                    )}
                                 </div>
-                                <div className="bg-[#1a1d21] rounded p-2">
-                                    <div className="text-slate-500 text-xs mb-0.5">Duration</div>
-                                    <div className="header-text text-lg font-semibold text-slate-200">{formatDuration(metricsSummary.total_duration_seconds)}</div>
-                                </div>
-                                <div className="bg-[#1a1d21] rounded p-2">
-                                    <div className="text-slate-500 text-xs mb-0.5">Exec Attempts</div>
-                                    <div className="header-text text-lg font-semibold text-slate-200">{metricsSummary.total_executor_attempts}</div>
-                                </div>
-                                <div className="bg-[#1a1d21] rounded p-2">
-                                    <div className="text-slate-500 text-xs mb-0.5">Escalations</div>
-                                    <div className="header-text text-lg font-semibold text-slate-200">{metricsSummary.total_escalations}</div>
-                                </div>
+                                {totalCost > 0 && (
+                                    <div className="bg-[#1a1d21] rounded p-2">
+                                        <div className="text-slate-500 text-xs mb-0.5 header-text uppercase tracking-wide">Total Cost</div>
+                                        <div className="header-text text-lg font-semibold text-slate-200 font-mono">{fmtUSD(totalCost)}</div>
+                                        <div className="mt-1 space-y-0.5 text-xs">
+                                            <div className="flex justify-between text-slate-400"><span>Planner</span><span className="font-mono">{fmtUSD(metricsSummary.planner_cost_total)}</span></div>
+                                            <div className="flex justify-between text-slate-400"><span>Executor</span><span className="font-mono">{fmtUSD(metricsSummary.executor_cost_total)}</span></div>
+                                            <div className="flex justify-between text-slate-400"><span>Reviewer</span><span className="font-mono">{fmtUSD(metricsSummary.reviewer_cost_total)}</span></div>
+                                        </div>
+                                    </div>
+                                )}
                             </div>
 
-                            {metricsSummary.phases && metricsSummary.phases.length > 0 && (
+                            {phases.length > 0 && (
                                 <div>
                                     <div className="text-slate-500 text-xs mb-1 header-text uppercase tracking-wide">Per-phase</div>
-                                    <div className="overflow-y-auto max-h-32 border border-[#1a1d21] rounded">
-                                        {metricsSummary.phases.map((phase, idx) => (
-                                            <div key={idx} className="flex items-center gap-3 px-2 py-1.5 text-xs border-b border-[#1a1d21] last:border-b-0">
-                                                <span className="header-text font-semibold text-slate-300 w-14 flex-shrink-0">{phase.phase}</span>
-                                                <span className="text-slate-500 w-10 flex-shrink-0">{formatDuration(phase.duration_seconds)}</span>
-                                                <span className="text-slate-500">{phase.executor_attempts}x exec</span>
-                                                {phase.blame_fires > 0 && (
-                                                    <span className="text-amber-600 ml-auto">{phase.blame_fires} blame</span>
-                                                )}
+                                    <div className="border border-[#1a1d21] rounded">
+                                        <div className="flex items-center gap-2 px-2 py-1 text-[10px] header-text uppercase tracking-wide text-slate-500 border-b border-[#1a1d21]">
+                                            <span className="w-16 flex-shrink-0">Phase</span>
+                                            <span className="w-14 flex-shrink-0 text-right">Duration</span>
+                                            <span className="w-10 flex-shrink-0 text-right">Execs</span>
+                                            {hasCostColumn && <span className="w-14 flex-shrink-0 text-right">Cost</span>}
+                                            <span className="ml-auto">Result</span>
+                                        </div>
+                                        {phases.map((phase, idx) => {
+                                            const badge = outcomeBadge(phase);
+                                            const badgeClass = badge.accent
+                                                ? 'text-red-400'
+                                                : (badge.muted ? 'text-slate-500' : 'text-emerald-400');
+                                            return (
+                                                <div key={idx} className="flex items-center gap-2 px-2 py-1.5 text-xs border-b border-[#1a1d21] last:border-b-0">
+                                                    <span className="header-text font-semibold text-slate-300 w-16 flex-shrink-0 font-mono">{phase.phase}</span>
+                                                    <span className="text-slate-400 w-14 flex-shrink-0 text-right font-mono">{formatDuration(phase.duration_seconds)}</span>
+                                                    <span className="text-slate-400 w-10 flex-shrink-0 text-right font-mono">{phase.executor_attempts}</span>
+                                                    {hasCostColumn && (
+                                                        <span className="text-slate-400 w-14 flex-shrink-0 text-right font-mono">{Number(phase.cost_total) > 0 ? fmtUSD(phase.cost_total) : '—'}</span>
+                                                    )}
+                                                    <span className={`ml-auto header-text ${badgeClass}`}>{badge.label}</span>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            )}
+
+                            {totalEscalations > 0 && (
+                                <div>
+                                    <div className="text-slate-500 text-xs mb-1 header-text uppercase tracking-wide">Escalation</div>
+                                    <div className="border border-[#1a1d21] rounded">
+                                        {phases.filter(p => Number(p.hold_seconds) > 0).map((phase, idx) => (
+                                            <div key={idx} className="flex items-center gap-2 px-2 py-1.5 text-xs border-b border-[#1a1d21] last:border-b-0">
+                                                <span className="header-text font-semibold text-slate-300 font-mono">{phase.phase}</span>
+                                                <span className="text-slate-500">·</span>
+                                                <span className="text-slate-400 font-mono">{formatDuration(phase.hold_seconds)} hold</span>
                                             </div>
                                         ))}
                                     </div>
@@ -2225,7 +2277,7 @@
 
                     {metricsSummary && metricsSummary.total_phases > 0 && (
                         <p className="header-text text-xs text-slate-500">
-                            Run so far: {metricsSummary.total_phases} phases · {metricsSummary.total_executor_attempts} exec attempts · {formatDuration(metricsSummary.total_duration_seconds)}{metricsSummary.cost_total > 0 ? ` · $${metricsSummary.cost_total.toFixed(2)}` : ''}
+                            Run so far: {metricsSummary.total_phases} phases · {metricsSummary.total_executor_attempts} exec attempts · {formatDuration(metricsSummary.total_duration_seconds)}{metricsSummary.total_cost > 0 ? ` · $${metricsSummary.total_cost.toFixed(2)}` : ''}
                         </p>
                     )}
 
@@ -2297,10 +2349,6 @@
                                                                     <span className="text-slate-300">{phaseMeta.reviewer_passes}</span>
                                                                 </div>
                                                                 <div>
-                                                                    <span className="text-slate-500">Blame fires: </span>
-                                                                    <span className="text-slate-300">{phaseMeta.blame_fires}</span>
-                                                                </div>
-                                                                <div>
                                                                     <span className="text-slate-500">Escalations: </span>
                                                                     <span className="text-slate-300">{phaseMeta.escalations}</span>
                                                                 </div>
@@ -2311,7 +2359,7 @@
                                                                 {phaseMeta.cost_total > 0 && (
                                                                     <div>
                                                                         <span className="text-slate-500">Cost: </span>
-                                                                        <span className="text-slate-300">${phaseMeta.cost_total.toFixed(2)}</span>
+                                                                        <span className="text-slate-300 font-mono">${phaseMeta.cost_total.toFixed(2)}</span>
                                                                     </div>
                                                                 )}
                                                             </div>

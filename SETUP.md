@@ -398,6 +398,78 @@ Setting `enabled` to `false` disables skill injection for all agents. Setting an
 
 ---
 
+## Cost metrics: configuring OpenClaw so AutoDev can report run cost
+
+AutoDev does **not** compute model cost. It reads `usage.cost.total` directly from each OpenClaw session JSONL row (`~/.openclaw/agents/<role>/sessions/<id>.jsonl`) and sums those values into `metrics.jsonl` and the **Pipeline Complete** panel. When OpenClaw writes zero for `cost.total`, AutoDev's UI correctly hides the cost card and the **Cost** column — there is nothing to display. If you want cost reporting, **OpenClaw must populate that field**.
+
+There is no single switch that works for every provider/model. The steps below are the rough order of operations that produces non-zero `cost.total` in most setups. Treat it as a checklist, not a script.
+
+### Step 1 — Enable pricing in `~/.openclaw/openclaw.json`
+
+OpenClaw computes `cost.total` per assistant turn only when pricing is enabled. The `models` block at the gateway level must contain:
+
+```json
+{
+  "models": {
+    "pricing": {
+      "enabled": true
+    }
+  }
+}
+```
+
+If `pricing` is missing or `enabled: false`, every `cost.total` in every session JSONL is `0` regardless of token volume.
+
+### Step 2 — Verify your provider exposes pricing to OpenClaw
+
+OpenClaw needs a price (per-million input/output/cache tokens) for **every model your pipeline agents use**. Three common sources, in rough priority order:
+
+1. **Provider-reported pricing.** Providers that expose token cost in their API response (e.g. some OpenRouter routes that include a `cost` field) feed OpenClaw directly. Nothing further to configure.
+2. **Built-in OpenClaw price tables.** OpenClaw ships rates for first-party Anthropic models (`claude-opus-*`, `claude-sonnet-*`, `claude-haiku-*`) and a handful of common third-party models. These work out of the box once `pricing.enabled` is `true`.
+3. **Explicit `pricing` block on the model entry.** If your model is not in OpenClaw's table and your provider does not report cost, add a `pricing` object to the model definition under `models.{model-id}.pricing`. Consult your OpenClaw version's docs for the exact field names (typical shape is `inputPerMillion`, `outputPerMillion`, `cacheReadPerMillion`, `cacheWritePerMillion`). Without this, OpenClaw has no way to convert tokens into dollars.
+
+**Local providers** (llama-server, Ollama, vLLM) generally have no real cost. You can leave them without pricing — `cost.total` will be `0`, AutoDev will hide the cost UI for runs that used only local models, and no report is wrong.
+
+### Step 3 — Restart the OpenClaw gateway after config changes
+
+Pricing is read at gateway start. **Existing agent sessions are baked at session-creation time** — they will not retroactively gain cost data when you flip `pricing.enabled`. To force a clean slate:
+
+1. Stop the OpenClaw gateway.
+2. (Optional but recommended) Edit `~/.openclaw/agents/<role>/sessions/sessions.json` and remove entries for the pipeline agents, or delete their `.jsonl` files.
+3. Restart the gateway.
+
+New sessions created from this point will write `cost.total` per assistant message.
+
+### Step 4 — Confirm cost data is flowing
+
+After running at least one pipeline phase, inspect a recent session JSONL:
+
+```bash
+grep -o '"cost":{[^}]*}' ~/.openclaw/agents/executor/sessions/*.jsonl | head -3
+```
+
+A healthy result looks like:
+
+```
+"cost":{"input":0.0012,"output":0.0048,"cacheRead":0.0001,"cacheWrite":0,"total":0.0061}
+```
+
+If every `total` is still `0`:
+
+- Re-check `models.pricing.enabled` in `openclaw.json`.
+- Confirm the model your agent actually used (look at the `model` field in the session JSONL — note that fallback can swap the model silently) has pricing defined either by OpenClaw or by an explicit `pricing` block.
+- Check `~/.openclaw/logs/` for OpenClaw warnings about missing rate tables.
+
+Once `cost.total` is non-zero on disk, AutoDev surfaces it automatically — no AutoDev restart needed; the Pipeline Complete panel reads `metrics.jsonl` on each poll.
+
+### What AutoDev does with the data
+
+- **Pipeline Complete panel** (left side, post-completion): shows total cost plus a planner/executor/reviewer breakdown when `total_cost > 0`. The COST column in the per-phase table appears when any phase has cost data.
+- **Roadmap panel** phase breakdown: shows **Cost: $X.XX** in the expanded run-metrics block for any phase with `cost_total > 0`. Phases that ran on local models (zero cost) simply omit the row.
+- **No backfill.** Phases that ran before pricing was configured stay at zero forever — re-running a phase will populate cost only for that new run.
+
+---
+
 ## Re-approving Gate Scripts
 
 OpenClaw maintains an `exec-approvals.json` file at `~/.openclaw/exec-approvals.json`. This file records which shell scripts and Python files each agent is permitted to execute. Gate scripts (the Python files in `autodev/pipeline/gate_scripts/`) must be pre-approved, or agent sessions will refuse to run them.
