@@ -40,6 +40,45 @@ function ctxExecutor(workspaceDir: string): PluginHookAgentContext {
   };
 }
 
+test("writes activity stamp when sessionKey is OpenClaw-prefixed agent:{role}:pipeline:... (production format)", () => {
+  // Regression test for the live-pipeline bug observed on phase-4:ui-e1
+  // (and CORE-E6 / STAT-E1 before it).  In production the gateway's
+  // hookCtx.sessionKey arrives with the OpenClaw ``agent:{role}:`` prefix
+  // (e.g. ``agent:executor:pipeline:phase-4:ui-e1:executor-attempt-1``).
+  // The plugin's ``isPipelineSession`` only matched the bare ``pipeline:``
+  // prefix, so the first branch in ``recordPipelineActivity`` was skipped
+  // and the runId fallback didn't fire either (model-call runIds don't
+  // equal sessions.json sessionId).  Net effect: stamp never refreshed
+  // during model work → orchestrator's startup_grace expired and the
+  // attempt was aborted while the model was still doing real work.
+  const tmpDir = makeTmpDir();
+  const openclawRoot = path.join(tmpDir, "openclaw");
+  const workspaceDir = path.join(openclawRoot, "workspace-executor");
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  const artifactsDir = makeArtifactsDir(openclawRoot);
+  const stampPath = path.join(artifactsDir, "executor_activity.stamp");
+
+  try {
+    assert.equal(fs.existsSync(stampPath), false);
+    recordPipelineActivity({
+      agentId: "executor",
+      // This is exactly the shape the gateway passes in production —
+      // confirmed via `[diagnostic] stalled session ... sessionKey=...`
+      // in /tmp/openclaw/openclaw-*.log.
+      sessionKey: "agent:executor:pipeline:phase-4:ui-e1:executor-attempt-1",
+      workspaceDir,
+    });
+    assert.equal(
+      fs.existsSync(stampPath),
+      true,
+      "stamp must be touched when sessionKey carries the OpenClaw " +
+        "``agent:{role}:`` prefix (production format)",
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test("writes activity stamp on model_call_started for pipeline executor session", () => {
   const tmpDir = makeTmpDir();
   const openclawRoot = path.join(tmpDir, "openclaw");

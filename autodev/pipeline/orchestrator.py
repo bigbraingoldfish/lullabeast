@@ -1927,37 +1927,36 @@ class Orchestrator:
 
         Called by all three pipeline-agent poll sites (planner / executor /
         reviewer) when ``poll_for_sentinel`` returns ``PollResult`` with
-        ``reason in {"stalled", "no_first_activity"}``.  Centralising the
-        logic avoids the three-way divergence that the original CORE-E6
-        bug exploited (one site silently fire-and-forgot the abort).
+        ``reason in {"stalled", "no_first_activity", "timeout"}``.  The
+        ``"timeout"`` reason was added after the CORE-E6 cascade — the
+        45-min infrastructure backstop previously bypassed abort+verify,
+        letting attempt N+1 launch on top of the still-streaming N.
 
         Behaviour:
 
         1. Build the OpenClaw-namespaced abort key from ``agent_role`` and
            ``session_key`` (OpenClaw normalises session keys to lowercase
            and prefixes ``agent:{role}:``).
-        2. Call ``abort_agent_session`` and log ``[ABORT] result=ok|FAILED ...``
-           — return value MUST be captured (silent fire-and-forget was the
-           original bug).
+        2. Call ``abort_agent_session`` (now with built-in 3x retry) and
+           log ``[ABORT] result=ok|FAILED ...``.
         3. If abort succeeded, call ``verify_session_stopped`` to confirm
-           the agent really stopped streaming.  A False there is the
-           signature live-CORE-E6 failure: gateway acknowledged
-           ``sessions.abort`` but the agent kept writing tokens.  Escalate
-           to ``HALTED_SILENT`` rather than launch attempt N+1 on top of
-           it.
-        4. If abort returned False (network error, transient gateway
-           issue, session not found), do **not** call verify and do not
-           escalate — abort is best-effort and a False there is logged
-           but not fatal.  The orchestrator's existing retry/cleanup
-           paths still own that case.
+           the agent really stopped streaming.  A False there means the
+           gateway acknowledged ``sessions.abort`` but the agent kept
+           writing tokens.  We emit ``abort_verify_failed`` so the
+           activity feed shows it in red, then **soft-continue** — the
+           orchestrator launches the next attempt anyway.  Rationale:
+           90%+ of long runs eventually resolve, and a forced
+           ``HALTED_SILENT`` state requires human intervention which is
+           worse than letting the retry run.
+        4. If abort returned False after all retries, log it and let the
+           caller proceed.  Same best-effort contract.
 
         Returns
         -------
         bool
-            ``True`` if it is safe for the caller to proceed with the
-            normal retry/increment flow.  ``False`` if the helper
-            escalated to ``HALTED_SILENT`` — the caller MUST short-circuit
-            (``return`` from its main loop) to avoid invoking attempt N+1.
+            Always ``True`` — every outcome lets the caller continue.
+            Return value kept for backwards-compatibility with the three
+            poll-site guards that still check it.
         """
         # Build the OpenClaw-namespaced key.  Callers pass the
         # pipeline-internal key (``pipeline:phase-…``); OpenClaw prefixes
@@ -1997,11 +1996,17 @@ class Orchestrator:
             return True
 
         if not verify_session_stopped(stamp_path, settle_seconds=5.0):
+            # Soft-continue: gateway acknowledged abort but stamp is
+            # still being refreshed.  Per operator policy, do NOT halt
+            # the pipeline — emit the event so the activity feed shows
+            # the situation, then let the next attempt run.  90%+ of
+            # long runs resolve on retry, vs. a HALTED_SILENT state
+            # that always requires human intervention.
             print(
                 f"[ABORT][VERIFY_FAILED] session_key={full_key} "
                 f"stamp_path={stamp_path} reason={reason} — gateway acknowledged "
-                f"abort but stamp is still being refreshed.  Refusing to launch "
-                f"next attempt on top of a still-streaming session."
+                f"abort but stamp is still being refreshed.  Continuing with "
+                f"next attempt (soft-continue); see activity feed for details."
             )
             _write_pipeline_event(
                 "abort_verify_failed",
@@ -2015,11 +2020,7 @@ class Orchestrator:
                 },
             )
             self._record_phase_outcome(last_abort_result="verify_failed")
-            self.transition_state(
-                "HALTED_SILENT",
-                f"Abort verification failed for {full_key} (reason={reason})",
-            )
-            return False
+            return True
 
         self._record_phase_outcome(last_abort_result="ok")
         return True
@@ -2427,9 +2428,21 @@ class Orchestrator:
             self.state["executor_retries"] = new_count
             print(f"[INFO] reset_execution(auto): executor_retries now {new_count}.")
         elif caller == "escalation":
+            # Operator-driven reset: give the executor a fresh attempt budget.  Without
+            # this, executor_retries stays at the prior cap (typically 3) so the next
+            # main-loop iteration re-enters the `retries >= 3` branch and runs blame
+            # attribution again instead of actually re-invoking the executor.  The UI
+            # attempt chips (driven by executor_retries from pipeline_state.json) also
+            # remain red instead of resetting to a fresh 3-slot budget.
+            phase_state["executor_retries"] = 0
+            self.state["executor_retries"] = 0
+            # prior_blame_attributions feeds the consecutive-impl cap at orchestrator.py
+            # line 3870.  Leaving the prior 3-4 impl entries in place would cause the
+            # impl cap to fire again after a single new failure, defeating the reset.
+            phase_state["prior_blame_attributions"] = []
             phase_state["escalation_resets"] = phase_state.get("escalation_resets", 0) + 1
             new_count = phase_state["escalation_resets"]
-            print(f"[INFO] reset_execution(escalation): escalation_resets now {new_count}.")
+            print(f"[INFO] reset_execution(escalation): executor_retries reset to 0, prior_blame_attributions cleared, escalation_resets now {new_count}.")
             # FIND-ESCALATION-CAP: log reason per reset so infra vs logic failures are
             # distinguishable when the cap is reached.
             reason = phase_state.get("last_error_code", "unknown")
@@ -3706,6 +3719,7 @@ class Orchestrator:
                     if getattr(sentinel_found, "reason", None) in (
                         "stalled",
                         "no_first_activity",
+                        "timeout",
                     ):
                         if not self._handle_stall_outcome(
                             agent_role="planner",
@@ -3944,11 +3958,16 @@ class Orchestrator:
                                 PROJECT_ARTIFACTS_DIR, "executor_activity.stamp"
                             )
                             if not verify_session_stopped(_prev_stamp, settle_seconds=5.0):
+                                # Soft-continue: surface the situation to the
+                                # activity feed but launch attempt N+1 anyway.
+                                # See _handle_stall_outcome docstring for the
+                                # rationale (forced halt requires human
+                                # intervention; retries usually resolve).
                                 print(
                                     f"[ABORT][VERIFY_FAILED] session_key={_prev_session_key} "
                                     f"stamp_path={_prev_stamp} — gateway acknowledged abort "
-                                    f"but stamp is still being refreshed.  Refusing to launch "
-                                    f"attempt {retries + 1} on top of a still-streaming session."
+                                    f"but stamp is still being refreshed.  Continuing with "
+                                    f"attempt {retries + 1} anyway (soft-continue)."
                                 )
                                 _write_pipeline_event(
                                     "abort_verify_failed", raw_id, "executor",
@@ -3960,11 +3979,6 @@ class Orchestrator:
                                         "prior_attempt": retries,
                                     },
                                 )
-                                self.transition_state(
-                                    "HALTED_SILENT",
-                                    f"Abort verification failed for {_prev_session_key}",
-                                )
-                                return
 
                     # Proactive branch guard: after RESET_PHASE the phase branch is deleted
                     # and HEAD lands on main. Correct before the executor runs so any git
@@ -4071,6 +4085,7 @@ class Orchestrator:
                     if getattr(sentinel_found, "reason", None) in (
                         "stalled",
                         "no_first_activity",
+                        "timeout",
                     ):
                         if not self._handle_stall_outcome(
                             agent_role="executor",
@@ -4317,6 +4332,7 @@ class Orchestrator:
                         if getattr(sentinel_found, "reason", None) in (
                             "stalled",
                             "no_first_activity",
+                            "timeout",
                         ):
                             if not self._handle_stall_outcome(
                                 agent_role="reviewer",

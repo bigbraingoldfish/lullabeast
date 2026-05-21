@@ -193,6 +193,34 @@ Treat each annotation as targeted feedback from the user on that specific sectio
 
 ---
 
+## Conversation History Access
+
+Each conversational turn is a fresh OpenClaw session, so the server injects recent context in a `[CONVERSATION HISTORY]` block at the top of the message body. **Only the most recent 3 complete turns** are guaranteed to appear inline (the count may be lower if a single turn is unusually large — the server hard-caps the block by character budget and notes the truncation).
+
+If the inline block contains a line like:
+```
+[NOTE] N earlier turn(s) omitted from this prompt. Use the Read tool on ~/.openclaw/ideas/{id}/conversation_log.md if you need older context.
+```
+and the user references something not visible in the inline window, use the Read tool to open:
+
+`~/.openclaw/ideas/{id}/conversation_log.md`
+
+This file is server-maintained, append-only, and contains every completed conversational turn in order. Format:
+```
+## Turn N
+### User
+...user message...
+
+### Assistant
+...assistant message...
+```
+
+**Do not write to `conversation_log.md`.** It is read-only from your perspective; the server is the sole writer and any agent-side edit will be overwritten on the next successful turn.
+
+Default behavior: trust the inline window. Read the log only when older context is genuinely needed to answer well.
+
+---
+
 ## Output Contract — Readiness Sessions
 
 When invoked with session key `ideas:{id}:readiness`, apply the readiness-reviewer skill at:
@@ -209,5 +237,5 @@ Do not produce conversational output in readiness sessions. Do not write a respo
 ## Tools
 
 - **Write**: output files to `~/.openclaw/ideas/{id}/` only
-- **Read**: your own prior output for continuity
+- **Read**: your own prior output for continuity, including the server-maintained `~/.openclaw/ideas/{id}/conversation_log.md` when older turns are needed (see "Conversation History Access")
 - No exec, no browser, no process tools

@@ -222,6 +222,12 @@ DOTENV_STALL_HINT_MARKER = "# --- AutoDev: Tier A stall timeouts (optional) ---"
 # Appended once per .env by install.sh so operators discover Ideas poll overrides.
 DOTENV_IDEAS_IDLE_HINT_MARKER = "# --- AutoDev: Ideas UI poll thresholds (optional) ---"
 
+# Independent marker so existing .env files (that already have the idle-hints block)
+# still gain the new history-budget placeholder on next install.sh run.
+DOTENV_IDEAS_HISTORY_BUDGET_HINT_MARKER = (
+    "# --- AutoDev: Ideas chat history budget (optional) ---"
+)
+
 
 def ensure_dotenv_stall_timeout_hints(env_path: str) -> str:
     """Append a comment-only block about AUTODEV_STALL_TIMEOUT_* if not present.
@@ -291,6 +297,46 @@ def ensure_dotenv_ideas_idle_hints(env_path: str) -> str:
 # ui/config.json. Defaults if unset: idle 120, grace 30.
 # AUTODEV_IDEAS_IDLE_THRESHOLD=
 # AUTODEV_IDEAS_STARTUP_GRACE=
+"""
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            if content and not content.endswith("\n"):
+                f.write("\n")
+            f.write(block.lstrip("\n"))
+    except OSError as e:
+        return f"error:{e}"
+    return "appended"
+
+
+def ensure_dotenv_ideas_history_budget_hint(env_path: str) -> str:
+    """Append a comment-only block about AUTODEV_IDEAS_HISTORY_CHAR_BUDGET.
+
+    Uses an independent marker from the idle-hints block so existing installs
+    that already appended the idle block still gain this placeholder on
+    upgrade. Idempotent via ``DOTENV_IDEAS_HISTORY_BUDGET_HINT_MARKER``.
+
+    Returns: appended | unchanged | error:<msg>
+    """
+    path = os.path.abspath(env_path)
+    if not os.path.isfile(path):
+        return "unchanged"
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except OSError as e:
+        return f"error:{e}"
+    if DOTENV_IDEAS_HISTORY_BUDGET_HINT_MARKER in content:
+        return "unchanged"
+    block = f"""
+{DOTENV_IDEAS_HISTORY_BUDGET_HINT_MARKER}
+# UI server Ideas chat: hard cap on characters in the inline [CONVERSATION HISTORY]
+# block prepended to each prd-creator webhook. The most recent 3 (user, assistant)
+# pairs are kept inline; once that block exceeds this budget the oldest pair is
+# dropped, and if a single remaining pair still exceeds the budget its content is
+# truncated with a [...truncated...] marker. Older context stays available via
+# ~/.openclaw/ideas/{{id}}/conversation_log.md, which the agent can Read on demand.
+# Default if unset: 20000.
+# AUTODEV_IDEAS_HISTORY_CHAR_BUDGET=
 """
     try:
         with open(path, "a", encoding="utf-8") as f:

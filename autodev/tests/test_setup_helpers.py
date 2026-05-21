@@ -197,6 +197,67 @@ def test_ensure_dotenv_ideas_idle_hints_appends_then_idempotent(tmp_path):
     assert setup_helpers.ensure_dotenv_ideas_idle_hints(str(envp)) == "unchanged"
 
 
+def test_ensure_dotenv_ideas_history_budget_hint_appends_then_idempotent(tmp_path):
+    envp = tmp_path / ".env"
+    envp.write_text("OPENCLAW_ROOT=/a\n")
+    assert setup_helpers.ensure_dotenv_ideas_history_budget_hint(str(envp)) == "appended"
+    text = envp.read_text()
+    assert setup_helpers.DOTENV_IDEAS_HISTORY_BUDGET_HINT_MARKER in text
+    assert "# AUTODEV_IDEAS_HISTORY_CHAR_BUDGET=" in text
+    # Documented default must match the value used by the server (20000).
+    assert "20000" in text
+    assert setup_helpers.ensure_dotenv_ideas_history_budget_hint(str(envp)) == "unchanged"
+
+
+def test_ensure_dotenv_ideas_history_budget_hint_missing_file(tmp_path):
+    missing = tmp_path / "missing.env"
+    assert setup_helpers.ensure_dotenv_ideas_history_budget_hint(str(missing)) == "unchanged"
+
+
+def test_ensure_dotenv_ideas_history_budget_hint_independent_of_idle_marker(tmp_path):
+    """An existing idle-hints block must not block the history-budget append (different marker)."""
+    envp = tmp_path / ".env"
+    envp.write_text("OPENCLAW_ROOT=/a\n")
+    assert setup_helpers.ensure_dotenv_ideas_idle_hints(str(envp)) == "appended"
+    assert setup_helpers.ensure_dotenv_ideas_history_budget_hint(str(envp)) == "appended"
+    text = envp.read_text()
+    assert setup_helpers.DOTENV_IDEAS_IDLE_HINT_MARKER in text
+    assert setup_helpers.DOTENV_IDEAS_HISTORY_BUDGET_HINT_MARKER in text
+
+
+def test_env_example_includes_every_helper_placeholder():
+    """Drift guard: every AUTODEV_* commented placeholder the helpers append must also
+    exist (commented) in the committed .env.example template.
+    """
+    import os
+    import re
+    import tempfile
+
+    repo_root = Path(__file__).resolve().parents[2]
+    example_path = repo_root / ".env.example"
+    assert example_path.is_file(), f".env.example missing at {example_path}"
+    example_text = example_path.read_text()
+
+    # Render every helper block once into a scratch .env, then extract every
+    # ``# AUTODEV_*=`` placeholder from the combined output.
+    with tempfile.TemporaryDirectory() as td:
+        scratch = Path(td) / ".env"
+        scratch.write_text("OPENCLAW_ROOT=/a\n")
+        setup_helpers.ensure_dotenv_stall_timeout_hints(str(scratch))
+        setup_helpers.ensure_dotenv_ideas_idle_hints(str(scratch))
+        setup_helpers.ensure_dotenv_ideas_history_budget_hint(str(scratch))
+        rendered = scratch.read_text()
+
+    placeholders = set(re.findall(r"^#\s*(AUTODEV_[A-Z0-9_]+)=", rendered, re.M))
+    assert placeholders, "no AUTODEV_* placeholders extracted from helper output"
+
+    missing = sorted(
+        p for p in placeholders
+        if not re.search(rf"^#\s*{re.escape(p)}=", example_text, re.M)
+    )
+    assert not missing, f".env.example missing placeholders that helpers append: {missing}"
+
+
 def test_read_openclaw_hooks_token_returns_value(tmp_path):
     oc = tmp_path / "openclaw.json"
     oc.write_text(json.dumps({"hooks": {"token": "abc123"}}))

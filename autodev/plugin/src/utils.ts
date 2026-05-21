@@ -113,10 +113,17 @@ export function touchIdeasPrdCreatorActivityStamp(
 /**
  * Return true when sessionKey belongs to an AutoDev pipeline session.
  * All pipeline sessions use the prefix "pipeline:" (enforced by
- * allowedSessionKeyPrefixes in openclaw.json).
+ * allowedSessionKeyPrefixes in openclaw.json).  The OpenClaw gateway
+ * additionally normalises session keys to ``agent:{role}:{key}`` at
+ * the protocol surface — accept both shapes here because production
+ * hookCtx.sessionKey arrives with the ``agent:`` prefix.
  */
 export function isPipelineSession(sessionKey: string | undefined): boolean {
-  return typeof sessionKey === "string" && sessionKey.startsWith("pipeline:");
+  if (typeof sessionKey !== "string") return false;
+  return (
+    sessionKey.startsWith("pipeline:") ||
+    /^agent:[a-z0-9_-]+:pipeline:/i.test(sessionKey)
+  );
 }
 
 /**

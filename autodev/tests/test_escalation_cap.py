@@ -328,3 +328,82 @@ class TestCapEnforcement:
             f"Exactly one reset must succeed after manual decrement; got {len(resets_executed)}"
         )
         assert len(notifications) == 1, "Cap must re-engage on the second attempt"
+
+
+class TestResetExecutionEscalationFreshBudget:
+    """
+    Validates that an operator-driven RESET_EXECUTION restores a fresh executor
+    retry budget so the UI attempt chips reset and the next executor invocation
+    is actually re-run (rather than re-entering the `retries >= 3` blame branch).
+    """
+
+    @pytest.fixture
+    def tmp_workspace(self, tmp_path):
+        return str(tmp_path)
+
+    def test_reset_execution_escalation_zeros_executor_retries_and_blame_history(self, tmp_workspace):
+        """After RESET_EXECUTION from the escalation path:
+          - phase_state.executor_retries → 0 (fresh budget for the UI chips)
+          - self.state.executor_retries → 0 (so the executor branch does not
+            immediately re-enter the retries >= 3 blame block)
+          - phase_state.prior_blame_attributions → []  (so the consecutive-impl
+            cap at orchestrator.py:3870 does not re-fire on the very next failure)
+          - escalation_resets is incremented exactly once
+        """
+        import orchestrator as orc_module
+
+        phase_state_path = os.path.join(tmp_workspace, "phase_state.json")
+        with open(phase_state_path, "w") as f:
+            json.dump({
+                "planner_retries": 0,
+                "executor_retries": 3,
+                "reviewer_retries": 0,
+                "reviewer_rejected": False,
+                "escalation_resets": 0,
+                "prior_blame_attributions": ["impl", "impl", "impl", "impl"],
+                "last_error_code": "IMPL_BLAME_CAP",
+            }, f)
+
+        with (
+            patch.object(orc_module, "SYMLINK_TARGET", tmp_workspace),
+            patch.object(orc_module, "PHASE_STATE_FILE", phase_state_path),
+        ):
+            from orchestrator import Orchestrator
+            orch = Orchestrator.__new__(Orchestrator)
+            orch.lock_fd = None
+            orch.openclaw_config = {"hooks": {"token": "tok"}}
+            orch.state = {
+                "current_phase": 1,
+                "current_phase_raw_id": "REND-E1",
+                "current_agent": "escalation",
+                "pipeline_status": "RUNNING",
+                "executor_retries": 3,
+                "reviewer_retries": 0,
+                "last_action": "",
+                "last_action_timestamp": "",
+            }
+            orch.write_state = MagicMock()
+            orch.transition_state = MagicMock()
+
+            with patch("orchestrator.subprocess.run") as mock_sub:
+                mock_sub.return_value = MagicMock(returncode=0)
+                orch.reset_execution(caller="escalation")
+
+        with open(phase_state_path) as f:
+            ps = json.load(f)
+
+        assert ps.get("executor_retries") == 0, (
+            "phase_state.executor_retries must be zeroed by reset_execution(escalation) "
+            "so the UI attempt chips reset to a fresh 3-slot budget."
+        )
+        assert orch.state.get("executor_retries") == 0, (
+            "self.state.executor_retries must be zeroed so the main loop does not "
+            "immediately re-enter the `retries >= 3` blame branch on the next iteration."
+        )
+        assert ps.get("prior_blame_attributions") == [], (
+            "prior_blame_attributions must be cleared so the consecutive-impl cap "
+            "does not re-fire after a single new failure."
+        )
+        assert ps.get("escalation_resets") == 1, (
+            "escalation_resets must still be incremented exactly once."
+        )

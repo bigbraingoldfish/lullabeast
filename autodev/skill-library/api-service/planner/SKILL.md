@@ -5,20 +5,29 @@ description: Domain guidance for planning API and service layer phases. Loaded w
 
 # API/Service Layer Planning Guidance
 
-## Contract-first, not code-first
-For every endpoint specify: method + path, auth requirement, request shape (per location: path/query/body), response shape, error envelope, and status-code mapping.
+## Decomposition checklist
+- Shared validation + error framework (canonical envelope: `code`, `message`, `details`, `request_id`).
+- 1–3 endpoints per phase, grouped by resource — never "the whole API layer" in one phase.
+- Middleware chain in exact order (e.g. request_id → auth → validation → handler → error handler) and where request-scoped context is created.
+- Contract tests + edge cases as a deliverable, not an afterthought.
 
-## Lock a canonical error envelope
-Define one error response structure (code, message, details, request_id) used everywhere. Treat it as part of the API contract.
+## Interfaces & contracts to specify
+For every endpoint: method + path, auth requirement, request shape per location (path/query/body), response shape, error envelope, status-code mapping. If event-driven: event name constants, payload schema, delivery semantics (ordering, at-least-once, idempotency).
 
-## Pass criteria must cover ugly paths
-- Success case + at least 5 negative cases per endpoint: invalid type, missing required, extra/unknown fields, boundary values, auth missing/invalid.
-- Explicit assertions for: status codes, content-type, empty responses (204 vs 200), error envelope shape.
-- Routing: include 404 (no route) and 405 (wrong method) expectations.
+## Edge cases — must enumerate, not generalise
+At least 5 negative cases per endpoint: invalid type, missing required field, extra/unknown fields, boundary values, auth missing/invalid. Plus routing: 404 (no route) and 405 (wrong method). Plus empty-response semantics (204 vs 200).
 
-## Middleware order is part of the spec
-Write middleware chain in exact intended order (e.g., request_id → auth → validation → handler → error handler). Define where request-scoped context is created and how it propagates.
+## Pass criteria patterns
+- Status-code assertions per endpoint (success and each negative case).
+- Content-type assertion and error envelope shape assertion.
+- Schema-shape assertion on responses (no `assert resp.json` without keys).
+- Contract test runs against the real handler, not a hand-rolled fake.
 
-## Scope for single-pass
-- Prefer phases that deliver: (1) shared validation + error framework, then (2) 1-3 endpoints, then (3) contract tests + edge cases.
-- Never "implement the whole API layer" in one phase; split by resource/domain.
+## Anti-patterns to avoid
+- "Return an appropriate error" — pin the status code and envelope shape.
+- Per-endpoint ad hoc auth checks instead of a single enforcement point.
+- Multiple error envelope shapes across endpoints.
+- Endpoints that share path prefix but split auth requirements without explicit documentation.
+
+## TDD test structure
+Minimum: one contract test file per endpoint group, one middleware-order test, one error-envelope conformance test.

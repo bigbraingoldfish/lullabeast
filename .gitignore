@@ -64,3 +64,9 @@ PIPELINE_STATE_MACHINE_AUDIT.md
 *-metaprompt.md
 analyze_executor_sessions.py
 executor-watchdog-calibration-findings.md
+.claude/scheduled_tasks.lock
+
+
+# Plugin build artifacts (compiled per-host by install.sh — never committed)
+autodev/plugin/dist/
+autodev/plugin/node_modules/

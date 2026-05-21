@@ -1149,6 +1149,19 @@ case "$ENV_IDEAS_HINTS" in
     *) warn ".env Ideas idle hint block: $ENV_IDEAS_HINTS" ;;
 esac
 
+ENV_IDEAS_HIST_HINT=$(
+    cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import ensure_dotenv_ideas_history_budget_hint
+import os
+print(ensure_dotenv_ideas_history_budget_hint(os.path.join(os.environ['AUTODEV_REPO_PATH'], '.env')))
+" 2>/dev/null || echo "error:helper"
+)
+case "$ENV_IDEAS_HIST_HINT" in
+    appended) ok "Added commented AUTODEV_IDEAS_HISTORY_CHAR_BUDGET placeholder to .env (Ideas chat prompt budget)" ;;
+    unchanged) : ;;
+    *) warn ".env Ideas history-budget hint block: $ENV_IDEAS_HIST_HINT" ;;
+esac
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 11/14  INSTALL PIPELINE SIGNALS PLUGIN
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1156,6 +1169,18 @@ hdr "11/14  Installing autodev-pipeline-signals plugin"
 
 PLUGIN_DIR="$AUTODEV_REPO_PATH/autodev/plugin"
 PLUGIN_INSTALL_STEP="not attempted"
+# OpenClaw >= 2026.5.x rejects TypeScript-source plugins; it expects a
+# compiled ``dist/index.js``.  Build the bundle here so ``openclaw plugins
+# install`` has the artifact it needs.  Silently fall back to the bundled
+# TS if the build tools are missing — older OpenClaw versions still accept
+# the source path.
+if command -v npm >/dev/null 2>&1; then
+    ( cd "$PLUGIN_DIR" \
+        && npm install --silent >/dev/null 2>&1 \
+        && npm run --silent build >/dev/null 2>&1 ) \
+        && info "Plugin compiled to $PLUGIN_DIR/dist/index.js" \
+        || warn "Could not build plugin bundle — old OpenClaw versions may still load TS source, newer versions will refuse to load it"
+fi
 if command -v openclaw >/dev/null 2>&1; then
     if openclaw plugins install "$PLUGIN_DIR" >/dev/null 2>&1; then
         ok "Plugin installed: autodev-pipeline-signals"

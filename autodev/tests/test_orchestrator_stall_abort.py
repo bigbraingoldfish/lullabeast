@@ -1,6 +1,6 @@
-"""Section 2 — inline abort + verify on stall / no_first_activity outcomes.
+"""Section 2 — inline abort + verify on stall / no_first_activity / timeout outcomes.
 
-When ``poll_for_sentinel`` returns ``PollResult(False, "stalled" | "no_first_activity")``
+When ``poll_for_sentinel`` returns ``PollResult`` with a non-success reason
 the orchestrator must:
 
 1. Call ``abort_agent_session`` against the *current* attempt's session key
@@ -8,9 +8,11 @@ the orchestrator must:
 2. Capture and log the abort return value (``[ABORT] result=ok|FAILED ...``).
 3. On a successful abort, verify the agent really stopped via
    ``verify_session_stopped``.  If verification fails (gateway acknowledged
-   abort but stamp still advancing — the exact CORE-E6 failure mode),
-   transition to ``HALTED_SILENT`` rather than launch attempt N+1 against
-   a still-streaming attempt N.
+   abort but stamp still advancing) we emit ``abort_verify_failed`` to the
+   activity feed and **soft-continue** — the orchestrator launches the
+   next attempt anyway.  Rationale: 90%+ of long runs eventually resolve
+   on retry, whereas a forced ``HALTED_SILENT`` always requires human
+   intervention.
 4. Otherwise return control so the existing retry path runs.
 
 These tests pin the helper that encapsulates this logic plus source-level
@@ -98,19 +100,19 @@ class TestHandleStallOutcomeHelper:
         # No HALTED_SILENT transition.
         assert orch.state.get("pipeline_status") == "RUNNING"
 
-    def test_transitions_halted_silent_when_verify_fails(
+    def test_soft_continues_when_verify_fails(
         self, monkeypatch, tmp_path, capsys
     ):
-        """Abort acknowledged but verify_session_stopped returns False —
-        the gateway said yes but the agent is still streaming.  Must
-        escalate to HALTED_SILENT (regression test for CORE-E6 attempt-#2
-        kept-running scenario) and return False to signal the caller to
-        bail out of its retry loop.
+        """Abort acknowledged but ``verify_session_stopped`` returns False
+        — the gateway said yes but the agent is still streaming.  Per the
+        post-CORE-E6 policy review, we no longer halt.  We emit the
+        ``[ABORT][VERIFY_FAILED]`` print + ``abort_verify_failed`` event
+        for activity-feed transparency and return ``True`` so the caller
+        proceeds with the next attempt.
         """
         orch = _bare_orchestrator()
         stamp = tmp_path / "executor_activity.stamp"
         stamp.write_text("")
-        # Capture transition_state calls instead of letting them write to disk.
         transitions = []
         monkeypatch.setattr(
             orch,
@@ -127,14 +129,17 @@ class TestHandleStallOutcomeHelper:
             stamp_path=str(stamp),
             reason="stalled",
         )
-        assert result is False, (
-            "Helper must return False after escalating so the caller does "
-            "not launch attempt N+1 against a still-streaming session"
+        assert result is True, (
+            "Helper must return True after soft-continue so the caller "
+            "proceeds with the next attempt"
         )
-        assert transitions, "transition_state must be called"
-        assert transitions[0][0] == "HALTED_SILENT"
+        assert not any(t[0] == "HALTED_SILENT" for t in transitions), (
+            "Helper must NOT transition to HALTED_SILENT on verify failure"
+        )
         out = capsys.readouterr().out
-        assert "[ABORT][VERIFY_FAILED]" in out
+        assert "[ABORT][VERIFY_FAILED]" in out, (
+            "Diagnostic marker must remain so operators can grep logs"
+        )
 
     def test_returns_true_when_abort_returns_false(
         self, monkeypatch, tmp_path, capsys
@@ -219,7 +224,7 @@ class TestPollSiteWiring:
         idx = src.find(agent_hint)
         assert idx != -1, f"Could not locate {agent} poll site in orchestrator.py"
         start = max(0, src.rfind("poll_for_sentinel(", 0, idx))
-        end = min(len(src), idx + 4000)
+        end = min(len(src), idx + 6000)
         return src[start:end]
 
     @pytest.mark.parametrize("agent", ["planner", "executor", "reviewer"])
