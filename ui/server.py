@@ -3507,6 +3507,173 @@ def _ideas_turn_output_contract_footer(idea_id: str, turn_n: int) -> str:
     )
 
 
+# Bounded conversation-history window injected per Ideas chat turn.
+# Each new turn spawns a fresh OpenClaw session, so history must be re-injected
+# inline — but unbounded injection overflows the model's input budget on long
+# threads. Cap at IDEAS_HISTORY_WINDOW_TURNS pairs and a hard character budget;
+# older pairs become a one-line pointer to ``conversation_log.md`` (server
+# writes that file after every successful turn; agent reads it on demand).
+IDEAS_HISTORY_WINDOW_TURNS = 3
+IDEAS_HISTORY_TRUNCATION_MARKER = "[…truncated…]"
+
+
+def _ideas_history_char_budget() -> int:
+    """Read AUTODEV_IDEAS_HISTORY_CHAR_BUDGET at call time so tests can monkeypatch."""
+    raw = os.environ.get("AUTODEV_IDEAS_HISTORY_CHAR_BUDGET", "").strip()
+    if raw:
+        try:
+            v = int(raw)
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+    return 20000
+
+
+def _complete_pairs(prior_messages: list) -> list:
+    """Walk messages, return ordered list of (user_msg, assistant_msg) tuples.
+
+    Skips:
+      - user messages flagged ``error: True`` (failed 408 timeouts)
+      - assistant messages flagged ``error: True``
+      - orphaned user messages with no immediate assistant follow-up
+    """
+    pairs: list = []
+    j = 0
+    n = len(prior_messages)
+    while j < n:
+        msg = prior_messages[j]
+        if msg.get("role") == "user":
+            if msg.get("error"):
+                j += 1
+                continue
+            nxt = prior_messages[j + 1] if j + 1 < n else None
+            if nxt and nxt.get("role") == "assistant" and not nxt.get("error"):
+                pairs.append((msg, nxt))
+                j += 2
+            else:
+                j += 1  # orphan
+        else:
+            j += 1
+    return pairs
+
+
+def _truncate_to_budget(text: str, budget: int) -> str:
+    """Truncate ``text`` so it fits within ``budget`` chars, inserting a marker."""
+    if budget <= 0 or len(text) <= budget:
+        return text
+    marker = f"\n{IDEAS_HISTORY_TRUNCATION_MARKER}\n"
+    if budget <= len(marker):
+        return text[: max(0, budget)]
+    keep = budget - len(marker)
+    head = keep // 2
+    tail = keep - head
+    return text[:head] + marker + text[-tail:] if tail else text[:head] + marker
+
+
+def _append_conversation_log(
+    idea_dir: Path, turn_n: int, user_content: str, agent_response: str
+) -> None:
+    """Append one completed (user, assistant) pair to conversation_log.md atomically.
+
+    Server is the sole writer; the prd-creator agent only reads this file.
+    Idempotent: if a ``## Turn {turn_n}`` marker already exists, the call is a no-op.
+    """
+    log_path = idea_dir / "conversation_log.md"
+    marker = f"\n## Turn {turn_n}\n"
+    existing = log_path.read_text() if log_path.exists() else ""
+    if marker in existing:
+        return
+    block = (
+        f"{marker}"
+        f"### User\n{(user_content or '').strip()}\n\n"
+        f"### Assistant\n{(agent_response or '').strip()}\n"
+    )
+    new_content = existing + block
+    idea_dir.mkdir(parents=True, exist_ok=True)
+    fd, tmp = mkstemp(dir=str(idea_dir), prefix=".conv_log_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(new_content)
+        os.replace(tmp, str(log_path))
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _ensure_conversation_log_exists(idea_dir: Path, prior_messages: list) -> None:
+    """Bootstrap conversation_log.md from session.json complete pairs (no-op if log exists)."""
+    log_path = idea_dir / "conversation_log.md"
+    if log_path.exists():
+        return
+    pairs = _complete_pairs(prior_messages)
+    if not pairs:
+        return
+    parts: list = []
+    for idx, (u, a) in enumerate(pairs, start=1):
+        parts.append(f"\n## Turn {idx}\n")
+        parts.append(f"### User\n{(u.get('content') or '').strip()}\n\n")
+        parts.append(f"### Assistant\n{(a.get('content') or '').strip()}\n")
+    idea_dir.mkdir(parents=True, exist_ok=True)
+    fd, tmp = mkstemp(dir=str(idea_dir), prefix=".conv_log_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write("".join(parts))
+        os.replace(tmp, str(log_path))
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _build_ideas_history_block(prior_messages: list, idea_id: str) -> str:
+    """Return the bounded ``[CONVERSATION HISTORY]`` block (or empty string)."""
+    pairs = _complete_pairs(prior_messages)
+    if not pairs:
+        return ""
+
+    omitted = 0
+    if len(pairs) > IDEAS_HISTORY_WINDOW_TURNS:
+        omitted = len(pairs) - IDEAS_HISTORY_WINDOW_TURNS
+        pairs = pairs[-IDEAS_HISTORY_WINDOW_TURNS:]
+
+    start_idx = omitted + 1
+
+    def render(idx: int, u: dict, a: dict) -> str:
+        return (
+            f"\n[Turn {idx}]\n"
+            f"User:\n{(u.get('content') or '').strip()}\n\n"
+            f"Assistant:\n{(a.get('content') or '').strip()}\n"
+        )
+
+    rendered = [render(start_idx + i, u, a) for i, (u, a) in enumerate(pairs)]
+    budget = _ideas_history_char_budget()
+    total = sum(len(s) for s in rendered)
+    while total > budget and len(rendered) > 1:
+        dropped = rendered.pop(0)
+        omitted += 1
+        start_idx += 1
+        total -= len(dropped)
+    if rendered and total > budget:
+        rendered[0] = _truncate_to_budget(rendered[0], budget)
+
+    lines = ["[CONVERSATION HISTORY]"]
+    if omitted > 0:
+        lines.append(
+            f"[NOTE] {omitted} earlier turn(s) omitted from this prompt. "
+            f"Use the Read tool on ~/.openclaw/ideas/{idea_id}/conversation_log.md "
+            f"if you need older context."
+        )
+    lines.extend(rendered)
+    lines.append("\n[/CONVERSATION HISTORY]")
+    return "\n".join(lines) + "\n\n"
+
+
 async def _poll_sentinel_with_idle_detect(
     done_path,
     session_key: str,
@@ -4079,44 +4246,12 @@ async def post_ideas_message(idea_id: str, request: Request):
 
     sent_context = _build_ideas_sent_context(unsubmitted, attachment)
 
-    # Build conversation history block so the agent has full thread context.
-    # Each new turn gets a fresh OpenClaw session, so history must be injected
-    # explicitly — the agent cannot access prior sessions natively.
-    # Format uses explicit [Turn N] delimiters so multi-line content doesn't
-    # create ambiguity about which message a line belongs to.
-    # Only COMPLETE pairs (user + assistant) are included — orphaned user messages
-    # (from previous 408-timed-out turns) are skipped to keep history clean.
-    history_block = ""
+    # Conversation history: bounded sliding window prepended to the prompt,
+    # plus a server-maintained ``conversation_log.md`` the agent can Read on
+    # demand for older context. Older pairs collapse to one [NOTE] line.
     prior_messages = pre_session.get("messages", [])
-    if prior_messages:
-        # Walk messages building complete (user, assistant) pairs.
-        # Orphaned user messages (no following assistant) are skipped.
-        complete_pairs: list[tuple] = []
-        j = 0
-        while j < len(prior_messages):
-            msg = prior_messages[j]
-            if msg.get("role") == "user":
-                # Check for error flag — skip turns that errored out
-                if msg.get("error"):
-                    j += 1
-                    continue
-                nxt = prior_messages[j + 1] if j + 1 < len(prior_messages) else None
-                if nxt and nxt.get("role") == "assistant" and not nxt.get("error"):
-                    complete_pairs.append((msg, nxt))
-                    j += 2
-                else:
-                    # Orphaned user message — skip
-                    j += 1
-            else:
-                j += 1
-        if complete_pairs:
-            lines = ["[CONVERSATION HISTORY]"]
-            for turn_idx, (u, a) in enumerate(complete_pairs, start=1):
-                lines.append(f"\n[Turn {turn_idx}]")
-                lines.append(f"User:\n{(u.get('content') or '').strip()}")
-                lines.append(f"\nAssistant:\n{(a.get('content') or '').strip()}")
-            lines.append("\n[/CONVERSATION HISTORY]")
-            history_block = "\n".join(lines) + "\n\n"
+    _ensure_conversation_log_exists(idea_dir, prior_messages)
+    history_block = _build_ideas_history_block(prior_messages, idea_id)
 
     # Consume any pending system events (alignment/adversarial check results)
     # stored by previous check endpoints. Injected here so the PRD agent sees
@@ -4306,6 +4441,15 @@ async def post_ideas_message(idea_id: str, request: Request):
     _merge_roadmap_draft_into_session_data(idea_dir, session_data)
 
     _atomic_write_json_file(str(session_path), session_data)
+
+    # Append this completed turn to the server-owned conversation log so the
+    # agent can Read it on future turns when older context is needed. Best
+    # effort: log failure must not turn a successful turn into an HTTP error.
+    try:
+        _append_conversation_log(idea_dir, int(turn_n), content, agent_response)
+    except OSError:
+        logger.warning("conversation_log append failed for idea=%s turn=%s",
+                       idea_id, turn_n, exc_info=True)
 
     _readiness_job_started_at[idea_id] = datetime.utcnow().timestamp()
     asyncio.create_task(_trigger_readiness_assessment(idea_id, config))

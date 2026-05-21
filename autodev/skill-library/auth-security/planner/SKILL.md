@@ -5,35 +5,32 @@ description: Domain guidance for planning authentication and security phases. Lo
 
 # Auth/Security Planning Guidance
 
-## Goal
-Make security properties explicit and verifiable. Do not assume the executor knows secure defaults.
+Make security properties explicit and verifiable. Do not assume the executor knows secure defaults — name them.
 
-## Mandatory planning artifacts
+## Decomposition checklist
 - Threat boundaries: client ↔ server, service ↔ service, tenant boundary.
 - Auth model: exactly one of session-based (cookies), stateless tokens (JWT), or OAuth/OIDC.
-- Enforcement point: where authn/authz is enforced (middleware, gateway, service guard). No per-endpoint ad hoc checks.
+- Single enforcement point (middleware/gateway/service guard) — no per-endpoint ad hoc checks.
+- Authentication, session/token lifecycle, authorization, secrets handling as separate sub-areas.
 
-## Requirements to specify (never leave implicit)
-### Authentication
-- Password storage method (Argon2id/bcrypt/scrypt).
-- Brute-force defenses: rate limit + lockout + audit events.
-- Credential validation: timing-safe compare, uniform error messages (no user enumeration).
+## Interfaces & contracts to specify
+- **Authentication:** password storage algorithm (Argon2id/bcrypt/scrypt), rate-limit + lockout policy, timing-safe credential compare, uniform error messages (no user enumeration).
+- **Session/token lifecycle:** rotate on login and privilege change; idle + absolute timeout; server-side logout invalidation; for JWT pin required claims (`exp`/`iss`/`aud`), the signing algorithm, refresh rotation, and a revocation strategy.
+- **Authorization:** RBAC/ABAC model with role list and per-action permissions; tenant isolation and IDOR protections; deny-by-default with allowed actions enumerated.
+- **Secrets/defaults:** secrets from env/config only — never hardcoded, in repo, in logs, or in errors. HTTPS enforcement, baseline security headers, CORS constraints (no wildcards on sensitive endpoints).
 
-### Session/token lifecycle
-- Rotation: rotate session ID on login and privilege change.
-- Expiration: idle + absolute timeout.
-- Logout: server-side invalidation (not only cookie deletion).
-- JWT: required claims (exp/iss/aud), algorithm pinning, refresh rotation, revocation strategy.
+## Edge cases — must enumerate, not generalise
+Invalid credentials, expired tokens, unauthorised roles, cross-tenant probes, replay of refresh tokens, concurrent logout from another device, missing/malformed Authorization header.
 
-### Authorization
-- RBAC/ABAC model with role list and per-action permissions.
-- Tenant isolation and IDOR protections.
-- Deny-by-default; explicitly enumerate allowed actions.
+## Pass criteria patterns
+- Negative-path tests assert specific status code and that no sensitive data leaks in the response.
+- Full functional test suite re-runs cleanly after the security change.
+- A grep proves no secret literal lives in the source tree.
 
-### Secrets and defaults
-- Secrets from env/config only. Forbid: hardcoded, in repo, in logs, in errors.
-- HTTPS enforcement. Baseline security headers. CORS constraints (no wildcards on sensitive endpoints).
+## Anti-patterns to avoid
+- Logging credentials or tokens at any level (including DEBUG).
+- Storage choice left unspecified (cookie flags / keychain / env / vault must be pinned), and likewise expiry and rotation.
+- Implementing roles per endpoint rather than via the central policy.
 
-## Pass criteria must verify security, not just functionality
-- Negative-path tests: invalid credentials, expired tokens, unauthorized roles, cross-tenant probes.
-- Rerun full functional suite after security changes.
+## TDD test structure
+Minimum: one positive-path test per auth flow, one negative-path test per enumerated edge case above, one cross-tenant isolation test.

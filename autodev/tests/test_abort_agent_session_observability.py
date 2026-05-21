@@ -214,34 +214,42 @@ class TestVerifySessionStopped:
 # ---------------------------------------------------------------------------
 
 
-class TestVerifyFailureEscalation:
-    def test_orchestrator_escalates_to_halted_silent_on_verify_failure(self):
-        """When abort returns True but verify_session_stopped returns False,
-        the orchestrator must transition to HALTED_SILENT and log
-        [ABORT][VERIFY_FAILED] rather than silently launching attempt N+1.
+class TestVerifyFailureSoftContinue:
+    """Per operator policy (post-CORE-E6 review): a verify-failed outcome
+    must NOT halt the pipeline.  90%+ of long runs eventually resolve on
+    retry, whereas a HALTED_SILENT transition always requires human
+    intervention.  We keep the ``[ABORT][VERIFY_FAILED]`` print and
+    ``abort_verify_failed`` event for activity-feed transparency, but
+    the orchestrator continues with the next attempt.
+    """
 
-        Source-level check: the orchestrator must reference both
-        verify_session_stopped and a HALTED_SILENT transition keyed on the
-        verify-failed outcome.
-        """
+    def test_orchestrator_logs_verify_failed_marker(self):
+        """The diagnostic print line must remain so operators can grep logs."""
         assert "verify_session_stopped" in _ORCH_SRC, (
             "orchestrator.py must call verify_session_stopped after abort"
         )
-        # Look for the verify-failure log + HALTED_SILENT pairing.
-        pat = re.compile(
-            r"\[ABORT\]\[VERIFY_FAILED\].*?HALTED_SILENT",
-            re.DOTALL,
+        assert "[ABORT][VERIFY_FAILED]" in _ORCH_SRC, (
+            "[ABORT][VERIFY_FAILED] marker must remain for log grep/diagnostics"
         )
-        # Also accept the reverse order — basicConfig-style code may emit
-        # the transition first.
-        pat2 = re.compile(
-            r"HALTED_SILENT.*?\[ABORT\]\[VERIFY_FAILED\]",
-            re.DOTALL,
-        )
-        assert pat.search(_ORCH_SRC) or pat2.search(_ORCH_SRC), (
-            "orchestrator.py must escalate to HALTED_SILENT and log "
-            "[ABORT][VERIFY_FAILED] when verify_session_stopped returns False"
-        )
+
+    def test_orchestrator_does_not_halt_on_verify_failure(self):
+        """No code path may transition to HALTED_SILENT off the back of a
+        verify failure — soft-continue is the new contract.  We forbid
+        the actual transition_state call (docstring mentions are fine)."""
+        for marker in ("[ABORT][VERIFY_FAILED]",):
+            idx = 0
+            while True:
+                idx = _ORCH_SRC.find(marker, idx)
+                if idx == -1:
+                    break
+                window = _ORCH_SRC[max(0, idx - 300) : idx + 1500]
+                assert not re.search(
+                    r'transition_state\(\s*["\']HALTED_SILENT["\']', window
+                ), (
+                    f"Found transition_state(\"HALTED_SILENT\", ...) near a "
+                    f"{marker} block; verify failure must soft-continue, not halt"
+                )
+                idx += len(marker)
 
 
 # ---------------------------------------------------------------------------

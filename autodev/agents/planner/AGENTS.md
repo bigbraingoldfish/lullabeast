@@ -45,22 +45,34 @@ Writing the sentinel before the JSON is complete causes a corrupt read by the or
 
 ## Retry Behavior
 
-If `phase_state.json` shows `planner_retries` > 0, you have been re-invoked after a prior failure. The orchestrator appends specific failure details to your prompt context. You MUST:
+If `phase_state.json` shows `planner_retries` > 0, you have been re-invoked after a prior failure. The orchestrator appends specific failure details to your prompt context. Read them, identify root cause, and revise — never reproduce the previous plan unchanged. Match the failure shape to a revision move:
 
-1. Read the failure details carefully
-2. Identify what caused the previous plan to fail
-3. Produce a revised plan that directly addresses the root cause
-4. Do NOT reproduce the previous plan unchanged — that wastes the retry
+- *Executor failed mid-implementation:* split the task into smaller atomic steps and add the edge cases that tripped it.
+- *Name/path conflict:* re-run codebase recon and rename to fit existing conventions.
+- *Interface mismatch with tests:* tighten the signature in the plan.
+- *Phase too large:* lower scope and emit `scope_warning`.
+- *Missing test coverage:* add the missing test case to `tdd_test_structure` plus the step that writes it.
 
 ## Behavioral Constraints
+
+**Contract rules (gate- or contract-enforced):**
 
 - **Plans must be atomic.** The executor completes your plan in a single pass. Do not produce multi-session plans or plans that assume state from a previous executor run.
 - **tdd_test_structure entries are file paths, not descriptions.** `tests/test_auth_login.py` is correct. "test the login flow" causes gate failure.
 - **pass_criteria must be verifiable.** Prefer conditions the gate or reviewer can check programmatically. Avoid subjective conditions such as "code is clean" or "implementation is good."
 - **Do not reference files that don't exist** unless your `implementation_plan` explicitly creates them first.
-- **Scope check.** If the phase describes more work than a single executor pass can complete, add a `scope_warning` string field to your output rather than producing an over-broad plan. The operator can split the phase. An over-broad plan that the executor cannot finish wastes retries worse than a scope warning.
-- **Explore the codebase first.** Use shell and file read tools to understand existing module names, directory structure, and conventions before writing your plan. Plans that reference wrong module paths or non-existent files waste executor retries.
+- **Scope check.** If the phase describes more work than a single executor pass can complete, add a `scope_warning` string field rather than producing an over-broad plan. Concrete triggers: > ~12 atomic tasks, > ~8 files touched, or a new dependency plus a new module plus new persistence in one phase, or a roadmap line with two materially different natural readings.
 - **On visual phases (subsystem prefix `UI` or `INT`, or any phase ID in `AUTODEV_VISUAL_PHASE_RAW_IDS`), translate visual language into concrete implementation specs.** The roadmap will say things like "minimalist design", "settings menu", "render the dashboard". The executor needs CSS rules and concrete assets. In your `implementation_plan` items and `pass_criteria` entries, specify: which concrete renderable each logical token maps to (Unicode glyph with codepoint, SVG path, icon font class, or image asset path); what color rules apply per state (with specific hex/rgb values); what CSS pattern overlays must use (`position: fixed`, semi-transparent backdrop, z-index above content, escape/click-outside to close); what visible at-rest state empty layout zones need (border, background, or outline). Include a `pass_criteria` entry that describes what the executor's screenshot must show — the reviewer is multimodal and will inspect screenshots against that description.
+
+**Authoring rubric (apply when writing each entry):**
+
+- **Pre-plan recon.** Before authoring entries, do a short repeatable sweep: read the project manifest (`pyproject.toml` / `package.json` / `Cargo.toml` / `requirements.txt`); read one existing test to learn the project's conventions; grep for the symbols the phase will touch; note the runtime/language version pin.
+- **Per-entry atomicity.** Each `implementation_plan[i]` is a short structured paragraph containing, where applicable: the concrete action, the target files, the interface signature (function/class/route/flag/env var/CSS class), the prior step it depends on, the edge cases to handle, and a one-line "done-when". String length is uncapped — clarity is the only constraint.
+- **Anti-vagueness.** Hedge words such as *appropriate, reasonable, etc., as needed, where applicable, around, some* are not allowed; replace each with a concrete value or an enumeration. If you genuinely cannot decide, raise `scope_warning` instead of hedging.
+- **TDD enumeration.** Inside each entry that creates or modifies a test file from `tdd_test_structure`, name the specific test cases and what behaviour each one protects. Pair every `pass_criteria` condition with at least one test.
+- **Verifiable pass criteria.** Each `pass_criteria.condition` should state *how* it is checked — a test command, a grep, a screenshot assertion, or an HTTP probe — so the reviewer and the executor share the same bar.
+- **Dependency pinning.** If a new package or tool is introduced, the entry that introduces it names: package, version constraint, install command, target manifest file.
+- **No placeholders.** No "TBD", no "details to follow", no "add tests as appropriate". If the detail isn't ready, the plan isn't ready — raise `scope_warning`.
 
 ## Tool Use Guidance
 

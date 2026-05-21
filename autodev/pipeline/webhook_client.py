@@ -153,58 +153,92 @@ def invoke_agent_webhook(
     return "INFRA_ERROR"
 
 
-def abort_agent_session(
+ABORT_MAX_ATTEMPTS = 3
+ABORT_RETRY_BACKOFF_SECONDS = 2.0
+
+
+def _attempt_abort_once(
     session_key: str,
     gateway_ws_url: str,
     gateway_token: str,
-    timeout_seconds: int = 8,
+    timeout_seconds: int,
 ) -> bool:
-    """Send ``sessions.abort`` to the OpenClaw gateway for the given session key.
+    """Single ``sessions.abort`` round-trip.  Returns True on success.
 
-    Uses the gateway WebSocket control plane (not the ``/hooks/agent`` HTTP endpoint).
-    Best-effort: any failure returns ``False`` and logs a warning; callers must not
-    treat ``False`` as a hard failure that blocks retries.
+    Gateway handshake protocol (mirrors OpenClaw's own GatewayClient at
+    ``client-*.js``: ``handleMessage`` / ``sendConnect``):
 
-    Parameters
-    ----------
-    session_key:
-        Full OpenClaw session key (lowercase), e.g.
-        ``agent:executor:pipeline:phase-1:core-e1:executor-attempt-1``.
-    gateway_ws_url:
-        WebSocket URL, e.g. ``ws://127.0.0.1:18789/__openclaw__/ws``.
-    gateway_token:
-        Shared-secret gateway token (``gateway.auth.token`` in ``openclaw.json``).
-        Distinct from the hooks Bearer token used by ``invoke_agent_webhook``.
-    timeout_seconds:
-        Socket timeout in seconds; kept short so a dead gateway does not stall retries.
-
-    Returns
-    -------
-    bool
-        ``True`` if the gateway reported ``aborted`` or ``no-active-run``;
-        ``False`` on handshake failure, transport error, or unexpected response.
+    1. Open WebSocket with ``Authorization: Bearer <gateway_token>``.
+    2. The gateway sends an unsolicited ``event: connect.challenge``
+       frame with ``{nonce, ts}`` *before* accepting any request frames.
+       The client MUST read this first frame and not send ``connect``
+       before it arrives — sending early causes the gateway to drop
+       the frame and the handshake times out (the exact bug that
+       made every live abort return False on CORE-E6 / PHYS-E1).
+    3. After receiving the challenge, send the ``connect`` request.
+       For bearer-token auth (no device identity) the nonce does not
+       need to be signed; we just need to have observed the challenge.
+    4. Receive ``hello-ok`` response → handshake complete.
+    5. Send ``sessions.abort`` and read the result.
     """
     try:
         ws = websocket.WebSocket()
         ws.settimeout(timeout_seconds)
-        # The gateway validates the token on the HTTP WebSocket upgrade request,
-        # not inside the protocol frame.  Pass it as Authorization: Bearer here so
-        # the handshake is accepted before any frames are sent.
-        ws.connect(gateway_ws_url, header={"Authorization": f"Bearer {gateway_token}"})
+        # Bearer-Auth on the HTTP upgrade request — the gateway validates
+        # this before promoting the socket to a WebSocket.
+        #
+        # ``suppress_origin=True`` is load-bearing: Python's ``websocket-client``
+        # library auto-derives an ``Origin: http://127.0.0.1:18789`` header,
+        # which the gateway interprets as a *browser* request and rejects
+        # the trusted-loopback-backend path that grants our scopes (see
+        # OpenClaw's ``shouldSkipLocalBackendSelfPairing``).  Without this
+        # flag the gateway returns ``scopes: []`` even on local connections
+        # with a valid shared-secret token, so ``sessions.abort`` fails
+        # with ``missing scope: operator.write``.
+        ws.connect(
+            gateway_ws_url,
+            header={"Authorization": f"Bearer {gateway_token}"},
+            suppress_origin=True,
+        )
 
+        # Step 1: read the unsolicited connect.challenge event.  The gateway
+        # always sends this immediately after the socket opens; sending
+        # ``connect`` before consuming it is the pre-fix bug.
+        challenge = json.loads(ws.recv())
+        if not (
+            challenge.get("type") == "event"
+            and challenge.get("event") == "connect.challenge"
+        ):
+            logging.warning(
+                "[ABORT] Unexpected first frame (wanted connect.challenge) for %s: %s",
+                session_key, challenge,
+            )
+            ws.close()
+            return False
+        nonce = challenge.get("payload", {}).get("nonce")
+
+        # Step 2: now send the connect request.  The schema is strict:
+        # ``client.id`` must come from the published GATEWAY_CLIENT_IDS
+        # list and ``client.mode`` from GATEWAY_CLIENT_MODES.  We pose
+        # as a generic ``gateway-client`` in ``backend`` mode — same
+        # values OpenClaw's own client library uses.  The nonce is NOT
+        # carried in the ``auth`` block (the schema rejects unknown
+        # properties there); merely observing the challenge before
+        # sending ``connect`` is what the gateway requires.
+        _ = nonce  # observed; not echoed back for bearer auth
         connect_frame = json.dumps(
             {
                 "type": "req",
                 "id": "1",
                 "method": "connect",
                 "params": {
-                    "minProtocol": 3,
+                    "minProtocol": 4,
                     "maxProtocol": 4,
                     "client": {
-                        "id": "autodev-pipeline",
+                        "id": "gateway-client",
                         "version": "1.0.0",
                         "platform": "linux",
-                        "mode": "operator",
+                        "mode": "backend",
                     },
                     "role": "operator",
                     "scopes": ["operator.write"],
@@ -258,3 +292,47 @@ def abort_agent_session(
             exc,
         )
         return False
+
+
+def abort_agent_session(
+    session_key: str,
+    gateway_ws_url: str,
+    gateway_token: str,
+    timeout_seconds: int = 8,
+) -> bool:
+    """Send ``sessions.abort`` to the OpenClaw gateway for the given session key.
+
+    Uses the gateway WebSocket control plane (not the ``/hooks/agent`` HTTP endpoint).
+    Best-effort: any failure returns ``False`` and logs a warning; callers must not
+    treat ``False`` as a hard failure that blocks retries.
+
+    Retry policy
+    ------------
+    A single 8-second WS handshake against a busy gateway is brittle — observed
+    in CORE-E6 where one transient handshake failure caused the orchestrator to
+    launch attempt N+1 on top of the still-streaming attempt N.  This wrapper
+    tries up to ``ABORT_MAX_ATTEMPTS`` times with ``ABORT_RETRY_BACKOFF_SECONDS``
+    between attempts, returning as soon as one succeeds.  After the ceiling we
+    return False; the caller still treats that as best-effort (does not halt).
+
+    Returns
+    -------
+    bool
+        ``True`` if any of the ``ABORT_MAX_ATTEMPTS`` attempts succeeded;
+        ``False`` if all attempts returned False.
+    """
+    for attempt in range(1, ABORT_MAX_ATTEMPTS + 1):
+        if _attempt_abort_once(session_key, gateway_ws_url, gateway_token, timeout_seconds):
+            if attempt > 1:
+                logging.info(
+                    "[ABORT] sessions.abort succeeded for %s on retry %d/%d",
+                    session_key, attempt, ABORT_MAX_ATTEMPTS,
+                )
+            return True
+        if attempt < ABORT_MAX_ATTEMPTS:
+            time.sleep(ABORT_RETRY_BACKOFF_SECONDS)
+    logging.warning(
+        "[ABORT] all %d attempts failed for %s — caller will proceed best-effort",
+        ABORT_MAX_ATTEMPTS, session_key,
+    )
+    return False

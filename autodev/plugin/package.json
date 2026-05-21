@@ -1,7 +1,7 @@
 {
   "name": "@autodev/pipeline-signals",
   "version": "1.0.0",
-  "description": "AutoDev pipeline hooks: completion sentinels, structural pre-checks, and Tier A activity stamps for stall detection",
+  "description": "AutoDev pipeline completion hooks: authoritative session-end signals and structural pre-checks via agent_end and before_agent_finalize",
   "type": "module",
   "openclaw": {
     "extensions": [
@@ -13,8 +13,10 @@
     }
   },
   "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node22 --external:node:* --outfile=dist/index.js",
     "test": "node --import tsx/esm --test tests/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepare": "npm run build"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
