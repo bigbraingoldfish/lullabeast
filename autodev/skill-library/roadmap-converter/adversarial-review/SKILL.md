@@ -56,6 +56,17 @@ For every phase in the roadmap, ask:
    all gate checks and still produce the wrong output if the plan
    misinterprets the PRD.
 
+6. **Behavioral Verification trigger**: For every phase, construct a
+   specific hypothesis about how the phase's
+   **Behavioral Verification → If this fails, the user sees** outcome
+   could trigger. "Under what concrete sequence of executor decisions or
+   environmental conditions would the reviewer's `How we'll check`
+   procedure produce the `If this fails` outcome?" If the hypothesis is
+   plausible, the phase's confidence score must reflect it. If you cannot
+   construct any plausible failure path that leads to that user-facing
+   outcome, the Behavioral Verification block itself is unfalsifiable and
+   should be flagged separately — see "Unfalsifiable verification" below.
+
 Assign a confidence score (0–100) based on your assessment across all
 five dimensions. This is your honest estimate of the probability that
 the pipeline executor completes this phase correctly on the first attempt
@@ -121,6 +132,20 @@ you do not actually understand well enough to have scored low.
 
 Mitigations are recommendations, not requirements. The user decides whether
 to act on them.
+
+---
+
+## Unfalsifiable Verification
+
+If a phase's **Behavioral Verification → If this fails, the user sees**
+sentence describes an outcome you cannot trace to any plausible failure
+mode of the **How we'll check** procedure, the verification is
+unfalsifiable. The reviewer cannot enforce a contract whose violation
+has no observable trigger. Flag this in the phase's row of the risk
+assessment with the phrase "unfalsifiable verification" and a one-line
+note describing the disconnect. Do not lower the confidence score on the
+basis of this alone — unfalsifiable verification is a roadmap problem,
+not an execution risk.
 
 ---
 

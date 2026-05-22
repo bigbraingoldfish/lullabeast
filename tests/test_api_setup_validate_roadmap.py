@@ -14,8 +14,14 @@ from ui.server import _validate_roadmap_content
 
 VALID_PHASE_LINE = "- [ ] `UI-E1` | LOW | Render the scaffold"
 VALID_TEST_LINE = "  > Test: Screen renders without errors."
+VALID_BEHAVIORAL_BLOCK = (
+    "  **Behavioral Verification:**\n"
+    "  - **User-observable:** The user sees the scaffold on /home.\n"
+    "  - **How we'll check:** Navigate to /home and confirm the scaffold renders.\n"
+    "  - **If this fails, the user sees:** The home screen does not load.\n"
+)
 
-VALID_ROADMAP = f"{VALID_PHASE_LINE}\n{VALID_TEST_LINE}\n"
+VALID_ROADMAP = f"{VALID_PHASE_LINE}\n{VALID_TEST_LINE}\n{VALID_BEHAVIORAL_BLOCK}"
 
 
 # ---------------------------------------------------------------------------
@@ -38,12 +44,18 @@ class TestValidateRoadmapContent:
         assert any("At least one valid phase" in e["message"] for e in result["errors"])
 
     def test_correctly_formatted_phase_without_test_is_flagged(self):
-        """A correctly formatted phase line with no > Test: within 10 lines returns an error."""
+        """A correctly formatted phase line with no > Test: within 10 lines returns an error.
+
+        The Behavioral Verification block is also required (Stage C, strict per §2.9), so
+        after the change this phase has multiple errors. Assert that the > Test: error is
+        among them — the other errors are correct under the new contract.
+        """
         content = f"{VALID_PHASE_LINE}\n# some comment without a test line\n"
         result = _validate_roadmap_content(content)
         assert result["valid"] is False
-        assert len(result["errors"]) == 1
-        err = result["errors"][0]
+        test_errors = [e for e in result["errors"] if "Test:" in e["message"]]
+        assert len(test_errors) == 1
+        err = test_errors[0]
         assert err["line"] == 1
         assert "UI-E1" in err["message"]
 
@@ -52,9 +64,9 @@ class TestValidateRoadmapContent:
         content = f"{VALID_PHASE_LINE}\n"
         result = _validate_roadmap_content(content)
         assert result["valid"] is False
-        errors = result["errors"]
-        assert len(errors) == 1
-        err = errors[0]
+        test_errors = [e for e in result["errors"] if "Test:" in e["message"]]
+        assert len(test_errors) == 1
+        err = test_errors[0]
         assert err["line"] == 1
         assert "UI-E1" in err["message"]
         assert err["content"] == VALID_PHASE_LINE
@@ -78,16 +90,16 @@ class TestValidateRoadmapContent:
         assert any("At least one valid phase" in e["message"] for e in result["errors"])
 
     def test_multiple_errors_all_returned(self):
-        """Roadmap with 2 phases both missing > Test: returns 2 errors."""
+        """Roadmap with 2 phases both missing > Test: returns 2 > Test: errors (plus behavioral errors)."""
         content = (
             "- [ ] `UI-A1` | LOW | First goal\n"
             "- [ ] `UI-A2` | HIGH | Second goal\n"
         )
         result = _validate_roadmap_content(content)
         assert result["valid"] is False
+        # Filter strictly to "> Test:" errors — Behavioral Verification adds its own.
         missing_test_errors = [
-            e for e in result["errors"]
-            if "missing" in e["message"].lower() or "Test" in e["message"]
+            e for e in result["errors"] if "'> Test:' line" in e["message"]
         ]
         assert len(missing_test_errors) == 2
         ids_in_errors = {e["content"] for e in missing_test_errors}
@@ -114,7 +126,12 @@ class TestValidateRoadmapContent:
         # Phase line = line 1. range(1, min(11, N+1)) → checks lines 1..10.
         # > Test: at line 10 means 8 intervening lines.
         filler_lines = ["# filler"] * 8  # lines 2-9
-        content = VALID_PHASE_LINE + "\n" + "\n".join(filler_lines) + "\n" + VALID_TEST_LINE + "\n"
+        content = (
+            VALID_PHASE_LINE + "\n"
+            + "\n".join(filler_lines) + "\n"
+            + VALID_TEST_LINE + "\n"
+            + VALID_BEHAVIORAL_BLOCK
+        )
         result = _validate_roadmap_content(content)
         assert result["valid"] is True
         assert result["errors"] == []

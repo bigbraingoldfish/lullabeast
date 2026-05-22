@@ -107,14 +107,21 @@ class TestApiIdeasConvert:
         assert r.status_code == 408
 
     def test_returns_200_with_roadmap_content_on_success(self):
-        """Returns 200 with roadmap_content when sentinel is found."""
+        """Returns 200 with roadmap_content when sentinels are found.
+
+        Post-P0 the converter produces both ``roadmap_draft.md`` and
+        ``verification_draft.md`` in the same session; the endpoint polls
+        both sentinels before completing."""
         client = load_server()
         idea_dir = self._write_session("4", prd_content="## Problem Statement\nContent.")
         roadmap_text = "# Project Roadmap\n\n- [ ] `phase-1` | LOW | First phase"
+        verification_text = "# Verification\n\n## Project type\ncli\n"
         mock_cls, _ = self._make_mock_aiohttp()
 
         async def write_sentinel(*args, **kwargs):
             (idea_dir / "roadmap_draft.md").write_text(roadmap_text)
+            (idea_dir / "verification_draft.md").write_text(verification_text)
+            (idea_dir / "verification_draft.done").write_text("")
             (idea_dir / "roadmap_draft.done").write_text("")
 
         with patch("ui.server.load_config", return_value=self._mock_config()), \
@@ -134,10 +141,13 @@ class TestApiIdeasConvert:
         client = load_server()
         idea_dir = self._write_session("5", prd_content="## Problem Statement\nContent.")
         roadmap_text = "# My Roadmap\n\n- [ ] `phase-1` | LOW | Step one"
+        verification_text = "# Verification\n\n## Project type\ncli\n"
         mock_cls, _ = self._make_mock_aiohttp()
 
         async def write_sentinel(*args, **kwargs):
             (idea_dir / "roadmap_draft.md").write_text(roadmap_text)
+            (idea_dir / "verification_draft.md").write_text(verification_text)
+            (idea_dir / "verification_draft.done").write_text("")
             (idea_dir / "roadmap_draft.done").write_text("")
 
         with patch("ui.server.load_config", return_value=self._mock_config()), \
@@ -155,23 +165,31 @@ class TestApiIdeasConvert:
         """Pre-existing roadmap_draft.done must not satisfy the poll before a new run writes it.
 
         Regression: without unlinking the sentinel after webhook POST, the handler would return
-        immediately with stale roadmap_draft.md content.
+        immediately with stale roadmap_draft.md content. Post-P0 the same guard applies to
+        ``verification_draft.done``.
         """
         client = load_server()
         idea_dir = self._write_session("6", prd_content="## Problem Statement\nContent.")
         old_text = "# OLD ROADMAP\n\nstale"
+        old_verification = "# OLD VERIFICATION"
         new_text = "# NEW ROADMAP\n\n- [ ] `CORE-E1` | LOW | Fresh phase"
+        new_verification = "# Verification\n\n## Project type\nweb-app\n"
         (idea_dir / "roadmap_draft.md").write_text(old_text)
         (idea_dir / "roadmap_draft.done").write_text("")
-        # Force mtimes far in the past so no poll_started/slack window can treat this
-        # sentinel as belonging to the current conversion attempt (deflakes full-suite runs).
+        (idea_dir / "verification_draft.md").write_text(old_verification)
+        (idea_dir / "verification_draft.done").write_text("")
+        # Force mtimes far in the past so no poll_started/slack window can treat these
+        # sentinels as belonging to the current conversion attempt (deflakes full-suite runs).
         _old = 1.0
-        os.utime(idea_dir / "roadmap_draft.md", (_old, _old))
-        os.utime(idea_dir / "roadmap_draft.done", (_old, _old))
+        for fname in ("roadmap_draft.md", "roadmap_draft.done",
+                      "verification_draft.md", "verification_draft.done"):
+            os.utime(idea_dir / fname, (_old, _old))
         mock_cls, _ = self._make_mock_aiohttp()
 
         async def write_fresh_sentinel(*args, **kwargs):
             (idea_dir / "roadmap_draft.md").write_text(new_text)
+            (idea_dir / "verification_draft.md").write_text(new_verification)
+            (idea_dir / "verification_draft.done").write_text("")
             (idea_dir / "roadmap_draft.done").write_text("")
 
         with patch("ui.server.load_config", return_value=self._mock_config()), \

@@ -131,7 +131,31 @@ Each phase entry must include all of the following. Do not omit any field.
   - [ ] {Specific verifiable condition 2}
   - [ ] All tests in TDD Requirements pass
   - [ ] Reviewer agent has approved the phase output
+
+  **Behavioral Verification:**
+  - **User-observable:** {One sentence in plain English describing what a
+    human can do and see after this phase.}
+  - **How we'll check:** {Concrete procedure the reviewer follows to exercise
+    the artifact — runnable from the project root, no manual setup beyond
+    what prior phases produced.}
+  - **If this fails, the user sees:** {One sentence in plain English the
+    executor's retry feedback and the escalation advisory surface when this
+    verification cannot be completed.}
 ```
+
+If the input roadmap is missing a Behavioral Verification block for a
+phase, you may add a structurally-correct stub block USING THE PHASE's
+EXISTING `> Test:` LINE as the source for the **How we'll check** field
+and inferring the **User-observable** and **If this fails** fields from
+the phase's existing description and exit criteria. Mark each inferred
+field with the comment `<!-- TODO: human-review -->` so the operator
+knows to confirm the inferred wording before queueing the project.
+
+You must not add a Behavioral Verification block by inventing content
+from outside the phase — only by restating what the phase's other fields
+already say in the required shape. If the phase has no `> Test:` line
+and no usable exit criteria, leave the block out and let validation
+reject the roadmap.
 
 ---
 

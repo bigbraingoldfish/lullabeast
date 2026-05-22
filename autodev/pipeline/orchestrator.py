@@ -3654,7 +3654,7 @@ class Orchestrator:
                     _planner_grace = _startup_grace_seconds(
                         "AUTODEV_STARTUP_GRACE_PLANNER", "600"
                     )
-                    _planner_backstop = 2700
+                    _planner_backstop = 4500  # 75 min infrastructure backstop
                     print(
                         f"[POLL][CONFIG] agent=planner "
                         f"startup_grace={_planner_grace}s "
@@ -4020,7 +4020,7 @@ class Orchestrator:
                     _executor_grace = _startup_grace_seconds(
                         "AUTODEV_STARTUP_GRACE_EXECUTOR", "600"
                     )
-                    _executor_backstop = 2700
+                    _executor_backstop = 4500  # 75 min infrastructure backstop
                     print(
                         f"[POLL][CONFIG] agent=executor "
                         f"startup_grace={_executor_grace}s "
@@ -4266,7 +4266,7 @@ class Orchestrator:
                         _reviewer_grace = _startup_grace_seconds(
                             "AUTODEV_STARTUP_GRACE_REVIEWER", "600"
                         )
-                        _reviewer_backstop = 2700
+                        _reviewer_backstop = 4500  # 75 min infrastructure backstop
                         print(
                             f"[POLL][CONFIG] agent=reviewer "
                             f"startup_grace={_reviewer_grace}s "

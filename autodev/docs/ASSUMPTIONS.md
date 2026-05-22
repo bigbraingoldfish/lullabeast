@@ -113,6 +113,20 @@ OpenClaw's convention is `skills/{name}/SKILL.md` where `{name}` comes from the 
 ### E. Whether to update `repo_init_check.py` to validate `skill-library/`
 Judgment: not added. The prompt specifies "Minimal footprint — touch the orchestrator and config layer only." Gate scripts were explicitly listed as out of scope. Also, skill-library absence is a graceful-degradation case already handled by SkillManager — adding a hard check in repo_init_check would turn a graceful degradation into a pipeline-blocking failure, which is the wrong trade-off.
 
+### F. P0 Stage C — `## Project type` strictness in `_validate_verification_content`
+
+The roadmap-generation skill instructs the converter LLM to pick from a canonical 9-item project-type list (`web-app | http-api | cli | library | data-pipeline | game | automation | desktop-app | mobile-app`). Open question at design time: should the validator soft-warn or hard-fail when the converter writes a value outside that list?
+
+Operator decision: **hard-fail.** Downstream gates and adapters (planned for P1) will branch on this value; admitting unknown types now would create silent fallbacks that mask malformed verification docs. Operators may extend the canonical list later by editing `_VERIFICATION_CANONICAL_TYPES` in `ui/server.py`; no preflight-level "allow custom type" knob exists. Strictness is paired with a shape check (single line, ≤40 chars, no markdown formatting characters) so the field cannot accidentally absorb a paragraph.
+
+### G. P0 Stage C — `verification.md` enforcement at every staging entry point
+
+Three endpoints can stage a project: `/api/setup/preflight`, `/api/setup/launch`, and `/api/setup/switch-project`. The original Stage C scope in the P0 plan named only `preflight`. Operator decision during plan review: include all three. Rationale: §2.9's strict-from-day-one promise has a hole if any path can bypass the gate. Implementation: each endpoint now accepts a `verification_content` body field; `_run_init_project` refuses to initialize a project when neither `verification_content` nor an existing `verification.md` is available. The error message points the operator at the Ideas-screen regenerate flow.
+
+### H. P0 Stage D — keep `exit_criteria` list, add `exit_criteria_block`
+
+`phase_resolver.parse_roadmap` historically returned `exit_criteria` as a list built from `>`-prefixed lines under each phase header. Reviewer-gate consumers rely on that shape today. The Stage D additions parse a separate `**Exit Criteria:**` markdown block as `exit_criteria_block: str` rather than replacing the list. Decision: additive only; no churn for existing consumers. Future cleanup (e.g. P2) can deprecate the list once all consumers are migrated.
+
 ---
 
 ## 6. Verification Checklist for Operator

@@ -36,6 +36,16 @@ that measurably fails to meet a stated PRD requirement. Apply this test:
 If yes: material gap. Add a phase.
 If no: not a material gap. Do not add a phase.
 
+A Behavioral Verification block also counts toward coverage: a phase is
+considered to address a PRD requirement only if the phase's
+**Behavioral Verification → User-observable** field exercises that
+requirement in plain user-facing terms. A phase that delivers a PRD
+requirement at the implementation level but whose Behavioral Verification
+block does not name the user-observable outcome is a partial gap — the
+pipeline will build the feature, but the reviewer cannot confirm the
+user-facing claim. Flag this as a material gap and rewrite the phase's
+Behavioral Verification block; do not add a new phase.
+
 A gap is NOT material if:
 - It is a quality concern ("could be better") rather than an omission
 - It is implied by another phase even if not explicitly stated
@@ -54,6 +64,14 @@ Inflation is a roadmap phase with no traceable backing in the PRD. This is
 scope creep introduced during conversion. Flag it — do not remove it
 automatically. The user may have intentionally expanded scope; removal
 could be destructive. Your job is to surface it, not fix it.
+
+A Behavioral Verification claim is inflation when it asserts a
+user-observable outcome that the PRD does not require. Even if the phase
+itself is well-grounded, an inflated Behavioral Verification block leads
+the reviewer to enforce a contract the user never asked for. Flag the
+specific claim, identify which sub-bullet (User-observable, How we'll
+check, or If this fails) carries the inflation, and recommend the
+correction without rewriting the phase yourself.
 
 ---
 

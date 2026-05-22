@@ -63,6 +63,8 @@ class TestApiIdeasConvertUpdated:
 
         async def write_sentinel(*args, **kwargs):
             (idea_dir / "roadmap_draft.md").write_text(roadmap_text)
+            (idea_dir / "verification_draft.md").write_text("# Verification\n\n## Project type\ncli\n")
+            (idea_dir / "verification_draft.done").write_text("")
             (idea_dir / "roadmap_draft.done").write_text("")
 
         with patch("ui.server.load_config", return_value=self._mock_config()), \
@@ -87,6 +89,8 @@ class TestApiIdeasConvertUpdated:
 
         async def write_sentinel(*args, **kwargs):
             (idea_dir / "roadmap_draft.md").write_text(roadmap_text)
+            (idea_dir / "verification_draft.md").write_text("# Verification\n\n## Project type\ncli\n")
+            (idea_dir / "verification_draft.done").write_text("")
             (idea_dir / "roadmap_draft.done").write_text("")
 
         with patch("ui.server.load_config", return_value=self._mock_config()), \
@@ -120,6 +124,8 @@ class TestApiIdeasConvertUpdated:
 
         async def write_sentinel(*args, **kwargs):
             (idea_dir / "roadmap_draft.md").write_text(roadmap_text)
+            (idea_dir / "verification_draft.md").write_text("# Verification\n\n## Project type\ncli\n")
+            (idea_dir / "verification_draft.done").write_text("")
             (idea_dir / "roadmap_draft.done").write_text("")
 
         with patch("ui.server.load_config", return_value=self._mock_config()), \
@@ -189,6 +195,8 @@ class TestApiIdeasConvertUpdated:
 
         async def write_sentinel(*args, **kwargs):
             (idea_dir / "roadmap_draft.md").write_text("# Roadmap")
+            (idea_dir / "verification_draft.md").write_text("# Verification\n\n## Project type\ncli\n")
+            (idea_dir / "verification_draft.done").write_text("")
             (idea_dir / "roadmap_draft.done").write_text("")
 
         with patch("ui.server.load_config", return_value=self._mock_config()), \

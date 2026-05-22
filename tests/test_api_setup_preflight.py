@@ -32,6 +32,23 @@ from ui.server import (
 VALID_ROADMAP_SEED = (
     "- [ ] `TEST-E1` | LOW | Do the thing\n"
     "  > Test: It works.\n"
+    "  **Behavioral Verification:**\n"
+    "  - **User-observable:** The user sees the thing happen.\n"
+    "  - **How we'll check:** Run the thing; confirm output.\n"
+    "  - **If this fails, the user sees:** Nothing happens.\n"
+)
+
+VALID_VERIFICATION_CONTENT = (
+    "# Verification\n\n"
+    "## Project type\n"
+    "cli\n\n"
+    "## Entry point\n"
+    "- Command: `mycli --help`\n"
+    "- Ready signal: process exits 0\n\n"
+    "## Public surface\n"
+    "1. Do the thing\n\n"
+    "## Verification stack\n"
+    "- Acceptance tool: subprocess + assertions\n"
 )
 
 WORKSPACE_AGENTS = ["planner", "executor", "reviewer", "escalation"]
@@ -912,3 +929,186 @@ class TestGitUnbornMainCommitAttempt:
             "No 'git initial commit' check should be added when HEAD already resolves. "
             f"Got: {init_checks}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Stage C — verification.md handling in preflight materialize + checks
+# ---------------------------------------------------------------------------
+
+class TestPreflightMaterializeVerification:
+    """_preflight_materialize writes verification.md and validates its content."""
+
+    def test_writes_verification_md_when_content_provided(self, tmp_path):
+        repo = tmp_path / "myproject"
+        repo.mkdir()
+        checks = _preflight_materialize(
+            str(repo),
+            VALID_ROADMAP_SEED,
+            None,
+            VALID_VERIFICATION_CONTENT,
+        )
+        assert any(
+            c["check"] == "verification write" and c["status"] == "fixed"
+            for c in checks
+        ), f"Expected verification write 'fixed'; got: {checks}"
+        assert (repo / "verification.md").read_text().strip() \
+            == VALID_VERIFICATION_CONTENT.strip()
+
+    def test_invalid_verification_fails_materialize(self, tmp_path):
+        repo = tmp_path / "myproject"
+        repo.mkdir()
+        # Missing the # Verification top heading → invalid
+        bad = VALID_VERIFICATION_CONTENT.replace("# Verification\n\n", "", 1)
+        checks = _preflight_materialize(
+            str(repo),
+            VALID_ROADMAP_SEED,
+            None,
+            bad,
+        )
+        assert any(
+            c["check"] == "verification doc" and c["status"] == "fail"
+            for c in checks
+        ), f"Expected verification doc fail; got: {checks}"
+        # And no file should be written when validation fails.
+        assert not (repo / "verification.md").exists()
+
+    def test_verification_conflict_when_disk_differs(self, tmp_path):
+        repo = tmp_path / "myproject"
+        repo.mkdir()
+        (repo / "verification.md").write_text("# Other content\n")
+        checks = _preflight_materialize(
+            str(repo),
+            VALID_ROADMAP_SEED,
+            None,
+            VALID_VERIFICATION_CONTENT,
+        )
+        assert any(
+            c["check"] == "verification conflict" and c["status"] == "fail"
+            for c in checks
+        ), f"Expected verification conflict; got: {checks}"
+
+
+class TestRunPreflightChecksVerification:
+    """_run_preflight_checks reports verification.md presence + validity."""
+
+    def test_missing_verification_md_fails(self, tmp_path):
+        repo_path = tmp_path / "myproject"
+        repo_path.mkdir()
+        openclaw = _make_openclaw_dir(tmp_path, repo_path)
+        _make_gitignore(repo_path, _full_gitignore_content())
+        _make_git_repo(repo_path)
+        (repo_path / "roadmap.md").write_text(VALID_ROADMAP_SEED)
+        # No verification.md on disk
+
+        with patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
+
+        ver = [c for c in results if c["check"] == "verification doc"]
+        assert ver, f"Expected verification doc check; got: {results}"
+        assert ver[0]["status"] == "fail"
+        assert "verification.md" in ver[0]["message"] or "Ideas screen" in ver[0]["message"]
+
+    def test_valid_verification_md_passes(self, tmp_path):
+        repo_path = tmp_path / "myproject"
+        repo_path.mkdir()
+        openclaw = _make_openclaw_dir(tmp_path, repo_path)
+        _make_gitignore(repo_path, _full_gitignore_content())
+        _make_git_repo(repo_path)
+        (repo_path / "roadmap.md").write_text(VALID_ROADMAP_SEED)
+        (repo_path / "verification.md").write_text(VALID_VERIFICATION_CONTENT)
+
+        with patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
+
+        ver = [c for c in results if c["check"] == "verification doc"]
+        assert ver
+        assert ver[0]["status"] == "pass"
+
+    def test_invalid_verification_md_on_disk_fails(self, tmp_path):
+        repo_path = tmp_path / "myproject"
+        repo_path.mkdir()
+        openclaw = _make_openclaw_dir(tmp_path, repo_path)
+        _make_gitignore(repo_path, _full_gitignore_content())
+        _make_git_repo(repo_path)
+        (repo_path / "roadmap.md").write_text(VALID_ROADMAP_SEED)
+        # On-disk doc missing required section
+        bad = VALID_VERIFICATION_CONTENT.replace(
+            "## Verification stack\n- Acceptance tool: subprocess + assertions\n",
+            "",
+            1,
+        )
+        (repo_path / "verification.md").write_text(bad)
+
+        with patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
+
+        ver = [c for c in results if c["check"] == "verification doc"]
+        assert ver and ver[0]["status"] == "fail"
+
+
+class TestPreflightEndpointVerification:
+    """POST /api/setup/preflight accepts and plumbs verification_content."""
+
+    def test_endpoint_writes_verification_md(self, tmp_path):
+        repo_path = tmp_path / "myproject"
+        repo_path.mkdir()
+        openclaw = _make_openclaw_dir(tmp_path, repo_path)
+        _make_gitignore(repo_path, _full_gitignore_content())
+        _make_git_repo(repo_path)
+
+        client = load_server()
+        with patch("ui.server.load_config", return_value=_preflight_config(openclaw, repo_path)), \
+             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
+            response = client.post(
+                "/api/setup/preflight",
+                json={
+                    "repo_path": str(repo_path),
+                    "roadmap_seed": VALID_ROADMAP_SEED,
+                    "verification_content": VALID_VERIFICATION_CONTENT,
+                },
+            )
+
+        assert response.status_code == 200
+        assert (repo_path / "verification.md").read_text().strip() \
+            == VALID_VERIFICATION_CONTENT.strip()
+        names = [c["check"] for c in response.json()["checks"]]
+        assert "verification write" in names or "verification doc" in names
+
+    def test_endpoint_fails_with_old_format_roadmap(self, tmp_path):
+        """Roadmap missing Behavioral Verification block fails preflight strictly."""
+        repo_path = tmp_path / "myproject"
+        repo_path.mkdir()
+        openclaw = _make_openclaw_dir(tmp_path, repo_path)
+        _make_gitignore(repo_path, _full_gitignore_content())
+        _make_git_repo(repo_path)
+
+        old_format = (
+            "- [ ] `TEST-E1` | LOW | Do the thing\n"
+            "  > Test: It works.\n"
+        )
+        client = load_server()
+        with patch("ui.server.load_config", return_value=_preflight_config(openclaw, repo_path)), \
+             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
+            response = client.post(
+                "/api/setup/preflight",
+                json={
+                    "repo_path": str(repo_path),
+                    "roadmap_seed": old_format,
+                    "verification_content": VALID_VERIFICATION_CONTENT,
+                },
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        # roadmap seed should fail validation due to missing Behavioral Verification block
+        assert any(
+            c["status"] == "fail"
+            and ("Behavioral Verification" in c["message"] or "roadmap" in c["check"].lower())
+            for c in data["checks"]
+        ), f"Expected failure for old-format roadmap; got: {data['checks']}"

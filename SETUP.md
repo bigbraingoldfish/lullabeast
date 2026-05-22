@@ -48,7 +48,13 @@ Expect `HTTP 200`. `HTTP 401` means the Bearer token does not match `hooks.token
 
 ## What Testers Bring
 
-You bring two things: a project directory (a git repository containing a `roadmap.md` in the format AutoDev expects) and a running OpenClaw instance configured with the four pipeline agents (planner, executor, reviewer, escalation) and the prd-creator agent.
+You bring two things: a project directory (a git repository containing a `roadmap.md` AND a `verification.md` in the formats AutoDev expects) and a running OpenClaw instance configured with the four pipeline agents (planner, executor, reviewer, escalation) and the prd-creator agent.
+
+**Three project-level documents form the contract**:
+
+- **`prd.md`** — *what* the project must do. Source of truth for user intent; the reviewer reads this first.
+- **`roadmap.md`** — *how* the work is broken into phases. Every phase must include a `**Behavioral Verification:**` block with three sub-bullets (`User-observable`, `How we'll check`, `If this fails, the user sees`). Preflight refuses to stage a project whose roadmap is missing the block.
+- **`verification.md`** — *proof*. Project-level document derived from the PRD that names the project type, entry point, public surface, and acceptance stack. Preflight refuses to stage a project without a valid `verification.md`. The user never edits it directly — if it's wrong, the fix is to edit the PRD and re-run conversion from the Ideas screen.
 
 AutoDev does not create the project repository or the OpenClaw agents — it orchestrates them. The `install.sh` script deploys the behavioral identity files (IDENTITY.md, SOUL.md, TOOLS.md, AGENTS.md, USER.md) into each agent's workspace directory so OpenClaw loads them at session start. You are responsible for having OpenClaw configured with the correct models for each agent.
 

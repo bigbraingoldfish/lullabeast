@@ -3352,6 +3352,7 @@
             const [messages, setMessages] = useState([]);
             const [prdContent, setPrdContent] = useState("");
             const [roadmapContent, setRoadmapContent] = useState("");
+            const [verificationContent, setVerificationContent] = useState("");
             const [isLoading, setIsLoading] = useState(false);
             const [convertLoading, setConvertLoading] = useState(false);
             const [convertError, setConvertError] = useState("");
@@ -3499,6 +3500,7 @@
                             const rm = (d.roadmap_content || "").trim();
                             if (rm) {
                                 setRoadmapContent(d.roadmap_content || "");
+                                setVerificationContent(d.verification_content || "");
                                 setConvertError("");
                                 refreshIdeas();
                                 stopRoadmapRecoverPoll();
@@ -3689,6 +3691,7 @@
                         );
                         setPrdContent(d.prd_content || "");
                         setRoadmapContent(d.roadmap_content || "");
+                        setVerificationContent(d.verification_content || "");
                         setActiveDocTab(prev =>
                             (prev === 'alignment' || prev === 'adversarial') ? 'prd' : prev
                         );
@@ -3969,6 +3972,7 @@
                         setHiddenNoteIdsForSend(() => new Set());
                         setPrdContent("");
                         setRoadmapContent("");
+                        setVerificationContent("");
                         setInputText("");
                         setReadinessStatus("unavailable");
                         setReadinessData(null);
@@ -4085,6 +4089,7 @@
                         const applySuccess = () => {
                             if (convertRequestSeqRef.current !== seq) return;
                             setRoadmapContent(d.roadmap_content || "");
+                            setVerificationContent(d.verification_content || "");
                             setConvertLoading(false);
                             setActiveDocTab("roadmap");
                         };
@@ -4150,7 +4155,7 @@
                             return;
                         }
                         if (ctx && ctx.navigateToPreflightWithSeed) {
-                            ctx.navigateToPreflightWithSeed(rm, prdContent || "");
+                            ctx.navigateToPreflightWithSeed(rm, prdContent || "", verificationContent || "");
                         }
                     })
                     .catch(() => {
@@ -4987,6 +4992,7 @@
                             {[
                                 {id:'prd', label:'PRD'},
                                 {id:'roadmap', label:'Roadmap'},
+                                {id:'verification', label:'Verification'},
                             ].map(tab => (
                                 <button
                                     key={tab.id}
@@ -5334,6 +5340,40 @@
                                                 className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500"
                                             >
                                                 Download Roadmap
+                                            </a>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                        {activeDocTab === 'verification' && (
+                            <div style={{flex:1, display:'flex', flexDirection:'column', overflow:'hidden'}}>
+                                <div style={{flex:1, overflowY:'auto', padding:'24px'}}>
+                                    {!verificationContent ? (
+                                        <div style={{display:'flex', flexDirection:'column', justifyContent:'center', alignItems:'center', height:'100%', gap:'12px'}}>
+                                            <p className="text-xs text-slate-500 text-center max-w-md px-2">
+                                                The verification document is produced alongside the roadmap. Generate the roadmap from the Roadmap tab to see this content. If the document is wrong, edit the PRD and regenerate &mdash; this file is not edited directly.
+                                            </p>
+                                        </div>
+                                    ) : (
+                                        <div className="msg-md" dangerouslySetInnerHTML={{__html: marked.parse(verificationContent)}}/>
+                                    )}
+                                </div>
+                                {verificationContent && (
+                                    <div className="flex-shrink-0 border-t border-[#1a1d21] px-4 py-2 flex justify-end items-center gap-2">
+                                        <button
+                                            className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500"
+                                            onClick={() => navigator.clipboard.writeText(verificationContent)}
+                                        >
+                                            Copy
+                                        </button>
+                                        {currentIdeaId && (
+                                            <a
+                                                href={`/api/ideas/${currentIdeaId}/download-verification`}
+                                                download
+                                                className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500"
+                                            >
+                                                Download Verification
                                             </a>
                                         )}
                                     </div>
@@ -8687,6 +8727,8 @@
             const [roadmapSeedLocked, setRoadmapSeedLocked] = useState(false);
             /** PRD text from Project Ideas, passed to preflight + launch when non-empty. */
             const [launchPrdContent, setLaunchPrdContent] = useState("");
+            /** verification.md text from Project Ideas, passed to preflight + launch when non-empty (Stage C). */
+            const [launchVerificationContent, setLaunchVerificationContent] = useState("");
             const [repoPathError, setRepoPathError] = useState("");
             const [roadmapSeedError, setRoadmapSeedError] = useState([]);
             const [preflightChecks, setPreflightChecks] = useState(null);
@@ -8714,12 +8756,13 @@
                     .catch(() => setRecentProjects([]));
             }, [currentScreen]);
 
-            const navigateToPreflightWithSeed = (content, prdText) => {
+            const navigateToPreflightWithSeed = (content, prdText, verificationText) => {
                 const text = content || "";
                 setSeedRoadmap(text);
                 setRoadmapSeed(text);
                 setRoadmapSeedLocked(!!text.trim());
                 setLaunchPrdContent(typeof prdText === "string" ? prdText : "");
+                setLaunchVerificationContent(typeof verificationText === "string" ? verificationText : "");
                 setCurrentScreen("preflight");
             };
 
@@ -8729,6 +8772,7 @@
                     setRoadmapSeed("");
                     setRoadmapSeedLocked(false);
                     setLaunchPrdContent("");
+                    setLaunchVerificationContent("");
                     setRepoPathError("");
                     setRepoRoadmapHintMessage("");
                     setRoadmapSeedError([]);
@@ -9002,6 +9046,9 @@
                 if ((launchPrdContent || "").trim()) {
                     body.prd_content = launchPrdContent;
                 }
+                if ((launchVerificationContent || "").trim()) {
+                    body.verification_content = launchVerificationContent;
+                }
                 if (confirmRoadmapArchive && archiveMeta) {
                     body.confirm_roadmap_archive = true;
                     body.keep_filename = archiveMeta.recommended_keep;
@@ -9094,10 +9141,14 @@
                         return;
                     }
 
-                    const launchBody = { repo_path: repoPath, roadmap_seed: roadmapSeed, completion_review: completionReview };
+                    const launchBody = { repo_path: repoPath, roadmap_seed: roadmapSeed };
                     if ((launchPrdContent || "").trim()) {
                         launchBody.prd_content = launchPrdContent;
                     }
+                    if ((launchVerificationContent || "").trim()) {
+                        launchBody.verification_content = launchVerificationContent;
+                    }
+                    launchBody.completion_review = completionReview;
                     const r = await fetch("/api/setup/launch", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
