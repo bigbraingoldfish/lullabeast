@@ -15,6 +15,23 @@ import pytest
 VALID_ROADMAP_SEED = (
     "- [ ] `TEST-E1` | LOW | Do the thing\n"
     "  > Test: It works.\n"
+    "  **Behavioral Verification:**\n"
+    "  - **User-observable:** The user sees the thing happen.\n"
+    "  - **How we'll check:** Run the thing; confirm output.\n"
+    "  - **If this fails, the user sees:** Nothing happens.\n"
+)
+
+VALID_VERIFICATION_CONTENT = (
+    "# Verification\n\n"
+    "## Project type\n"
+    "cli\n\n"
+    "## Entry point\n"
+    "- Command: `mycli --help`\n"
+    "- Ready signal: process exits 0\n\n"
+    "## Public surface\n"
+    "1. Do the thing\n\n"
+    "## Verification stack\n"
+    "- Acceptance tool: subprocess + assertions\n"
 )
 
 PIPELINE_GITIGNORE_ENTRIES = [".autodev/pipeline/"]
@@ -102,7 +119,7 @@ class TestEndpointBasics:
              p1, p2, p3:
             response = client.post(
                 "/api/setup/launch",
-                json={"repo_path": str(repo_path), "roadmap_seed": VALID_ROADMAP_SEED},
+                json={"repo_path": str(repo_path), "roadmap_seed": VALID_ROADMAP_SEED, "verification_content": VALID_VERIFICATION_CONTENT},
             )
 
         assert response.status_code == 200
@@ -140,7 +157,7 @@ class TestEndpointBasics:
              p1, p2, p3:
             response = client.post(
                 "/api/setup/launch",
-                json={"repo_path": str(repo_path), "roadmap_seed": VALID_ROADMAP_SEED},
+                json={"repo_path": str(repo_path), "roadmap_seed": VALID_ROADMAP_SEED, "verification_content": VALID_VERIFICATION_CONTENT},
             )
 
         assert response.status_code == 200
@@ -163,7 +180,7 @@ class TestModeADirectoryStructure:
              patch("ui.server.os.symlink"), \
              patch("ui.server.os.path.lexists", return_value=False), \
              patch("ui.server.os.remove"):
-            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED)
+            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is True
         assert (_art(repo_path) / "phases").is_dir()
@@ -180,7 +197,7 @@ class TestModeADirectoryStructure:
              patch("ui.server.os.symlink"), \
              patch("ui.server.os.path.lexists", return_value=False), \
              patch("ui.server.os.remove"):
-            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED)
+            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is True
         pipeline = json.loads((_art(repo_path) / "pipeline.json").read_text())
@@ -196,7 +213,7 @@ class TestModeADirectoryStructure:
              patch("ui.server.os.symlink"), \
              patch("ui.server.os.path.lexists", return_value=False), \
              patch("ui.server.os.remove"):
-            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED)
+            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is True
         for fname in ["roadmap.md", "prd.md", ".gitignore"]:
@@ -212,7 +229,7 @@ class TestModeADirectoryStructure:
              patch("ui.server.os.symlink"), \
              patch("ui.server.os.path.lexists", return_value=False), \
              patch("ui.server.os.remove"):
-            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED)
+            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is True
         gitignore = (repo_path / ".gitignore").read_text()
@@ -227,7 +244,7 @@ class TestModeADirectoryStructure:
              patch("ui.server.os.symlink"), \
              patch("ui.server.os.path.lexists", return_value=False), \
              patch("ui.server.os.remove"):
-            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED)
+            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is True
         assert (repo_path / "roadmap.md").read_text() == VALID_ROADMAP_SEED
@@ -242,7 +259,7 @@ class TestModeADirectoryStructure:
              patch("ui.server.os.symlink"), \
              patch("ui.server.os.path.lexists", return_value=False), \
              patch("ui.server.os.remove"):
-            result = _run_init_project(str(repo_path), bad_seed)
+            result = _run_init_project(str(repo_path), bad_seed, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is False
         assert result["error"] is not None
@@ -258,7 +275,7 @@ class TestModeADirectoryStructure:
              patch("ui.server.os.symlink"), \
              patch("ui.server.os.path.lexists", return_value=False), \
              patch("ui.server.os.remove"):
-            result = _run_init_project(str(repo_path), bad_seed)
+            result = _run_init_project(str(repo_path), bad_seed, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is False
         # Directory should have been cleaned up via shutil.rmtree
@@ -284,7 +301,7 @@ class TestModeAGitFailure:
              patch("ui.server.os.symlink"), \
              patch("ui.server.os.path.lexists", return_value=False), \
              patch("ui.server.os.remove"):
-            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED)
+            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is False
         assert result["error"] is not None
@@ -303,7 +320,7 @@ class TestModeAGitFailure:
              patch("ui.server.os.symlink"), \
              patch("ui.server.os.path.lexists", return_value=False), \
              patch("ui.server.os.remove"):
-            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED)
+            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is False
         # Directory should have been removed via shutil.rmtree
@@ -342,7 +359,7 @@ class TestModeBExistingRepo:
         with patch("ui.server.os.symlink"), \
              patch("ui.server.os.path.lexists", return_value=False), \
              patch("ui.server.os.remove"):
-            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED)
+            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is True
         # Existing roadmap.md should not be overwritten
@@ -358,7 +375,7 @@ class TestModeBExistingRepo:
         with patch("ui.server.os.symlink"), \
              patch("ui.server.os.path.lexists", return_value=False), \
              patch("ui.server.os.remove"):
-            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED)
+            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is True
         gitignore = (repo_path / ".gitignore").read_text()
@@ -376,7 +393,7 @@ class TestModeBExistingRepo:
         with patch("ui.server.os.symlink"), \
              patch("ui.server.os.path.lexists", return_value=False), \
              patch("ui.server.os.remove"):
-            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED)
+            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is True
         gitignore = (repo_path / ".gitignore").read_text()
@@ -390,7 +407,7 @@ class TestModeBExistingRepo:
         with patch("ui.server.os.symlink"), \
              patch("ui.server.os.path.lexists", return_value=False), \
              patch("ui.server.os.remove"):
-            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED)
+            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is True
         assert (_art(repo_path) / "phases").is_dir()
@@ -406,7 +423,7 @@ class TestModeBExistingRepo:
         with patch("ui.server.os.symlink"), \
              patch("ui.server.os.path.lexists", return_value=False), \
              patch("ui.server.os.remove"):
-            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, prd)
+            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, prd, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is True
         assert (repo_path / "prd.md").read_text() == prd
@@ -430,7 +447,7 @@ class TestSymlinkSetting:
              patch("ui.server.os.symlink", side_effect=capture_symlink), \
              patch("ui.server.os.path.lexists", return_value=False), \
              patch("ui.server.os.remove"):
-            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED)
+            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is True
         assert len(symlink_calls) == 1
@@ -460,7 +477,7 @@ class TestSymlinkSetting:
              patch("ui.server.os.symlink", side_effect=track_symlink), \
              patch("ui.server.os.path.lexists", return_value=True), \
              patch("ui.server.os.remove", side_effect=track_remove):
-            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED)
+            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is True
         assert call_order[0][0] == "remove"
@@ -477,7 +494,7 @@ class TestSymlinkSetting:
              patch("ui.server.os.symlink", side_effect=lambda s, d: symlink_calls.append((s, d))), \
              patch("ui.server.os.path.lexists", return_value=False), \
              patch("ui.server.os.remove"):
-            result = _run_init_project(str(repo_path), bad_seed)
+            result = _run_init_project(str(repo_path), bad_seed, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is False
         assert len(symlink_calls) == 0
@@ -497,7 +514,7 @@ class TestReturnValues:
              patch("ui.server.os.symlink"), \
              patch("ui.server.os.path.lexists", return_value=False), \
              patch("ui.server.os.remove"):
-            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED)
+            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result == {"ok": True, "error": None}
 
@@ -511,7 +528,7 @@ class TestReturnValues:
              patch("ui.server.os.symlink"), \
              patch("ui.server.os.path.lexists", return_value=False), \
              patch("ui.server.os.remove"):
-            result = _run_init_project(str(repo_path), bad_seed)
+            result = _run_init_project(str(repo_path), bad_seed, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is False
         assert isinstance(result["error"], str)
@@ -546,7 +563,7 @@ class TestLaunchSpawnsOrchestrator:
              patch("ui.server._spawn_orchestrator") as spawn_m:
             response = client.post(
                 "/api/setup/launch",
-                json={"repo_path": str(repo_path), "roadmap_seed": VALID_ROADMAP_SEED},
+                json={"repo_path": str(repo_path), "roadmap_seed": VALID_ROADMAP_SEED, "verification_content": VALID_VERIFICATION_CONTENT},
             )
 
         assert response.status_code == 200
@@ -581,7 +598,7 @@ class TestLaunchSpawnsOrchestrator:
              patch("ui.server._spawn_orchestrator") as spawn_m:
             response = client.post(
                 "/api/setup/launch",
-                json={"repo_path": str(repo_path), "roadmap_seed": VALID_ROADMAP_SEED},
+                json={"repo_path": str(repo_path), "roadmap_seed": VALID_ROADMAP_SEED, "verification_content": VALID_VERIFICATION_CONTENT},
             )
 
         assert response.status_code == 409
@@ -589,3 +606,71 @@ class TestLaunchSpawnsOrchestrator:
         assert data.get("code") == "orchestrator_running"
         assert data.get("ok") is False
         spawn_m.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Stage C — verification.md plumbing through /api/setup/launch + _run_init_project
+# ---------------------------------------------------------------------------
+
+class TestVerificationContentPlumbing:
+    """Decision #3: _run_init_project / /api/setup/launch require verification_content."""
+
+    def test_mode_a_writes_verification_md(self, tmp_path):
+        """Mode A (fresh repo) writes verification.md to repo root."""
+        repo_path = tmp_path / "myproject"
+        with patch("subprocess.run", side_effect=_make_subprocess_pass()):
+            result = _run_init_project(
+                str(repo_path),
+                VALID_ROADMAP_SEED,
+                prd_content=None,
+                verification_content=VALID_VERIFICATION_CONTENT,
+            )
+        assert result.get("ok") is True, f"Expected ok=True; got: {result}"
+        assert (repo_path / "verification.md").read_text().strip() \
+            == VALID_VERIFICATION_CONTENT.strip()
+
+    def test_missing_verification_content_fails_init(self, tmp_path):
+        """No verification_content AND no verification.md on disk → init refuses."""
+        repo_path = tmp_path / "myproject"
+        with patch("subprocess.run", side_effect=_make_subprocess_pass()):
+            result = _run_init_project(
+                str(repo_path),
+                VALID_ROADMAP_SEED,
+                prd_content=None,
+                verification_content=None,
+            )
+        assert result.get("ok") is False
+        assert "verification" in (result.get("error") or "").lower()
+
+    def test_endpoint_accepts_verification_content(self, tmp_path):
+        """POST /api/setup/launch accepts verification_content and plumbs it through."""
+        repo_path = tmp_path / "myproject"
+        state_file = tmp_path / "pipeline_state.json"
+        orch_dir = tmp_path / "orch"
+        orch_dir.mkdir()
+        (orch_dir / "orchestrator.py").write_text("# mock\n")
+        cfg = {
+            "pipeline_state_path": str(state_file),
+            "lock_path": str(tmp_path / "pipeline.lock"),
+            "autodev_repo_path": str(orch_dir),
+        }
+        client = load_server()
+        with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
+             patch("ui.server.os.symlink"), \
+             patch("ui.server.os.path.lexists", return_value=False), \
+             patch("ui.server.os.remove"), \
+             patch("ui.server.load_config", return_value=cfg), \
+             patch("ui.server._check_orchestrator_liveness", return_value=False), \
+             patch("ui.server._spawn_orchestrator", return_value={"ok": True, "error": None}):
+            response = client.post(
+                "/api/setup/launch",
+                json={
+                    "repo_path": str(repo_path),
+                    "roadmap_seed": VALID_ROADMAP_SEED,
+                    "verification_content": VALID_VERIFICATION_CONTENT,
+                },
+            )
+
+        assert response.status_code == 200
+        assert (repo_path / "verification.md").read_text().strip() \
+            == VALID_VERIFICATION_CONTENT.strip()

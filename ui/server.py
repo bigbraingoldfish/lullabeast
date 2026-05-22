@@ -688,7 +688,13 @@ def load_config(config_path=None):
 
 
 def _idea_paths_for_messages(config: dict, idea_id: str) -> dict[str, str]:
-    """Absolute paths for idea-scoped files (agent webhook instructions)."""
+    """Absolute paths for idea-scoped files (agent webhook instructions).
+
+    Returned keys: ``dir``, ``prd_draft``, ``roadmap_draft``, ``roadmap_done``,
+    ``verification_draft``, ``verification_done``, ``clarity_result``,
+    ``clarity_done``. The ``verification_*`` paths land alongside the roadmap
+    artefacts; the converter writes both in the same Mode 1 session.
+    """
     root = Path(config.get("ideas_dir", ""))
     d = root / idea_id
     return {
@@ -696,6 +702,8 @@ def _idea_paths_for_messages(config: dict, idea_id: str) -> dict[str, str]:
         "prd_draft": str(d / "prd_draft.md"),
         "roadmap_draft": str(d / "roadmap_draft.md"),
         "roadmap_done": str(d / "roadmap_draft.done"),
+        "verification_draft": str(d / "verification_draft.md"),
+        "verification_done": str(d / "verification_draft.done"),
         "clarity_result": str(d / "clarity_result.json"),
         "clarity_done": str(d / "clarity_result.done"),
     }
@@ -3356,6 +3364,26 @@ def _merge_roadmap_draft_into_session_data(idea_dir: Path, session_data: dict) -
     return False
 
 
+def _merge_verification_draft_into_session_data(idea_dir: Path, session_data: dict) -> bool:
+    """If ``verification_draft.md`` + ``verification_draft.done`` exist and disk text differs from session, sync.
+
+    Mirrors ``_merge_roadmap_draft_into_session_data``. Used by the salvage
+    path on ``GET /api/ideas/{id}/session`` when the converter wrote its
+    artefacts to disk after the ``/convert`` call had already returned (e.g.
+    API timeout, but agent finished).
+    """
+    verification_draft_path = idea_dir / "verification_draft.md"
+    verification_done_path = idea_dir / "verification_draft.done"
+    if not (verification_draft_path.exists() and verification_done_path.exists()):
+        return False
+    disk_verification = verification_draft_path.read_text()
+    session_verification = session_data.get("verification_content") or ""
+    if disk_verification.strip() and disk_verification.strip() != session_verification.strip():
+        session_data["verification_content"] = disk_verification
+        return True
+    return False
+
+
 def _ideas_persist_data_image_to_inbound(openclaw_root: str, data_uri: str, _orig_filename: str) -> str:
     """Decode ``data:image/...;base64,...``, write under ``media/inbound``, return marker line."""
     if ";base64," not in data_uri:
@@ -3840,11 +3868,17 @@ def _parse_agent_response(content: str) -> dict:
 
 
 def _default_idea_session(name: str = "") -> dict:
+    """Empty session schema for a brand-new idea.
+
+    ``verification_content`` holds the project-level ``verification.md`` text
+    produced by the roadmap-converter Mode 1 session alongside the roadmap.
+    """
     return {
         "name": name,
         "messages": [],
         "prd_content": "",
         "roadmap_content": "",
+        "verification_content": "",
         "created": None,
         "updated": None,
     }
@@ -3855,7 +3889,13 @@ def _iso_from_mtime(path: Path) -> str:
 
 
 def _rehydrate_session_from_artifacts(idea_dir: Path, session_data: dict) -> tuple[dict, bool]:
-    """Backfill empty session.json from turns/*.md and prd_draft.md if available."""
+    """Backfill empty session.json from ``turns/*.md``, ``prd_draft.md``, and
+    ``verification_draft.md`` if available on disk.
+
+    Returns ``(session_data, changed)``; ``changed`` is True if at least one
+    field was populated from disk. Existing populated fields are never
+    overwritten — backfill only fills empty slots.
+    """
     if not isinstance(session_data, dict):
         session_data = _default_idea_session()
     else:
@@ -3863,12 +3903,14 @@ def _rehydrate_session_from_artifacts(idea_dir: Path, session_data: dict) -> tup
         session_data.setdefault("messages", [])
         session_data.setdefault("prd_content", "")
         session_data.setdefault("roadmap_content", "")
+        session_data.setdefault("verification_content", "")
         session_data.setdefault("created", None)
         session_data.setdefault("updated", None)
 
     has_messages = bool(session_data.get("messages"))
     has_prd = bool((session_data.get("prd_content") or "").strip())
-    if has_messages and has_prd:
+    has_verification = bool((session_data.get("verification_content") or "").strip())
+    if has_messages and has_prd and has_verification:
         return session_data, False
 
     turns_dir = idea_dir / "turns"
@@ -3904,12 +3946,24 @@ def _rehydrate_session_from_artifacts(idea_dir: Path, session_data: dict) -> tup
             session_data["prd_content"] = prd_path.read_text()
             changed = True
 
+    if not has_verification:
+        verification_path = idea_dir / "verification_draft.md"
+        verification_done = idea_dir / "verification_draft.done"
+        # Sentinel-gated: the converter writes the doc and the sentinel in
+        # sequence; the doc alone may be a partial write. Match the contract
+        # of ``_merge_verification_draft_into_session_data``.
+        if verification_path.exists() and verification_done.exists():
+            session_data["verification_content"] = verification_path.read_text()
+            changed = True
+
     if changed:
         ts_candidates = []
         if session_data.get("messages"):
             ts_candidates.extend([m.get("ts") for m in session_data["messages"] if m.get("ts")])
         if (idea_dir / "prd_draft.md").exists():
             ts_candidates.append(_iso_from_mtime(idea_dir / "prd_draft.md"))
+        if (idea_dir / "verification_draft.md").exists():
+            ts_candidates.append(_iso_from_mtime(idea_dir / "verification_draft.md"))
         latest_ts = max(ts_candidates) if ts_candidates else datetime.utcnow().isoformat() + "Z"
         if not session_data.get("updated") or str(session_data.get("updated")) < latest_ts:
             session_data["updated"] = latest_ts
@@ -4022,7 +4076,12 @@ def _reconcile_ideas_session_after_late_done(
 
 @app.get("/api/ideas/{idea_id}/draft-sync-status")
 def get_ideas_draft_sync_status(idea_id: str):
-    """Compare PRD vs roadmap draft mtimes for staleness hints (``roadmap_behind_prd``)."""
+    """Compare PRD vs roadmap draft mtimes for staleness hints (``roadmap_behind_prd``).
+
+    Returns the mtimes of ``prd_draft.md``, ``roadmap_draft.md``, and
+    ``verification_draft.md`` so the Ideas-screen UI can flag any of the
+    three documents as stale relative to the PRD.
+    """
     config = load_config()
     ideas_dir = Path(config.get("ideas_dir") or "")
     idea_dir = ideas_dir / idea_id
@@ -4031,8 +4090,10 @@ def get_ideas_draft_sync_status(idea_id: str):
 
     prd_p = idea_dir / "prd_draft.md"
     rm_p = idea_dir / "roadmap_draft.md"
+    ver_p = idea_dir / "verification_draft.md"
     prd_mtime = None
     rm_mtime = None
+    ver_mtime = None
     if prd_p.exists():
         try:
             prd_mtime = os.path.getmtime(prd_p)
@@ -4043,6 +4104,11 @@ def get_ideas_draft_sync_status(idea_id: str):
             rm_mtime = os.path.getmtime(rm_p)
         except OSError:
             rm_mtime = None
+    if ver_p.exists():
+        try:
+            ver_mtime = os.path.getmtime(ver_p)
+        except OSError:
+            ver_mtime = None
 
     behind = bool(
         prd_mtime is not None
@@ -4053,6 +4119,7 @@ def get_ideas_draft_sync_status(idea_id: str):
         "roadmap_behind_prd": behind,
         "prd_draft_mtime": prd_mtime,
         "roadmap_draft_mtime": rm_mtime,
+        "verification_draft_mtime": ver_mtime,
     }
     return JSONResponse(content=body, headers={"Cache-Control": "no-store"})
 
@@ -4094,6 +4161,12 @@ def get_ideas_session(idea_id: str):
         if disk_roadmap.strip() and disk_roadmap.strip() != session_roadmap.strip():
             session_data["roadmap_content"] = disk_roadmap
             _atomic_write_json_file(session_path, session_data)
+
+    # Verification draft merge: same pattern as the roadmap salvage above —
+    # if /convert timed out at the API layer but the agent eventually wrote
+    # verification_draft.md + its sentinel, surface it on the next session GET.
+    if _merge_verification_draft_into_session_data(idea_dir, session_data):
+        _atomic_write_json_file(session_path, session_data)
 
     _enrich_assistant_messages_with_parsed(session_data)
     session_data.pop("alignment_report", None)
@@ -4950,7 +5023,10 @@ async def post_ideas_clarity_check(idea_id: str):
     return result_data
 
 
-CONVERT_TIMEOUT = 300   # seconds; patchable in tests
+CONVERT_TIMEOUT = 480   # seconds; patchable in tests. Bumped from 300 in P0
+                        # Stage B9 — the converter now produces both
+                        # roadmap_draft.md AND verification_draft.md in the
+                        # same session, which needs ~60% more headroom.
 CONVERT_POLL_INTERVAL = 2  # seconds between sentinel checks
 FORMAT_CORRECTION_TIMEOUT = 180  # seconds; patchable in tests
 FORMAT_CORRECTION_POLL_INTERVAL = 2  # seconds between sentinel checks
@@ -5015,14 +5091,17 @@ async def post_ideas_convert(idea_id: str):
     """Trigger PRD-to-roadmap conversion.
 
     Injects the roadmap-generation skill, then sends a webhook to the
-    roadmap-converter agent, polls for roadmap_draft.done (``CONVERT_POLL_INTERVAL`` s
-    interval, up to ``CONVERT_TIMEOUT`` s), then atomically stores the resulting
-    roadmap_content in session.json and returns it.
+    roadmap-converter agent. The agent produces TWO artefacts in the same
+    session: ``roadmap_draft.md`` and ``verification_draft.md`` (the
+    project-level Verification document). This endpoint polls BOTH sentinels
+    — ``roadmap_draft.done`` AND ``verification_draft.done`` — at
+    ``CONVERT_POLL_INTERVAL`` s intervals for up to ``CONVERT_TIMEOUT`` s,
+    then atomically stores both contents in session.json and returns them.
 
     Returns 404 if the idea is not found.
     Returns 422 if prd_content is empty.
-    Returns 408 if polling times out.
-    Returns 200 with {"roadmap_content": str} on success.
+    Returns 408 if polling times out (either sentinel missing).
+    Returns 200 with {"roadmap_content": str, "verification_content": str} on success.
     """
     config = load_config()
     ideas_dir = Path(config.get("ideas_dir", ""))
@@ -5057,8 +5136,10 @@ async def post_ideas_convert(idea_id: str):
             f"{conversion_prompt.strip()}\n\n"
             f"---\n\n"
             f"{prd_content}\n\n"
-            f"Write the resulting roadmap.md content to {ip['roadmap_draft']}, "
-            f"then create {ip['roadmap_done']}."
+            f"Write the resulting roadmap.md content to {ip['roadmap_draft']}.\n"
+            f"Write the project-level verification.md content to {ip['verification_draft']}.\n"
+            f"Then create {ip['verification_done']} (verification sentinel) FIRST.\n"
+            f"Then create {ip['roadmap_done']} (roadmap sentinel) LAST.\n"
         ),
     }
 
@@ -5071,15 +5152,19 @@ async def post_ideas_convert(idea_id: str):
             raise HTTPException(status_code=502, detail=f"Webhook returned {resp.status}")
 
     done_path = idea_dir / "roadmap_draft.done"
+    verification_done_path = idea_dir / "verification_draft.done"
     done_path.unlink(missing_ok=True)
+    verification_done_path.unlink(missing_ok=True)
 
-    # Poll for roadmap_draft.done (must not latch onto a stale sentinel from a prior run).
-    # ``not_before`` is captured after unlink so only a sentinel touched this attempt counts.
+    # Poll for BOTH sentinels (must not latch onto stale sentinels from a prior run).
+    # ``not_before`` is captured after both unlinks so only sentinels touched this
+    # attempt count toward completion.
     poll_started = time.time()
     deadline = poll_started + CONVERT_TIMEOUT
 
     while time.time() < deadline:
-        if _idea_roadmap_done_sentinel_fresh(done_path, poll_started):
+        if (_idea_roadmap_done_sentinel_fresh(done_path, poll_started)
+                and _idea_roadmap_done_sentinel_fresh(verification_done_path, poll_started)):
             break
         await asyncio.sleep(CONVERT_POLL_INTERVAL)
     else:
@@ -5090,21 +5175,27 @@ async def post_ideas_convert(idea_id: str):
 
     _record_operation_metric("roadmap_generation", datetime.utcnow().timestamp() - op_start, config)
 
-    # Read roadmap content
+    # Read both contents
     roadmap_draft_path = idea_dir / "roadmap_draft.md"
-    roadmap_content = ""
-    if roadmap_draft_path.exists():
-        roadmap_content = roadmap_draft_path.read_text()
+    verification_draft_path = idea_dir / "verification_draft.md"
+    roadmap_content = roadmap_draft_path.read_text() if roadmap_draft_path.exists() else ""
+    verification_content = (
+        verification_draft_path.read_text() if verification_draft_path.exists() else ""
+    )
 
-    # Atomically store roadmap_content in session.json
+    # Atomically store both fields in session.json
     session_data["roadmap_content"] = roadmap_content
+    session_data["verification_content"] = verification_content
     session_data["updated"] = datetime.utcnow().isoformat() + "Z"
     tmp_path = str(session_path) + ".tmp"
     with open(tmp_path, "w") as f:
         json.dump(session_data, f)
     os.replace(tmp_path, session_path)
 
-    return {"roadmap_content": roadmap_content}
+    return {
+        "roadmap_content": roadmap_content,
+        "verification_content": verification_content,
+    }
 
 
 
@@ -5222,6 +5313,49 @@ async def post_ideas_fix_roadmap_format(idea_id: str, body: FixRoadmapFormatRequ
     _atomic_write_json_file(session_path, updated_session)
 
     return {"roadmap_content": corrected_content}
+
+
+@app.get("/api/ideas/{idea_id}/download-verification")
+def get_ideas_download_verification(idea_id: str):
+    """Download the verification_content from session.json as a markdown file.
+
+    Filename is derived from the first ``# heading`` in ``prd_content``,
+    or falls back to the idea id. Suffix is always ``-verification.md``.
+    Returns 404 if the idea is not found or verification_content is empty.
+    """
+    config = load_config()
+    ideas_dir = Path(config.get("ideas_dir") or "")
+    session_path = Path(ideas_dir) / idea_id / "session.json"
+
+    if not session_path.exists():
+        raise HTTPException(status_code=404, detail="Idea not found")
+
+    session_data = _read_json_file(str(session_path)) or {}
+    verification_content = session_data.get("verification_content", "") or ""
+
+    if not verification_content:
+        raise HTTPException(status_code=404, detail="No verification content available")
+
+    # Derive filename from first # heading in prd_content, or fall back to id.
+    import re as _re
+    prd_content = session_data.get("prd_content", "") or ""
+    filename = idea_id
+    for line in prd_content.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            heading = stripped[2:].strip()
+            filename = heading.replace(" ", "-")
+            filename = _re.sub(r"[^\w\-.]", "", filename)
+            break
+
+    filename = (filename or idea_id) + "-verification.md"
+
+    from fastapi.responses import Response
+    return Response(
+        content=verification_content.encode("utf-8"),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/ideas/{idea_id}/download-roadmap")
@@ -5387,14 +5521,40 @@ def _roadmap_phase_checkbox_stats(content: str) -> tuple[int, int]:
     return len(all_phases), completed
 
 
+# Behavioral Verification block enforcement (Stage C, P0 §2.2).
+# Strict — no legacy opt-out per operator decision in §2.9.
+_BV_BLOCK_HEADER_RE = re.compile(r"^\s*\*\*Behavioral Verification:\*\*\s*$")
+_BV_SUBBULLETS = {
+    "user_observable": re.compile(
+        r"^\s*-\s+\*\*User-observable:\*\*\s+(.+)$"
+    ),
+    "how_to_check": re.compile(
+        r"^\s*-\s+\*\*How we'll check:\*\*\s+(.+)$"
+    ),
+    "failure_language": re.compile(
+        r"^\s*-\s+\*\*If this fails, the user sees:\*\*\s+(.+)$"
+    ),
+}
+_BV_SUBBULLET_LABELS = {
+    "user_observable": "User-observable",
+    "how_to_check": "How we'll check",
+    "failure_language": "If this fails, the user sees",
+}
+# Scan window for the block after each phase header (P0 §2.2: "within 30 lines").
+_BV_SEARCH_WINDOW = 30
+
+
 def _validate_roadmap_content(content: str) -> dict:
     """Validate roadmap content format.
 
     Checks:
     1. Phase lines match the required format.
     2. Each phase has a '> Test:' line within 10 lines.
-    3. No duplicate phase IDs.
-    4. At least one phase line exists.
+    3. Each phase has a Behavioral Verification block within 30 lines, with
+       three sub-bullets (User-observable / How we'll check / If this fails,
+       the user sees), each non-empty. Strict — no opt-out per P0 §2.9.
+    4. No duplicate phase IDs.
+    5. At least one phase line exists.
 
     Returns {"valid": bool, "errors": [{"line": int, "content": str, "message": str}]}
     """
@@ -5430,6 +5590,49 @@ def _validate_roadmap_content(content: str) -> dict:
                 "message": f"Phase {phase_id} (line {line_num}) is missing a '> Test:' line",
             })
 
+    # Check Behavioral Verification block + its three sub-bullets within
+    # _BV_SEARCH_WINDOW lines of each phase header. Strict per §2.9.
+    for line_num, phase_id, line_content in phase_matches:
+        window_end = min(line_num + _BV_SEARCH_WINDOW, len(lines))
+        block_line = None
+        for j in range(line_num, window_end + 1):
+            if _BV_BLOCK_HEADER_RE.match(lines[j - 1]):
+                block_line = j
+                break
+        if block_line is None:
+            errors.append({
+                "line": line_num,
+                "content": line_content,
+                "message": (
+                    f"Phase {phase_id} (line {line_num}) is missing the "
+                    "**Behavioral Verification:** block"
+                ),
+            })
+            continue
+        # Scan the body after the block header (until next phase header or window end).
+        body_end = window_end
+        for j in range(block_line + 1, len(lines) + 1):
+            if _PHASE_LINE_RE.match(lines[j - 1]):
+                body_end = j - 1
+                break
+        found = {key: False for key in _BV_SUBBULLETS}
+        for j in range(block_line + 1, body_end + 1):
+            for key, pat in _BV_SUBBULLETS.items():
+                m = pat.match(lines[j - 1])
+                if m and m.group(1).strip():
+                    found[key] = True
+        for key, present in found.items():
+            if not present:
+                label = _BV_SUBBULLET_LABELS[key]
+                errors.append({
+                    "line": block_line,
+                    "content": line_content,
+                    "message": (
+                        f"Phase {phase_id} (line {line_num}) is missing "
+                        f"Behavioral Verification sub-bullet: {label}"
+                    ),
+                })
+
     # Check for duplicate phase IDs — only examine phase header lines, not body text.
     # Using re.findall() on the full document would false-positive on phase IDs that
     # appear in Entry/Exit Criteria references (e.g. "`CORE-E1` complete").
@@ -5443,6 +5646,168 @@ def _validate_roadmap_content(content: str) -> dict:
                 "content": pid,
                 "message": f"Duplicate phase ID: {pid} appears {count} times",
             })
+
+    return {"valid": len(errors) == 0, "errors": errors}
+
+
+_VERIFICATION_SECTIONS = [
+    ("# Verification", "Verification"),
+    ("## Project type", "Project type"),
+    ("## Entry point", "Entry point"),
+    ("## Public surface", "Public surface"),
+    ("## Verification stack", "Verification stack"),
+]
+_VERIFICATION_CANONICAL_TYPES = {
+    "web-app", "http-api", "cli", "library", "data-pipeline",
+    "game", "automation", "desktop-app", "mobile-app",
+}
+_VERIFICATION_DOC_MAX_LINES = 80
+_VERIFICATION_TYPE_MAX_LEN = 40
+_VERIFICATION_TYPE_BAD_CHARS = set("*_`#[]")
+
+
+def _validate_verification_content(content: str) -> dict:
+    """Validate project-level ``verification.md`` content.
+
+    Schema (from the roadmap-generation skill's "Verification Document
+    Output" section): required headings in order — ``# Verification``,
+    ``## Project type``, ``## Entry point``, ``## Public surface``,
+    ``## Verification stack``. Each section's body must be non-empty.
+
+    Project type body: single line, <= 40 chars, no markdown formatting
+    characters, and must match one of the canonical types
+    (P0 §2.2 strict mode, user decision #1).
+
+    Total doc length capped at 80 lines (skill rule).
+
+    Returns the same shape as :func:`_validate_roadmap_content`:
+    ``{"valid": bool, "errors": [{"line": int, "content": str, "message": str}]}``.
+    """
+    errors = []
+    raw = content or ""
+    lines = raw.splitlines()
+    line_count = raw.count("\n") + (0 if raw.endswith("\n") or not raw else 1)
+    # ``splitlines()`` does not preserve a trailing newline; use raw count to enforce cap.
+
+    if line_count > _VERIFICATION_DOC_MAX_LINES:
+        errors.append({
+            "line": line_count,
+            "content": "",
+            "message": (
+                f"verification.md exceeds the {_VERIFICATION_DOC_MAX_LINES}-line "
+                f"length cap (got {line_count} lines)."
+            ),
+        })
+
+    # Find each required section in order — out-of-order placement fails.
+    cursor = 0
+    section_spans = []  # (key, label, header_line, body_start, body_end)
+    section_keys = []
+    for idx, (heading, label) in enumerate(_VERIFICATION_SECTIONS):
+        found_at = None
+        for j in range(cursor, len(lines)):
+            if lines[j].strip() == heading:
+                found_at = j
+                break
+        if found_at is None:
+            errors.append({
+                "line": cursor + 1 if cursor < len(lines) else max(line_count, 1),
+                "content": heading,
+                "message": (
+                    f"Missing required section: {heading}"
+                    + ("" if idx == 0 else f" (expected after {_VERIFICATION_SECTIONS[idx - 1][0]!r})")
+                ),
+            })
+            # Continue cursor — keep scanning so we can report all missing.
+            continue
+        # Detect out-of-order: if a *later* required section appears before
+        # this one was found, that's an order violation.
+        if section_spans and found_at < section_spans[-1][2]:
+            errors.append({
+                "line": found_at + 1,
+                "content": heading,
+                "message": (
+                    f"Section {heading!r} is out of canonical order; expected after "
+                    f"{_VERIFICATION_SECTIONS[idx - 1][0]!r}."
+                ),
+            })
+        section_spans.append((heading, label, found_at, found_at + 1, None))
+        section_keys.append(idx)
+        cursor = found_at + 1
+
+    # Fill in body_end as the start of the next section (or EOF).
+    for span_idx, (heading, label, header_line, body_start, _end) in enumerate(section_spans):
+        if span_idx + 1 < len(section_spans):
+            next_header_line = section_spans[span_idx + 1][2]
+        else:
+            next_header_line = len(lines)
+        # Mutate the tuple (rebuild because tuples are immutable).
+        section_spans[span_idx] = (heading, label, header_line, body_start, next_header_line)
+
+    # Each `## ...` section's body must be non-empty. The top-level
+    # `# Verification` heading is a document title; it has no body of
+    # its own (the four `##` sections sit below it).
+    for heading, label, header_line, body_start, body_end in section_spans:
+        if heading == "# Verification":
+            continue
+        body_lines = lines[body_start:body_end]
+        if not any(line.strip() for line in body_lines):
+            errors.append({
+                "line": header_line + 1,
+                "content": heading,
+                "message": f"Section {heading!r} has empty body — fill in {label}.",
+            })
+
+    # Project type body strictness (decision #1 + #2).
+    for heading, label, header_line, body_start, body_end in section_spans:
+        if heading != "## Project type":
+            continue
+        body_lines = [lines[i] for i in range(body_start, body_end)]
+        non_blank = [ln for ln in body_lines if ln.strip()]
+        if not non_blank:
+            # Already flagged as empty body above; do not double-report.
+            break
+        if len(non_blank) > 1:
+            errors.append({
+                "line": header_line + 1,
+                "content": heading,
+                "message": (
+                    "Project type body must be a single line "
+                    f"(got {len(non_blank)} non-blank lines)."
+                ),
+            })
+            break
+        token = non_blank[0].strip()
+        if len(token) > _VERIFICATION_TYPE_MAX_LEN:
+            errors.append({
+                "line": header_line + 1,
+                "content": token,
+                "message": (
+                    f"Project type token is too long "
+                    f"({len(token)} chars; max {_VERIFICATION_TYPE_MAX_LEN})."
+                ),
+            })
+            break
+        if any(ch in token for ch in _VERIFICATION_TYPE_BAD_CHARS):
+            errors.append({
+                "line": header_line + 1,
+                "content": token,
+                "message": (
+                    "Project type body must not contain markdown formatting characters "
+                    f"({''.join(sorted(_VERIFICATION_TYPE_BAD_CHARS))})."
+                ),
+            })
+            break
+        if token not in _VERIFICATION_CANONICAL_TYPES:
+            errors.append({
+                "line": header_line + 1,
+                "content": token,
+                "message": (
+                    f"Project type {token!r} is unknown — must be one of: "
+                    + ", ".join(sorted(_VERIFICATION_CANONICAL_TYPES))
+                ),
+            })
+        break
 
     return {"valid": len(errors) == 0, "errors": errors}
 
@@ -5588,6 +5953,18 @@ async def post_setup_validate_roadmap(request: Request):
     return _validate_roadmap_content(content)
 
 
+@app.post("/api/setup/validate-verification")
+async def post_setup_validate_verification(request: Request):
+    """Validate project-level ``verification.md`` content (Stage C).
+
+    Body: ``{"content": str}``. No file writes. Returns the same shape as
+    ``/api/setup/validate-roadmap``: ``{valid, errors[]}``.
+    """
+    body = await request.json()
+    content = body.get("content", "")
+    return _validate_verification_content(content)
+
+
 # ─── Preflight checks ────────────────────────────────────────────────────────
 
 _PIPELINE_GITIGNORE_ENTRIES = [".autodev/pipeline/"]
@@ -5612,8 +5989,20 @@ def _atomic_write_file(path: str, content: str) -> None:
     os.replace(tmp, path)
 
 
-def _preflight_materialize(repo_path: str, roadmap_seed, prd_content) -> list:
-    """Write roadmap/prd from preflight request when valid. Returns extra check rows."""
+def _preflight_materialize(
+    repo_path: str,
+    roadmap_seed,
+    prd_content,
+    verification_content=None,
+) -> list:
+    """Write roadmap/prd/verification from preflight request when valid.
+
+    ``verification_content`` is the project-level ``verification.md`` text
+    (Stage C). When provided non-empty, it is validated via
+    :func:`_validate_verification_content`, conflict-checked against any
+    on-disk ``verification.md`` (same pattern as ``prd.md``), and written
+    atomically. Returns the list of extra check rows.
+    """
     import glob as glob_mod
 
     checks = []
@@ -5711,6 +6100,54 @@ def _preflight_materialize(repo_path: str, roadmap_seed, prd_content) -> list:
                 "check": "prd write",
                 "status": "fixed",
                 "message": "Wrote prd.md",
+            })
+
+    vc = verification_content if verification_content is not None else ""
+    vc = vc.strip()
+    if vc:
+        val = _validate_verification_content(vc)
+        if not val["valid"]:
+            em = "; ".join(e["message"] for e in val["errors"][:3])
+            checks.append({
+                "check": "verification doc",
+                "status": "fail",
+                "message": f"Invalid verification.md format: {em}",
+            })
+            return checks
+        ver_path = os.path.join(repo_path, "verification.md")
+        if os.path.exists(ver_path):
+            try:
+                existing = Path(ver_path).read_text()
+            except OSError as exc:
+                checks.append({
+                    "check": "verification conflict",
+                    "status": "fail",
+                    "message": f"Could not read verification.md: {exc}",
+                })
+                return checks
+            if _normalize_doc_text_for_compare(existing) != _normalize_doc_text_for_compare(vc):
+                checks.append({
+                    "check": "verification conflict",
+                    "status": "fail",
+                    "message": (
+                        "verification.md on disk does not match the doc staged in the UI."
+                    ),
+                })
+                return checks
+        else:
+            try:
+                _atomic_write_file(ver_path, vc)
+            except OSError as exc:
+                checks.append({
+                    "check": "verification write",
+                    "status": "fail",
+                    "message": str(exc),
+                })
+                return checks
+            checks.append({
+                "check": "verification write",
+                "status": "fixed",
+                "message": "Wrote verification.md",
             })
 
     return checks
@@ -6096,6 +6533,46 @@ def _run_preflight_checks(repo_path: str, config: dict | None = None) -> list:
                             "or use Launch to bootstrap the project."
                         )})
 
+    # 7. Verification doc on disk (Stage C) — fail if missing or malformed.
+    # Strict per §2.9: a project without a valid verification.md cannot run.
+    ver_path = os.path.join(repo_path, "verification.md")
+    if not os.path.exists(ver_path):
+        checks.append({
+            "check": "verification doc",
+            "status": "fail",
+            "message": (
+                "verification.md is missing — re-run conversion from the Ideas screen "
+                "to generate it."
+            ),
+        })
+    else:
+        try:
+            ver_text = Path(ver_path).read_text()
+        except OSError as exc:
+            checks.append({
+                "check": "verification doc",
+                "status": "fail",
+                "message": f"Could not read verification.md: {exc}",
+            })
+        else:
+            ver_val = _validate_verification_content(ver_text)
+            if ver_val["valid"]:
+                checks.append({
+                    "check": "verification doc",
+                    "status": "pass",
+                    "message": "verification.md present and valid",
+                })
+            else:
+                em = "; ".join(e["message"] for e in ver_val["errors"][:3])
+                checks.append({
+                    "check": "verification doc",
+                    "status": "fail",
+                    "message": (
+                        f"verification.md is invalid: {em}. "
+                        "Re-run conversion from the Ideas screen to regenerate it."
+                    ),
+                })
+
     return checks
 
 
@@ -6104,7 +6581,8 @@ async def post_setup_preflight(request: Request):
     """Run preflight validation checks for a project directory.
 
     Body: {"repo_path": str, "roadmap_seed": optional, "prd_content": optional,
-           "confirm_roadmap_archive": optional bool, "keep_filename": optional str}
+           "verification_content": optional, "confirm_roadmap_archive": optional bool,
+           "keep_filename": optional str}
     When multiple *oadmap*.md exist, returns roadmap_ambiguous until confirm_roadmap_archive.
     Returns: {"checks": [...], optional roadmap_ambiguous, roadmap_files, recommended_keep}
     """
@@ -6112,6 +6590,7 @@ async def post_setup_preflight(request: Request):
     repo_path = body.get("repo_path", "")
     roadmap_seed = body.get("roadmap_seed")
     prd_content = body.get("prd_content")
+    verification_content = body.get("verification_content")
     confirm_roadmap_archive = bool(body.get("confirm_roadmap_archive"))
     keep_filename = body.get("keep_filename")
     if not repo_path:
@@ -6150,7 +6629,7 @@ async def post_setup_preflight(request: Request):
             )
         _archive_extra_roadmaps(repo_abs, keep)
 
-    mat = _preflight_materialize(repo_abs, roadmap_seed, prd_content)
+    mat = _preflight_materialize(repo_abs, roadmap_seed, prd_content, verification_content)
     if any(c.get("status") == "fail" for c in mat):
         return {"checks": mat}
 
@@ -7207,6 +7686,7 @@ async def post_setup_switch_project(request: Request):
     repo_path = (body.get("repo_path") or "").strip()
     roadmap_seed = body.get("roadmap_seed")
     prd_content = body.get("prd_content")
+    verification_content = body.get("verification_content")
     confirm_roadmap_archive = bool(body.get("confirm_roadmap_archive"))
     keep_filename = body.get("keep_filename")
     confirm_destructive = body.get("confirm_destructive")
@@ -7243,7 +7723,7 @@ async def post_setup_switch_project(request: Request):
             )
         _archive_extra_roadmaps(repo_abs, keep)
 
-    mat = _preflight_materialize(repo_abs, roadmap_seed, prd_content)
+    mat = _preflight_materialize(repo_abs, roadmap_seed, prd_content, verification_content)
     if any(c.get("status") == "fail" for c in mat):
         return {"ok": False, "checks": mat, "coherence": None}
 
@@ -7344,11 +7824,22 @@ async def post_setup_switch_project(request: Request):
 
 # ─── Launch sequence ──────────────────────────────────────────────────────────
 
-def _run_init_project(repo_path: str, roadmap_seed: str, prd_content=None) -> dict:
+def _run_init_project(
+    repo_path: str,
+    roadmap_seed: str,
+    prd_content=None,
+    verification_content=None,
+) -> dict:
     """Initialize a project directory (Mode A: new repo, Mode B: existing repo).
 
     Mode A: .git does NOT exist → create full structure, git init, initial commit.
     Mode B: .git exists → create only missing files, append missing gitignore entries.
+
+    ``verification_content`` (Stage C): if provided, written to
+    ``<repo>/verification.md`` after PRD. If absent AND no verification.md
+    exists on disk, init refuses with a hint to re-run conversion from the
+    Ideas screen. Strict per §2.9 — no project can be staged without a
+    verification doc.
 
     Returns {"ok": bool, "error": str|null}
     """
@@ -7359,6 +7850,24 @@ def _run_init_project(repo_path: str, roadmap_seed: str, prd_content=None) -> di
     name = os.path.basename(repo_path.rstrip("/"))
     now = datetime.utcnow().isoformat() + "Z"
     mode = "B" if os.path.exists(os.path.join(repo_path, ".git")) else "A"
+
+    # Strict check before any filesystem writes: if no verification doc is
+    # available (neither in the request body nor already on disk), refuse.
+    _ver_text = (verification_content or "").strip()
+    _existing_ver = os.path.join(repo_path, "verification.md")
+    if not _ver_text and not os.path.exists(_existing_ver):
+        return {
+            "ok": False,
+            "error": (
+                "verification.md is required — re-run conversion from the Ideas "
+                "screen to generate it."
+            ),
+        }
+    if _ver_text:
+        _ver_val = _validate_verification_content(_ver_text)
+        if not _ver_val["valid"]:
+            errs = "; ".join(e["message"] for e in _ver_val["errors"][:3])
+            return {"ok": False, "error": f"verification.md invalid: {errs}"}
 
     def atomic_write(path: str, content: str):
         tmp = path + ".tmp"
@@ -7406,6 +7915,10 @@ def _run_init_project(repo_path: str, roadmap_seed: str, prd_content=None) -> di
                 atomic_write(prd_path, str(prd_content))
             elif not os.path.exists(prd_path):
                 atomic_write(prd_path, "# PRD\n\n_To be completed._\n")
+            # Step 5b: verification.md (Stage C). Strict — already validated above.
+            ver_path = os.path.join(repo_path, "verification.md")
+            if _ver_text:
+                atomic_write(ver_path, _ver_text + ("\n" if not _ver_text.endswith("\n") else ""))
             lessons_path = os.path.join(art, "lessons.md")
             if not os.path.exists(lessons_path):
                 atomic_write(lessons_path, "# Lessons\n\n_Hard-won insights go here._\n")
@@ -7464,6 +7977,13 @@ def _run_init_project(repo_path: str, roadmap_seed: str, prd_content=None) -> di
             elif not os.path.exists(prd_path):
                 atomic_write(prd_path, "# PRD\n\n_To be completed._\n")
 
+            # Stage C: verification.md — write when provided. On-disk doc is
+            # left untouched in Mode B (re-running launch on an existing repo
+            # should not silently overwrite).
+            ver_path_b = os.path.join(repo_path, "verification.md")
+            if _ver_text and not os.path.exists(ver_path_b):
+                atomic_write(ver_path_b, _ver_text + ("\n" if not _ver_text.endswith("\n") else ""))
+
             metrics_path = os.path.join(art, "metrics.jsonl")
             if not os.path.exists(metrics_path):
                 open(metrics_path, "w").close()
@@ -7521,18 +8041,20 @@ def _run_init_project(repo_path: str, roadmap_seed: str, prd_content=None) -> di
 async def post_setup_launch(request: Request):
     """Initialize project directory, set symlink, sync pipeline_state.json, spawn orchestrator.
 
-    Body: {"repo_path": str, "roadmap_seed": str, "prd_content": optional, "completion_review": bool}
+    Body: {"repo_path": str, "roadmap_seed": str, "prd_content": optional,
+           "verification_content": optional, "completion_review": bool}
     Returns: {"ok": bool, "error": str|null}; 409 with code orchestrator_running if lock held.
     """
     body = await request.json()
     repo_path = body.get("repo_path", "")
     roadmap_seed = body.get("roadmap_seed", "")
     prd_content = body.get("prd_content")
+    verification_content = body.get("verification_content")
     completion_review = bool(body.get("completion_review", False))
     if not repo_path:
         raise HTTPException(status_code=422, detail="repo_path is required")
 
-    result = _run_init_project(repo_path, roadmap_seed, prd_content)
+    result = _run_init_project(repo_path, roadmap_seed, prd_content, verification_content)
     if not result.get("ok"):
         return result
 

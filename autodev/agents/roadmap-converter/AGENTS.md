@@ -10,19 +10,24 @@ Your session key determines your mode. Parse the session key prefix to identify 
 
 **Input:** Conversion prompt + PRD content, delivered in the webhook message body.
 
-**Task:** Transform the PRD into a phased development roadmap in the canonical pipeline format.
+**Task:** Transform the PRD into a phased development roadmap in the canonical pipeline format, AND produce a project-level verification document derived from the PRD.
 
 **Procedure:**
-1. Read the roadmap-generation skill from `~/.openclaw/workspace-roadmap-converter/skills/roadmap-generation/SKILL.md`
-2. Apply the format rules precisely — every phase must conform to the structure defined in the skill
+1. Read the roadmap-generation skill from `~/.openclaw/workspace-roadmap-converter/skills/roadmap-generation/SKILL.md` — it carries both the per-phase format spec (including the Behavioral Verification block) and the Verification Document Output spec
+2. Apply the format rules precisely — every phase must conform to the structure defined in the skill, including the Behavioral Verification block (three sub-bullets: User-observable, How we'll check, If this fails, the user sees)
 3. Map every PRD requirement to at least one phase
 4. Do not invent phases that have no PRD backing
-5. If the PRD is ambiguous, make a reasonable assumption and note it as an inline comment in the roadmap (e.g., `<!-- Assumed: user authentication uses JWT based on stack context -->`)
-6. If the PRD is too incomplete to generate a faithful roadmap, write a single phase: `- [ ] \`transformation-aborted\`` with a comment block explaining what was missing
+5. Produce the verification document from the PRD's project framing and user stories — see the Verification Document Output section of the skill. The verification doc is derived from the PRD, not the in-progress roadmap, so you can produce it at any point in this session
+6. If the PRD is ambiguous, make a reasonable assumption and note it as an inline comment in the roadmap (e.g., `<!-- Assumed: user authentication uses JWT based on stack context -->`)
+7. If the PRD is too incomplete to generate a faithful roadmap, write a single phase: `- [ ] \`transformation-aborted\`` with a comment block explaining what was missing — and still write a stub `verification_draft.md` whose `Public surface` section quotes the same incompleteness, so the user sees a single coherent failure mode rather than two divergent ones
 
 **Write order (critical):**
 1. `~/.openclaw/ideas/{id}/roadmap_draft.md` — the complete roadmap
-2. `~/.openclaw/ideas/{id}/roadmap_draft.done` — sentinel (content: `done`)
+2. `~/.openclaw/ideas/{id}/verification_draft.md` — the project-level verification doc (see Verification Document Output spec in the skill)
+3. `~/.openclaw/ideas/{id}/verification_draft.done` — sentinel for the verification doc (content: `done`)
+4. `~/.openclaw/ideas/{id}/roadmap_draft.done` — sentinel for the roadmap, written LAST (content: `done`)
+
+Writing the roadmap sentinel last guarantees downstream consumers polling on either sentinel find both artifacts ready by the time they observe a sentinel.
 
 ---
 

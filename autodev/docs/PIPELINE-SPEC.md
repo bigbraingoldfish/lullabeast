@@ -1215,10 +1215,41 @@ Complete JSON schemas for all pipeline data files. Schemas in §3–§6 define a
   "phase_number": { "type": "integer" },
   "detail": { "type": "string", "description": "Phase description from roadmap" },
   "category": { "type": "string" },
+  "raw_id": { "type": "string", "description": "Phase identifier (e.g. 'CORE-E1')" },
+  "status": { "type": "string", "enum": ["PENDING", "BLOCKED"] },
   "exit_criteria": {
     "type": "array",
-    "items": { "type": "string" }
-  }
+    "items": { "type": "string" },
+    "description": "Body text of every `> ...` line under the phase header (preserved for back-compat with reviewer-gate consumers)."
+  },
+  "behavioral_verification": {
+    "type": ["object", "null"],
+    "description": "Stage D — the per-phase Behavioral Verification block. Null when absent (transitional case for in-flight pre-P0 runs; preflight refuses to stage projects whose roadmaps are missing the block).",
+    "properties": {
+      "user_observable": { "type": "string", "description": "One sentence in plain English describing what a human can do/see after this phase." },
+      "how_to_check": { "type": "string", "description": "Concrete procedure the reviewer follows to exercise the artifact (route, command, file, etc.)." },
+      "failure_language": { "type": "string", "description": "One sentence the executor's retry feedback and escalation advisory surface when verification cannot be completed." }
+    }
+  },
+  "entry_criteria": { "type": "string", "description": "Stage D — body of the `**Entry Criteria:**` markdown block, verbatim." },
+  "exit_criteria_block": { "type": "string", "description": "Stage D — body of the `**Exit Criteria:**` markdown block. Distinct from the legacy `exit_criteria` list above." },
+  "tdd_requirements": {
+    "type": "array",
+    "items": {
+      "type": "object",
+      "properties": {
+        "file": { "type": "string", "description": "Path to the test file." },
+        "description": { "type": "string", "description": "What this test validates." }
+      }
+    },
+    "description": "Stage D — parsed `- \\`{test_file}\\`: {description}` bullets under `**TDD Requirements:**`."
+  },
+  "done_criteria": {
+    "type": "array",
+    "items": { "type": "string" },
+    "description": "Stage D — `- [ ] ...` checkbox bodies under `**Done Criteria:**`."
+  },
+  "verification_path": { "type": "string", "description": "Stage D — absolute path to the project-level verification.md (typically `<project_root>/verification.md`). Agents read this doc to understand the project type, entry point, public surface, and verification stack." }
 }
 ```
 

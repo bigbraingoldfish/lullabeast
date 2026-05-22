@@ -359,7 +359,19 @@ class TestPostQueueAdd:
         proj = tmp_path / "nogit"
         proj.mkdir()
         (proj / "roadmap.md").write_text(
-            "- [ ] `T-E1` | LOW | Task\n  > Test line.\n"
+            "- [ ] `T-E1` | LOW | Task\n"
+            "  > Test line.\n"
+            "  **Behavioral Verification:**\n"
+            "  - **User-observable:** It works.\n"
+            "  - **How we'll check:** Run it.\n"
+            "  - **If this fails, the user sees:** Nothing.\n"
+        )
+        (proj / "verification.md").write_text(
+            "# Verification\n\n"
+            "## Project type\ncli\n\n"
+            "## Entry point\n- Command: `x`\n- Ready signal: ok\n\n"
+            "## Public surface\n1. do thing\n\n"
+            "## Verification stack\n- Acceptance tool: subprocess + assertions\n"
         )
         openclaw = _openclaw_like_for_queue(tmp_path, proj)
         monkeypatch.setattr(
@@ -1231,6 +1243,18 @@ class TestGetStateQueueSummary:
 VALID_LAUNCH_ROADMAP_SEED = (
     "- [ ] `TEST-E1` | LOW | Do the thing\n"
     "  > Test: It works.\n"
+    "  **Behavioral Verification:**\n"
+    "  - **User-observable:** It works.\n"
+    "  - **How we'll check:** Run it.\n"
+    "  - **If this fails, the user sees:** Nothing.\n"
+)
+
+VALID_LAUNCH_VERIFICATION = (
+    "# Verification\n\n"
+    "## Project type\ncli\n\n"
+    "## Entry point\n- Command: `x`\n- Ready signal: ok\n\n"
+    "## Public surface\n1. do thing\n\n"
+    "## Verification stack\n- Acceptance tool: subprocess + assertions\n"
 )
 
 
@@ -1280,7 +1304,7 @@ class TestSetupLaunchQueueSync:
              patch("ui.server._spawn_orchestrator", return_value={"ok": True, "error": None}):
             resp = c.post(
                 "/api/setup/launch",
-                json={"repo_path": str(repo_path), "roadmap_seed": VALID_LAUNCH_ROADMAP_SEED},
+                json={"repo_path": str(repo_path), "roadmap_seed": VALID_LAUNCH_ROADMAP_SEED, "verification_content": VALID_LAUNCH_VERIFICATION},
             )
 
         assert resp.status_code == 200

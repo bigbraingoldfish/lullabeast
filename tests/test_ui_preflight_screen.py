@@ -285,3 +285,43 @@ class TestAppPreflightQueueActiveGating:
         assert "setPreflightQueueActive((d.queue || []).some(e => e.state === 'ACTIVE'))" not in app_html
         assert "setPreflightQueueActive(!!qActive)" not in app_html
         assert "queueEntriesHaveBusyLivePipeline(qr.queue)" in app_html
+
+
+class TestAppPreflightVerificationContent:
+    """Stage C — App component plumbs verification_content to /api/setup/preflight."""
+
+    def test_launch_verification_content_state_exists(self):
+        """App has a launchVerificationContent state variable alongside launchPrdContent."""
+        html = load_html()
+        app_html = extract_function(html, "App")
+        assert app_html is not None, "App function not found"
+        assert "launchVerificationContent" in app_html, (
+            "Expected launchVerificationContent state variable in App component"
+        )
+        assert "setLaunchVerificationContent" in app_html, (
+            "Expected setLaunchVerificationContent setter in App component"
+        )
+
+    def test_onRunPreflight_includes_verification_content_in_body(self):
+        """onRunPreflight constructs body with verification_content when non-empty."""
+        html = load_html()
+        app_html = extract_function(html, "App")
+        assert app_html is not None
+        # The body construction should reference verification_content as a key
+        # somewhere in the onRunPreflight handler.
+        assert "verification_content" in app_html, (
+            "onRunPreflight body must include verification_content field"
+        )
+
+    def test_navigateToPreflightWithSeed_accepts_verification_arg(self):
+        """navigateToPreflightWithSeed signature must accept a verification argument."""
+        html = load_html()
+        app_html = extract_function(html, "App")
+        assert app_html is not None
+        # Either three-arg form `(content, prdText, verificationText)` or a more
+        # explicit named-arg flavor. Either way, the function body must call
+        # setLaunchVerificationContent.
+        assert "navigateToPreflightWithSeed" in app_html
+        assert "setLaunchVerificationContent" in app_html, (
+            "navigateToPreflightWithSeed must wire setLaunchVerificationContent"
+        )

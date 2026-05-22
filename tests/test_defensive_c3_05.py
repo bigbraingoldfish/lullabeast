@@ -24,6 +24,18 @@ def _make_subprocess_pass():
 VALID_ROADMAP = (
     "- [ ] `TEST-E1` | LOW | Do the thing\n"
     "  > Test: It works.\n"
+    "  **Behavioral Verification:**\n"
+    "  - **User-observable:** The thing works.\n"
+    "  - **How we'll check:** Run it.\n"
+    "  - **If this fails, the user sees:** Nothing.\n"
+)
+
+VALID_VERIFICATION = (
+    "# Verification\n\n"
+    "## Project type\ncli\n\n"
+    "## Entry point\n- Command: `x`\n- Ready signal: ok\n\n"
+    "## Public surface\n1. do thing\n\n"
+    "## Verification stack\n- Acceptance tool: subprocess + assertions\n"
 )
 
 
@@ -56,7 +68,7 @@ class TestC305LaunchStateNotWrittenOnSpawnFail:
                    return_value={"ok": False, "error": "mock spawn failure"}):
             response = client.post(
                 "/api/setup/launch",
-                json={"repo_path": str(tmp_path / "proj"), "roadmap_seed": VALID_ROADMAP},
+                json={"repo_path": str(tmp_path / "proj"), "roadmap_seed": VALID_ROADMAP, "verification_content": VALID_VERIFICATION},
             )
 
         data = response.json()
@@ -92,7 +104,7 @@ class TestC305LaunchStateNotWrittenOnSpawnFail:
                    return_value={"ok": True, "error": None}):
             response = client.post(
                 "/api/setup/launch",
-                json={"repo_path": str(tmp_path / "proj"), "roadmap_seed": VALID_ROADMAP},
+                json={"repo_path": str(tmp_path / "proj"), "roadmap_seed": VALID_ROADMAP, "verification_content": VALID_VERIFICATION},
             )
 
         data = response.json()

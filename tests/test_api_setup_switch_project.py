@@ -13,6 +13,23 @@ from ui.server import app
 VALID_ROADMAP_SEED = (
     "- [ ] `TEST-E1` | LOW | Do the thing\n"
     "  > Test: It works.\n"
+    "  **Behavioral Verification:**\n"
+    "  - **User-observable:** The user sees the thing happen.\n"
+    "  - **How we'll check:** Run the thing; confirm output.\n"
+    "  - **If this fails, the user sees:** Nothing happens.\n"
+)
+
+VALID_VERIFICATION_CONTENT = (
+    "# Verification\n\n"
+    "## Project type\n"
+    "cli\n\n"
+    "## Entry point\n"
+    "- Command: `mycli --help`\n"
+    "- Ready signal: process exits 0\n\n"
+    "## Public surface\n"
+    "1. Do the thing\n\n"
+    "## Verification stack\n"
+    "- Acceptance tool: subprocess + assertions\n"
 )
 
 WORKSPACE_AGENTS = ["planner", "executor", "reviewer", "escalation"]
@@ -126,6 +143,7 @@ class TestSwitchProject:
         repo_path = tmp_path / "proj"
         repo_path.mkdir()
         (repo_path / "roadmap.md").write_text(VALID_ROADMAP_SEED, encoding="utf-8")
+        (repo_path / "verification.md").write_text(VALID_VERIFICATION_CONTENT, encoding="utf-8")
         (repo_path / ".git").mkdir()
         (repo_path / ".gitignore").write_text("*.pyc\n", encoding="utf-8")
         openclaw = _make_openclaw_dir(tmp_path, repo_path)
@@ -177,6 +195,7 @@ class TestSwitchProject:
         repo_path = tmp_path / "proj"
         repo_path.mkdir()
         (repo_path / "roadmap.md").write_text(VALID_ROADMAP_SEED, encoding="utf-8")
+        (repo_path / "verification.md").write_text(VALID_VERIFICATION_CONTENT, encoding="utf-8")
         (repo_path / ".git").mkdir()
         (repo_path / ".gitignore").write_text("*.pyc\n", encoding="utf-8")
         openclaw = _make_openclaw_dir(tmp_path, repo_path)
@@ -197,3 +216,31 @@ class TestSwitchProject:
         assert data.get("ok") is True
         assert data.get("ready_to_start") is True
         assert data.get("coherence", {}).get("ok") is True
+
+    def test_switch_writes_verification_md_from_body(self, tmp_path, client):
+        """Stage C — /api/setup/switch-project accepts verification_content and writes it."""
+        repo_path = tmp_path / "proj"
+        repo_path.mkdir()
+        (repo_path / ".git").mkdir()
+        (repo_path / ".gitignore").write_text("*.pyc\n", encoding="utf-8")
+        openclaw = _make_openclaw_dir(tmp_path, repo_path)
+        state = tmp_path / "pipeline_state.json"
+        _stopped_state(state)
+        cfg = {"pipeline_state_path": str(state)}
+
+        with patch("ui.server.os.path.expanduser", side_effect=lambda p: str(openclaw) if "openclaw" in p else p), \
+             patch("ui.server.load_config", return_value=cfg), \
+             patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
+            r = client.post(
+                "/api/setup/switch-project",
+                json={
+                    "repo_path": str(repo_path),
+                    "roadmap_seed": VALID_ROADMAP_SEED,
+                    "verification_content": VALID_VERIFICATION_CONTENT,
+                    "start_orchestrator": False,
+                },
+            )
+
+        assert r.status_code == 200, f"Got {r.status_code}: {r.text}"
+        assert (repo_path / "verification.md").read_text().strip() \
+            == VALID_VERIFICATION_CONTENT.strip()

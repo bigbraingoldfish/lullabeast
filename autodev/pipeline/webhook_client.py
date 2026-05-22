@@ -80,21 +80,32 @@ def invoke_agent_webhook(
     # files written by the agent to its workspace directory.
     url = "http://localhost:18789/hooks/agent"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    # Default messages per agent role — agents read workspace files for full context
+    # Default messages per agent role — agents read workspace files for full context.
+    # Stage D (P0 §2.3): planner / executor / reviewer also read pipeline-project/prd.md
+    # and pipeline-project/verification.md. The PRD is the source of truth for user
+    # intent; verification.md tells the reviewer how the artifact will be exercised.
+    # Escalation is intentionally unchanged — its inputs are phase_state.json + the
+    # output files; PRD/verification are not on its read path.
     _p = _PIPELINE_ARTIFACTS
     default_messages = {
         "planner": (
-            f"Begin planning. Read {_p}/current_phase.json and {_p}/phase_state.json. "
-            f"Produce {_p}/planner_output.json then write {_p}/planner_output.done."
+            f"Begin planning. Read pipeline-project/prd.md and pipeline-project/verification.md "
+            f"first — the PRD is the source of truth for user intent; verification.md tells you "
+            f"how the artifact will be exercised. Then read {_p}/current_phase.json and "
+            f"{_p}/phase_state.json. Produce {_p}/planner_output.json then write "
+            f"{_p}/planner_output.done."
         ),
         "executor": (
-            f"Begin implementation. Read {_p}/planner_output.json for your task list. "
+            f"Begin implementation. Read pipeline-project/prd.md and pipeline-project/verification.md "
+            f"before implementing. Then read {_p}/planner_output.json for your task list. "
             f"Produce {_p}/executor_output.json then write {_p}/executor_output.done."
         ),
         "reviewer": (
-            f"Begin code review. Read {_p}/executor_output.json, {_p}/planner_output.json, "
-            f"and {_p}/current_phase.json. Produce {_p}/reviewer_output.json "
-            f"then write {_p}/reviewer_output.done."
+            f"Begin code review. Read pipeline-project/prd.md, then pipeline-project/verification.md, "
+            f"in that order before reviewing — the PRD is truth, the planner spec is derivative. "
+            f"Then read {_p}/executor_output.json, {_p}/planner_output.json, and "
+            f"{_p}/current_phase.json. Produce {_p}/reviewer_output.json then write "
+            f"{_p}/reviewer_output.done."
         ),
         "escalation": (
             f"Pipeline needs human intervention. Read {_p}/phase_state.json and relevant output "
