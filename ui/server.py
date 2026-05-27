@@ -3358,38 +3358,54 @@ def _ideas_scrub_stale_turn_artifacts(idea_dir: Path, turn_n: int, attempt_start
             pass
 
 
-def _merge_roadmap_draft_into_session_data(idea_dir: Path, session_data: dict) -> bool:
-    """If ``roadmap_draft.md`` + ``roadmap_draft.done`` exist and disk text differs from session, sync."""
-    roadmap_draft_path = idea_dir / "roadmap_draft.md"
-    roadmap_done_path = idea_dir / "roadmap_draft.done"
-    if not (roadmap_draft_path.exists() and roadmap_done_path.exists()):
+def _merge_draft_into_session_data(
+    idea_dir: Path,
+    session_data: dict,
+    basename: str,
+    session_key: str,
+) -> bool:
+    """Salvage helper core. Both typed wrappers below delegate here.
+
+    If ``<basename>.md`` + ``<basename>.done`` both exist in ``idea_dir`` and
+    the disk text differs (stripped) from ``session_data[session_key]``,
+    mutate ``session_data`` in place and return True. Caller is responsible
+    for atomic persistence on True.
+    """
+    draft_path = idea_dir / f"{basename}.md"
+    done_path = idea_dir / f"{basename}.done"
+    if not (draft_path.exists() and done_path.exists()):
         return False
-    disk_roadmap = roadmap_draft_path.read_text()
-    session_roadmap = session_data.get("roadmap_content") or ""
-    if disk_roadmap.strip() and disk_roadmap.strip() != session_roadmap.strip():
-        session_data["roadmap_content"] = disk_roadmap
+    disk_text = draft_path.read_text()
+    session_text = session_data.get(session_key) or ""
+    if disk_text.strip() and disk_text.strip() != session_text.strip():
+        session_data[session_key] = disk_text
         return True
     return False
+
+
+def _merge_roadmap_draft_into_session_data(idea_dir: Path, session_data: dict) -> bool:
+    """If ``roadmap_draft.md`` + ``roadmap_draft.done`` exist and disk text differs from session, sync.
+
+    Thin wrapper over :func:`_merge_draft_into_session_data` — the shared
+    salvage core. Returns True iff ``session_data`` was mutated.
+    """
+    return _merge_draft_into_session_data(
+        idea_dir, session_data, "roadmap_draft", "roadmap_content"
+    )
 
 
 def _merge_verification_draft_into_session_data(idea_dir: Path, session_data: dict) -> bool:
     """If ``verification_draft.md`` + ``verification_draft.done`` exist and disk text differs from session, sync.
 
-    Mirrors ``_merge_roadmap_draft_into_session_data``. Used by the salvage
-    path on ``GET /api/ideas/{id}/session`` when the converter wrote its
-    artefacts to disk after the ``/convert`` call had already returned (e.g.
-    API timeout, but agent finished).
+    Thin wrapper over :func:`_merge_draft_into_session_data`. Used by the
+    salvage path on ``GET /api/ideas/{id}/session`` when the converter wrote
+    its artefacts to disk after the ``/convert`` call had already returned
+    (e.g. API timeout, but agent finished). Returns True iff ``session_data``
+    was mutated.
     """
-    verification_draft_path = idea_dir / "verification_draft.md"
-    verification_done_path = idea_dir / "verification_draft.done"
-    if not (verification_draft_path.exists() and verification_done_path.exists()):
-        return False
-    disk_verification = verification_draft_path.read_text()
-    session_verification = session_data.get("verification_content") or ""
-    if disk_verification.strip() and disk_verification.strip() != session_verification.strip():
-        session_data["verification_content"] = disk_verification
-        return True
-    return False
+    return _merge_draft_into_session_data(
+        idea_dir, session_data, "verification_draft", "verification_content"
+    )
 
 
 def _ideas_persist_data_image_to_inbound(openclaw_root: str, data_uri: str, _orig_filename: str) -> str:
@@ -4158,21 +4174,12 @@ def get_ideas_session(idea_id: str):
     if late_changed:
         _atomic_write_json_file(session_path, session_data)
 
-    # Roadmap draft merge: if roadmap_draft.md + roadmap_draft.done exist and
-    # the session's roadmap_content is empty or stale (the conversion agent
-    # may write roadmap_draft.md after the session was last persisted), sync it.
-    roadmap_draft_path = idea_dir / "roadmap_draft.md"
-    roadmap_done_path = idea_dir / "roadmap_draft.done"
-    if roadmap_draft_path.exists() and roadmap_done_path.exists():
-        disk_roadmap = roadmap_draft_path.read_text()
-        session_roadmap = session_data.get("roadmap_content") or ""
-        if disk_roadmap.strip() and disk_roadmap.strip() != session_roadmap.strip():
-            session_data["roadmap_content"] = disk_roadmap
-            _atomic_write_json_file(session_path, session_data)
-
-    # Verification draft merge: same pattern as the roadmap salvage above —
-    # if /convert timed out at the API layer but the agent eventually wrote
-    # verification_draft.md + its sentinel, surface it on the next session GET.
+    # Post-timeout salvage: if /convert returned before the converter finished
+    # writing one or both drafts to disk, surface them on the next session GET.
+    # Each helper is sentinel-gated (writes only when ``*.done`` is present
+    # alongside ``*.md``) and idempotent (no rewrite when stripped text matches).
+    if _merge_roadmap_draft_into_session_data(idea_dir, session_data):
+        _atomic_write_json_file(session_path, session_data)
     if _merge_verification_draft_into_session_data(idea_dir, session_data):
         _atomic_write_json_file(session_path, session_data)
 
@@ -4519,6 +4526,12 @@ async def post_ideas_message(idea_id: str, request: Request):
             if first_user.strip():
                 session_data["name"] = first_user.strip()[:40].title()
 
+    # post_ideas_message has prior unconditional mutations (assistant response,
+    # possible name extraction above) so session.json must be written below
+    # regardless of whether the roadmap merge fires. Bool return intentionally
+    # ignored. See plans/upcomming/FUTURE-ENHANCEMENTS.md →
+    # "Audit _merge_*_into_session_data bool-return contract" for the L3
+    # API-design question deferred from P0 Stage I.
     _merge_roadmap_draft_into_session_data(idea_dir, session_data)
 
     _atomic_write_json_file(str(session_path), session_data)
