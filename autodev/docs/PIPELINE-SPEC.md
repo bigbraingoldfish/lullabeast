@@ -126,7 +126,9 @@ The orchestrator polls for output files via a simple `time.sleep()` polling loop
   "current_phase_raw_id": "<string — full phase ID e.g. 'CORE-2'; avoids int-suffix collisions>",
   "current_agent": "<planner|executor|reviewer|escalation>",
   "planner_retries": "<int>",
-  "executor_retries": "<int>",
+  "executor_retries": "<int — per-segment budget; resets on reviewer ROUTE_EXECUTOR rejection>",
+  "executor_self_failure_retries": "<int — P0 Stage H lifetime accumulator; never reset on rejection/escalation>",
+  "executor_reviewer_rejection_retries": "<int — P0 Stage H lifetime accumulator; mirror of self_failure_retries>",
   "reviewer_retries": "<int>",
   "last_action": "<string — description of last webhook/gate action>",
   "last_action_timestamp": "<ISO 8601>",
@@ -523,6 +525,13 @@ Pipeline completion is also notified via Signal (not just escalation).
 
 **Separation of counters:** `executor_retries` tracks automatic retry-path resets (incremented by `reset_execution("auto")`). `escalation_resets` tracks human-triggered resets via `RESET_PHASE`/`RESET_EXECUTION` (incremented by `reset_execution("escalation")` and the `RESET_PHASE` handler). Never both in one operation.
 
+**P0 Stage H — three retry-counter dimensions:** alongside the legacy per-segment `executor_retries`, the orchestrator persists two lifetime counters that accumulate across the whole phase:
+
+- `executor_self_failure_retries` — incremented by `reset_execution("auto")` whenever the executor's own gate or sentinel poll fails. Never reset on reviewer rejection or operator escalation reset.
+- `executor_reviewer_rejection_retries` — incremented inline at the orchestrator's `ROUTE_EXECUTOR` handler (where `set_reviewer_rejected()` already fires). Tracks reviewer-driven re-runs separately from executor self-failures.
+
+Both lifetime counters reset only inside `reset_phase()` (true new phase). The canonical metrics row sources `executor_attempts` from these two so the invariant `executor_attempts == executor_self_failures + executor_reviewer_rejections + 1` holds across reviewer-driven mid-phase resets of the per-segment counter. The legacy `executor_retries` field stays in place for escalation/cap logic that needs the per-segment budget. The orchestrator's process-local `_current_attempt_retry_class` (values `"initial_attempt"` / `"executor_self_failure"` / `"reviewer_rejection"`) is set by `reset_phase()`, `reset_execution("auto")`, and the `ROUTE_EXECUTOR` handler, and stamped onto every `gate_fail` and `attempt_end` pipeline event's `detail.retry_class` so the UI can distinguish retry sources in the activity feed.
+
 Resume commands trigger `orchestrator.py` operations.
 **Sentinel Pattern Bridge:** The human's response from Signal is passed back to the orchestrator via the `escalation_output.json` file. The Escalation Agent has a strict tool policy carve-out in `openclaw.json` allowing it to write exactly this file and its sentinel (`escalation_output.done`). While awaiting a reply (`WAITING_FOR_HUMAN`), the orchestrator actively polls for this sentinel, parses the command, and triggers the corresponding state transition.
 **`PROCEED` implementation detail:** On receiving `PROCEED`, the orchestrator skips the merge step (assumes git state is already correct), then: `git tag --force phase-N-complete`, updates roadmap to `[x]`, and loops back to the roadmap gate. It does NOT append to `suggestions.md`, does NOT clear working files, and does NOT run any other post-merge sequence. If the tag or roadmap update fails, escalate again — do not silently advance.
@@ -873,10 +882,13 @@ Read `phase_state.json` for `executor_retries` and `reviewer_retries`; default t
 Append one JSON line to `pipeline-project/.autodev/pipeline/metrics.jsonl`:
 
 ```json
-{"ts": "<ISO 8601 UTC>", "phase": "<phase_raw_id>", "goal": "<detail from current_phase.json>", "executor_attempts": <int>, "reviewer_passes": <int>, "blame_fires": 0, "escalations": 0, "duration_seconds": null, "skill_used": "<discipline name or null>"}
+{"ts": "<ISO 8601 UTC>", "phase": "<phase_raw_id>", "goal": "<detail from current_phase.json>", "executor_attempts": <int>, "executor_self_failures": <int>, "executor_reviewer_rejections": <int>, "reviewer_passes": <int>, "blame_fires": 0, "escalations": 0, "duration_seconds": null, "skill_used": "<discipline name or null>"}
 ```
 
-- `executor_attempts` = `executor_retries + 1` (from `phase_state.json`, default 0 if absent)
+- `executor_attempts` = `executor_self_failure_retries + executor_reviewer_rejection_retries + 1` (P0 Stage H — lifetime, sourced from `phase_state.json`; reflects total attempts across reviewer-driven mid-phase resets)
+- `executor_self_failures` = `executor_self_failure_retries` (P0 Stage H additive breakdown; default 0 for pre-Stage-H rows)
+- `executor_reviewer_rejections` = `executor_reviewer_rejection_retries` (P0 Stage H additive breakdown; default 0 for pre-Stage-H rows)
+- Invariant: `executor_attempts == executor_self_failures + executor_reviewer_rejections + 1` (the +1 is the initial attempt)
 - `reviewer_passes` = `reviewer_retries + 1`
 - `blame_fires` / `escalations`: 0 unless definitive evidence otherwise
 - `duration_seconds`: `null` unless computable from timestamps

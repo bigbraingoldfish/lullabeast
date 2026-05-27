@@ -207,6 +207,28 @@ mirothinker-30b retired; Ollama tools API limitation no longer relevant.
 - `escalation_resets` is NOT zeroed inside `reset_phase()` — only zeroed when the roadmap genuinely advances to a new phase (which deletes `phase_state.json`). Zeroing it inside `reset_phase()` would allow circumventing the cap by repeated resets.
 - `executor_retries` (incremented by the automatic retry path via `reset_execution("auto")`) and `escalation_resets` (incremented by human-triggered commands) are separate counters. Neither increments the other.
 
+### Executor Retry Counter Split (P0 Stage H, 2026-05-27)
+
+The legacy `executor_retries` counter resets to 0 on every reviewer `ROUTE_EXECUTOR` rejection (it is the per-segment escalation/cap budget). That makes it useless as a lifetime "how many executor attempts ran in this phase" figure — a phase with 4 attempts driven by 1 self-failure + 2 reviewer rejections + initial would show `executor_retries == 0` at metrics-write time.
+
+Stage H persists two additional lifetime counters alongside `executor_retries`:
+
+| Counter | Tracks | Reset on reviewer ROUTE_EXECUTOR | Reset on operator escalation | Reset on `reset_phase()` |
+|---|---|---|---|---|
+| `executor_retries` (legacy, unchanged) | Per-segment budget for escalation/cap logic | ✓ (segment boundary) | ✓ (operator gives fresh budget) | ✓ |
+| `executor_self_failure_retries` (NEW) | Lifetime count of executor self-failures (gate exit 1, sentinel crash, blame=impl) | ✗ preserved | ✗ preserved | ✓ |
+| `executor_reviewer_rejection_retries` (NEW) | Lifetime count of reviewer-driven re-runs | ✗ preserved | ✗ preserved | ✓ |
+
+Increment sites:
+- `executor_self_failure_retries` → inside `reset_execution("auto")` (alongside the legacy increment)
+- `executor_reviewer_rejection_retries` → inline at the `ROUTE_EXECUTOR` handler in the orchestrator main loop (the rejection path bypasses `reset_execution()` entirely; co-locating the increment with the rejection event keeps the counter accurate)
+
+The canonical `metrics.jsonl` row sources `executor_attempts` from these lifetime counters so the invariant `executor_attempts == executor_self_failures + executor_reviewer_rejections + 1` holds. New top-level fields `executor_self_failures` and `executor_reviewer_rejections` give the dashboard the breakdown directly.
+
+Also Stage H: `gate_fail` and `attempt_end` pipeline events now carry `detail.retry_class` (`"initial_attempt"` / `"executor_self_failure"` / `"reviewer_rejection"`) sourced from the orchestrator's process-local `_current_attempt_retry_class` tracker. The activity feed labels retries by class so operators can distinguish "executor stuck → auto-retry" from "reviewer rejection → executor retry" at a glance.
+
+Same release: `apply_reviewer_routing` pass-2 routing tightened from `blocking_issues[0].attribution` (ordering-sensitive) to "any-plan" semantics (if any blocking_issue is tagged `attribution: "plan"`, route to planner). Uses more of the reviewer agent's existing JSON output; does NOT touch the orchestrator's separate `run_blame_attribution()` AI-driven attribution system.
+
 ### Reviewer Counter Split (RR-4, 2026-03-12)
 
 The single `reviewer_retries` counter was split into three distinct counters to prevent conflation of genuine LLM rejections with infrastructure failures:

@@ -192,3 +192,56 @@ def test_phase_state_read_at_metrics_write_site():
         "No phase_state read found within 120 lines of the metrics writer. "
         "Add a phase_state read to source blame_fires, escalations, and skill_used."
     )
+
+
+# ---------------------------------------------------------------------------
+# P0 Stage H: executor_self_failures + executor_reviewer_rejections fields
+# ---------------------------------------------------------------------------
+
+def test_metrics_row_includes_executor_self_failures_field():
+    """Stage H adds executor_self_failures to the canonical metrics row
+    schema. Source-text guard: the literal must appear in orchestrator.py
+    so we catch a regression where the field is silently dropped."""
+    assert '"executor_self_failures"' in _SRC, (
+        '"executor_self_failures" key not found in orchestrator metrics '
+        "row. Stage H requires this field so the dashboard can render the "
+        "retry-source breakdown."
+    )
+
+
+def test_metrics_row_includes_executor_reviewer_rejections_field():
+    """Symmetric guard for the rejection counter field."""
+    assert '"executor_reviewer_rejections"' in _SRC, (
+        '"executor_reviewer_rejections" key not found in orchestrator '
+        "metrics row. Stage H requires this field."
+    )
+
+
+def test_executor_attempts_no_longer_sourced_from_executor_retries():
+    """Stage H redefines the source of executor_attempts. The legacy
+    expression ``self.state.get("executor_retries", 0) + 1`` must no
+    longer feed the canonical metrics row — it under-reports total
+    attempts when reviewer rejections reset executor_retries to 0
+    mid-phase. The new source is the lifetime counters."""
+    # Find the _write_canonical_metrics_row method block.
+    method_idx = _SRC.find("def _write_canonical_metrics_row")
+    assert method_idx != -1, (
+        "Could not locate _write_canonical_metrics_row method"
+    )
+    next_def = _SRC.find("\n    def ", method_idx + 1)
+    method_body = _SRC[method_idx : next_def if next_def != -1 else method_idx + 8000]
+    # The method body must NOT compute executor_attempts from the
+    # per-segment executor_retries — that's the bug Stage H fixes.
+    bad_pat_1 = 'self.state.get("executor_retries", 0) + 1'
+    bad_pat_2 = "self.state.get('executor_retries', 0) + 1"
+    assert bad_pat_1 not in method_body and bad_pat_2 not in method_body, (
+        "_write_canonical_metrics_row must NOT compute executor_attempts "
+        "from self.state['executor_retries'] + 1. That source under-reports "
+        "total attempts when a reviewer rejection has reset the per-segment "
+        "counter to 0. Stage H requires sourcing from the lifetime counters:\n"
+        "    executor_attempts = (\n"
+        '        ps_m.get("executor_self_failure_retries", 0)\n'
+        '        + ps_m.get("executor_reviewer_rejection_retries", 0)\n'
+        "        + 1\n"
+        "    )"
+    )

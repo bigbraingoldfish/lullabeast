@@ -883,17 +883,40 @@ def _write_run_summary(outcome: str, outcome_detail: str) -> None:
 class Orchestrator:
     def __init__(self):
         self.lock_fd = None
+        # P0 Stage H — three retry-counter fields are persisted side-by-side:
+        #   * executor_retries (legacy) — per-segment budget; resets to 0 on
+        #     reviewer ROUTE_EXECUTOR rejection. Drives escalation/cap logic.
+        #   * executor_self_failure_retries (NEW, lifetime) — accumulates every
+        #     reset_execution('auto') across the whole phase. Never reset on
+        #     reviewer rejection or operator escalation.
+        #   * executor_reviewer_rejection_retries (NEW, lifetime) — accumulates
+        #     every reviewer ROUTE_EXECUTOR dispatch across the phase. Same
+        #     reset semantics as the self-failure lifetime counter.
+        # Both lifetime counters reset to 0 only inside reset_phase(). They feed
+        # the canonical metrics row's executor_attempts so the invariant
+        # ``executor_attempts == self_failures + rejections + 1`` holds even
+        # after reviewer rejections have reset the per-segment counter.
         self.state = {
             "current_phase": 0,
             "current_phase_raw_id": "",  # full phase-id string e.g. "CORE-2"; avoids int-suffix collisions
             "current_agent": "planner",
             "planner_retries": 0,
             "executor_retries": 0,
+            "executor_self_failure_retries": 0,
+            "executor_reviewer_rejection_retries": 0,
             "reviewer_retries": 0,
             "last_action": "initialized",
             "last_action_timestamp": datetime.now(timezone.utc).isoformat(),
             "pipeline_status": "RUNNING"
         }
+        # P0 Stage H — orchestrator-private tracker for the current attempt's
+        # retry classification. Used by gate_fail and attempt_end emits to
+        # label events with retry_class. Values: "initial_attempt" |
+        # "executor_self_failure" | "reviewer_rejection". reset_phase() resets
+        # this to "initial_attempt"; reset_execution('auto') sets it to
+        # "executor_self_failure"; the ROUTE_EXECUTOR handler sets it to
+        # "reviewer_rejection".
+        self._current_attempt_retry_class = "initial_attempt"
         _validate_openclaw_root(OPENCLAW_ROOT)
         self.openclaw_config = self.load_config()
         self.skill_manager = SkillManager(OPENCLAW_ROOT)
@@ -1331,12 +1354,17 @@ class Orchestrator:
                 "current_agent": "planner",
                 "planner_retries": 0,
                 "executor_retries": 0,
+                "executor_self_failure_retries": 0,
+                "executor_reviewer_rejection_retries": 0,
                 "reviewer_retries": 0,
                 "last_action": f"queue auto-advance to {entry['name']}",
                 "last_action_timestamp": now,
                 "pipeline_status": "RUNNING",
                 "project_path": project_path,
             }
+            # P0 Stage H — queue auto-advance starts a fresh project; the
+            # retry-class tracker starts at "initial_attempt" same as __init__.
+            self._current_attempt_retry_class = "initial_attempt"
             self.write_state()
             self._apply_pending_escalation_command(project_path)
             return True
@@ -1777,7 +1805,7 @@ class Orchestrator:
             except Exception:
                 pass
         else:
-            phase_state = {"planner_retries": 0, "executor_retries": 0, "reviewer_retries": 0, "reviewer_rejected": False, "escalation_resets": 0}
+            phase_state = {"planner_retries": 0, "executor_retries": 0, "executor_self_failure_retries": 0, "executor_reviewer_rejection_retries": 0, "reviewer_retries": 0, "reviewer_rejected": False, "escalation_resets": 0}
 
         phase_state["planner_retries"] = phase_state.get("planner_retries", 0) + 1
         
@@ -2341,9 +2369,15 @@ class Orchestrator:
         # RR-4 (Phase 2): reviewer_infra_retries and reviewer_infra_recovery_attempts are
         # zeroed on phase reset — they are per-phase attempt budgets, not global caps.
         # RR-2 (Phase 4): planner_output_preserved cleared — new phase, no preserved output.
+        # P0 Stage H — reset_phase is the canonical boundary at which the
+        # lifetime counters re-zero. Reviewer rejection and operator
+        # escalation reset do NOT reset them (those preserve lifetime
+        # visibility into prior failures).
         new_phase_state = {
             "planner_retries": 0,
             "executor_retries": 0,
+            "executor_self_failure_retries": 0,
+            "executor_reviewer_rejection_retries": 0,
             "reviewer_retries": 0,
             "reviewer_rejected": False,
             "reviewer_infra_retries": 0,
@@ -2356,7 +2390,13 @@ class Orchestrator:
         self.state["current_agent"] = "planner"
         self.state["planner_retries"] = 0
         self.state["executor_retries"] = 0
+        self.state["executor_self_failure_retries"] = 0
+        self.state["executor_reviewer_rejection_retries"] = 0
         self.state["reviewer_retries"] = 0
+        # P0 Stage H — fresh phase starts fresh; subsequent attempts will
+        # update the tracker via reset_execution('auto') or the
+        # ROUTE_EXECUTOR handler.
+        self._current_attempt_retry_class = "initial_attempt"
         # Clear the pipeline_state flag so the main loop doesn't skip planner re-invocation
         # due to stale preserved output that was just deleted above.
         self.state["planner_output_preserved"] = False
@@ -2385,9 +2425,17 @@ class Orchestrator:
     def reset_execution(self, caller: str):
         """Partial execution-level reset. Preserves planner output. Clears executor + reviewer outputs.
 
-        caller='auto'       — from automatic executor retry path. Increments executor_retries.
+        caller='auto'       — from automatic executor retry path. Increments executor_retries
+                              AND the lifetime executor_self_failure_retries counter (P0 Stage H).
+                              Also sets self._current_attempt_retry_class = "executor_self_failure"
+                              so subsequent gate_fail / attempt_end events label the retry source.
         caller='escalation' — from RESET_EXECUTION resume command. Increments escalation_resets.
-        Never increments both counters.
+                              Resets executor_retries to 0 (fresh budget) but does NOT touch the
+                              lifetime self-failure / rejection counters (operator visibility into
+                              prior failures is preserved across escalation resets).
+        Never increments both legacy counters in one call. The lifetime counters are independent
+        of the legacy counter and tracked alongside it for the metrics-row invariant
+        ``executor_attempts == executor_self_failures + executor_reviewer_rejections + 1``.
 
         After this returns, the main loop (current_agent='executor', RUNNING) re-invokes the executor.
         """
@@ -2454,7 +2502,22 @@ class Orchestrator:
             phase_state["executor_retries"] = phase_state.get("executor_retries", 0) + 1
             new_count = phase_state["executor_retries"]
             self.state["executor_retries"] = new_count
-            print(f"[INFO] reset_execution(auto): executor_retries now {new_count}.")
+            # P0 Stage H — lifetime self-failure counter. Tracks every auto
+            # retry across the phase regardless of intervening reviewer
+            # rejections (which reset the per-segment executor_retries).
+            phase_state["executor_self_failure_retries"] = (
+                phase_state.get("executor_self_failure_retries", 0) + 1
+            )
+            self.state["executor_self_failure_retries"] = (
+                phase_state["executor_self_failure_retries"]
+            )
+            # Tracker for next attempt's event labelling.
+            self._current_attempt_retry_class = "executor_self_failure"
+            print(
+                f"[INFO] reset_execution(auto): executor_retries now {new_count} "
+                f"(lifetime self_failures="
+                f"{phase_state['executor_self_failure_retries']})."
+            )
         elif caller == "escalation":
             # Operator-driven reset: give the executor a fresh attempt budget.  Without
             # this, executor_retries stays at the prior cap (typically 3) so the next
@@ -2612,7 +2675,7 @@ class Orchestrator:
             except Exception:
                 pass
         else:
-            phase_state = {"planner_retries": 0, "executor_retries": 0, "reviewer_retries": 0, "reviewer_rejected": False, "escalation_resets": 0}
+            phase_state = {"planner_retries": 0, "executor_retries": 0, "executor_self_failure_retries": 0, "executor_reviewer_rejection_retries": 0, "reviewer_retries": 0, "reviewer_rejected": False, "escalation_resets": 0}
 
         phase_state["executor_retries"] = phase_state.get("executor_retries", 0) + 1
         
@@ -3210,7 +3273,6 @@ class Orchestrator:
             except Exception:
                 pass
 
-        executor_attempts = self.state.get("executor_retries", 0) + 1
         reviewer_passes = self.state.get("reviewer_retries", 0) + 1
 
         ps_m = {}
@@ -3221,6 +3283,19 @@ class Orchestrator:
             except Exception:
                 pass
 
+        # P0 Stage H — source executor_attempts from the lifetime counters,
+        # not the per-segment executor_retries. The legacy expression read
+        # from the per-segment counter, which under-reports total attempts
+        # when reviewer rejections have reset that counter to 0 mid-phase.
+        # The two new lifetime counters accumulate across rejections so the
+        # invariant
+        # ``executor_attempts == self_failures + rejections + 1`` holds.
+        executor_self_failures = ps_m.get("executor_self_failure_retries", 0)
+        executor_reviewer_rejections = ps_m.get(
+            "executor_reviewer_rejection_retries", 0
+        )
+        executor_attempts = executor_self_failures + executor_reviewer_rejections + 1
+
         planner_tok = ps_m.get("planner_tokens_acc", {}) or {}
         executor_tok = ps_m.get("executor_tokens_acc", {}) or {}
         reviewer_tok = ps_m.get("reviewer_tokens_acc", {}) or {}
@@ -3229,6 +3304,9 @@ class Orchestrator:
             "phase": raw_id,
             "goal": goal_text,
             "executor_attempts": executor_attempts,
+            # P0 Stage H — additive breakdown fields.
+            "executor_self_failures": executor_self_failures,
+            "executor_reviewer_rejections": executor_reviewer_rejections,
             "reviewer_passes": reviewer_passes,
             "blame_fires": ps_m.get("blame_fires", 0),    # W1-A
             "escalations": ps_m.get("escalations", 0),    # W1-B
@@ -3379,7 +3457,7 @@ class Orchestrator:
             except Exception:
                 pass
         else:
-            phase_state = {"planner_retries": 0, "executor_retries": 0, "reviewer_retries": 0, "reviewer_rejected": False, "escalation_resets": 0}
+            phase_state = {"planner_retries": 0, "executor_retries": 0, "executor_self_failure_retries": 0, "executor_reviewer_rejection_retries": 0, "reviewer_retries": 0, "reviewer_rejected": False, "escalation_resets": 0}
 
         phase_state["reviewer_retries"] = phase_state.get("reviewer_retries", 0) + 1
         
@@ -3796,6 +3874,9 @@ class Orchestrator:
                             "duration_s": _planner_attempt_duration,
                             "attempt": retries + 1,
                             "session_key": session_key,
+                            # P0 Stage H — see Orchestrator.__init__ comment
+                            # for the retry_class enum.
+                            "retry_class": self._current_attempt_retry_class,
                         },
                     )
                     self._record_phase_outcome(
@@ -4162,6 +4243,9 @@ class Orchestrator:
                             "duration_s": _executor_attempt_duration,
                             "attempt": retries + 1,
                             "session_key": session_key,
+                            # P0 Stage H — see Orchestrator.__init__ comment
+                            # for the retry_class enum.
+                            "retry_class": self._current_attempt_retry_class,
                         },
                     )
                     self._record_phase_outcome(
@@ -4257,6 +4341,12 @@ class Orchestrator:
                                 {
                                     "exit_code": 1,
                                     "last_error_code": self.read_phase_state().get("last_error_code"),
+                                    # P0 Stage H — label this gate-fail with
+                                    # what kicked off the failing attempt so
+                                    # the activity feed can distinguish
+                                    # self-failure retries from rejection
+                                    # retries from initial attempts.
+                                    "retry_class": self._current_attempt_retry_class,
                                 },
                             )  # W1-F
                             self.write_failure_context("executor", self.state.get("executor_retries", 0) + 1)
@@ -4408,6 +4498,12 @@ class Orchestrator:
                                 "duration_s": _reviewer_attempt_duration,
                                 "attempt": retries + 1,
                                 "session_key": session_key,
+                                # P0 Stage H — see Orchestrator.__init__
+                                # comment for the retry_class enum. Reviewer
+                                # attempts share the tracker; the value reflects
+                                # what kicked off the executor attempt that
+                                # produced the output now being reviewed.
+                                "retry_class": self._current_attempt_retry_class,
                             },
                         )
                         self._record_phase_outcome(
@@ -4534,6 +4630,19 @@ class Orchestrator:
                     )
 
                     if gate_result != "PASS":
+                        # P0 Stage H — only ROUTE_EXECUTOR creates an executor
+                        # retry; other non-PASS verdicts (ROUTE_PLANNER,
+                        # ROUTE_ESCALATE, MISSING_ARTIFACTS, INFRA_FAILURE,
+                        # VISUAL_UNVERIFIED, BEHAVIORAL_UNVERIFIED) don't.
+                        # retry_class is always present on the event for
+                        # schema stability — None when not applicable so the
+                        # UI's typeof-string check works without branching on
+                        # absence.
+                        _reviewer_retry_class = (
+                            "reviewer_rejection"
+                            if gate_result == "ROUTE_EXECUTOR"
+                            else None
+                        )
                         _write_pipeline_event(
                             "gate_fail",
                             raw_id,
@@ -4541,6 +4650,7 @@ class Orchestrator:
                             {
                                 "gate_result": gate_result,
                                 "last_error_code": self.read_phase_state().get("last_error_code"),
+                                "retry_class": _reviewer_retry_class,
                             },
                         )  # W1-F
                         if self._escalate_if_provider_rejected(_jsonl_path, "Reviewer"):
@@ -4903,7 +5013,25 @@ class Orchestrator:
                         # considered "succeeded" for crash-recovery purposes.
                         _ps_re = self.read_phase_state()
                         _ps_re.pop("executor_succeeded", None)
+                        # P0 Stage H — increment the lifetime
+                        # executor_reviewer_rejection_retries counter. Lives at
+                        # the handler site, not inside reset_execution(), because
+                        # the rejection path bypasses reset_execution entirely
+                        # (it manually resets executor_retries=0 below as the
+                        # per-segment budget, then re-invokes the executor).
+                        # Co-locating the increment with the rejection event
+                        # keeps the counter accurate even if reset_execution is
+                        # refactored later.
+                        _ps_re["executor_reviewer_rejection_retries"] = (
+                            _ps_re.get("executor_reviewer_rejection_retries", 0) + 1
+                        )
                         self.write_phase_state_atomic(_ps_re)
+                        # Mirror to self.state (state-sync invariant).
+                        self.state["executor_reviewer_rejection_retries"] = (
+                            _ps_re["executor_reviewer_rejection_retries"]
+                        )
+                        # Tracker for next attempt's event labelling.
+                        self._current_attempt_retry_class = "reviewer_rejection"
                         self.increment_reviewer_retries()
                         self.state["current_agent"] = "executor"
                         self.state["executor_retries"] = 0
