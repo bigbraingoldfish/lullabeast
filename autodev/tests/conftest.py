@@ -83,11 +83,71 @@ def valid_executor_output():
 
 @pytest.fixture
 def valid_reviewer_output():
+    """Baseline reviewer output. Includes the minimal ``behavioral_verification``
+    object required by the gate on phases whose ``current_phase.json`` carries
+    a populated Behavioral Verification block.
+
+    Tests that exercise non-behavioral phases (no block in current_phase.json)
+    will still pass through this fixture because the gate's behavioral check
+    is content-driven on the phase, not on the reviewer output.
+
+    Tests that *require* the evidence paths to exist on disk should mutate
+    ``behavioral_verification.evidence[*].file_or_screenshot_or_log`` and
+    create the files before invoking the gate.
+    """
     return {
         "blocking_issues": [],
         "suggestions": ["Consider adding docstrings"],
         "integration_tests_passing": True,
-        "phase_intent_validated": True,
+        "behavioral_verification": {
+            "verdict": "pass",
+            "evidence": [
+                {
+                    "claim": "Public surface item 1 exercised",
+                    "file_or_screenshot_or_log": "behavioral-smoke/anchor-1.txt",
+                    "method": "stdout_capture",
+                },
+                {
+                    "claim": "Public surface item 2 exercised",
+                    "file_or_screenshot_or_log": "behavioral-smoke/anchor-2.txt",
+                    "method": "stdout_capture",
+                },
+                {
+                    "claim": "Public surface item 3 exercised",
+                    "file_or_screenshot_or_log": "behavioral-smoke/anchor-3.txt",
+                    "method": "stdout_capture",
+                },
+            ],
+            "how_to_check_followed": True,
+        },
+    }
+
+
+@pytest.fixture
+def current_phase_with_behavioral():
+    """Build a ``current_phase.json`` payload populated with the P0 Behavioral
+    Verification block. Returns a dict the test writes into ``tmp_workspace``.
+
+    Mirrors the canonical shape produced by ``phase_resolver.py`` after Stage D.
+    Tests use this directly (write it as JSON into ``tmp_workspace``) when they
+    need to exercise the gate's behavioral-verification path."""
+    return {
+        "phase_number": 1,
+        "detail": "Phase CORE-E1: Implement task list",
+        "category": "CORE",
+        "exit_criteria": ["Task list renders without errors"],
+        "status": "PENDING",
+        "raw_id": "CORE-E1",
+        "behavioral_verification": {
+            "user_observable": "The user sees a list of tasks on /tasks.",
+            "how_to_check": "Navigate to /tasks; expect at least one row rendered.",
+            "failure_language": "The /tasks page does not load.",
+        },
+        "entry_criteria": "",
+        "exit_criteria_block": "",
+        "tdd_requirements": [],
+        "done_criteria": [],
+        "verification_path": "/tmp/verification.md",
     }
 
 

@@ -172,12 +172,36 @@ def test_switch_modal_no_select_element(pw_page):
 
 
 def test_queue_add_autorepairs_git(pw_page):
-    """Add empty git-less dir with roadmap.md; queue add should succeed (server git init)."""
+    """Add empty git-less dir with roadmap.md + verification.md; queue add
+    should succeed (server git init).
+
+    The fixture writes the minimal P0-compliant project shape (roadmap with
+    Behavioral Verification block, verification.md with all five required
+    headings). Both files are required by Stage C's strict preflight; the
+    test's actual concern is the *git auto-init* step that happens after
+    preflight passes. Shape mirrors ``tests/test_queue_api.py`` line ~361,
+    the canonical server-side fixture for this contract.
+    """
     base = tempfile.mkdtemp(prefix="autodev-e2e-git-")
     proj = os.path.join(base, "proj")
     os.makedirs(proj, exist_ok=True)
     with open(os.path.join(proj, "roadmap.md"), "w") as f:
-        f.write("- [ ] `T-E1` | LOW | Task\n  > Test.\n")
+        f.write(
+            "- [ ] `T-E1` | LOW | Task\n"
+            "  > Test.\n"
+            "  **Behavioral Verification:**\n"
+            "  - **User-observable:** It works.\n"
+            "  - **How we'll check:** Run it.\n"
+            "  - **If this fails, the user sees:** Nothing.\n"
+        )
+    with open(os.path.join(proj, "verification.md"), "w") as f:
+        f.write(
+            "# Verification\n\n"
+            "## Project type\ncli\n\n"
+            "## Entry point\n- Command: `x`\n- Ready signal: ok\n\n"
+            "## Public surface\n1. do thing\n\n"
+            "## Verification stack\n- Acceptance tool: subprocess + assertions\n"
+        )
 
     page = pw_page
     page.goto(URL + "/", wait_until="domcontentloaded")

@@ -1669,8 +1669,35 @@ class Orchestrator:
             "imperative sentence. Use only the recovery commands listed as available in the "
             "context — do not recommend commands that are not available for the current phase "
             "state.\n\n"
-            "Maximum 200 characters per field. Be direct. No hedging, no filler phrases."
+            "Maximum 200 characters per field. Be direct. No hedging, no filler phrases.\n\n"
+            "When the user-message payload includes a non-null `behavioral_verification` block "
+            "AND `reviewer_retries >= 2`, the failure is behavioural and the executor's self-heal "
+            "passes have already been attempted; quote the project's pre-authored "
+            "`failure_language` verbatim as part of the summary. Otherwise do not reference "
+            "`failure_language` in your output."
         )
+
+        # P0 Stage G: derive a compact behavioural block from failure_context so the
+        # LLM has the project's pre-authored failure_language available when (and
+        # only when) reviewer_retries >= 2. Below the threshold the executor's
+        # self-heal pass has not been attempted yet — surfacing failure_language
+        # prematurely would skip the targeted self-heal step. Block is None when
+        # below threshold OR when failure_context carries no behavioural data; the
+        # system prompt instructs the LLM not to reference failure_language in that
+        # case.
+        _behavioural_block = None
+        if int(_ps.get("reviewer_retries", 0)) >= 2:
+            _claimed = (failure_context_data or {}).get("current_phase_behavioral_verification")
+            _observed = (failure_context_data or {}).get("behavioral_verification_evidence")
+            if isinstance(_claimed, dict) and _claimed.get("failure_language"):
+                _behavioural_block = {
+                    "failure_language": _claimed.get("failure_language"),
+                    "verdict": (_observed or {}).get("verdict") if isinstance(_observed, dict) else None,
+                    "evidence_count": (
+                        len((_observed or {}).get("evidence") or [])
+                        if isinstance(_observed, dict) else 0
+                    ),
+                }
 
         _user_message = json.dumps({
             "failure_context": failure_context_data,
@@ -1679,6 +1706,7 @@ class Orchestrator:
             "executor_retries": _ps.get("executor_retries", 0),
             "reviewer_retries": _ps.get("reviewer_retries", 0),
             "available_recovery_commands": _available_commands,
+            "behavioral_verification": _behavioural_block,
         })
 
         _payload = {
@@ -2844,6 +2872,28 @@ class Orchestrator:
         except OSError as e:
             print(f"[WARN] _append_failure_history: {e}")
 
+    def _load_current_phase_block(self):
+        """Return the ``behavioral_verification`` block from
+        ``current_phase.json``, or None if missing/malformed. Used by
+        ``write_failure_context`` to capture the *claimed* half of the
+        behavioural-verification snapshot alongside the reviewer's *observed*
+        half (P0 Stage G).
+
+        Reads the file fresh — current_phase.json is small and the
+        failure-context write path runs once per failure, so the I/O cost is
+        negligible. Non-blocking: returns None on any error rather than raising.
+        """
+        cp_path = os.path.join(PROJECT_ARTIFACTS_DIR, "current_phase.json")
+        if not os.path.exists(cp_path):
+            return None
+        try:
+            with open(cp_path, "r") as f:
+                cp = json.load(f)
+            block = cp.get("behavioral_verification")
+            return block if isinstance(block, dict) else None
+        except Exception:
+            return None
+
     def write_failure_context(self, failing_agent: str, attempt_number: int) -> None:
         """Write failure_context.json atomically under PROJECT_ARTIFACTS_DIR.
 
@@ -2930,6 +2980,17 @@ class Orchestrator:
                 if failing_agent == "executor" else []
             ),
             "blocking_issues": reviewer_output.get("blocking_issues") or [],
+            # P0 Stage G: claimed-vs-observed behavioural verification snapshot.
+            # behavioral_verification_evidence = what the reviewer recorded;
+            # current_phase_behavioral_verification = what the phase contract claimed.
+            # The executor's reviewer-rejection retry pass sees both halves in one
+            # read; the escalation advisory (fallback consumer) reads the claimed
+            # half's failure_language when reviewer_retries >= 2.
+            "behavioral_verification_evidence": (
+                reviewer_output.get("behavioral_verification")
+                if failing_agent == "reviewer" else None
+            ),
+            "current_phase_behavioral_verification": self._load_current_phase_block(),
             "tests_written": executor_output.get("tests_written") or [],
             "tests_passing": tests_passing,
             "file_manifest": executor_output.get("file_manifest") or [],
@@ -2981,6 +3042,28 @@ class Orchestrator:
             except Exception:
                 pass
 
+    def _enrich_blocking_issue_with_criterion_default(self, bi):
+        """P0 Stage G: every blocking issue carries an explicit
+        ``criterion_source``. Issues that arrive without one — reviewer-written
+        free-form blocking issues with no anchor — get the explicit ``"free"``
+        label so downstream code can branch on a complete enum without
+        None-checking.
+
+        Does NOT overwrite a populated source. The gate's synthesis path
+        already sets ``"behavioral"``; the reviewer agent's direct writes can
+        set ``"test"`` or ``"prd_verbatim"`` when anchored to a planner
+        ``traces_to`` value. ``criterion_id`` is intentionally omitted on
+        ``"free"`` source — there is no anchor to point at, and writing an
+        empty-string or null field would force downstream consumers to
+        truthiness-check instead of presence-check.
+        """
+        if not isinstance(bi, dict):
+            return bi
+        out = dict(bi)
+        if "criterion_source" not in out:
+            out["criterion_source"] = "free"
+        return out
+
     def _write_reviewer_failure_context(
         self,
         blocking_issues: list,
@@ -3030,7 +3113,14 @@ class Orchestrator:
 
         existing["source"] = "reviewer"
         existing["phase_id"] = self.state.get("current_phase_raw_id", "")
-        existing["blocking_issues"] = list(blocking_issues)
+        # P0 Stage G: every blocking issue carries an explicit ``criterion_source``
+        # enum (``"behavioral" | "test" | "prd_verbatim" | "free"``). Gate-synthesised
+        # behavioural issues arrive pre-tagged; reviewer-written free-form issues
+        # without an anchor get the explicit ``"free"`` label here.
+        existing["blocking_issues"] = [
+            self._enrich_blocking_issue_with_criterion_default(bi)
+            for bi in blocking_issues
+        ]
         if reviewer_pass is not None:
             existing["reviewer_pass"] = int(reviewer_pass)
         if reviewer_summary is not None:
@@ -4428,6 +4518,7 @@ class Orchestrator:
                         "MISSING_ARTIFACTS": "executor",
                         "INFRA_FAILURE": "reviewer",
                         "VISUAL_UNVERIFIED": "reviewer",
+                        "BEHAVIORAL_UNVERIFIED": "reviewer",
                     }.get(gate_result, "halted")
                     print(
                         f"[REVIEWER_GATE] verdict={gate_result} "
@@ -5059,6 +5150,58 @@ class Orchestrator:
                                 f"Reviewer VISUAL_UNVERIFIED: re-invoking "
                                 f"reviewer to provide visual artifacts "
                                 f"(attempt {_vu_retries}/2)",
+                            )
+                        time.sleep(5)
+                        continue
+
+                    elif gate_result == "BEHAVIORAL_UNVERIFIED":
+                        # P0 Stage F. Reviewer's ``behavioral_verification``
+                        # object is missing/malformed on a phase whose
+                        # current_phase.json carries a populated Behavioral
+                        # Verification block. Mirror of VISUAL_UNVERIFIED:
+                        # re-invoke the reviewer, NON-retry-consuming on the
+                        # main ``reviewer_retries`` budget, capped at 2 via a
+                        # dedicated ``reviewer_behavioral_retries`` counter
+                        # so contract-shape failures cannot loop unbounded.
+                        _ps_bu = self.read_phase_state()
+                        _bu_retries = _ps_bu.get("reviewer_behavioral_retries", 0) + 1
+                        _ps_bu["reviewer_behavioral_retries"] = _bu_retries
+                        _ps_bu["behavioral_instruction"] = (
+                            "BEHAVIORAL VERIFICATION REQUIRED: Before writing "
+                            "reviewer_output.done, you MUST attach a "
+                            "``behavioral_verification`` object to "
+                            "reviewer_output.json with verdict ∈ "
+                            "{pass, fail, cannot_verify}, at least three "
+                            "evidence anchors when verdict='pass' (each with "
+                            "claim + file_or_screenshot_or_log + method), and "
+                            "how_to_check_followed as a boolean — see your "
+                            "AGENTS.md. A phase whose current_phase.json "
+                            "carries a Behavioral Verification block cannot "
+                            "pass without this."
+                        )
+                        self.write_phase_state_atomic(_ps_bu)
+                        print(
+                            f"[WARN] Reviewer gate: BEHAVIORAL_UNVERIFIED "
+                            f"(behavioral_retries={_bu_retries}/2)."
+                        )
+                        if _bu_retries >= 2:
+                            print(
+                                "[WARN] BEHAVIORAL_UNVERIFIED retry cap "
+                                "reached — escalating."
+                            )
+                            self.state["current_agent"] = "escalation"
+                            self.transition_state(
+                                "RUNNING",
+                                f"Reviewer BEHAVIORAL_UNVERIFIED: behavioral "
+                                f"retry cap reached ({_bu_retries})",
+                            )
+                        else:
+                            self.state["current_agent"] = "reviewer"
+                            self.transition_state(
+                                "RUNNING",
+                                f"Reviewer BEHAVIORAL_UNVERIFIED: re-invoking "
+                                f"reviewer to provide behavioural verdict + "
+                                f"evidence (attempt {_bu_retries}/2)",
                             )
                         time.sleep(5)
                         continue

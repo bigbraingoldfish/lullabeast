@@ -1,14 +1,15 @@
 """Section 5 — reviewer-gate verdict routing audit.
 
 The reviewer gate (``autodev/pipeline/gate_scripts/reviewer_gate.py``) can
-emit seven distinct verdicts: ``PASS``, ``ROUTE_EXECUTOR``,
+emit eight distinct verdicts: ``PASS``, ``ROUTE_EXECUTOR``,
 ``ROUTE_PLANNER``, ``ROUTE_ESCALATE``, ``MISSING_ARTIFACTS``,
-``INFRA_FAILURE``, and ``VISUAL_UNVERIFIED``.  The orchestrator's
-``if/elif`` chain had explicit handlers for the first six and silently
-fell through on the seventh — ``current_agent`` stayed ``"reviewer"`` and
-the next loop iteration re-invoked the reviewer in a new session,
-exactly the symptom observed live for CORE-E6 (3 reviewer invocations,
-no executor between them).
+``INFRA_FAILURE``, ``VISUAL_UNVERIFIED``, and ``BEHAVIORAL_UNVERIFIED``
+(the last added in P0 Stage F).  The orchestrator's ``if/elif`` chain
+had explicit handlers for the first six and silently fell through on
+``VISUAL_UNVERIFIED`` — ``current_agent`` stayed ``"reviewer"`` and the
+next loop iteration re-invoked the reviewer in a new session, exactly
+the symptom observed live for CORE-E6 (3 reviewer invocations, no
+executor between them).
 
 These tests pin:
 
@@ -58,6 +59,7 @@ KNOWN_VERDICTS = (
     "MISSING_ARTIFACTS",
     "INFRA_FAILURE",
     "VISUAL_UNVERIFIED",
+    "BEHAVIORAL_UNVERIFIED",
 )
 
 
@@ -106,6 +108,33 @@ def test_visual_unverified_emitted_by_gate_script():
     assert 'return "VISUAL_UNVERIFIED"' in _GATE_SRC, (
         "reviewer_gate.py must still emit VISUAL_UNVERIFIED — otherwise "
         "the orchestrator handler is dead code"
+    )
+
+
+# ---------------------------------------------------------------------------
+# R8b: BEHAVIORAL_UNVERIFIED — new handler (P0 Stage F)
+# ---------------------------------------------------------------------------
+
+
+def test_behavioral_unverified_referenced_in_orchestrator():
+    """BEHAVIORAL_UNVERIFIED must appear in orchestrator.py (not just in
+    the gate script) so it cannot fall through silently — same property
+    as VISUAL_UNVERIFIED above."""
+    assert "BEHAVIORAL_UNVERIFIED" in _ORCH_SRC, (
+        "orchestrator must reference BEHAVIORAL_UNVERIFIED — without an "
+        "explicit handler, current_agent stays 'reviewer' and the next "
+        "loop re-invokes the reviewer in a new session"
+    )
+
+
+def test_behavioral_unverified_emitted_by_gate_script():
+    """Pre-condition: the gate script emits BEHAVIORAL_UNVERIFIED on a
+    contract-shape failure of ``reviewer_output.behavioral_verification``.
+    If a future refactor removes the gate-side emit, the orchestrator
+    handler becomes dead code — gate change must come first."""
+    assert 'return "BEHAVIORAL_UNVERIFIED"' in _GATE_SRC, (
+        "reviewer_gate.py must emit BEHAVIORAL_UNVERIFIED so the "
+        "orchestrator handler stays load-bearing"
     )
 
 
@@ -342,4 +371,38 @@ def test_reviewer_gate_diagnostic_log_emitted():
         "reviewer-gate consumption block must emit '[REVIEWER_GATE] "
         "verdict=…' log line for every dispatch so operators can see "
         "the routing decision in /tmp/orchestrator.log"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Stage G regression guard: ROUTE_EXECUTOR handler stays orchestrator-side
+# ---------------------------------------------------------------------------
+
+
+def test_route_executor_handler_unchanged_after_stage_g():
+    """P0 Stage G moved blocking-issue synthesis into the *reviewer gate*
+    (reviewer_gate.py:_synthesize_behavioral_blocking_issues), NOT into the
+    orchestrator's ROUTE_EXECUTOR branch.  The orchestrator's branch must
+    continue to call `_write_reviewer_failure_context(blocking_issues=...)`
+    with the reviewer_output.json contents — it does not synthesise on its
+    own.  Reverting this split would mean reviewer_output.json on disk no
+    longer matches what failure_context.json carries downstream, breaking
+    the post-mortem auditability invariant from ASSUMPTIONS §J."""
+    idx = _ORCH_SRC.find('elif gate_result == "ROUTE_EXECUTOR"')
+    assert idx != -1, "ROUTE_EXECUTOR handler must remain present"
+    next_elif = _ORCH_SRC.find("elif gate_result ==", idx + 10)
+    branch = _ORCH_SRC[idx : next_elif if next_elif != -1 else idx + 2500]
+
+    assert "_write_reviewer_failure_context" in branch, (
+        "ROUTE_EXECUTOR handler must still call _write_reviewer_failure_context "
+        "so the executor's retry sees the canonical blocking-issue list and "
+        "the source='reviewer' marker"
+    )
+    assert "_synthesize_behavioral_blocking_issues" not in branch, (
+        "ROUTE_EXECUTOR handler must NOT call the gate's synthesis helper "
+        "directly — synthesis lives in evaluate_reviewer (reviewer_gate.py) "
+        "so reviewer_output.json on disk reflects the canonical list. "
+        "If this regresses, post-mortem readers of reviewer_output.json will "
+        "see an empty blocking_issues while failure_context.json carries the "
+        "synthesised list — confusing and load-bearing per ASSUMPTIONS §J."
     )

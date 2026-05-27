@@ -109,7 +109,6 @@ class TestReviewerInfraFailureClassification:
             ],
             "suggestions": [],
             "integration_tests_passing": False,
-            "phase_intent_validated": True,
         }
         output_path = os.path.join(tmp_workspace, "reviewer_output.json")
         with open(output_path, "w") as f:
