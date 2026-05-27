@@ -416,7 +416,26 @@ def _check_done_criteria_artifacts(phase_raw_id: str) -> list:
 
 
 def apply_reviewer_routing(data):
-    """Pass 1: executor, Pass 2: attr, Pass 3: escalate"""
+    """Pass 1: executor, Pass 2: any-plan pivot, Pass 3: escalate.
+
+    Pass-2 routing (P0 Stage H — folded-in Stage G callout #1): if ANY
+    blocking_issue carries ``attribution: "plan"``, route to planner.
+    Otherwise route to executor. The legacy pivot only inspected
+    ``blocking_issues[0].attribution``, making the routing decision
+    ordering-sensitive — a valid plan-attributed issue at index 1+ would
+    silently route to executor and the planner-spec problem would never
+    get fixed.
+
+    Defensive ``isinstance(bi, dict)`` coalesce guards against pathological
+    non-dict entries (the legacy fixture in
+    ``test_route_executor_writes_failure_context_atomically`` passes
+    string-shaped issues; this pivot survives them by treating non-dict
+    entries as carrying no attribution).
+
+    This is *not* the orchestrator's separate ``run_blame_attribution()``
+    AI-driven attribution system — that lives elsewhere and is
+    untouched.
+    """
     state_data = {}
     if os.path.exists(PHASE_STATE_FILE):
         try:
@@ -431,10 +450,14 @@ def apply_reviewer_routing(data):
     if pass_number == 1:
         return "ROUTE_EXECUTOR"
     elif pass_number == 2:
-        if data and data.get("blocking_issues") and len(data["blocking_issues"]) > 0:
-            attr = data["blocking_issues"][0].get("attribution")
-            return "ROUTE_PLANNER" if attr == "plan" else "ROUTE_EXECUTOR"
-        return "ROUTE_EXECUTOR" # fallback
+        issues = data.get("blocking_issues") if data else None
+        if issues:
+            any_plan = any(
+                (bi if isinstance(bi, dict) else {}).get("attribution") == "plan"
+                for bi in issues
+            )
+            return "ROUTE_PLANNER" if any_plan else "ROUTE_EXECUTOR"
+        return "ROUTE_EXECUTOR"  # fallback
     else:
         return "ROUTE_ESCALATE"
 

@@ -176,6 +176,8 @@ class TestExecutorCompletionDetection:
         with open(phase_state_path, "w") as f:
             json.dump({
                 "executor_retries": 0,
+                "executor_self_failure_retries": 0,
+                "executor_reviewer_rejection_retries": 0,
                 "planner_retries": 0,
                 "reviewer_retries": 0,
                 "escalation_resets": 0,
@@ -207,4 +209,24 @@ class TestExecutorCompletionDetection:
         assert os.path.exists(output_path), (
             "executor_output.json must NOT be deleted on preemption detection — "
             "it may contain valid output that can be gate-checked."
+        )
+
+        # P0 Stage H regression guard: preemption is an infra event, NOT an
+        # executor self-failure and NOT a reviewer rejection. The two new
+        # lifetime counters must remain at 0 — incrementing them here would
+        # corrupt the metrics-row invariant. ``classify_executor_outcome`` is
+        # a pure function and does not write phase_state, so this assertion
+        # is a defensive future-proofing pin: if a refactor ever moves
+        # counter mutation into the classifier, the test catches it.
+        with open(phase_state_path) as _ps_f:
+            _ps_after = json.load(_ps_f)
+        assert _ps_after["executor_self_failure_retries"] == 0, (
+            "executor_preempted classification must NOT bump "
+            "executor_self_failure_retries — preemption is infrastructure, "
+            "not executor self-failure. Stage H invariant."
+        )
+        assert _ps_after["executor_reviewer_rejection_retries"] == 0, (
+            "executor_preempted classification must NOT bump "
+            "executor_reviewer_rejection_retries — preemption is not a "
+            "reviewer rejection either. Stage H invariant."
         )

@@ -624,8 +624,17 @@
                         route = "Required output files missing — cannot review";
                     else if (d.exit_code != null) route = `Agent output rejected (exit code ${d.exit_code})`;
                     else route = "Gate check failed";
-                    if (friendly) return route ? `${route} — ${friendly}` : friendly;
-                    return route;
+                    // P0 Stage H — prefix with retry-source label when the
+                    // event carries retry_class. Initial attempts (and
+                    // pre-Stage-H events from history) get no decoration so
+                    // the common case reads unchanged.
+                    const retryPrefix =
+                        d.retry_class === "executor_self_failure" ? "Executor stuck → auto-retry — " :
+                        d.retry_class === "reviewer_rejection" ? "Reviewer rejection → executor retry — " :
+                        "";
+                    const decorated = retryPrefix + route;
+                    if (friendly) return route ? `${decorated} — ${friendly}` : friendly;
+                    return decorated;
                 }
                 case 'phase_complete': {
                     const a = d.executor_attempts;
@@ -679,12 +688,19 @@
                         ? `${agent[0].toUpperCase() + agent.slice(1)} attempt ${n}`
                         : `${agent[0].toUpperCase() + agent.slice(1)}`;
                     const durStr = dur != null ? ` (${dur}s)` : '';
-                    if (reason === 'succeeded') return `${prefix} succeeded${durStr}`;
-                    if (reason === 'stalled') return `${prefix} stalled — no activity past the stall threshold${durStr}`;
-                    if (reason === 'no_first_activity') return `${prefix} never started — no first hook within the startup grace`;
-                    if (reason === 'timeout') return `${prefix} timed out — infrastructure backstop hit (gateway unreachable)${durStr}`;
-                    if (reason === 'stopped') return `${prefix} stopped by operator`;
-                    return reason ? `${prefix} ended — reason=${reason}${durStr}` : `${prefix} ended${durStr}`;
+                    // P0 Stage H — suffix with retry-source label when the
+                    // event carries retry_class. Initial attempts (and
+                    // pre-Stage-H events from history) get no decoration.
+                    const classSuffix =
+                        d.retry_class === "executor_self_failure" ? " [self-failure retry]" :
+                        d.retry_class === "reviewer_rejection" ? " [reviewer-rejection retry]" :
+                        "";
+                    if (reason === 'succeeded') return `${prefix} succeeded${durStr}${classSuffix}`;
+                    if (reason === 'stalled') return `${prefix} stalled — no activity past the stall threshold${durStr}${classSuffix}`;
+                    if (reason === 'no_first_activity') return `${prefix} never started — no first hook within the startup grace${classSuffix}`;
+                    if (reason === 'timeout') return `${prefix} timed out — infrastructure backstop hit (gateway unreachable)${durStr}${classSuffix}`;
+                    if (reason === 'stopped') return `${prefix} stopped by operator${classSuffix}`;
+                    return reason ? `${prefix} ended — reason=${reason}${durStr}${classSuffix}` : `${prefix} ended${durStr}${classSuffix}`;
                 }
                 case 'abort_attempted': {
                     const role = d.agent_role || event.agent || 'agent';
@@ -877,6 +893,27 @@
             const m = Math.floor((s % 3600) / 60);
             if (h > 0) return `${h}h ${m}m`;
             return `${m}m`;
+        }
+
+        /** P0 Stage H — format "Exec attempts" with retry-source breakdown.
+         *
+         * Clean common case: when both lifetime counters are 0 (single
+         * attempt, no retries of either kind), return just the attempts
+         * count as a bare string — preserves the historical "Exec
+         * attempts: 1" appearance.
+         *
+         * Breakdown case: when either counter > 0, append a parenthetical
+         * with the split (e.g. "4 (1 self-failure, 2 reviewer rejections)").
+         */
+        function formatExecAttemptsBreakdown(attempts, selfFailures, rejections) {
+            const a = Number(attempts) || 0;
+            const s = Number(selfFailures) || 0;
+            const r = Number(rejections) || 0;
+            if (s === 0 && r === 0) return String(a);
+            const parts = [];
+            if (s > 0) parts.push(`${s} self-failure${s > 1 ? 's' : ''}`);
+            if (r > 0) parts.push(`${r} reviewer rejection${r > 1 ? 's' : ''}`);
+            return `${a} (${parts.join(', ')})`;
         }
 
         // ─── Primitive components ─────────────────────────────────────────────────
@@ -2342,7 +2379,11 @@
                                                                 </div>
                                                                 <div>
                                                                     <span className="text-slate-500">Exec attempts: </span>
-                                                                    <span className="text-slate-300">{phaseMeta.executor_attempts}</span>
+                                                                    <span className="text-slate-300">{formatExecAttemptsBreakdown(
+                                                                        phaseMeta.executor_attempts,
+                                                                        phaseMeta.executor_self_failures,
+                                                                        phaseMeta.executor_reviewer_rejections
+                                                                    )}</span>
                                                                 </div>
                                                                 <div>
                                                                     <span className="text-slate-500">Reviewer passes: </span>

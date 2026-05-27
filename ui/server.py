@@ -3135,6 +3135,14 @@ def get_metrics_summary():
                 "goal": p.get("goal"),
                 "duration_seconds": p.get("duration_seconds"),
                 "executor_attempts": p.get("executor_attempts", 0),
+                # P0 Stage H — additive retry-source breakdown. Defaults to 0
+                # for pre-Stage-H history rows so the frontend's
+                # formatExecAttemptsBreakdown helper always sees numeric
+                # values (undefined would render as 'NaN').
+                "executor_self_failures": p.get("executor_self_failures", 0),
+                "executor_reviewer_rejections": p.get(
+                    "executor_reviewer_rejections", 0
+                ),
                 "reviewer_passes": p.get("reviewer_passes", 0),
                 "blame_fires": p.get("blame_fires", 0),
                 "escalations": p.get("escalations", 0),
