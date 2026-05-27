@@ -27,11 +27,19 @@
  * Reviewer (plugin-safe):
  *   blocking_issues           — array present; each item has description, attribution, affected_file
  *   integration_tests_passing — boolean present
- *   phase_intent_validated    — boolean present
+ *   behavioral_verification   — object with verdict (string), evidence (array),
+ *                                how_to_check_followed (boolean). Structural
+ *                                shape only — semantic enforcement (≥3 anchors
+ *                                on verdict="pass", on-disk path existence,
+ *                                workspace bounds) lives in the hard
+ *                                reviewer_gate.py.
  *
  * Gate-only (NOT checked here):
- *   Executor: file existence, path traversal, TDD path match, git deletion check
- *   Reviewer: done-criteria artifact existence (filesystem), test run
+ *   Executor: file existence, path traversal, TDD path match, git deletion check,
+ *             behavioral_smoke_artifacts on-disk validation.
+ *   Reviewer: done-criteria artifact existence (filesystem), test run,
+ *             behavioral_verification semantic rules (anchor count, path safety,
+ *             on-disk existence).
  */
 
 import * as path from "node:path";
@@ -150,8 +158,28 @@ function checkReviewer(data: Record<string, unknown>): string[] {
     missing.push("integration_tests_passing (boolean required)");
   }
 
-  if (typeof data["phase_intent_validated"] !== "boolean") {
-    missing.push("phase_intent_validated (boolean required)");
+  // P0 Stage F: structured ``behavioral_verification`` object replaces the
+  // legacy ``phase_intent_validated: boolean`` field. The plugin enforces
+  // only the structural shape (object with verdict + evidence + boolean
+  // how_to_check_followed); the hard reviewer_gate.py enforces the
+  // semantic rules (≥3 anchors on pass, on-disk path existence, workspace
+  // bounds).
+  const bv = data["behavioral_verification"];
+  if (typeof bv !== "object" || bv === null || Array.isArray(bv)) {
+    missing.push("behavioral_verification (object required)");
+  } else {
+    const bvObj = bv as Record<string, unknown>;
+    if (typeof bvObj["verdict"] !== "string") {
+      missing.push("behavioral_verification.verdict (string required)");
+    }
+    if (!Array.isArray(bvObj["evidence"])) {
+      missing.push("behavioral_verification.evidence (array required)");
+    }
+    if (typeof bvObj["how_to_check_followed"] !== "boolean") {
+      missing.push(
+        "behavioral_verification.how_to_check_followed (boolean required)",
+      );
+    }
   }
 
   return missing;

@@ -549,6 +549,9 @@ These values appear throughout the codebase. Do not change them without understa
 | SSE heartbeat | 15 seconds | `/api/events/stream` keep-alive |
 | Event ring buffer size | 50 entries | In-memory, not persisted across server restart |
 | Escalation reset cap | 3 resets | `escalation_resets` counter in `phase_state.json`; UI disables command buttons at ≥ 3 |
+| Reviewer visual-contract retry cap | 2 retries | `reviewer_visual_retries` counter in `phase_state.json`; `VISUAL_UNVERIFIED` orchestrator handler escalates beyond this. Independent of `reviewer_retries` so a contract-shape failure does not burn a code-quality retry slot |
+| Reviewer behavioural-contract retry cap | 2 retries | `reviewer_behavioral_retries` counter in `phase_state.json`; `BEHAVIORAL_UNVERIFIED` orchestrator handler (added P0 Stage F) escalates beyond this. Independent of `reviewer_retries` and `reviewer_visual_retries` — three orthogonal budgets covering main-quality, visual-shape, and behavioural-shape failure modes |
+| Behavioural evidence anchors (min on `verdict: "pass"`) | 3 anchors | `_MIN_BEHAVIORAL_EVIDENCE_ANCHORS` in `reviewer_gate.py`; `_check_behavioral_verification` rejects shorter evidence arrays. Hard rule, not configurable per-project |
 | Session TTL | 30 days | `session_cleanup.py`; escalation sessions are exempt |
 | UI server port | 18790 | `DEFAULTS["port"]`; OpenClaw gateway is on 18789 |
 | Webhook endpoint | `http://localhost:18789/hooks/agent` | `DEFAULTS["hooks_url"]`; requires Bearer token |

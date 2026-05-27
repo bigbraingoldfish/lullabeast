@@ -75,12 +75,17 @@ def _write_done_artifacts(workspace, raw_id):
 
 
 def _reviewer_output(**overrides):
-    """A base passing reviewer output. Override fields per test."""
+    """A base passing reviewer output. Override fields per test.
+
+    Note: ``phase_intent_validated`` was removed in P0 Stage F — the gate no
+    longer reads that boolean. Visual-phase tests in this file do not write a
+    ``behavioral_verification`` block to ``current_phase.json``, so the gate's
+    new behavioral check is content-driven False and these tests stay focused
+    on visual semantics."""
     out = {
         "blocking_issues": [],
         "suggestions": [],
         "integration_tests_passing": True,
-        "phase_intent_validated": True,
     }
     out.update(overrides)
     return out
@@ -355,7 +360,6 @@ class TestVisualVerificationDoesNotBreakExistingChecks:
                 ],
                 "suggestions": [],
                 "integration_tests_passing": True,
-                "phase_intent_validated": True,
                 "visual_verification": "pass",
                 "visual_smoke_artifacts": [
                     {"path": "visual-smoke/UI-E1-default.png", "description": "ok"}

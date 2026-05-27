@@ -11,12 +11,20 @@
  *   - Executor with complete status and valid structure → void
  *   - Executor with non-"complete" status → void (hard gate handles it)
  *   - Executor missing test_results.all_passing → revise
- *   - Reviewer with well-formed output → void
+ *   - Reviewer with well-formed output (incl. structured behavioral_verification) → void
  *   - Reviewer with missing blocking_issues → revise
  *   - Reviewer with malformed blocking_issues items → revise
  *   - Reviewer with missing integration_tests_passing → revise
+ *   - Reviewer with missing behavioral_verification → revise
+ *   - Reviewer with malformed behavioral_verification (e.g. missing verdict) → revise
  *   - Missing output file → revise
  *   - Malformed JSON output file → revise
+ *
+ * Note: ``phase_intent_validated`` was removed from the reviewer contract in
+ * P0 Stage F; the plugin now enforces the replacement ``behavioral_verification``
+ * structural shape (verdict + evidence + how_to_check_followed). Hard gate
+ * scripts still own semantic enforcement (≥3 anchors on pass, path safety,
+ * on-disk existence).
  */
 
 import { test } from "node:test";
@@ -82,7 +90,27 @@ const validExecutor = {
 const validReviewer = {
   blocking_issues: [],
   integration_tests_passing: true,
-  phase_intent_validated: true,
+  behavioral_verification: {
+    verdict: "pass",
+    evidence: [
+      {
+        claim: "Public surface item 1",
+        file_or_screenshot_or_log: "behavioral-smoke/anchor-1.txt",
+        method: "stdout_capture",
+      },
+      {
+        claim: "Public surface item 2",
+        file_or_screenshot_or_log: "behavioral-smoke/anchor-2.txt",
+        method: "stdout_capture",
+      },
+      {
+        claim: "Public surface item 3",
+        file_or_screenshot_or_log: "behavioral-smoke/anchor-3.txt",
+        method: "stdout_capture",
+      },
+    ],
+    how_to_check_followed: true,
+  },
 };
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -354,7 +382,11 @@ test("returns void for reviewer with blocking issues (gate decides routing)", ()
       },
     ],
     integration_tests_passing: false,
-    phase_intent_validated: true,
+    behavioral_verification: {
+      verdict: "fail",
+      evidence: [],
+      how_to_check_followed: true,
+    },
   });
 
   try {
@@ -373,7 +405,15 @@ test("requests revision when reviewer blocking_issues is absent", () => {
   const artifactsDir = makeArtifactsDir(openclawRoot);
   writeOutput(artifactsDir, "reviewer", {
     integration_tests_passing: true,
-    phase_intent_validated: true,
+    behavioral_verification: {
+      verdict: "pass",
+      evidence: [
+        { claim: "a", file_or_screenshot_or_log: "x", method: "m" },
+        { claim: "b", file_or_screenshot_or_log: "y", method: "m" },
+        { claim: "c", file_or_screenshot_or_log: "z", method: "m" },
+      ],
+      how_to_check_followed: true,
+    },
   });
 
   try {
@@ -415,7 +455,15 @@ test("requests revision when reviewer integration_tests_passing is absent", () =
   const artifactsDir = makeArtifactsDir(openclawRoot);
   writeOutput(artifactsDir, "reviewer", {
     blocking_issues: [],
-    phase_intent_validated: true,
+    behavioral_verification: {
+      verdict: "pass",
+      evidence: [
+        { claim: "a", file_or_screenshot_or_log: "x", method: "m" },
+        { claim: "b", file_or_screenshot_or_log: "y", method: "m" },
+        { claim: "c", file_or_screenshot_or_log: "z", method: "m" },
+      ],
+      how_to_check_followed: true,
+    },
   });
 
   try {
@@ -427,7 +475,9 @@ test("requests revision when reviewer integration_tests_passing is absent", () =
   }
 });
 
-test("requests revision when reviewer phase_intent_validated is absent", () => {
+test("requests revision when reviewer behavioral_verification is absent", () => {
+  // P0 Stage F: replaced the legacy ``phase_intent_validated: boolean`` check
+  // with structural enforcement of the ``behavioral_verification`` object.
   const tmpDir = makeTmpDir();
   const openclawRoot = path.join(tmpDir, "openclaw");
   const workspaceDir = path.join(openclawRoot, "workspace-reviewer");
@@ -441,7 +491,81 @@ test("requests revision when reviewer phase_intent_validated is absent", () => {
   try {
     const result = runHandler("reviewer", workspaceDir);
     assert.equal(result?.action, "revise");
-    assert.ok(result?.reason?.includes("phase_intent_validated"));
+    assert.ok(result?.reason?.includes("behavioral_verification"));
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("requests revision when reviewer behavioral_verification.verdict is missing", () => {
+  const tmpDir = makeTmpDir();
+  const openclawRoot = path.join(tmpDir, "openclaw");
+  const workspaceDir = path.join(openclawRoot, "workspace-reviewer");
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  const artifactsDir = makeArtifactsDir(openclawRoot);
+  writeOutput(artifactsDir, "reviewer", {
+    ...validReviewer,
+    behavioral_verification: {
+      // verdict missing entirely
+      evidence: [],
+      how_to_check_followed: true,
+    },
+  });
+
+  try {
+    const result = runHandler("reviewer", workspaceDir);
+    assert.equal(result?.action, "revise");
+    assert.ok(result?.reason?.includes("behavioral_verification.verdict"));
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("requests revision when reviewer behavioral_verification.how_to_check_followed is not boolean", () => {
+  const tmpDir = makeTmpDir();
+  const openclawRoot = path.join(tmpDir, "openclaw");
+  const workspaceDir = path.join(openclawRoot, "workspace-reviewer");
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  const artifactsDir = makeArtifactsDir(openclawRoot);
+  writeOutput(artifactsDir, "reviewer", {
+    ...validReviewer,
+    behavioral_verification: {
+      verdict: "pass",
+      evidence: validReviewer.behavioral_verification.evidence,
+      how_to_check_followed: "yes",  // string, not boolean
+    },
+  });
+
+  try {
+    const result = runHandler("reviewer", workspaceDir);
+    assert.equal(result?.action, "revise");
+    assert.ok(
+      result?.reason?.includes("behavioral_verification.how_to_check_followed"),
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("requests revision when reviewer behavioral_verification.evidence is not an array", () => {
+  const tmpDir = makeTmpDir();
+  const openclawRoot = path.join(tmpDir, "openclaw");
+  const workspaceDir = path.join(openclawRoot, "workspace-reviewer");
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  const artifactsDir = makeArtifactsDir(openclawRoot);
+  writeOutput(artifactsDir, "reviewer", {
+    ...validReviewer,
+    behavioral_verification: {
+      verdict: "pass",
+      evidence: "not an array",
+      how_to_check_followed: true,
+    },
+  });
+
+  try {
+    const result = runHandler("reviewer", workspaceDir);
+    assert.equal(result?.action, "revise");
+    assert.ok(result?.reason?.includes("behavioral_verification.evidence"));
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

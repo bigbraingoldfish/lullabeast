@@ -70,6 +70,39 @@ def _write_executor_gate_detail(payload: dict) -> None:
                 pass
 
 
+def _load_current_phase():
+    """Return the full ``current_phase.json`` dict, or {} on miss.
+
+    A sibling helper used by the behavioural-artifacts check; loads the same
+    file that ``phase_resolver.py`` writes after Stage D, then read by the
+    reviewer gate's ``_load_current_phase`` (the two gates intentionally
+    keep their own copies — see plan §7 callout: extracting to utils.py is
+    deferred until a third caller appears)."""
+    path = os.path.join(ARTIFACTS_DIR, "current_phase.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _phase_has_behavioral_block(current_phase):
+    """True iff the phase carries a populated Behavioral Verification block.
+
+    Mirror of ``reviewer_gate._requires_behavioral_verification`` so both
+    gates agree on which phases enforce behavioural artifacts. P0 §2.9
+    transitional rule: legacy phases (block is None or missing) are
+    exempt — only phases produced after P0 ships carry the block."""
+    if not current_phase:
+        return False
+    block = current_phase.get("behavioral_verification")
+    if not isinstance(block, dict):
+        return False
+    return all(block.get(k) for k in ("user_observable", "how_to_check", "failure_language"))
+
+
 def evaluate_executor(output_path=None):
     if output_path is None:
         output_path = os.path.join(ARTIFACTS_DIR, "executor_output.json")
@@ -120,6 +153,70 @@ def evaluate_executor(output_path=None):
             record_error_code_only("executor", "ERR_TDD_COVERAGE_MISMATCH")
             print(f"[GATE FAIL] Missing planned tests: {missing}", file=sys.stderr)
             return "FAIL"
+
+    # ------------------------------------------------------------------
+    # FIND-BEHAVIORAL-ARTIFACTS: P0 Stage F. Phases whose current_phase.json
+    # carries a populated behavioral_verification block (effectively every
+    # P0 phase) must report behavioral_smoke_artifacts proving the executor
+    # ran the phase's how_to_check procedure. Path-safety rules are the
+    # same as file_manifest: workspace-bounded via os.path.commonpath, and
+    # each listed path must exist on disk.
+    # ------------------------------------------------------------------
+    _current_phase = _load_current_phase()
+    if _phase_has_behavioral_block(_current_phase):
+        behavioral_artifacts = data.get("behavioral_smoke_artifacts") or []
+        if not isinstance(behavioral_artifacts, list) or len(behavioral_artifacts) == 0:
+            record_error_code_only("executor", "ERR_BEHAVIORAL_ARTIFACTS_MISSING")
+            print(
+                "[GATE FAIL] behavioral_smoke_artifacts missing or empty on a "
+                "phase with a populated behavioral_verification block. "
+                "Capture the output of current_phase.behavioral_verification.how_to_check "
+                "under pipeline-project/.autodev/pipeline/behavioral-smoke/ and "
+                "list it in executor_output.behavioral_smoke_artifacts.",
+                file=sys.stderr,
+            )
+            return "FAIL"
+        for i, entry in enumerate(behavioral_artifacts):
+            if not isinstance(entry, dict):
+                record_error_code_only("executor", "ERR_BEHAVIORAL_ARTIFACTS_MISSING")
+                print(
+                    f"[GATE FAIL] behavioral_smoke_artifacts[{i}] is not an object "
+                    f"(got {type(entry).__name__}). Each entry must be "
+                    f"{{path, description}}.",
+                    file=sys.stderr,
+                )
+                return "FAIL"
+            path = entry.get("path")
+            if not path or not isinstance(path, str):
+                record_error_code_only("executor", "ERR_BEHAVIORAL_ARTIFACTS_MISSING")
+                print(
+                    f"[GATE FAIL] behavioral_smoke_artifacts[{i}] missing path",
+                    file=sys.stderr,
+                )
+                return "FAIL"
+            target_abs = os.path.abspath(os.path.join(WORKSPACE_DIR, path))
+            try:
+                if os.path.commonpath([workspace_abs, target_abs]) != workspace_abs:
+                    record_error_code_only("executor", "ERR_PATH_TRAVERSAL")
+                    print(
+                        f"[GATE FAIL] behavioral_smoke_artifacts[{i}] path escapes workspace: {path}",
+                        file=sys.stderr,
+                    )
+                    return "FAIL"
+            except ValueError:
+                record_error_code_only("executor", "ERR_PATH_TRAVERSAL")
+                print(
+                    f"[GATE FAIL] behavioral_smoke_artifacts[{i}] path escapes workspace: {path}",
+                    file=sys.stderr,
+                )
+                return "FAIL"
+            if not os.path.exists(target_abs):
+                record_error_code_only("executor", "ERR_BEHAVIORAL_ARTIFACTS_MISSING")
+                print(
+                    f"[GATE FAIL] behavioral_smoke_artifacts[{i}] path does not exist on disk: {path}",
+                    file=sys.stderr,
+                )
+                return "FAIL"
 
     # ------------------------------------------------------------------
     # FIND-DELETION-CHECK: Detect unaccounted file deletions.

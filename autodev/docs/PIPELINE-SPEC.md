@@ -399,7 +399,7 @@ The reviewer gate runs the same script on each pass. Routing on failure varies b
 | 1 | Blocking issues present | Re-run executor with `blocking_issues` in context |
 | 2 | Blocking issues present | Check `attribution` field: `plan` → planner, `impl` → executor (final retry) |
 | 3 | Blocking issues present | → Escalation agent (no more retries) |
-| Any | No blocking issues + tests passing + intent validated | → Merge |
+| Any | No blocking issues + tests passing + behavioral verdict pass (when block present) + visual verdict pass (when applicable) | → Merge |
 
 ### Output Schema — `reviewer_output.json`
 
@@ -426,8 +426,33 @@ The reviewer gate runs the same script on each pass. Routing on failure varies b
   "integration_tests_passing": {
     "type": "boolean"
   },
-  "phase_intent_validated": {
-    "type": "boolean"
+  "behavioral_verification": {
+    "type": "object",
+    "description": "Structured replacement for the legacy phase_intent_validated boolean (removed in P0 Stage F). REQUIRED on every phase whose current_phase.json carries a populated behavioral_verification block (effectively every P0 phase).",
+    "properties": {
+      "verdict": { "type": "string", "enum": ["pass", "fail", "cannot_verify"] },
+      "evidence": {
+        "type": "array",
+        "minItems": 3,
+        "description": "Minimum 3 entries on verdict='pass'. Each anchor is the reviewer's independent record of one exercised public-surface claim.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "claim": { "type": "string" },
+            "file_or_screenshot_or_log": { "type": "string", "description": "Workspace-relative path; gate enforces both path safety and on-disk existence." },
+            "method": { "type": "string", "description": "e.g. playwright_screenshot, curl_then_jq, stdout_capture, log_grep." }
+          },
+          "required": ["claim", "file_or_screenshot_or_log", "method"]
+        }
+      },
+      "how_to_check_followed": { "type": "boolean", "description": "True if the reviewer ran the phase's how_to_check procedure end-to-end; false if it only inspected the executor's behavioral_smoke_artifacts." }
+    },
+    "required": ["verdict", "evidence", "how_to_check_followed"]
+  },
+  "visual_verification": {
+    "type": "string",
+    "enum": ["pass", "fail", "cannot_verify"],
+    "description": "REQUIRED on visual phases only (UI-*, INT-*, or AUTODEV_VISUAL_PHASE_RAW_IDS). Omit on non-visual phases. See visual_smoke_artifacts."
   }
 }
 ```
@@ -612,7 +637,21 @@ Written atomically by the orchestrator **before every routing decision** that fo
   "agent_status": "<complete|failed|stuck|null>",
   "agent_failure_reason": "<string|null>",
   "agent_troubleshooting_attempts": ["<string>"],
-  "blocking_issues": [{"description": "...", "attribution": "...", "affected_file": "..."}],
+  "blocking_issues": [{
+    "description": "...", "attribution": "plan|impl", "affected_file": "...",
+    "criterion_source": "behavioral|test|prd_verbatim|free",
+    "criterion_id": "behavioral_evidence[N] | tests/<path> | <prd substring> (absent on free)"
+  }],
+  "behavioral_verification_evidence": {
+    "verdict": "pass|fail|cannot_verify",
+    "how_to_check_followed": "<bool>",
+    "evidence": [{"claim": "...", "file_or_screenshot_or_log": "...", "method": "..."}]
+  },
+  "current_phase_behavioral_verification": {
+    "user_observable": "...",
+    "how_to_check": "...",
+    "failure_language": "..."
+  },
   "tests_written": ["<path>"],
   "tests_passing": "<bool|null>",
   "file_manifest": ["<path>"],
@@ -625,6 +664,14 @@ Written atomically by the orchestrator **before every routing decision** that fo
 ```
 
 `files_present_on_disk` vs `file_manifest` comparison is the primary signal for the blame analyst: missing files indicate deletion or failed write; unexpected files indicate scope creep. The file is consumed by Layer 1 blame analyst (see below).
+
+**Self-heal feedback loop (P0 Stage G).** Three additions land here so the executor's reviewer-rejection retry pass has both halves of the failed verification in one read:
+
+- `current_phase_behavioral_verification` is the **claimed** half — copied verbatim from `current_phase.behavioral_verification` (user-observable / how_to_check / failure_language). Captured on every failure write, regardless of which agent failed; the field is `null` only when the current phase has no behavioural block (transitional pre-P0 in-flight phases).
+- `behavioral_verification_evidence` is the **observed** half — copied verbatim from `reviewer_output.behavioral_verification` when the reviewer is the failing agent. `null` otherwise so a stale reviewer verdict from a prior attempt cannot pollute the executor's failure context.
+- Each `blocking_issues[i]` additionally carries `criterion_source` (four-valued enum) and `criterion_id` so the executor knows *which* anchor failed. When `criterion_source == "behavioral"`, the executor's `AGENTS.md` Scenario B (line 145) requires re-running the phase's `how_to_check` procedure after the targeted fix and re-capturing fresh `behavioral_smoke_artifacts`. Stale artifacts on retry are the bug pattern this field eliminates.
+
+The reviewer gate (`reviewer_gate.py:_synthesize_behavioral_blocking_issues`) synthesises `criterion_source: "behavioral"` entries from `behavioral_verification.evidence` when the reviewer leaves `blocking_issues` empty on a `fail` / `cannot_verify` verdict; the orchestrator's `_write_reviewer_failure_context` defaults entries arriving without `criterion_source` to the explicit `"free"` label so downstream code branches on a complete enum. See ASSUMPTIONS.md §J for the gate-side-vs-orchestrator-side write-back decision and the `criterion_id` format rationale.
 
 ### Blame Attribution — Three-Layer System
 
@@ -715,15 +762,29 @@ ELSE:
 
 `reviewer_artifacts_retries` is a separate counter that does NOT consume `reviewer_retries`. It is preserved across `reset_execution()` and only zeroed by `reset_phase()`. The `artifact_instruction` in `phase_state.json` tells the executor it must write the phase archive and metrics row before its sentinel.
 
-**Validation checks:**
+**Validation checks (in order):**
 ```
-IF blocking_issues array is NOT empty            → FAIL
-IF integration_tests_passing != true             → FAIL
-IF phase_intent_validated != true                → FAIL
+IF current_phase.behavioral_verification populated AND reviewer_output.behavioral_verification
+   missing/malformed (contract-shape failure)    → BEHAVIORAL_UNVERIFIED   ← P0 Stage F
+IF visual phase AND visual_verification missing/malformed
+                                                  → VISUAL_UNVERIFIED
+IF blocking_issues array is NOT empty            → ERR_VALIDATION_FAILED
+IF integration_tests_passing != true             → ERR_VALIDATION_FAILED
+IF visual_verification ∈ {fail, cannot_verify}   → ERR_VALIDATION_FAILED
+IF behavioral_verification.verdict ∈ {fail, cannot_verify}
+                                                  → ERR_VALIDATION_FAILED   ← replaces the legacy
+                                                                              ``not phase_intent_validated``
+                                                                              trigger removed in P0 Stage F
 ELSE                                             → PASS
 ```
 
-**On FAIL:** Increment `reviewer_retries` in `phase_state.json`.
+**Non-`reviewer_retries`-consuming verdicts (separate counters, each capped at 2 before escalation):**
+- `VISUAL_UNVERIFIED` → `reviewer_visual_retries`
+- `BEHAVIORAL_UNVERIFIED` → `reviewer_behavioral_retries`
+
+Either contract-shape verdict re-invokes the reviewer with an instruction recorded in `phase_state.json` (`visual_instruction` or `behavioral_instruction`). The reviewer's main retry budget (`reviewer_retries`) is preserved so a legitimate code-quality rejection on the next pass can still drive the 3-pass attribution routing.
+
+**On `ERR_VALIDATION_FAILED`:** Increment `reviewer_retries` in `phase_state.json`.
 
 **Branching (pass-dependent):**
 ```
