@@ -730,8 +730,12 @@ class TestApiIdeasMessage:
         elapsed = _time.monotonic() - start
 
         assert response.status_code == 408, f"Expected 408, got {response.status_code}"
-        detail = (response.json() or {}).get("detail") or ""
-        assert "No sentinel" in detail or "stalled" in detail.lower()
+        # 408 detail is now a structured {reason, message} object (reason-aware
+        # timeout messaging) rather than a flat string.
+        detail = (response.json() or {}).get("detail") or {}
+        assert isinstance(detail, dict), f"expected structured 408 detail, got {detail!r}"
+        assert detail.get("reason") in {"no_first_activity", "stalled", "timeout"}
+        assert detail.get("message"), "408 detail must carry a user-facing message"
         assert elapsed < 6.0, f"expected ~3s poll budget, took {elapsed:.2f}s"
 
     def test_does_not_408_while_sentinel_present(self):

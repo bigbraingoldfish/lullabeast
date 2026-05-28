@@ -15,9 +15,9 @@
   "hooks_url": "http://localhost:18789/hooks/agent",
   "hooks_token": "",
   "base_branch": "",
-  "poll_timeout": 600,
+  "poll_timeout": 900,
   "poll_interval": 2,
-  "ideas_idle_threshold": 120,
+  "ideas_idle_threshold": 300,
   "ideas_startup_grace": 30,
   "auto_sync_agent_workspaces": true
 }

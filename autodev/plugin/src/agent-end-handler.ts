@@ -65,10 +65,18 @@ export function handleAgentEnd(
 
   const ideasRoot = resolveIdeasRootFromWorkspace(workspaceDir);
   if (!ideasRoot) {
+    // After the HOME/.openclaw fallback landed (see utils.ts) this branch
+    // should only fire in genuinely degenerate environments — no
+    // workspaceDir, no OPENCLAW_ROOT, no HOME, and os.homedir() returned
+    // empty.  Log loudly so future operators don't have to reverse-engineer
+    // a silent no-op.
     console.warn(
       `[autodev-pipeline-signals] agent_end: cannot resolve ideas root ` +
-        `(sessionKey=${sessionKey}, workspaceDir=${workspaceDir}). ` +
-        `Set OPENCLAW_ROOT env var as fallback.`,
+        `(sessionKey=${sessionKey}, workspaceDir=${workspaceDir}, ` +
+        `OPENCLAW_ROOT=${process.env["OPENCLAW_ROOT"] ?? "<unset>"}, ` +
+        `HOME=${process.env["HOME"] ?? "<unset>"}). ` +
+        `All three resolution sources returned empty — this is an ` +
+        `infrastructure setup bug, not a transient gateway issue.`,
     );
     return;
   }

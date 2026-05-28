@@ -21,6 +21,8 @@ import type {
 } from "./openclaw-types.d.ts";
 import {
   extractIdeasIdFromSessionKey,
+  ideasActivityStampFilename,
+  isIdeasSession,
   isPipelineSession,
   PIPELINE_AGENT_IDS,
   PRD_CREATOR_AGENT_ID,
@@ -71,16 +73,17 @@ export function recordPipelineActivity(
     }
   }
 
-  if (
-    agentId === PRD_CREATOR_AGENT_ID &&
-    typeof sessionKey === "string" &&
-    sessionKey.startsWith("ideas:")
-  ) {
-    const ideaId = extractIdeasIdFromSessionKey(sessionKey);
+  if (agentId === PRD_CREATOR_AGENT_ID && isIdeasSession(sessionKey)) {
+    const key = sessionKey as string;
+    const ideaId = extractIdeasIdFromSessionKey(key);
     if (!ideaId) return;
     const ideasRoot = resolveIdeasRootFromWorkspace(workspaceDir);
     if (!ideasRoot) return;
-    touchIdeasPrdCreatorActivityStamp(ideasRoot, ideaId);
+    touchIdeasPrdCreatorActivityStamp(
+      ideasRoot,
+      ideaId,
+      ideasActivityStampFilename(key),
+    );
   }
 }
 
@@ -96,6 +99,26 @@ export function recordPipelineActivityFromAgentEvent(
 ): void {
   const eventSessionKey =
     typeof event.sessionKey === "string" ? event.sessionKey : undefined;
+
+  // Ideas branch — agent-event-stream reliability backstop for the prd-creator
+  // stamp.  Without this, Ideas would go dark whenever OpenClaw fails to fire
+  // one of the typed model_call/tool hooks the Ideas branch in
+  // `recordPipelineActivity` relies on, while pipeline sessions would still
+  // refresh via the pipeline branch below.  Mirrors the pipeline coverage.
+  if (isIdeasSession(eventSessionKey)) {
+    const key = eventSessionKey as string;
+    const ideaId = extractIdeasIdFromSessionKey(key);
+    if (!ideaId) return;
+    const ideasRoot = resolveIdeasRootFromWorkspace(undefined, env);
+    if (!ideasRoot) return;
+    touchIdeasPrdCreatorActivityStamp(
+      ideasRoot,
+      ideaId,
+      ideasActivityStampFilename(key),
+    );
+    return;
+  }
+
   const agentFromEventSession = parsePipelineAgentIdFromSessionKey(eventSessionKey);
   let agentId = agentFromEventSession;
 

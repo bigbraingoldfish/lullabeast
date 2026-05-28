@@ -36,6 +36,7 @@ _AUTODEV_PIPELINE_DIR = os.path.join(_AUTODEV_UI_ROOT, "autodev", "pipeline")
 if _AUTODEV_PIPELINE_DIR not in _sys.path:
     _sys.path.insert(0, _AUTODEV_PIPELINE_DIR)
 from autodev.pipeline.queue_semantics import parent_blocks_child
+from autodev.pipeline.sentinel_poller import PollResult  # noqa: E402
 from env_resolvers import resolve_openclaw_root, resolve_pipeline_root  # noqa: E402
 from skill_manager import SkillManager  # noqa: E402  (W5-E: inline completion reviewer)
 from webhook_client import invoke_agent_webhook  # noqa: E402
@@ -534,10 +535,10 @@ DEFAULTS = {
     "autodev_pipeline_root": "",
     "roadmap_converter_workspace": "~/.openclaw/workspace-roadmap-converter",
     "pipeline_queue_path": "",
-    "poll_timeout": 180,
+    "poll_timeout": 900,  # ideas-message full-turn backstop. MUST equal the POLL_TIMEOUT constant below — load_config merges DEFAULTS so this value wins in production; the constant is only the fallback for tests that omit the key. 900 (not 180) because a thorough multi-call PRD turn exceeds 180s. Guarded by tests/test_config_defaults_consistency.py
     "poll_interval": 2,
-    "ideas_idle_threshold": 120,  # seconds of JSONL silence before declaring agent idle
-    "ideas_startup_grace": 30,    # seconds to wait for OpenClaw to register the session
+    "ideas_idle_threshold": 300,  # max stamp silence after first activity → "stalled". 300s (not 120) because a single opaque model call (PRD draft) ran 118s silent live; matches pipeline stall philosophy
+    "ideas_startup_grace": 30,    # max wait for first stamp activity before declaring "no_first_activity"
     # When True, copy autodev/agents/* guidance into OPENCLAW_ROOT/workspace-* on each
     # UI server start (same mtime rules as install.sh). Set False to manage workspace
     # files only via ./install.sh (e.g. custom agent instructions).
@@ -3303,7 +3304,12 @@ def get_metrics_global():
     }
 
 
-POLL_TIMEOUT = 180  # seconds; patchable in tests
+POLL_TIMEOUT = 900  # ideas-message turn backstop (s); patchable in tests.
+# Raised 180→900 after live measurement showed a single PRD-draft model call
+# can run 118s+ of opaque stamp silence; a thorough multi-call turn exceeds
+# 180s.  This is the infra failsafe — the per-gap stall detector
+# (ideas_idle_threshold) catches genuine hangs sooner.  Ideas-only;
+# ORCHESTRATOR_POLL_TIMEOUT is separate.
 POLL_INTERVAL = 2   # seconds between sentinel checks
 
 # Tolerance when comparing .done mtime against attempt_start_wall.
@@ -3494,65 +3500,6 @@ async def _post_agent_webhook(hooks_url: str, hooks_token: str, webhook_payload:
         )
 
 
-def _resolve_prd_creator_jsonl(session_key: str, openclaw_root: str) -> str | None:
-    """Resolve the JSONL file path for a prd-creator session.
-
-    Reads {openclaw_root}/agents/prd-creator/sessions/sessions.json, looks up
-    ``agent:prd-creator:{session_key}``, and returns the full path to the
-    corresponding .jsonl file.  Returns None on any error or missing entry.
-    """
-    sessions_json = os.path.join(
-        os.path.expanduser(openclaw_root),
-        "agents", "prd-creator", "sessions", "sessions.json",
-    )
-    try:
-        with open(sessions_json) as f:
-            sessions = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return None
-
-    full_key = f"agent:prd-creator:{session_key}"
-    entry = sessions.get(full_key)
-    if not entry:
-        return None
-
-    session_id = entry.get("sessionId")
-    if not session_id:
-        return None
-
-    return os.path.join(
-        os.path.expanduser(openclaw_root),
-        "agents", "prd-creator", "sessions", f"{session_id}.jsonl",
-    )
-
-
-def _idea_workspace_activity_mtime(idea_dir: Path) -> float | None:
-    """Latest mtime among PRD agent artifacts under an idea directory.
-
-    Watches ``prd_draft.md`` and ``turns/*.md`` only (not ``session.json``), so server
-    writes to session.json do not mask agent idle. Used with Ideas polling when JSONL
-    is quiet but the agent is still writing files.
-    """
-    best: float | None = None
-    prd = idea_dir / "prd_draft.md"
-    if prd.is_file():
-        try:
-            best = os.path.getmtime(prd)
-        except OSError:
-            pass
-    turns = idea_dir / "turns"
-    if turns.is_dir():
-        for p in turns.glob("*.md"):
-            if not p.is_file():
-                continue
-            try:
-                m = os.path.getmtime(p)
-                best = m if best is None else max(best, m)
-            except OSError:
-                pass
-    return best
-
-
 def _ideas_turn_output_contract_footer(idea_id: str, turn_n: int) -> str:
     """Short per-turn reminder appended to Ideas conversational webhook bodies."""
     return (
@@ -3731,72 +3678,85 @@ def _build_ideas_history_block(prior_messages: list, idea_id: str) -> str:
 
 
 async def _poll_sentinel_with_idle_detect(
-    done_path,
-    session_key: str,
-    openclaw_root: str,
+    done_path: Path,
+    stamp_path: Path,
+    attempt_start_wall: float,
     poll_timeout: float,
     poll_interval: float,
-    idle_threshold: float,
+    stall_threshold: float,
     startup_grace: float,
-    idea_watch_dir: Path | None = None,
-) -> bool:
-    """Poll for a sentinel file with JSONL-based idle detection.
+) -> PollResult:
+    """Poll for the turn ``.done`` sentinel, governed by the Tier A activity stamp.
 
-    Returns True when the sentinel appears.  Returns False when either:
-    - No liveness for ``idle_threshold`` seconds: JSONL mtime stale and (when given)
-      ``idea_watch_dir`` artifact mtimes stale, or
-    - ``poll_timeout`` seconds have elapsed with no sentinel (hard timeout fallback).
+    Mirrors the pipeline's :func:`poll_for_sentinel` two-knob design (see
+    ``autodev/pipeline/sentinel_poller.py``).  The OpenClaw plugin's
+    ``recordPipelineActivity`` (``autodev/plugin/src/stall-detector.ts``) touches
+    ``prd_creator_activity.stamp`` on every ``model_call_started`` /
+    ``model_call_ended`` / ``after_tool_call`` — its mtime is the single source
+    of truth for "is the agent doing anything right now".
 
-    During ``startup_grace`` seconds from start, we retry resolving the JSONL path
-    from sessions.json on every tick (OpenClaw may not register the session instantly).
-    After startup_grace expires without finding the JSONL, idle detection is disabled
-    and only the hard timeout applies.
+    Only stamp mtimes ``>= attempt_start_wall`` count as fresh activity; an
+    older mtime is the residue of a prior turn and is treated as "first
+    activity has not yet arrived" so a stale stamp cannot fire ``"stalled"``
+    on the first poll iteration.
+
+    Returns a :class:`PollResult` with one of four reasons:
+
+    * ``"succeeded"``         — ``.done`` observed; happy path.
+    * ``"timeout"``           — ``poll_timeout`` infrastructure backstop fired
+      (gateway unreachable, plugin missing, …).
+    * ``"no_first_activity"`` — ``startup_grace`` elapsed without ever seeing
+      a fresh stamp.  Cold OpenClaw session failures land here.
+    * ``"stalled"``           — fresh stamp was seen at least once, then went
+      silent for ``stall_threshold`` seconds.  This is the mid-turn-death
+      signal (CORE-E6 pattern as it would manifest in Ideas).
+
+    Caller side: ``PollResult.__bool__`` delegates to ``success``, so existing
+    ``if not sentinel_found:`` checks continue working unchanged.
     """
-    start = time.monotonic()
-    deadline = start + poll_timeout
-
-    jsonl_path: str | None = None
-    last_jsonl_mtime: float | None = None
-    last_idea_mtime: float | None = None
-    last_activity = start  # reset when JSONL or idea artifacts advance
+    start_mono = time.monotonic()
+    attempt_start_wall_ns = int(attempt_start_wall * 1e9)
+    last_fresh_mtime_ns: int | None = None  # last stamp mtime >= attempt_start_wall
 
     while True:
         if Path(done_path).exists():
-            return True
+            last_mtime_s = (
+                last_fresh_mtime_ns / 1e9 if last_fresh_mtime_ns is not None else None
+            )
+            return PollResult(True, "succeeded", last_mtime_s)
 
-        now = time.monotonic()
-        if now >= deadline:
-            return False
+        elapsed = time.monotonic() - start_mono
 
-        # Try to resolve JSONL path during startup grace period
-        if jsonl_path is None:
-            jsonl_path = _resolve_prd_creator_jsonl(session_key, openclaw_root)
-            if jsonl_path is None and (now - start) > startup_grace:
-                # Grace expired with no session registered — agent never started; fail now
-                return False
+        if elapsed >= poll_timeout:
+            last_mtime_s = (
+                last_fresh_mtime_ns / 1e9 if last_fresh_mtime_ns is not None else None
+            )
+            return PollResult(False, "timeout", last_mtime_s)
 
-        # JSONL heartbeat
-        if jsonl_path is not None:
-            try:
-                jm = os.path.getmtime(jsonl_path)
-            except OSError:
-                jm = None
-            if jm is not None:
-                if last_jsonl_mtime is None or jm > last_jsonl_mtime:
-                    last_jsonl_mtime = jm
-                    last_activity = now
+        # Probe the activity stamp.  Use ``st_mtime_ns`` so rapid same-second
+        # touches register — the plugin's atomic tmp+rename means we can see
+        # multiple writes within a single second on fast filesystems.
+        try:
+            cur_mtime_ns: int | None = stamp_path.stat().st_mtime_ns
+        except OSError:
+            cur_mtime_ns = None
 
-        # Idea-dir file writes (tool output) — recency bias vs JSONL-only idle
-        if idea_watch_dir is not None:
-            im = _idea_workspace_activity_mtime(idea_watch_dir)
-            if im is not None:
-                if last_idea_mtime is None or im > last_idea_mtime:
-                    last_idea_mtime = im
-                    last_activity = now
+        if cur_mtime_ns is not None and cur_mtime_ns >= attempt_start_wall_ns:
+            if last_fresh_mtime_ns is None or cur_mtime_ns > last_fresh_mtime_ns:
+                last_fresh_mtime_ns = cur_mtime_ns
 
-        if jsonl_path is not None and (now - last_activity) >= idle_threshold:
-            # No JSONL progress and no fresh idea artifacts for idle_threshold
-            return False
+        if last_fresh_mtime_ns is None:
+            # Pre-first-activity window: tolerate a non-advancing stamp
+            # until ``startup_grace`` elapses.
+            if elapsed >= startup_grace:
+                return PollResult(False, "no_first_activity", None)
+        else:
+            # Post-first-activity window: ``stall_threshold`` governs.
+            silence_seconds = time.time() - (last_fresh_mtime_ns / 1e9)
+            if silence_seconds >= stall_threshold:
+                return PollResult(
+                    False, "stalled", last_fresh_mtime_ns / 1e9
+                )
 
         await asyncio.sleep(poll_interval)
 
@@ -4215,6 +4175,83 @@ def _build_ideas_sent_context(
     return out
 
 
+def _strip_trailing_failed_pairs(messages: list[dict]) -> list[dict]:
+    """Return ``messages`` with trailing failed-turn pairs removed.
+
+    A "failed pair" is a user message followed immediately by an assistant
+    message whose ``error`` field is truthy.  This mirrors the client-side
+    filter at ``ui/index.html`` that drops ``_gatewayFailed`` rows from
+    ``baseMsgs`` before sending a new message, so the persisted
+    ``session.json`` matches what the user sees in the chat.
+
+    Walks backward from the end and pops trailing failed pairs (and orphan
+    trailing error-only assistant bubbles) until the list ends with either
+    a non-error item or an in-progress user message with no following
+    assistant.  Non-trailing failed pairs are preserved — by user policy,
+    mid-conversation error history is kept so operators can audit it after
+    the fact (see ``CHANGELOG.md`` entry).
+
+    The helper is pure: it returns a new list and never mutates the input.
+
+    Invoked by :func:`post_ideas_message` once per chat turn, between the
+    ``pre_session`` read and the pre-save write, so the cleanup runs exactly
+    when the user is about to add a new turn (which is the user-observable
+    moment at which they expect the prior failure to disappear).
+    """
+    result = list(messages)
+    while result:
+        last = result[-1]
+        if last.get("role") == "assistant" and last.get("error"):
+            result.pop()
+            if result and result[-1].get("role") == "user":
+                result.pop()
+            continue
+        break
+    return result
+
+
+def _ideas_timeout_message(reason: str | None, poll_timeout: float) -> str:
+    """Map a chat-poll ``PollResult.reason`` to user-facing, reason-specific copy.
+
+    ``_poll_sentinel_with_idle_detect`` already knows WHY a turn failed; this
+    turns that into honest guidance instead of a blanket "model may be slow".
+
+    **Sole author of the message text.** The 408 response body, the persisted
+    session placeholder, and (via the response body) the frontend all use this
+    one string — the wording is not duplicated in ``ui/index.html``. This is the
+    deliberate single-source design that avoids the dual-source drift which bit
+    the timeout *values* (see ``tests/test_config_defaults_consistency.py``).
+
+    Reasons (from ``autodev/pipeline/sentinel_poller.py``):
+
+    * ``no_first_activity`` — the agent never produced a first activity stamp;
+      OpenClaw likely never picked up the request (gateway/session/provider-auth
+      issue), NOT a slow model.
+    * ``stalled`` — the agent was active then went silent past the stall
+      threshold; the model most likely stalled mid-response.
+    * ``timeout`` — the full ``poll_timeout`` infra backstop elapsed without the
+      turn finishing; the request may be too large or the model very slow.
+    * anything else / ``None`` — fall back to the original generic copy.
+    """
+    if reason == "no_first_activity":
+        return (
+            "The agent never started responding — OpenClaw may not have picked "
+            "up the request. Check that the gateway is running, then retry."
+        )
+    if reason == "stalled":
+        return (
+            "The agent began working but went quiet partway through — the model "
+            "likely stalled mid-response. Retrying usually clears it."
+        )
+    if reason == "timeout":
+        minutes = max(1, int(poll_timeout) // 60)
+        return (
+            f"The agent ran for ~{minutes} min without finishing — the request "
+            "may be too large or the model very slow. Try a shorter message or retry."
+        )
+    return "Agent timed out — the model may be slow. You can retry."
+
+
 def _late_done_valid_for_attempt(done_path: Path | str, attempt_start_wall: float) -> bool:
     """True when the turn sentinel exists and was written at or after this attempt started.
 
@@ -4223,6 +4260,12 @@ def _late_done_valid_for_attempt(done_path: Path | str, attempt_start_wall: floa
 
     Used after poll timeout to avoid restoring draft annotations when the agent completed
     just after the idle/timeout window (race with late .done write).
+
+    This is the **authoritative late-recovery path** for Ideas turns and is
+    deliberately decoupled from the Tier A activity stamp polled by
+    :func:`_poll_sentinel_with_idle_detect` — a late ``.done`` is enough on its
+    own; a stale stamp from a prior turn cannot block reconciliation here.
+    Do not consolidate this with the stamp poller in a future refactor.
     """
     p = Path(done_path)
     if not p.exists():
@@ -4328,6 +4371,14 @@ async def post_ideas_message(idea_id: str, request: Request):
     if session_path_pre.exists():
         pre_session = _read_json_file(str(session_path_pre)) or {}
 
+    # Drop trailing failed-turn pairs (user + assistant-with-error) before
+    # appending the new turn — keeps session.json in sync with what the
+    # client already shows after its `_gatewayFailed` filter, so a browser
+    # refresh after a 408/502/503 retry does not re-surface stacked red
+    # bubbles.  Non-trailing errors are preserved as conversation history.
+    if pre_session.get("messages"):
+        pre_session["messages"] = _strip_trailing_failed_pairs(pre_session["messages"])
+
     # Inject unsubmitted annotations into message context
     pending_annotation_ids: list[str] = []
     unsubmitted = [a for a in pre_session.get("annotations", []) if not a.get("submitted")]
@@ -4405,7 +4456,7 @@ async def post_ideas_message(idea_id: str, request: Request):
 
     poll_timeout = float(config.get("poll_timeout", POLL_TIMEOUT))
     poll_interval = float(config.get("poll_interval", POLL_INTERVAL))
-    idle_threshold = float(config.get("ideas_idle_threshold", 120))
+    idle_threshold = float(config.get("ideas_idle_threshold", 300))
     startup_grace = float(config.get("ideas_startup_grace", 30))
 
     try:
@@ -4425,29 +4476,37 @@ async def post_ideas_message(idea_id: str, request: Request):
     prd_draft_path = idea_dir / "prd_draft.md"
 
     sentinel_found = await _poll_sentinel_with_idle_detect(
-        done_path, session_key, openclaw_root,
-        poll_timeout, poll_interval, idle_threshold, startup_grace,
-        idea_watch_dir=idea_dir,
+        done_path=done_path,
+        stamp_path=idea_dir / "prd_creator_activity.stamp",
+        attempt_start_wall=_attempt_start_wall,
+        poll_timeout=poll_timeout,
+        poll_interval=poll_interval,
+        stall_threshold=idle_threshold,
+        startup_grace=startup_grace,
     )
     if not sentinel_found and _late_done_valid_for_attempt(done_path, _attempt_start_wall):
         sentinel_found = True
 
     if not sentinel_found:
-        # Timed out / agent idle — update the pre-saved pending placeholder to an error state
-        # so the user sees a clear error on refresh instead of a "working…" spinner
+        # Timed out / agent idle — surface WHY (PollResult.reason) instead of a
+        # blanket message. The same string lands in the persisted placeholder
+        # (shown on refresh) and the 408 body (shown immediately), so the UI
+        # renders one authoritative message — see _ideas_timeout_message.
+        _timeout_reason = getattr(sentinel_found, "reason", None)
+        _timeout_msg = _ideas_timeout_message(_timeout_reason, poll_timeout)
         _timeout_data = _read_json_file(str(session_path)) or _pre_save_data
         _timeout_msgs = _timeout_data.get("messages", [])
         for _m in reversed(_timeout_msgs):
             if _m.get("pending"):
                 _m["pending"] = False
                 _m["error"] = True
-                _m["content"] = "Agent timed out — the model may be slow. You can retry."
+                _m["content"] = _timeout_msg
                 break
         _timeout_data["messages"] = _timeout_msgs
         _atomic_write_json_file(str(session_path), _timeout_data)
         raise HTTPException(
             status_code=408,
-            detail=f"No agent response after {int(poll_timeout)}s — the model may be slow or the agent session may be stalled.",
+            detail={"reason": _timeout_reason or "timeout", "message": _timeout_msg},
         )
 
     # Read agent response
