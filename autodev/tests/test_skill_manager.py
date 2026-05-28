@@ -72,12 +72,22 @@ def skills_enabled_config(
     }
 
 
+# P1 Stage A: SkillManager.BASE_DISCIPLINES are always injected on every
+# phase regardless of prefix.  build_manager() seeds them automatically so
+# every test in this module exercises the post-Stage-A layout where the
+# workspace can hold up to (len(BASE_DISCIPLINES) + 1) subdirectories.
+_BASE_DISCIPLINES = ("integration-wiring", "testing-quality")
+
+
 def build_manager(tmp_path, disciplines=None, mapping=None) -> SkillManager:
-    """Build a SkillManager wired to tmp_path, with optional pre-populated library."""
+    """Build a SkillManager wired to tmp_path, with the base + prefix disciplines seeded."""
     disciplines = disciplines or ["core-logic"]
     mapping = mapping or {"CORE": "core-logic"}
 
-    make_skill_library(str(tmp_path), disciplines, ["planner", "executor", "reviewer"])
+    all_disciplines = list(_BASE_DISCIPLINES) + [
+        d for d in disciplines if d not in _BASE_DISCIPLINES
+    ]
+    make_skill_library(str(tmp_path), all_disciplines, ["planner", "executor", "reviewer"])
     make_mapping_file(os.path.join(str(tmp_path), "autodev", "config"), mapping)
     for role in ("planner", "executor", "reviewer"):
         make_workspace(str(tmp_path), role)
@@ -101,7 +111,7 @@ def test_resolve_mapped_subsystem(tmp_path):
 
 
 def test_resolve_unmapped_subsystem(tmp_path, capsys):
-    """MCP-E3 has no mapping — workspace should be cleaned, Status=none_mapped logged."""
+    """MCP-E3 has no mapping — stale prefix skill gone, base skills still injected, Status=none_mapped logged."""
     sm = build_manager(tmp_path)
     config = skills_enabled_config()
 
@@ -113,9 +123,13 @@ def test_resolve_unmapped_subsystem(tmp_path, capsys):
     sm.inject_skill("MCP-E3", "executor", config)
 
     skills_dir = tmp_path / "workspace-executor" / "skills"
-    # directory exists but should be empty (cleaned)
+    # Stale skill gone; base skills present; no prefix-discipline skill
+    # because MCP is unmapped (P1 Stage A: base skills inject regardless).
     assert skills_dir.exists()
-    assert list(skills_dir.iterdir()) == [], "Stale skill should have been removed"
+    assert {p.name for p in skills_dir.iterdir()} == {
+        "integration-wiring-executor",
+        "testing-quality-executor",
+    }, "Stale skill should be gone; base skills should be present; no prefix skill"
     captured = capsys.readouterr()
     assert "Status=none_mapped" in captured.out
 
@@ -150,7 +164,12 @@ def test_inject_skill_copies_file(tmp_path):
 
 
 def test_inject_skill_cleans_stale_before_injecting(tmp_path):
-    """A skill from phase N is removed before injecting the skill for phase N+1."""
+    """A skill from phase N is removed before injecting the skill for phase N+1.
+
+    Augmented for P1 Stage A: both base skills are re-injected fresh on each
+    phase (the single-cleanup-at-start contract is what prevents the prior
+    phase's prefix skill from leaking through).
+    """
     sm = build_manager(
         tmp_path,
         disciplines=["core-logic", "infra-config"],
@@ -163,15 +182,25 @@ def test_inject_skill_cleans_stale_before_injecting(tmp_path):
     core_dest = tmp_path / "workspace-executor" / "skills" / "core-logic-executor" / "SKILL.md"
     assert core_dest.exists()
 
-    # Phase 2 — INFRA (should clean CORE skill and inject INFRA)
+    # Phase 2 — INFRA (should clean CORE skill and inject INFRA + both base skills)
     sm.inject_skill("INFRA-2", "executor", cfg)
     assert not core_dest.exists(), "Stale CORE skill should have been removed"
     infra_dest = tmp_path / "workspace-executor" / "skills" / "infra-config-executor" / "SKILL.md"
     assert infra_dest.exists()
+    # Both base skills must be present on phase 2 as well (no stale survival,
+    # fresh inject each phase).
+    for base in ("integration-wiring-executor", "testing-quality-executor"):
+        assert (tmp_path / "workspace-executor" / "skills" / base / "SKILL.md").exists(), (
+            f"Base skill {base} must be present after phase 2"
+        )
 
 
 def test_same_phase_different_roles(tmp_path):
-    """Each role gets its own discipline+role-specific skill for the same phase."""
+    """Each role gets its own discipline+role-specific skill for the same phase.
+
+    Augmented for P1 Stage A: each role workspace must also carry both base
+    skills tagged with that role's suffix (no cross-role bleed).
+    """
     sm = build_manager(tmp_path)
     cfg = skills_enabled_config()
 
@@ -180,6 +209,10 @@ def test_same_phase_different_roles(tmp_path):
         dest = tmp_path / f"workspace-{role}" / "skills" / f"core-logic-{role}" / "SKILL.md"
         assert dest.exists(), f"SKILL.md missing for {role}"
         assert f"core-logic-{role}" in dest.read_text()
+        for base in (f"integration-wiring-{role}", f"testing-quality-{role}"):
+            base_dest = tmp_path / f"workspace-{role}" / "skills" / base / "SKILL.md"
+            assert base_dest.exists(), f"Base skill {base} missing for role {role}"
+            assert base in base_dest.read_text(), f"Base skill {base} content wrong"
 
 
 # ---------------------------------------------------------------------------
@@ -264,12 +297,24 @@ def test_bad_yaml_mapping(tmp_path, capsys):
 
 
 def test_empty_phase_id(tmp_path, capsys):
-    """Empty phase_raw_id → none_mapped, no crash."""
+    """Empty phase_raw_id → prefix lookup skipped (logged), base skills still inject.
+
+    P1 Stage A: universal rules apply universally — an empty phase identifier
+    does not strip the base skills, which exist precisely *because* they don't
+    depend on the phase prefix.  Today's "do-nothing on empty ID" behaviour
+    is deliberately dropped.
+    """
     sm = build_manager(tmp_path)
     sm.inject_skill("", "executor", skills_enabled_config())
 
     captured = capsys.readouterr()
     assert "none_mapped" in captured.out or "empty_phase_id" in captured.out
+
+    skills_dir = tmp_path / "workspace-executor" / "skills"
+    assert {p.name for p in skills_dir.iterdir()} == {
+        "integration-wiring-executor",
+        "testing-quality-executor",
+    }, "Base skills must be present even when phase_raw_id is empty"
 
 
 def test_default_enabled_when_config_absent(tmp_path):
@@ -286,7 +331,12 @@ def test_default_enabled_when_config_absent(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_inject_logs_skill_status(tmp_path, capsys):
-    """[SKILL] log line must include Phase, Agent, Skill, Status fields."""
+    """[SKILL] log lines: one per injected skill (P1 Stage A: 2 base + 1 prefix).
+
+    Each Status=loaded line carries the Phase, Agent, Skill identifier, and a
+    ``base=true|false`` token distinguishing base from prefix.  Order of
+    emission is implementation detail and is not asserted.
+    """
     sm = build_manager(tmp_path)
     sm.inject_skill("CORE-E2", "executor", skills_enabled_config())
 
@@ -294,8 +344,13 @@ def test_inject_logs_skill_status(tmp_path, capsys):
     assert "[SKILL]" in out
     assert "Phase=CORE-E2" in out
     assert "Agent=executor" in out
-    assert "Status=loaded" in out
+    loaded_lines = [line for line in out.splitlines() if "Status=loaded" in line]
+    assert len(loaded_lines) == 3, (
+        f"Expected 3 Status=loaded lines (2 base + 1 prefix), got: {loaded_lines}"
+    )
     assert "core-logic/executor/SKILL.md" in out
+    assert "integration-wiring/executor/SKILL.md" in out
+    assert "testing-quality/executor/SKILL.md" in out
 
 
 def test_log_emitted_for_disabled_case(tmp_path, capsys):

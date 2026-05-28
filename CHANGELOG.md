@@ -10,6 +10,36 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ### Added
 
+- **P1 Stage B — Cutover-hygiene test fixture migration + recents self-cleaning.** The `test_recents_appear_after_preflight` browser test silently `pytest.skip`'d under P0 Stage C's strict-mode preflight because its fixture was missing the Behavioral Verification block in `roadmap.md` and the entire `verification.md` file. Silent skips in CI mask exactly the regressions they exist to catch. Stage B brings the fixture to the canonical P0-compliant shape, narrows the surviving skip path to the one sanctioned case (CI without a full OpenClaw workspace install), and converts every other skip into a `pytest.fail` so a future regression surfaces loud. While here, the scope was extended to fix a separate ongoing pain: the recents JSON (`~/.openclaw/ui_recent_projects.json`) accumulates stale `/tmp/...` entries from every test run that exercises preflight, and the HTML `<datalist>` exposes no per-row remove affordance, so the user had no in-app way to clear the mess.
+
+  *New API surface:*
+  - `DELETE /api/setup/recent-projects` — body `{"path": "<absolute path>"}` removes a single entry. Idempotent (removing a path not in the list returns `removed: false` with status 200, not an error). Path is normalised via `os.path.realpath(os.path.expanduser(...))` so callers may submit `~/foo` / `/a/./b` / etc. and still target the canonical stored entry.
+  - `POST /api/setup/recent-projects/prune` — no body. Sweeps every entry whose `path` is not an existing directory on disk (`os.path.isdir`). Returns `{removed_count, removed_paths, projects}`. Malformed entries (non-dict, missing/empty `path`) are also treated as dead and removed. Designed to be called from any test that mutates recents: the test removes its tmpdir, then calls prune, and the recents JSON self-cleans.
+
+  Both handlers reuse the existing `_read_recent_projects` and `_write_recent_projects_atomic` helpers — no new file-format or locking surface.
+
+  *Browser test changes (`tests/test_browser_path_selector.py::test_recents_appear_after_preflight`):*
+  - Roadmap fixture extended with the four-line Behavioral Verification block. The `> Test:` line now uses the colon form (`_validate_roadmap_content`'s regex rejects the period form — proven empirically).
+  - Adjacent `verification.md` written with all five required sections (mirrors the canonical shape used by the sibling `test_queue_add_autorepairs_git`).
+  - Old "any failing check → skip" replaced with: `pytest.fail` on any non-`workspace-{agent}` failure, `pytest.skip` only when *every* failure is workspace-related (i.e., the CI environment legitimately lacks OpenClaw workspaces). The `urllib.error.HTTPError` branch flips from skip to `pytest.fail` for the same reason — an HTTP error is a real server bug.
+  - `finally` block removes the test's tmpdir and POSTs `/api/setup/recent-projects/prune` so the recents entry created by preflight does not leak to the next run.
+
+  *Tests added:* `tests/test_api_setup_recent_projects.py` — 5 tests for the DELETE endpoint (single-entry removal, idempotency on missing path, realpath normalisation, 422 on empty body, order preservation) and 5 tests for the prune endpoint (removes dead entries, keeps live entries, no-op on empty list, idempotency on second call, malformed entries swept).
+
+  *Docs:* `plans/Active/post-p0-ordered-roadmap.md` updated to mark P1 Stage B as delivered. `CLAUDE.md` is unchanged — these endpoints are UI-side utilities that don't impact pipeline state or the orchestration model documented there.
+
+- **P1 Stage A — Always inject `integration-wiring` + `testing-quality` base skills.** `SkillManager.inject_skill` now writes two base skills (`integration-wiring/{role}/SKILL.md` and `testing-quality/{role}/SKILL.md`) into the agent workspace on every phase regardless of the roadmap prefix, alongside the existing phase-prefix discipline skill. The base skills encode universal rules (the "read the entrypoint before wiring" rule and TDD discipline) that previously fired only when a phase carried the `INTEGRATION` / `TEST` prefix — i.e., almost never on real projects. P0's behavioural-verification gate caught the failures these rules would have prevented up front; Stage A removes that ceiling.
+
+  *Implementation:*
+  - `autodev/pipeline/skill_manager.py` exposes `SkillManager.BASE_DISCIPLINES = ("integration-wiring", "testing-quality")`. `inject_skill` is restructured to clean the workspace exactly once at method start, then write the base skills in a loop followed by the conditional phase-prefix skill. Each skill write emits a `[SKILL] Status=loaded base=true|false` log line so operators can audit which layer landed. A missing base-skill source does not strip the rest of the call (graceful per-skill degradation); kill switches (`pipeline.skills.enabled`, `{role}_skills_enabled`) still suppress both base and prefix.
+  - `autodev/pipeline/orchestrator.py` `_record_injected_skill` filters `BASE_DISCIPLINES` out of the workspace listing before deriving the recorded discipline name. The `phase_state.skill_injected` field continues to surface only the *variable* phase-prefix discipline (metrics row, snapshot endpoint, UI label all preserved unchanged) — base skills are constant and would be reporting noise.
+
+  *Workspace contract change:* Each `workspace-{role}/skills/` directory now holds 2–3 subdirectories per phase (2 base + optional 1 prefix) instead of 0–1. OpenClaw's `loadWorkspaceSkillEntries` already walks the entire tree, so the multi-subdirectory layout requires no OpenClaw config change.
+
+  *Tests added:* `autodev/tests/test_skill_manager_base_skills.py` (9 tests covering mapped/unmapped/empty-prefix paths, per-role isolation, wipe-between-phases preservation, kill-switch behaviour, missing-base-source graceful degradation, and the one-log-line-per-skill format) and `autodev/tests/test_record_injected_skill_filters_base.py` (3 tests pinning the orchestrator filter). `autodev/tests/test_skill_manager.py` updated: 5 existing tests now assert the multi-skill workspace shape, and the shared `build_manager` helper seeds the base disciplines by default.
+
+  *Docs:* `CLAUDE.md` "Skill Injection — End-to-End" section rewritten to describe the base-skills + phase-prefix model and the per-layer skip semantics. `autodev/docs/PIPELINE-SPEC.md` §Skills Overview, Skill Resolution Algorithm, and `skill_injected` schema entry updated to match.
+
 - **P0 Stage G — Self-heal feedback loop for behavioural rejections.** The reviewer-rejection retry path (primary) and escalation advisory (fallback) now consume the structured behavioural-verification context Stage F materialised. Without Stage G, the executor saw an empty `blocking_issues` list whenever the reviewer rejected on a behavioural verdict alone, forcing blind re-implementation; the escalation advisory could not quote the project's own pre-authored `failure_language`. Stage G closes both gaps. Strict, no `legacy_mode` opt-out.
 
   *Gate-side synthesis:*
