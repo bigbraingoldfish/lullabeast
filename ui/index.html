@@ -89,14 +89,6 @@
             animation: teal-pulse 2s ease-in-out infinite;
         }
 
-        /* Pending assistant message — subtle opacity pulse, no amber flash */
-        @keyframes chat-pending-soft {
-            0%, 100% { opacity: 0.72; }
-            50% { opacity: 1; }
-        }
-        .chat-pending-soft {
-            animation: chat-pending-soft 2s ease-in-out infinite;
-        }
 
         /* L-28: in-flight attempt cell only — subtle opacity pulse */
         @keyframes agent-attempt-inflight-pulse {
@@ -145,20 +137,20 @@
         /* h2 = top-level category grouper in PRD sections → white */
         .msg-md h1, .msg-md h2 { color: #e2e8f0; }
         /* h3/h4 = actual subsection headers → slate (teal reserved for section labels only) */
-        .msg-md h3, .msg-md h4 { color: #94a3b8; }
+        .msg-md h3, .msg-md h4 { color: #94a3b8; margin: 0.9em 0 0.4em; }
         .msg-md h1 { font-size: 1.2rem; }
         .msg-md h2 { font-size: 1.05rem; }
         .msg-md h3 { font-size: 0.98rem; }
         .msg-md p, .msg-md li, .msg-md blockquote {
             color: #e2e8f0;
-            margin: 0.35em 0;
+            margin: 0.5em 0;
             line-height: 1.45;
         }
         .msg-md em { color: #64748b; }
-        .msg-md ul, .msg-md ol { margin: 0.35em 0; padding-left: 1.25rem; }
+        .msg-md ul, .msg-md ol { margin: 0.5em 0; padding-left: 1.25rem; }
         .msg-md code {
-            background: #1a1d21;
-            color: #67e8f9;
+            background: #2a2d31;
+            color: #e2e8f0;
             padding: 0.1em 0.35em;
             border-radius: 0.25rem;
             font-size: 0.85em;
@@ -3394,6 +3386,671 @@
             );
         }
 
+        function PendingBubbleLifeBackdrop() {
+            const containerRef = useRef(null);
+            const canvasRef = useRef(null);
+
+            useEffect(() => {
+                const container = containerRef.current;
+                const canvas = canvasRef.current;
+                if (!container || !canvas) return undefined;
+
+                const CELL = 4;
+                const LIVE_COLOR = "#23262a";
+                const DEAD_COLOR = "#1a1d21";
+                const FADE_RGBA = "rgba(26, 29, 33, 0.18)";
+
+                let cols = 0, rows = 0, w = 0, h = 0;
+                let dpr = window.devicePixelRatio || 1;
+                let rafId = 0;
+                let firstRoFire = true;
+
+                let patternIdx = 0;
+                let patternStart = 0;
+                let prevNow = 0;
+                let patternState = {};
+
+                function drawCell(ctx, x, y) {
+                    if (x < 0 || x >= cols || y < 0 || y >= rows) return;
+                    ctx.fillRect(x * CELL, y * CELL, CELL - 0.5, CELL - 0.5);
+                }
+
+                function clearCanvas(ctx) {
+                    ctx.fillStyle = DEAD_COLOR;
+                    ctx.fillRect(0, 0, w, h);
+                }
+
+                function fadeCanvas(ctx) {
+                    ctx.fillStyle = FADE_RGBA;
+                    ctx.fillRect(0, 0, w, h);
+                }
+
+                const patterns = [
+                    // 0. Sine wave traveling right (abstract)
+                    (ctx, t) => {
+                        clearCanvas(ctx);
+                        ctx.fillStyle = LIVE_COLOR;
+                        const amp = rows * 0.35;
+                        const period = Math.max(6, cols * 0.22);
+                        for (let x = 0; x < cols; x++) {
+                            const y = Math.round(rows / 2 + amp * Math.sin((x / period) * Math.PI * 2 + t * 1.8));
+                            drawCell(ctx, x, y);
+                            drawCell(ctx, x, y - 1);
+                        }
+                    },
+                    // 1. Pac-chomp (arcade): round 7x7 character with a wedge mouth munches plus-shaped dots
+                    (ctx, t, dt) => {
+                        if (!patternState.pac) {
+                            patternState.pac = { x: -4, dots: [], row: Math.floor(rows / 2) };
+                            for (let i = 12; i < cols; i += 6) patternState.pac.dots.push(i);
+                        }
+                        const p = patternState.pac;
+                        p.x += 14 * dt;
+                        if (p.x > cols + 4) {
+                            p.x = -4;
+                            p.dots = [];
+                            for (let i = 12; i < cols; i += 6) p.dots.push(i);
+                        }
+                        const pacCenterX = Math.round(p.x);
+                        // Dot is eaten the moment Pac-Man's center column passes its center
+                        p.dots = p.dots.filter((dotX) => dotX >= pacCenterX);
+                        clearCanvas(ctx);
+                        ctx.fillStyle = LIVE_COLOR;
+                        // Dots: 3x3 plus shape (5 cells) centered on (dotX, p.row)
+                        for (const dotX of p.dots) {
+                            drawCell(ctx, dotX, p.row - 1);
+                            drawCell(ctx, dotX - 1, p.row);
+                            drawCell(ctx, dotX, p.row);
+                            drawCell(ctx, dotX + 1, p.row);
+                            drawCell(ctx, dotX, p.row + 1);
+                        }
+                        // Pac-Man: 7x7 filled circle (r=3, r²+r threshold for fuller shape) with right-opening wedge mouth
+                        const cx = pacCenterX;
+                        const cy = p.row;
+                        const r = 3;
+                        const r2 = r * r + r;
+                        const mouthFactor = Math.max(0, Math.sin(t * 9)) * 1.4;
+                        for (let dy = -r; dy <= r; dy++) {
+                            for (let dx = -r; dx <= r; dx++) {
+                                if (dx * dx + dy * dy > r2) continue;
+                                if (mouthFactor > 0 && dx > 0 && Math.abs(dy) < dx * mouthFactor) continue;
+                                drawCell(ctx, cx + dx, cy + dy);
+                            }
+                        }
+                    },
+                    // 2. Plasma flow (abstract)
+                    (ctx, t) => {
+                        clearCanvas(ctx);
+                        ctx.fillStyle = LIVE_COLOR;
+                        const cx = cols / 2, cy = rows / 2;
+                        for (let y = 0; y < rows; y++) {
+                            for (let x = 0; x < cols; x++) {
+                                const v =
+                                    Math.sin(x * 0.20 + t * 1.4) +
+                                    Math.sin(y * 0.35 + t * 1.1) +
+                                    Math.sin((x + y) * 0.12 - t * 0.9) +
+                                    Math.sin(Math.sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy)) * 0.22 + t * 1.6);
+                                if (v > 1.4) drawCell(ctx, x, y);
+                            }
+                        }
+                    },
+                    // 3. Survival (game): particles hunt smaller ones; biggest wins, then resets
+                    (ctx, t, dt) => {
+                        const seedSurvival = () => {
+                            const count = Math.max(10, Math.min(30, Math.floor((cols * rows) / 80)));
+                            const arr = [];
+                            for (let i = 0; i < count; i++) {
+                                arr.push({
+                                    x: 2 + Math.random() * Math.max(1, cols - 4),
+                                    y: 2 + Math.random() * Math.max(1, rows - 4),
+                                    vx: 0,
+                                    vy: 0,
+                                    size: 1.0 + Math.random() * 2.8,
+                                });
+                            }
+                            return { particles: arr, settleT: 0 };
+                        };
+                        if (!patternState.survival) patternState.survival = seedSurvival();
+                        const S = patternState.survival;
+                        // End condition: ≤1 particle left → brief hold, then reseed
+                        if (S.particles.length <= 1) {
+                            S.settleT += dt;
+                            if (S.settleT > 2.5) {
+                                patternState.survival = seedSurvival();
+                            }
+                        }
+                        // Movement: chase nearest smaller; if none, random drift
+                        for (const p of S.particles) {
+                            let nearest = null;
+                            let nearestD = Infinity;
+                            for (const q of S.particles) {
+                                if (q === p || q.size >= p.size) continue;
+                                const dx = q.x - p.x;
+                                const dy = q.y - p.y;
+                                const d = dx * dx + dy * dy;
+                                if (d < nearestD) { nearestD = d; nearest = q; }
+                            }
+                            if (nearest) {
+                                const dx = nearest.x - p.x;
+                                const dy = nearest.y - p.y;
+                                const d = Math.sqrt(nearestD) || 1;
+                                const speed = 5.5;
+                                p.vx = (dx / d) * speed;
+                                p.vy = (dy / d) * speed;
+                            } else {
+                                // No prey — wander
+                                p.vx += (Math.random() - 0.5) * 1.4;
+                                p.vy += (Math.random() - 0.5) * 1.4;
+                                p.vx *= 0.94;
+                                p.vy *= 0.94;
+                            }
+                            p.x += p.vx * dt;
+                            p.y += p.vy * dt;
+                            if (p.x < p.size) { p.x = p.size; p.vx = Math.abs(p.vx); }
+                            if (p.x > cols - p.size) { p.x = cols - p.size; p.vx = -Math.abs(p.vx); }
+                            if (p.y < p.size) { p.y = p.size; p.vy = Math.abs(p.vy); }
+                            if (p.y > rows - p.size) { p.y = rows - p.size; p.vy = -Math.abs(p.vy); }
+                        }
+                        // Collisions: bigger consumes smaller
+                        const dead = new Set();
+                        for (let i = 0; i < S.particles.length; i++) {
+                            if (dead.has(i)) continue;
+                            const a = S.particles[i];
+                            for (let j = i + 1; j < S.particles.length; j++) {
+                                if (dead.has(j)) continue;
+                                const b = S.particles[j];
+                                const dx = a.x - b.x;
+                                const dy = a.y - b.y;
+                                const dist = Math.sqrt(dx * dx + dy * dy);
+                                if (dist < Math.max(a.size, b.size)) {
+                                    if (a.size > b.size) {
+                                        a.size = Math.sqrt(a.size * a.size + b.size * b.size * 0.6);
+                                        dead.add(j);
+                                    } else if (b.size > a.size) {
+                                        b.size = Math.sqrt(b.size * b.size + a.size * a.size * 0.6);
+                                        dead.add(i);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if (dead.size > 0) {
+                            S.particles = S.particles.filter((_, i) => !dead.has(i));
+                        }
+                        clearCanvas(ctx);
+                        ctx.fillStyle = LIVE_COLOR;
+                        for (const p of S.particles) {
+                            const r = p.size;
+                            const r2 = r * r;
+                            const minX = Math.floor(p.x - r);
+                            const maxX = Math.ceil(p.x + r);
+                            const minY = Math.floor(p.y - r);
+                            const maxY = Math.ceil(p.y + r);
+                            for (let yy = minY; yy <= maxY; yy++) {
+                                for (let xx = minX; xx <= maxX; xx++) {
+                                    const dx = xx + 0.5 - p.x;
+                                    const dy = yy + 0.5 - p.y;
+                                    if (dx * dx + dy * dy <= r2) drawCell(ctx, xx, yy);
+                                }
+                            }
+                        }
+                    },
+                    // 4. Matrix rain (abstract)
+                    (ctx, t, dt) => {
+                        if (!patternState.drops) {
+                            patternState.drops = [];
+                            for (let i = 0; i < cols; i++) {
+                                patternState.drops.push({
+                                    y: -Math.random() * rows,
+                                    speed: 8 + Math.random() * 18,
+                                    active: Math.random() < 0.4,
+                                });
+                            }
+                        }
+                        fadeCanvas(ctx);
+                        ctx.fillStyle = LIVE_COLOR;
+                        for (let x = 0; x < cols; x++) {
+                            const d = patternState.drops[x];
+                            if (!d.active) {
+                                if (Math.random() < 0.008) {
+                                    d.active = true;
+                                    d.y = -1;
+                                    d.speed = 8 + Math.random() * 18;
+                                }
+                                continue;
+                            }
+                            d.y += d.speed * dt;
+                            if (d.y >= rows + 1) { d.active = false; continue; }
+                            drawCell(ctx, x, Math.floor(d.y));
+                        }
+                    },
+                    // 5. Snake (arcade): AI wanders toward food, grows, resets if stuck
+                    (ctx, t, dt) => {
+                        const resetSnake = () => {
+                            const sx = Math.floor(cols / 2);
+                            const sy = Math.floor(rows / 2);
+                            const body = [];
+                            for (let i = 0; i < 6; i++) body.push({x: sx - i, y: sy});
+                            return {
+                                body,
+                                dir: [1, 0],
+                                food: { x: Math.floor(Math.random() * cols), y: Math.floor(Math.random() * rows) },
+                            };
+                        };
+                        if (!patternState.snake) {
+                            patternState.snake = Object.assign({ timer: 0, interval: 0.07 }, resetSnake());
+                        }
+                        const S = patternState.snake;
+                        S.timer += dt;
+                        while (S.timer >= S.interval) {
+                            S.timer -= S.interval;
+                            const head = S.body[0];
+                            const distR = ((S.food.x - head.x) + cols) % cols;
+                            const distD = ((S.food.y - head.y) + rows) % rows;
+                            const candidates = [];
+                            if (distR > 0 && distR <= cols - distR) candidates.push([1, 0]);
+                            if (distR > 0 && distR > cols - distR) candidates.push([-1, 0]);
+                            if (distD > 0 && distD <= rows - distD) candidates.push([0, 1]);
+                            if (distD > 0 && distD > rows - distD) candidates.push([0, -1]);
+                            const opposite = [-S.dir[0], -S.dir[1]];
+                            const safe = candidates.filter(d => !(d[0] === opposite[0] && d[1] === opposite[1])).filter(d => {
+                                const nx = (head.x + d[0] + cols) % cols;
+                                const ny = (head.y + d[1] + rows) % rows;
+                                for (let i = 0; i < S.body.length - 1; i++) {
+                                    if (S.body[i].x === nx && S.body[i].y === ny) return false;
+                                }
+                                return true;
+                            });
+                            if (safe.length > 0) S.dir = safe[0];
+                            const nx = (head.x + S.dir[0] + cols) % cols;
+                            const ny = (head.y + S.dir[1] + rows) % rows;
+                            let selfHit = false;
+                            for (let i = 0; i < S.body.length - 1; i++) {
+                                if (S.body[i].x === nx && S.body[i].y === ny) { selfHit = true; break; }
+                            }
+                            if (selfHit) {
+                                Object.assign(S, resetSnake());
+                                continue;
+                            }
+                            S.body.unshift({ x: nx, y: ny });
+                            if (nx === S.food.x && ny === S.food.y) {
+                                for (let tries = 0; tries < 30; tries++) {
+                                    const fx = Math.floor(Math.random() * cols);
+                                    const fy = Math.floor(Math.random() * rows);
+                                    if (!S.body.some(c => c.x === fx && c.y === fy)) {
+                                        S.food = { x: fx, y: fy };
+                                        break;
+                                    }
+                                }
+                            } else {
+                                S.body.pop();
+                            }
+                        }
+                        clearCanvas(ctx);
+                        ctx.fillStyle = LIVE_COLOR;
+                        for (const c of S.body) drawCell(ctx, c.x, c.y);
+                        drawCell(ctx, S.food.x, S.food.y);
+                    },
+                    // 6. Radial pulse rings (abstract)
+                    (ctx, t) => {
+                        clearCanvas(ctx);
+                        ctx.fillStyle = LIVE_COLOR;
+                        const cx = cols / 2, cy = rows / 2;
+                        const maxR = Math.sqrt(cx * cx + cy * cy);
+                        const span = maxR + 4;
+                        const ring1 = (t * 7) % span;
+                        const ring2 = ((t * 7) + span / 2) % span;
+                        for (let y = 0; y < rows; y++) {
+                            for (let x = 0; x < cols; x++) {
+                                const dx = x - cx, dy = y - cy;
+                                const d = Math.sqrt(dx * dx + dy * dy);
+                                if (Math.abs(d - ring1) < 0.7 || Math.abs(d - ring2) < 0.7) {
+                                    drawCell(ctx, x, y);
+                                }
+                            }
+                        }
+                    },
+                    // 7. Starfield twinkle (abstract): scattered cells fade in/out at independent phases
+                    (ctx, t) => {
+                        if (!patternState.stars) {
+                            patternState.stars = [];
+                            const count = Math.max(8, Math.floor(cols * rows * 0.05));
+                            for (let i = 0; i < count; i++) {
+                                patternState.stars.push({
+                                    x: Math.floor(Math.random() * cols),
+                                    y: Math.floor(Math.random() * rows),
+                                    phase: Math.random() * Math.PI * 2,
+                                    speed: 0.6 + Math.random() * 1.8,
+                                });
+                            }
+                        }
+                        clearCanvas(ctx);
+                        ctx.fillStyle = LIVE_COLOR;
+                        for (const s of patternState.stars) {
+                            const v = Math.sin(t * s.speed + s.phase);
+                            if (v > 0.2) drawCell(ctx, s.x, s.y);
+                        }
+                    },
+                    // 8. Spiral arms (abstract)
+                    (ctx, t) => {
+                        clearCanvas(ctx);
+                        ctx.fillStyle = LIVE_COLOR;
+                        const cx = cols / 2, cy = rows / 2;
+                        for (let y = 0; y < rows; y++) {
+                            for (let x = 0; x < cols; x++) {
+                                const dx = x - cx, dy = y - cy;
+                                const r = Math.sqrt(dx * dx + dy * dy);
+                                const a = Math.atan2(dy, dx);
+                                const v = a / (Math.PI * 2) + r * 0.06 - t * 0.35;
+                                const f = v - Math.floor(v);
+                                if (f < 0.15) drawCell(ctx, x, y);
+                            }
+                        }
+                    },
+                    // 9. Pong (arcade): perfect-tracking paddles, 2x2 ball, endless rally
+                    (ctx, t, dt) => {
+                        if (!patternState.pong) {
+                            patternState.pong = {
+                                bx: cols / 2,
+                                by: rows / 2,
+                                vx: 14 + Math.random() * 6,
+                                vy: (Math.random() - 0.5) * 14,
+                                ly: rows / 2 - 3,
+                                ry: rows / 2 - 3,
+                                ph: Math.max(5, Math.min(8, Math.floor(rows / 2.5))),
+                                ps: 20,
+                            };
+                        }
+                        const S = patternState.pong;
+                        S.bx += S.vx * dt;
+                        S.by += S.vy * dt;
+                        if (S.by <= 0) { S.by = 0; S.vy = Math.abs(S.vy); }
+                        if (S.by >= rows - 2) { S.by = rows - 2; S.vy = -Math.abs(S.vy); }
+                        if (S.bx <= 2 && S.by + 1 >= S.ly && S.by < S.ly + S.ph) {
+                            S.bx = 2;
+                            S.vx = Math.abs(S.vx);
+                            S.vy = (S.by + 0.5 - (S.ly + S.ph / 2)) * 7;
+                        }
+                        if (S.bx >= cols - 4 && S.by + 1 >= S.ry && S.by < S.ry + S.ph) {
+                            S.bx = cols - 4;
+                            S.vx = -Math.abs(S.vx);
+                            S.vy = (S.by + 0.5 - (S.ry + S.ph / 2)) * 7;
+                        }
+                        if (S.bx < -2 || S.bx > cols + 2) {
+                            S.bx = cols / 2;
+                            S.by = rows / 2;
+                            S.vx = (Math.random() < 0.5 ? -1 : 1) * (14 + Math.random() * 6);
+                            S.vy = (Math.random() - 0.5) * 14;
+                        }
+                        const target = S.by + 0.5 - S.ph / 2;
+                        const step = S.ps * dt;
+                        S.ly = Math.abs(S.ly - target) < step ? target : S.ly + Math.sign(target - S.ly) * step;
+                        S.ry = Math.abs(S.ry - target) < step ? target : S.ry + Math.sign(target - S.ry) * step;
+                        S.ly = Math.max(0, Math.min(rows - S.ph, S.ly));
+                        S.ry = Math.max(0, Math.min(rows - S.ph, S.ry));
+                        clearCanvas(ctx);
+                        ctx.fillStyle = LIVE_COLOR;
+                        // Paddles: 2 columns wide
+                        for (let i = 0; i < S.ph; i++) {
+                            drawCell(ctx, 0, Math.round(S.ly + i));
+                            drawCell(ctx, 1, Math.round(S.ly + i));
+                            drawCell(ctx, cols - 1, Math.round(S.ry + i));
+                            drawCell(ctx, cols - 2, Math.round(S.ry + i));
+                        }
+                        // Ball: 2x2
+                        const bx = Math.round(S.bx);
+                        const by = Math.round(S.by);
+                        drawCell(ctx, bx, by);
+                        drawCell(ctx, bx + 1, by);
+                        drawCell(ctx, bx, by + 1);
+                        drawCell(ctx, bx + 1, by + 1);
+                    },
+                    // 10. Crossing waves (abstract): two standing waves — pixels bob in place at each x, no horizontal scroll
+                    (ctx, t) => {
+                        clearCanvas(ctx);
+                        ctx.fillStyle = LIVE_COLOR;
+                        const amp = rows * 0.35;
+                        const cy = rows / 2;
+                        const k1 = (Math.PI * 2) / Math.max(6, cols * 0.18);
+                        const k2 = (Math.PI * 2) / Math.max(6, cols * 0.30);
+                        for (let x = 0; x < cols; x++) {
+                            const y1 = Math.round(cy + amp * Math.sin(x * k1) * Math.cos(t * 2.0));
+                            const y2 = Math.round(cy + amp * Math.sin(x * k2 + 0.7) * Math.cos(t * 1.3 + 0.5));
+                            drawCell(ctx, x, y1);
+                            drawCell(ctx, x, y2);
+                        }
+                    },
+                    // 11. Space invaders (arcade): 2 rows march; defender at the bottom shoots up
+                    (ctx, t, dt) => {
+                        const ALIEN_A = [[1,0],[3,0],[0,1],[1,1],[2,1],[3,1],[4,1],[0,2],[2,2],[4,2]];
+                        const ALIEN_B = [[1,0],[3,0],[0,1],[1,1],[2,1],[3,1],[4,1],[1,2],[3,2]];
+                        const DEFENDER = [[1,0],[0,1],[1,1],[2,1]];
+                        if (!patternState.invaders) {
+                            const ALIEN_W = 5, ALIEN_H = 3;
+                            const rowsCount = Math.max(1, Math.min(2, Math.floor(rows / 5)));
+                            const colsCount = Math.max(2, Math.min(8, Math.floor(cols / (ALIEN_W + 2))));
+                            const startX = Math.floor((cols - colsCount * (ALIEN_W + 2)) / 2);
+                            const aliens = [];
+                            for (let r = 0; r < rowsCount; r++) {
+                                for (let c = 0; c < colsCount; c++) {
+                                    aliens.push({ x: startX + c * (ALIEN_W + 2), y: 1 + r * (ALIEN_H + 1) });
+                                }
+                            }
+                            patternState.invaders = {
+                                aliens,
+                                dir: 1,
+                                timer: 0,
+                                interval: 0.32,
+                                frame: 0,
+                                alienW: ALIEN_W,
+                                alienH: ALIEN_H,
+                                defender: { x: cols / 2, fireT: 0 },
+                                bullets: [],
+                            };
+                        }
+                        const S = patternState.invaders;
+                        S.timer += dt;
+                        while (S.timer >= S.interval) {
+                            S.timer -= S.interval;
+                            S.frame = 1 - S.frame;
+                            let atEdge = false;
+                            for (const a of S.aliens) {
+                                if (S.dir > 0 && a.x + S.alienW >= cols) { atEdge = true; break; }
+                                if (S.dir < 0 && a.x <= 0) { atEdge = true; break; }
+                            }
+                            if (atEdge) {
+                                let bottomed = false;
+                                for (const a of S.aliens) {
+                                    a.y += 1;
+                                    if (a.y + S.alienH >= rows - 2) bottomed = true;
+                                }
+                                S.dir = -S.dir;
+                                if (bottomed) {
+                                    patternState.invaders = null;
+                                    break;
+                                }
+                            } else {
+                                for (const a of S.aliens) a.x += S.dir;
+                            }
+                        }
+                        if (!patternState.invaders) return;
+                        // Defender tracks nearest alien horizontally
+                        const D = S.defender;
+                        if (S.aliens.length > 0) {
+                            let target = S.aliens[0];
+                            let bestDist = Math.abs(target.x + S.alienW / 2 - D.x);
+                            for (const a of S.aliens) {
+                                const d = Math.abs(a.x + S.alienW / 2 - D.x);
+                                if (d < bestDist) { bestDist = d; target = a; }
+                            }
+                            const targetX = target.x + S.alienW / 2;
+                            const dStep = 12 * dt;
+                            const diff = targetX - D.x;
+                            D.x = Math.abs(diff) < dStep ? targetX : D.x + Math.sign(diff) * dStep;
+                            D.x = Math.max(1, Math.min(cols - 2, D.x));
+                        }
+                        // Fire bullets
+                        D.fireT += dt;
+                        if (D.fireT > 0.45 && S.aliens.length > 0) {
+                            D.fireT = 0;
+                            S.bullets.push({ x: D.x, y: rows - 3, vy: -22 });
+                        }
+                        for (const b of S.bullets) b.y += b.vy * dt;
+                        S.bullets = S.bullets.filter(b => b.y > -1);
+                        // Bullet-alien collisions
+                        const killed = new Set();
+                        S.aliens = S.aliens.filter(a => {
+                            for (let i = 0; i < S.bullets.length; i++) {
+                                if (killed.has(i)) continue;
+                                const b = S.bullets[i];
+                                if (b.x >= a.x && b.x < a.x + S.alienW && b.y >= a.y && b.y < a.y + S.alienH) {
+                                    killed.add(i);
+                                    return false;
+                                }
+                            }
+                            return true;
+                        });
+                        S.bullets = S.bullets.filter((_, i) => !killed.has(i));
+                        if (S.aliens.length === 0) {
+                            patternState.invaders = null;
+                            return;
+                        }
+                        clearCanvas(ctx);
+                        ctx.fillStyle = LIVE_COLOR;
+                        const sprite = S.frame === 0 ? ALIEN_A : ALIEN_B;
+                        for (const a of S.aliens) {
+                            for (const [dx, dy] of sprite) drawCell(ctx, a.x + dx, a.y + dy);
+                        }
+                        // Defender (centered on D.x at the bottom 2 rows)
+                        const dxBase = Math.round(D.x);
+                        const dyBase = rows - 2;
+                        for (const [px, py] of DEFENDER) drawCell(ctx, dxBase + px - 1, dyBase + py);
+                        // Bullets
+                        for (const b of S.bullets) drawCell(ctx, Math.round(b.x), Math.round(b.y));
+                    },
+                    // 12. Lissajous trail (abstract)
+                    (ctx, t) => {
+                        fadeCanvas(ctx);
+                        ctx.fillStyle = LIVE_COLOR;
+                        const cx = cols / 2, cy = rows / 2;
+                        const ax = cols * 0.42, ay = rows * 0.42;
+                        const px = Math.round(cx + ax * Math.sin(t * 1.7));
+                        const py = Math.round(cy + ay * Math.sin(t * 2.3 + 0.7));
+                        drawCell(ctx, px, py);
+                        drawCell(ctx, px + 1, py);
+                        drawCell(ctx, px, py + 1);
+                        drawCell(ctx, px + 1, py + 1);
+                    },
+                    // 13. Breathing grid of dots (abstract)
+                    (ctx, t) => {
+                        clearCanvas(ctx);
+                        ctx.fillStyle = LIVE_COLOR;
+                        for (let y = 0; y < rows; y += 2) {
+                            for (let x = 0; x < cols; x += 2) {
+                                const phase = x * 0.18 + y * 0.30;
+                                const v = Math.sin(t * 1.6 + phase);
+                                if (v > 0.3) drawCell(ctx, x, y);
+                            }
+                        }
+                    },
+                    // 14. Diagonal stripes scroll (abstract)
+                    (ctx, t) => {
+                        clearCanvas(ctx);
+                        ctx.fillStyle = LIVE_COLOR;
+                        const stride = 8;
+                        const offset = (t * 8) % stride;
+                        for (let y = 0; y < rows; y++) {
+                            for (let x = 0; x < cols; x++) {
+                                if (((x + y + offset) % stride) < 2) drawCell(ctx, x, y);
+                            }
+                        }
+                    },
+                ];
+
+                // Pick a random starting pattern each mount so consecutive pending bubbles
+                // don't always open with the same one.
+                patternIdx = Math.floor(Math.random() * patterns.length);
+
+                function applyPattern() {
+                    patternState = {};
+                    patternStart = performance.now();
+                    prevNow = patternStart;
+                    const ctx = canvas.getContext("2d");
+                    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+                    clearCanvas(ctx);
+                }
+
+                function geometry() {
+                    const rect = container.getBoundingClientRect();
+                    dpr = window.devicePixelRatio || 1;
+                    w = Math.max(40, Math.floor(rect.width));
+                    h = Math.max(16, Math.floor(rect.height));
+                    canvas.style.width = w + "px";
+                    canvas.style.height = h + "px";
+                    canvas.style.display = "block";
+                    canvas.width = Math.floor(w * dpr);
+                    canvas.height = Math.floor(h * dpr);
+                    cols = Math.max(8, Math.floor(w / CELL));
+                    rows = Math.max(4, Math.floor(h / CELL));
+                }
+
+                function loop(now) {
+                    const ctx = canvas.getContext("2d");
+                    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+                    const t = (now - patternStart) / 1000;
+                    const dt = Math.min(0.1, (now - prevNow) / 1000);
+                    prevNow = now;
+                    patterns[patternIdx](ctx, t, dt);
+                    rafId = requestAnimationFrame(loop);
+                }
+
+                function cycle() {
+                    patternIdx = (patternIdx + 1) % patterns.length;
+                    applyPattern();
+                }
+
+                geometry();
+                applyPattern();
+                rafId = requestAnimationFrame(loop);
+
+                const clickTarget = container.parentElement;
+                const onClick = () => cycle();
+                if (clickTarget) {
+                    clickTarget.style.cursor = "pointer";
+                    clickTarget.addEventListener("click", onClick);
+                }
+
+                let ro = null;
+                if (typeof ResizeObserver !== "undefined") {
+                    ro = new ResizeObserver(() => {
+                        if (firstRoFire) { firstRoFire = false; return; }
+                        geometry();
+                        applyPattern();
+                    });
+                    ro.observe(container);
+                }
+
+                return () => {
+                    if (rafId) cancelAnimationFrame(rafId);
+                    if (ro) ro.disconnect();
+                    if (clickTarget) {
+                        clickTarget.style.cursor = "";
+                        clickTarget.removeEventListener("click", onClick);
+                    }
+                };
+            }, []);
+
+            return (
+                <div
+                    ref={containerRef}
+                    className="absolute inset-0 pointer-events-none"
+                    aria-hidden="true"
+                >
+                    <canvas ref={canvasRef} />
+                </div>
+            );
+        }
+
         function ChatElapsedSeconds({ startTs }) {
             const [secs, setSecs] = useState(0);
             useEffect(() => {
@@ -4638,7 +5295,7 @@
                                         </button>
                                     ) : null}
                                 </div>
-                                <div ref={sidebarScrollRef} className="flex-1 sidebar-scroll py-1 px-3 space-y-1 min-h-0">
+                                <div ref={sidebarScrollRef} className="flex-1 sidebar-scroll py-1 px-3 space-y-1.5 min-h-0">
                                     {ideasLoading ? (
                                         <>
                                             {[0, 1, 2].map((idx) => (
@@ -4826,7 +5483,7 @@
                         <div className="flex-shrink-0 border-b border-[#1a1d21] px-3 py-2 flex items-center justify-between gap-2">
                             <span className="header-text text-xs text-slate-500 truncate">{currentIdeaName}</span>
                         </div>
-                        <div className="flex-1 overflow-y-auto p-4 space-y-2 min-h-0">
+                        <div className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
                             {!currentIdeaId ? (
                                 <p className="text-slate-600 text-xs italic">Select an idea from the list or click + New to start.</p>
                             ) : userFirstTurnPending && messages.length === 0 ? (
@@ -4903,7 +5560,7 @@
                                                     msg.error
                                                         ? "rounded-xl border border-red-900/60 bg-red-950/40 overflow-hidden w-full min-w-0"
                                                         : msg.pending
-                                                          ? "rounded-xl border border-slate-600/50 bg-[#1a1d21] overflow-hidden w-full min-w-0 chat-pending-soft"
+                                                          ? "rounded-xl border border-slate-600/50 bg-[#1a1d21] overflow-hidden w-full min-w-0 relative min-h-[70px] flex items-center"
                                                           : "rounded-xl border border-[#2a2d31] bg-[#1a1d21] overflow-hidden w-full min-w-0";
                                                 const proseAssumptionsDivider =
                                                     hasAssumptions
@@ -4917,9 +5574,10 @@
                                                     <>
                                                         {showAssistantCard ? (
                                                             <div className={assistantCardShell}>
+                                                                {msg.pending && <PendingBubbleLifeBackdrop />}
                                                                 {hasProse ? (
                                                                     <div
-                                                                        className={`flex flex-row items-stretch gap-1 px-3 py-2 w-full min-w-0 ${proseAssumptionsDivider}`}
+                                                                        className={`relative z-10 ${msg.pending ? "opacity-50" : ""} flex flex-row items-stretch gap-1 px-3 py-2 w-full min-w-0 ${proseAssumptionsDivider}`}
                                                                     >
                                                                         <div
                                                                             className={`msg-md text-sm min-w-0 flex-1 leading-[1.6] ${
@@ -4968,7 +5626,7 @@
                             <div ref={messagesEndRef} />
                         </div>
                         <div
-                            className={`flex-shrink-0 border-t p-3 space-y-2 bg-[#141618] transition-colors ${isDraggingOver ? "border-cyan-500 bg-cyan-950/20" : "border-[#1a1d21]"}`}
+                            className={`flex-shrink-0 border-t p-3 space-y-2.5 bg-[#141618] transition-colors ${isDraggingOver ? "border-cyan-500 bg-cyan-950/20" : "border-[#1a1d21]"}`}
                             onDragOver={(e) => {
                                 if (!currentIdeaId || isLoading) return;
                                 if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files")) {
@@ -5077,7 +5735,7 @@
                                     key={tab.id}
                                     onClick={() => setActiveDocTab(tab.id)}
                                     style={{
-                                        padding:'8px 16px', fontSize:'13px',
+                                        padding:'10px 16px', fontSize:'13px',
                                         fontWeight: activeDocTab === tab.id ? 600 : 400,
                                         color: activeDocTab === tab.id ? '#fff' : '#94a3b8',
                                         borderBottom: activeDocTab === tab.id ? '2px solid #00b4d8' : '2px solid transparent',
@@ -5143,10 +5801,10 @@
                                                 <div
                                                     key={title}
                                                     id={`prd-sec-${slug}`}
-                                                    className={`mb-5 group/section ${draftingIndicator === title ? "ring-1 ring-[#00b4d8]/20 rounded" : ""} ${isRemovedDiff ? "rounded border border-dashed border-slate-600/80 bg-[#0d0f11]/50 p-3 opacity-90" : ""}`}
+                                                    className={`mb-6 group/section ${draftingIndicator === title ? "ring-1 ring-[#00b4d8]/20 rounded" : ""} ${isRemovedDiff ? "rounded border border-dashed border-slate-600/80 bg-[#0d0f11]/50 p-3 opacity-90" : ""}`}
                                                 >
                                                     {/* Section header row: title/badge left, controls right */}
-                                                    <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+                                                    <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                                                         <div className="flex items-center gap-2 min-w-[180px]">
                                                             <span className="header-text text-sm font-semibold text-[#00b4d8]">
                                                                 {title}
@@ -5461,7 +6119,7 @@
                         )}
                         {/* ── Sticky action bar ─────────────────────────────────────────── */}
                         {prdContent.trim().length > 0 && (
-                            <div className="flex-shrink-0 border-t border-[#1a1d21] px-4 py-2 bg-[#0d0f11] space-y-2">
+                            <div className="flex-shrink-0 border-t border-[#1a1d21] px-4 py-3 bg-[#0d0f11] space-y-2.5">
                                 {activeDocTab === "prd" && (
                                     <React.Fragment>
                                 {readinessStatus === "updating" && (
