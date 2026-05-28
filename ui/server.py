@@ -2857,7 +2857,11 @@ def get_roadmap():
     1. pipeline_state[\"project_path\"] (realpath) → _canonical_roadmap_path
     2. config [\"roadmap_path\"] (fallback: first-time setup, idle, explicit override)
 
-    Returns a JSON array of phase objects with id, goal, status, and exit_criteria.
+    Returns a JSON array of phase objects with id, goal, status, exit_criteria,
+    and behavioral_verification. ``behavioral_verification`` is either the
+    structured ``{user_observable, how_to_check, failure_language}`` block or
+    ``None`` for pre-P0 phases that predate the block (transitional only —
+    preflight refuses to stage projects whose roadmap is missing the block).
     If pipeline_state contains current_phase_raw_id, the matching phase's status
     is overridden to 'in_progress' (taking precedence over checkbox status) when
     pipeline_status is not terminal. Returns [] when no roadmap file is found or

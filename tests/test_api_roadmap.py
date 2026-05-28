@@ -365,3 +365,82 @@ class TestRoadmapResolvesFromPipelineState:
         ids = [p["id"] for p in data]
         assert "GLOB-1" in ids
         assert "OTHER-1" not in ids
+
+
+class TestRoadmapBehavioralVerification:
+    """P0 Stage J — /api/roadmap must surface the per-phase Behavioral
+    Verification block to the frontend.
+
+    Stage D wired ``ui/roadmap_parser.parse_roadmap`` to emit a
+    ``behavioral_verification`` field per phase. The endpoint at
+    ``ui/server.py:get_roadmap`` returns the parser output unfiltered, so
+    the field already reaches the frontend in practice. This test pins
+    that contract — a future refactor that introduces a Pydantic response
+    model, an explicit field allowlist, or any other accidental filter
+    will fail here rather than silently break the new Stage J phase
+    dropdown rendering.
+    """
+
+    def test_endpoint_round_trips_behavioral_verification(self, temp_dir):
+        """Roadmap fixture with a full Behavioral Verification block →
+        the endpoint response carries the structured dict on the
+        corresponding phase, with all three sub-fields intact."""
+        roadmap = (
+            "# Round-trip fixture\n"
+            "\n"
+            "- [ ] `CORE-J1` | LOW | First phase exercising behavioral verification\n"
+            "  **Behavioral Verification:**\n"
+            "  - **User-observable:** A round-trip-fixture user sees the canary line.\n"
+            "  - **How we'll check:** Visit /canary and assert the body equals \"OK\".\n"
+            "  - **If this fails, the user sees:** \"Canary endpoint unreachable.\"\n"
+            "- [ ] `CORE-J2` | LOW | Phase without the new block (pre-P0 shape)\n"
+        )
+        roadmap_path = os.path.join(temp_dir, "roadmap.md")
+        with open(roadmap_path, "w") as f:
+            f.write(roadmap)
+
+        mock_config = {
+            "pipeline_state_path": os.path.join(temp_dir, "pipeline_state.json"),
+            "phase_state_path": os.path.join(temp_dir, "phase_state.json"),
+            "lock_path": os.path.join(temp_dir, "pipeline.lock"),
+            "events_path": os.path.join(temp_dir, "pipeline_events.jsonl"),
+            "roadmap_path": roadmap_path,
+        }
+        with patch("ui.server.load_config", return_value=mock_config):
+            response = client.get("/api/roadmap")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data, list)
+        assert len(data) == 2
+
+        # First phase: full BV block — must round-trip with exact field values.
+        phase_one = data[0]
+        assert phase_one["id"] == "CORE-J1"
+        bv = phase_one.get("behavioral_verification")
+        assert bv is not None, (
+            "/api/roadmap dropped the behavioral_verification field for a "
+            "phase that has a complete block in the source roadmap. The "
+            "parser emits the dict; the endpoint must not filter it out."
+        )
+        assert bv == {
+            "user_observable": "A round-trip-fixture user sees the canary line.",
+            "how_to_check": 'Visit /canary and assert the body equals "OK".',
+            "failure_language": '"Canary endpoint unreachable."',
+        }, (
+            "behavioral_verification round-trip is wrong-shaped. All three "
+            "sub-fields must survive the parse → serialize → JSON path "
+            "byte-for-byte."
+        )
+
+        # Second phase: no BV block — None must survive too (transitional
+        # case for pre-P0 roadmaps; the UI subsection short-circuits on
+        # null, so the contract is "exposed as null, not omitted").
+        phase_two = data[1]
+        assert phase_two["id"] == "CORE-J2"
+        assert "behavioral_verification" in phase_two, (
+            "phases without the block must still expose the key as null. "
+            "Omitting it would force every UI consumer to defensive-check "
+            "before reading, defeating the parser's contract."
+        )
+        assert phase_two["behavioral_verification"] is None

@@ -12,7 +12,10 @@ H03 = "Gate failed; retries exhausted. See phase state for the specific gate."
 H04 = "Awaiting your decision in the active phase."
 H05 = "Overwrites any existing parent. Child enters Waiting on parent until the parent completes."
 H06 = "Removes parent and restores the entry to READY."
-H07 = "Required format check before Run Preflight."
+# H07 — was "Required format check before Run Preflight." — title on the Step 2
+# "Validate roadmap" button. P0 Stage J.4 removed that button (Setup-screen
+# Step 2 became a read-only summary card of the linked Project Idea), so the
+# title constant and its assertion are gone with it.
 H08 = "Required before Launch."
 H09 = "Creates phase branch and starts the orchestrator. Use Stop Pipeline to halt."
 H12 = (
@@ -59,13 +62,17 @@ def test_depends_on_select_merged_parent_hints_h05_h06(html_content):
     assert H05 in window and H06 in window, "Merged parent hint should appear near Depends on control"
 
 
-def test_preflight_button_titles_h07_h08_h09_h12(html_content):
-    """H-07, H-08, H-09, H-12: Setup & Preflight primary actions."""
-    assert H07 in html_content
+def test_preflight_button_titles_h08_h09_h12(html_content):
+    """H-08, H-09, H-12: Setup & Preflight primary actions.
+
+    Originally also covered H-07 ("Required format check before Run Preflight.")
+    — the native title on the Step 2 "Validate roadmap" button. P0 Stage J.4
+    removed that button when it replaced the free-text textarea with a
+    read-only summary card of the linked Project Idea. H-07 stays in the
+    docstring index as a historical anchor; the assertion is gone."""
     assert H08 in html_content
     assert H09 in html_content
     assert H12 in html_content
-    assert "title={P3_PREFLIGHT_TITLE_VALIDATE_ROADMAP}" in html_content
     assert "title={P3_PREFLIGHT_TITLE_LAUNCH_NOW}" in html_content
     assert "P3_PREFLIGHT_TITLE_RERUN_PREFLIGHT" in html_content
     assert "P3_PREFLIGHT_TITLE_RUN_PREFLIGHT" in html_content
