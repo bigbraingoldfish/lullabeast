@@ -2270,18 +2270,25 @@ class Orchestrator:
     def _record_injected_skill(self, agent_role: str) -> None:
         """Write skill_injected and skill_agent to phase_state.json after inject_skill().
 
-        Reads the workspace skills directory to determine what was actually placed by
-        skill_manager.inject_skill() — the directory is clean-then-write, so any
-        subdirectory present after the call is the current skill (or empty = no skill).
-        Writes skill_injected: None if injection produced no skill (disabled, not mapped,
-        or source file missing).  Non-blocking: errors are logged and swallowed.
+        Reads the workspace skills directory to identify the *variable* phase-prefix
+        discipline.  P1 Stage A added two constant base disciplines that are injected
+        on every phase regardless of prefix; those are filtered out here because
+        surfacing them in metrics rows or in the UI's "Skill: X / role" label would
+        be pure reporting noise — the value of this field is precisely "which
+        discipline did this phase route to."
+
+        Writes skill_injected: None if no prefix discipline applies (unmapped or empty
+        phase ID, missing source file, or the role / global kill switch suppressed all
+        injection).  Non-blocking: errors are logged and swallowed.
         """
         skills_dir = os.path.join(OPENCLAW_ROOT, f"workspace-{agent_role}", "skills")
+        base_dirnames = {f"{d}-{agent_role}" for d in SkillManager.BASE_DISCIPLINES}
         discipline = None
         try:
             entries = [
                 e for e in os.listdir(skills_dir)
                 if os.path.isdir(os.path.join(skills_dir, e))
+                and e not in base_dirnames
             ]
             if entries:
                 skill_name = entries[0]

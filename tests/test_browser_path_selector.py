@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import tempfile
 import time
 import urllib.error
@@ -239,31 +240,99 @@ def test_queue_add_autorepairs_git(pw_page):
 
 
 def test_recents_appear_after_preflight(pw_page):
-    """POST preflight via API so recents list is non-empty; datalist gets options in DOM."""
+    """POST preflight via API so recents list is non-empty; datalist gets options in DOM.
+
+    Fixture writes the canonical P0-compliant project shape (roadmap with a
+    Behavioral Verification block, ``verification.md`` with all five required
+    sections). Both files are required by Stage C's strict preflight; the
+    test's actual concern is that a successful preflight call populates the
+    recents list and the UI exposes it as a ``<datalist>`` option.
+
+    Skip-handling discipline (P1 Stage B): the only sanctioned skip path is
+    a missing OpenClaw workspace install — every other failure mode raises
+    ``pytest.fail`` rather than silently masking a real regression.
+
+    Cleanup: the test removes its tmpdir on disk and POSTs
+    ``/api/setup/recent-projects/prune`` so the recents JSON self-cleans
+    rather than accumulating one stale ``/tmp/autodev-e2e-rc-*`` entry per
+    run. Prune sweeps the entry because its directory no longer exists.
+    """
     base = tempfile.mkdtemp(prefix="autodev-e2e-rc-")
-    proj = os.path.join(base, "prefproj")
-    os.makedirs(proj, exist_ok=True)
-    with open(os.path.join(proj, "roadmap.md"), "w") as f:
-        f.write("- [ ] `T-E1` | LOW | Task\n  > Test.\n")
-
-    body = json.dumps({"repo_path": proj}).encode("utf-8")
-    req = urllib.request.Request(
-        URL + "/api/setup/preflight",
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-            data = json.loads(raw)
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        pytest.skip(f"Preflight HTTP {e.code} (needs full OpenClaw workspaces): {body[:500]}")
-    checks = data.get("checks") or []
-    if any(c.get("status") == "fail" for c in checks):
-        pytest.skip(f"Preflight had failing checks (need workspaces): {checks[:3]}")
+        proj = os.path.join(base, "prefproj")
+        os.makedirs(proj, exist_ok=True)
+        # ``> Test:`` (colon) is the form _validate_roadmap_content's regex
+        # accepts. A period would be rejected if seed-validation ever runs
+        # on existing on-disk roadmaps — defensive consistency with the
+        # canonical fixture shape in test_queue_add_autorepairs_git above.
+        with open(os.path.join(proj, "roadmap.md"), "w") as f:
+            f.write(
+                "- [ ] `T-E1` | LOW | Task\n"
+                "  > Test: It works.\n"
+                "  **Behavioral Verification:**\n"
+                "  - **User-observable:** It works.\n"
+                "  - **How we'll check:** Run it.\n"
+                "  - **If this fails, the user sees:** Nothing.\n"
+            )
+        # verification.md required by _run_preflight_checks step 7 (strict
+        # mode, no opt-out). Five sections, each with a non-empty body.
+        with open(os.path.join(proj, "verification.md"), "w") as f:
+            f.write(
+                "# Verification\n\n"
+                "## Project type\ncli\n\n"
+                "## Entry point\n- Command: `x`\n- Ready signal: ok\n\n"
+                "## Public surface\n1. do thing\n\n"
+                "## Verification stack\n- Acceptance tool: subprocess + assertions\n"
+            )
 
-    _goto_preflight(pw_page)
-    opts = pw_page.locator("#preflight-repo-path-recents option")
-    assert opts.count() >= 1
+        body = json.dumps({"repo_path": proj}).encode("utf-8")
+        req = urllib.request.Request(
+            URL + "/api/setup/preflight",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+                data = json.loads(raw)
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8", errors="replace")
+            # An HTTP error is a real server-side bug, not a CI artefact —
+            # fail loud instead of silently skipping.
+            pytest.fail(f"Preflight HTTP {e.code}: {err_body[:500]}")
+
+        checks = data.get("checks") or []
+        fails = [c for c in checks if c.get("status") == "fail"]
+        # Only workspace-{agent} failures are a sanctioned skip case (CI
+        # without a full OpenClaw install). Any other failure means the
+        # fixture or the endpoint regressed and should fail loud.
+        non_workspace_fails = [
+            c for c in fails if not str(c.get("check", "")).startswith("workspace-")
+        ]
+        if non_workspace_fails:
+            pytest.fail(
+                f"Preflight failed with non-workspace issues "
+                f"(fixture should satisfy these): {non_workspace_fails}"
+            )
+        if fails:
+            pytest.skip(
+                f"Preflight workspace checks failed (CI without OpenClaw): {fails}"
+            )
+
+        _goto_preflight(pw_page)
+        opts = pw_page.locator("#preflight-repo-path-recents option")
+        assert opts.count() >= 1
+    finally:
+        # Remove tmpdir so prune sweeps the recents entry. Best-effort: a
+        # cleanup failure must not mask a real test failure.
+        shutil.rmtree(base, ignore_errors=True)
+        try:
+            prune_req = urllib.request.Request(
+                URL + "/api/setup/recent-projects/prune",
+                data=b"",
+                method="POST",
+            )
+            urllib.request.urlopen(prune_req, timeout=10).close()
+        except Exception:
+            pass

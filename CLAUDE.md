@@ -408,6 +408,8 @@ Skill files live in `autodev/skill-library/{discipline}/{agent_role}/SKILL.md`. 
 
 **The 9 disciplines:** `api-service`, `auth-security`, `cli-tooling`, `core-logic`, `data-persistence`, `infra-config`, `integration-wiring`, `testing-quality`, `ui-frontend`.
 
+**Base skills (always injected, P1 Stage A).** Two of the nine disciplines — `integration-wiring` and `testing-quality` — are written to the agent workspace on **every phase regardless of the phase prefix**. They are the universal-rule layer (integration-wiring's "read the entrypoint before wiring" rule and testing-quality's TDD discipline). The phase-prefix discipline is layered on top when the prefix maps. See `SkillManager.BASE_DISCIPLINES`.
+
 ### Mapping mechanism
 
 `autodev/config/skill_mapping.yaml` maps roadmap subsystem prefixes (uppercase) to discipline directory names. Example:
@@ -432,9 +434,15 @@ The subsystem is extracted from the phase ID by `phase_raw_id.split("-")[0].uppe
 OPENCLAW_ROOT/workspace-{agent_role}/skills/{discipline}-{agent_role}/SKILL.md
 ```
 
-Example: `~/.openclaw/workspace-executor/skills/core-logic-executor/SKILL.md`
+After P1 Stage A, the directory holds **two or three** subdirectories per phase: the two base skills always, plus the phase-prefix discipline when one maps. Example for a `CORE-E2` executor phase:
 
-`_clean_workspace_skills()` runs **before** every injection (including no-op cases). It does `shutil.rmtree` followed by `os.makedirs`. This ensures no stale skill from a previous phase can survive into the next phase. OpenClaw loads `workspace/skills/{name}/SKILL.md` at session start.
+```
+~/.openclaw/workspace-executor/skills/integration-wiring-executor/SKILL.md
+~/.openclaw/workspace-executor/skills/testing-quality-executor/SKILL.md
+~/.openclaw/workspace-executor/skills/core-logic-executor/SKILL.md
+```
+
+`_clean_workspace_skills()` runs **exactly once at the start of every `inject_skill()` call** (`shutil.rmtree` + `os.makedirs`). All base + prefix skills are written into the freshly prepared directory; no per-skill cleanup. This ensures no stale skill from a previous phase can survive into the next phase. OpenClaw's `loadWorkspaceSkillEntries` walks the entire `skills/` tree at session start and surfaces every `SKILL.md` it finds — that's why writing multiple subdirectories per phase works without any OpenClaw configuration change.
 
 ### The `~/.openclaw/skills/` (global tier) is intentionally untouched
 
@@ -442,16 +450,23 @@ Example: `~/.openclaw/workspace-executor/skills/core-logic-executor/SKILL.md`
 
 ### Conditions under which injection is silently skipped
 
-`inject_skill()` always cleans the workspace skills directory first (removing prior skill), then returns early (injecting nothing) if any of these are true:
+The kill switches suppress **everything** (base + prefix); the per-skill skip cases suppress only the *prefix* skill (the base skills still inject in the same call).
+
+**Kill switches — no skills injected at all (workspace ends up empty):**
 1. `pipeline.skills.enabled` is `false` in `openclaw.json`
 2. `pipeline.skills.{agent_role}_skills_enabled` is `false`
-3. `phase_raw_id` is empty
-4. Subsystem prefix has no entry in `skill_mapping.yaml`
-5. `autodev/skill-library/{discipline}/{role}/SKILL.md` does not exist on disk
-6. `OSError` during file copy
-7. PyYAML not installed
+3. `_clean_workspace_skills()` failure (workspace directory unwritable)
+4. PyYAML not installed (mapping disabled; base skills also need no mapping but the missing-PyYAML log warns at construction — base skills do still inject in this case)
 
-In all cases a `[SKILL]` log line is emitted to stdout with `Status=none_mapped`, `Status=disabled`, or `Status=none_found` before returning.
+**Prefix-skip cases — base skills inject; only the prefix is skipped:**
+5. `phase_raw_id` is empty
+6. Subsystem prefix has no entry in `skill_mapping.yaml`
+7. `autodev/skill-library/{discipline}/{role}/SKILL.md` does not exist on disk (prefix or base — a missing base-skill source skips only that one base discipline; the others and the prefix still inject)
+8. `OSError` during file copy (per-skill, not per-call)
+
+In all cases a `[SKILL]` log line is emitted to stdout with `Status=loaded base=true|false`, `Status=none_mapped`, `Status=disabled`, or `Status=none_found`. Operators can grep for `base=true|false` to distinguish base-skill outcomes from prefix-skill outcomes.
+
+`phase_state.skill_injected` (consumed by metrics row, UI label, snapshot endpoint) intentionally records only the **variable phase-prefix discipline** — base skills are filtered out by `_record_injected_skill()` because surfacing constant values would be reporting noise.
 
 ---
 

@@ -6682,6 +6682,70 @@ def get_setup_recent_projects():
     return {"projects": _read_recent_projects()}
 
 
+@app.delete("/api/setup/recent-projects")
+async def delete_setup_recent_project(request: Request):
+    """Remove a single entry from the recent-projects list by absolute path.
+
+    Body: ``{"path": "<absolute path>"}``. The path is canonicalized via
+    ``os.path.realpath(os.path.expanduser(...))`` — the same normalization
+    :func:`append_recent_project` applies before storing — so callers may
+    submit denormalized forms (e.g. ``~/foo`` or ``/a/./b``) and still
+    target the stored entry.
+
+    Idempotent: removing a path not in the list returns ``removed=False``
+    with status 200, not an error.
+    """
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="JSON body object required")
+    raw = body.get("path")
+    if not isinstance(raw, str) or not raw.strip():
+        raise HTTPException(status_code=422, detail="path is required (non-empty string)")
+    target = os.path.realpath(os.path.expanduser(raw.strip()))
+    entries = _read_recent_projects()
+    kept = [
+        e for e in entries
+        if not (isinstance(e, dict) and e.get("path") == target)
+    ]
+    removed = len(kept) != len(entries)
+    if removed:
+        _write_recent_projects_atomic(kept)
+    return {"removed": removed, "projects": kept}
+
+
+@app.post("/api/setup/recent-projects/prune")
+def post_setup_recent_projects_prune():
+    """Remove every recent-projects entry whose ``path`` is no longer a directory on disk.
+
+    Returns ``{"removed_count": int, "removed_paths": [str, ...], "projects": [entry, ...]}``.
+
+    Used by tests in tear-down (after the test's tmpdir is gone) so test runs
+    self-clean instead of accumulating stale entries, and exposed for ad-hoc
+    operator cleanup of accumulated dead entries from manually deleted
+    projects. Malformed entries (non-dict, missing/empty ``path``) are also
+    treated as dead and removed.
+    """
+    entries = _read_recent_projects()
+    kept: list = []
+    removed_paths: list[str] = []
+    for e in entries:
+        if not isinstance(e, dict):
+            removed_paths.append(repr(e))
+            continue
+        p = e.get("path")
+        if isinstance(p, str) and p and os.path.isdir(p):
+            kept.append(e)
+        else:
+            removed_paths.append(p if isinstance(p, str) else repr(p))
+    if removed_paths:
+        _write_recent_projects_atomic(kept)
+    return {
+        "removed_count": len(removed_paths),
+        "removed_paths": removed_paths,
+        "projects": kept,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Queue endpoints
 # IMPORTANT: Fixed-path routes (status, trigger-next, mode) MUST be registered
