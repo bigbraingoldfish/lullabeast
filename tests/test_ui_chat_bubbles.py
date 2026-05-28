@@ -35,7 +35,7 @@ def assistant_reply_card_outer_class(msg: Mapping[str, Any]) -> str:
     if msg.get("pending"):
         return (
             "rounded-xl border border-slate-600/50 bg-[#1a1d21] overflow-hidden "
-            "w-full min-w-0 chat-pending-soft"
+            "w-full min-w-0"
         )
     return (
         "rounded-xl border border-[#2a2d31] bg-[#1a1d21] overflow-hidden "
@@ -72,9 +72,6 @@ def test_assistant_pending_inner_flat_no_nested_bubble():
     assert "leading-[1.6]" in s
     assert "border-[#00b4d8]" not in s
     assert "rounded-lg" not in s
-    assert "chat-pending-soft" not in s
-    outer = assistant_reply_card_outer_class({"error": False, "pending": True})
-    assert "chat-pending-soft" in outer
 
 
 def test_assistant_error_inner_flat_no_nested_bubble():

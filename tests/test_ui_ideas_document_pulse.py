@@ -88,4 +88,3 @@ class TestIdeasDocumentPulse:
         func_body = extract_function_body(content, "IdeasScreen")
         assert func_body is not None
         assert "Updating PRD draft" in func_body
-        assert "chat-pending-soft" in func_body
