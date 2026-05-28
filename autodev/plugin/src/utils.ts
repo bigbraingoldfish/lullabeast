@@ -9,46 +9,135 @@ export const PIPELINE_AGENT_IDS = new Set(["planner", "executor", "reviewer"]);
 export const PRD_CREATOR_AGENT_ID = "prd-creator";
 
 /**
- * Return true when sessionKey belongs to the Ideas UI workflow (OpenClaw
- * session keys prefixed with "ideas:").
+ * Return true when sessionKey belongs to the Ideas UI workflow.
+ *
+ * Accepts both the bare ``ideas:`` prefix and the OpenClaw gateway-normalised
+ * form ``agent:{role}:ideas:`` (e.g. ``agent:prd-creator:ideas:abc:session-1``),
+ * mirroring :func:`isPipelineSession` below.  Without the gateway-prefix
+ * branch, production hookCtx.sessionKey values fail this check and the
+ * stamp-touch path is silently skipped — the live bug observed on
+ * Untitled Balloon Popping Game (chat session-13/14) where ``startup_grace``
+ * fired at 30 s while the agent was genuinely working.
  */
 export function isIdeasSession(sessionKey: string | undefined): boolean {
-  return typeof sessionKey === "string" && sessionKey.startsWith("ideas:");
+  if (typeof sessionKey !== "string") return false;
+  return (
+    sessionKey.startsWith("ideas:") ||
+    /^agent:[a-z0-9_-]+:ideas:/i.test(sessionKey)
+  );
 }
 
 /**
  * Parse `ideas:{ideaId}:session-{turn}` — turn-by-turn chat only.
  * Returns null for clarity/convert/alignment keys.
+ *
+ * Tolerates the gateway's ``agent:{role}:`` prefix so callers (e.g.
+ * ``agent-end-handler``) see the same parse result whether they receive a
+ * bare or normalised session key.
  */
 export function parseIdeasTurnSession(
   sessionKey: string,
 ): { ideaId: string; turn: number } | null {
-  const m = /^ideas:([^:]+):session-(\d+)$/.exec(sessionKey);
+  const m = /^(?:agent:[a-z0-9_-]+:)?ideas:([^:]+):session-(\d+)$/i.exec(sessionKey);
   if (!m) return null;
   return { ideaId: m[1], turn: parseInt(m[2], 10) };
 }
 
 /**
- * Extract idea id from any `ideas:{id}:...` session key (first segment after prefix).
+ * Extract idea id from any ``ideas:{id}:...`` session key (first segment after prefix).
+ *
+ * Tolerates the gateway's ``agent:{role}:`` prefix; returns the bare id in
+ * both shapes.
  */
 export function extractIdeasIdFromSessionKey(sessionKey: string): string | null {
-  const m = /^ideas:([^:]+):/.exec(sessionKey);
+  const m = /^(?:agent:[a-z0-9_-]+:)?ideas:([^:]+):/i.exec(sessionKey);
   return m ? m[1] : null;
 }
 
+/** Activity stamp watched by the foreground chat-turn poller (the SOLE consumer). */
+export const IDEAS_CHAT_ACTIVITY_STAMP = "prd_creator_activity.stamp";
+
+/** Separate stamp for the background readiness assessment (see selector below). */
+export const IDEAS_READINESS_ACTIVITY_STAMP = "prd_creator_readiness_activity.stamp";
+
 /**
- * Resolve `$OPENCLAW_ROOT/ideas` from workspace-prd-creator path or OPENCLAW_ROOT env.
+ * Return true when sessionKey is the background readiness-assessment session
+ * (`ideas:{id}:readiness`), as opposed to a chat turn / clarity / convert /
+ * format-correction key.
+ *
+ * Tolerates the gateway's ``agent:{role}:`` prefix, mirroring
+ * :func:`parseIdeasTurnSession`.  Anchored on ``:readiness$`` so only the
+ * readiness session matches.
+ */
+export function isIdeasReadinessSession(
+  sessionKey: string | undefined,
+): boolean {
+  if (typeof sessionKey !== "string") return false;
+  return /^(?:agent:[a-z0-9_-]+:)?ideas:[^:]+:readiness$/i.test(sessionKey);
+}
+
+/**
+ * Pick the Ideas activity-stamp filename for a session key.
+ *
+ * The readiness assessment is auto-fired fire-and-forget after every chat turn
+ * (ui/server.py ``_trigger_readiness_assessment``) and runs as the same
+ * prd-creator agent with the same ideaId as the foreground chat turn.  If it
+ * shared the chat stamp, a readiness run that overlapped a new chat turn would
+ * keep that stamp fresh and mask a genuinely-stalled foreground turn from the
+ * chat poller (``_poll_sentinel_with_idle_detect``).  Routing readiness to its
+ * own stamp keeps the two liveness signals independent; the chat stamp then
+ * means exactly "the foreground chat turn is alive".
+ */
+export function ideasActivityStampFilename(sessionKey: string): string {
+  return isIdeasReadinessSession(sessionKey)
+    ? IDEAS_READINESS_ACTIVITY_STAMP
+    : IDEAS_CHAT_ACTIVITY_STAMP;
+}
+
+/**
+ * Resolve `$OPENCLAW_ROOT/ideas`.
+ *
+ * Resolution order (highest → lowest):
+ *   1. ``workspaceDir`` parent (the typed-hook path always has this).
+ *   2. ``env["OPENCLAW_ROOT"]`` (operator-set override).
+ *   3. ``env["HOME"]/.openclaw`` (the production default; mirrors
+ *      ``resolveOpenClawStateDirFromEnv``).
+ *   4. ``os.homedir()/.openclaw`` (final fallback for when even HOME is
+ *      missing from the env).
+ *
+ * The HOME fallback is what makes the agent-event-stream backstop
+ * (``recordPipelineActivityFromAgentEvent``) work in production: that path
+ * has no ``workspaceDir`` because the event stream is host-level, and the
+ * gateway's systemd unit sets ``HOME=/home/pi`` but does NOT set
+ * ``OPENCLAW_ROOT``.  Without the HOME fallback the resolver returned null
+ * and the Ideas stamp went stale during long model generations — the live
+ * bug observed on the Untitled Balloon Popping Game session (Cursor MCP
+ * validation, see CHANGELOG).  The pipeline equivalent
+ * (``resolvePipelineArtifactsDirFromEnv`` via
+ * ``resolveOpenClawStateDirFromEnv``) already had this fallback; Ideas
+ * didn't.
+ *
+ * Accepts an explicit ``env`` so tests can drive the fallback chain
+ * deterministically without monkey-patching ``process.env``.
  */
 export function resolveIdeasRootFromWorkspace(
   workspaceDir: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
 ): string | null {
   let openclawRoot: string | null = null;
   if (workspaceDir) {
     openclawRoot = path.dirname(workspaceDir.replace(/\/+$/, ""));
   } else {
-    const envRoot = process.env["OPENCLAW_ROOT"];
-    if (envRoot) {
-      openclawRoot = path.resolve(envRoot.replace(/^~/, os.homedir()));
+    const envRoot = env["OPENCLAW_ROOT"];
+    if (envRoot?.trim()) {
+      openclawRoot = path.resolve(envRoot.trim().replace(/^~/, os.homedir()));
+    } else {
+      // HOME fallback — production gateways usually have HOME set but not
+      // OPENCLAW_ROOT.  os.homedir() is the last-resort if HOME is also
+      // missing (it reads HOME under the hood on POSIX so it usually
+      // matches anyway).
+      const home = env["HOME"]?.trim() || os.homedir();
+      openclawRoot = path.join(home, ".openclaw");
     }
   }
   if (!openclawRoot) return null;
@@ -86,16 +175,22 @@ export function writeIdeasTurnDoneIfAbsent(donePath: string): boolean {
 }
 
 /**
- * Touch `{ideasRoot}/{ideaId}/prd_creator_activity.stamp` for Ideas stall detection.
+ * Touch `{ideasRoot}/{ideaId}/{stampFilename}` for Ideas stall detection.
  * Creates `ideaId` directory if needed.
+ *
+ * ``stampFilename`` defaults to the chat-turn stamp; pass
+ * :const:`IDEAS_READINESS_ACTIVITY_STAMP` (via
+ * :func:`ideasActivityStampFilename`) for the background readiness session so
+ * its activity cannot mask a stalled foreground chat turn.
  */
 export function touchIdeasPrdCreatorActivityStamp(
   ideasRoot: string,
   ideaId: string,
+  stampFilename: string = IDEAS_CHAT_ACTIVITY_STAMP,
 ): void {
   const ideaDir = path.join(ideasRoot, ideaId);
   fs.mkdirSync(ideaDir, { recursive: true });
-  const stampPath = path.join(ideaDir, "prd_creator_activity.stamp");
+  const stampPath = path.join(ideaDir, stampFilename);
   const tmpPath = `${stampPath}.tmp.${process.pid}`;
   try {
     fs.writeFileSync(tmpPath, "", { flag: "w" });

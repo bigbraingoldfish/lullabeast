@@ -16,7 +16,8 @@
     "build": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node22 --external:node:* --outfile=dist/index.js",
     "test": "node --import tsx/esm --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "deploy": "npm run build && DEST=\"${OPENCLAW_ROOT:-$HOME/.openclaw}/extensions/autodev-pipeline-signals/dist/index.js\" && if [ -f \"$DEST\" ]; then cp dist/index.js \"$DEST\" && echo \"[deploy] copied dist/index.js → $DEST\" && echo \"[deploy] next: systemctl --user restart openclaw-gateway\"; else echo \"[deploy] extension not installed at $DEST — run install.sh, or first-time: openclaw plugins install '$(pwd)'\"; fi"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",

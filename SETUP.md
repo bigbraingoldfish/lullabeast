@@ -228,8 +228,10 @@ The output should show `status: "loaded"`, `hookCount: 5`, and typed hooks for `
 
 | Env | Default (seconds) | Role |
 | --- | ------------------ | ---- |
-| `AUTODEV_IDEAS_IDLE_THRESHOLD` | 120 | Max silence on stamp mtime before the chat request returns **408** stall |
-| `AUTODEV_IDEAS_STARTUP_GRACE` | 30 | Grace before treating a missing stamp as **no session** |
+| `AUTODEV_IDEAS_IDLE_THRESHOLD` | 300 | Max silence on stamp mtime **after first activity** before the chat request returns **408** stall. 300 s (not 120) because a thorough PRD-draft model call runs with the stamp silent for its whole duration (118 s measured live) |
+| `AUTODEV_IDEAS_STARTUP_GRACE` | 30 | Grace before treating a missing first-activity stamp as **no first activity** |
+
+The companion `poll_timeout` (full-turn infra backstop, `ui/config.json` `poll_timeout`, default **900 s**) bounds the total turn — a thorough PRD turn chains several model calls and can exceed the old 180 s ceiling.
 
 `install.sh` also appends these two as commented placeholders to `.env` (separate marker; idempotent). **`.env.example`** includes the same block.
 

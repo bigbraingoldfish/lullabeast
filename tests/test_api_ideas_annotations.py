@@ -9,6 +9,7 @@ from unittest.mock import patch, AsyncMock, MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from autodev.pipeline.sentinel_poller import PollResult
 from fastapi.testclient import TestClient
 from ui.server import app
 
@@ -298,7 +299,16 @@ def test_annotations_drafts_preserved_on_message_timeout(tmp_path):
 
 
 def test_late_done_reconciliation_after_poll_false(tmp_path):
-    """Poll returns False but .done is newer than attempt start → 200 and drafts consumed."""
+    """Poll returns False but .done is newer than attempt start → 200 and drafts consumed.
+
+    Prior to the stamp migration the poll mock returned a tuple ``(False, ...)``
+    that evaluated truthy, so the success branch ran and the late-recovery
+    code at ``ui/server.py:4432`` was never reached — the test passed by
+    accident.  Returning ``PollResult(False, "timeout")`` makes
+    ``bool(sentinel_found)`` honestly False, forcing the late-recovery branch
+    to run for the first time.  The ``mock_late`` spy asserts that branch
+    was exercised.
+    """
     ideas_dir = tmp_path / "ideas"
     idea_id = str(uuid.uuid4())
     idea_dir = Path(ideas_dir) / idea_id
@@ -348,21 +358,30 @@ def test_late_done_reconciliation_after_poll_false(tmp_path):
             f"/api/ideas/{idea_id}/annotations",
             json={"section": "API", "comment": "note"},
         )
+        real_late_done = srv._late_done_valid_for_attempt
         with patch("aiohttp.ClientSession", return_value=fake_session):
             with patch("asyncio.create_task"):
                 with patch(
                     "ui.server._poll_sentinel_with_idle_detect",
-                    AsyncMock(return_value=(False, "poll_timeout")),
+                    AsyncMock(return_value=PollResult(False, "timeout")),
                 ):
-                    with patch("ui.server.time.time", return_value=1000.0):
-                        with patch("ui.server.os.path.getmtime", side_effect=fake_gm):
-                            resp = client.post(
-                                f"/api/ideas/{idea_id}/message",
-                                json={"content": "Go", "turn": 2},
-                            )
+                    with patch(
+                        "ui.server._late_done_valid_for_attempt",
+                        wraps=real_late_done,
+                    ) as mock_late:
+                        with patch("ui.server.time.time", return_value=1000.0):
+                            with patch("ui.server.os.path.getmtime", side_effect=fake_gm):
+                                resp = client.post(
+                                    f"/api/ideas/{idea_id}/message",
+                                    json={"content": "Go", "turn": 2},
+                                )
 
         assert resp.status_code == 200, resp.text
         assert resp.json().get("response") == "Recovered response"
         assert client.get(f"/api/ideas/{idea_id}/annotations").json() == []
+        assert mock_late.call_count >= 1, (
+            "late-recovery branch (server.py:4432) was not consulted — the "
+            "PollResult(False, 'timeout') return did not drive the failure path"
+        )
 
     srv.POLL_TIMEOUT = orig_timeout

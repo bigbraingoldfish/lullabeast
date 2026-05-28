@@ -4255,6 +4255,19 @@
 
             useEffect(() => () => stopRoadmapRecoverPoll(), [currentIdeaId]);
 
+            // Auto-scroll the chat to the newest assistant reply when it arrives.
+            // Fires only when the LAST message is a non-pending assistant — so the
+            // user's own send (which inserts a pending bubble) does not bump them
+            // down while their request is in flight, but the eventual reply or
+            // error transition does.
+            useEffect(() => {
+                if (messages.length === 0) return;
+                const last = messages[messages.length - 1];
+                if (last.role === "assistant" && !last.pending) {
+                    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+                }
+            }, [messages]);
+
             const startReadinessPoll = (ideaId) => {
                 stopReadinessPoll();
                 if (!ideaId) return;
@@ -4570,7 +4583,19 @@
                     body: JSON.stringify(body),
                 })
                     .then((r) => {
-                        if (!r.ok) throw new Error(String(r.status));
+                        if (!r.ok) {
+                            // Read the JSON body so we can surface the backend's
+                            // reason-specific timeout message (detail.message).
+                            // The wording lives only in the backend
+                            // (_ideas_timeout_message); we just render it.
+                            return r.json().catch(() => null).then((errBody) => {
+                                const e = new Error(String(r.status));
+                                e.status = r.status;
+                                const d = errBody && errBody.detail;
+                                if (d && typeof d === "object" && d.message) e.serverMessage = d.message;
+                                throw e;
+                            });
+                        }
                         return r.json();
                     })
                     .then((data) => {
@@ -4606,10 +4631,12 @@
                         fetchPrdSectionDiff(currentIdeaId);
                     })
                     .catch((err) => {
-                        const status = parseInt(err?.message, 10);
+                        const status = err?.status ?? parseInt(err?.message, 10);
                         let errorMsg = "Message sent but agent response failed. You can retry.";
                         if (status === 408) {
-                            errorMsg = "Agent timed out — the model may be slow. You can retry.";
+                            // Prefer the backend's reason-specific message (sole author);
+                            // fall back to the generic copy only if the body was unreadable.
+                            errorMsg = err?.serverMessage || "Agent timed out — the model may be slow. You can retry.";
                         } else if (status === 502 || status === 503) {
                             errorMsg = "Agent gateway is unreachable. Check that OpenClaw is running.";
                         } else if (!Number.isFinite(status)) {
@@ -4624,10 +4651,10 @@
                                         error: true,
                                         content: errorMsg,
                                         ts: new Date().toISOString(),
-                                        ...((status === 502 || status === 503) ? { _gatewayFailed: true } : {}),
+                                        ...((status === 408 || status === 502 || status === 503) ? { _gatewayFailed: true } : {}),
                                     };
                                 }
-                                if ((status === 502 || status === 503) && m.id === userMsgId) {
+                                if ((status === 408 || status === 502 || status === 503) && m.id === userMsgId) {
                                     return { ...m, _gatewayFailed: true };
                                 }
                                 return m;
@@ -4635,7 +4662,7 @@
                         );
                         setHiddenNoteIdsForSend(() => new Set());
                         setStagedAttachment(attachmentSnap);
-                        if ((status === 502 || status === 503) && overrideText === undefined) {
+                        if ((status === 408 || status === 502 || status === 503) && overrideText === undefined) {
                             setInputText(t);
                         }
                         setIsLoading(false);

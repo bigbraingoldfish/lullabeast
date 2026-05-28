@@ -1182,9 +1182,11 @@ if command -v npm >/dev/null 2>&1; then
         || warn "Could not build plugin bundle — old OpenClaw versions may still load TS source, newer versions will refuse to load it"
 fi
 if command -v openclaw >/dev/null 2>&1; then
-    if openclaw plugins install "$PLUGIN_DIR" >/dev/null 2>&1; then
-        ok "Plugin installed: autodev-pipeline-signals"
-        info "  Restart the OpenClaw gateway to load the plugin."
+    if openclaw plugins install --force "$PLUGIN_DIR" >/dev/null 2>&1; then
+        # --force so a re-run (git pull && ./install.sh) REPLACES the existing
+        # extension. Without it the CLI errors "plugin already exists" and the
+        # stale bundle stays deployed while the repo source moves on.
+        ok "Plugin installed: autodev-pipeline-signals (--force replaces any prior bundle)"
         # Ensure allowConversationAccess is set in the installed plugin entry.
         OC_CFG="$OPENCLAW_ROOT/openclaw.json"
         if [ -f "$OC_CFG" ]; then
@@ -1231,12 +1233,46 @@ raise SystemExit(1)
             warn "Expected typed hooks: agent_end, before_agent_finalize, model_call_started, model_call_ended, after_tool_call"
             PLUGIN_INSTALL_STEP="warn (installed; inspect hooks)"
         fi
+
+        # Content-level deploy check. `plugins inspect` proves the hooks are
+        # REGISTERED, but a stale bundle registers the same hooks — so it cannot
+        # tell current code from a months-old copy. Grep the DEPLOYED bundle for
+        # a marker string that exists only in current source: the Ideas
+        # production-form session-key matcher (agent:{role}:ideas:). If this
+        # marker drifts in a future refactor, update it here AND in
+        # tests/test_install_sh_plugin_deploy.py.
+        DEPLOYED_BUNDLE="$OPENCLAW_ROOT/extensions/autodev-pipeline-signals/dist/index.js"
+        if [ -f "$DEPLOYED_BUNDLE" ]; then
+            if grep -qF 'agent:[a-z0-9_-]+:ideas:' "$DEPLOYED_BUNDLE"; then
+                ok "Deployed bundle carries current source (Ideas matcher present)"
+            else
+                warn "Deployed bundle missing expected marker — likely STALE. Rebuild+redeploy: (cd \"$PLUGIN_DIR\" && npm run deploy)"
+                PLUGIN_INSTALL_STEP="warn (deployed bundle stale)"
+            fi
+        else
+            warn "Deployed bundle not found at $DEPLOYED_BUNDLE — gateway will run without the plugin"
+        fi
+
+        # Restart the gateway so the freshly-installed bundle is actually loaded.
+        # `plugins install` writes the file; the RUNNING gateway keeps the old
+        # code in memory until restarted (this exact gap shipped a stale bundle
+        # during the Ideas-chat hotfix). Guarded: non-systemd OpenClaw launches
+        # (bare macOS, manual runs) get a manual-restart hint, not a hard error.
+        if systemctl --user is-active openclaw-gateway >/dev/null 2>&1; then
+            if systemctl --user restart openclaw-gateway 2>/dev/null; then
+                ok "Gateway restarted (systemctl --user) — new plugin bundle loaded"
+            else
+                warn "Could not restart gateway — run manually: systemctl --user restart openclaw-gateway"
+            fi
+        else
+            info "Gateway is not a running user systemd service — restart it your usual way to load the plugin bundle"
+        fi
     else
-        warn "Plugin install failed — run manually: openclaw plugins install \"$PLUGIN_DIR\""
+        warn "Plugin install failed — run manually: openclaw plugins install --force \"$PLUGIN_DIR\""
         PLUGIN_INSTALL_STEP="warn (see above)"
     fi
 else
-    warn "openclaw CLI not found — plugin not installed. Run manually after gateway is available: openclaw plugins install \"$PLUGIN_DIR\""
+    warn "openclaw CLI not found — plugin not installed. Run manually after gateway is available: openclaw plugins install --force \"$PLUGIN_DIR\""
     PLUGIN_INSTALL_STEP="warn (openclaw not in PATH)"
 fi
 

@@ -294,7 +294,7 @@ def ensure_dotenv_ideas_idle_hints(env_path: str) -> str:
 {DOTENV_IDEAS_IDLE_HINT_MARKER}
 # UI server Ideas chat: seconds before declaring stall (no Tier A stamp refresh)
 # and startup grace before requiring the activity stamp. Env overrides win over
-# ui/config.json. Defaults if unset: idle 120, grace 30.
+# ui/config.json. Defaults if unset: idle 300, grace 30.
 # AUTODEV_IDEAS_IDLE_THRESHOLD=
 # AUTODEV_IDEAS_STARTUP_GRACE=
 """
