@@ -3183,10 +3183,12 @@ class Orchestrator:
 
         existing["source"] = "reviewer"
         existing["phase_id"] = self.state.get("current_phase_raw_id", "")
-        # P0 Stage G: every blocking issue carries an explicit ``criterion_source``
-        # enum (``"behavioral" | "test" | "prd_verbatim" | "free"``). Gate-synthesised
-        # behavioural issues arrive pre-tagged; reviewer-written free-form issues
-        # without an anchor get the explicit ``"free"`` label here.
+        # P0 Stage G + P1 Stage D: every blocking issue carries an explicit
+        # ``criterion_source`` enum
+        # (``"behavioral" | "test" | "prd_verbatim" | "regression_prior_phase" | "free"``).
+        # Gate-synthesised behavioural and regression issues arrive pre-tagged;
+        # reviewer-written free-form issues without an anchor get the explicit
+        # ``"free"`` label here.
         existing["blocking_issues"] = [
             self._enrich_blocking_issue_with_criterion_default(bi)
             for bi in blocking_issues
@@ -4622,6 +4624,7 @@ class Orchestrator:
                         "INFRA_FAILURE": "reviewer",
                         "VISUAL_UNVERIFIED": "reviewer",
                         "BEHAVIORAL_UNVERIFIED": "reviewer",
+                        "REGRESSION_UNVERIFIED": "reviewer",
                     }.get(gate_result, "halted")
                     print(
                         f"[REVIEWER_GATE] verdict={gate_result} "
@@ -5242,101 +5245,84 @@ class Orchestrator:
                                 time.sleep(5)
                                 continue
 
-                    elif gate_result == "VISUAL_UNVERIFIED":
-                        # Reviewer flagged a visual phase for missing
-                        # ``visual_verification`` / ``screenshot_paths`` artifacts.
-                        # Re-invoke the reviewer with an explicit instruction
-                        # in failure_context.json so it knows what to produce
-                        # (analogous to the MISSING_ARTIFACTS handler — same
-                        # shape, different remediation).  Does NOT consume
-                        # reviewer_retries; uses a separate counter so a
-                        # legitimate ROUTE_EXECUTOR can still occur on the
-                        # following pass.
-                        _ps_vu = self.read_phase_state()
-                        _vu_retries = _ps_vu.get("reviewer_visual_retries", 0) + 1
-                        _ps_vu["reviewer_visual_retries"] = _vu_retries
-                        _ps_vu["visual_instruction"] = (
-                            "VISUAL VERIFICATION REQUIRED: Before writing "
-                            "reviewer_output.done, you MUST attach screenshot "
-                            "paths and a visual_verification block to "
-                            "reviewer_output.json per your AGENTS.md.  A "
-                            "phase that touches UI cannot pass without this."
-                        )
-                        self.write_phase_state_atomic(_ps_vu)
+                    elif gate_result in (
+                        "VISUAL_UNVERIFIED",
+                        "BEHAVIORAL_UNVERIFIED",
+                        "REGRESSION_UNVERIFIED",
+                    ):
+                        # P1 Stage D: pooled contract-shape handler. Visual,
+                        # behavioural, and regression shape failures all
+                        # re-invoke the reviewer with a verdict-specific
+                        # instruction, drawing from a single pooled counter
+                        # ``reviewer_unverified_retries`` (cap 2 across all
+                        # three). None of these consume the main
+                        # ``reviewer_retries`` budget; a legitimate
+                        # ROUTE_EXECUTOR rejection on the following pass is
+                        # preserved.
+                        _UNVERIFIED_INSTRUCTIONS = {
+                            "VISUAL_UNVERIFIED": (
+                                "VISUAL VERIFICATION REQUIRED: Before writing "
+                                "reviewer_output.done, you MUST attach screenshot "
+                                "paths and a visual_verification block to "
+                                "reviewer_output.json per your AGENTS.md.  A "
+                                "phase that touches UI cannot pass without this."
+                            ),
+                            "BEHAVIORAL_UNVERIFIED": (
+                                "BEHAVIORAL VERIFICATION REQUIRED: Before writing "
+                                "reviewer_output.done, you MUST attach a "
+                                "``behavioral_verification`` object to "
+                                "reviewer_output.json with verdict ∈ "
+                                "{pass, fail, cannot_verify}, at least three "
+                                "evidence anchors when verdict='pass' (each with "
+                                "claim + file_or_screenshot_or_log + method), and "
+                                "how_to_check_followed as a boolean — see your "
+                                "AGENTS.md. A phase whose current_phase.json "
+                                "carries a Behavioral Verification block cannot "
+                                "pass without this."
+                            ),
+                            "REGRESSION_UNVERIFIED": (
+                                "REGRESSION VERIFICATION REQUIRED: Before writing "
+                                "reviewer_output.done, you MUST attach a "
+                                "``regression_verification`` object to "
+                                "reviewer_output.json with verdict ∈ "
+                                "{pass, fail, cannot_verify}, "
+                                "prior_phase_raw_id matching "
+                                "current_phase.prior_phase_raw_id, "
+                                "prior_phase_how_to_check_followed as a boolean, "
+                                "and at least three evidence anchors when "
+                                "verdict='pass' and followed=True (each with "
+                                "claim + file_or_screenshot_or_log + method). "
+                                "Execute current_phase.prior_phase_how_to_check "
+                                "against the artifact and report what you saw."
+                            ),
+                        }
+                        _ps_uv = self.read_phase_state()
+                        _uv_retries = _ps_uv.get("reviewer_unverified_retries", 0) + 1
+                        _ps_uv["reviewer_unverified_retries"] = _uv_retries
+                        _ps_uv["unverified_instruction"] = _UNVERIFIED_INSTRUCTIONS[gate_result]
+                        self.write_phase_state_atomic(_ps_uv)
                         print(
-                            f"[WARN] Reviewer gate: VISUAL_UNVERIFIED "
-                            f"(visual_retries={_vu_retries}/2)."
+                            f"[WARN] Reviewer gate: {gate_result} "
+                            f"(unverified_retries={_uv_retries}/2)."
                         )
-                        if _vu_retries >= 2:
+                        if _uv_retries >= 2:
                             print(
-                                "[WARN] VISUAL_UNVERIFIED retry cap reached — "
-                                "escalating."
+                                f"[WARN] {gate_result} retry cap reached — "
+                                f"escalating."
                             )
                             self.state["current_agent"] = "escalation"
                             self.transition_state(
                                 "RUNNING",
-                                f"Reviewer VISUAL_UNVERIFIED: visual retry cap "
-                                f"reached ({_vu_retries})",
+                                f"Reviewer {gate_result}: contract-shape retry "
+                                f"cap reached ({_uv_retries})",
                             )
                         else:
                             self.state["current_agent"] = "reviewer"
                             self.transition_state(
                                 "RUNNING",
-                                f"Reviewer VISUAL_UNVERIFIED: re-invoking "
-                                f"reviewer to provide visual artifacts "
-                                f"(attempt {_vu_retries}/2)",
-                            )
-                        time.sleep(5)
-                        continue
-
-                    elif gate_result == "BEHAVIORAL_UNVERIFIED":
-                        # P0 Stage F. Reviewer's ``behavioral_verification``
-                        # object is missing/malformed on a phase whose
-                        # current_phase.json carries a populated Behavioral
-                        # Verification block. Mirror of VISUAL_UNVERIFIED:
-                        # re-invoke the reviewer, NON-retry-consuming on the
-                        # main ``reviewer_retries`` budget, capped at 2 via a
-                        # dedicated ``reviewer_behavioral_retries`` counter
-                        # so contract-shape failures cannot loop unbounded.
-                        _ps_bu = self.read_phase_state()
-                        _bu_retries = _ps_bu.get("reviewer_behavioral_retries", 0) + 1
-                        _ps_bu["reviewer_behavioral_retries"] = _bu_retries
-                        _ps_bu["behavioral_instruction"] = (
-                            "BEHAVIORAL VERIFICATION REQUIRED: Before writing "
-                            "reviewer_output.done, you MUST attach a "
-                            "``behavioral_verification`` object to "
-                            "reviewer_output.json with verdict ∈ "
-                            "{pass, fail, cannot_verify}, at least three "
-                            "evidence anchors when verdict='pass' (each with "
-                            "claim + file_or_screenshot_or_log + method), and "
-                            "how_to_check_followed as a boolean — see your "
-                            "AGENTS.md. A phase whose current_phase.json "
-                            "carries a Behavioral Verification block cannot "
-                            "pass without this."
-                        )
-                        self.write_phase_state_atomic(_ps_bu)
-                        print(
-                            f"[WARN] Reviewer gate: BEHAVIORAL_UNVERIFIED "
-                            f"(behavioral_retries={_bu_retries}/2)."
-                        )
-                        if _bu_retries >= 2:
-                            print(
-                                "[WARN] BEHAVIORAL_UNVERIFIED retry cap "
-                                "reached — escalating."
-                            )
-                            self.state["current_agent"] = "escalation"
-                            self.transition_state(
-                                "RUNNING",
-                                f"Reviewer BEHAVIORAL_UNVERIFIED: behavioral "
-                                f"retry cap reached ({_bu_retries})",
-                            )
-                        else:
-                            self.state["current_agent"] = "reviewer"
-                            self.transition_state(
-                                "RUNNING",
-                                f"Reviewer BEHAVIORAL_UNVERIFIED: re-invoking "
-                                f"reviewer to provide behavioural verdict + "
-                                f"evidence (attempt {_bu_retries}/2)",
+                                f"Reviewer {gate_result}: re-invoking reviewer "
+                                f"to fix contract-shape failure "
+                                f"(attempt {_uv_retries}/2)",
                             )
                         time.sleep(5)
                         continue

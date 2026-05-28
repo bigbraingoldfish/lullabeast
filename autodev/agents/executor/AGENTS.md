@@ -10,12 +10,12 @@ Read these files from your workspace before starting. PRD + verification doc com
 
 - `pipeline-project/prd.md` — the user's authoritative requirements. Read it before you start coding so you can spot where the plan paraphrases or omits something the PRD requires.
 - `pipeline-project/verification.md` — project type, entry point, public surface, and verification stack. Tells you what to run to verify your work (Playwright? curl? CLI invocation?).
-- `pipeline-project/.autodev/pipeline/current_phase.json` — phase contract. Pay particular attention to the `behavioral_verification` block (`user_observable`, `how_to_check`, `failure_language`): you will execute `how_to_check` against your implementation as a final step before declaring complete.
+- `pipeline-project/.autodev/pipeline/current_phase.json` — phase contract. Pay particular attention to the `behavioral_verification` block (`user_observable`, `how_to_check`, `failure_language`): you will execute `how_to_check` against your implementation as a final step before declaring complete. Also note `prior_phase_raw_id` and `prior_phase_how_to_check` (resolver-populated when the most recent completed phase had a behavioural recipe): the reviewer will re-execute that prior recipe alongside the current phase's, and a regression failure routes back to you with `criterion_source: "regression_prior_phase"` (see Scenario B).
 - `pipeline-project/.autodev/pipeline/planner_output.json` — your instructions:
   - `implementation_plan` — ordered list of tasks to complete
   - `tdd_test_structure` — test file paths you MUST create (exact paths)
   - `pass_criteria` — conditions that must be true when implementation is complete; each carries a `traces_to` anchor
-- On reviewer-rejection retries: the orchestrator provides `blocking_issues` from the reviewer's last output in your invocation context. Address each issue specifically. If any blocking issue carries `criterion_source: "behavioral"`, you must additionally re-run the phase's `how_to_check` procedure after your targeted fix (see Scenario B below).
+- On reviewer-rejection retries: the orchestrator provides `blocking_issues` from the reviewer's last output in your invocation context. Address each issue specifically. If any blocking issue carries `criterion_source: "behavioral"`, you must additionally re-run the current phase's `how_to_check` procedure after your targeted fix (see Scenario B below). If any blocking issue carries `criterion_source: "regression_prior_phase"`, the prior phase's user-observable behaviour broke — you must re-run BOTH `current_phase.behavioral_verification.how_to_check` AND `current_phase.prior_phase_how_to_check` after the targeted fix (see Scenario B below).
 
 ## Output Contract
 
@@ -143,6 +143,8 @@ Your workspace has been reset: `git reset --hard HEAD && git clean -fd`. None of
 Your code is still in the workspace — it was NOT reset. The orchestrator provides the `blocking_issues` array in your context. Fix specifically what was flagged. Do NOT rewrite working code from scratch. Your existing implementation is the starting point; targeted fixes only.
 
 When `failure_context.json` has `source: "reviewer"` AND any `blocking_issues[i].criterion_source == "behavioral"`, you MUST re-run the phase's `how_to_check` procedure after your targeted fix and re-capture fresh `behavioral_smoke_artifacts` for the retry. Do not reuse the prior attempt's artifacts — the reviewer needs proof that this round's fix is verified, not stale evidence from the rejected attempt. Old artifacts on disk that you do not re-capture must still be listed in the new array only if you genuinely re-ran them (do not falsely claim to have re-executed something).
+
+When `failure_context.json` has `source: "reviewer"` AND any `blocking_issues[i].criterion_source == "regression_prior_phase"`, the prior phase's user-observable behaviour broke. Your targeted fix must restore the prior phase's behaviour without losing the current phase's. After the fix you MUST re-execute BOTH `current_phase.behavioral_verification.how_to_check` AND `current_phase.prior_phase_how_to_check` and re-capture fresh artifacts for each: the current-phase artifacts go in `behavioral_smoke_artifacts` as usual; the prior-phase artifacts go in the same array (the reviewer cross-references them against `current_phase.prior_phase_how_to_check`). A regression rejection is a stronger signal than a current-phase behavioural rejection: it means your changes broke a feature that was already shipping.
 
 ## Behavioral Constraints
 

@@ -48,7 +48,7 @@ Every pass criterion must trace to one of these. Free-floating paraphrases of th
 - `tdd:<test_path>` — anchors the criterion to a specific TDD test in `tdd_test_structure`. Use when the criterion is mechanically verifiable by running a test. Example: `"traces_to": "tdd:tests/test_tasks_api.py"`.
 - `behavior:user_observable` — anchors to the phase's Behavioral Verification `user_observable` claim from `current_phase.json`. Use when the criterion restates the plain-English user-observable behaviour for this phase.
 - `behavior:how_to_check` — anchors to the phase's Behavioral Verification `how_to_check` procedure. Use when the criterion is the runnable check the reviewer (and executor's final-step smoke) will perform.
-- `prd_verbatim:<exact PRD substring>` — quotes the PRD verbatim. The substring after the colon MUST appear character-for-character in `prd.md`. Use when the criterion restates a user requirement verbatim; the reviewer's PRD-first read will grep for it.
+- `prd_verbatim:<exact PRD substring>` — quotes the PRD verbatim. The substring after the colon MUST appear character-for-character in `prd.md`. Use when the criterion restates a user requirement verbatim; the reviewer's PRD-first read will grep for it. **The executor gate enforces literal presence in the build via `grep -F` over git-tracked source (P1 Stage C) — anchor only strings that must appear character-for-character in code (taglines, button labels, error messages, CLI flag names, endpoint paths, exact API response strings). Over-anchoring on paraphraseable copy will fail the gate with `ERR_PRD_VERBATIM_MISSING`.**
 
 ## Sentinel Pattern
 

@@ -12,6 +12,7 @@ if current_dir not in sys.path:
 from utils import (
     ARTIFACTS_DIR,
     load_json_safe,
+    phase_has_behavioral_block,
     record_error_code_only,
     PHASE_STATE_FILE,
     WORKSPACE_DIR,
@@ -88,19 +89,124 @@ def _load_current_phase():
         return {}
 
 
-def _phase_has_behavioral_block(current_phase):
-    """True iff the phase carries a populated Behavioral Verification block.
+_PRD_VERBATIM_PREFIX = "prd_verbatim:"
+# Chunk size for grep file arguments. Keeps us well under ARG_MAX on every
+# POSIX shell the pipeline targets (Linux ARG_MAX is ~128 KiB; 500 paths at an
+# average 60 bytes each is ~30 KiB).
+_GREP_CHUNK_SIZE = 500
 
-    Mirror of ``reviewer_gate._requires_behavioral_verification`` so both
-    gates agree on which phases enforce behavioural artifacts. P0 §2.9
-    transitional rule: legacy phases (block is None or missing) are
-    exempt — only phases produced after P0 ships carry the block."""
-    if not current_phase:
-        return False
-    block = current_phase.get("behavioral_verification")
-    if not isinstance(block, dict):
-        return False
-    return all(block.get(k) for k in ("user_observable", "how_to_check", "failure_language"))
+
+def _extract_prd_verbatim_anchors(planner_data):
+    """Return the ordered list of literal substrings declared by
+    ``pass_criteria[].traces_to`` entries of the form
+    ``"prd_verbatim:<str>"``.
+
+    Malformed entries (non-dict, non-string traces_to, wrong prefix) are
+    skipped silently — the planner gate is the authoritative shape
+    validator; this consumer takes what is well-formed. Order is
+    preserved so failure reports are deterministic; no deduplication
+    (callers may dedupe if they care)."""
+    if not isinstance(planner_data, dict):
+        return []
+    criteria = planner_data.get("pass_criteria") or []
+    if not isinstance(criteria, list):
+        return []
+    anchors = []
+    for entry in criteria:
+        if not isinstance(entry, dict):
+            continue
+        traces_to = entry.get("traces_to")
+        if not isinstance(traces_to, str):
+            continue
+        if traces_to.startswith(_PRD_VERBATIM_PREFIX):
+            anchors.append(traces_to[len(_PRD_VERBATIM_PREFIX):])
+    return anchors
+
+
+def _tracked_files(workspace_dir):
+    """Return the list of git-tracked files in ``workspace_dir`` as
+    workspace-relative paths.
+
+    Empty list when ``git ls-files`` errors or the workspace is not a git
+    repo. Logs ``[GATE WARN]`` to stderr on failure rather than raising —
+    the caller's job is to treat missing files as missing anchors, not
+    to crash the gate."""
+    try:
+        result = subprocess.run(
+            ["git", "ls-files"],
+            cwd=workspace_dir,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        print(f"[GATE WARN] git ls-files failed: {e}", file=sys.stderr)
+        return []
+    if result.returncode != 0:
+        print(
+            f"[GATE WARN] git ls-files rc={result.returncode}: "
+            f"{result.stderr.strip()}",
+            file=sys.stderr,
+        )
+        return []
+    return [p for p in result.stdout.splitlines() if p]
+
+
+def _check_prd_verbatim_anchors(planner_data, workspace_dir):
+    """Return ``(True, [])`` when no anchors are declared or every anchor
+    is found verbatim in at least one git-tracked file. Return
+    ``(False, missing_list)`` otherwise.
+
+    Uses ``grep -F`` so regex metacharacters in anchors are treated as
+    literal characters. Files are passed to grep in chunks of
+    ``_GREP_CHUNK_SIZE`` to stay under ARG_MAX on every POSIX shell."""
+    anchors = _extract_prd_verbatim_anchors(planner_data)
+    if not anchors:
+        return (True, [])
+
+    tracked = _tracked_files(workspace_dir)
+    if not tracked:
+        # No tracked files → no eligible source for any anchor. Conservative:
+        # treat every anchor as missing.
+        return (False, list(anchors))
+
+    missing = []
+    for anchor in anchors:
+        found = False
+        for i in range(0, len(tracked), _GREP_CHUNK_SIZE):
+            chunk = tracked[i:i + _GREP_CHUNK_SIZE]
+            try:
+                result = subprocess.run(
+                    ["grep", "-F", "-l", "--", anchor] + chunk,
+                    cwd=workspace_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+                print(
+                    f"[GATE WARN] grep failed for anchor={anchor!r}: {e}",
+                    file=sys.stderr,
+                )
+                continue
+            if result.returncode == 0:
+                found = True
+                break
+            if result.returncode == 1:
+                # Anchor not in this chunk; try next chunk.
+                continue
+            # rc >= 2 is a grep error (e.g. unreadable file). Log and treat
+            # as not found in this chunk; the next chunks may still match.
+            print(
+                f"[GATE WARN] grep rc={result.returncode} for anchor="
+                f"{anchor!r}: {result.stderr.strip()}",
+                file=sys.stderr,
+            )
+        if not found:
+            missing.append(anchor)
+    if missing:
+        return (False, missing)
+    return (True, [])
 
 
 def evaluate_executor(output_path=None):
@@ -154,6 +260,28 @@ def evaluate_executor(output_path=None):
             print(f"[GATE FAIL] Missing planned tests: {missing}", file=sys.stderr)
             return "FAIL"
 
+        # P1 Stage C. Every pass_criteria entry whose traces_to is
+        # 'prd_verbatim:<literal>' must have its literal string present in
+        # at least one git-tracked file in the workspace. grep -F semantics:
+        # regex metacharacters in the anchor are treated as literal
+        # characters. Runs after the cheap structural tdd cross-check so
+        # subprocess work is gated on the manifest already being shape-valid.
+        ok, missing_anchors = _check_prd_verbatim_anchors(
+            planner_data, WORKSPACE_DIR
+        )
+        if not ok:
+            _write_executor_gate_detail({
+                "gate_error": "ERR_PRD_VERBATIM_MISSING",
+                "missing_anchors": missing_anchors,
+            })
+            record_error_code_only("executor", "ERR_PRD_VERBATIM_MISSING")
+            print(
+                f"[GATE FAIL] PRD-verbatim anchors missing from tracked "
+                f"source: {missing_anchors}",
+                file=sys.stderr,
+            )
+            return "FAIL"
+
     # ------------------------------------------------------------------
     # FIND-BEHAVIORAL-ARTIFACTS: P0 Stage F. Phases whose current_phase.json
     # carries a populated behavioral_verification block (effectively every
@@ -163,7 +291,7 @@ def evaluate_executor(output_path=None):
     # each listed path must exist on disk.
     # ------------------------------------------------------------------
     _current_phase = _load_current_phase()
-    if _phase_has_behavioral_block(_current_phase):
+    if phase_has_behavioral_block(_current_phase):
         behavioral_artifacts = data.get("behavioral_smoke_artifacts") or []
         if not isinstance(behavioral_artifacts, list) or len(behavioral_artifacts) == 0:
             record_error_code_only("executor", "ERR_BEHAVIORAL_ARTIFACTS_MISSING")

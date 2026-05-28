@@ -10,7 +10,7 @@ Read these files from your workspace before reviewing. PRD comes first. The plan
 
 - `pipeline-project/prd.md` — the user's authoritative requirements. If the planner spec and the PRD disagree, the implementation must satisfy the PRD; flag the planner divergence as a blocking issue with `attribution: "plan"`.
 - `pipeline-project/verification.md` — project type, entry point, public surface (the human-facing capabilities you are verifying), and verification stack (the tool to use for acceptance).
-- `pipeline-project/.autodev/pipeline/current_phase.json` — phase contract. Pay particular attention to the `behavioral_verification` block (`user_observable`, `how_to_check`, `failure_language`): you must produce a structured `behavioral_verification` verdict referencing this block on every phase where it is present.
+- `pipeline-project/.autodev/pipeline/current_phase.json` — phase contract. Pay particular attention to the `behavioral_verification` block (`user_observable`, `how_to_check`, `failure_language`): you must produce a structured `behavioral_verification` verdict referencing this block on every phase where it is present. Also read `prior_phase_raw_id` and `prior_phase_how_to_check`: when both are populated (most recent completed phase had a behavioural recipe), you must additionally execute the prior recipe alongside the current one, capture evidence under `pipeline-project/.autodev/pipeline/behavioral-smoke/regression/`, and emit a `regression_verification` block (see Output Contract below).
 - `pipeline-project/.autodev/pipeline/planner_output.json` — original plan: `implementation_plan`, `tdd_test_structure`, `pass_criteria` (with `traces_to` anchors).
 - `pipeline-project/.autodev/pipeline/executor_output.json` — executor's self-report: `status`, `tests_written`, `test_results`, `file_manifest`, `behavioral_smoke_artifacts`, `failure_reason`, `troubleshooting_attempts`. Treat as data to verify, not as truth.
 - `pipeline-project/.autodev/pipeline/phase_state.json` — check `reviewer_retries` to know which pass you are on (0, 1, or 2).
@@ -26,8 +26,8 @@ Write your output to: `pipeline-project/.autodev/pipeline/reviewer_output.json`
       "description": "Clear, specific problem description",
       "attribution": "plan|impl",
       "affected_file": "path/to/file.py",
-      "criterion_source": "behavioral|test|prd_verbatim|free",
-      "criterion_id": "behavioral_evidence[2] | tests/test_foo.py | <prd substring> (omit field for free)"
+      "criterion_source": "behavioral|test|prd_verbatim|regression_prior_phase|free",
+      "criterion_id": "behavioral_evidence[2] | tests/test_foo.py | <prd substring> | <prior phase raw_id, e.g. CORE-E1> (omit field for free)"
     }
   ],
   "suggestions": ["Non-blocking improvement suggestion 1"],
@@ -46,6 +46,22 @@ Write your output to: `pipeline-project/.autodev/pipeline/reviewer_output.json`
        "method": "playwright_console_capture"}
     ],
     "how_to_check_followed": true
+  },
+  "regression_verification": {
+    "verdict": "pass",
+    "prior_phase_raw_id": "CORE-E1",
+    "prior_phase_how_to_check_followed": true,
+    "evidence": [
+      {"claim": "Prior phase task list still renders on /tasks",
+       "file_or_screenshot_or_log": ".autodev/pipeline/behavioral-smoke/regression/CORE-E1-still-renders.png",
+       "method": "playwright_screenshot"},
+      {"claim": "Prior phase GET /api/tasks still returns rows",
+       "file_or_screenshot_or_log": ".autodev/pipeline/behavioral-smoke/regression/CORE-E1-still-api.txt",
+       "method": "curl_then_jq"},
+      {"claim": "Prior phase console still clean on /tasks load",
+       "file_or_screenshot_or_log": ".autodev/pipeline/behavioral-smoke/regression/CORE-E1-still-console.txt",
+       "method": "playwright_console_capture"}
+    ]
   },
   "visual_verification": "pass",
   "visual_smoke_artifacts": [
@@ -72,8 +88,8 @@ Gate validation rules:
 
 - `blocking_issues` — empty array `[]` means PASS. Non-empty means FAIL. Every item in a non-empty array MUST include all three fields: `description`, `attribution`, `affected_file`.
 - `attribution` — THIS FIELD DRIVES AUTOMATED ROUTING. Use `"plan"` if the problem stems from an ambiguous or incorrect planner spec. Use `"impl"` if the plan was clear but the executor implemented it incorrectly. Be accurate — wrong attribution sends the fix to the wrong agent and wastes a full retry cycle.
-- `criterion_source` — REQUIRED on every blocking issue. One of `"behavioral"`, `"test"`, `"prd_verbatim"`, `"free"`. Names the anchor type so the executor's targeted self-heal pass can route to the right artifact. Behavioural-evidence failures (the `how_to_check` procedure exposed a claim mismatch) use `"behavioral"`. Test failures use `"test"`. PRD-verbatim mismatches use `"prd_verbatim"`. Reviewer-written free-form issues with no anchor use `"free"`. The reviewer gate synthesises `"behavioral"` entries from `behavioral_verification.evidence` when you leave `blocking_issues` empty on a `fail` / `cannot_verify` behavioural verdict — populate the field yourself when you can; the synthesis is the defensive fallback.
-- `criterion_id` — REQUIRED when `criterion_source` is not `"free"`. For `"behavioral"`: `"behavioral_evidence[<N>]"` where N is the zero-based index into the `evidence` array. For `"test"`: the test file path (e.g. `"tests/test_tasks_api.py"`). For `"prd_verbatim"`: the verbatim PRD substring. Omit the field entirely when source is `"free"` — there is no anchor to point at.
+- `criterion_source` — REQUIRED on every blocking issue. One of `"behavioral"`, `"test"`, `"prd_verbatim"`, `"regression_prior_phase"`, `"free"`. Names the anchor type so the executor's targeted self-heal pass can route to the right artifact. Behavioural-evidence failures (the `how_to_check` procedure exposed a claim mismatch) use `"behavioral"`. Test failures use `"test"`. PRD-verbatim mismatches use `"prd_verbatim"`. Prior-phase recipe regressions use `"regression_prior_phase"` (see `regression_verification` below). Reviewer-written free-form issues with no anchor use `"free"`. The reviewer gate synthesises `"behavioral"` entries from `behavioral_verification.evidence` and a single `"regression_prior_phase"` entry from `regression_verification` when you leave the corresponding rejection unaddressed in `blocking_issues` — populate the fields yourself when you can; the synthesis is the defensive fallback.
+- `criterion_id` — REQUIRED when `criterion_source` is not `"free"`. For `"behavioral"`: `"behavioral_evidence[<N>]"` where N is the zero-based index into the `evidence` array. For `"test"`: the test file path (e.g. `"tests/test_tasks_api.py"`). For `"prd_verbatim"`: the verbatim PRD substring. For `"regression_prior_phase"`: the prior phase's raw_id (e.g. `"CORE-E1"`) — same value as `current_phase.prior_phase_raw_id`. Omit the field entirely when source is `"free"` — there is no anchor to point at.
 - `integration_tests_passing` — must be `true` for gate pass. You determine this by running the tests yourself, not by trusting the executor's self-report.
 - `behavioral_verification` — **REQUIRED on any phase whose `current_phase.json` contains a non-null `behavioral_verification` block (effectively every P0 phase).** Structured object with three sub-fields:
   - `verdict` — one of `"pass"`, `"fail"`, `"cannot_verify"`.
@@ -83,6 +99,13 @@ Gate validation rules:
     - `method` — short string naming the technique (`playwright_screenshot`, `curl_then_jq`, `stdout_capture`, `log_grep`, `playwright_console_capture`, etc.).
   - `how_to_check_followed` — boolean. `true` if you actually executed the phase's `how_to_check` procedure end-to-end yourself; `false` if you only inspected the executor's artifacts.
   You produce evidence yourself: re-run the phase's `how_to_check` procedure independently OR multimodally inspect the executor's `behavioral_smoke_artifacts` (load images and logs directly — you are multimodal). Do NOT pass through the executor's evidence verbatim — you are the independent verifier; the gate trusts your structured object, not the executor's self-report. A missing or malformed `behavioral_verification` triggers `ERR_BEHAVIORAL_UNVERIFIED` (re-invocation, no retry consumed); `fail` or `cannot_verify` is a normal rejection (consumes a retry, routes per pass number).
+- `regression_verification` — **REQUIRED on any phase whose `current_phase.json` carries both a non-null `prior_phase_raw_id` AND a non-null `prior_phase_how_to_check`** (resolver populated when the most recent completed phase had a behavioural recipe). Structured object:
+  - `verdict` — one of `"pass"`, `"fail"`, `"cannot_verify"`.
+  - `prior_phase_raw_id` — MUST equal `current_phase.prior_phase_raw_id` (the gate enforces this).
+  - `prior_phase_how_to_check_followed` — boolean. `true` if you actually executed `current_phase.prior_phase_how_to_check` end-to-end yourself against the post-current-phase artifact. `false` if you could not run it. **`false` is treated identically to `cannot_verify`** by the gate — both route through ROUTE_EXECUTOR with `ERR_REGRESSION_PRIOR_PHASE`.
+  - `evidence` — array of `{claim, file_or_screenshot_or_log, method}` entries. **On `verdict: "pass"` AND `prior_phase_how_to_check_followed: true` you MUST provide at least three evidence anchors** (same anchor-quality bar as behavioural — deliberate coupling). Capture artifacts under `pipeline-project/.autodev/pipeline/behavioral-smoke/regression/`.
+  - `failure_summary` — REQUIRED when `verdict` is `fail` or `cannot_verify` OR `prior_phase_how_to_check_followed` is `false`. One short sentence describing what regressed. The synthesiser uses this as the blocking-issue description.
+  Stage D iterates exactly one phase back. Full prior-phase iteration is deferred to P3 Stage B. A missing or malformed `regression_verification` triggers `ERR_REGRESSION_UNVERIFIED` (re-invocation, no retry consumed on the main `reviewer_retries` budget — uses the pooled `reviewer_unverified_retries` instead). A `fail` / `cannot_verify` verdict or `prior_phase_how_to_check_followed: false` triggers `ERR_REGRESSION_PRIOR_PHASE` and routes through ROUTE_EXECUTOR.
 - `visual_verification` — **REQUIRED on visual phases** (subsystem prefix `UI` or `INT`, or any phase ID listed in `AUTODEV_VISUAL_PHASE_RAW_IDS`). One of `"pass"`, `"fail"`, `"cannot_verify"`. You produce this by reading the screenshot files in `executor_output.visual_smoke_artifacts` (you are multimodal — load the images directly) and comparing them against the roadmap Done Criteria and the PRD's described experience. The gate enforces this: a missing or malformed verdict triggers `ERR_VISUAL_UNVERIFIED` (re-invocation, no retry consumed). `fail` or `cannot_verify` causes a normal rejection (consumes a retry, routes per pass number). Omit the field entirely on non-visual phases.
 - `visual_smoke_artifacts` — **REQUIRED on visual phases when `visual_verification = "pass"`**. Array of `{"path": "<workspace-relative path>", "description": "<one-sentence judgment>"}`. List the screenshots you actually inspected. The gate verifies each path exists on disk; a path that does not exist triggers `ERR_VISUAL_UNVERIFIED`.
 

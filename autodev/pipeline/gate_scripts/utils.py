@@ -40,6 +40,43 @@ ARTIFACTS_DIR = os.path.join(WORKSPACE_DIR.rstrip(os.sep), AUTODEV_PIPELINE_SUBD
 PHASE_STATE_FILE = os.path.join(ARTIFACTS_DIR, "phase_state.json")
 
 
+def phase_has_behavioral_block(current_phase):
+    """Content-driven: True iff ``current_phase`` carries a populated
+    Behavioral Verification block with all three required sub-fields.
+
+    Shared by ``reviewer_gate`` and ``executor_gate`` (P1 Stage D Hygiene H1
+    extracted the prior duplicates ``_requires_behavioral_verification`` and
+    ``_phase_has_behavioral_block`` into this single source of truth).
+
+    Pre-P0 in-flight phases carry ``behavioral_verification: None`` and must
+    be exempt — only phases produced after P0 ships have the block.
+    """
+    if not isinstance(current_phase, dict):
+        return False
+    block = current_phase.get("behavioral_verification")
+    if not isinstance(block, dict):
+        return False
+    return all(block.get(k) for k in ("user_observable", "how_to_check", "failure_language"))
+
+
+def requires_regression_verification(current_phase):
+    """Content-driven: True iff ``current_phase`` carries a prior phase
+    raw_id AND a prior phase how_to_check recipe (both truthy).
+
+    Drives the reviewer-gate's REGRESSION_UNVERIFIED branch (P1 Stage D).
+    The resolver populates these fields when the most recent completed
+    phase had a behavioural recipe; the regression branch is skipped when
+    either is None (first phase, all predecessors blocked/skipped, or
+    predecessor had no behavioural block).
+    """
+    if not isinstance(current_phase, dict):
+        return False
+    return bool(
+        current_phase.get("prior_phase_raw_id")
+        and current_phase.get("prior_phase_how_to_check")
+    )
+
+
 def record_error_code_only(agent_type, error_code):
     """Writes last_error_code to phase_state.json without incrementing retry counters.
 

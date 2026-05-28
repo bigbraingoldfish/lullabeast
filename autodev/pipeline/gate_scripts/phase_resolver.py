@@ -116,6 +116,13 @@ def parse_roadmap(filepath):
     # trailing integer (e.g. INFRA-1, CORE-1, and UI-1 all have suffix "1" but
     # occupy different positions in the roadmap and therefore produce distinct keys).
     global_idx = 0
+    # P1 Stage D: track the most recent COMPLETED phase as we walk so the
+    # reviewer can re-execute its how_to_check recipe alongside the current
+    # phase's (N→N-1 regression check). Only `x`-status phases qualify;
+    # `-` (skipped) and `!` (escalated) intentionally do not update this.
+    # N→N-1 only — if N-1 has no how_to_check, we do not walk further back
+    # to N-2. Promotion to full iteration is P3 Stage B.
+    last_completed = None
     for i, line in enumerate(lines):
         raw_line = line.rstrip("\n")
         stripped = line.strip()
@@ -131,8 +138,24 @@ def parse_roadmap(filepath):
         phase_number = global_idx
         global_idx += 1
 
-        if status_char == 'x' or status_char == '-':
-            continue  # Skip completed or skipped phases
+        if status_char == 'x':
+            # Completed phase: extract its behavioural how_to_check (if any)
+            # for the regression check that fires on the current phase.
+            _completed_body_end = len(lines)
+            for j in range(i + 1, len(lines)):
+                if _PHASE_HEADER_RE.match(lines[j].strip()):
+                    _completed_body_end = j
+                    break
+            _completed_body = [ln.rstrip("\n") for ln in lines[i + 1:_completed_body_end]]
+            _completed_bv = _extract_behavioral_verification(_completed_body)
+            last_completed = {
+                "raw_id": phase_id,
+                "how_to_check": _completed_bv.get("how_to_check") if _completed_bv else None,
+            }
+            continue
+        if status_char == '-':
+            # Skipped phase: never landed; do NOT update last_completed.
+            continue
 
         parts = phase_id.split('-')
         status = 'BLOCKED' if status_char == '!' else 'PENDING'
@@ -151,6 +174,12 @@ def parse_roadmap(filepath):
             "exit_criteria_block": "",
             "tdd_requirements": [],
             "done_criteria": [],
+            # P1 Stage D: most recent completed phase's id + how_to_check
+            # recipe. Both None when there is no completed predecessor.
+            # how_to_check is None when the predecessor lacks a behavioural
+            # block — the reviewer's regression branch is then skipped.
+            "prior_phase_raw_id": last_completed["raw_id"] if last_completed else None,
+            "prior_phase_how_to_check": last_completed["how_to_check"] if last_completed else None,
         }
 
         # Bounded scan: lines from the phase header until the next phase header

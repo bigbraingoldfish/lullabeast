@@ -10,7 +10,9 @@ if current_dir not in sys.path:
 from utils import (
     ARTIFACTS_DIR,
     load_json_safe,
+    phase_has_behavioral_block,
     record_error_code_only,
+    requires_regression_verification,
     PHASE_STATE_FILE,
     WORKSPACE_DIR,
 )
@@ -56,23 +58,6 @@ def _is_visual_phase(phase_raw_id):
 
 _REQUIRED_BEHAVIORAL_EVIDENCE_KEYS = ("claim", "file_or_screenshot_or_log", "method")
 _MIN_BEHAVIORAL_EVIDENCE_ANCHORS = 3
-
-
-def _requires_behavioral_verification(current_phase):
-    """Content-driven: True iff ``current_phase.json`` carries a populated
-    Behavioral Verification block with all three required sub-fields.
-
-    Mirrors the *intent* of :func:`_is_visual_phase` but is content-driven
-    rather than prefix-driven — under P0 effectively every phase has a block,
-    but legacy/in-flight phases queued before P0 ship with
-    ``behavioral_verification: None`` and must be exempt (see parent plan
-    §2.9 transitional rule)."""
-    if not current_phase:
-        return False
-    block = current_phase.get("behavioral_verification")
-    if not isinstance(block, dict):
-        return False
-    return all(block.get(k) for k in ("user_observable", "how_to_check", "failure_language"))
 
 
 def _check_behavioral_verification(data):
@@ -142,6 +127,90 @@ def _check_behavioral_verification(data):
     return []
 
 
+def _check_regression_verification(data, current_phase):
+    """Return a list of problems with the reviewer's ``regression_verification``
+    object on a phase that requires it (resolver populated both prior-phase
+    fields), or [] when the shape is valid.
+
+    Required shape:
+
+      - ``regression_verification``: dict.
+      - ``verdict``: one of ``"pass"``, ``"fail"``, ``"cannot_verify"``.
+      - ``prior_phase_raw_id``: must equal ``current_phase.prior_phase_raw_id``
+        (reviewer cannot claim a regression against a different prior phase).
+      - ``prior_phase_how_to_check_followed``: boolean.
+      - ``evidence``: list. On ``verdict == "pass"`` AND
+        ``prior_phase_how_to_check_followed is True`` it MUST contain at least
+        :data:`_MIN_BEHAVIORAL_EVIDENCE_ANCHORS` entries (each a dict with
+        ``claim``, ``file_or_screenshot_or_log``, ``method`` keys, paths
+        workspace-bounded and resolvable on disk).
+
+    A ``"fail"`` / ``"cannot_verify"`` verdict OR a ``followed: False`` signal
+    is not a shape failure — those flow through the validation block as
+    ``regression_rejection``. This function only validates the *contract shape*.
+
+    Mirror of :func:`_check_behavioral_verification` — the regression evidence
+    contract reuses the same anchor-quality bar.
+    """
+    # Deliberate coupling: changing the behavioural evidence shape changes the
+    # regression evidence shape too. Both anchors share the same anchor-quality
+    # bar by design.
+    block = data.get("regression_verification")
+    if not isinstance(block, dict):
+        return ["regression_verification missing or not an object"]
+    verdict = block.get("verdict")
+    if verdict not in ("pass", "fail", "cannot_verify"):
+        return [
+            f"regression_verification.verdict must be pass|fail|cannot_verify, got {verdict!r}"
+        ]
+    expected_prior = current_phase.get("prior_phase_raw_id")
+    actual_prior = block.get("prior_phase_raw_id")
+    if actual_prior != expected_prior:
+        return [
+            f"regression_verification.prior_phase_raw_id must be "
+            f"{expected_prior!r}, got {actual_prior!r}"
+        ]
+    if not isinstance(block.get("prior_phase_how_to_check_followed"), bool):
+        return ["regression_verification.prior_phase_how_to_check_followed must be a boolean"]
+    followed = block["prior_phase_how_to_check_followed"]
+    evidence = block.get("evidence") or []
+    if verdict != "pass" or not followed:
+        # fail / cannot_verify / not-followed: shape OK without evidence
+        # anchors; the rejection signal itself is verdict or followed.
+        return []
+    if not isinstance(evidence, list) or len(evidence) < _MIN_BEHAVIORAL_EVIDENCE_ANCHORS:
+        return [
+            f"regression_verification.evidence must have at least "
+            f"{_MIN_BEHAVIORAL_EVIDENCE_ANCHORS} entries when "
+            f"verdict='pass' and prior_phase_how_to_check_followed=True"
+        ]
+    workspace_abs = os.path.abspath(WORKSPACE_DIR)
+    for i, entry in enumerate(evidence):
+        if not isinstance(entry, dict):
+            return [f"regression_verification.evidence[{i}] must be an object"]
+        for key in _REQUIRED_BEHAVIORAL_EVIDENCE_KEYS:
+            if not entry.get(key):
+                return [
+                    f"regression_verification.evidence[{i}] missing required key {key!r}"
+                ]
+        path = entry["file_or_screenshot_or_log"]
+        abs_path = path if os.path.isabs(path) else os.path.join(WORKSPACE_DIR, path)
+        try:
+            if os.path.commonpath([workspace_abs, os.path.abspath(abs_path)]) != workspace_abs:
+                return [
+                    f"regression_verification.evidence[{i}] path escapes workspace: {path}"
+                ]
+        except ValueError:
+            return [
+                f"regression_verification.evidence[{i}] path escapes workspace: {path}"
+            ]
+        if not os.path.exists(abs_path):
+            return [
+                f"regression_verification.evidence[{i}] path does not exist on disk: {path}"
+            ]
+    return []
+
+
 def _synthesize_behavioral_blocking_issues(data):
     """When the reviewer recorded a behavioural failure verdict but did not
     populate ``blocking_issues``, synthesise one entry per evidence claim so
@@ -190,6 +259,76 @@ def _synthesize_behavioral_blocking_issues(data):
             "criterion_id": f"behavioral_evidence[{i}]",
         })
     data["blocking_issues"] = synthesised
+
+
+def _synthesize_regression_blocking_issue(data, current_phase):
+    """When the reviewer's regression check rejected (verdict ∈ fail /
+    cannot_verify OR ``prior_phase_how_to_check_followed: False``), append a
+    SINGLE blocking_issue describing the regression so the executor's
+    self-heal context names it explicitly.
+
+    Mutates ``data`` in place. Idempotent: skip when any existing
+    ``blocking_issues`` entry already carries
+    ``criterion_source == "regression_prior_phase"``. This is stricter than
+    the behavioural synthesiser's "blocking_issues empty" check on purpose —
+    behavioural + regression coexistence requires regression to fire even
+    when the behavioural synthesiser has just populated the list.
+
+    Description selection (in order of preference):
+
+      - ``regression_verification.failure_summary`` when present.
+      - ``"Prior phase {raw_id} how_to_check recipe was not executed"`` when
+        ``prior_phase_how_to_check_followed is False`` (no recipe run).
+      - ``"Prior phase regression check could not verify"`` when
+        ``verdict == "cannot_verify"``.
+      - ``"Prior phase {raw_id} how_to_check regressed"`` on ``verdict == "fail"``.
+
+    Entry shape:
+
+      attribution      = "impl"
+      affected_file    = evidence[0].file_or_screenshot_or_log if evidence else ""
+      criterion_source = "regression_prior_phase"
+      criterion_id     = current_phase.prior_phase_raw_id
+    """
+    block = data.get("regression_verification") or {}
+    verdict = block.get("verdict")
+    followed = block.get("prior_phase_how_to_check_followed")
+    rejected = verdict in ("fail", "cannot_verify") or followed is False
+    if not rejected:
+        return
+    existing = data.get("blocking_issues") or []
+    if any(
+        isinstance(bi, dict)
+        and bi.get("criterion_source") == "regression_prior_phase"
+        for bi in existing
+    ):
+        return  # idempotent — already populated
+
+    prior_raw_id = current_phase.get("prior_phase_raw_id") or ""
+    summary = block.get("failure_summary")
+    if summary:
+        description = str(summary)
+    elif followed is False:
+        description = f"Prior phase {prior_raw_id} how_to_check recipe was not executed"
+    elif verdict == "cannot_verify":
+        description = "Prior phase regression check could not verify"
+    else:
+        description = f"Prior phase {prior_raw_id} how_to_check regressed"
+
+    evidence = block.get("evidence") or []
+    first_path = ""
+    if isinstance(evidence, list) and evidence and isinstance(evidence[0], dict):
+        first_path = evidence[0].get("file_or_screenshot_or_log") or ""
+
+    new_entry = {
+        "description": description,
+        "attribution": "impl",
+        "affected_file": first_path,
+        "criterion_source": "regression_prior_phase",
+        "criterion_id": prior_raw_id,
+    }
+    # Append rather than overwrite so a behavioural-synthesised list survives.
+    data["blocking_issues"] = list(existing) + [new_entry]
 
 
 def _load_current_phase():
@@ -304,7 +443,7 @@ def evaluate_reviewer(output_path=None):
     # judgment we need, so a "code-quality" retry should not be burned).
     # ------------------------------------------------------------------
     _current_phase = _load_current_phase()
-    if _requires_behavioral_verification(_current_phase):
+    if phase_has_behavioral_block(_current_phase):
         behavioral_problems = _check_behavioral_verification(data)
         if behavioral_problems:
             record_error_code_only("reviewer", "ERR_BEHAVIORAL_UNVERIFIED")
@@ -313,6 +452,27 @@ def evaluate_reviewer(output_path=None):
                 file=sys.stderr,
             )
             return "BEHAVIORAL_UNVERIFIED"
+
+    # ------------------------------------------------------------------
+    # FIND-REGRESSION-VERIFICATION: P1 Stage D. Phases whose
+    # current_phase.json carries a prior_phase_raw_id AND a
+    # prior_phase_how_to_check (resolver populated when the most recent
+    # completed phase had a behavioural recipe) require a structured
+    # ``regression_verification`` object on the reviewer output. Missing
+    # or malformed → re-invoke the reviewer (NON-retry-consuming on the
+    # pooled ``reviewer_unverified_retries`` counter — orchestrator-side).
+    # Mirror of BEHAVIORAL_UNVERIFIED. N→N-1 only; promotion to full
+    # iteration is P3 Stage B.
+    # ------------------------------------------------------------------
+    if requires_regression_verification(_current_phase):
+        regression_problems = _check_regression_verification(data, _current_phase)
+        if regression_problems:
+            record_error_code_only("reviewer", "ERR_REGRESSION_UNVERIFIED")
+            print(
+                f"[GATE] REGRESSION_UNVERIFIED ({_current_phase_raw_id}): {regression_problems}",
+                file=sys.stderr,
+            )
+            return "REGRESSION_UNVERIFIED"
 
     blocking_issues = data.get("blocking_issues")
     if blocking_issues is None:
@@ -334,25 +494,63 @@ def evaluate_reviewer(output_path=None):
     # structured verdict is anchored to evidence.
     behavioral_verdict = (data.get("behavioral_verification") or {}).get("verdict")
     behavioral_rejection = (
-        _requires_behavioral_verification(_current_phase)
+        phase_has_behavioral_block(_current_phase)
         and behavioral_verdict in ("fail", "cannot_verify")
+    )
+
+    # P1 Stage D: a regression_verification verdict of "fail" or
+    # "cannot_verify", OR ``prior_phase_how_to_check_followed: False``, is
+    # a code-quality rejection on the same lifetime budget as any other
+    # reviewer-driven executor rejection (per the locked rejection-budget
+    # decision — no per-flavour rejection counter). Routes through
+    # ROUTE_EXECUTOR via the existing apply_reviewer_routing pass logic.
+    _regression_block = data.get("regression_verification") or {}
+    regression_rejection = requires_regression_verification(_current_phase) and (
+        _regression_block.get("verdict") in ("fail", "cannot_verify")
+        or _regression_block.get("prior_phase_how_to_check_followed") is False
     )
 
     if (len(blocking_issues) > 0 or
         not data.get("integration_tests_passing") or
         visual_rejection or
-        behavioral_rejection):
+        behavioral_rejection or
+        regression_rejection):
 
-        record_error_code_only("reviewer", "ERR_VALIDATION_FAILED")
+        # P1 Stage D: emit ERR_REGRESSION_PRIOR_PHASE when regression is
+        # the sole failing dimension so operators can grep one error code
+        # for "demo viewer broke an old feature." Any other coexisting
+        # rejection falls back to the generic ERR_VALIDATION_FAILED — a
+        # mixed failure is not a regression failure specifically.
+        _only_regression = (
+            regression_rejection
+            and not behavioral_rejection
+            and not visual_rejection
+            and not blocking_issues
+            and data.get("integration_tests_passing")
+        )
+        if _only_regression:
+            record_error_code_only("reviewer", "ERR_REGRESSION_PRIOR_PHASE")
+        else:
+            record_error_code_only("reviewer", "ERR_VALIDATION_FAILED")
 
         # P0 Stage G: synthesise per-evidence-entry blocking_issues when the
-        # reviewer recorded a behavioural failure with an empty list. Persist
-        # the augmented payload back to reviewer_output.json (atomic mkstemp +
-        # os.replace) so the orchestrator's downstream read sees the canonical
-        # list and reviewer_output.json on disk matches what failure_context.json
-        # carries. apply_reviewer_routing stays pure routing.
+        # reviewer recorded a behavioural failure with an empty list.
+        # P1 Stage D: independently synthesise a single regression
+        # blocking_issue when the regression check rejected (regression
+        # synthesiser idempotency keys on criterion_source so it coexists
+        # with the behavioural synthesiser — dual-failure case).
+        # Persist any augmented payload back to reviewer_output.json
+        # (atomic mkstemp + os.replace) so the orchestrator's downstream
+        # read sees the canonical list. apply_reviewer_routing stays pure
+        # routing.
+        _mutated = False
         if behavioral_rejection:
             _synthesize_behavioral_blocking_issues(data)
+            _mutated = True
+        if regression_rejection:
+            _synthesize_regression_blocking_issue(data, _current_phase)
+            _mutated = True
+        if _mutated:
             try:
                 _out_dir = os.path.dirname(output_path) or "."
                 _fd, _tmp = tempfile.mkstemp(dir=_out_dir, prefix="reviewer_output_")
