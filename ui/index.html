@@ -290,8 +290,11 @@
             'Overwrites any existing parent. Child enters Waiting on parent until the parent completes. ' +
             'Choose None: Removes parent and restores the entry to READY.';
 
-        /** P3 Setup & Preflight button titles (H-07, H-08, H-09, H-12). */
-        const P3_PREFLIGHT_TITLE_VALIDATE_ROADMAP = 'Required format check before Run Preflight.';
+        /** P3 Setup & Preflight button titles (H-08, H-09, H-12).
+         * H-07 ("Required format check before Run Preflight.") was the title
+         * on the Step 2 "Validate roadmap" button — removed by P0 Stage J.4
+         * when Step 2 became a read-only summary card of the linked Project
+         * Idea. */
         const P3_PREFLIGHT_TITLE_RUN_PREFLIGHT = 'Required before Launch.';
         const P3_PREFLIGHT_TITLE_RERUN_PREFLIGHT =
             'Runs the full preflight (symlink, .gitignore, workspace files, roadmap). Not the same as the lightweight queue check.';
@@ -914,6 +917,15 @@
             if (s > 0) parts.push(`${s} self-failure${s > 1 ? 's' : ''}`);
             if (r > 0) parts.push(`${r} reviewer rejection${r > 1 ? 's' : ''}`);
             return `${a} (${parts.join(', ')})`;
+        }
+
+        /* P0 Stage J — pulse decision for the Ideas-screen tab strip.
+         * /api/ideas/{id}/convert produces roadmap_draft.md AND
+         * verification_draft.md in one session, so both tabs regenerate
+         * in lockstep while convertLoading is true. PRD content is not
+         * touched by /convert, so its tab stays static. */
+        function tabIsRegenerating(tabId, convertLoading) {
+            return Boolean(convertLoading) && (tabId === 'roadmap' || tabId === 'verification');
         }
 
         // ─── Primitive components ─────────────────────────────────────────────────
@@ -2363,6 +2375,26 @@
                                                                 <span>{criteria}</span>
                                                             </li>
                                                         ))}
+                                                    </ul>
+                                                </div>
+                                            )}
+                                            {/* Expanded: Behavioral Verification (P0 Stage J — null for pre-P0 phases) */}
+                                            {isExpanded && phase.behavioral_verification && (
+                                                <div className="mt-3 pt-2 border-t border-[#1a1d21]">
+                                                    <div className="text-xs font-semibold text-slate-400 mb-1">Behavioral Verification:</div>
+                                                    <ul className="text-xs text-slate-400 space-y-1">
+                                                        <li className="flex items-start gap-1">
+                                                            <span className="text-blue-400">•</span>
+                                                            <span><span className="text-slate-500">User-observable: </span>{phase.behavioral_verification.user_observable}</span>
+                                                        </li>
+                                                        <li className="flex items-start gap-1">
+                                                            <span className="text-blue-400">•</span>
+                                                            <span><span className="text-slate-500">How we'll check: </span>{phase.behavioral_verification.how_to_check}</span>
+                                                        </li>
+                                                        <li className="flex items-start gap-1">
+                                                            <span className="text-blue-400">•</span>
+                                                            <span><span className="text-slate-500">If this fails, you see: </span>{phase.behavioral_verification.failure_language}</span>
+                                                        </li>
                                                     </ul>
                                                 </div>
                                             )}
@@ -4196,7 +4228,13 @@
                             return;
                         }
                         if (ctx && ctx.navigateToPreflightWithSeed) {
-                            ctx.navigateToPreflightWithSeed(rm, prdContent || "", verificationContent || "");
+                            ctx.navigateToPreflightWithSeed(
+                                rm,
+                                prdContent || "",
+                                verificationContent || "",
+                                currentIdeaName || "",
+                                currentIdeaId || null,
+                            );
                         }
                     })
                     .catch(() => {
@@ -5048,7 +5086,7 @@
                                         display:'flex', alignItems:'center', gap:'6px',
                                     }}
                                 >
-                                    {tab.label}
+                                    <span className={tabIsRegenerating(tab.id, convertLoading) ? 'animate-pulse text-[#00b4d8]' : ''}>{tab.label}</span>
                                 </button>
                             ))}
                         </div>
@@ -5705,18 +5743,11 @@
                 repoPath,
                 repoPathLocked,
                 roadmapSeed,
-                roadmapSeedLocked,
                 onRepoPathChange,
                 onRepoPathLockToggle,
-                onRoadmapSeedChange,
-                onRoadmapSeedLockToggle,
                 onBack,
                 repoPathError,
-                roadmapSeedError,
                 onRepoPathConfirm,
-                onRoadmapSeedConfirm,
-                onFixRoadmapSeedFormat,
-                preflightFixFormatLoading,
                 onRunPreflight,
                 onConfirmRoadmapArchive,
                 preflightRoadmapAmbiguous,
@@ -5737,7 +5768,17 @@
                 preflightLastRun,
                 hasFail,
                 recentProjects,
-                repoRoadmapHintMessage,
+                /* P0 Stage J.4 — Step 2 became a read-only summary card of the
+                 * linked Project Idea. PRD + verification text and idea
+                 * metadata flow from App so the card can render without
+                 * needing to refetch. ``onOpenInIdeas(ideaId | null)`` is
+                 * the back-link to authoring; null clicks land on the
+                 * Ideas screen without pre-selecting an idea. */
+                launchPrdContent,
+                launchVerificationContent,
+                linkedIdeaName,
+                linkedIdeaId,
+                onOpenInIdeas,
             } = props;
 
             const repoPathInputFsStatus =
@@ -5749,12 +5790,21 @@
                         ? repoPathFsStatus
                         : null;
 
-            const [roadmapInputMode, setRoadmapInputMode] = useState("paste");
-            const [roadmapSeedFileName, setRoadmapSeedFileName] = useState("");
-            const roadmapSeedFileRef = useRef(null);
-
             const preflightBtnLabel = preflightChecks ? "Re-run Preflight" : "Run Preflight";
             const [completionReviewOptIn, setCompletionReviewOptIn] = useState(null);
+
+            /* Step 2 readiness — the trio of contents carried in from the
+             * linked Project Idea. ``hasLinkedIdea`` gates the summary
+             * card vs. the empty-state CTA. Phase count is derived
+             * client-side by counting roadmap.md-style phase lines (no
+             * server round-trip) so the card stays a pure render. */
+            const prdReady = Boolean((launchPrdContent || "").trim());
+            const roadmapReady = Boolean((roadmapSeed || "").trim());
+            const verificationReady = Boolean((launchVerificationContent || "").trim());
+            const hasLinkedIdea = prdReady || roadmapReady || verificationReady;
+            const linkedRoadmapPhaseCount = roadmapReady
+                ? (roadmapSeed.match(/^-\s*\[[ x!\-]\]\s+`[^`]+`/gm) || []).length
+                : 0;
 
             const step3Done = completionReviewOptIn !== null;
             const step4Done = !!preflightChecks && !hasFail && !preflightRoadmapAmbiguous;
@@ -5762,7 +5812,7 @@
             const step4HasWarning = !!preflightChecks && !hasFail && !!preflightRoadmapAmbiguous;
 
             const firstIncompleteStep = !repoPathLocked ? 1
-                : !roadmapSeedLocked ? 2
+                : !hasLinkedIdea ? 2
                 : !step3Done ? 3
                 : !step4Done ? 4
                 : null;
@@ -5843,146 +5893,87 @@
                         </div>
                         <div
                             data-testid="preflight-step-2"
-                            className={`rounded border p-3 space-y-2 ${roadmapSeedLocked ? "border-emerald-600/60" : "border-[#2a2d31]"}`}
+                            className={`rounded border p-3 space-y-2 ${hasLinkedIdea ? "border-emerald-600/60" : "border-[#2a2d31]"}`}
                         >
                             <div className="flex flex-wrap justify-between items-start gap-2">
                                 <div className="min-w-0 flex-1 space-y-1">
-                                    <p className="header-text text-xs font-semibold text-slate-400">Step 2 — Roadmap</p>
+                                    <p className="header-text text-xs font-semibold text-slate-400">Step 2 — Project Idea</p>
                                     <p className="text-[11px] text-slate-500 leading-relaxed max-w-prose">
-                                        Format check only - content quality review lives in Project Ideas if needed.
+                                        The roadmap and verification doc come from Project Ideas. Authoring lives there; the Setup screen stages.
                                     </p>
                                 </div>
-                                <div className="flex gap-2 items-center shrink-0 self-start">
-                                    {!roadmapSeedLocked ? (
-                                        <button
-                                            type="button"
-                                            onClick={onRoadmapSeedConfirm}
-                                            title={P3_PREFLIGHT_TITLE_VALIDATE_ROADMAP}
-                                            className="header-text text-sm px-3 py-1 rounded bg-[#00b4d8] text-[#0d0f12] font-medium"
-                                        >
-                                            Validate roadmap
-                                        </button>
-                                    ) : (
-                                        <>
-                                            <span className="text-emerald-500">✓</span>
-                                            <button type="button" onClick={onRoadmapSeedLockToggle} className="header-text text-xs text-slate-500 hover:text-slate-300">
-                                                Edit
-                                            </button>
-                                        </>
-                                    )}
-                                </div>
+                                {hasLinkedIdea ? (
+                                    <div className="flex gap-2 items-center shrink-0 self-start">
+                                        <span className="text-emerald-500">✓</span>
+                                    </div>
+                                ) : null}
                             </div>
-                            {seedRoadmap ? (
-                                <p className="text-xs text-[#00b4d8]">From Project Ideas</p>
-                            ) : null}
-                            {roadmapSeedLocked ? (
-                                <textarea
-                                    value={roadmapSeed}
-                                    onChange={(e) => onRoadmapSeedChange(e.target.value)}
-                                    readOnly
-                                    disabled
-                                    placeholder="Paste roadmap markdown…"
-                                    className="w-full min-h-[100px] max-h-[38vh] overflow-y-auto rounded border border-[#1a1d21] px-3 py-2 text-sm bg-[#0d0f12] text-slate-300"
-                                />
-                            ) : roadmapSeed ? (
-                                <textarea
-                                    value={roadmapSeed}
-                                    onChange={(e) => onRoadmapSeedChange(e.target.value)}
-                                    placeholder="Paste roadmap markdown…"
-                                    className="w-full min-h-[100px] max-h-[38vh] overflow-y-auto rounded border border-[#1a1d21] px-3 py-2 text-sm bg-[#1a1d21] text-slate-200"
-                                />
-                            ) : (
-                                <div className="space-y-2">
-                                    {!seedRoadmap ? (
-                                        <div className="flex gap-2 flex-wrap">
-                                            <button
-                                                type="button"
-                                                onClick={() => setRoadmapInputMode("upload")}
-                                                className={`header-text text-xs px-3 py-1.5 rounded border ${
-                                                    roadmapInputMode === "upload"
-                                                        ? "border-[#00b4d8] text-[#00b4d8] bg-[#00b4d8]/10"
-                                                        : "border-[#1a1d21] text-slate-400 hover:border-slate-600"
-                                                }`}
-                                            >
-                                                Upload file
-                                            </button>
-                                            <button
-                                                type="button"
-                                                onClick={() => setRoadmapInputMode("paste")}
-                                                className={`header-text text-xs px-3 py-1.5 rounded border ${
-                                                    roadmapInputMode === "paste"
-                                                        ? "border-[#00b4d8] text-[#00b4d8] bg-[#00b4d8]/10"
-                                                        : "border-[#1a1d21] text-slate-400 hover:border-slate-600"
-                                                }`}
-                                            >
-                                                Paste content
-                                            </button>
+                            {hasLinkedIdea ? (
+                                <div className="rounded border border-[#1a1d21] bg-[#0d0f11] p-4 space-y-3">
+                                    <div className="flex items-center justify-between gap-3 flex-wrap">
+                                        <div className="flex items-center gap-2 min-w-0">
+                                            <p className="text-xs text-[#00b4d8] header-text">From Project Ideas</p>
+                                            <span className="text-sm font-semibold text-slate-200 truncate">{linkedIdeaName || "(linked idea)"}</span>
+                                            <span className="text-xs px-2 py-0.5 rounded bg-[#1a1d21] text-slate-400">
+                                                {linkedRoadmapPhaseCount} phase{linkedRoadmapPhaseCount === 1 ? "" : "s"}
+                                            </span>
                                         </div>
-                                    ) : null}
-                                    {seedRoadmap || roadmapInputMode === "paste" ? (
-                                        <textarea
-                                            value={roadmapSeed}
-                                            onChange={(e) => onRoadmapSeedChange(e.target.value)}
-                                            placeholder="Paste roadmap markdown…"
-                                            className="w-full min-h-[100px] max-h-[38vh] overflow-y-auto rounded border border-[#1a1d21] px-3 py-2 text-sm bg-[#1a1d21] text-slate-200"
-                                        />
-                                    ) : (
-                                        <div className="space-y-2">
-                                            <input
-                                                ref={roadmapSeedFileRef}
-                                                type="file"
-                                                accept=".md"
-                                                className="hidden"
-                                                onChange={(e) => {
-                                                    const file = e.target.files && e.target.files[0];
-                                                    if (!file) return;
-                                                    setRoadmapSeedFileName(file.name);
-                                                    const reader = new FileReader();
-                                                    reader.onload = () => onRoadmapSeedChange(String(reader.result || ""));
-                                                    reader.readAsText(file);
-                                                    e.target.value = "";
-                                                }}
-                                            />
-                                            <button
-                                                type="button"
-                                                onClick={() => roadmapSeedFileRef.current && roadmapSeedFileRef.current.click()}
-                                                className="header-text w-full sm:w-auto text-sm px-4 py-2 rounded bg-[#1a1d21] text-[#00b4d8] border border-[#00b4d8]/40 hover:border-[#00b4d8]/70"
-                                            >
-                                                Upload .md file
-                                            </button>
-                                            {roadmapSeedFileName ? (
-                                                <p className="text-[11px] text-slate-500 truncate">{roadmapSeedFileName}</p>
-                                            ) : null}
-                                        </div>
-                                    )}
-                                </div>
-                            )}
-                            {(roadmapSeedError && roadmapSeedError.length > 0 || preflightFixFormatLoading) && (
-                                <div className="space-y-2">
-                                    {onFixRoadmapSeedFormat && (
                                         <button
                                             type="button"
-                                            onClick={onFixRoadmapSeedFormat}
-                                            disabled={preflightFixFormatLoading}
-                                            className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8]/20 text-[#00b4d8] border border-[#00b4d8]/40 disabled:opacity-40"
+                                            onClick={() => onOpenInIdeas && onOpenInIdeas(linkedIdeaId)}
+                                            className="text-xs text-[#00b4d8] hover:underline shrink-0"
                                         >
-                                            {preflightFixFormatLoading ? "Fixing..." : "Fix Format"}
+                                            Open in Project Ideas →
                                         </button>
-                                    )}
-                                    {roadmapSeedError && roadmapSeedError.length > 0 && (
-                                        <ul className="text-red-400 text-xs space-y-1">
-                                            {roadmapSeedError.map((er, i) => (
-                                                <li key={i}>Line {er.line}: {er.message}</li>
-                                            ))}
-                                        </ul>
-                                    )}
+                                    </div>
+                                    <div className="flex gap-2 flex-wrap">
+                                        <span className={`text-[11px] px-2 py-0.5 rounded border ${prdReady ? "border-emerald-600/60 text-emerald-400" : "border-[#2a2d31] text-slate-500"}`}>
+                                            {prdReady ? "PRD ready" : "PRD missing"}
+                                        </span>
+                                        <span className={`text-[11px] px-2 py-0.5 rounded border ${roadmapReady ? "border-emerald-600/60 text-emerald-400" : "border-[#2a2d31] text-slate-500"}`}>
+                                            {roadmapReady ? "Roadmap ready" : "Roadmap missing"}
+                                        </span>
+                                        <span className={`text-[11px] px-2 py-0.5 rounded border ${verificationReady ? "border-emerald-600/60 text-emerald-400" : "border-[#2a2d31] text-slate-500"}`}>
+                                            {verificationReady ? "Verification ready" : "Verification missing"}
+                                        </span>
+                                    </div>
+                                    <details className="text-xs text-slate-400">
+                                        <summary className="cursor-pointer text-slate-500 hover:text-slate-300">Show carried-in content (read-only)</summary>
+                                        <div className="mt-2 space-y-3">
+                                            {roadmapReady ? (
+                                                <div>
+                                                    <p className="text-[11px] uppercase tracking-wide text-slate-500 mb-1">Roadmap</p>
+                                                    <pre className="max-h-[24vh] overflow-y-auto rounded bg-[#0d0f12] border border-[#1a1d21] px-2 py-1 whitespace-pre-wrap">{roadmapSeed}</pre>
+                                                </div>
+                                            ) : null}
+                                            {verificationReady ? (
+                                                <div>
+                                                    <p className="text-[11px] uppercase tracking-wide text-slate-500 mb-1">Verification</p>
+                                                    <pre className="max-h-[24vh] overflow-y-auto rounded bg-[#0d0f12] border border-[#1a1d21] px-2 py-1 whitespace-pre-wrap">{launchVerificationContent}</pre>
+                                                </div>
+                                            ) : null}
+                                            <button
+                                                type="button"
+                                                onClick={() => onOpenInIdeas && onOpenInIdeas(linkedIdeaId)}
+                                                className="text-xs text-[#00b4d8] hover:underline"
+                                            >
+                                                Edit in Project Ideas →
+                                            </button>
+                                        </div>
+                                    </details>
+                                </div>
+                            ) : (
+                                <div className="rounded border border-[#1a1d21] bg-[#0d0f11] p-4 text-center space-y-2">
+                                    <p className="text-sm text-slate-300">No project idea linked to this repo path.</p>
+                                    <button
+                                        type="button"
+                                        onClick={() => onOpenInIdeas && onOpenInIdeas(null)}
+                                        className="text-xs text-[#00b4d8] hover:underline"
+                                    >
+                                        Create one in Project Ideas →
+                                    </button>
                                 </div>
                             )}
-                            {repoRoadmapHintMessage ? (
-                                <p className="text-[11px] text-amber-400 leading-relaxed max-w-prose">
-                                    {repoRoadmapHintMessage}
-                                </p>
-                            ) : null}
                         </div>
                         {/* W5-G: Step 3 — Completion Report (required Yes/No selection) */}
                         <div
@@ -6039,7 +6030,7 @@
                                     <button
                                         type="button"
                                         onClick={onRunPreflight}
-                                        disabled={!repoPathLocked || !roadmapSeedLocked}
+                                        disabled={!repoPathLocked || !hasLinkedIdea}
                                         title={
                                             preflightChecks
                                                 ? P3_PREFLIGHT_TITLE_RERUN_PREFLIGHT
@@ -6069,7 +6060,7 @@
                                     <button
                                         type="button"
                                         onClick={onConfirmRoadmapArchive}
-                                        disabled={!repoPathLocked || !roadmapSeedLocked}
+                                        disabled={!repoPathLocked || !hasLinkedIdea}
                                         className="header-text text-xs px-3 py-1.5 rounded bg-amber-900/60 border border-amber-600 text-amber-50 disabled:opacity-40"
                                     >
                                         Archive extras &amp; continue preflight
@@ -6100,7 +6091,7 @@
                                     className="text-xs text-slate-500 min-w-0 sm:max-w-[55%]"
                                 >
                                     {firstIncompleteStep === 1 && "Complete Step 1 — confirm your repository path."}
-                                    {firstIncompleteStep === 2 && "Complete Step 2 — validate your roadmap."}
+                                    {firstIncompleteStep === 2 && "Complete Step 2 — link a project idea via Project Ideas."}
                                     {firstIncompleteStep === 3 && "Complete Step 3 — choose your completion report preference."}
                                     {firstIncompleteStep === 4 && (
                                         step4HasError
@@ -8765,13 +8756,17 @@
             const [repoPath, setRepoPath] = useState("");
             const [repoPathLocked, setRepoPathLocked] = useState(false);
             const [roadmapSeed, setRoadmapSeed] = useState("");
-            const [roadmapSeedLocked, setRoadmapSeedLocked] = useState(false);
             /** PRD text from Project Ideas, passed to preflight + launch when non-empty. */
             const [launchPrdContent, setLaunchPrdContent] = useState("");
             /** verification.md text from Project Ideas, passed to preflight + launch when non-empty (Stage C). */
             const [launchVerificationContent, setLaunchVerificationContent] = useState("");
+            /** P0 Stage J.4 — idea metadata carried in from navigateToPreflightWithSeed.
+             * Drives the Step-2 summary-card heading and the Open-in-Project-Ideas link.
+             * Cleared by handleNavigate('preflight') so a fresh Setup entry shows the
+             * empty-state CTA. */
+            const [launchIdeaName, setLaunchIdeaName] = useState("");
+            const [launchIdeaId, setLaunchIdeaId] = useState(null);
             const [repoPathError, setRepoPathError] = useState("");
-            const [roadmapSeedError, setRoadmapSeedError] = useState([]);
             const [preflightChecks, setPreflightChecks] = useState(null);
             /** When set, preflight found multiple *oadmap*.md — launch blocked until user confirms archive. */
             const [preflightRoadmapAmbiguous, setPreflightRoadmapAmbiguous] = useState(null);
@@ -8781,13 +8776,20 @@
             const [addToQueueBusy, setAddToQueueBusy] = useState(false);
             const [addToQueueError, setAddToQueueError] = useState("");
             const [preflightQueueActive, setPreflightQueueActive] = useState(false);
-            const [repoRoadmapHintMessage, setRepoRoadmapHintMessage] = useState("");
             /** null | "exists" | "parent" | "bad" — from filesystem check on server (debounced). */
             const [repoPathFsStatus, setRepoPathFsStatus] = useState(null);
             const [showCreateFolderPrompt, setShowCreateFolderPrompt] = useState(false);
             const [createFolderError, setCreateFolderError] = useState("");
             const repoPathValidateTimerRef = useRef(null);
             const [recentProjects, setRecentProjects] = useState([]);
+            const onOpenInIdeas = useCallback((ideaId) => {
+                if (ideaId) {
+                    try {
+                        sessionStorage.setItem("autodev:lastIdeaId", ideaId);
+                    } catch (_e) { /* sessionStorage unavailable — IdeasScreen falls back to its own selection */ }
+                }
+                setCurrentScreen("ideas");
+            }, [setCurrentScreen]);
 
             useEffect(() => {
                 if (currentScreen !== "preflight") return;
@@ -8797,13 +8799,20 @@
                     .catch(() => setRecentProjects([]));
             }, [currentScreen]);
 
-            const navigateToPreflightWithSeed = (content, prdText, verificationText) => {
+            /* P0 Stage J.4 — extended to also carry the linked Idea's
+             * name + id so the Setup-screen Step 2 summary card can
+             * render the heading + the Open-in-Project-Ideas back-link.
+             * Older callers passing only the trio still work; the extra
+             * args default to empty/null and the card falls back to a
+             * generic label. */
+            const navigateToPreflightWithSeed = (content, prdText, verificationText, ideaName, ideaId) => {
                 const text = content || "";
                 setSeedRoadmap(text);
                 setRoadmapSeed(text);
-                setRoadmapSeedLocked(!!text.trim());
                 setLaunchPrdContent(typeof prdText === "string" ? prdText : "");
                 setLaunchVerificationContent(typeof verificationText === "string" ? verificationText : "");
+                setLaunchIdeaName(typeof ideaName === "string" ? ideaName : "");
+                setLaunchIdeaId(typeof ideaId === "string" && ideaId ? ideaId : null);
                 setCurrentScreen("preflight");
             };
 
@@ -8811,12 +8820,11 @@
                 if (screen === "preflight") {
                     setSeedRoadmap("");
                     setRoadmapSeed("");
-                    setRoadmapSeedLocked(false);
                     setLaunchPrdContent("");
                     setLaunchVerificationContent("");
+                    setLaunchIdeaName("");
+                    setLaunchIdeaId(null);
                     setRepoPathError("");
-                    setRepoRoadmapHintMessage("");
-                    setRoadmapSeedError([]);
                     setPreflightChecks(null);
                     setPreflightRoadmapAmbiguous(null);
                     setPreflightLastRun(null);
@@ -8929,39 +8937,13 @@
                         if (check.exists) {
                             setRepoPathLocked(true);
                             setRepoPath(path);
-                            setRepoRoadmapHintMessage("");
-                            const seedEligible =
-                                !(seedRoadmap || "").trim() &&
-                                !(roadmapSeed || "").trim() &&
-                                !roadmapSeedLocked;
-                            if (seedEligible) {
-                                fetch("/api/setup/repo-roadmap-hint", {
-                                    method: "POST",
-                                    headers: { "Content-Type": "application/json" },
-                                    body: JSON.stringify({ path }),
-                                })
-                                    .then((r3) => r3.json().catch(() => ({})))
-                                    .then((hint) => {
-                                        if (!hint || !hint.found) return;
-                                        if (hint.ambiguous) {
-                                            setRepoRoadmapHintMessage(
-                                                "Multiple roadmap files found; run preflight or remove extras before auto-load."
-                                            );
-                                            return;
-                                        }
-                                        if (hint.all_phases_complete) {
-                                            setRepoRoadmapHintMessage(
-                                                "Roadmap on disk is fully checked off; seed left empty."
-                                            );
-                                            return;
-                                        }
-                                        if (typeof hint.content === "string" && hint.content.trim()) {
-                                            setRoadmapSeed(hint.content);
-                                            setRoadmapSeedError([]);
-                                        }
-                                    })
-                                    .catch(() => {});
-                            }
+                            /* P0 Stage J.4 — the on-disk auto-load (formerly
+                             * fetching /api/setup/repo-roadmap-hint to
+                             * prepopulate the Step 2 textarea) was removed.
+                             * The Setup screen no longer ingests free-text
+                             * roadmap content; the only path for Step 2
+                             * to populate is navigateToPreflightWithSeed
+                             * from Project Ideas. */
                         } else if (check.parent_exists) {
                             setShowCreateFolderPrompt(true);
                         } else {
@@ -9000,80 +8982,6 @@
                 setShowCreateFolderPrompt(false);
             };
 
-            const onRoadmapSeedConfirm = () => {
-                setRoadmapSeedError([]);
-                fetch("/api/setup/validate-roadmap", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ content: roadmapSeed }),
-                })
-                    .then(async (r) => {
-                        const d = await r.json().catch(() => ({}));
-                        if (!r.ok) {
-                            const detail = d.detail;
-                            const msg = Array.isArray(detail)
-                                ? detail.map((x) => x.msg || JSON.stringify(x)).join("; ")
-                                : detail || d.message || `Request failed (${r.status})`;
-                            setRoadmapSeedError([{ line: 0, message: String(msg) }]);
-                            return;
-                        }
-                        if (d.valid) setRoadmapSeedLocked(true);
-                        else setRoadmapSeedError(d.errors || []);
-                    })
-                    .catch(() => setRoadmapSeedError([{ line: 0, message: "Request failed" }]));
-            };
-
-            const [preflightFixFormatLoading, setPreflightFixFormatLoading] = useState(false);
-            const onFixRoadmapSeedFormat = () => {
-                if (!roadmapSeed || !roadmapSeed.trim()) return;
-                setPreflightFixFormatLoading(true);
-                // Create a temporary idea session, fix the roadmap, then discard the session
-                fetch("/api/ideas", { method: "POST" })
-                    .then((r) => r.json())
-                    .then((d) => {
-                        const tmpId = d.id;
-                        return fetch(`/api/ideas/${tmpId}/fix-roadmap-format`, {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ roadmap_content: roadmapSeed }),
-                        })
-                            .then((r2) => {
-                                if (!r2.ok) return r2.text().then((t) => { throw new Error(t); });
-                                return r2.json();
-                            })
-                            .then((d2) => {
-                                setPreflightFixFormatLoading(false);
-                                fetch(`/api/ideas/${tmpId}`, { method: "DELETE" }).catch(() => {});
-                                if (d2.roadmap_content) {
-                                    setRoadmapSeed(d2.roadmap_content);
-                                    // Auto-run confirm on the corrected content so the user
-                                    // sees pass/fail immediately without a manual Confirm click.
-                                    setRoadmapSeedError([]);
-                                    fetch("/api/setup/validate-roadmap", {
-                                        method: "POST",
-                                        headers: { "Content-Type": "application/json" },
-                                        body: JSON.stringify({ content: d2.roadmap_content }),
-                                    })
-                                        .then((rv) => rv.json().catch(() => ({})))
-                                        .then((vd) => {
-                                            if (vd.valid) setRoadmapSeedLocked(true);
-                                            else setRoadmapSeedError(vd.errors || []);
-                                        })
-                                        .catch(() => setRoadmapSeedError([{ line: 0, message: "Validation failed after fix" }]));
-                                }
-                            })
-                            .catch((e) => {
-                                setPreflightFixFormatLoading(false);
-                                setRoadmapSeedError([{ line: 0, message: `Fix Format failed: ${e.message || e}` }]);
-                                fetch(`/api/ideas/${tmpId}`, { method: "DELETE" }).catch(() => {});
-                            });
-                    })
-                    .catch((e) => {
-                        setPreflightFixFormatLoading(false);
-                        setRoadmapSeedError([{ line: 0, message: `Could not create session for fix: ${e.message || e}` }]);
-                    });
-            };
-
             const onRunPreflight = (confirmRoadmapArchive) => {
                 const archiveMeta = confirmRoadmapArchive ? preflightRoadmapAmbiguous : null;
                 if (!confirmRoadmapArchive) {
@@ -9081,7 +8989,7 @@
                 }
                 setPreflightChecks(null);
                 const body = { repo_path: (repoPath || "").trim() };
-                if (roadmapSeedLocked && (roadmapSeed || "").trim()) {
+                if ((roadmapSeed || "").trim()) {
                     body.roadmap_seed = roadmapSeed;
                 }
                 if ((launchPrdContent || "").trim()) {
@@ -9133,7 +9041,7 @@
             const hasFail = preflightChecks && preflightChecks.some((c) => c.status === "fail");
             const launchDisabled =
                 !repoPathLocked ||
-                !roadmapSeedLocked ||
+                !(roadmapSeed && roadmapSeed.trim()) ||
                 !preflightChecks ||
                 hasFail ||
                 !!preflightRoadmapAmbiguous ||
@@ -9244,7 +9152,6 @@
             const appCtxValue = {
                 navigateToPreflightWithSeed,
                 setSeedRoadmap,
-                setRoadmapSeedLocked,
                 setCurrentScreen,
                 currentScreen,
                 safeNavigate,
@@ -9293,25 +9200,19 @@
                                     repoPath={repoPath}
                                     repoPathLocked={repoPathLocked}
                                     roadmapSeed={roadmapSeed}
-                                    roadmapSeedLocked={roadmapSeedLocked}
+                                    launchPrdContent={launchPrdContent}
+                                    launchVerificationContent={launchVerificationContent}
+                                    linkedIdeaName={launchIdeaName}
+                                    linkedIdeaId={launchIdeaId}
+                                    onOpenInIdeas={onOpenInIdeas}
                                     onRepoPathChange={handleRepoPathChange}
                                     onRepoPathLockToggle={() => {
                                         setRepoPathLocked(false);
                                         setRepoPathFsStatus(null);
-                                        setRepoRoadmapHintMessage("");
                                     }}
-                                    onRoadmapSeedChange={(value) => {
-                                        setRoadmapSeed(value);
-                                        setRepoRoadmapHintMessage("");
-                                    }}
-                                    onRoadmapSeedLockToggle={() => setRoadmapSeedLocked(false)}
                                     onBack={() => setCurrentScreen("ideas")}
                                     repoPathError={repoPathError}
-                                    roadmapSeedError={roadmapSeedError}
                                     onRepoPathConfirm={onRepoPathConfirm}
-                                    onRoadmapSeedConfirm={onRoadmapSeedConfirm}
-                                    onFixRoadmapSeedFormat={onFixRoadmapSeedFormat}
-                                    preflightFixFormatLoading={preflightFixFormatLoading}
                                     onRunPreflight={() => onRunPreflight(false)}
                                     onConfirmRoadmapArchive={() => onRunPreflight(true)}
                                     preflightRoadmapAmbiguous={preflightRoadmapAmbiguous}
@@ -9332,7 +9233,6 @@
                                     onCancelCreateFolder={onCancelCreateFolder}
                                     preflightLastRun={preflightLastRun}
                                     hasFail={hasFail}
-                                    repoRoadmapHintMessage={repoRoadmapHintMessage}
                                 />
                             )}
                             {currentScreen === "ideas" && <IdeasScreen />}

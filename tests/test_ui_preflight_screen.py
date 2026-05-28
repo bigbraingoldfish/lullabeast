@@ -37,8 +37,17 @@ def extract_function(html, func_name):
 
 
 class TestPreflightScreenRendering:
-    """pass_criteria: PreflightScreen renders repo path text input and roadmap seed
-    file input in the DOM"""
+    """pass_criteria: PreflightScreen renders repo path text input and the
+    Step 2 "From Project Ideas" summary surface.
+
+    P0 Stage J.4 removed the Step 2 free-text roadmap textarea, the file
+    upload input, the independent lock toggles for the roadmap seed,
+    and the Fix-Format CTA. Six tests that pinned those behaviours have
+    been deleted — keeping passing assertions for code that no longer
+    exists would be a liability. The Step 2 summary card and
+    empty-state CTA are now pinned by
+    ``tests/test_p0_stage_j_setup_step2_summary_card.py``.
+    """
 
     def test_has_repo_path_input(self):
         """PreflightScreen contains ServerPathInput for repo path (text input lives in child)."""
@@ -49,53 +58,11 @@ class TestPreflightScreenRendering:
         assert "ServerPathInput" in preflight, "PreflightScreen should use ServerPathInput for repo path"
         assert 'id="preflight-repo-path"' in preflight
 
-    def test_has_roadmap_seed_file_input(self):
-        """PreflightScreen contains a file input for roadmap seed upload."""
-        html = load_html()
-        preflight = extract_function(html, "PreflightScreen")
-        assert preflight is not None, "PreflightScreen function not found"
-
-        has_file_input = bool(re.search(
-            r'<input[^>]*type=["\']file["\'][^>]*accept=["\']\.md["\'][^>]*>',
-            preflight
-        ))
-        assert has_file_input, "No <input type='file' accept='.md'> found in PreflightScreen"
-
-    def test_has_independent_lock_buttons(self):
-        """pass_criteria: PreflightScreen renders independent lock/unlock toggle buttons
-        for each field."""
-        html = load_html()
-        preflight = extract_function(html, "PreflightScreen")
-        assert preflight is not None, "PreflightScreen function not found"
-
-        # At least 2 lock-related callbacks
-        lock_button_pattern = re.compile(
-            r'<button[^>]*onClick[^>]*lock[^>]*>|'
-            r'onRepoPathLockToggle|'
-            r'onRoadmapSeedLockToggle',
-            re.IGNORECASE
-        )
-        matches = lock_button_pattern.findall(preflight)
-        assert len(matches) >= 2, \
-            f"Expected at least 2 lock-related callbacks, found {len(matches)}: {matches}"
-
-    def test_locking_switches_input_to_readonly(self):
-        """pass_criteria: Locking a field switches its input to read-only/disabled state;
-        unlocking restores editability."""
-        html = load_html()
-        preflight = extract_function(html, "PreflightScreen")
-        assert preflight is not None, "PreflightScreen function not found"
-
-        has_disabled_attr = 'disabled' in preflight or 'readOnly' in preflight
-        assert has_disabled_attr, \
-            "PreflightScreen should conditionally set disabled/readOnly on inputs when locked"
-
-        assert 'repoPathLocked' in preflight, "Missing repoPathLocked state check"
-        assert 'roadmapSeedLocked' in preflight, "Missing roadmapSeedLocked state check"
-
     def test_pre_populated_roadmap_shows_indicator(self):
         """pass_criteria: When seedRoadmap prop is non-empty, PreflightScreen shows
-        'From Project Ideas' indicator."""
+        'From Project Ideas' indicator. Post-Stage-J.4 the indicator is the
+        summary-card heading rather than a textarea badge — both render the
+        same literal so this assertion is intact."""
         html = load_html()
         preflight = extract_function(html, "PreflightScreen")
         assert preflight is not None, "PreflightScreen function not found"
@@ -107,64 +74,6 @@ class TestPreflightScreenRendering:
         )
         assert indicator_pattern, \
             "PreflightScreen should show 'From Project Ideas' indicator when roadmap is pre-populated"
-
-    def test_pre_populated_roadmap_hides_file_upload(self):
-        """pass_criteria: When seedRoadmap prop is non-empty, PreflightScreen hides the
-        file upload button."""
-        html = load_html()
-        preflight = extract_function(html, "PreflightScreen")
-        assert preflight is not None, "PreflightScreen function not found"
-
-        # The logic: when roadmapSeed is populated, file input is NOT shown
-        # This is done by showing the content area when roadmapSeed is truthy
-        # and only showing file input in the else branch
-        has_conditional_content = bool(re.search(
-            r'\{roadmapSeed\s*\?|'
-            r'roadmapSeed\s*\?\s*\(',
-            preflight
-        ))
-        assert has_conditional_content, \
-            "PreflightScreen should conditionally show content vs file input based on roadmapSeed"
-
-        # The file input should be in an else branch (only shown when roadmapSeed is empty)
-        # Since roadmapSeed truthy → content, roadmapSeed falsy → file input
-        has_file_input_conditional = bool(re.search(
-            r':\s*\(?[^)]*input[^>]*type=["\']file["\']|'
-            r'<input[^>]*type=["\']file["\'][^>]*>[^}]*:\s*\(',
-            preflight,
-            re.DOTALL
-        ))
-        assert has_file_input_conditional, \
-            "File input should only appear when roadmapSeed is empty"
-
-    def test_pre_populated_roadmap_is_pre_locked(self):
-        """pass_criteria: When seedRoadmap prop is non-empty, roadmap seed is pre-locked.
-
-        Note: This initialization happens in App component's navigateToPreflight,
-        not in PreflightScreen itself. The test verifies that PreflightScreen
-        receives roadmapSeedLocked as a prop and uses it."""
-        html = load_html()
-        preflight = extract_function(html, "PreflightScreen")
-        assert preflight is not None, "PreflightScreen function not found"
-
-        # PreflightScreen should accept roadmapSeedLocked prop
-        assert 'roadmapSeedLocked' in preflight, \
-            "PreflightScreen should accept roadmapSeedLocked prop"
-        # The prop should be used to determine rendering
-        assert 'roadmapSeedLocked' in preflight, \
-            "PreflightScreen should use roadmapSeedLocked to control rendering"
-
-        # App component should set roadmapSeedLocked=true when navigating with seedRoadmap
-        app_html = extract_function(html, "App")
-        assert app_html is not None, "App function not found"
-        # Check that navigateToPreflight sets roadmapSeedLocked
-        has_locked_logic = bool(re.search(
-            r'setRoadmapSeedLocked\s*\(\s*true\s*\)|'
-            r'roadmapSeedLocked\s*:\s*true',
-            app_html
-        ))
-        assert has_locked_logic, \
-            "App should set roadmapSeedLocked=true when navigating to preflight with seedRoadmap"
 
 
 class TestPreflightScreenNoConsoleErrors:
@@ -181,7 +90,12 @@ class TestPreflightScreenNoConsoleErrors:
         assert '(' in preflight, "PreflightScreen should return JSX with parentheses"
 
     def test_preflight_accepts_all_required_props(self):
-        """PreflightScreen accepts all required props from the plan."""
+        """PreflightScreen accepts all required props from the plan.
+
+        Stage J.4 removed ``roadmapSeedLocked``, ``onRoadmapSeedChange``,
+        and ``onRoadmapSeedLockToggle`` from the prop set — the textarea
+        they controlled is gone. The remaining props still flow through
+        the component."""
         html = load_html()
         preflight = extract_function(html, "PreflightScreen")
         assert preflight is not None, "PreflightScreen function not found"
@@ -191,11 +105,8 @@ class TestPreflightScreenNoConsoleErrors:
             'repoPath',
             'repoPathLocked',
             'roadmapSeed',
-            'roadmapSeedLocked',
             'onRepoPathChange',
             'onRepoPathLockToggle',
-            'onRoadmapSeedChange',
-            'onRoadmapSeedLockToggle',
             'onBack',
             'recentProjects',
         ]
@@ -203,38 +114,6 @@ class TestPreflightScreenNoConsoleErrors:
         for prop in required_props:
             assert prop in preflight, \
                 f"PreflightScreen missing prop: {prop}"
-
-
-class TestFileUploadReadsContent:
-    """pass_criteria: File upload (<input type='file' accept='.md'>) reads .md file content
-    into roadmapSeed state without errors."""
-
-    def test_file_input_has_onChange_handler(self):
-        """File input should have an onChange handler to read file content."""
-        html = load_html()
-        preflight = extract_function(html, "PreflightScreen")
-        assert preflight is not None, "PreflightScreen function not found"
-
-        has_onchange = bool(re.search(
-            r'<input[^>]*type=["\']file["\'][^>]*onChange[^>]*>|'
-            r'onChange[^>]*<input[^>]*type=["\']file["\']',
-            preflight
-        ))
-        assert has_onchange, \
-            "File input should have onChange handler to read file content"
-
-    def test_has_filereader_usage(self):
-        """PreflightScreen should use FileReader to read uploaded file content."""
-        html = load_html()
-        preflight = extract_function(html, "PreflightScreen")
-        assert preflight is not None, "PreflightScreen function not found"
-
-        has_filereader = bool(re.search(
-            r'FileReader|readAsText|onRoadmapSeedChange',
-            preflight
-        ))
-        assert has_filereader, \
-            "PreflightScreen should use FileReader to read file content into roadmapSeed"
 
 
 class TestPreflightServerPathInput:

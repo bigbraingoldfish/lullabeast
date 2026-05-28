@@ -77,11 +77,18 @@ def test_step1_border_green_on_locked():
 
 
 def test_step2_border_green_on_locked():
+    """Step 2 border goes green when a Project Idea is linked.
+
+    P0 Stage J.4 removed the free-text textarea and its ``roadmapSeedLocked``
+    state. The green-border signal now comes from ``hasLinkedIdea`` —
+    derived inside PreflightScreen from the trio of contents carried in
+    via ``navigateToPreflightWithSeed`` (see ``tests/test_p0_stage_j_setup_step2_summary_card.py``
+    for the full Step 2 contract)."""
     body = _preflight_body()
     i2 = body.index('data-testid="preflight-step-2"')
     i3 = body.index('data-testid="preflight-step-3"')
     slice_ = body[i2:i3]
-    assert "roadmapSeedLocked" in slice_
+    assert "hasLinkedIdea" in slice_
     assert "border-emerald" in slice_
 
 
@@ -108,7 +115,12 @@ def test_blocking_hint_messages():
 
 
 def test_per_step_descriptions():
+    """Step descriptions match the current UI copy.
+
+    P0 Stage J.4 changed the Step 2 description when the textarea was
+    replaced by the Project-Ideas summary card. The new copy makes it
+    explicit that authoring is somewhere else."""
     body = _preflight_body()
     assert "Confirm the repository path AutoDev will build in." in body
-    assert "Format check only - content quality review lives in Project Ideas if needed." in body
+    assert "The roadmap and verification doc come from Project Ideas. Authoring lives there; the Setup screen stages." in body
     assert "Checks symlink, .gitignore, workspace files, and roadmap." in body
