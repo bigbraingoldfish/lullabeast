@@ -209,6 +209,12 @@ phase. Either the roadmap is complete or it is aborted.
 
 ---
 
+## Preserving PRD Verbatim Strings
+
+- When the PRD carries a `### Verbatim Strings` subsection inside `## Functional Requirements`, treat each listed literal as authoritative. Quote those strings verbatim in any phase description, `Test:` line, Entry/Exit Criteria, or Done Criteria that references them — do not paraphrase, abbreviate, or punctuate them differently. The planner reads the PRD directly and emits `pass_criteria[].traces_to: "prd_verbatim:<literal>"` anchors for these strings; the executor gate then enforces `grep -F` literal presence in git-tracked source (P1 Stage C). Paraphrasing in the roadmap weakens the chain even though the gate reads the PRD, not the roadmap — operators reading the roadmap need to see the same strings the gate will be checking for.
+
+---
+
 ## Verification Document Output
 
 In addition to the roadmap, you produce a project-level `verification.md`

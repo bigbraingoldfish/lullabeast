@@ -143,54 +143,14 @@ def _reviewer_output(**overrides):
 
 # ---------------------------------------------------------------------------
 # B1 — content-driven phase detection
+#
+# The predicate ``_requires_behavioral_verification`` was extracted to
+# ``gate_scripts.utils.phase_has_behavioral_block`` in P1 Stage D Hygiene H1.
+# Its contract is now pinned by ``test_gate_helpers.TestPhaseHasBehavioralBlock``;
+# the gate-local symbol is gone. The end-to-end ``B3`` tests below still
+# exercise the call site through ``evaluate_reviewer`` — that's the right
+# layer for this file.
 # ---------------------------------------------------------------------------
-
-
-class TestRequiresBehavioralVerification:
-    """``_requires_behavioral_verification`` is content-driven on the
-    current_phase.json block, not on raw_id prefix like the visual helper."""
-
-    def test_returns_true_for_populated_block(self):
-        current_phase = {
-            "raw_id": "CORE-E1",
-            "behavioral_verification": {
-                "user_observable": "x",
-                "how_to_check": "y",
-                "failure_language": "z",
-            },
-        }
-        assert reviewer_gate_module._requires_behavioral_verification(
-            current_phase
-        ) is True
-
-    def test_returns_false_for_none_block(self):
-        """Pre-P0 in-flight phases have behavioral_verification: None — gate
-        must not falsely demand a verdict (per parent plan §2.9)."""
-        current_phase = {"raw_id": "CORE-E1", "behavioral_verification": None}
-        assert reviewer_gate_module._requires_behavioral_verification(
-            current_phase
-        ) is False
-
-    def test_returns_false_for_missing_key(self):
-        current_phase = {"raw_id": "CORE-E1"}
-        assert reviewer_gate_module._requires_behavioral_verification(
-            current_phase
-        ) is False
-
-    def test_returns_false_for_partial_block(self):
-        """A partial block (missing one of the three required sub-fields) is
-        a parser bug upstream; the gate must not pretend the block is usable."""
-        current_phase = {
-            "raw_id": "CORE-E1",
-            "behavioral_verification": {
-                "user_observable": "x",
-                "how_to_check": "y",
-                # failure_language missing
-            },
-        }
-        assert reviewer_gate_module._requires_behavioral_verification(
-            current_phase
-        ) is False
 
 
 # ---------------------------------------------------------------------------

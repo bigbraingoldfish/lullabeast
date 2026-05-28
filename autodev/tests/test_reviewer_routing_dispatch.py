@@ -1,13 +1,13 @@
 """Section 5 — reviewer-gate verdict routing audit.
 
 The reviewer gate (``autodev/pipeline/gate_scripts/reviewer_gate.py``) can
-emit eight distinct verdicts: ``PASS``, ``ROUTE_EXECUTOR``,
+emit nine distinct verdicts: ``PASS``, ``ROUTE_EXECUTOR``,
 ``ROUTE_PLANNER``, ``ROUTE_ESCALATE``, ``MISSING_ARTIFACTS``,
-``INFRA_FAILURE``, ``VISUAL_UNVERIFIED``, and ``BEHAVIORAL_UNVERIFIED``
-(the last added in P0 Stage F).  The orchestrator's ``if/elif`` chain
-had explicit handlers for the first six and silently fell through on
-``VISUAL_UNVERIFIED`` — ``current_agent`` stayed ``"reviewer"`` and the
-next loop iteration re-invoked the reviewer in a new session, exactly
+``INFRA_FAILURE``, ``VISUAL_UNVERIFIED``, ``BEHAVIORAL_UNVERIFIED``
+(P0 Stage F), and ``REGRESSION_UNVERIFIED`` (P1 Stage D). The orchestrator's
+``if/elif`` chain had explicit handlers for the first six and silently fell
+through on ``VISUAL_UNVERIFIED`` — ``current_agent`` stayed ``"reviewer"``
+and the next loop iteration re-invoked the reviewer in a new session, exactly
 the symptom observed live for CORE-E6 (3 reviewer invocations, no
 executor between them).
 
@@ -60,6 +60,7 @@ KNOWN_VERDICTS = (
     "INFRA_FAILURE",
     "VISUAL_UNVERIFIED",
     "BEHAVIORAL_UNVERIFIED",
+    "REGRESSION_UNVERIFIED",
 )
 
 
