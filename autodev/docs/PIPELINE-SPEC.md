@@ -1361,7 +1361,7 @@ Complete JSON schemas for all pipeline data files. Schemas in §3–§6 define a
   "escalation_resets": { "type": "integer", "default": 0, "description": "Incremented by RESET_PHASE and RESET_EXECUTION resume commands. Cap: 3. NOT zeroed inside reset_phase() — only zeroed when roadmap genuinely advances to a new phase. Distinct from executor_retries." },
   "blame_context": { "type": "string", "description": "Appended by blame attribution" },
   "last_error_code": { "type": "string", "description": "Distinct codes for parse vs. structural failures" },
-  "skill_injected": { "type": "string|null", "description": "Discipline name of the *variable phase-prefix* skill injected for the most recent agent turn (e.g. 'core-logic', 'infra-config'). null if no phase-prefix skill applied (prefix unmapped, phase_raw_id empty, source file missing, or kill switch suppressed all injection). Base skills (integration-wiring, testing-quality), which P1 Stage A always injects, are intentionally filtered out of this field — surfacing constant values would be reporting noise. The base-skill audit trail is the [SKILL] stdout log lines (one per injected skill, tagged base=true|false). Written atomically by _record_injected_skill() immediately after each inject_skill() call." },
+  "skill_injected": { "type": "string|null", "description": "Discipline name of the phase-prefix skill injected for the most recent agent turn (e.g. 'core-logic', 'infra-config'). null if no skill applied (prefix unmapped, phase_raw_id empty, source file missing, or kill switch suppressed injection). Written atomically by _record_injected_skill() immediately after each inject_skill() call." },
   "skill_agent": { "type": "string", "description": "Agent role for which the skill_injected value was recorded ('planner', 'executor', or 'reviewer'). Always written alongside skill_injected." },
   "escalation_trigger_reason": { "type": "string", "description": "Human-readable reason the pipeline transitioned to WAITING_FOR_HUMAN. Written atomically immediately before transition_state('WAITING_FOR_HUMAN', ...) at all three escalation trigger points. Used by the UI command panel header and audit log. Preserved until phase_state.json is deleted at phase completion." }
 }
@@ -1517,12 +1517,9 @@ Components that require no LLM at all:
 
 ### Overview
 
-The pipeline supports per-agent, per-phase discipline skills in two layers (P1 Stage A introduced the base-skills layer; the original 2026-03-14 validation covers the phase-prefix layer):
+The pipeline injects a single per-agent, per-phase discipline skill (validated in a production E2E run 2026-03-14). Before invoking each agent webhook, the orchestrator calls `inject_skill()` once. It cleans the workspace skills directory at the start of the call, then writes the one discipline derived from `phase_raw_id` via `skill_mapping.yaml` (or nothing, when the prefix is unmapped). OpenClaw's `loadWorkspaceSkillEntries` walks the `skills/` tree at session start and loads the `SKILL.md` it finds. Skills are supplemental domain guidance — they do NOT replace or modify AGENTS.md, SOUL.md, TOOLS.md, IDENTITY.md, or USER.md.
 
-* **Base skills (always injected, one per `SkillManager.BASE_DISCIPLINES` entry).** `integration-wiring/{role}/SKILL.md` and `testing-quality/{role}/SKILL.md` are written on *every* phase regardless of prefix. They encode universal rules that apply to every code-shipping phase.
-* **Phase-prefix skill (conditional).** A single discipline derived from `phase_raw_id` via `skill_mapping.yaml`. Cohabitates with the base skills in the same workspace.
-
-Before invoking each agent webhook, the orchestrator calls `inject_skill()` once. It cleans the workspace skills directory exactly once at the start of the call, then writes 2–3 subdirectories (depending on whether the prefix maps). OpenClaw's `loadWorkspaceSkillEntries` walks the `skills/` tree at session start and loads every `SKILL.md` it finds — multi-skill injection requires no OpenClaw configuration change. Skills are supplemental domain guidance — they do NOT replace or modify AGENTS.md, SOUL.md, TOOLS.md, IDENTITY.md, or USER.md.
+> **Historical note (P1 Stage A + refactor).** P1 Stage A briefly added an "always-injected base skills" layer here — `integration-wiring` and `testing-quality` written to every workspace via a `SkillManager.BASE_DISCIPLINES` constant. That was refactored out: an always-applied rule is standing identity, not a per-phase skill, so those rules moved into each role's `autodev/agents/{role}/AGENTS.md` under `## Always-Apply: Integration Wiring` and `## Always-Apply: Testing Quality`. The two skill-library directories were deleted and the `INTEGRATION` / `TEST` / `E2E` mappings removed. Git history at the relevant commits shows the layered model if needed.
 
 ### File Locations
 
@@ -1561,30 +1558,25 @@ Step 1: Check config flags
 
 Step 2: Clean workspace once
         Clean workspace-executor/skills/ entirely (rmtree + recreate).
-        All subsequent writes share this freshly prepared directory.
         On rmtree failure → log Status=clean_failed, done.
 
-Step 3: Inject base skills (always)
-        For each discipline in SkillManager.BASE_DISCIPLINES ("integration-wiring", "testing-quality"):
-          source = skill-library/{discipline}/executor/SKILL.md
-          If missing → log Status=none_found Reason=missing_base_skill base=true, continue.
-          Copy → workspace-executor/skills/{discipline}-executor/SKILL.md
-          Log Status=loaded base=true
-
-Step 4: Resolve phase-prefix skill
-        If phase_raw_id is empty → log Status=none_mapped Reason=empty_phase_id, done.
+Step 3: Extract subsystem
+        If phase_raw_id is empty → log Status=none_mapped Reason=empty_phase_id, done
+          (workspace stays empty — nothing injected).
         subsystem = "CORE-E2".split("-")[0].upper() → "CORE"
+
+Step 4: Look up mapping
         discipline = skill_mapping.yaml["CORE"] → "core-logic"
         If no entry → log Status=none_mapped Reason=no_mapping_for_{subsystem}, done.
 
-Step 5: Inject phase-prefix skill
+Step 5: Locate source and inject
         source = skill-library/core-logic/executor/SKILL.md
-        If missing → log Status=none_found Reason=missing_file base=false, done.
+        If missing → log Status=none_found Reason=missing_file, done.
         Copy → workspace-executor/skills/core-logic-executor/SKILL.md
-        Log Status=loaded base=false
+        Log Status=loaded
 ```
 
-Final workspace contents per phase: 0 subdirectories (kill switch active or rmtree failed), 2 subdirectories (base only — unmapped/empty prefix), or 3 subdirectories (base + prefix). The single-cleanup-at-start contract guarantees no stale skill from any prior phase ever survives.
+Final workspace contents per phase: 0 subdirectories (kill switch active, rmtree failed, empty/unmapped prefix, or missing source) or 1 subdirectory (the mapped prefix discipline). The single-cleanup-at-start contract guarantees no stale skill from any prior phase ever survives.
 
 ### Skill Mapping File Format (`config/skill_mapping.yaml`)
 
@@ -1625,7 +1617,7 @@ self.skill_manager.inject_skill(
 )
 ```
 
-**Post-inject phase_state.json write:** Immediately after each `inject_skill()` call, `_record_injected_skill(agent_role)` reads the workspace skills directory and writes `skill_injected` (the *variable phase-prefix* discipline, or `null` if no prefix skill applied) and `skill_agent` (role string) to `phase_state.json` atomically. Base-skill subdirectory names (`integration-wiring-{role}`, `testing-quality-{role}`) are filtered out — they're constant, so surfacing them in metrics rows or in the UI's "Skill: X / role" label would be pure reporting noise. The base-skill audit trail lives in the `[SKILL]` stdout log lines (one per injected skill, each tagged `base=true|false`).
+**Post-inject phase_state.json write:** Immediately after each `inject_skill()` call, `_record_injected_skill(agent_role)` reads the workspace skills directory and writes `skill_injected` (the injected phase-prefix discipline, or `null` if nothing was injected) and `skill_agent` (role string) to `phase_state.json` atomically. The directory is clean-then-write, so any subdirectory present after the call is the current phase's skill. This makes the injected skill visible to the UI and audit log without parsing workspace directories externally.
 
 ### Graceful Degradation Contract
 

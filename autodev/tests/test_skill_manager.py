@@ -11,6 +11,7 @@ import shutil
 from unittest.mock import patch
 
 import pytest
+import yaml
 
 from skill_manager import SkillManager
 
@@ -72,22 +73,12 @@ def skills_enabled_config(
     }
 
 
-# P1 Stage A: SkillManager.BASE_DISCIPLINES are always injected on every
-# phase regardless of prefix.  build_manager() seeds them automatically so
-# every test in this module exercises the post-Stage-A layout where the
-# workspace can hold up to (len(BASE_DISCIPLINES) + 1) subdirectories.
-_BASE_DISCIPLINES = ("integration-wiring", "testing-quality")
-
-
 def build_manager(tmp_path, disciplines=None, mapping=None) -> SkillManager:
-    """Build a SkillManager wired to tmp_path, with the base + prefix disciplines seeded."""
+    """Build a SkillManager wired to tmp_path, with optional pre-populated library."""
     disciplines = disciplines or ["core-logic"]
     mapping = mapping or {"CORE": "core-logic"}
 
-    all_disciplines = list(_BASE_DISCIPLINES) + [
-        d for d in disciplines if d not in _BASE_DISCIPLINES
-    ]
-    make_skill_library(str(tmp_path), all_disciplines, ["planner", "executor", "reviewer"])
+    make_skill_library(str(tmp_path), disciplines, ["planner", "executor", "reviewer"])
     make_mapping_file(os.path.join(str(tmp_path), "autodev", "config"), mapping)
     for role in ("planner", "executor", "reviewer"):
         make_workspace(str(tmp_path), role)
@@ -111,7 +102,7 @@ def test_resolve_mapped_subsystem(tmp_path):
 
 
 def test_resolve_unmapped_subsystem(tmp_path, capsys):
-    """MCP-E3 has no mapping — stale prefix skill gone, base skills still injected, Status=none_mapped logged."""
+    """MCP-E3 has no mapping — workspace should be cleaned, Status=none_mapped logged."""
     sm = build_manager(tmp_path)
     config = skills_enabled_config()
 
@@ -123,13 +114,9 @@ def test_resolve_unmapped_subsystem(tmp_path, capsys):
     sm.inject_skill("MCP-E3", "executor", config)
 
     skills_dir = tmp_path / "workspace-executor" / "skills"
-    # Stale skill gone; base skills present; no prefix-discipline skill
-    # because MCP is unmapped (P1 Stage A: base skills inject regardless).
+    # directory exists but should be empty (cleaned, nothing injected)
     assert skills_dir.exists()
-    assert {p.name for p in skills_dir.iterdir()} == {
-        "integration-wiring-executor",
-        "testing-quality-executor",
-    }, "Stale skill should be gone; base skills should be present; no prefix skill"
+    assert list(skills_dir.iterdir()) == [], "Stale skill should have been removed"
     captured = capsys.readouterr()
     assert "Status=none_mapped" in captured.out
 
@@ -164,12 +151,7 @@ def test_inject_skill_copies_file(tmp_path):
 
 
 def test_inject_skill_cleans_stale_before_injecting(tmp_path):
-    """A skill from phase N is removed before injecting the skill for phase N+1.
-
-    Augmented for P1 Stage A: both base skills are re-injected fresh on each
-    phase (the single-cleanup-at-start contract is what prevents the prior
-    phase's prefix skill from leaking through).
-    """
+    """A skill from phase N is removed before injecting the skill for phase N+1."""
     sm = build_manager(
         tmp_path,
         disciplines=["core-logic", "infra-config"],
@@ -182,25 +164,15 @@ def test_inject_skill_cleans_stale_before_injecting(tmp_path):
     core_dest = tmp_path / "workspace-executor" / "skills" / "core-logic-executor" / "SKILL.md"
     assert core_dest.exists()
 
-    # Phase 2 — INFRA (should clean CORE skill and inject INFRA + both base skills)
+    # Phase 2 — INFRA (should clean CORE skill and inject INFRA)
     sm.inject_skill("INFRA-2", "executor", cfg)
     assert not core_dest.exists(), "Stale CORE skill should have been removed"
     infra_dest = tmp_path / "workspace-executor" / "skills" / "infra-config-executor" / "SKILL.md"
     assert infra_dest.exists()
-    # Both base skills must be present on phase 2 as well (no stale survival,
-    # fresh inject each phase).
-    for base in ("integration-wiring-executor", "testing-quality-executor"):
-        assert (tmp_path / "workspace-executor" / "skills" / base / "SKILL.md").exists(), (
-            f"Base skill {base} must be present after phase 2"
-        )
 
 
 def test_same_phase_different_roles(tmp_path):
-    """Each role gets its own discipline+role-specific skill for the same phase.
-
-    Augmented for P1 Stage A: each role workspace must also carry both base
-    skills tagged with that role's suffix (no cross-role bleed).
-    """
+    """Each role gets its own discipline+role-specific skill for the same phase."""
     sm = build_manager(tmp_path)
     cfg = skills_enabled_config()
 
@@ -209,10 +181,6 @@ def test_same_phase_different_roles(tmp_path):
         dest = tmp_path / f"workspace-{role}" / "skills" / f"core-logic-{role}" / "SKILL.md"
         assert dest.exists(), f"SKILL.md missing for {role}"
         assert f"core-logic-{role}" in dest.read_text()
-        for base in (f"integration-wiring-{role}", f"testing-quality-{role}"):
-            base_dest = tmp_path / f"workspace-{role}" / "skills" / base / "SKILL.md"
-            assert base_dest.exists(), f"Base skill {base} missing for role {role}"
-            assert base in base_dest.read_text(), f"Base skill {base} content wrong"
 
 
 # ---------------------------------------------------------------------------
@@ -297,13 +265,7 @@ def test_bad_yaml_mapping(tmp_path, capsys):
 
 
 def test_empty_phase_id(tmp_path, capsys):
-    """Empty phase_raw_id → prefix lookup skipped (logged), base skills still inject.
-
-    P1 Stage A: universal rules apply universally — an empty phase identifier
-    does not strip the base skills, which exist precisely *because* they don't
-    depend on the phase prefix.  Today's "do-nothing on empty ID" behaviour
-    is deliberately dropped.
-    """
+    """Empty phase_raw_id → none_mapped, no crash, nothing injected."""
     sm = build_manager(tmp_path)
     sm.inject_skill("", "executor", skills_enabled_config())
 
@@ -311,10 +273,7 @@ def test_empty_phase_id(tmp_path, capsys):
     assert "none_mapped" in captured.out or "empty_phase_id" in captured.out
 
     skills_dir = tmp_path / "workspace-executor" / "skills"
-    assert {p.name for p in skills_dir.iterdir()} == {
-        "integration-wiring-executor",
-        "testing-quality-executor",
-    }, "Base skills must be present even when phase_raw_id is empty"
+    assert list(skills_dir.iterdir()) == [], "Empty phase_raw_id injects nothing"
 
 
 def test_default_enabled_when_config_absent(tmp_path):
@@ -331,11 +290,10 @@ def test_default_enabled_when_config_absent(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_inject_logs_skill_status(tmp_path, capsys):
-    """[SKILL] log lines: one per injected skill (P1 Stage A: 2 base + 1 prefix).
+    """[SKILL] log line: exactly one Status=loaded line for the single injected discipline.
 
-    Each Status=loaded line carries the Phase, Agent, Skill identifier, and a
-    ``base=true|false`` token distinguishing base from prefix.  Order of
-    emission is implementation detail and is not asserted.
+    Single-discipline injection means one prefix skill per phase = one loaded line.
+    The line carries Phase, Agent, and the Skill identifier.
     """
     sm = build_manager(tmp_path)
     sm.inject_skill("CORE-E2", "executor", skills_enabled_config())
@@ -345,12 +303,10 @@ def test_inject_logs_skill_status(tmp_path, capsys):
     assert "Phase=CORE-E2" in out
     assert "Agent=executor" in out
     loaded_lines = [line for line in out.splitlines() if "Status=loaded" in line]
-    assert len(loaded_lines) == 3, (
-        f"Expected 3 Status=loaded lines (2 base + 1 prefix), got: {loaded_lines}"
+    assert len(loaded_lines) == 1, (
+        f"Expected exactly 1 Status=loaded line, got: {loaded_lines}"
     )
     assert "core-logic/executor/SKILL.md" in out
-    assert "integration-wiring/executor/SKILL.md" in out
-    assert "testing-quality/executor/SKILL.md" in out
 
 
 def test_log_emitted_for_disabled_case(tmp_path, capsys):
@@ -361,3 +317,69 @@ def test_log_emitted_for_disabled_case(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "[SKILL]" in out
     assert "Status=disabled" in out
+
+
+# ---------------------------------------------------------------------------
+# 6. Refactor regression guards — these pin the ABSENCE of the P1 Stage A
+#    "base skills" mechanism (refactored into role AGENTS.md). They exist so a
+#    future contributor cannot silently re-introduce always-injected skills,
+#    re-add base/prefix log tagging, or re-map a deleted discipline and keep
+#    the suite green. See plans/Active/p1-stage-a-refactor-universal-rules-into-agents-md.md.
+# ---------------------------------------------------------------------------
+
+def test_base_disciplines_constant_absent():
+    """SkillManager must NOT carry a BASE_DISCIPLINES constant.
+
+    The always-inject base-skill mechanism was removed; universal rules now
+    live in each role's AGENTS.md. A re-introduced constant would resurrect the
+    semantic the refactor deliberately retired.
+    """
+    assert not hasattr(SkillManager, "BASE_DISCIPLINES"), (
+        "SkillManager.BASE_DISCIPLINES was removed in the P1 Stage A refactor "
+        "(universal rules moved to AGENTS.md). Re-adding it re-introduces the "
+        "always-injected-skill mechanism that was deliberately un-shipped."
+    )
+
+
+def test_no_base_token_emitted_in_log_lines(tmp_path, capsys):
+    """No [SKILL] log line carries a base=true|false token post-refactor.
+
+    Single-discipline injection has no base/prefix distinction, so the log
+    tagging that distinguished the two layers is gone.
+    """
+    sm = build_manager(tmp_path)
+    sm.inject_skill("CORE-E2", "executor", skills_enabled_config())
+
+    out = capsys.readouterr().out
+    assert "base=true" not in out, "base=true log token must not be emitted post-refactor"
+    assert "base=false" not in out, "base=false log token must not be emitted post-refactor"
+
+
+def test_deleted_disciplines_have_no_surviving_mapping():
+    """No entry in the production skill_mapping.yaml may point at a deleted discipline.
+
+    `integration-wiring` and `testing-quality` were removed from the skill
+    library (their content lives in AGENTS.md now). Any surviving mapping value
+    pointing at them would resolve to a non-existent directory (none_found)
+    mid-pipeline. This guards against re-adding INTEGRATION/TEST/E2E (or any
+    new key) that resurrects a reference to a deleted directory.
+
+    Static-on-production check (not build_manager's synthetic mapping): the
+    real autodev/config/skill_mapping.yaml is the file the refactor edits.
+    """
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    mapping_file = os.path.join(repo_root, "autodev", "config", "skill_mapping.yaml")
+    with open(mapping_file, "r") as fh:
+        raw = yaml.safe_load(fh)
+    values = {str(v).strip() for v in raw.values()} if isinstance(raw, dict) else set()
+
+    assert "integration-wiring" not in values, (
+        "skill_mapping.yaml still maps a prefix to 'integration-wiring', but that "
+        "discipline directory was deleted in the P1 Stage A refactor. Remove the "
+        "mapping (INTEGRATION) — the rules live in AGENTS.md now."
+    )
+    assert "testing-quality" not in values, (
+        "skill_mapping.yaml still maps a prefix to 'testing-quality', but that "
+        "discipline directory was deleted in the P1 Stage A refactor. Remove the "
+        "mappings (TEST, E2E) — the rules live in AGENTS.md now."
+    )

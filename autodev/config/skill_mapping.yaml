@@ -20,15 +20,19 @@ DATA: data-persistence
 API: api-service
 AUTH: auth-security
 UI: ui-frontend
-INTEGRATION: integration-wiring
-TEST: testing-quality
-E2E: testing-quality
 CLI: cli-tooling
 COMPLETE: completion
 
-# INTENTIONALLY UNMAPPED subsystems — run without skills until explicit mappings are
-# validated by the operator and added here:
+# INTENTIONALLY UNMAPPED subsystems — run without a phase-prefix skill until explicit
+# mappings are validated by the operator and added here:
 #   MCP, HOOK, APPR, CTX, WORK, GIT, DASH, OPS
+#
+# INTEGRATION / TEST / E2E are deliberately NOT mapped. Their former disciplines
+# (integration-wiring, testing-quality) were universal rules that applied to every
+# phase, so they were promoted into each role's AGENTS.md under the
+# "## Always-Apply: ..." sections (standing primary context). Re-adding a mapping
+# here would point at a deleted skill-library directory and resolve to none_found.
+# See plans/Active/p1-stage-a-refactor-universal-rules-into-agents-md.md.
 #
 # FUTURE CONSIDERATION: Adaptive/semantic matching
 # In a future enhancement, this mapping could be extended with fuzzy or semantic
