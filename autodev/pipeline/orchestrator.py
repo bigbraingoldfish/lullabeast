@@ -2267,6 +2267,66 @@ class Orchestrator:
         except Exception as e:
             print(f"[WARN] _record_phase_outcome: write failed: {e}")
 
+    def _emit_reachability_advisory(self, raw_id):
+        """Drain executor_advisory_detail.json into one summary event + one
+        not_applicable event + N diagnostic events, then remove the file."""
+        advisory_path = os.path.join(PROJECT_ARTIFACTS_DIR, "executor_advisory_detail.json")
+        if not os.path.exists(advisory_path):
+            return
+        try:
+            with open(advisory_path, "r") as f:
+                advisory = json.load(f)
+        except Exception as e:
+            print(f"[WARN] _emit_reachability_advisory: could not read advisory: {e}")
+            return
+        if not isinstance(advisory, dict):
+            return
+        summary = advisory.get("reachability_summary")
+        if isinstance(summary, dict) and summary.get("files"):
+            _write_pipeline_event(
+                "reachability_warning",
+                raw_id,
+                "executor",
+                {
+                    "kind": "unreachable_summary",
+                    "count": summary.get("count", len(summary["files"])),
+                    "files": summary["files"],
+                    "command": summary.get("command", ""),
+                    # Hedged copy — operator must not read "unreachable" as "dead."
+                    "reason": summary.get(
+                        "reason_template",
+                        "files declared in manifest but not reached from entry point",
+                    ),
+                },
+            )
+        not_applicable = advisory.get("reachability_not_applicable")
+        if isinstance(not_applicable, dict):
+            _write_pipeline_event(
+                "reachability_not_applicable",
+                raw_id,
+                "executor",
+                {"reason": not_applicable.get("reason", "")},
+            )
+        diagnostics = advisory.get("reachability_diagnostics")
+        if isinstance(diagnostics, list):
+            for d in diagnostics:
+                if not isinstance(d, dict):
+                    continue
+                _write_pipeline_event(
+                    "reachability_warning",
+                    raw_id,
+                    "executor",
+                    {
+                        "kind": d.get("kind", "resolver_error"),
+                        "reason": d.get("reason", ""),
+                        "file": d.get("file"),
+                    },
+                )
+        try:
+            os.remove(advisory_path)
+        except OSError:
+            pass
+
     def _record_injected_skill(self, agent_role: str) -> None:
         """Write skill_injected and skill_agent to phase_state.json after inject_skill().
 
@@ -2361,6 +2421,8 @@ class Orchestrator:
             "reviewer_output.json", "reviewer_output.done",
             "phase_state.json", "failure_context.json",
             "executor_gate_detail.json",
+            # P1 Stage F — advisory channel; same per-phase artifact lifecycle.
+            "executor_advisory_detail.json",
         ]:
             try:
                 os.remove(os.path.join(PROJECT_ARTIFACTS_DIR, fname))
@@ -2476,6 +2538,8 @@ class Orchestrator:
             "reviewer_output.json", "reviewer_output.done",
             "failure_context.json",
             "executor_gate_detail.json",
+            # P1 Stage F — advisory channel; same per-phase artifact lifecycle.
+            "executor_advisory_detail.json",
         ]:
             try:
                 os.remove(os.path.join(PROJECT_ARTIFACTS_DIR, fname))
@@ -3009,6 +3073,8 @@ class Orchestrator:
             "escalation_output.json", "escalation_output.done",
             "failure_context.json", "current_phase.json",
             "executor_gate_detail.json",
+            # P1 Stage F — advisory channel; same per-phase artifact lifecycle.
+            "executor_advisory_detail.json",
         }
         files_present_on_disk = []
         try:
@@ -4329,6 +4395,10 @@ class Orchestrator:
                     if outcome == "executor_succeeded":
                         gate_passed = self.run_executor_output_gate()
                         if gate_passed:
+                            # P1 Stage F — advisory; never affects gate verdict.
+                            # Drains executor_advisory_detail.json into pipeline
+                            # events so the UI shows reachability findings.
+                            self._emit_reachability_advisory(raw_id)
                             _ps_ex = self.read_phase_state()
                             _ps_ex.pop("last_error_code", None)
                             self.write_phase_state_atomic(_ps_ex)
@@ -4891,6 +4961,8 @@ class Orchestrator:
                             "reviewer_output.json", "reviewer_output.done",
                             "current_phase.json", "failure_context.json",
                             "executor_gate_detail.json",
+                            # P1 Stage F — advisory channel; same per-phase artifact lifecycle.
+                            "executor_advisory_detail.json",
                         ]
                         for t in targets:
                             try:

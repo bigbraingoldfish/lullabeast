@@ -257,6 +257,10 @@ Gate scripts are in `autodev/pipeline/gate_scripts/`. They are invoked by the or
 
 On exit 1, the gate must print a JSON object to stdout. The orchestrator reads stdout only when exit code is non-zero. The JSON is written to `failure_context.json` for the next retry attempt. Gate scripts must **not** print partial or malformed JSON on failure.
 
+### Advisory output channel (P1 Stage F)
+
+On PASS, a gate may write structured advisory output to a **separate** artifact file `executor_advisory_detail.json`. The orchestrator drains it on the executor PASS path and emits pipeline events; the file is removed after consumption. This is architecturally distinct from `executor_gate_detail.json` (the FAIL channel consumed by `write_failure_context`). The two channels never co-tenant. Stage F's COMPLETE-phase reachability advisory is the first instance — see `autodev/docs/PIPELINE-SPEC.md` §4.5 for the full pattern and promotion criteria.
+
 ### Determinism requirement
 
 Gate scripts must be deterministic — they receive filesystem state and return a verdict. They must not invoke LLMs, make network calls, or produce variable output. The orchestrator calls them at specific points in the loop and expects a stable result.
@@ -359,6 +363,8 @@ The UI server tails this file via `_poll_pipeline_events_file()` (`ui/server.py:
 | **`abort_verify_failed`**  | When `verify_session_stopped()` returns `False` (no longer halts — soft-continue) | `{session_key, stamp_path, agent_role, reason}`                                                       | 6.1.b |
 | **`reviewer_verdict`**     | On every reviewer-gate consumption                                 | `{verdict, pass_number, next_agent}`                                                                  | 6.1.c |
 | **`stamp_init_failed`**    | When `_init_activity_stamp_or_halt` returns False                  | `{agent_role, stamp_path, reason}`                                                                    | 6.1.d |
+| **`reachability_warning`** | On the executor PASS path, when `executor_advisory_detail.json` has a populated `reachability_summary` or non-empty `reachability_diagnostics`. One summary event per phase + one event per diagnostic. | `{kind, count?, files?, command?, file?, reason}` where `kind ∈ {unreachable_summary, no_resolver, resolver_limitation, resolver_error}` | P1 Stage F |
+| **`reachability_not_applicable`** | On the executor PASS path, when the entry-point command is a recognised test runner (pytest, jest, vitest, ...) | `{reason}` | P1 Stage F |
 
 The bold entries are Section 6 additions; existing UI consumers handle them transparently because the JSONL schema is additive.
 

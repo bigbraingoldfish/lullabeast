@@ -41,15 +41,33 @@ def _is_build_artifact_rotation(path: str, workspace_dir: str) -> bool:
 
 
 EXECUTOR_GATE_DETAIL_JSON = "executor_gate_detail.json"
+# P1 Stage F — separate advisory channel. Failure detail goes in
+# ``executor_gate_detail.json`` (consumed by write_failure_context for executor
+# self-heal). Advisory output goes in ``executor_advisory_detail.json``
+# (consumed by _emit_reachability_advisory for events). The two channels
+# never co-tenant.
+EXECUTOR_ADVISORY_DETAIL_JSON = "executor_advisory_detail.json"
 
 
 def _executor_gate_detail_path():
     return os.path.join(ARTIFACTS_DIR, EXECUTOR_GATE_DETAIL_JSON)
 
 
+def _executor_advisory_detail_path():
+    return os.path.join(ARTIFACTS_DIR, EXECUTOR_ADVISORY_DETAIL_JSON)
+
+
 def _clear_executor_gate_detail():
     try:
         os.remove(_executor_gate_detail_path())
+    except FileNotFoundError:
+        pass
+
+
+def _clear_advisory_detail():
+    """Remove executor_advisory_detail.json if it exists; ignore errors."""
+    try:
+        os.remove(_executor_advisory_detail_path())
     except FileNotFoundError:
         pass
 
@@ -69,6 +87,125 @@ def _write_executor_gate_detail(payload: dict) -> None:
                 os.remove(tmp)
             except OSError:
                 pass
+
+
+def _write_advisory_detail(payload: dict) -> None:
+    """Atomic write to executor_advisory_detail.json — same shape as
+    _write_executor_gate_detail but to the advisory channel."""
+    dest = _executor_advisory_detail_path()
+    os.makedirs(ARTIFACTS_DIR, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=ARTIFACTS_DIR.rstrip(os.sep), prefix="executor_advisory_detail_")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(payload, f, indent=2)
+        os.replace(tmp, dest)
+    except Exception:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+def _check_reachability_advisory(current_phase, executor_output, project_root):
+    """Return {summary, not_applicable, diagnostics} envelope; never raises.
+
+    Short-circuits with an all-empty envelope on every non-COMPLETE phase —
+    reachability is a whole-artifact property; running it per phase would
+    cry wolf on the routine add-then-wire roadmap pattern.
+    """
+    raw_id = (current_phase or {}).get("raw_id") or ""
+    if not raw_id.startswith("COMPLETE-"):
+        return {"summary": None, "not_applicable": None, "diagnostics": []}
+    entry = (current_phase or {}).get("entry_point") or {}
+    cmd = (entry.get("command") or "").strip() if isinstance(entry, dict) else ""
+    if not cmd:
+        return {"summary": None, "not_applicable": None, "diagnostics": []}
+    try:
+        from reachability import classify_command, get_resolver
+    except Exception as e:
+        return {
+            "summary": None, "not_applicable": None,
+            "diagnostics": [{"file": None, "reason": f"reachability import failed: {e}",
+                             "kind": "resolver_error"}],
+        }
+    try:
+        classification = classify_command(cmd)
+    except Exception as e:
+        return {
+            "summary": None, "not_applicable": None,
+            "diagnostics": [{"file": None, "reason": f"classify_command crashed: {e}",
+                             "kind": "resolver_error"}],
+        }
+    if classification == "test_runner":
+        head = cmd.split()[0] if cmd.split() else cmd
+        return {
+            "summary": None,
+            "not_applicable": {
+                "reason": f"entry point is a test runner ({head!r}); reachability check intentionally skipped"
+            },
+            "diagnostics": [],
+        }
+    if classification == "unsupported":
+        return {
+            "summary": None, "not_applicable": None,
+            "diagnostics": [{"file": None, "reason": f"no resolver for entry command {cmd!r}",
+                             "kind": "no_resolver"}],
+        }
+    try:
+        resolver = get_resolver(cmd, project_root)
+    except Exception as e:
+        return {
+            "summary": None, "not_applicable": None,
+            "diagnostics": [{"file": None, "reason": f"resolver registry crashed: {e}",
+                             "kind": "resolver_error"}],
+        }
+    if resolver is None:
+        return {
+            "summary": None, "not_applicable": None,
+            "diagnostics": [{"file": None, "reason": f"no resolver instantiated for {cmd!r}",
+                             "kind": "resolver_error"}],
+        }
+    try:
+        result = resolver.resolve(project_root, cmd)
+    except Exception as e:
+        return {
+            "summary": None, "not_applicable": None,
+            "diagnostics": [{"file": None,
+                             "reason": f"resolver crashed: {type(e).__name__}: {e}",
+                             "kind": "resolver_error"}],
+        }
+    diagnostics = [
+        {"file": None, "reason": lim, "kind": "resolver_limitation"}
+        for lim in (result.limitations or [])
+    ]
+    if result.entry_resolved is None:
+        diagnostics.append({
+            "file": None,
+            "reason": f"could not resolve entry from {cmd!r}",
+            "kind": "resolver_error",
+        })
+        return {"summary": None, "not_applicable": None, "diagnostics": diagnostics}
+    manifest = executor_output.get("file_manifest") or []
+    reachable_norm = {os.path.normpath(p) for p in (result.reachable or set())}
+    unreachable = [
+        p for p in manifest
+        if isinstance(p, str) and os.path.normpath(p) not in reachable_norm
+    ]
+    summary = None
+    if unreachable:
+        summary = {
+            "files": unreachable,
+            "count": len(unreachable),
+            "command": cmd,
+            # Copy hedge: do NOT call this "dead." Operator must read it as
+            # "you may have intended this — confirm before treating as a problem."
+            "reason_template": (
+                "declared in manifest but not reached from entry point — orphan, "
+                "or wiring landed in a different entry's path"
+            ),
+        }
+    return {"summary": summary, "not_applicable": None, "diagnostics": diagnostics}
 
 
 def _load_current_phase():
@@ -456,6 +593,46 @@ def evaluate_executor(output_path=None):
                 return "FAIL"
         except Exception as _del_err:
             print(f"[GATE WARN] Deletion check error: {_del_err} — skipping.", file=sys.stderr)
+
+    # P1 Stage F — reachability advisory. Pure addition; never fails the gate.
+    # Short-circuits on non-COMPLETE phases, so this is near-zero cost on the
+    # common path. Advisory output lives on its own channel
+    # (executor_advisory_detail.json) — completely independent of the FAIL-
+    # channel _clear_executor_gate_detail() call below.
+    _clear_advisory_detail()
+    try:
+        _reach_current = _load_current_phase()
+        _reach_envelope = _check_reachability_advisory(_reach_current, data, WORKSPACE_DIR)
+    except Exception as _rwerr:
+        _reach_envelope = {
+            "summary": None, "not_applicable": None,
+            "diagnostics": [{"file": None,
+                             "reason": f"reachability check crashed: {_rwerr!r}",
+                             "kind": "resolver_error"}],
+        }
+    if _reach_envelope["summary"] or _reach_envelope["not_applicable"] or _reach_envelope["diagnostics"]:
+        _write_advisory_detail({
+            "reachability_summary": _reach_envelope["summary"],
+            "reachability_not_applicable": _reach_envelope["not_applicable"],
+            "reachability_diagnostics": _reach_envelope["diagnostics"],
+        })
+        if _reach_envelope["summary"]:
+            print(
+                f"[GATE INFO] reachability advisory: "
+                f"{_reach_envelope['summary']['count']} file(s) not reached from entry",
+                file=sys.stderr,
+            )
+        if _reach_envelope["not_applicable"]:
+            print(
+                f"[GATE INFO] reachability not applicable: "
+                f"{_reach_envelope['not_applicable']['reason']}",
+                file=sys.stderr,
+            )
+        for _d in _reach_envelope["diagnostics"]:
+            print(
+                f"[GATE INFO] reachability diagnostic ({_d['kind']}): {_d['reason']}",
+                file=sys.stderr,
+            )
 
     # FIND-DONE-FILE: Record executor_succeeded = True so the orchestrator can distinguish
     # "executor OK, reviewer failed" from "executor failed" on restart.

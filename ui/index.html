@@ -539,6 +539,12 @@
                 case 'escalation_resolve': return 'bg-blue-600 text-white';
                 case 'phase_complete': return 'bg-green-600 text-white';
                 case 'status_changed': return 'bg-slate-600 text-white';
+                // P1 Stage F — advisory reachability events. Yellow for findings
+                // (visible signal worth attention but never blocking); slate for
+                // "consciously skipped" (test-runner entry) so it reads as
+                // informational, not a problem.
+                case 'reachability_warning': return 'bg-yellow-500 text-black';
+                case 'reachability_not_applicable': return 'bg-slate-500 text-white';
                 // Section 6 diagnostic event family — operator-specified
                 // purple so poll / abort / verdict / setup events read as
                 // one cohesive group in the Activity Feed.
@@ -571,6 +577,9 @@
             abort_verify_failed: 'Verify Fail',
             reviewer_verdict: 'Verdict',
             stamp_init_failed: 'Setup Fail',
+            // P1 Stage F — advisory reachability events.
+            reachability_warning: 'Reach Warn',
+            reachability_not_applicable: 'Reach N/A',
         };
 
         // Hover descriptions for each event type (rendered as the badge
@@ -591,6 +600,12 @@
             abort_verify_failed: 'Gateway acknowledged the abort but the agent kept refreshing its activity stamp. Pipeline halts rather than launch the next attempt on top of a still-streaming session.',
             reviewer_verdict: 'The reviewer-gate dispatch decision. Detail.verdict is PASS / ROUTE_EXECUTOR / ROUTE_PLANNER / ROUTE_ESCALATE / MISSING_ARTIFACTS / INFRA_FAILURE / VISUAL_UNVERIFIED.',
             stamp_init_failed: 'Could not seed the agent activity stamp — workspace dir is missing or unwritable. Stall detection would be silently disabled; pipeline halts loudly instead.',
+            // P1 Stage F — advisory reachability events. Hedged copy: operators
+            // must not infer "broken" from "unreachable" — it could just be
+            // wiring landing in a different entry, or a dynamic-import pattern
+            // the static walk cannot follow.
+            reachability_warning: 'A static reachability check found something worth surfacing — manifest files not reached from the entry point, no resolver for the project language, or a resolver limitation. Advisory only — the phase still passes; treat as "confirm intent," not "broken."',
+            reachability_not_applicable: 'The verified entry point is a test runner (pytest, jest, vitest, ...); the reachability check was consciously skipped. Informational only — no problem detected.',
         };
 
         function getEventDescription(eventType) {
@@ -725,6 +740,31 @@
                     const role = d.agent_role || event.agent || 'agent';
                     return `Could not initialize ${role} activity stamp — workspace dir missing or unwritable`;
                 }
+                // P1 Stage F — advisory reachability events. Hedged copy
+                // prevents the operator reading "unreachable" as "broken."
+                case 'reachability_warning': {
+                    const kind = d.kind || 'unreachable_summary';
+                    if (kind === 'unreachable_summary') {
+                        const files = Array.isArray(d.files) ? d.files : [];
+                        const count = typeof d.count === 'number' ? d.count : files.length;
+                        const first3 = files.slice(0, 3).join(', ');
+                        const rest = Math.max(0, files.length - 3);
+                        const tail = rest > 0 ? ` (+${rest} more)` : '';
+                        return `reachability: ${count} file(s) not reached from entry — ${first3}${tail}. Confirm intent: orphan vs. wiring landed elsewhere.`;
+                    }
+                    if (kind === 'no_resolver') {
+                        return 'reachability: no resolver for entry command — language not yet supported';
+                    }
+                    if (kind === 'resolver_limitation') {
+                        return `reachability: ${d.reason || 'check incomplete (dynamic imports detected)'}`;
+                    }
+                    if (kind === 'resolver_error') {
+                        return `reachability: check could not run — ${d.reason || 'unknown error'}`;
+                    }
+                    return d.reason || 'reachability advisory';
+                }
+                case 'reachability_not_applicable':
+                    return `reachability skipped — ${d.reason || 'entry point is a test runner'}`;
 
                 default:
                     return formatPipelineEventDetail(d) || type;
