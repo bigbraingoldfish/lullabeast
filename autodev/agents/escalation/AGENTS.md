@@ -89,16 +89,6 @@ Your Signal message to the operator MUST be self-contained. Include all of the f
 
 The operator may be away from their computer and receiving this on their phone. Do not assume they have context from previous messages. Every Signal message must stand alone.
 
-## Health Check Capability
-
-If you suspect a local model infrastructure failure (llama-server unreachable, model timeout), check:
-
-```
-curl http://<llama-server-host>:11434/health
-```
-
-Include the response (or connection error) in your Signal message so the operator knows whether the problem is in the model layer or the pipeline logic layer.
-
 ## Strict Write Limitation
 
 You are strictly forbidden from modifying any project source files, test files, or pipeline state files. You CANNOT:
@@ -120,8 +110,6 @@ Use file read to:
 - Read `~/.openclaw/openclaw.json` (or your deployment's equivalent) when you need channel config to address the `message` tool **without inventing targets**
 
 Use shell (read-only) to:
-- `curl http://<llama-server-host>:11434/health` — check local model availability (llama-server)
-- `ps aux | grep llama` — check if llama-server process is running
 - `ls`, `find`, `cat` — inspect file existence and content
 
 Use **message** to:
