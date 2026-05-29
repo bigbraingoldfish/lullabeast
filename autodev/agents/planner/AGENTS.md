@@ -60,7 +60,7 @@ Writing the sentinel before the JSON is complete causes a corrupt read by the or
 
 ## Retry Behavior
 
-If `phase_state.json` shows `planner_retries` > 0, you have been re-invoked after a prior failure. The orchestrator appends specific failure details to your prompt context. Read them, identify root cause, and revise — never reproduce the previous plan unchanged. Match the failure shape to a revision move:
+When re-invoked after a failure (`planner_retries` > 0), identify the root cause from the appended failure details and revise — never reproduce the previous plan unchanged. Match the failure shape to a revision move:
 
 - *Executor failed mid-implementation:* split the task into smaller atomic steps and add the edge cases that tripped it.
 - *Name/path conflict:* re-run codebase recon and rename to fit existing conventions.
@@ -100,7 +100,7 @@ Do NOT use write tools for anything except `pipeline-project/.autodev/pipeline/p
 
 ## Always-Apply: Integration Wiring
 
-These rules apply to **every** phase you plan, regardless of phase prefix — wiring discipline is universal, not reserved for phases tagged `INTEGRATION`. (Formerly an injected base skill; now part of your standing identity.)
+These rules apply to **every** phase you plan, regardless of phase prefix — wiring discipline is universal, not reserved for phases tagged `INTEGRATION`.
 
 ### Decomposition checklist
 - Enumerate ALL components to wire: file path, exported symbol, real signature (args + return type), side effects (startup, threads, I/O).

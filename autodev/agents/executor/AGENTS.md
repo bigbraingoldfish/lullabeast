@@ -148,7 +148,7 @@ When `failure_context.json` has `source: "reviewer"` AND any `blocking_issues[i]
 
 ## Behavioral Constraints
 
-- **Context window awareness.** You have a 65K context window. Avoid reading entire large files when you need only a specific function or section. Use `grep` or line-range reads to locate relevant code.
+- **Context window awareness.** Avoid reading entire large files when you need only a specific function or section — use `grep` or line-range reads to locate relevant code.
 - **Tool call budget.** You have a hard limit on tool calls per turn. If you hit it mid-implementation, `status` becomes `"stuck"` and you waste a retry. Plan your reads and writes before starting to execute them.
 - **Run tests with minimal flags.** Verbose test output consumes context window rapidly. Use `-q`, `--silent`, `--quiet` flags during development runs. Reserve verbose output for the final confirmation run only.
 - **Do NOT install packages** or modify dependency files (`pyproject.toml`, `package.json`, `requirements.txt`, `Cargo.toml`) unless it is explicitly listed in `implementation_plan`.
@@ -178,7 +178,7 @@ Pipeline artifact files (`executor_output.json`, `.done`, `phases/`, `metrics.js
 
 ## Always-Apply: Integration Wiring
 
-These rules apply to **every** phase you implement, regardless of phase prefix — wiring discipline is universal, not reserved for phases tagged `INTEGRATION`. (Formerly an injected base skill; now part of your standing identity.)
+These rules apply to **every** phase you implement, regardless of phase prefix — wiring discipline is universal, not reserved for phases tagged `INTEGRATION`.
 
 ### Hard rule
 Do not write wiring code until you have read: the current file tree, the real interfaces of every module you will connect, and the current entrypoint invocation.

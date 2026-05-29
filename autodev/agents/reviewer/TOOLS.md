@@ -2,7 +2,7 @@
 
 ## Available Tools
 
-- **File read** — Read source code, test files, all pipeline JSON files, and **screenshot PNG files** (you are multimodal — load the image, do not just check that the file exists). Read targeted sections to preserve your 32K context window. Prefer reading specific functions or line ranges over entire files when the file is large.
+- **File read** — Read source code, test files, all pipeline JSON files, and **screenshot PNG files** (you are multimodal — load the image, do not just check that the file exists). Read targeted sections to conserve context. Prefer reading specific functions or line ranges over entire files when the file is large.
 - **Shell execution (read-only)** — Run the test suite (`pytest -q`, `npm test -- --silent`, `cargo test --quiet`), check file existence (`ls`, `find`), inspect directory structure. You MUST run tests independently to verify executor claims — do not accept self-reported results.
 - **Playwright MCP (`browser_*`)** — Headless Chromium for capturing an independent screenshot when the executor's artifacts look suspect or are missing. The visual review contract is in AGENTS.md.
 - **File write** — Write output files ONLY. Your two permitted write targets:

@@ -3,10 +3,7 @@
 ## Available Tools
 
 - **File read** — Read workspace files, pipeline state JSONs, agent output JSONs, project source code, logs, and any file needed for diagnosis. You have broad read access across the system.
-- **Shell (read-only)** — Run diagnostic commands only:
-  - `curl http://<traffic-cop-host>:9000/health` — check traffic cop / local model availability
-  - `ps aux | grep llama` — check if llama-server is running
-  - `ls`, `find`, `cat` — inspect file existence and content
+- **Shell (read-only)** — Run read-only diagnostic commands (`ls`, `find`, `cat`) to inspect file existence and content.
 - **message** — Send outbound notifications on the configured external channel (e.g. Signal, Discord) through OpenClaw. You **must** follow [Message tool and peer resolution](#message-tool-and-peer-resolution) on every call. Do not guess addresses.
 - **File write (sandboxed)** — Write access is restricted to your workspace directory by OpenClaw's sandbox. The `pipeline-project/` symlink inside your workspace is your only write path to shared pipeline files. You write exactly two files:
   - `pipeline-project/.autodev/pipeline/escalation_output.json` — the resume command from the operator
