@@ -745,6 +745,7 @@ hdr "8/14  Register AutoDev agents in openclaw.json"
 
 REGISTER_STATUS_STEP="not attempted"
 TOOLS_PROFILE_STEP="skipped"
+CTX_LIMITS_STEP="not attempted"
 HOOKS_STEP="not attempted"
 WEBHOOK_SYNC_STEP="not checked"
 REGISTER_AGENT="$AUTODEV_REPO_PATH/autodev/installer/register_agent.py"
@@ -1076,6 +1077,36 @@ print(set_openclaw_global_tools_profile(sys.argv[1], 'coding'))
         *)
             warn "Unexpected dry-run result: $REGISTER_DRY_STATUS"
             REGISTER_STATUS_STEP="unexpected result"
+            ;;
+    esac
+
+    # Seed/upgrade truncation caps so AGENTS.md (incl. the Stage A Always-Apply
+    # rules) is not truncated at bootstrap or dropped on compaction. Idempotent;
+    # touches only AutoDev agents and leaves all other keys intact. New agents are
+    # already born correct via register_agent; this covers existing entries too.
+    CTX_LIMITS_RESULT=$(
+        cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import ensure_openclaw_context_limits
+import sys
+print(ensure_openclaw_context_limits(sys.argv[1]))
+" "$OPENCLAW_ROOT/openclaw.json" 2>/dev/null || echo "error:helper"
+    )
+    case "$CTX_LIMITS_RESULT" in
+        updated)
+            ok "Context limits seeded (bootstrapMaxChars=32000; postCompaction caps/sections)"
+            CTX_LIMITS_STEP="updated"
+            ;;
+        unchanged)
+            ok "Context limits already in place"
+            CTX_LIMITS_STEP="ok (unchanged)"
+            ;;
+        error:*)
+            warn "Could not seed context limits: ${CTX_LIMITS_RESULT#error:}"
+            CTX_LIMITS_STEP="error"
+            ;;
+        *)
+            warn "Unexpected context-limits result: $CTX_LIMITS_RESULT"
+            CTX_LIMITS_STEP="unexpected result"
             ;;
     esac
 fi
@@ -1416,6 +1447,7 @@ printf "  %-32s %s\n" "OpenClaw hooks (webhook):"   "$HOOKS_STEP"
 printf "  %-32s %s\n" "Webhook secret sync:"      "$WEBHOOK_SYNC_STEP"
 printf "  %-32s %s\n" "OpenClaw tools.profile:"   "$TOOLS_PROFILE_STEP"
 printf "  %-32s %s\n" "OpenClaw agents (register):" "$REGISTER_STATUS_STEP"
+printf "  %-32s %s\n" "OpenClaw context limits:"  "$CTX_LIMITS_STEP"
 printf "  %-32s %s\n" "Pipeline signals plugin:"    "$PLUGIN_INSTALL_STEP"
 printf "  %-32s %s\n" "Playwright MCP (visual):"   "$PLAYWRIGHT_STEP"
 echo   "  Agent files deployed:"

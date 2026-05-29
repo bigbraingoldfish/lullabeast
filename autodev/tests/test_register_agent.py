@@ -189,3 +189,63 @@ def test_agents_not_object_errors(tmp_path):
     _write_oc(oc, {"agents": "bad"})
     rv = register_roadmap_converter(str(oc), root, dry_run=True, stderr=StringIO())
     assert rv.startswith("error:")
+
+
+# --- Truncation seeding (audit: metaprompt-2-truncation-settings-audit) ------
+# Newly created agent entries must be "born correct" with the AutoDev bootstrap
+# cap (all six) and, for the pipeline roles, the post-compaction cap. Existing
+# installs are handled by setup_helpers.ensure_openclaw_context_limits; these
+# tests pin the fresh-install path that _build_new_entry owns.
+
+
+def _oc_openrouter(tmp_path):
+    oc = tmp_path / "openclaw.json"
+    root = str(tmp_path / "ocroot")
+    os.makedirs(root, exist_ok=True)
+    _write_oc(
+        oc,
+        {
+            "agents": {"defaults": {}},
+            "models": {"providers": {"openrouter": {"apiKey": "x"}}},
+        },
+    )
+    return oc, root
+
+
+def test_new_entries_seed_bootstrap_max_chars(tmp_path):
+    from autodev.installer.register_agent import BOOTSTRAP_MAX_CHARS
+
+    oc, root = _oc_openrouter(tmp_path)
+    assert register_roadmap_converter(str(oc), root, dry_run=False, stderr=StringIO()) == "registered"
+    data = json.loads(oc.read_text())
+    assert BOOTSTRAP_MAX_CHARS == 32000
+    for e in data["agents"]["list"]:
+        assert e["bootstrapMaxChars"] == BOOTSTRAP_MAX_CHARS, e["id"]
+
+
+def test_new_pipeline_entries_seed_postcompaction_cap(tmp_path):
+    from autodev.installer.register_agent import POSTCOMPACTION_AGENT_IDS, POSTCOMPACTION_MAX_CHARS
+
+    oc, root = _oc_openrouter(tmp_path)
+    register_roadmap_converter(str(oc), root, dry_run=False, stderr=StringIO())
+    by_id = {e["id"]: e for e in json.loads(oc.read_text())["agents"]["list"]}
+    assert POSTCOMPACTION_MAX_CHARS == 8000
+    assert tuple(POSTCOMPACTION_AGENT_IDS) == ("planner", "executor", "reviewer")
+    for a in POSTCOMPACTION_AGENT_IDS:
+        assert by_id[a]["contextLimits"]["postCompactionMaxChars"] == POSTCOMPACTION_MAX_CHARS, a
+    for a in ("escalation", "prd-creator", "roadmap-converter"):
+        assert "postCompactionMaxChars" not in by_id[a].get("contextLimits", {}), a
+
+
+def test_register_agent_seed_matches_setup_helpers_constants():
+    """Drift guard: register_agent runs as a standalone script (no package import at
+    runtime), so its seed constants are duplicated by necessity. This test prevents
+    the two installer modules from silently diverging on the truncation values.
+    """
+    from autodev.installer import register_agent, setup_helpers
+
+    assert register_agent.BOOTSTRAP_MAX_CHARS == setup_helpers.AUTODEV_BOOTSTRAP_MAX_CHARS
+    assert register_agent.POSTCOMPACTION_MAX_CHARS == setup_helpers.AUTODEV_POSTCOMPACTION_MAX_CHARS
+    assert tuple(register_agent.POSTCOMPACTION_AGENT_IDS) == tuple(
+        setup_helpers.AUTODEV_POSTCOMPACTION_AGENT_IDS
+    )

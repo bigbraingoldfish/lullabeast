@@ -16,10 +16,10 @@ The pipeline is an autonomous multi-agent software development system. A Python 
 |---|---|---|
 | `orchestrator.py` | Pure Python script | Raspberry Pi 5 |
 | OpenClaw gateway | Agent gateway | Raspberry Pi 5 |
-| Planner agent | LLM (cloud — OpenRouter) | OpenRouter → MiniMax M2.5 |
-| Executor agent | LLM (cloud — OpenRouter) | OpenRouter → MiniMax M2.5 |
-| Reviewer agent | LLM (cloud — OpenRouter) | OpenRouter → MiniMax M2.5 |
-| Escalation agent | LLM (local) | Main machine via llama-server (Qwen3.5-27B, port 11434) |
+| Planner agent | LLM (cloud — OpenRouter) | OpenRouter → MiniMax M2.7 |
+| Executor agent | LLM (cloud — OpenRouter) | OpenRouter → Kimi K2.6 (Moonshot AI) |
+| Reviewer agent | LLM (cloud — OpenRouter) | OpenRouter → Kimi K2.6 (Moonshot AI) |
+| Escalation agent | LLM (local) | Main machine via llama-server (Qwen3.6-27B, port 11434) |
 | Gate scripts (×4) | Deterministic Python | Raspberry Pi 5 |
 
 ### Infrastructure Topology
@@ -28,29 +28,31 @@ The pipeline is an autonomous multi-agent software development system. A Python 
 Raspberry Pi 5                         Main Machine (Windows 11 + RTX 4090)
 ┌─────────────────────┐                ┌─────────────────────────────────────┐
 │ orchestrator.py     │                │ llama-server :11434                 │
-│ OpenClaw gateway    │──local reqs──▶ │   Qwen3.5-27B (escalation only)     │
+│ OpenClaw gateway    │──local reqs──▶ │   Qwen3.6-27B (escalation only)     │
 │   :18789            │                │                                     │
 │ Gate scripts        │                └─────────────────────────────────────┘
 └────────┬────────────┘
          │ cloud reqs (planner, executor, reviewer)
          ▼
-   OpenRouter API → MiniMax M2.5
+   OpenRouter API → MiniMax M2.7 (planner) / Kimi K2.6 (executor, reviewer)
 ```
 
 - Local model requests (escalation only) go directly to llama-server at `http://<llama-server-host>:11434`
-- Cloud requests (planner, executor, reviewer) route via OpenRouter; inference provider: MiniMax M2.5
+- Cloud requests route via OpenRouter: planner → MiniMax M2.7 (`openrouter/minimax/minimax-m2.7`), executor & reviewer → Kimi K2.6 (`openrouter/moonshotai/kimi-k2.6`)
 - OpenClaw webhook endpoint: `POST http://localhost:18789/hooks/agent` — requires `Authorization: Bearer <token>` header. Token source: `hooks.token` in `~/.openclaw/openclaw.json`. Do not use query string auth (`?token=...` returns 400).
 
 ### Agent LLM Configuration
 
-Current production configuration (updated 2026-03-18 after E2E validation run):
+Current production configuration (live values per `~/.openclaw/openclaw.json`; snapshot 2026-05-29):
 
 | Agent | Model | Provider | Inference | Config Source |
 |---|---|---|---|---|
-| Planner | (example) MiniMax M2.5 via OpenRouter | OpenRouter | Cloud | `openclaw.json` → `agents.list[]` for `planner` (`model.primary`) |
-| Executor | (example) same pattern | OpenRouter or local | Cloud or local | `openclaw.json` → `agents.list[]` for `executor` |
-| Reviewer | (example) same pattern | OpenRouter or local | Cloud or local | `openclaw.json` → `agents.list[]` for `reviewer` |
-| Escalation | Qwen3.5-27B (Q6_K) | llama-local (llama-server :11434) | Local | `openclaw.json` per-agent |
+| Planner | MiniMax M2.7 (`openrouter/minimax/minimax-m2.7`) | OpenRouter | Cloud | `openclaw.json` → `agents.list[]` for `planner` (`model.primary`) |
+| Executor | Kimi K2.6 / Moonshot AI (`openrouter/moonshotai/kimi-k2.6`) | OpenRouter | Cloud | `openclaw.json` → `agents.list[]` for `executor` |
+| Reviewer | Kimi K2.6 / Moonshot AI (`openrouter/moonshotai/kimi-k2.6`) | OpenRouter | Cloud | `openclaw.json` → `agents.list[]` for `reviewer` |
+| Escalation | Qwen3.6-27B (`llama-local/qwen3.6-27b`) | llama-local (llama-server :11434) | Local | `openclaw.json` per-agent |
+
+(`prd-creator` and `roadmap-converter` also run `openrouter/moonshotai/kimi-k2.6`.)
 
 > **Webhook model field:** The orchestrator does **not** send a `model` field on `POST /hooks/agent` for planner, executor, or reviewer. OpenClaw therefore uses each agent’s configured model from `openclaw.json` (same semantics as the Ideas / prd-creator webhook path). To change inference for pipeline agents, edit `agents.list[].model` in `openclaw.json` and restart the gateway if needed so new sessions pick up changes (see also § Session model is baked at creation time in operator docs).
 
@@ -168,7 +170,7 @@ Every state transition is written to `pipeline_state.json` atomically **before**
 
 ### Model
 
-`openrouter/minimax/minimax-m2.5` (cloud via OpenRouter)
+`openrouter/minimax/minimax-m2.7` (MiniMax M2.7, cloud via OpenRouter)
 
 ### Invocation Contract
 
@@ -259,7 +261,7 @@ THEN  skip planner invocation → advance current_agent to executor
 
 ### Model
 
-`openrouter/minimax/minimax-m2.5` (cloud via OpenRouter)
+`openrouter/moonshotai/kimi-k2.6` (Kimi K2.6 / Moonshot AI, cloud via OpenRouter)
 
 ### Invocation Contract
 
@@ -371,9 +373,9 @@ Fields marked `GATE-CHECKED` are validated by the executor output gate (see § G
 
 ### Model
 
-`openrouter/minimax/minimax-m2.5` (cloud via OpenRouter)
+`openrouter/moonshotai/kimi-k2.6` (Kimi K2.6 / Moonshot AI, cloud via OpenRouter)
 
-> **Model update — 2026-03-12:** Reviewer migrated from local Qwen3.5-27B to MiniMax M2.5 via OpenRouter after smoke testing confirmed unacceptable latency for local reviewer inference. The escalation agent remains on local Qwen3.5-27B. See §1 > Agent LLM Configuration > Configuration History / Original Intent.
+> **Model update — 2026-03-12:** Reviewer migrated from local Qwen3.5-27B to MiniMax M2.5 via OpenRouter after smoke testing confirmed unacceptable latency for local reviewer inference. The escalation agent remains on local Qwen. (Historical note. The reviewer has since moved again to Kimi K2.6 via OpenRouter — see the live model line above and the §1 inventory; `openclaw.json` is the source of truth.)
 
 ### Invocation Contract
 
