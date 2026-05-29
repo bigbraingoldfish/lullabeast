@@ -3965,6 +3965,256 @@
                             }
                         }
                     },
+                    // 15. Mega Man takedown (arcade): faster, denser Mets — one touch and he's down, survivors bounce in celebration, then we reset
+                    (ctx, t, dt) => {
+                        if (!patternState.mega) {
+                            patternState.mega = {
+                                cx: Math.floor(cols / 2),
+                                cy: Math.max(5, rows - 6),
+                                facing: 1,
+                                chargeAmt: 0,
+                                phase: 'pellet',
+                                phaseT: 0,
+                                mets: [],
+                                pellets: [],
+                                shotT: 0,
+                                spawnT: 0,
+                                dead: false,
+                                deadT: 0,
+                                megaShotPhase: 'idle',
+                                megaShotT: 0,
+                            };
+                        }
+                        const M = patternState.mega;
+                        if (!M.dead) {
+                            M.phaseT += dt;
+                            M.shotT += dt;
+                            M.spawnT += dt;
+                            if (M.megaShotPhase === 'charging' || M.megaShotPhase === 'flashing') {
+                                M.megaShotT += dt;
+                                if (M.megaShotPhase === 'charging' && M.megaShotT >= 1.2) {
+                                    M.megaShotPhase = 'flashing';
+                                    M.megaShotT = 0;
+                                    // Vaporise every Met on the facing side at the firing moment
+                                    M.mets = M.mets.filter(m => Math.sign(m.x + 2 - M.cx) !== M.facing);
+                                } else if (M.megaShotPhase === 'flashing' && M.megaShotT >= 0.8) {
+                                    M.megaShotPhase = 'done';
+                                }
+                            }
+                            // Twice the spawn pressure, slightly faster march
+                            if (M.spawnT > 0.5 + Math.random() * 0.7) {
+                                M.spawnT = 0;
+                                const fromLeft = Math.random() < 0.5;
+                                M.mets.push({
+                                    x: fromLeft ? -6 : cols + 1,
+                                    y: M.cy,
+                                    vx: (fromLeft ? 1 : -1) * (5 + Math.random() * 3),
+                                });
+                            }
+                            // March Mets toward Mega Man
+                            for (const m of M.mets) m.x += m.vx * dt;
+                            // One Met touching him ends the run
+                            let touched = false;
+                            for (const m of M.mets) {
+                                if (Math.abs(m.x + 2 - M.cx) < 5.5) { touched = true; break; }
+                            }
+                            if (touched) {
+                                M.dead = true;
+                                M.deadT = 0;
+                                M.pellets = [];
+                                // Freeze survivors and give each a random bounce phase
+                                for (const m of M.mets) {
+                                    m.bouncePhase = Math.random() * Math.PI * 2;
+                                    m.vx = 0;
+                                }
+                            } else {
+                                // Face the nearest Met (locked while the super-shot is charging or flashing — no spinning mid-shot)
+                                if (M.megaShotPhase === 'idle' || M.megaShotPhase === 'done') {
+                                    let nearest = null, nearestD = Infinity;
+                                    for (const m of M.mets) {
+                                        const d = Math.abs(m.x + 2 - M.cx);
+                                        if (d < nearestD) { nearestD = d; nearest = m; }
+                                    }
+                                    if (nearest) M.facing = nearest.x + 2 > M.cx ? 1 : -1;
+                                }
+                                // Panic-button super shot — one per life. Triggers when any Met on the facing side enters mid-range (well before he's in trouble). 1.2s build-up, then a 0.8s wall of energy that vaporises that side.
+                                if (M.megaShotPhase === 'idle') {
+                                    let danger = false;
+                                    for (const m of M.mets) {
+                                        const dx = m.x + 2 - M.cx;
+                                        const ad = Math.abs(dx);
+                                        if (ad > 5.5 && ad < 22 && Math.sign(dx) === M.facing) { danger = true; break; }
+                                    }
+                                    if (danger) {
+                                        M.megaShotPhase = 'charging';
+                                        M.megaShotT = 0;
+                                        // Cancel any in-progress regular charge so the build-up reads clean
+                                        M.chargeAmt = 0;
+                                        if (M.phase === 'charging') { M.phase = 'pellet'; M.phaseT = 0; }
+                                    }
+                                }
+                                // Phase machine: pellet barrage → charging → big blast → repeat
+                                if (M.phase === 'pellet') {
+                                    if (M.shotT > 0.875) {
+                                        M.shotT = 0;
+                                        M.pellets.push({ x: M.cx + M.facing * 7, y: M.cy + 2, vx: M.facing * 38, big: false });
+                                    }
+                                    if (M.phaseT > 4.5) { M.phase = 'charging'; M.phaseT = 0; }
+                                } else if (M.phase === 'charging') {
+                                    M.chargeAmt = Math.min(1, M.phaseT / 1.4);
+                                    if (M.phaseT > 1.4) {
+                                        M.phase = 'blast';
+                                        M.phaseT = 0;
+                                        M.pellets.push({ x: M.cx + M.facing * 7, y: M.cy + 2, vx: M.facing * 55, big: true, hits: 0 });
+                                        M.chargeAmt = 0;
+                                    }
+                                } else {
+                                    if (M.phaseT > 0.6) { M.phase = 'pellet'; M.phaseT = 0; }
+                                }
+                                // Pellets fly
+                                for (const p of M.pellets) p.x += p.vx * dt;
+                                M.pellets = M.pellets.filter(p => p.x > -3 && p.x < cols + 3);
+                                // Hit detection — small pellet pops on first Met; big blast plows through up to 3 then dies
+                                for (const p of M.pellets) {
+                                    for (let i = M.mets.length - 1; i >= 0; i--) {
+                                        const m = M.mets[i];
+                                        if (Math.abs(m.x + 2 - p.x) < 3 && Math.abs(m.y + 2 - p.y) < 3) {
+                                            M.mets.splice(i, 1);
+                                            if (!p.big) { p.hit = true; break; }
+                                            else { p.hits++; if (p.hits >= 3) { p.hit = true; break; } }
+                                        }
+                                    }
+                                }
+                                M.pellets = M.pellets.filter(p => !p.hit);
+                            }
+                        } else {
+                            // Celebration window — Mets bounce, then the whole pattern reseeds
+                            M.deadT += dt;
+                            if (M.deadT > 3.5) { patternState.mega = null; return; }
+                        }
+                        clearCanvas(ctx);
+                        ctx.fillStyle = LIVE_COLOR;
+                        // Met sprite (5w × 6h). Each gets a celebration bounce while Mega Man is down.
+                        for (const m of M.mets) {
+                            const mx = Math.floor(m.x);
+                            const bounce = M.dead ? Math.max(0, Math.sin(M.deadT * 8 + (m.bouncePhase || 0))) * 3 : 0;
+                            const my = Math.floor(m.y - bounce);
+                            drawCell(ctx, mx + 1, my);
+                            drawCell(ctx, mx + 2, my);
+                            drawCell(ctx, mx + 3, my);
+                            for (let d = 0; d <= 4; d++) {
+                                drawCell(ctx, mx + d, my + 1);
+                                drawCell(ctx, mx + d, my + 2);
+                            }
+                            drawCell(ctx, mx, my + 3);
+                            drawCell(ctx, mx + 1, my + 3);
+                            drawCell(ctx, mx + 3, my + 3);
+                            drawCell(ctx, mx + 4, my + 3);
+                            for (let d = 0; d <= 4; d++) drawCell(ctx, mx + d, my + 4);
+                            drawCell(ctx, mx, my + 5);
+                            drawCell(ctx, mx + 4, my + 5);
+                        }
+                        if (M.dead) return;
+                        // Pellets / charged Mega Buster blast (only while he's alive)
+                        for (const p of M.pellets) {
+                            const px = Math.round(p.x), py = Math.round(p.y);
+                            if (p.big) {
+                                for (let dy = -1; dy <= 1; dy++)
+                                    for (let dx = -1; dx <= 1; dx++) drawCell(ctx, px + dx, py + dy);
+                                drawCell(ctx, px + 2, py);
+                                drawCell(ctx, px - 2, py);
+                            } else {
+                                drawCell(ctx, px, py);
+                                drawCell(ctx, px + (p.vx > 0 ? 1 : -1), py);
+                            }
+                        }
+                        // Mega Man v2 (11 rows × 7 wide base + 4-cell Mega Buster)
+                        const cx = M.cx, cy = M.cy, f = M.facing;
+                        for (let d = -1; d <= 1; d++) drawCell(ctx, cx + d, cy - 5);
+                        for (let d = -2; d <= 2; d++) drawCell(ctx, cx + d, cy - 4);
+                        for (let d = -3; d <= 3; d++) drawCell(ctx, cx + d, cy - 3);
+                        for (let d = -3; d <= 3; d++) if (d !== -2 && d !== 2) drawCell(ctx, cx + d, cy - 2);
+                        for (let d = -3; d <= 3; d++) drawCell(ctx, cx + d, cy - 1);
+                        for (let d = -2; d <= 2; d++) drawCell(ctx, cx + d, cy);
+                        for (let d = -2; d <= 2; d++) drawCell(ctx, cx + d, cy + 1);
+                        for (let d = 3; d <= 6; d++) drawCell(ctx, cx + f * d, cy + 1);
+                        for (let d = -2; d <= 2; d++) drawCell(ctx, cx + d, cy + 2);
+                        for (let d = 3; d <= 6; d++) drawCell(ctx, cx + f * d, cy + 2);
+                        for (let d = -2; d <= 2; d++) drawCell(ctx, cx + d, cy + 3);
+                        drawCell(ctx, cx - 2, cy + 4);
+                        drawCell(ctx, cx - 1, cy + 4);
+                        drawCell(ctx, cx + 1, cy + 4);
+                        drawCell(ctx, cx + 2, cy + 4);
+                        drawCell(ctx, cx - 3, cy + 5);
+                        drawCell(ctx, cx - 2, cy + 5);
+                        drawCell(ctx, cx - 1, cy + 5);
+                        drawCell(ctx, cx + 1, cy + 5);
+                        drawCell(ctx, cx + 2, cy + 5);
+                        drawCell(ctx, cx + 3, cy + 5);
+                        if (M.chargeAmt > 0) {
+                            const tip = cx + f * 6;
+                            if (M.chargeAmt > 0.25) {
+                                drawCell(ctx, tip, cy);
+                                drawCell(ctx, tip, cy + 3);
+                            }
+                            if (M.chargeAmt > 0.55) {
+                                const next = tip + f;
+                                drawCell(ctx, next, cy + 1);
+                                drawCell(ctx, next, cy + 2);
+                                drawCell(ctx, tip, cy - 1);
+                                drawCell(ctx, tip, cy + 4);
+                            }
+                            if (M.chargeAmt > 0.85) {
+                                const next2 = tip + f * 2;
+                                drawCell(ctx, next2, cy + 1);
+                                drawCell(ctx, next2, cy + 2);
+                                drawCell(ctx, tip + f, cy);
+                                drawCell(ctx, tip + f, cy + 3);
+                            }
+                        }
+                        // Super-shot build-up: two expanding rings around Mega Man + a late-charge flicker at the cannon
+                        if (M.megaShotPhase === 'charging') {
+                            const r1 = 3 + (M.megaShotT / 1.2) * 13;
+                            for (let dy = -Math.ceil(r1); dy <= Math.ceil(r1); dy++) {
+                                for (let dx = -Math.ceil(r1); dx <= Math.ceil(r1); dx++) {
+                                    const d = Math.sqrt(dx * dx + dy * dy);
+                                    if (Math.abs(d - r1) < 0.8) drawCell(ctx, cx + dx, cy + dy);
+                                }
+                            }
+                            if (M.megaShotT > 0.4) {
+                                const r2 = 3 + Math.min(1, (M.megaShotT - 0.4) / 0.8) * 10;
+                                for (let dy = -Math.ceil(r2); dy <= Math.ceil(r2); dy++) {
+                                    for (let dx = -Math.ceil(r2); dx <= Math.ceil(r2); dx++) {
+                                        const d = Math.sqrt(dx * dx + dy * dy);
+                                        if (Math.abs(d - r2) < 0.8) drawCell(ctx, cx + dx, cy + dy);
+                                    }
+                                }
+                            }
+                            if (M.megaShotT > 1.02 && Math.sin(M.megaShotT * 60) > 0) {
+                                const tipCx = cx + f * 6;
+                                for (let dy = -3; dy <= 3; dy++) {
+                                    for (let dx = -3; dx <= 3; dx++) {
+                                        if (dx * dx + dy * dy <= 9) drawCell(ctx, tipCx + dx, cy + 1 + dy);
+                                    }
+                                }
+                            }
+                        }
+                        // Super-shot beam — tapered wall of energy, widest at the cannon, narrowing toward the bubble edge
+                        if (M.megaShotPhase === 'flashing') {
+                            const tipX = cx + f * 7;
+                            const beamLo = f > 0 ? tipX : 0;
+                            const beamHi = f > 0 ? cols : tipX + 1;
+                            const beamLen = Math.max(1, beamHi - beamLo);
+                            for (let bx = beamLo; bx < beamHi; bx++) {
+                                const distFromCannon = f > 0 ? bx - tipX : tipX - bx;
+                                const normDist = Math.min(1, Math.max(0, distFromCannon / beamLen));
+                                const halfH = Math.floor(7 - normDist * 3);
+                                for (let by = cy - halfH; by <= cy + halfH; by++) {
+                                    drawCell(ctx, bx, by);
+                                }
+                            }
+                        }
+                    },
                 ];
 
                 // Pick a random starting pattern each mount so consecutive pending bubbles
@@ -4211,6 +4461,73 @@
                     clearInterval(lateHealPollRef.current);
                     lateHealPollRef.current = null;
                 }
+            };
+
+            // Max ms the chat send holds ONE HTTP connection before it stops
+            // waiting and hands off to the recovery poll. The server keeps
+            // working up to its own poll_timeout (~900 s); the browser must not
+            // hold a single connection that long (it drops/hangs and the reply
+            // then only shows on a manual refresh). Kept well under any proxy /
+            // OS idle-connection reaping window.
+            const CLIENT_WAIT_MS = 120000;
+
+            // One background poll loop, two callers (no second near-identical
+            // poller — the dual-source lesson). Watches GET /session every 5 s
+            // until `resolveWhen(messages)` is true, then renders the server
+            // state and runs the post-turn cleanup. `onExhausted` fires if
+            // `maxTicks` elapses first.
+            //   • 408/502/503 late-heal: resolveWhen = no assistant error remains
+            //     (a late .done reconciled the error placeholder into a reply).
+            //   • bounded-wait abort / network drop: resolveWhen = the turn's
+            //     assistant message is no longer pending (real reply OR a
+            //     server-written reason-aware error).
+            const startSessionHealPoll = ({ ideaId, resolveWhen, onExhausted, maxTicks }) => {
+                stopLateHealPoll();
+                if (!ideaId) return;
+                let ticks = 0;
+                let fails = 0; // consecutive GET failures — bail fast if the server is actually down
+                lateHealPollRef.current = setInterval(() => {
+                    ticks += 1;
+                    if (ticks > maxTicks) {
+                        stopLateHealPoll();
+                        if (onExhausted) onExhausted();
+                        return;
+                    }
+                    fetch(`/api/ideas/${ideaId}/session`)
+                        .then((r) => r.json())
+                        .then((d) => {
+                            fails = 0;
+                            const rawMsgs = d.messages || [];
+                            if (!resolveWhen(rawMsgs)) return;
+                            stopLateHealPoll();
+                            setStagedAttachment(null);
+                            setHiddenNoteIdsForSend(() => new Set());
+                            setMessages(
+                                rawMsgs.map((m, idx) => ({
+                                    ...m,
+                                    id:
+                                        m.id ||
+                                        `${m.role}-${idx}-${(m.ts || "").slice(0, 19) || idx}`,
+                                }))
+                            );
+                            setPrdContent(d.prd_content || "");
+                            setIsLoading(false);
+                            isLoadingRef.current = false;
+                            refreshAnnotations(ideaId);
+                            fetchPrdSectionDiff(ideaId);
+                            setReadinessStatus("updating");
+                            setReadinessData(null);
+                            setReadinessTimedOut(false);
+                            startReadinessPoll(ideaId);
+                        })
+                        .catch(() => {
+                            fails += 1;
+                            if (fails >= 6) { // ~30s of unreachable server → stop waiting
+                                stopLateHealPoll();
+                                if (onExhausted) onExhausted();
+                            }
+                        });
+                }, 5000);
             };
 
             const stopRoadmapRecoverPoll = () => {
@@ -4577,12 +4894,18 @@
                 isLoadingRef.current = true;
                 const body = { content: t, turn };
                 if (attachmentSnap) body.attachment = attachmentSnap;
+                // Bound the held connection: abort after CLIENT_WAIT_MS and hand
+                // off to the recovery poll (the server keeps working).
+                const _sendController = new AbortController();
+                const _abortTimer = setTimeout(() => _sendController.abort(), CLIENT_WAIT_MS);
                 fetch(`/api/ideas/${currentIdeaId}/message`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(body),
+                    signal: _sendController.signal,
                 })
                     .then((r) => {
+                        clearTimeout(_abortTimer);
                         if (!r.ok) {
                             // Read the JSON body so we can surface the backend's
                             // reason-specific timeout message (detail.message).
@@ -4631,16 +4954,49 @@
                         fetchPrdSectionDiff(currentIdeaId);
                     })
                     .catch((err) => {
+                        clearTimeout(_abortTimer);
+                        const isAbort = err && err.name === "AbortError";
                         const status = err?.status ?? parseInt(err?.message, 10);
+
+                        // Client stopped holding the connection — either the
+                        // bounded-wait abort fired or the connection dropped
+                        // mid-wait. The server is still working and will write
+                        // the turn outcome to session.json. Keep the
+                        // "Working on your request…" bubble (no error, no
+                        // draft-restore) and poll until it resolves — this is
+                        // what stops long replies from needing a refresh.
+                        if (isAbort || !Number.isFinite(status)) {
+                            startSessionHealPoll({
+                                ideaId: currentIdeaId,
+                                resolveWhen: (msgs) => {
+                                    const a = [...msgs].reverse().find((m) => m.role === "assistant");
+                                    return !!a && !a.pending; // real reply OR server-written reason-aware error
+                                },
+                                maxTicks: 192, // ~16 min @ 5s — covers the 900s server backstop + margin
+                                onExhausted: () => {
+                                    setIsLoading(false);
+                                    isLoadingRef.current = false;
+                                    setMessages((prev) =>
+                                        prev.map((m) =>
+                                            m.id === assistantPendingId
+                                                ? { ...m, pending: false, error: true, content: "Couldn't confirm the reply landed — refresh to check, or retry." }
+                                                : m
+                                        )
+                                    );
+                                },
+                            });
+                            return;
+                        }
+
+                        // Explicit server error response (408 stall/timeout, or
+                        // 502/503 gateway reject). Show the message and start the
+                        // late-heal poll for the late-`.done` reconciliation case.
                         let errorMsg = "Message sent but agent response failed. You can retry.";
                         if (status === 408) {
-                            // Prefer the backend's reason-specific message (sole author);
-                            // fall back to the generic copy only if the body was unreadable.
+                            // Backend is the sole author of the reason-specific wording.
                             errorMsg = err?.serverMessage || "Agent timed out — the model may be slow. You can retry.";
                         } else if (status === 502 || status === 503) {
                             errorMsg = "Agent gateway is unreachable. Check that OpenClaw is running.";
-                        } else if (!Number.isFinite(status)) {
-                            errorMsg = "Network error — check your connection and retry.";
                         }
                         setMessages((prev) =>
                             prev.map((m) => {
@@ -4668,46 +5024,11 @@
                         setIsLoading(false);
                         isLoadingRef.current = false;
                         if (status === 408 || status === 502 || status === 503) {
-                            stopLateHealPoll();
-                            const healIdeaId = currentIdeaId;
-                            const maxHealPolls = 24;
-                            let healTicks = 0;
-                            lateHealPollRef.current = setInterval(() => {
-                                healTicks += 1;
-                                if (!healIdeaId || healTicks > maxHealPolls) {
-                                    stopLateHealPoll();
-                                    return;
-                                }
-                                fetch(`/api/ideas/${healIdeaId}/session`)
-                                    .then((r) => r.json())
-                                    .then((d) => {
-                                        const rawMsgs = d.messages || [];
-                                        const anyAsstErr = rawMsgs.some(
-                                            (m) => m.role === "assistant" && m.error
-                                        );
-                                        if (!anyAsstErr) {
-                                            stopLateHealPoll();
-                                            setStagedAttachment(null);
-                                            setHiddenNoteIdsForSend(() => new Set());
-                                            setMessages(
-                                                rawMsgs.map((m, idx) => ({
-                                                    ...m,
-                                                    id:
-                                                        m.id ||
-                                                        `${m.role}-${idx}-${(m.ts || "").slice(0, 19) || idx}`,
-                                                }))
-                                            );
-                                            setPrdContent(d.prd_content || "");
-                                            refreshAnnotations(healIdeaId);
-                                            fetchPrdSectionDiff(healIdeaId);
-                                            setReadinessStatus("updating");
-                                            setReadinessData(null);
-                                            setReadinessTimedOut(false);
-                                            startReadinessPoll(healIdeaId);
-                                        }
-                                    })
-                                    .catch(() => {});
-                            }, 5000);
+                            startSessionHealPoll({
+                                ideaId: currentIdeaId,
+                                resolveWhen: (msgs) => !msgs.some((m) => m.role === "assistant" && m.error),
+                                maxTicks: 24,
+                            });
                         }
                     });
             };

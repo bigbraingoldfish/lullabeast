@@ -3718,6 +3718,16 @@ async def _poll_sentinel_with_idle_detect(
     attempt_start_wall_ns = int(attempt_start_wall * 1e9)
     last_fresh_mtime_ns: int | None = None  # last stamp mtime >= attempt_start_wall
 
+    def _fresh_reply_md_present() -> bool:
+        # The agent wrote turns/{n}.md (the reply) but no .done sentinel — a
+        # stranded completion. Only meaningful at the stalled/timeout exits,
+        # where the agent has demonstrably stopped, so the .md is final.
+        md = Path(done_path).with_suffix(".md")
+        try:
+            return md.stat().st_mtime >= attempt_start_wall - IDEAS_LATE_DONE_MTIME_SLACK_SEC
+        except OSError:
+            return False
+
     while True:
         if Path(done_path).exists():
             last_mtime_s = (
@@ -3731,6 +3741,10 @@ async def _poll_sentinel_with_idle_detect(
             last_mtime_s = (
                 last_fresh_mtime_ns / 1e9 if last_fresh_mtime_ns is not None else None
             )
+            # Backstop hit without a .done — but if the agent left a fresh reply
+            # .md, surface it rather than failing the turn.
+            if _fresh_reply_md_present():
+                return PollResult(True, "succeeded", last_mtime_s)
             return PollResult(False, "timeout", last_mtime_s)
 
         # Probe the activity stamp.  Use ``st_mtime_ns`` so rapid same-second
@@ -3754,6 +3768,11 @@ async def _poll_sentinel_with_idle_detect(
             # Post-first-activity window: ``stall_threshold`` governs.
             silence_seconds = time.time() - (last_fresh_mtime_ns / 1e9)
             if silence_seconds >= stall_threshold:
+                # The agent has gone silent. If it left a fresh reply .md
+                # (written but .done never landed), that output is final now —
+                # surface it instead of declaring a stall.
+                if _fresh_reply_md_present():
+                    return PollResult(True, "succeeded", last_fresh_mtime_ns / 1e9)
                 return PollResult(
                     False, "stalled", last_fresh_mtime_ns / 1e9
                 )
@@ -3972,10 +3991,64 @@ def _enrich_assistant_messages_with_parsed(session_data: dict) -> None:
         m["parsed"] = _parse_agent_response(content)
 
 
+def _ideas_stranded_md_reply(
+    idea_dir: Path,
+    turn_int: int,
+    attempt_start: float,
+    quiet_secs: float,
+) -> str | None:
+    """Reply text for a turn whose ``turns/{n}.md`` was written but ``.done`` never landed.
+
+    The completion contract normally hinges on the ``turns/{n}.done`` sentinel
+    (written last by the agent, backstopped by the plugin's ``agent_end``). When
+    a run is interrupted after writing the reply ``.md`` but before the
+    sentinel, the reply is stranded on disk — the poll waits the full backstop
+    and ``GET /session`` never resolves the placeholder. This recovers it.
+
+    Returns the ``.md`` content ONLY when the agent has demonstrably stopped:
+    the activity stamp (``prd_creator_activity.stamp``) has been silent for at
+    least ``quiet_secs``. That gate is essential — during a normal turn the
+    agent writes the chat ``.md`` first, then works on ``prd_draft.md`` (a model
+    call can run silently for ~2 min), then writes ``.done`` last. Surfacing on
+    stamp-silence (not mere ``.md`` presence) means this never fires mid-turn
+    and so cannot prematurely resolve a healthy long turn.
+
+    Returns ``None`` when ``.done`` exists (the normal path owns that), when no
+    fresh ``.md`` exists for this attempt, or when the stamp was touched within
+    ``quiet_secs`` (agent may still be working).
+    """
+    turns_dir = idea_dir / "turns"
+    if (turns_dir / f"{turn_int}.done").exists():
+        return None
+    md_path = turns_dir / f"{turn_int}.md"
+    try:
+        md_mtime = md_path.stat().st_mtime
+    except OSError:
+        return None
+    # Stale .md from a prior attempt — not this turn's output.
+    if md_mtime < attempt_start - IDEAS_LATE_DONE_MTIME_SLACK_SEC:
+        return None
+    stamp = idea_dir / "prd_creator_activity.stamp"
+    try:
+        last_activity = stamp.stat().st_mtime
+    except OSError:
+        # No stamp at all — the .md write itself is the last known activity.
+        last_activity = md_mtime
+    if (time.time() - last_activity) < quiet_secs:
+        return None  # agent may still be working
+    text = md_path.read_text()
+    return text if text.strip() else None
+
+
 def _reconcile_ideas_session_after_late_done(
-    idea_dir: Path, session_data: dict
+    idea_dir: Path, session_data: dict, quiet_secs: float = 300.0
 ) -> tuple[dict, bool]:
-    """If the last turn ended in assistant error but turns/n.done arrived later, heal session.
+    """Heal an unresolved last turn (``pending`` or ``error``) once its output is on disk.
+
+    Two recovery sources, in priority order:
+      1. ``turns/{n}.done`` arrived (authoritative) — the original late-done case.
+      2. ``turns/{n}.md`` is stranded (``.done`` missing) and the agent has gone
+         quiet for ``quiet_secs`` (see :func:`_ideas_stranded_md_reply`).
 
     Uses user row ``ideas_turn`` + ``attempt_start_wall`` (post–post_ideas_message schema).
     """
@@ -3988,7 +4061,7 @@ def _reconcile_ideas_session_after_late_done(
     asst_idx = None
     for i in range(len(msgs) - 1, -1, -1):
         m = msgs[i]
-        if m.get("role") == "assistant" and m.get("error"):
+        if m.get("role") == "assistant" and (m.get("pending") or m.get("error")):
             asst_idx = i
             break
     if asst_idx is None or asst_idx < 1:
@@ -4011,16 +4084,20 @@ def _reconcile_ideas_session_after_late_done(
     turns_dir = idea_dir / "turns"
     done_path = turns_dir / f"{turn_int}.done"
     md_path = turns_dir / f"{turn_int}.md"
-    if not done_path.exists():
-        return session_data, False
-    try:
-        done_mtime = os.path.getmtime(done_path)
-    except OSError:
-        return session_data, False
-    if done_mtime < attempt_start:
-        return session_data, False
 
-    agent_response = md_path.read_text() if md_path.exists() else ""
+    agent_response = None
+    if done_path.exists():
+        try:
+            done_mtime = os.path.getmtime(done_path)
+        except OSError:
+            done_mtime = None
+        if done_mtime is not None and done_mtime >= attempt_start - IDEAS_LATE_DONE_MTIME_SLACK_SEC:
+            agent_response = md_path.read_text() if md_path.exists() else ""
+    if agent_response is None:
+        # No fresh .done — recover a stranded .md if the agent has stopped.
+        agent_response = _ideas_stranded_md_reply(idea_dir, turn_int, attempt_start, quiet_secs)
+    if agent_response is None:
+        return session_data, False
     prd_draft_path = idea_dir / "prd_draft.md"
     prd_content = prd_draft_path.read_text() if prd_draft_path.exists() else ""
 
@@ -4134,7 +4211,9 @@ def get_ideas_session(idea_id: str):
     session_data, changed = _rehydrate_session_from_artifacts(idea_dir, session_data)
     if changed:
         _atomic_write_json_file(session_path, session_data)
-    session_data, late_changed = _reconcile_ideas_session_after_late_done(idea_dir, session_data)
+    session_data, late_changed = _reconcile_ideas_session_after_late_done(
+        idea_dir, session_data, quiet_secs=float(config.get("ideas_idle_threshold", 300))
+    )
     if late_changed:
         _atomic_write_json_file(session_path, session_data)
 
