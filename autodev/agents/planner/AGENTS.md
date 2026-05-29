@@ -98,6 +98,74 @@ Use file read and shell tools to:
 
 Do NOT use write tools for anything except `pipeline-project/.autodev/pipeline/planner_output.json` and `pipeline-project/.autodev/pipeline/planner_output.done`. Do not touch source code, test files, or any pipeline state file.
 
+## Always-Apply: Integration Wiring
+
+These rules apply to **every** phase you plan, regardless of phase prefix — wiring discipline is universal, not reserved for phases tagged `INTEGRATION`. (Formerly an injected base skill; now part of your standing identity.)
+
+### Decomposition checklist
+- Enumerate ALL components to wire: file path, exported symbol, real signature (args + return type), side effects (startup, threads, I/O).
+- Identify the true runtime entrypoint and the exact command to run it.
+- Construct an explicit init graph in topological order; ban hidden init at import time.
+- Specify the main loop pattern, signal handling, and cleanup ordering (reverse of init).
+
+### Interfaces & contracts to specify
+For every boundary (A → B): input type/schema, output type/schema, error contract (exceptions vs Result), ownership (who constructs and who closes what), and failure semantics at the boundary (retry / fall through / fail closed).
+
+If event-driven: canonical event name constants, payload schema per event, and delivery semantics (ordering, at-least-once, idempotency).
+
+Write the main loop in pseudocode the executor can implement literally: read → validate → route → execute → persist → emit → sleep/yield, with stop criteria named.
+
+### Edge cases — must enumerate, not generalise
+Component A produces but B is not yet started; A fails to construct; B raises mid-loop; SIGTERM during a request; resource leak on shutdown path; replay of the same event; configuration missing for one wired component.
+
+### Pass criteria patterns
+- "Running the real entrypoint succeeds and performs a full happy-path cycle."
+- Integration test asserts module A's output is consumed by module B (not just that both ran).
+- Graceful shutdown closes resources in the documented reverse-init order and exits cleanly.
+- Unit tests alone are insufficient — at least one end-to-end test per wired boundary.
+
+### Anti-patterns to avoid
+- Initialisation happening as a side effect of `import`.
+- Singletons created in two places.
+- Listing components that are wired but not naming each one's failure semantics.
+- Pass criteria that only verify each component in isolation.
+
+### TDD test structure
+Minimum: one end-to-end happy-path test through the real entrypoint, one boundary-contract test per wired pair, one shutdown-cleanup test.
+
+## Always-Apply: Testing Quality
+
+These rules apply to **every** phase you plan, regardless of phase prefix — test-quality discipline is universal, not reserved for phases tagged `TEST` or `E2E`.
+
+### Decomposition checklist
+- Identify the real entry point(s) under test (CLI, HTTP, UI flow). No helper-only tests.
+- Define the system boundary and the allowed doubles: it is OK to fake external network, the clock, and third-party APIs; it is NOT OK to mock internal domain logic, validation, or persistence (unless the phase is explicitly unit-only).
+- Treat test infrastructure as first-class deliverables: `conftest.py` (shared fixtures + cleanup), test utilities, test data factories (schema-valid), cleanup mechanisms (DB truncate, tmp dirs, env reset).
+- Keep the E2E test count small; lean on shared fixtures rather than copy-paste tests.
+
+### Interfaces & contracts to specify
+Pin the test runner command (exact invocation), the coverage target if any, the fixture scope (default function), fixture cleanup ownership, and what state each fixture may mutate. Specify per-test layer (unit / integration / E2E) and what each layer is allowed to touch.
+
+### Edge cases — must enumerate, not generalise
+Test run on a cold machine (no caches), test order randomised, two tests sharing a tmp dir, a flake reproducer (run-N times), network unavailable, time-dependent assertion crossing midnight UTC.
+
+### Pass criteria patterns
+- "Tests can fail": include a deliberate negative control (break behaviour, confirm the suite catches it).
+- "Tests are deterministic": N-repeat run with zero flakes.
+- "Tests are isolated": order-randomised run with no failures.
+- Coverage threshold (if used) is enforced in the test command itself, not as a manual check.
+
+### Anti-patterns to avoid
+- Sleep used as synchronisation.
+- Hard-coded ports or paths.
+- Cleanup ownership omitted (a fixture that mutates state and does not restore it).
+- Tests that rely on live network.
+- Growing the E2E count instead of building shared fixtures.
+- Assertions on internal state or mock call counts when an observable output is available.
+
+### TDD test structure
+Minimum: one E2E test per user-visible flow asserting on observable outputs, one negative-control test, one order-randomised CI invocation.
+
 ## Discipline Skill
 
-A `SKILL.md` may optionally be present in your `skills/` directory when the current phase maps to a known discipline. If it appears, treat it as supplemental domain guidance that complements — but does not override — this document or any other contract file.
+A phase-specific `SKILL.md` may optionally be present in your `skills/` directory when the current phase maps to a known discipline (e.g. `core-logic`, `ui-frontend`). It is the **variable** layer — it changes per phase prefix. The **universal** rules above (Always-Apply: Integration Wiring and Testing Quality) apply on every phase regardless of prefix. If a phase skill appears, treat it as supplemental domain guidance that complements — but does not override — this document or any other contract file.

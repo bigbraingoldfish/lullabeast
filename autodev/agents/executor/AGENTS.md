@@ -176,6 +176,76 @@ Use file write to:
 
 Pipeline artifact files (`executor_output.json`, `.done`, `phases/`, `metrics.jsonl`) go under `pipeline-project/.autodev/pipeline/` inside your workspace; application source and tests live at normal project-relative paths (`src/`, `tests/`). Do not use absolute paths for writes.
 
+## Always-Apply: Integration Wiring
+
+These rules apply to **every** phase you implement, regardless of phase prefix — wiring discipline is universal, not reserved for phases tagged `INTEGRATION`. (Formerly an injected base skill; now part of your standing identity.)
+
+### Hard rule
+Do not write wiring code until you have read: the current file tree, the real interfaces of every module you will connect, and the current entrypoint invocation.
+
+### Import safety
+- Verify imports against actual paths on disk (no guessing).
+- Prefer absolute imports; avoid ambiguous relative imports.
+- Confirm `__init__.py` exists where expected; keep it minimal with no import-time side effects.
+
+### Wiring pattern
+- Build a single composition root (one place where objects are constructed).
+- Pass dependencies explicitly (constructor args or factory params).
+- Avoid globals for cross-component references.
+
+### Initialization ordering
+- Initialize in topological order: config/env → logging → core services → adapters → main loop.
+- Ensure each dependency available before constructing dependents.
+- No work starts (threads, loops, network) until after init completes.
+
+### Main loop discipline
+- Choose canonical loop pattern; avoid blocking calls inside non-blocking loops.
+- Implement stop criteria, SIGINT/SIGTERM handling, cleanup in reverse init order.
+
+### Testing
+- Always run the real entrypoint after wiring changes.
+- Add at least one integration test: construct composition root, run full happy-path, assert cross-component effects.
+- If failure occurs, reproduce via entrypoint first, then isolate.
+
+### Anti-patterns
+- "Each component works in isolation" without end-to-end run.
+- Fixing symptoms (extra imports) without confirming runtime path.
+- Adding code instead of adding validation/adapters at boundaries.
+
+## Always-Apply: Testing Quality
+
+These rules apply to **every** phase you implement, regardless of phase prefix — test-quality discipline is universal, not reserved for phases tagged `TEST` or `E2E`.
+
+### Golden rule
+Tests must fail if the system is broken. No "it runs" checks.
+
+### Fixtures and data
+- Shared fixtures in conftest.py. Default scope: function. Session scope only for immutable, expensive resources.
+- Factories generate schema-valid, constraint-valid data.
+- Never share mutable objects across tests unless deep-copied.
+
+### Mock discipline
+- Mock at boundaries only (network, clock, filesystem, third-party).
+- Strict mocks that enforce interface contracts (no permissive "anything goes").
+- Reset/clear mocks between tests (especially global monkeypatches).
+
+### Isolation
+- Filesystem: per-test temp dirs. Never hardcode /tmp paths.
+- Env vars: safe patch helpers; always restore.
+- Ports: ephemeral/dynamic; never hardcode.
+- Databases: transaction rollback or truncate between tests.
+
+### E2E construction
+- Start the SUT the way a user does (real CLI command, real HTTP surface).
+- Assert on observable outputs only (responses, persisted state, emitted messages).
+- Avoid asserting internal steps or mock call counts unless required.
+
+### Flake avoidance
+Never add sleep() to "fix" flake. Use framework-native waits. If intermittent: reproduce, identify unstable dependency, fix root cause.
+
+### Browser perf benchmarks (web UI projects)
+Performance benchmarks for browser UI — animation frame rate, drag input latency, layout shift, paint timing — MUST run in a real browser, not jsdom. jsdom does not implement `requestAnimationFrame` fidelity, CSS layout, paint, or composited animation. A jsdom-based "60fps benchmark" is a number generator unrelated to user experience. Use Playwright (or equivalent) to drive a real Chromium and measure via `performance.now()` / `performance.getEntriesByType("paint")`. If you cannot run a real browser in the test environment, mark the perf benchmark as skipped and report it in `failure_reason` rather than producing a meaningless jsdom number.
+
 ## Discipline Skill
 
-A `SKILL.md` may optionally be present in your `skills/` directory when the current phase maps to a known discipline. If it appears, treat it as supplemental domain guidance that complements — but does not override — this document or any other contract file.
+A phase-specific `SKILL.md` may optionally be present in your `skills/` directory when the current phase maps to a known discipline (e.g. `core-logic`, `ui-frontend`). It is the **variable** layer — it changes per phase prefix. The **universal** rules above (Always-Apply: Integration Wiring and Testing Quality) apply on every phase regardless of prefix. If a phase skill appears, treat it as supplemental domain guidance that complements — but does not override — this document or any other contract file.
