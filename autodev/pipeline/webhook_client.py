@@ -119,6 +119,13 @@ def invoke_agent_webhook(
         "wakeMode": wake_mode,
         "message": message or default_messages.get(agent_id, "Begin your assigned pipeline task. Read your workspace files for context."),
     }
+    # File-only run for the working agents: completion is detected via sentinel
+    # files, never channel delivery.  Without deliver=False the gateway tries to
+    # deliver every reply to the bound Signal channel and marks the run errored
+    # ("Delivering to Signal requires target").  Escalation is the sole exception
+    # — it sends the human a real Signal notification, so it keeps default delivery.
+    if agent_id != "escalation":
+        payload["deliver"] = False
     if model:
         payload["model"] = model
 

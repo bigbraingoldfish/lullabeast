@@ -151,3 +151,42 @@ class TestTriggerReadinessAssessment:
 
         asyncio.run(_trigger_readiness_assessment(iid, config))
         assert not (d / "readiness.done").exists()
+
+    def test_readiness_webhook_is_file_only_not_delivered(self, tmp_path, monkeypatch):
+        """Readiness webhook must set deliver=False so the gateway does not try to
+        deliver the agent reply to the bound Signal channel (which fails with
+        'Delivering to Signal requires target' and marks the run errored)."""
+        from ui.server import _trigger_readiness_assessment
+
+        ideas_root = tmp_path / "ideas"
+        iid = "trig-deliver"
+        d = ideas_root / iid
+        d.mkdir(parents=True)
+
+        config = {
+            "ideas_dir": str(ideas_root),
+            "hooks_url": "http://127.0.0.1:9/hook",
+            "hooks_token": "t",
+        }
+
+        captured: dict = {}
+
+        class FakeResp:
+            status = 200
+
+        class FakeSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return None
+
+            async def post(self, *a, **k):
+                captured["json"] = k.get("json")
+                return FakeResp()
+
+        monkeypatch.setattr("aiohttp.ClientSession", lambda *a, **k: FakeSession())
+
+        asyncio.run(_trigger_readiness_assessment(iid, config))
+        assert captured["json"] is not None
+        assert captured["json"].get("deliver") is False
