@@ -3386,6 +3386,36 @@
             );
         }
 
+        // Module-level so the chosen loading effect survives across pending-bubble
+        // mount/unmount cycles (the component remounts for every new "Working on your
+        // request…" bubble). `last` makes the effect "sticky" — a fresh bubble re-opens
+        // on whatever was last shown. `bag` is a shuffled queue of every pattern index:
+        // clicking draws the next one, and the bag only reshuffles once fully drained,
+        // so every effect appears exactly once before any repeats.
+        let pendingBubblePatternBag = [];
+        let pendingBubblePatternLast = null;
+
+        function drawNextPendingBubblePattern(count) {
+            if (pendingBubblePatternBag.length === 0) {
+                pendingBubblePatternBag = Array.from({ length: count }, (_, i) => i);
+                // Fisher-Yates shuffle
+                for (let i = pendingBubblePatternBag.length - 1; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    const tmp = pendingBubblePatternBag[i];
+                    pendingBubblePatternBag[i] = pendingBubblePatternBag[j];
+                    pendingBubblePatternBag[j] = tmp;
+                }
+                // Avoid the same effect repeating across a bag boundary.
+                if (count > 1 && pendingBubblePatternBag[0] === pendingBubblePatternLast) {
+                    const tmp = pendingBubblePatternBag[0];
+                    pendingBubblePatternBag[0] = pendingBubblePatternBag[1];
+                    pendingBubblePatternBag[1] = tmp;
+                }
+            }
+            pendingBubblePatternLast = pendingBubblePatternBag.shift();
+            return pendingBubblePatternLast;
+        }
+
         function PendingBubbleLifeBackdrop() {
             const containerRef = useRef(null);
             const canvasRef = useRef(null);
@@ -3403,7 +3433,6 @@
                 let cols = 0, rows = 0, w = 0, h = 0;
                 let dpr = window.devicePixelRatio || 1;
                 let rafId = 0;
-                let firstRoFire = true;
 
                 let patternIdx = 0;
                 let patternStart = 0;
@@ -3634,7 +3663,7 @@
                             return {
                                 body,
                                 dir: [1, 0],
-                                food: { x: Math.floor(Math.random() * cols), y: Math.floor(Math.random() * rows) },
+                                food: { x: Math.floor(Math.random() * (cols - 1)), y: Math.floor(Math.random() * (rows - 1)) },
                             };
                         };
                         if (!patternState.snake) {
@@ -3675,8 +3704,8 @@
                             S.body.unshift({ x: nx, y: ny });
                             if (nx === S.food.x && ny === S.food.y) {
                                 for (let tries = 0; tries < 30; tries++) {
-                                    const fx = Math.floor(Math.random() * cols);
-                                    const fy = Math.floor(Math.random() * rows);
+                                    const fx = Math.floor(Math.random() * (cols - 1));
+                                    const fy = Math.floor(Math.random() * (rows - 1));
                                     if (!S.body.some(c => c.x === fx && c.y === fy)) {
                                         S.food = { x: fx, y: fy };
                                         break;
@@ -3688,8 +3717,18 @@
                         }
                         clearCanvas(ctx);
                         ctx.fillStyle = LIVE_COLOR;
-                        for (const c of S.body) drawCell(ctx, c.x, c.y);
+                        // Snake body — each segment renders as a 2x2 block so the snake reads as a chunky cable
+                        for (const c of S.body) {
+                            drawCell(ctx, c.x, c.y);
+                            drawCell(ctx, c.x + 1, c.y);
+                            drawCell(ctx, c.x, c.y + 1);
+                            drawCell(ctx, c.x + 1, c.y + 1);
+                        }
+                        // Food — 2x2 block to match the snake's scale
                         drawCell(ctx, S.food.x, S.food.y);
+                        drawCell(ctx, S.food.x + 1, S.food.y);
+                        drawCell(ctx, S.food.x, S.food.y + 1);
+                        drawCell(ctx, S.food.x + 1, S.food.y + 1);
                     },
                     // 6. Radial pulse rings (abstract)
                     (ctx, t) => {
@@ -3970,7 +4009,7 @@
                         if (!patternState.mega) {
                             patternState.mega = {
                                 cx: Math.floor(cols / 2),
-                                cy: Math.max(5, rows - 6),
+                                cy: Math.max(7, rows - 6),
                                 facing: 1,
                                 chargeAmt: 0,
                                 phase: 'pellet',
@@ -4057,7 +4096,7 @@
                                 if (M.phase === 'pellet') {
                                     if (M.shotT > 0.875) {
                                         M.shotT = 0;
-                                        M.pellets.push({ x: M.cx + M.facing * 7, y: M.cy + 2, vx: M.facing * 38, big: false });
+                                        M.pellets.push({ x: M.cx + M.facing * 7, y: M.cy, vx: M.facing * 38, big: false });
                                     }
                                     if (M.phaseT > 4.5) { M.phase = 'charging'; M.phaseT = 0; }
                                 } else if (M.phase === 'charging') {
@@ -4065,7 +4104,7 @@
                                     if (M.phaseT > 1.4) {
                                         M.phase = 'blast';
                                         M.phaseT = 0;
-                                        M.pellets.push({ x: M.cx + M.facing * 7, y: M.cy + 2, vx: M.facing * 55, big: true, hits: 0 });
+                                        M.pellets.push({ x: M.cx + M.facing * 7, y: M.cy, vx: M.facing * 55, big: true, hits: 0 });
                                         M.chargeAmt = 0;
                                     }
                                 } else {
@@ -4128,48 +4167,74 @@
                                 drawCell(ctx, px + (p.vx > 0 ? 1 : -1), py);
                             }
                         }
-                        // Mega Man v2 (11 rows × 7 wide base + 4-cell Mega Buster)
+                        // Mega Man v3 — 13 rows tall, Mega Buster at shoulder height (rows cy-1 and cy) so pellets emerge from his shoulder, not his waist
                         const cx = M.cx, cy = M.cy, f = M.facing;
-                        for (let d = -1; d <= 1; d++) drawCell(ctx, cx + d, cy - 5);
-                        for (let d = -2; d <= 2; d++) drawCell(ctx, cx + d, cy - 4);
+                        // Helmet peak (rounded top, 3 cells)
+                        for (let d = -1; d <= 1; d++) drawCell(ctx, cx + d, cy - 7);
+                        // Helmet upper (5 cells)
+                        for (let d = -2; d <= 2; d++) drawCell(ctx, cx + d, cy - 6);
+                        // Helmet brim — widest part of the head (7 cells)
+                        for (let d = -3; d <= 3; d++) drawCell(ctx, cx + d, cy - 5);
+                        // Face row: gaps at -1 and +1 read as two eyes flanking a center nose pixel
+                        drawCell(ctx, cx - 3, cy - 4);
+                        drawCell(ctx, cx - 2, cy - 4);
+                        drawCell(ctx, cx, cy - 4);
+                        drawCell(ctx, cx + 2, cy - 4);
+                        drawCell(ctx, cx + 3, cy - 4);
+                        // Jaw / lower helmet edge (7 cells)
                         for (let d = -3; d <= 3; d++) drawCell(ctx, cx + d, cy - 3);
-                        for (let d = -3; d <= 3; d++) if (d !== -2 && d !== 2) drawCell(ctx, cx + d, cy - 2);
-                        for (let d = -3; d <= 3; d++) drawCell(ctx, cx + d, cy - 1);
+                        // Neck — narrower than head (5 cells)
+                        for (let d = -2; d <= 2; d++) drawCell(ctx, cx + d, cy - 2);
+                        // Shoulders + Mega Buster row 1 (the arm fires from HERE, not below)
+                        for (let d = -2; d <= 2; d++) drawCell(ctx, cx + d, cy - 1);
+                        for (let d = 3; d <= 6; d++) drawCell(ctx, cx + f * d, cy - 1);
+                        // Chest + Mega Buster row 2 — 2-row cannon for the chunky Mega Buster look
                         for (let d = -2; d <= 2; d++) drawCell(ctx, cx + d, cy);
+                        for (let d = 3; d <= 6; d++) drawCell(ctx, cx + f * d, cy);
+                        // Lower chest
                         for (let d = -2; d <= 2; d++) drawCell(ctx, cx + d, cy + 1);
-                        for (let d = 3; d <= 6; d++) drawCell(ctx, cx + f * d, cy + 1);
-                        for (let d = -2; d <= 2; d++) drawCell(ctx, cx + d, cy + 2);
-                        for (let d = 3; d <= 6; d++) drawCell(ctx, cx + f * d, cy + 2);
-                        for (let d = -2; d <= 2; d++) drawCell(ctx, cx + d, cy + 3);
+                        // Waist with central belt-buckle gap
+                        drawCell(ctx, cx - 2, cy + 2);
+                        drawCell(ctx, cx - 1, cy + 2);
+                        drawCell(ctx, cx + 1, cy + 2);
+                        drawCell(ctx, cx + 2, cy + 2);
+                        // Thighs (split)
+                        drawCell(ctx, cx - 2, cy + 3);
+                        drawCell(ctx, cx - 1, cy + 3);
+                        drawCell(ctx, cx + 1, cy + 3);
+                        drawCell(ctx, cx + 2, cy + 3);
+                        // Shins (split)
                         drawCell(ctx, cx - 2, cy + 4);
                         drawCell(ctx, cx - 1, cy + 4);
                         drawCell(ctx, cx + 1, cy + 4);
                         drawCell(ctx, cx + 2, cy + 4);
+                        // Boots — 1 cell wider than legs each side
                         drawCell(ctx, cx - 3, cy + 5);
                         drawCell(ctx, cx - 2, cy + 5);
                         drawCell(ctx, cx - 1, cy + 5);
                         drawCell(ctx, cx + 1, cy + 5);
                         drawCell(ctx, cx + 2, cy + 5);
                         drawCell(ctx, cx + 3, cy + 5);
+                        // Charge glow — centered on the new shoulder-height cannon (rows cy-1 and cy)
                         if (M.chargeAmt > 0) {
                             const tip = cx + f * 6;
                             if (M.chargeAmt > 0.25) {
-                                drawCell(ctx, tip, cy);
-                                drawCell(ctx, tip, cy + 3);
+                                drawCell(ctx, tip, cy - 2);
+                                drawCell(ctx, tip, cy + 1);
                             }
                             if (M.chargeAmt > 0.55) {
                                 const next = tip + f;
-                                drawCell(ctx, next, cy + 1);
-                                drawCell(ctx, next, cy + 2);
-                                drawCell(ctx, tip, cy - 1);
-                                drawCell(ctx, tip, cy + 4);
+                                drawCell(ctx, next, cy - 1);
+                                drawCell(ctx, next, cy);
+                                drawCell(ctx, tip, cy - 3);
+                                drawCell(ctx, tip, cy + 2);
                             }
                             if (M.chargeAmt > 0.85) {
                                 const next2 = tip + f * 2;
-                                drawCell(ctx, next2, cy + 1);
-                                drawCell(ctx, next2, cy + 2);
-                                drawCell(ctx, tip + f, cy);
-                                drawCell(ctx, tip + f, cy + 3);
+                                drawCell(ctx, next2, cy - 1);
+                                drawCell(ctx, next2, cy);
+                                drawCell(ctx, tip + f, cy - 2);
+                                drawCell(ctx, tip + f, cy + 1);
                             }
                         }
                         // Super-shot build-up: two expanding rings around Mega Man + a late-charge flicker at the cannon
@@ -4217,9 +4282,12 @@
                     },
                 ];
 
-                // Pick a random starting pattern each mount so consecutive pending bubbles
-                // don't always open with the same one.
-                patternIdx = Math.floor(Math.random() * patterns.length);
+                // Sticky: a fresh bubble re-opens on the last-shown effect. Only draw a
+                // new one from the shuffle bag the very first time (or if the recorded
+                // index is somehow out of range for the current pattern set).
+                patternIdx = (pendingBubblePatternLast !== null && pendingBubblePatternLast < patterns.length)
+                    ? pendingBubblePatternLast
+                    : drawNextPendingBubblePattern(patterns.length);
 
                 function applyPattern() {
                     patternState = {};
@@ -4230,11 +4298,20 @@
                     clearCanvas(ctx);
                 }
 
+                // Measure the bubble and (re)size the canvas. Returns true only when the
+                // geometry actually changed. The bubble often mounts narrower than its
+                // settled width (flex layout has not resolved on the first frame), so the
+                // initial measurement can be too small; the ResizeObserver below calls
+                // this again once the real width arrives and we resize to fill the bar.
                 function geometry() {
                     const rect = container.getBoundingClientRect();
-                    dpr = window.devicePixelRatio || 1;
-                    w = Math.max(40, Math.floor(rect.width));
-                    h = Math.max(16, Math.floor(rect.height));
+                    const newDpr = window.devicePixelRatio || 1;
+                    const newW = Math.max(40, Math.floor(rect.width));
+                    const newH = Math.max(16, Math.floor(rect.height));
+                    if (newW === w && newH === h && newDpr === dpr && canvas.width > 0) return false;
+                    dpr = newDpr;
+                    w = newW;
+                    h = newH;
                     canvas.style.width = w + "px";
                     canvas.style.height = h + "px";
                     canvas.style.display = "block";
@@ -4242,6 +4319,7 @@
                     canvas.height = Math.floor(h * dpr);
                     cols = Math.max(8, Math.floor(w / CELL));
                     rows = Math.max(4, Math.floor(h / CELL));
+                    return true;
                 }
 
                 function loop(now) {
@@ -4255,7 +4333,7 @@
                 }
 
                 function cycle() {
-                    patternIdx = (patternIdx + 1) % patterns.length;
+                    patternIdx = drawNextPendingBubblePattern(patterns.length);
                     applyPattern();
                 }
 
@@ -4273,9 +4351,10 @@
                 let ro = null;
                 if (typeof ResizeObserver !== "undefined") {
                     ro = new ResizeObserver(() => {
-                        if (firstRoFire) { firstRoFire = false; return; }
-                        geometry();
-                        applyPattern();
+                        // Re-seed only when the size genuinely changed — this both fixes the
+                        // mount-too-narrow case and absorbs later real resizes without
+                        // needlessly restarting the effect on every spurious callback.
+                        if (geometry()) applyPattern();
                     });
                     ro.observe(container);
                 }
