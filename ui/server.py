@@ -4371,6 +4371,10 @@ async def _trigger_readiness_assessment(idea_id: str, config: dict) -> None:
             "agentId": WEBHOOK_AGENT_ID,
             "sessionKey": f"ideas:{idea_id}:readiness",
             "wakeMode": "now",
+            # File-only run: the agent writes readiness.json/.done. Without this the
+            # gateway tries to deliver the reply to the bound Signal channel and the
+            # run is marked errored ("Delivering to Signal requires target").
+            "deliver": False,
             "message": (
                 f"[SESSION] ideas:{idea_id}:readiness\n\n"
                 f"A new PRD draft is available. Read {ip['prd_draft']} and produce an "
@@ -4495,6 +4499,8 @@ async def post_ideas_message(idea_id: str, request: Request):
         "agentId": WEBHOOK_AGENT_ID,
         "sessionKey": session_key,
         "wakeMode": "now",
+        # File-only run; reply is read from the workspace, never delivered to Signal.
+        "deliver": False,
         "message": (
             f"[SESSION] ideas:{idea_id}:session-{turn_n}\n\n"
             f"{history_block}{system_events_block}{message_content}{_contract_footer}"
@@ -5146,6 +5152,8 @@ async def post_ideas_clarity_check(idea_id: str):
         "agentId": WEBHOOK_AGENT_ID,
         "sessionKey": session_key,
         "wakeMode": "now",
+        # File-only run; reply is read from the workspace, never delivered to Signal.
+        "deliver": False,
         "message": (
             "Review the following PRD for clarity and completeness. "
             "Do not write or modify any files other than clarity_result.json and clarity_result.done listed below. "
@@ -5295,6 +5303,8 @@ async def post_ideas_convert(idea_id: str):
         "agentId": ROADMAP_CONVERTER_AGENT_ID,
         "sessionKey": session_key,
         "wakeMode": "now",
+        # File-only run; reply is read from the workspace, never delivered to Signal.
+        "deliver": False,
         "message": (
             f"{conversion_prompt.strip()}\n\n"
             f"---\n\n"
@@ -5431,6 +5441,8 @@ async def post_ideas_fix_roadmap_format(idea_id: str, body: FixRoadmapFormatRequ
         "agentId": ROADMAP_CONVERTER_AGENT_ID,
         "sessionKey": session_key,
         "wakeMode": "now",
+        # File-only run; reply is read from the workspace, never delivered to Signal.
+        "deliver": False,
         "message": (
             f"[SESSION] {session_key}\n\n"
             f"Format-correct the following roadmap for idea {idea_id}.\n\n"
