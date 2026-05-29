@@ -296,3 +296,179 @@ def test_set_dotenv_key_replaces_existing_value(tmp_path):
     text = envp.read_text()
     assert "AUTODEV_HOOKS_TOKEN=new" in text
     assert "AUTODEV_HOOKS_TOKEN=old" not in text
+
+
+# ---------------------------------------------------------------------------
+# Context-limit truncation seeding (bootstrapMaxChars / postCompaction*).
+#
+# Audit: plans/Active/metaprompt-2-truncation-settings-audit.md.
+# Regime 1 (bootstrap files): OpenClaw truncates each injected AGENTS.md at the
+# 12k per-file default, cutting off the Stage A ``## Always-Apply: ...`` rules
+# (which begin past byte ~10k in every pipeline role's AGENTS.md). Compaction
+# compounds it: the post-compaction refresh re-injects only the sections named
+# in ``agents.defaults.compaction.postCompactionSections`` (OpenClaw default
+# ["Session Startup","Red Lines"] — names our AGENTS.md does NOT contain),
+# capped at per-agent ``contextLimits.postCompactionMaxChars`` (default 1800).
+# Net effect today: the universal rules are dropped on every compaction.
+#
+# These tests pin the AutoDev fix: raise the bootstrap cap on all six agents,
+# point the post-compaction refresh at our real section names, and size its cap
+# to hold them. They fail until ``ensure_openclaw_context_limits`` and the
+# canonical constants exist.
+# ---------------------------------------------------------------------------
+
+_AUTODEV_SIX = ("planner", "executor", "reviewer", "escalation", "prd-creator", "roadmap-converter")
+
+
+def _oc_with_six_agents(tmp_path):
+    oc = tmp_path / "openclaw.json"
+    agents = [{"id": a, "workspace": f"/ws/{a}", "model": {"primary": "m"}} for a in _AUTODEV_SIX]
+    oc.write_text(json.dumps({"agents": {"list": agents}, "hooks": {}}))
+    return oc
+
+
+def test_context_limit_constants_present():
+    """Canonical truncation values live in setup_helpers (single source of truth)."""
+    assert setup_helpers.AUTODEV_BOOTSTRAP_MAX_CHARS == 32000
+    assert setup_helpers.AUTODEV_POSTCOMPACTION_MAX_CHARS == 8000
+    assert tuple(setup_helpers.AUTODEV_BOOTSTRAP_AGENT_IDS) == _AUTODEV_SIX
+    assert tuple(setup_helpers.AUTODEV_POSTCOMPACTION_AGENT_IDS) == ("planner", "executor", "reviewer")
+    secs = list(setup_helpers.AUTODEV_POSTCOMPACTION_SECTIONS)
+    assert "Always-Apply: Integration Wiring" in secs
+    assert "Always-Apply: Testing Quality" in secs
+
+
+def test_ensure_context_limits_sets_bootstrap_on_all_six_agents(tmp_path):
+    oc = _oc_with_six_agents(tmp_path)
+    assert setup_helpers.ensure_openclaw_context_limits(str(oc)) == "updated"
+    data = json.loads(oc.read_text())
+    for e in data["agents"]["list"]:
+        assert e["bootstrapMaxChars"] == 32000, e["id"]
+
+
+def test_ensure_context_limits_postcompaction_pipeline_only(tmp_path):
+    oc = _oc_with_six_agents(tmp_path)
+    setup_helpers.ensure_openclaw_context_limits(str(oc))
+    data = json.loads(oc.read_text())
+    by_id = {e["id"]: e for e in data["agents"]["list"]}
+    for a in ("planner", "executor", "reviewer"):
+        assert by_id[a]["contextLimits"]["postCompactionMaxChars"] == 8000, a
+    # Non-pipeline agents have no Always-Apply sections, so no post-compaction cap.
+    for a in ("escalation", "prd-creator", "roadmap-converter"):
+        assert "postCompactionMaxChars" not in by_id[a].get("contextLimits", {}), a
+
+
+def test_ensure_context_limits_seeds_postcompaction_sections_default(tmp_path):
+    oc = _oc_with_six_agents(tmp_path)
+    setup_helpers.ensure_openclaw_context_limits(str(oc))
+    data = json.loads(oc.read_text())
+    secs = data["agents"]["defaults"]["compaction"]["postCompactionSections"]
+    assert "Always-Apply: Integration Wiring" in secs
+    assert "Always-Apply: Testing Quality" in secs
+
+
+def test_ensure_context_limits_merges_and_dedupes_existing_sections(tmp_path):
+    oc = tmp_path / "openclaw.json"
+    agents = [{"id": a, "workspace": f"/ws/{a}"} for a in _AUTODEV_SIX]
+    oc.write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "list": agents,
+                    "defaults": {
+                        "compaction": {"postCompactionSections": ["Red Lines", "Custom Section"]}
+                    },
+                }
+            }
+        )
+    )
+    setup_helpers.ensure_openclaw_context_limits(str(oc))
+    data = json.loads(oc.read_text())
+    secs = data["agents"]["defaults"]["compaction"]["postCompactionSections"]
+    assert secs.count("Red Lines") == 1  # preserved, not duplicated
+    assert "Custom Section" in secs  # operator additions preserved
+    assert "Always-Apply: Integration Wiring" in secs  # ours appended
+
+
+def test_ensure_context_limits_idempotent(tmp_path):
+    oc = _oc_with_six_agents(tmp_path)
+    assert setup_helpers.ensure_openclaw_context_limits(str(oc)) == "updated"
+    assert setup_helpers.ensure_openclaw_context_limits(str(oc)) == "unchanged"
+
+
+def test_ensure_context_limits_preserves_unrelated_keys(tmp_path):
+    oc = tmp_path / "openclaw.json"
+    agents = [
+        {
+            "id": "executor",
+            "workspace": "/ws/executor",
+            "model": {"primary": "m"},
+            "tools": {"allow": ["read"]},
+        }
+    ]
+    oc.write_text(json.dumps({"agents": {"list": agents}}))
+    setup_helpers.ensure_openclaw_context_limits(str(oc))
+    e = json.loads(oc.read_text())["agents"]["list"][0]
+    assert e["model"]["primary"] == "m"
+    assert e["tools"]["allow"] == ["read"]
+    assert e["bootstrapMaxChars"] == 32000
+
+
+def test_ensure_context_limits_ignores_non_autodev_agents(tmp_path):
+    oc = tmp_path / "openclaw.json"
+    agents = [
+        {"id": "executor", "workspace": "/ws/executor"},
+        {"id": "some-other-agent", "workspace": "/ws/other"},
+    ]
+    oc.write_text(json.dumps({"agents": {"list": agents}}))
+    setup_helpers.ensure_openclaw_context_limits(str(oc))
+    by_id = {e["id"]: e for e in json.loads(oc.read_text())["agents"]["list"]}
+    assert by_id["executor"]["bootstrapMaxChars"] == 32000
+    assert "bootstrapMaxChars" not in by_id["some-other-agent"]
+
+
+def test_ensure_context_limits_missing_file(tmp_path):
+    assert setup_helpers.ensure_openclaw_context_limits(str(tmp_path / "nope.json")).startswith("error:")
+
+
+def test_postcompaction_sections_match_real_agents_md_headers():
+    """Drift guard: every ``Always-Apply: *`` name we seed into postCompactionSections
+    must exist as a literal ``## <name>`` header in all three pipeline AGENTS.md files.
+    If a header is renamed without updating the seed, the post-compaction refresh
+    silently stops re-injecting the Stage A rules — the exact failure this audit fixes.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    always_apply = [
+        s for s in setup_helpers.AUTODEV_POSTCOMPACTION_SECTIONS if s.startswith("Always-Apply")
+    ]
+    assert always_apply, "expected at least one Always-Apply section in the seed"
+    for role in setup_helpers.AUTODEV_POSTCOMPACTION_AGENT_IDS:
+        md = (repo_root / "autodev" / "agents" / role / "AGENTS.md").read_text()
+        for name in always_apply:
+            assert f"## {name}" in md, (
+                f"{role}/AGENTS.md missing '## {name}' — postCompactionSections drift; "
+                f"keep the seed and the AGENTS.md header in sync."
+            )
+
+
+def test_postcompaction_cap_covers_largest_always_apply_block():
+    """Drift guard: postCompactionMaxChars must be >= the combined size of the two
+    Always-Apply sections in every pipeline AGENTS.md, or the cap would truncate the
+    very rules it exists to preserve. Measured max ~4.5k today; cap is 8000.
+    """
+    import re as _re
+
+    repo_root = Path(__file__).resolve().parents[2]
+    iw = "## Always-Apply: Integration Wiring"
+    tq = "## Always-Apply: Testing Quality"
+    for role in setup_helpers.AUTODEV_POSTCOMPACTION_AGENT_IDS:
+        md = (repo_root / "autodev" / "agents" / role / "AGENTS.md").read_text()
+        a = md.index(iw)
+        b = md.index(tq)
+        m = _re.search(r"\n## ", md[b + len(tq):])
+        end = b + len(tq) + m.start() if m else len(md)
+        span = end - a
+        assert span <= setup_helpers.AUTODEV_POSTCOMPACTION_MAX_CHARS, (
+            f"{role}/AGENTS.md Always-Apply block is {span} chars but the cap is "
+            f"{setup_helpers.AUTODEV_POSTCOMPACTION_MAX_CHARS}; raise AUTODEV_POSTCOMPACTION_MAX_CHARS."
+        )

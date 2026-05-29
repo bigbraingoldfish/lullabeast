@@ -49,6 +49,17 @@ AUTODEV_AGENT_IDS = (
     "roadmap-converter",
 )
 
+# Truncation seeds for newly created entries (audit:
+# plans/Active/metaprompt-2-truncation-settings-audit.md). These MUST match the
+# canonical values in setup_helpers.py — this module runs as a standalone script
+# (no package import at runtime), so the values are duplicated here and kept in
+# sync by test_register_agent.py::test_register_agent_seed_matches_setup_helpers_constants.
+# setup_helpers.ensure_openclaw_context_limits handles existing installs; this
+# only makes *new* entries born correct. See setup_helpers for the rationale.
+BOOTSTRAP_MAX_CHARS = 32000
+POSTCOMPACTION_MAX_CHARS = 8000
+POSTCOMPACTION_AGENT_IDS = ("planner", "executor", "reviewer")
+
 ESCALATION_TOOLS = {
     "allow": ["read", "write"],
     "deny": ["edit", "apply_patch", "exec", "process", "browser"],
@@ -187,12 +198,24 @@ def _build_new_entry(
     working_list: list,
     stderr,
 ) -> dict:
-    """Build one agents.list entry for ``agent_id`` (not yet persisted)."""
+    """Build one agents.list entry for ``agent_id`` (not yet persisted).
+
+    New entries are born with the AutoDev truncation caps: ``bootstrapMaxChars``
+    for every agent and ``contextLimits.postCompactionMaxChars`` for the pipeline
+    roles (see module constants). Existing entries are handled separately by
+    ``setup_helpers.ensure_openclaw_context_limits``.
+    """
     entry: dict = {
         "id": agent_id,
         "workspace": os.path.join(autodev_root, f"workspace-{agent_id}"),
         "model": copy.deepcopy(shared_model),
     }
+    # Born-correct truncation caps: every AutoDev agent gets the raised bootstrap
+    # cap; only the pipeline coding roles (which carry the Always-Apply sections)
+    # get the post-compaction cap.
+    entry["bootstrapMaxChars"] = BOOTSTRAP_MAX_CHARS
+    if agent_id in POSTCOMPACTION_AGENT_IDS:
+        entry["contextLimits"] = {"postCompactionMaxChars": POSTCOMPACTION_MAX_CHARS}
     if agent_id == "escalation":
         entry["tools"] = copy.deepcopy(ESCALATION_TOOLS)
         primary = (shared_model.get("primary") or "") if isinstance(shared_model, dict) else ""

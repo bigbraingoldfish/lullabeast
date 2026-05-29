@@ -327,7 +327,7 @@ Decisions made explicitly — not defaults to drift from. Preserved for human re
 
 **Original design intent:** Local-first inference for all agents using llama.cpp on local hardware, with no cloud dependencies in the execution path.
 
-**Current production configuration:** Cloud inference via OpenRouter (MiniMax M2.5) for planner, executor, and reviewer agents. Local inference (Qwen3.5-27B, llama.cpp) retained for the escalation agent. This configuration was adopted after smoke testing confirmed local inference latency was not viable for the development loop and direct cloud API costs were prohibitive.
+**Current production configuration:** Cloud inference via OpenRouter — planner on MiniMax M2.7 (`openrouter/minimax/minimax-m2.7`); executor and reviewer on Kimi K2.6 / Moonshot AI (`openrouter/moonshotai/kimi-k2.6`). Local inference (Qwen3.6-27B, llama.cpp) retained for the escalation agent. This cloud-first configuration was adopted after smoke testing confirmed local inference latency was not viable for the development loop and direct cloud API costs were prohibitive. (`openclaw.json` is the live source of truth; the local-model registry and dated incident notes below describe the preserved local-first infrastructure and historical model states.)
 
 The local inference infrastructure is intentionally preserved. Returning to local-first operation requires only updating agent LLM config entries and re-enabling the SSH recovery path — no structural changes needed.
 

@@ -22,6 +22,52 @@ from typing import Any
 # Webhook session keys used by the pipeline and idea-to-PRD flows.
 _REQUIRED_SESSION_KEY_PREFIXES: tuple[str, ...] = ("pipeline:", "ideas:")
 
+# --- AutoDev context-limit / truncation seeds -------------------------------
+# Canonical source of truth for the openclaw.json truncation keys AutoDev tunes
+# (audit: plans/Active/metaprompt-2-truncation-settings-audit.md).
+#
+# Why these values:
+#   * bootstrapMaxChars=32000 — OpenClaw truncates each injected bootstrap file
+#     (AGENTS.md, SOUL.md, …) at a 12k per-file default. Every pipeline role's
+#     AGENTS.md exceeds that (planner 15.5k, executor 20.5k, reviewer 23k) and
+#     its Stage A ``## Always-Apply: …`` rules begin past byte ~10k, so the
+#     default silently drops the universal rules. 32k clears the largest file
+#     with headroom for the living docs to grow.
+#   * postCompactionMaxChars=8000 — after a context compaction OpenClaw re-injects
+#     only the AGENTS.md sections named in postCompactionSections (below), capped
+#     by this per-agent value (OpenClaw default 1800). The two Always-Apply
+#     sections measure <=4.6k combined today; 8k holds them with headroom.
+#   * postCompactionSections — OpenClaw's default ["Session Startup","Red Lines"]
+#     names sections our AGENTS.md does not contain, so by default NOTHING of our
+#     rules survives a compaction. We point it at our real H2 header names and
+#     keep OpenClaw's defaults too (harmless for agents that lack those sections).
+#
+# register_agent.py duplicates the per-agent values because it runs as a
+# standalone script and cannot import this module at runtime;
+# test_register_agent.py::test_register_agent_seed_matches_setup_helpers_constants
+# is the drift guard that keeps the two in sync.
+AUTODEV_BOOTSTRAP_MAX_CHARS = 32000
+AUTODEV_POSTCOMPACTION_MAX_CHARS = 8000
+AUTODEV_BOOTSTRAP_AGENT_IDS: tuple[str, ...] = (
+    "planner",
+    "executor",
+    "reviewer",
+    "escalation",
+    "prd-creator",
+    "roadmap-converter",
+)
+# Only the pipeline coding roles carry the Stage A ``## Always-Apply: …``
+# sections, so only they need the post-compaction cap.
+AUTODEV_POSTCOMPACTION_AGENT_IDS: tuple[str, ...] = ("planner", "executor", "reviewer")
+# Verbatim the H2 headers pinned by test_agents_md_universal_rules.py; OpenClaw's
+# own defaults are appended so any future agent that adds them still benefits.
+AUTODEV_POSTCOMPACTION_SECTIONS: tuple[str, ...] = (
+    "Always-Apply: Integration Wiring",
+    "Always-Apply: Testing Quality",
+    "Session Startup",
+    "Red Lines",
+)
+
 
 def openclaw_hooks_issues(openclaw_json_path: str) -> list[str]:
     """Return human-readable issue codes for AutoDev hook expectations (read-only).
@@ -659,6 +705,111 @@ def set_openclaw_global_tools_profile(openclaw_json_path: str, profile: str = "c
     parent = os.path.dirname(path)
     try:
         fd, tmp = tempfile.mkstemp(dir=parent, prefix="openclaw_tools_", suffix=".json")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+        return "updated"
+    except Exception as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return f"error:{e}"
+
+
+def _merge_sections(existing: Any, required: tuple[str, ...]) -> list[str]:
+    """Preserve order of existing string entries; append any missing required names."""
+    out: list[str] = []
+    seen: set[str] = set()
+    if isinstance(existing, list):
+        for s in existing:
+            if isinstance(s, str) and s not in seen:
+                out.append(s)
+                seen.add(s)
+    for s in required:
+        if s not in seen:
+            out.append(s)
+            seen.add(s)
+    return out
+
+
+def ensure_openclaw_context_limits(openclaw_json_path: str) -> str:
+    """Seed AutoDev bootstrap/compaction truncation keys in openclaw.json (atomic).
+
+    Idempotently ensures, without disturbing any other key:
+      * ``agents.list[id in AUTODEV_BOOTSTRAP_AGENT_IDS].bootstrapMaxChars`` =
+        ``AUTODEV_BOOTSTRAP_MAX_CHARS`` — stops the 12k per-file bootstrap default
+        from truncating each role's AGENTS.md (the Stage A ``## Always-Apply``
+        rules begin past byte ~10k).
+      * ``agents.list[id in AUTODEV_POSTCOMPACTION_AGENT_IDS].contextLimits.
+        postCompactionMaxChars`` = ``AUTODEV_POSTCOMPACTION_MAX_CHARS`` — sizes the
+        post-compaction refresh to hold the two Always-Apply sections.
+      * ``agents.defaults.compaction.postCompactionSections`` merged to include
+        ``AUTODEV_POSTCOMPACTION_SECTIONS`` — points the refresh at our real H2
+        header names (OpenClaw's default targets sections we do not have, so the
+        rules are otherwise dropped on every compaction).
+
+    Only entries whose ``id`` is an AutoDev agent are touched; other agents and
+    all unrelated keys are preserved. This is the upgrade path for installs whose
+    agents already exist (register_agent leaves existing entries untouched) and is
+    safe to re-run.
+
+    Returns: updated | unchanged | error:<msg>
+    """
+    path = os.path.abspath(openclaw_json_path)
+    if not os.path.isfile(path):
+        return "error:file not found"
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        return f"error:{e}"
+    if not isinstance(data, dict):
+        return "error:root must be an object"
+    agents = data.get("agents")
+    if not isinstance(agents, dict):
+        return "error:agents must be an object"
+    agent_list = agents.get("list")
+    if not isinstance(agent_list, list):
+        return "error:agents.list must be an array"
+
+    before = json.dumps(data, sort_keys=True)
+
+    bootstrap_ids = set(AUTODEV_BOOTSTRAP_AGENT_IDS)
+    postcompaction_ids = set(AUTODEV_POSTCOMPACTION_AGENT_IDS)
+    for entry in agent_list:
+        if not isinstance(entry, dict):
+            continue
+        aid = entry.get("id")
+        if aid in bootstrap_ids:
+            entry["bootstrapMaxChars"] = AUTODEV_BOOTSTRAP_MAX_CHARS
+        if aid in postcompaction_ids:
+            cl = entry.get("contextLimits")
+            if not isinstance(cl, dict):
+                cl = {}
+                entry["contextLimits"] = cl
+            cl["postCompactionMaxChars"] = AUTODEV_POSTCOMPACTION_MAX_CHARS
+
+    # postCompactionSections is global-only — the schema has no per-agent
+    # ``agents.list[].compaction`` block — so it lives under agents.defaults.
+    defaults = agents.get("defaults")
+    if not isinstance(defaults, dict):
+        defaults = {}
+        agents["defaults"] = defaults
+    compaction = defaults.get("compaction")
+    if not isinstance(compaction, dict):
+        compaction = {}
+        defaults["compaction"] = compaction
+    compaction["postCompactionSections"] = _merge_sections(
+        compaction.get("postCompactionSections"), AUTODEV_POSTCOMPACTION_SECTIONS
+    )
+
+    after = json.dumps(data, sort_keys=True)
+    if before == after:
+        return "unchanged"
+    parent = os.path.dirname(path)
+    try:
+        fd, tmp = tempfile.mkstemp(dir=parent, prefix="openclaw_ctxlimits_", suffix=".json")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
         os.replace(tmp, path)
