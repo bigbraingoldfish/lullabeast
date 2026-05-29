@@ -29,6 +29,15 @@ _SECTION_HEADERS = {
 _TDD_LINE_RE = re.compile(r'^\s*-\s+`([^`]+)`\s*:\s*(.+)$')
 _DONE_LINE_RE = re.compile(r'^\s*-\s+\[\s?\]\s+(.+)$')
 
+# P1 Stage F — verification.md ``## Entry point`` parser. Each bullet parses
+# INDEPENDENTLY (departs from ``_extract_behavioral_verification`` all-or-nothing
+# rule). Reachability depends only on ``command``; coupling it to ``ready_signal``
+# would silently disable the check whenever the unrelated field was absent.
+_ENTRY_SECTION_RE = re.compile(r"^\s*##\s+Entry point\s*$")
+_ENTRY_CMD_RE = re.compile(r"^\s*-\s+Command:\s*`([^`]+)`\s*$")
+_ENTRY_READY_RE = re.compile(r"^\s*-\s+Ready signal:\s*(.+)$")
+_NEXT_SECTION_RE = re.compile(r"^\s*##\s+")
+
 
 def _extract_behavioral_verification(body_lines):
     """Return ``{user_observable, how_to_check, failure_language}`` or ``None`` if no block present."""
@@ -55,6 +64,41 @@ def _extract_behavioral_verification(body_lines):
     # Partial block — treat as absent to keep the orchestrator's gating
     # contract clean. Preflight is the gate that enforces completeness.
     return None
+
+
+def _extract_entry_point(verification_path):
+    """Parse the ``## Entry point`` section of verification.md into
+    ``{command, ready_signal}``; None on missing or empty section."""
+    if not verification_path or not os.path.exists(verification_path):
+        return None
+    try:
+        with open(verification_path, "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return None
+    in_section = False
+    command = None
+    ready_signal = None
+    for line in lines:
+        if _ENTRY_SECTION_RE.match(line):
+            in_section = True
+            continue
+        if not in_section:
+            continue
+        if _NEXT_SECTION_RE.match(line):
+            # Hit the next ## section — stop reading entry-point bullets.
+            break
+        m = _ENTRY_CMD_RE.match(line)
+        if m:
+            command = m.group(1).strip()
+            continue
+        m = _ENTRY_READY_RE.match(line)
+        if m:
+            ready_signal = m.group(1).strip()
+            continue
+    if command is None and ready_signal is None:
+        return None
+    return {"command": command, "ready_signal": ready_signal}
 
 
 def _slice_until_next_section(body_lines, start_idx):
@@ -268,6 +312,11 @@ def validate_and_identify(roadmap_path=None):
         
     # Stage D: point agents at the project-level verification.md.
     phase["verification_path"] = os.path.join(project_root, "verification.md")
+
+    # P1 Stage F: extract structured entry_point so the executor gate can run
+    # the COMPLETE-phase reachability advisory. Additive — pre-existing
+    # consumers of current_phase.json ignore unknown keys.
+    phase["entry_point"] = _extract_entry_point(phase["verification_path"])
 
     try:
         import tempfile

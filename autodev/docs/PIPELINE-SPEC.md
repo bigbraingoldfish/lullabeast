@@ -367,6 +367,43 @@ Fields marked `GATE-CHECKED` are validated by the executor output gate (see § G
 
 `executor_output.done` — written after `executor_output.json`.
 
+### Reachability Advisory (P1 Stage F)
+
+After every FAIL-returning blocking check in `executor_gate.py` has passed, the gate runs a static reachability check from `verification.entry_point.command`. Manifest files that cannot be reached are surfaced as one summarising `reachability_warning` pipeline event per phase; the gate exit code is unchanged (PASS). The check is **advisory only** — no `ERR_*` code is ever emitted; the phase always advances.
+
+**Scoping — COMPLETE phases only.** The check is gated on `current_phase.raw_id.startswith("COMPLETE-")`. Reachability-from-entry is a *whole-artifact* property: orphaned code matters at the end of a build, not mid-stream. The roadmap pattern is explicitly add-then-wire (e.g. `DATA-E1` adds a localStorage utility; `DATA-E2` wires it in a later phase). Running per phase would flag the DATA-E1 utility as unreachable at the moment it lands — a false positive on the most common build pattern, exactly the cry-wolf trust erosion that the advisory posture is meant to avoid. The executor gate is the convenient seam, not the right granularity; the COMPLETE-prefix gate makes it the right one.
+
+**Channel separation.** Advisory output lives in `executor_advisory_detail.json`, a separate artifact from the FAIL-channel `executor_gate_detail.json`. The orchestrator's `_emit_reachability_advisory(raw_id)` drains the advisory file on the executor PASS path and emits events; the file is then removed. The two channels never co-tenant. See §4.5 for the full pattern.
+
+**Hedged copy.** Operators must not read "unreachable" as "dead code." The summary reads: *"N file(s) not reached from entry — a.py, b.py, c.py. Confirm intent: orphan vs. wiring landed elsewhere."* This phrasing is enforced by `tests/test_ui_reachability_warning_rendering.py::test_humanize_summary_uses_hedged_copy`.
+
+**Resolver coverage.** Stage F ships Python (`python`, `python -m`, `uvicorn`, `flask`, `gunicorn`) and JS/TS (`node`, `npm`, `vite`, `tsx`, `ts-node`, plus `npx <tool>` which strips the wrapper before classification) via pure-Python regex parsing. Other languages emit a single `no_resolver` warning per phase. Test-runner entries (`pytest`, `jest`, `vitest`, `playwright`, ...) emit a distinct `reachability_not_applicable` event so visibility is preserved without polluting the warning channel. Promotion to a blocking gate (`ERR_UNREACHABLE_MODULE`) is the explicit job of **P3 Stage A**, gated on (1) per-language resolver coverage matching the demo project mix, (2) measured false-positive rate below an agreed threshold from launch data, (3) a `pure_library: true` suppression marker so known-pure files can opt out.
+
+### Pipeline event catalogue additions (P1 Stage F)
+
+| Event | When | `detail` shape |
+|---|---|---|
+| `reachability_warning` | Orchestrator emits on the executor PASS path when `executor_advisory_detail.json` contains a populated `reachability_summary` or non-empty `reachability_diagnostics`. One summary event per phase + one event per diagnostic. | `{kind, count?, files?, command?, file?, reason}` where `kind ∈ {unreachable_summary, no_resolver, resolver_limitation, resolver_error}` |
+| `reachability_not_applicable` | Orchestrator emits when the gate signalled "consciously skipped" — entry command is a recognised test runner. | `{reason}` |
+
+---
+
+## 4.5. Advisory Checks vs Blocking Gates
+
+P1 Stage F establishes the first formal *advisory check* pattern in the pipeline. The pattern is captured here once so future advisory checks (notably P3 Stages A, D, E) extend a documented shape rather than reinventing it.
+
+**Definition.** An advisory check runs after every blocking check in a gate has passed. It writes structured output to a dedicated *advisory* artifact file, NOT the gate's failure-detail file. The gate exit code is unchanged. The orchestrator drains the advisory file on the success path and emits pipeline events. The check NEVER blocks the phase.
+
+**The two-channel artifact rule.** Failure detail belongs in `executor_gate_detail.json` (consumed by `write_failure_context` for executor self-heal). Advisory output belongs in `executor_advisory_detail.json` (consumed by `_emit_reachability_advisory` for events). These channels never co-tenant. Future advisory checks should add new top-level keys to the advisory file's envelope, not new entries inside the failure file.
+
+**Promotion criteria (advisory → blocking).** An advisory check can be promoted to a blocking gate only when ALL of the following hold:
+
+1. **Resolver coverage** for the supported languages matches the actual demo project mix (operationally, ≥80% of demo `project_type`s have a stable resolver).
+2. **Measured false-positive rate** from advisory-mode operation is below an agreed threshold (operationally, <10% over 20+ demo runs).
+3. **Operator escape hatch** for known-correct deviations exists. For reachability this is the `pure_library: true` suppression marker in the planner's `implementation_plan`.
+
+Until all three hold, the check stays advisory. Promotion is a deliberate per-check decision, not a default trajectory.
+
 ---
 
 ## 5. Reviewer Agent
