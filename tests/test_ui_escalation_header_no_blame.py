@@ -60,13 +60,15 @@ def test_shared_panel_header_binds_advisory_or_clean_headline(html):
 
 def test_escalation_headline_field_is_wired_through(html):
     """The clean escalation_headline reaches the shared component in BOTH views: the
-    Monitor passes it from pState; the Queue reads it from /api/state and passes it as a
-    prop (it no longer derives a header inline)."""
+    Monitor passes it from pState; the Queue reads it from the per-entry snapshot and
+    passes it as a prop (it no longer derives a header inline, and no longer reads the
+    ACTIVE project's headline from /api/state)."""
     assert "escalation_headline={pState.escalation_headline}" in html, (
         "Pipeline Monitor must pass escalation_headline to the shared component"
     )
-    assert "d.escalation_headline" in html, (
-        "Queue useEffect must read escalation_headline from /api/state"
+    assert "snapshot.escalation_headline" in html, (
+        "Queue must read escalation_headline from the per-entry snapshot (the selected "
+        "project), not from /api/state (the active project)"
     )
     assert "escalation_headline={hubHeadline}" in html, (
         "Queue view must pass the clean headline to the shared component as a prop"

@@ -2071,10 +2071,192 @@ def get_log_tail(lines: int = 500):
     return {"lines": result, "path": log_path}
 
 
+def _compute_escalation_view(
+    project_root,
+    *,
+    phase_state_path=None,
+    queue_halted_reason=None,
+    current_phase_raw_id=None,
+):
+    """Escalation/advisory view + eligibility probes for ONE project.
+
+    Single source of truth shared by ``GET /api/state`` (the active symlink project) and
+    ``GET /api/queue/{id}/snapshot`` (the selected queue entry). Extracting it kills the
+    two-sources drift that let the Queue escalation panel describe the active project
+    while dispatching commands to the selected one.
+
+    Returns a dict with:
+
+    * **Always-present probe keys** (filesystem/git, not phase_state fields):
+      ``executor_output_exists``, ``planner_output_exists``, ``phase_branch_exists``,
+      ``merge_probe_passed``. False when the project / phase id is unresolvable.
+    * **Present-only phase_state keys** — included ONLY when present in the project's
+      ``phase_state.json`` (mirrors ``get_state``'s ``if "x" in phase_state`` semantics so
+      ``/api/state`` keeps its "absent when unset" contract): ``escalation_resets``,
+      ``escalation_trigger_reason``, ``escalation_headline``, ``escalation_message``
+      (fallback → trigger_reason, then ``[:500]``), ``escalation_advisory_status``,
+      ``escalation_recommended_action`` (``[:200]``), ``last_error_code``,
+      ``skill_injected``, ``skill_agent``, ``waiting_for_human_at``.
+
+    Args:
+        project_root: project directory (expanded + realpath'd internally). Falsy → probes
+            return False and (when ``phase_state_path`` is also None) no phase_state fields.
+        phase_state_path: explicit phase_state.json path. None → derived from
+            ``project_root`` (the per-entry snapshot relies on this so a parked entry reads
+            its OWN phase_state). For the active project the configured path and the
+            derived path resolve to the same file; the override exists purely to keep
+            ``/api/state`` byte-for-byte.
+        queue_halted_reason: when provided (``/api/state``), applies the queue-halted
+            friendly transform to ``escalation_message``. None (the snapshot) lets the raw
+            message through unmodified.
+        current_phase_raw_id: phase id for the branch/merge probes. None/empty → both
+            probes skip gracefully (False).
+    """
+    view = {}
+
+    _root_real = ""
+    if project_root:
+        try:
+            _root_real = os.path.realpath(os.path.expanduser(str(project_root)))
+        except Exception:
+            _root_real = ""
+
+    # Resolve phase_state path: explicit (active /api/state) or derived (per-entry snapshot).
+    if phase_state_path is None and _root_real:
+        phase_state_path = os.path.join(_pipeline_artifacts_dir(_root_real), "phase_state.json")
+    elif phase_state_path:
+        phase_state_path = os.path.expanduser(phase_state_path)
+
+    # ── Present-only phase_state fields (mirror get_state's `if "x" in phase_state`) ──
+    if phase_state_path:
+        phase_state = _read_json_file(phase_state_path)
+        if phase_state:
+            if "last_error_code" in phase_state:
+                view["last_error_code"] = phase_state["last_error_code"]
+            if "escalation_resets" in phase_state:
+                view["escalation_resets"] = phase_state["escalation_resets"]
+            if "skill_injected" in phase_state:
+                view["skill_injected"] = phase_state["skill_injected"]
+            if "skill_agent" in phase_state:
+                view["skill_agent"] = phase_state["skill_agent"]
+            if "escalation_trigger_reason" in phase_state:
+                view["escalation_trigger_reason"] = phase_state["escalation_trigger_reason"]
+            # P1 Stage G1: clean, non-blame headline.
+            if "escalation_headline" in phase_state:
+                view["escalation_headline"] = phase_state["escalation_headline"]
+            if "waiting_for_human_at" in phase_state:
+                view["waiting_for_human_at"] = phase_state["waiting_for_human_at"]
+            # escalation_message: dedicated field first; fall back to trigger reason.
+            if "escalation_message" in phase_state:
+                view["escalation_message"] = phase_state["escalation_message"]
+            elif "escalation_trigger_reason" in phase_state:
+                view["escalation_message"] = phase_state["escalation_trigger_reason"]
+            # Never pass raw agent output through uncapped.
+            if "escalation_message" in view and isinstance(view["escalation_message"], str):
+                view["escalation_message"] = view["escalation_message"][:500]
+            # Advisory status and recommended action (pre-alert LLM review).
+            if "escalation_advisory_status" in phase_state:
+                view["escalation_advisory_status"] = phase_state["escalation_advisory_status"]
+            if "escalation_recommended_action" in phase_state:
+                _ra = phase_state["escalation_recommended_action"]
+                view["escalation_recommended_action"] = _ra[:200] if isinstance(_ra, str) else _ra
+
+    # ── Queue-halted friendly transform (only when a halt reason is supplied) ──
+    # Keep pipeline_state.queue_halted_reason as the machine token; humanize the message.
+    if queue_halted_reason is not None:
+        _escalation_msg = view.get("escalation_message")
+        if isinstance(_escalation_msg, str) and isinstance(queue_halted_reason, str):
+            if _escalation_msg.strip().lower().startswith("queue halted:"):
+                _friendly = {
+                    "all_blocked": (
+                        "Queue halted: all queued projects are currently BLOCKED. "
+                        "Unblock at least one project (or fix its blocker) to resume auto-advance."
+                    ),
+                    "all_dependency_hold": (
+                        "Queue halted: all queued projects are in DEPENDENCY_HOLD. "
+                        "Complete or clear parent dependencies to resume."
+                    ),
+                    "mixed": (
+                        "Queue halted: remaining projects are blocked and/or dependency-held. "
+                        "Resolve at least one hold/blocker to resume."
+                    ),
+                }.get(queue_halted_reason)
+                if _friendly:
+                    view["escalation_message"] = _friendly
+
+    # ── Always-present probes: artifact existence (gate Re-run Reviewer / Mark Complete) ──
+    if _root_real:
+        _art = _pipeline_artifacts_dir(_root_real)
+        view["executor_output_exists"] = os.path.isfile(os.path.join(_art, "executor_output.json"))
+        view["planner_output_exists"] = os.path.isfile(os.path.join(_art, "planner_output.json"))
+    else:
+        view["executor_output_exists"] = False
+        view["planner_output_exists"] = False
+
+    _raw_id = current_phase_raw_id or ""
+
+    # phase_branch_exists: probe refs/heads/phase/<raw_id> in the project repo.
+    if _root_real and _raw_id:
+        try:
+            _br_result = subprocess.run(
+                ["git", "show-ref", "--verify", "--quiet", f"refs/heads/phase/{_raw_id}"],
+                cwd=_root_real,
+                capture_output=True,
+            )
+            view["phase_branch_exists"] = _br_result.returncode == 0
+        except Exception:
+            view["phase_branch_exists"] = False
+    else:
+        view["phase_branch_exists"] = False
+
+    # merge_probe_passed: probe whether phase/<raw_id> is an ancestor of the base branch.
+    if _root_real and _raw_id:
+        try:
+            _base_branch = ""
+            try:
+                _base_branch = (load_config().get("base_branch") or "").strip()
+            except Exception:
+                _base_branch = ""
+            if not _base_branch:
+                _base_branch = _detect_base_branch(_root_real)
+            _mp_result = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", f"phase/{_raw_id}", _base_branch],
+                cwd=_root_real,
+                capture_output=True,
+            )
+            view["merge_probe_passed"] = _mp_result.returncode == 0
+        except Exception:
+            view["merge_probe_passed"] = False
+    else:
+        view["merge_probe_passed"] = False
+
+    return view
+
+
+def _resolve_entry_raw_id(project_path):
+    """Resolve a queue entry's OWN current phase raw_id for branch/merge probes.
+
+    A parked entry cannot use the global ``pipeline_state.current_phase_raw_id`` — that is
+    the ACTIVE project's. Reads the entry's own ``phase_state.json`` first (``current_phase_raw_id``),
+    then ``current_phase.json`` (``raw_id``). Returns None when unresolvable, in which case
+    the probes skip gracefully (Mark Complete shows disabled — conservative by design).
+    """
+    if not project_path:
+        return None
+    art = _pipeline_artifacts_dir(project_path)
+    ph = _read_json_file(os.path.join(art, "phase_state.json"))
+    if isinstance(ph, dict) and ph.get("current_phase_raw_id"):
+        return ph["current_phase_raw_id"]
+    cp = _read_json_file(os.path.join(art, "current_phase.json"))
+    if isinstance(cp, dict) and cp.get("raw_id"):
+        return cp["raw_id"]
+    return None
+
+
 @app.get("/api/state")
 def get_state():
     """Get the current pipeline state.
-    
+
     Merges pipeline_state.json and phase_state.json, adds server-derived
     fields (orchestrator_alive, event_source), and handles missing files gracefully.
     """
@@ -2126,115 +2308,27 @@ def get_state():
             "sentinel_wait_started_at": None,
         }
     
-    # Read phase state and conditionally add fields
+    # Escalation/advisory view + eligibility probes for the ACTIVE project, computed by
+    # the shared _compute_escalation_view helper (same computation the Queue snapshot runs
+    # for the selected entry — single source, no drift). The present-only escalation keys
+    # preserve get_state's "absent when unset" contract; the 4 probe keys are always set.
+    _view = _compute_escalation_view(
+        config.get("project_dir_path") or "",
+        phase_state_path=phase_state_path,
+        queue_halted_reason=response.get("queue_halted_reason"),
+        current_phase_raw_id=response.get("current_phase_raw_id"),
+    )
+    response.update(_view)
+
+    # Two phase_state fields NOT in the shared helper — the Queue snapshot sources these
+    # live (from pipeline_state), so they remain get_state-local here.
     if phase_state_path:
-        phase_state = _read_json_file(phase_state_path)
-        if phase_state:
-            if "last_error_code" in phase_state:
-                response["last_error_code"] = phase_state["last_error_code"]
-            if "escalation_resets" in phase_state:
-                response["escalation_resets"] = phase_state["escalation_resets"]
-            if "last_action_timestamp" in phase_state:
-                response["last_action_timestamp"] = phase_state["last_action_timestamp"]
-            if "skill_injected" in phase_state:
-                response["skill_injected"] = phase_state["skill_injected"]
-            if "skill_agent" in phase_state:
-                response["skill_agent"] = phase_state["skill_agent"]
-            if "escalation_trigger_reason" in phase_state:
-                response["escalation_trigger_reason"] = phase_state["escalation_trigger_reason"]
-            # P1 Stage G1: clean, non-blame headline the UI renders instead of the
-            # raw escalation_trigger_reason (which is demoted into the details disclosure).
-            if "escalation_headline" in phase_state:
-                response["escalation_headline"] = phase_state["escalation_headline"]
-            if "waiting_for_human_at" in phase_state:
-                response["waiting_for_human_at"] = phase_state["waiting_for_human_at"]
-            if "waiting_for_human_resolved_at" in phase_state:
-                response["waiting_for_human_resolved_at"] = phase_state["waiting_for_human_resolved_at"]
-            # escalation_message: richer human-readable escalation context for the UI.
-            # Reads dedicated field first; falls back to escalation_trigger_reason.
-            if "escalation_message" in phase_state:
-                response["escalation_message"] = phase_state["escalation_message"]
-            elif "escalation_trigger_reason" in phase_state:
-                response["escalation_message"] = phase_state["escalation_trigger_reason"]
-            # Enforce max length — never pass raw agent output through uncapped
-            if "escalation_message" in response and isinstance(response["escalation_message"], str):
-                response["escalation_message"] = response["escalation_message"][:500]
-            # Advisory status and recommended action — new fields from pre-alert LLM review
-            if "escalation_advisory_status" in phase_state:
-                response["escalation_advisory_status"] = phase_state["escalation_advisory_status"]
-            if "escalation_recommended_action" in phase_state:
-                _ra = phase_state["escalation_recommended_action"]
-                response["escalation_recommended_action"] = _ra[:200] if isinstance(_ra, str) else _ra
-
-    # Humanize queue-halted escalation reasons in monitor text.
-    # Keep pipeline_state.queue_halted_reason as the machine token.
-    _qhr = response.get("queue_halted_reason")
-    _escalation_msg = response.get("escalation_message")
-    if isinstance(_escalation_msg, str) and isinstance(_qhr, str):
-        if _escalation_msg.strip().lower().startswith("queue halted:"):
-            _friendly = {
-                "all_blocked": (
-                    "Queue halted: all queued projects are currently BLOCKED. "
-                    "Unblock at least one project (or fix its blocker) to resume auto-advance."
-                ),
-                "all_dependency_hold": (
-                    "Queue halted: all queued projects are in DEPENDENCY_HOLD. "
-                    "Complete or clear parent dependencies to resume."
-                ),
-                "mixed": (
-                    "Queue halted: remaining projects are blocked and/or dependency-held. "
-                    "Resolve at least one hold/blocker to resume."
-                ),
-            }.get(_qhr)
-            if _friendly:
-                response["escalation_message"] = _friendly
-    
-    # File probe: artifact existence fields
-    # Used by UI to gate action visibility (Re-run Reviewer, Mark Complete)
-    _project_dir = config.get("project_dir_path") or ""
-    if _project_dir:
-        _project_real = os.path.realpath(os.path.expanduser(_project_dir))
-        _art = _pipeline_artifacts_dir(_project_real)
-        _executor_output_path = os.path.join(_art, "executor_output.json")
-        response["executor_output_exists"] = os.path.isfile(_executor_output_path)
-        _planner_output_path = os.path.join(_art, "planner_output.json")
-        response["planner_output_exists"] = os.path.isfile(_planner_output_path)
-    else:
-        _project_real = ""
-        response["executor_output_exists"] = False
-        response["planner_output_exists"] = False
-
-    # phase_branch_exists: probe refs/heads/phase/<raw_id> in the project repo
-    _raw_id = response.get("current_phase_raw_id", "") or ""
-    if _project_real and _raw_id:
-        try:
-            _br_result = subprocess.run(
-                ["git", "show-ref", "--verify", "--quiet", f"refs/heads/phase/{_raw_id}"],
-                cwd=_project_real,
-                capture_output=True,
-            )
-            response["phase_branch_exists"] = _br_result.returncode == 0
-        except Exception:
-            response["phase_branch_exists"] = False
-    else:
-        response["phase_branch_exists"] = False
-
-    # merge_probe_passed: probe whether phase/<raw_id> is an ancestor of base branch
-    if _project_real and _raw_id:
-        try:
-            _base_branch = (config.get("base_branch") or "").strip()
-            if not _base_branch:
-                _base_branch = _detect_base_branch(_project_real)
-            _mp_result = subprocess.run(
-                ["git", "merge-base", "--is-ancestor", f"phase/{_raw_id}", _base_branch],
-                cwd=_project_real,
-                capture_output=True,
-            )
-            response["merge_probe_passed"] = _mp_result.returncode == 0
-        except Exception:
-            response["merge_probe_passed"] = False
-    else:
-        response["merge_probe_passed"] = False
+        _ps_extra = _read_json_file(phase_state_path)
+        if _ps_extra:
+            if "last_action_timestamp" in _ps_extra:
+                response["last_action_timestamp"] = _ps_extra["last_action_timestamp"]
+            if "waiting_for_human_resolved_at" in _ps_extra:
+                response["waiting_for_human_resolved_at"] = _ps_extra["waiting_for_human_resolved_at"]
 
     # Add server-derived fields
     # Orchestrator liveness
@@ -7539,25 +7633,36 @@ def get_queue_entry_snapshot(entry_id: str):
         except Exception:
             pass
 
-    escalation_resets = None
-    last_error_code = None
-    escalation_message = None
-    escalation_trigger_reason = None
-    skill_injected = None
-    skill_agent = None
-    waiting_for_human_at = None
-    if is_active_project and project_path:
-        psp = os.path.join(_pipeline_artifacts_dir(project_path), "phase_state.json")
-        ph = _read_json_file(psp) if os.path.exists(psp) else {}
-        if isinstance(ph, dict):
-            escalation_resets = ph.get("escalation_resets", 0)
-            last_error_code = ph.get("last_error_code")
-            raw_esc_msg = ph.get("escalation_message")
-            escalation_message = raw_esc_msg[:500] if isinstance(raw_esc_msg, str) and len(raw_esc_msg) > 500 else raw_esc_msg
-            escalation_trigger_reason = ph.get("escalation_trigger_reason")
-            skill_injected = ph.get("skill_injected")
-            skill_agent = ph.get("skill_agent")
-            waiting_for_human_at = ph.get("waiting_for_human_at")
+    # Per-entry escalation/advisory view + eligibility probes, computed by the SHARED
+    # _compute_escalation_view helper against THIS entry's project (not the active one).
+    # This is the fix: a parked ESCALATION entry now describes its OWN project — the same
+    # project a command dispatched from the Queue targets. The merge/branch probes need
+    # the entry's OWN phase id: the global pipeline_state.current_phase_raw_id is the
+    # active project's, so a parked entry resolves its id from its own artifacts (else the
+    # probes skip gracefully → Mark Complete stays disabled, conservative by design).
+    _probe_raw_id = current_phase_raw_id if is_active_project else _resolve_entry_raw_id(project_path)
+    _view = _compute_escalation_view(
+        project_path,
+        phase_state_path=None,        # derive from project_path → the entry's OWN phase_state
+        queue_halted_reason=None,     # halt state is the active run's property, not a parked entry's
+        current_phase_raw_id=_probe_raw_id,
+    )
+    # Apply the snapshot's existing default conventions at the return-dict layer:
+    # escalation_resets → 0; the other present-only fields → None.
+    escalation_resets = _view.get("escalation_resets", 0)
+    last_error_code = _view.get("last_error_code")
+    escalation_message = _view.get("escalation_message")
+    escalation_trigger_reason = _view.get("escalation_trigger_reason")
+    escalation_headline = _view.get("escalation_headline")
+    escalation_advisory_status = _view.get("escalation_advisory_status")
+    escalation_recommended_action = _view.get("escalation_recommended_action")
+    skill_injected = _view.get("skill_injected")
+    skill_agent = _view.get("skill_agent")
+    waiting_for_human_at = _view.get("waiting_for_human_at")
+    executor_output_exists = _view.get("executor_output_exists", False)
+    planner_output_exists = _view.get("planner_output_exists", False)
+    phase_branch_exists = _view.get("phase_branch_exists", False)
+    merge_probe_passed = _view.get("merge_probe_passed", False)
 
     return {
         "id": entry["id"],
@@ -7585,9 +7690,16 @@ def get_queue_entry_snapshot(entry_id: str):
         "last_error_code": last_error_code,
         "escalation_message": escalation_message,
         "escalation_trigger_reason": escalation_trigger_reason,
+        "escalation_headline": escalation_headline,
+        "escalation_advisory_status": escalation_advisory_status,
+        "escalation_recommended_action": escalation_recommended_action,
         "skill_injected": skill_injected,
         "skill_agent": skill_agent,
         "waiting_for_human_at": waiting_for_human_at,
+        "executor_output_exists": executor_output_exists,
+        "planner_output_exists": planner_output_exists,
+        "phase_branch_exists": phase_branch_exists,
+        "merge_probe_passed": merge_probe_passed,
     }
 
 
