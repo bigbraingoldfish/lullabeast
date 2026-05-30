@@ -1,18 +1,21 @@
-"""P0 Stage G — escalation advisory consumes behavioural context (fallback path).
+"""P0 Stage G + P1 Stage G1 — escalation advisory consumes behavioural context.
 
-The escalation advisory is the FALLBACK consumer of Stage G behavioural data —
-the primary consumer is the executor's reviewer-rejection retry. The advisory
-fires only after the executor's self-heal passes have been attempted, which
-the orchestrator gates on ``reviewer_retries >= 2``.
+The escalation advisory surfaces the project's pre-authored ``failure_language``
+to the operator. **P1 Stage G1 loosened the gate:** the behavioural block is now
+built whenever ``failure_context`` carries a ``failure_language`` string,
+regardless of ``reviewer_retries`` — executor-self-failure escalations get the
+user-voice copy too. The complementary de-blame assertions (block present below
+the OLD ``reviewer_retries >= 2`` threshold, blame keys stripped from the payload,
+and the system prompt no longer naming a retry precondition) live in
+``test_orchestrator_escalation_advisory_deblame.py``.
 
 Two contract points enforced here:
 
-  1. The ``_user_message`` payload sent to the LLM carries a top-level
+  1. When ``reviewer_retries >= 2`` AND a ``failure_language`` is available, the
+     ``_user_message`` payload carries a top-level
      ``behavioral_verification: {failure_language, verdict, evidence_count}``
-     block — but ONLY when ``reviewer_retries >= 2``. Below that threshold,
-     the block is ``None`` so the LLM has no behavioural language to quote.
-     This is the data-level gating (load-bearing); the system prompt also
-     names the rule, but the prompt is constant.
+     block. (Stage G1 made this block also appear below the threshold; that
+     additional case is covered in the deblame test module.)
   2. The advisory reads ``failure_language`` from
      ``failure_context.current_phase_behavioral_verification.failure_language``,
      NOT from a fresh read of ``current_phase.json``. The advisory and the
@@ -187,78 +190,6 @@ class TestEscalationAdvisoryBehavioralPayload:
         )
         assert bv.get("verdict") == "fail"
         assert bv.get("evidence_count") == 3
-
-    def test_user_message_behavioral_block_is_none_when_reviewer_retries_lt_2(
-        self, tmp_path
-    ):
-        """Below the self-heal-attempted threshold, the advisory must NOT carry
-        the behavioural block — even if the data is available. This enforces
-        the principle that escalation is the FALLBACK consumer; the executor's
-        self-heal path is primary and goes first."""
-        import orchestrator as orc_module
-
-        orch = _make_test_orchestrator(str(tmp_path))
-        _write_failure_context(
-            tmp_path,
-            claimed_failure_language="The /tasks page did not load.",
-            observed_verdict="fail",
-            observed_evidence_count=3,
-        )
-        _write_phase_state(tmp_path, reviewer_retries=1)  # below threshold
-
-        fake_post, captured = _capture_post_payload()
-        with (
-            patch.object(orc_module, "PROJECT_ARTIFACTS_DIR", str(tmp_path)),
-            patch.object(orc_module, "PHASE_STATE_FILE", str(tmp_path / "phase_state.json")),
-            patch("requests.post", side_effect=fake_post),
-        ):
-            orch._generate_escalation_advisory()
-
-        msgs = captured["payload"].get("messages") or []
-        user_msg = next((m["content"] for m in msgs if m.get("role") == "user"), None)
-        payload = json.loads(user_msg)
-        assert payload.get("behavioral_verification") is None, (
-            "advisory must not carry behavioural language when "
-            "reviewer_retries < 2 — that condition means self-heal has not been "
-            "attempted yet, and quoting failure_language prematurely would "
-            "skip the executor's targeted self-heal pass"
-        )
-
-    def test_system_prompt_instructs_verbatim_failure_language_quote(self, tmp_path):
-        """The system prompt must name the conditional quoting rule. The data
-        gating (block None below threshold) is what actually flips behaviour,
-        but the prompt has to explain the contract to the LLM so it knows what
-        to do with the data when it's present."""
-        import orchestrator as orc_module
-
-        orch = _make_test_orchestrator(str(tmp_path))
-        _write_failure_context(
-            tmp_path,
-            claimed_failure_language="The /tasks page did not load.",
-            observed_verdict="fail",
-            observed_evidence_count=3,
-        )
-        _write_phase_state(tmp_path, reviewer_retries=2)
-
-        fake_post, captured = _capture_post_payload()
-        with (
-            patch.object(orc_module, "PROJECT_ARTIFACTS_DIR", str(tmp_path)),
-            patch.object(orc_module, "PHASE_STATE_FILE", str(tmp_path / "phase_state.json")),
-            patch("requests.post", side_effect=fake_post),
-        ):
-            orch._generate_escalation_advisory()
-
-        msgs = captured["payload"].get("messages") or []
-        system_msg = next((m["content"] for m in msgs if m.get("role") == "system"), "")
-        assert "failure_language" in system_msg, (
-            "system prompt must mention failure_language so the LLM knows the "
-            "data shape it might receive in the user payload"
-        )
-        assert "reviewer_retries >= 2" in system_msg, (
-            "system prompt must name the reviewer_retries >= 2 trigger so the "
-            "LLM does not invent the contract — the rule is contractual, the "
-            "data gating enforces it, but the prompt explains it"
-        )
 
     def test_advisory_failure_language_sourced_from_failure_context_not_current_phase(
         self, tmp_path

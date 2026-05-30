@@ -1652,6 +1652,13 @@ class Orchestrator:
         The result should be written to phase_state.json as escalation_message and
         escalation_recommended_action BEFORE invoke_agent_webhook is called, so the
         UI and the webhook message both carry the human-readable context.
+
+        P1 Stage G1 (de-blame): the LLM input is grounded in failure_context, the
+        project's user-voice failure_language, and the retry counts. Blame-framed
+        keys (escalation_trigger_reason, prior_blame_attributions) are NOT sent, so
+        the advisory cannot parrot internal blame-attribution jargon back to the
+        operator. failure_language is surfaced on every escalation that carries it,
+        not only reviewer-rejection ones (the old reviewer_retries >= 2 gate).
         """
         failure_context_path = os.path.join(PROJECT_ARTIFACTS_DIR, "failure_context.json")
         if not os.path.isfile(failure_context_path):
@@ -1698,39 +1705,42 @@ class Orchestrator:
             "context — do not recommend commands that are not available for the current phase "
             "state.\n\n"
             "Maximum 200 characters per field. Be direct. No hedging, no filler phrases.\n\n"
-            "When the user-message payload includes a non-null `behavioral_verification` block "
-            "AND `reviewer_retries >= 2`, the failure is behavioural and the executor's self-heal "
-            "passes have already been attempted; quote the project's pre-authored "
-            "`failure_language` verbatim as part of the summary. Otherwise do not reference "
+            "When the user-message payload includes a non-null `behavioral_verification` block, "
+            "the failure has a project-authored, user-facing description; quote the project's "
+            "pre-authored `failure_language` verbatim as part of the summary so the operator reads "
+            "the failure in their own product's voice. When the block is absent, do not reference "
             "`failure_language` in your output."
         )
 
-        # P0 Stage G: derive a compact behavioural block from failure_context so the
-        # LLM has the project's pre-authored failure_language available when (and
-        # only when) reviewer_retries >= 2. Below the threshold the executor's
-        # self-heal pass has not been attempted yet — surfacing failure_language
-        # prematurely would skip the targeted self-heal step. Block is None when
-        # below threshold OR when failure_context carries no behavioural data; the
-        # system prompt instructs the LLM not to reference failure_language in that
-        # case.
+        # P0 Stage G + P1 Stage G1: derive a compact behavioural block from
+        # failure_context so the LLM has the project's pre-authored
+        # failure_language available. Stage G1 LOOSENED the gate: the block is
+        # built whenever failure_context carries a failure_language string,
+        # regardless of reviewer_retries. Executor-self-failure escalations
+        # (reviewer_retries < 2) now get the user-voice copy too — previously
+        # they were denied it and the advisory parroted blame jargon instead.
+        # Block stays None only when failure_context has no behavioural data; the
+        # system prompt tells the LLM not to reference failure_language then.
         _behavioural_block = None
-        if int(_ps.get("reviewer_retries", 0)) >= 2:
-            _claimed = (failure_context_data or {}).get("current_phase_behavioral_verification")
-            _observed = (failure_context_data or {}).get("behavioral_verification_evidence")
-            if isinstance(_claimed, dict) and _claimed.get("failure_language"):
-                _behavioural_block = {
-                    "failure_language": _claimed.get("failure_language"),
-                    "verdict": (_observed or {}).get("verdict") if isinstance(_observed, dict) else None,
-                    "evidence_count": (
-                        len((_observed or {}).get("evidence") or [])
-                        if isinstance(_observed, dict) else 0
-                    ),
-                }
+        _claimed = (failure_context_data or {}).get("current_phase_behavioral_verification")
+        _observed = (failure_context_data or {}).get("behavioral_verification_evidence")
+        if isinstance(_claimed, dict) and _claimed.get("failure_language"):
+            _behavioural_block = {
+                "failure_language": _claimed.get("failure_language"),
+                "verdict": (_observed or {}).get("verdict") if isinstance(_observed, dict) else None,
+                "evidence_count": (
+                    len((_observed or {}).get("evidence") or [])
+                    if isinstance(_observed, dict) else 0
+                ),
+            }
 
+        # P1 Stage G1 (de-blame): ground the advisory in the actual failure
+        # (failure_context), the project's user-voice failure_language, and the
+        # retry counts — NOT in blame-attribution state. escalation_trigger_reason
+        # (usually the blame-cap string) and prior_blame_attributions are
+        # deliberately omitted so the summary never parrots internal jargon.
         _user_message = json.dumps({
             "failure_context": failure_context_data,
-            "escalation_trigger_reason": _ps.get("escalation_trigger_reason", ""),
-            "prior_blame_attributions": _ps.get("prior_blame_attributions", []),
             "executor_retries": _ps.get("executor_retries", 0),
             "reviewer_retries": _ps.get("reviewer_retries", 0),
             "available_recovery_commands": _available_commands,
@@ -2234,6 +2244,27 @@ class Orchestrator:
             print(f"[ERROR] Failed to write phase_state: {e}")
             if os.path.exists(temp_path):
                 os.remove(temp_path)
+
+    def _clean_escalation_headline(self, raw_id=None):
+        """P1 Stage G1 — a clean, deterministic headline for the escalation panel.
+
+        Returns a phase-level string the UI can render as the escalation
+        headline WITHOUT ever surfacing the raw blame-attribution
+        ``escalation_trigger_reason``. Derived solely from the phase id, so it is
+        structurally incapable of echoing the blame-cap string. Persisted as
+        ``escalation_headline`` alongside ``escalation_trigger_reason`` at every
+        escalation trigger.
+
+        Args:
+            raw_id: optional explicit phase raw id (call sites pass their local).
+                Falls back to ``self.state['current_phase_raw_id']``. The
+                "unknown" sentinel used by the call sites is treated as absent.
+        """
+        rid = raw_id if raw_id is not None else self.state.get("current_phase_raw_id", "")
+        rid = str(rid or "").strip()
+        if rid and rid.lower() != "unknown":
+            return f"Phase {rid} needs your input"
+        return "This phase needs your input"
 
     def _record_phase_outcome(self, **fields) -> None:
         """Atomically merge outcome fields into ``phase_state.json``.
@@ -3730,6 +3761,9 @@ class Orchestrator:
                     cleanup_output_files(PROJECT_ARTIFACTS_DIR, "escalation")
                 _ps = self.read_phase_state()
                 _ps["escalation_trigger_reason"] = failure_context
+                # P1 Stage G1: repo-init failures are pre-phase; give the UI a clean,
+                # non-blame headline. The raw reason stays in the details disclosure.
+                _ps["escalation_headline"] = "Repository setup needs your attention"
                 _ps["escalations"] = _ps.get("escalations", 0) + 1  # W1-B
                 _ps["waiting_for_human_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # W1-E
                 _ps["escalation_advisory_status"] = "generating"
@@ -5426,6 +5460,9 @@ class Orchestrator:
                         cleanup_output_files(PROJECT_ARTIFACTS_DIR, "escalation")
                         _ps = self.read_phase_state()
                         _ps["escalation_trigger_reason"] = self.state.get("last_action", "escalation triggered")
+                        # P1 Stage G1: persist a clean, non-blame headline for the UI alongside
+                        # the raw trigger reason (which is demoted into the details disclosure).
+                        _ps["escalation_headline"] = self._clean_escalation_headline(raw_id)
                         _ps["escalations"] = _ps.get("escalations", 0) + 1  # W1-B
                         _ps["waiting_for_human_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # W1-E
 
@@ -5632,6 +5669,8 @@ class Orchestrator:
                 if webhook_status == "SUCCESS":
                     _ps = self.read_phase_state()
                     _ps["escalation_trigger_reason"] = f"Escalated after unhandled exception: {exc_description}"
+                    # P1 Stage G1: clean headline for the UI (raw reason stays in the disclosure).
+                    _ps["escalation_headline"] = self._clean_escalation_headline(raw_id)
                     # Advisory generated AFTER webhook in the crash handler — the webhook
                     # must not be delayed by an LLM call in this last-resort path
                     _exc_advisory = self._generate_escalation_advisory()

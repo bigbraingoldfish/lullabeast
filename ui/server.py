@@ -2146,6 +2146,10 @@ def get_state():
                 response["skill_agent"] = phase_state["skill_agent"]
             if "escalation_trigger_reason" in phase_state:
                 response["escalation_trigger_reason"] = phase_state["escalation_trigger_reason"]
+            # P1 Stage G1: clean, non-blame headline the UI renders instead of the
+            # raw escalation_trigger_reason (which is demoted into the details disclosure).
+            if "escalation_headline" in phase_state:
+                response["escalation_headline"] = phase_state["escalation_headline"]
             if "waiting_for_human_at" in phase_state:
                 response["waiting_for_human_at"] = phase_state["waiting_for_human_at"]
             if "waiting_for_human_resolved_at" in phase_state:
