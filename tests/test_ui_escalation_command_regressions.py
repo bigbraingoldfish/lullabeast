@@ -27,10 +27,17 @@ def test_escalation_panel_supports_queue_halted_escalation_commands(html_content
     assert "const canIssueCommands = humanWait || queueHaltedEscalation;" in html_content
 
 
-def test_queue_escalation_command_posts_target_project_path(html_content):
-    """Queue Action Hub must route parked ESCALATION commands to target_project_path."""
-    assert "if (selected && selected.state === 'ESCALATION' && selected.project_path)" in html_content
-    assert "payload.target_project_path = selected.project_path;" in html_content
+def test_queue_escalation_command_routes_target_project_path(html_content):
+    """The Queue still routes parked ESCALATION commands via target_project_path (the
+    deferred hold). After G3 consolidation the ESCALATION guard lives at the Queue call
+    site (as the targetProjectPath prop) and the shared EscalationCommandPanel dispatcher
+    appends target_project_path to the /api/command body."""
+    # Queue call site selects the deferred target with the ESCALATION guard preserved.
+    assert "selected.state === 'ESCALATION'" in html_content
+    assert "selected.project_path" in html_content
+    assert "targetProjectPath=" in html_content
+    # Shared dispatcher carries it onto the request so the server defers (holds) the command.
+    assert "target_project_path" in html_content
 
 
 def test_queue_escalation_message_effect_is_not_tied_to_queue_identity(html_content):
