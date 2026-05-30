@@ -1,0 +1,108 @@
+"""P1 Stage G3 — the Queue view consumes the shared escalation panel.
+
+Replaces the former ``test_ui_queue_escalation_parity.py``, whose entire premise —
+two hand-maintained panels that must be kept matching by hand — no longer exists
+after consolidation. Parity is now structural: the Queue renders the same
+``EscalationCommandPanel`` the Pipeline Monitor does. The one behaviour that is
+genuinely Queue-specific and must be preserved is the deferred dispatch: a command
+issued for a parked ``ESCALATION`` project carries ``target_project_path`` so the
+server HOLDS it (``pending_escalation_command.json``) and it fires when the
+orchestrator picks that project back up.
+"""
+
+import re
+from pathlib import Path
+
+import pytest
+
+INDEX_HTML = Path(__file__).parent.parent / "ui" / "index.html"
+
+
+@pytest.fixture
+def html():
+    return INDEX_HTML.read_text(encoding="utf-8")
+
+
+def _queue_action_hub_block(html):
+    m = re.search(r"function QueueActionHub\(\)(.*?)(?=\n\s+function [A-Z])", html, re.DOTALL)
+    assert m, "QueueActionHub not found in index.html"
+    return m.group(0)
+
+
+# ── Structural consolidation: Queue renders the shared component ──────────────
+
+def test_queue_renders_shared_escalation_panel(html):
+    hub = _queue_action_hub_block(html)
+    assert "<EscalationCommandPanel" in hub, (
+        "the Queue escalation branch must render the shared <EscalationCommandPanel>"
+    )
+
+
+def test_queue_has_no_forked_inline_escalation_render(html):
+    """None of the forked render machinery survives in QueueActionHub."""
+    hub = _queue_action_hub_block(html)
+    for forked in (
+        "renderQueueEscalationButton",
+        "hubRecoverCmds",
+        "hubAdvanceCmds",
+        "hubStopDef",
+        "hubHeaderText",
+        "hubCounterText",
+        "hubModalConfirm",
+    ):
+        assert forked not in hub, f"forked Queue escalation symbol still present: {forked}"
+
+
+def test_queue_feeds_deblamed_fields_as_props(html):
+    """The Queue passes the /api/state-sourced de-blamed fields to the shared component
+    instead of rendering a header/advisory inline."""
+    hub = _queue_action_hub_block(html)
+    for prop in (
+        "escalation_headline={hubHeadline}",
+        "escalation_trigger_reason={hubTriggerReason}",
+        "escalation_message={escalationMsg}",
+        "escalation_advisory_status={hubAdvisoryStatus}",
+        "escalation_recommended_action={hubRecommendedAction}",
+    ):
+        assert prop in hub, f"Queue must pass {prop} to the shared component"
+
+
+def test_queue_feeds_eligibility_fields_as_props(html):
+    hub = _queue_action_hub_block(html)
+    assert "escalation_resets={hubEscalationResets}" in hub
+    assert "executor_output_exists={hubExecutorOutputExists}" in hub
+    assert "merge_probe_passed={hubMergeProbePassed}" in hub
+
+
+# ── Deferred-hold preserved (the load-bearing Queue behaviour) ────────────────
+
+def test_queue_preserves_target_project_path_deferred_dispatch(html):
+    """A parked ESCALATION project's command must be routed with target_project_path so
+    the server defers it (held until the orchestrator activates that project)."""
+    hub = _queue_action_hub_block(html)
+    assert "targetProjectPath=" in hub, "Queue must pass targetProjectPath to the shared component"
+    # The guard that selects deferred-vs-immediate must be preserved exactly.
+    assert "selected.state === 'ESCALATION'" in hub, (
+        "the ESCALATION guard for deferred dispatch must be preserved"
+    )
+    assert "selected.project_path" in hub, "the target project path source must be preserved"
+
+
+def test_queue_onDispatched_refreshes_queue(html):
+    hub = _queue_action_hub_block(html)
+    assert "onDispatched={fetchQueue}" in hub, (
+        "Queue must pass onDispatched={fetchQueue} so the queue refreshes after dispatch"
+    )
+
+
+# ── Lifecycle chrome stays OFF in the Queue (decision: 'Queue stays light') ───
+
+def test_queue_does_not_enable_orchestrator_lifecycle_chrome(html):
+    """The Queue must not opt into the Monitor-only orchestrator-lifecycle chrome."""
+    hub = _queue_action_hub_block(html)
+    assert "showOrchestratorLifecycle" not in hub, (
+        "Queue must NOT enable showOrchestratorLifecycle (chrome stays Monitor-only)"
+    )
+    assert "showCommandSentScreen" not in hub, (
+        "Queue must NOT enable showCommandSentScreen (chrome stays Monitor-only)"
+    )

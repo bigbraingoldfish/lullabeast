@@ -1385,6 +1385,19 @@
 
         // ─── EscalationCommandPanel ───────────────────────────────────────────────
 
+        // Shared escalation/recovery surface, rendered by BOTH the Pipeline Monitor and the
+        // Queue view (P1 Stage G3 consolidation — one component, written once for G1/G2).
+        // Control props beyond the escalation data:
+        //  • targetProjectPath: when set (Queue, a parked ESCALATION project that is NOT the
+        //    active pipeline project), the dispatcher appends target_project_path so the server
+        //    HOLDS the command (pending_escalation_command) and it fires when the orchestrator
+        //    picks that project back up. null (Monitor) → immediate dispatch on the active project.
+        //  • onDispatched: optional callback invoked after a successful POST (Queue → fetchQueue).
+        //  • showOrchestratorLifecycle: Monitor-only chrome (Restart Orchestrator button +
+        //    orchestrator-down warning). Off in the Queue — deferred dispatch has no live
+        //    orchestrator to restart.
+        //  • showCommandSentScreen: Monitor shows the "command submitted — waiting" screen;
+        //    the Queue relies on onDispatched (queue refresh) instead.
         function EscalationCommandPanel({
             pipeline_status,
             escalation_trigger_reason,
@@ -1401,6 +1414,10 @@
             planner_output_exists = true,
             phase_branch_exists = true,
             merge_probe_passed = false,
+            targetProjectPath = null,
+            onDispatched = null,
+            showOrchestratorLifecycle = false,
+            showCommandSentScreen = false,
         }) {
             const [commandSent, setCommandSent] = useState(false);
             const [lastSubmittedCommand, setLastSubmittedCommand] = useState(null);
@@ -1412,8 +1429,6 @@
             const [restartBusy, setRestartBusy] = useState(false);
             const [restartError, setRestartError] = useState("");
             const [advisoryExpanded, setAdvisoryExpanded] = useState(escalation_resets === 0);
-
-            const isResetDisabled = escalation_resets >= 3;
 
             useEffect(() => {
                 if (prevStatus === "WAITING_FOR_HUMAN" && pipeline_status !== "WAITING_FOR_HUMAN") {
@@ -1434,7 +1449,7 @@
                 !!(escalation_trigger_reason || escalation_message);
             const canIssueCommands = humanWait || queueHaltedEscalation;
             const orchestratorDownBlocksCommands =
-                canIssueCommands && !orchestrator_alive && !commandSent;
+                showOrchestratorLifecycle && canIssueCommands && !orchestrator_alive && !commandSent;
             const keepPanelMounted = canIssueCommands || showConfirmModal || commandSent;
             if (!keepPanelMounted) return null;
 
@@ -1446,42 +1461,10 @@
             const commandErrParts = commandError ? splitApiDetail(commandError) : null;
 
             const handleCommand = (command) => {
-                if (
-                    command === "RESET_PHASE" ||
-                    command === "RESET_EXECUTION" ||
-                    command === "RESET_REVIEWER" ||
-                    command === "SKIP" ||
-                    command === "PROCEED"
-                ) {
-                    setModalCommand(command);
-                    setShowConfirmModal(true);
-                    return;
-                }
-                sendCommand(command);
-            };
-
-            const sendCommand = async (command) => {
-                setCommandError("");
-                try {
-                    const r = await fetch("/api/command", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ command }),
-                    });
-                    const d = await r.json().catch(() => ({}));
-                    if (!r.ok) {
-                        const msg =
-                            typeof d.detail === "string"
-                                ? d.detail
-                                : d.message || `Request failed (${r.status})`;
-                        setCommandError(msg);
-                        return;
-                    }
-                    setLastSubmittedCommand(command);
-                    setCommandSent(true);
-                } catch (err) {
-                    setCommandError(String(err?.message || err));
-                }
+                // Every command opens a confirmation modal; which modal renders (StopConfirmModal
+                // vs ConfirmationModal) is decided at render time by the pending command, not here.
+                setModalCommand(command);
+                setShowConfirmModal(true);
             };
 
             const modalConfirm = async () => {
@@ -1489,16 +1472,19 @@
                 setConfirmBusy(true);
                 setCommandError("");
                 try {
-                    let r;
-                    if (modalCommand === "STOP") {
-                        r = await fetch("/api/stop", { method: "POST" });
-                    } else {
-                        r = await fetch("/api/command", {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ command: modalCommand }),
-                        });
-                    }
+                    // Unified dispatch: always POST /api/command. When targetProjectPath is set
+                    // (Queue, a parked ESCALATION project that is not the active one), the server
+                    // HOLDS the command (pending_escalation_command) so it fires when the
+                    // orchestrator picks that project back up; otherwise it acts immediately on the
+                    // active project. STOP rides this same path — equivalent to /api/stop while
+                    // WAITING_FOR_HUMAN (the panel's only render state).
+                    const payload = { command: modalCommand };
+                    if (targetProjectPath) payload.target_project_path = targetProjectPath;
+                    const r = await fetch("/api/command", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(payload),
+                    });
                     const d = await r.json().catch(() => ({}));
                     if (!r.ok) {
                         const msg =
@@ -1511,9 +1497,10 @@
                         return;
                     }
                     setLastSubmittedCommand(modalCommand);
-                    setCommandSent(true);
+                    if (showCommandSentScreen) setCommandSent(true);
                     setShowConfirmModal(false);
                     setModalCommand(null);
+                    if (typeof onDispatched === "function") onDispatched();
                 } catch (err) {
                     setCommandError(String(err?.message || err));
                     setShowConfirmModal(false);
@@ -1550,17 +1537,38 @@
             const counterText = `Escalation loops: ${escalation_resets}/3`;
 
             // ── Shared action button renderer ─────────────────────────────────────
-            const renderActionButton = ({ command, label, desc, title: cmdTitle }) => (
-                <button
-                    key={command}
-                    className="flex flex-col items-start text-left px-3 py-2 rounded bg-[#1a1d21] hover:bg-[#252830] transition-colors w-full"
-                    title={cmdTitle}
-                    onClick={() => handleCommand(command)}
-                >
-                    <span className="header-text text-sm font-medium">{label}</span>
-                    {desc && <span className="text-slate-400 text-xs mt-0.5 leading-snug">{desc}</span>}
-                </button>
-            );
+            // group === 'stop' → red label (visually distinct, same component).
+            const renderActionButton = ({ command, label, desc, title: cmdTitle, group }) => {
+                const isStop = group === 'stop';
+                return (
+                    <button
+                        key={command}
+                        type="button"
+                        className="flex flex-col items-start text-left px-3 py-2 rounded bg-[#1a1d21] hover:bg-[#252830] transition-colors w-full"
+                        title={cmdTitle}
+                        onClick={() => handleCommand(command)}
+                    >
+                        <span className={`header-text text-sm font-medium ${isStop ? 'text-red-400' : ''}`}>{label}</span>
+                        {desc && <span className="text-slate-400 text-xs mt-0.5 leading-snug">{desc}</span>}
+                    </button>
+                );
+            };
+
+            // Buttons are sourced from the shared ESCALATION_CMD_DEFS (single source of truth),
+            // filtered to reproduce the exact prior Monitor visibility rules: recover group hidden
+            // at cap; Re-run Reviewer hidden without executor output; Mark Complete needs merge
+            // AND not-cap (the cap-reached state offers only Abandon Phase / Stop Pipeline).
+            const recoverCmds = ESCALATION_CMD_DEFS
+                .filter(d => d.group === 'recover')
+                .filter(d => {
+                    if (capReached) return false;
+                    if (d.command === 'RESET_REVIEWER' && !showRerunReviewer) return false;
+                    return true;
+                });
+            const advanceCmds = ESCALATION_CMD_DEFS
+                .filter(d => d.group === 'advance')
+                .filter(d => !(d.command === 'PROCEED' && (!showMarkComplete || capReached)));
+            const stopDef = ESCALATION_CMD_DEFS.find(d => d.group === 'stop');
 
             const handleRestartOrchestrator = async () => {
                 setRestartError("");
@@ -1706,8 +1714,8 @@
                                         ) : (
                                             <p className="text-slate-500 text-xs leading-relaxed italic">
                                                 {escalation_advisory_status === "fallback"
-                                                    ? "Automated review unavailable — the analysis could not be generated. See Pipeline log for full context."
-                                                    : "See Pipeline log for details."}
+                                                    ? "Automated review unavailable — the analysis could not be generated. See the pipeline log for full context."
+                                                    : "See the pipeline log for details."}
                                             </p>
                                         )}
                                         {/* P1 Stage G1: raw internal reason, demoted out of the headline into the disclosure. */}
@@ -1728,24 +1736,7 @@
                             ) : (
                                 <div className="space-y-1.5">
                                     <InfoGroupLabel hiddenItems={hiddenRecoverItems}>Recover</InfoGroupLabel>
-                                    {renderActionButton({
-                                        command: "RESET_PHASE",
-                                        label: "Reset Phase",
-                                        desc: "Deletes branch · wipes all artifacts · reruns from top.",
-                                        title: "Destructive: git reset to pre-phase commit + branch delete + full artifact wipe. Increments reset counter.",
-                                    })}
-                                    {renderActionButton({
-                                        command: "RESET_EXECUTION",
-                                        label: "Reset Execution",
-                                        desc: "Keeps plan · reruns executor from a clean working tree.",
-                                        title: "Destructive: git reset --hard on phase branch + clears executor/reviewer outputs. Planner preserved.",
-                                    })}
-                                    {showRerunReviewer && renderActionButton({
-                                        command: "RESET_REVIEWER",
-                                        label: "Re-run Reviewer",
-                                        desc: "Deletes reviewer output only · reruns review.",
-                                        title: "Deletes reviewer outputs only. Executor work is preserved. Increments reset counter.",
-                                    })}
+                                    {recoverCmds.map(def => renderActionButton(def))}
                                 </div>
                             )}
 
@@ -1754,45 +1745,33 @@
                             {/* 3. Advance manually group */}
                             <div className="space-y-1.5">
                                 <InfoGroupLabel hiddenItems={hiddenFinalizeItems}>Advance manually</InfoGroupLabel>
-                                {showMarkComplete && !capReached && renderActionButton({
-                                    command: "PROCEED",
-                                    label: "Mark Complete",
-                                    desc: "Merge confirmed · advances pipeline to next phase.",
-                                    title: "Marks roadmap [x], force-tags phase complete, advances to next phase. No merge is executed.",
-                                })}
-                                {renderActionButton({
-                                    command: "SKIP",
-                                    label: "Abandon Phase",
-                                    desc: "Marks skipped · no git cleanup · branch stays in repo.",
-                                    title: "Marks roadmap [-], advances. No branch delete, no file cleanup. Manual git work required.",
-                                })}
+                                {advanceCmds.map(def => renderActionButton(def))}
                             </div>
 
                             <div className="border-t border-[#2a2d31]" />
 
-                            {/* 4. Stop Pipeline — standalone, red label */}
-                            <button
-                                type="button"
-                                className="w-full flex flex-col items-start text-left px-3 py-2 rounded bg-[#1a1d21] hover:bg-[#252830] transition-colors"
-                                title="Halts the pipeline. No further phases will run. Current phase state is preserved."
-                                onClick={() => { setModalCommand("STOP"); setShowConfirmModal(true); }}
-                            >
-                                <span className="header-text text-sm font-medium text-red-400">Stop Pipeline</span>
-                                <span className="text-slate-400 text-xs mt-0.5 leading-snug">Halts all pipeline activity immediately.</span>
-                            </button>
+                            {/* 4. Stop Pipeline — standalone, red label via group==='stop' */}
+                            {stopDef && renderActionButton(stopDef)}
 
                         </div>
                     ) : showConfirmModal ? (
                         <p className="text-slate-500 text-xs">Finish confirmation below, or cancel.</p>
                     ) : null}
 
-                    {showConfirmModal && (
+                    {showConfirmModal && modalCommand !== "STOP" && (
                         <ConfirmationModal
                             command={modalCommand}
                             onConfirm={modalConfirm}
                             onDismiss={modalDismiss}
                             busy={confirmBusy}
                             escalationResets={escalation_resets}
+                        />
+                    )}
+                    {showConfirmModal && modalCommand === "STOP" && (
+                        <StopConfirmModal
+                            onConfirm={modalConfirm}
+                            onDismiss={modalDismiss}
+                            pipelineStatus={pipeline_status}
                         />
                     )}
                 </div>
@@ -7471,8 +7450,6 @@
             const [snapshotVersion, setSnapshotVersion] = useState(0);
             const [hubBusy, setHubBusy] = useState(false);
             const [hubError, setHubError] = useState('');
-            const [hubModalCommand, setHubModalCommand] = useState(null);
-            const [hubConfirmBusy, setHubConfirmBusy] = useState(false);
             const [revalidateChecks, setRevalidateChecks] = useState(null);
             const [escalationMsg, setEscalationMsg] = useState('');
             const [hubHeadline, setHubHeadline] = useState('');         // P1 Stage G1: clean headline
@@ -7780,43 +7757,6 @@
                     .finally(() => setHubBusy(false));
             };
 
-            // Button click: open the confirmation modal.
-            const handleCommand = (cmd) => {
-                setHubError('');
-                setHubModalCommand(cmd);
-            };
-
-            // Modal confirm: deferred dispatch — adds target_project_path for parked
-            // ESCALATION entries so the server writes pending_escalation_command.json
-            // rather than acting immediately (distinct from the monitor's direct path).
-            const hubModalConfirm = () => {
-                if (!hubModalCommand) return;
-                const cmd = hubModalCommand;
-                setHubConfirmBusy(true);
-                setHubError('');
-                const payload = { command: cmd };
-                if (selected && selected.state === 'ESCALATION' && selected.project_path) {
-                    payload.target_project_path = selected.project_path;
-                }
-                fetch('/api/command', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(payload),
-                })
-                .then(async r => {
-                    if (!r.ok) { const d = await r.json().catch(() => ({})); setHubError(d.detail || 'Command failed'); return; }
-                    setHubModalCommand(null);
-                    fetchQueue();
-                })
-                .catch(() => setHubError('Request failed'))
-                .finally(() => { setHubConfirmBusy(false); setHubBusy(false); });
-            };
-
-            const hubModalDismiss = () => {
-                if (hubConfirmBusy) return;
-                setHubModalCommand(null);
-            };
-
             // Drag-to-reorder: recursive descendants of a root (by parent_id), matching server group move
             const getAllDescendantIds = (q, rootId) => {
                 const out = [];
@@ -8089,160 +8029,39 @@
                     </button>
                 );
 
-                // Phase 2 eligibility fields from the active pipeline snapshot
+                // Phase 2 eligibility fields from the active pipeline snapshot — fed to the shared
+                // EscalationCommandPanel as props (the Queue renders the same component as the
+                // Pipeline Monitor after the P1 Stage G3 consolidation).
                 const hubEscalationResets = (snapshot && snapshot.escalation_resets) || 0;
-                const capReached = hubEscalationResets >= 3;
                 const hubExecutorOutputExists = snapshot ? (snapshot.executor_output_exists ?? true) : true;
                 const hubMergeProbePassed = snapshot ? (snapshot.merge_probe_passed ?? false) : false;
 
-                const [advisoryExpanded, setAdvisoryExpanded] = React.useState(hubEscalationResets === 0);
-
-                // Render helper: button with label + description. Clicking opens the modal.
-                // group === 'stop' → red label (visually distinct, same component).
-                const renderQueueEscalationButton = ({ command, label, desc, title: cmdTitle, group }) => {
-                    const isStop = group === 'stop';
-                    return (
-                        <button
-                            key={command}
-                            disabled={hubBusy || hubConfirmBusy || reorderDirty}
-                            title={reorderDirty ? 'Save or cancel reorder first' : cmdTitle}
-                            onClick={() => handleCommand(command)}
-                            className="header-text flex flex-col items-start text-left px-3 py-2 rounded w-full bg-[#1a1d21] hover:bg-[#252830] transition-colors disabled:opacity-50">
-                            <span className={`text-sm font-medium ${isStop ? 'text-red-400' : 'text-slate-300'}`}>
-                                {label}
-                            </span>
-                            {desc && <span className="text-xs mt-0.5 leading-snug text-slate-400">{desc}</span>}
-                        </button>
-                    );
-                };
-
-                const hubAdvisoryText = escalationMsg || null;
-                // P1 Stage G1: show the advisory summary when ready, else the clean headline.
-                // Never the raw blame string (which lives in the Internal reason disclosure).
-                const hubHeaderText   = (hubAdvisoryStatus === "ready" && hubAdvisoryText)
-                    ? hubAdvisoryText
-                    : (hubHeadline || 'Awaiting escalation command');
-                const hubCounterText  = `Escalation loops: ${hubEscalationResets}/3`;
-
-                const hubRecoverCmds = ESCALATION_CMD_DEFS
-                    .filter(d => d.group === 'recover')
-                    .filter(d => {
-                        if (capReached) return false;
-                        if (d.command === 'RESET_REVIEWER' && !hubExecutorOutputExists) return false;
-                        return true;
-                    });
-                const hubAdvanceCmds = ESCALATION_CMD_DEFS
-                    .filter(d => d.group === 'advance')
-                    .filter(d => !(d.command === 'PROCEED' && !hubMergeProbePassed));
-                const hubStopDef = ESCALATION_CMD_DEFS.find(d => d.group === 'stop');
-
-                const hubHiddenRecoverItems = !hubExecutorOutputExists
-                    ? ['Re-run Reviewer — no executor output to review'] : [];
-                const hubHiddenAdvanceItems = !hubMergeProbePassed
-                    ? ['Mark Complete — phase branch not yet merged into base'] : [];
-
                 if (isEscalationWaiting) {
+                    // The Queue renders the SAME EscalationCommandPanel as the Pipeline Monitor.
+                    // targetProjectPath routes a parked ESCALATION project's command through the
+                    // server's deferred path (pending_escalation_command) so it is HELD and fires
+                    // when the orchestrator picks that project back up. The Monitor-only lifecycle
+                    // chrome (Restart Orchestrator / command-sent screen) is intentionally OFF here.
                     return (
                         <div className="space-y-3">
-                            {/* 1. Collapsible advisory block */}
-                            <div className="rounded border border-[#2a3040] bg-[#111418]/60">
-                                <button type="button"
-                                    className="w-full flex items-center gap-2 px-3 py-2 text-left"
-                                    onClick={() => setAdvisoryExpanded(v => !v)}
-                                    aria-expanded={advisoryExpanded}>
-                                    <span className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${capReached ? 'bg-red-500' : 'bg-orange-400'}`}
-                                        style={{ animation: 'pulse 2s cubic-bezier(0.4,0,0.6,1) infinite' }} />
-                                    <span className="header-text text-xs text-slate-300 flex-1 leading-snug">{hubHeaderText}</span>
-                                    <span className="text-slate-500 text-xs ml-1 flex-shrink-0">{advisoryExpanded ? '▲' : '▼'}</span>
-                                </button>
-                                {advisoryExpanded && (
-                                    <div className="px-3 pb-3 space-y-1.5 border-t border-[#2a3040]/60">
-                                        <p className="text-slate-500 text-xs pt-2 font-mono">{hubCounterText}</p>
-                                        {hubAdvisoryStatus === "generating" ? (
-                                            <p className="text-slate-400 text-xs leading-relaxed flex items-center gap-2">
-                                                <span className="inline-block w-3 h-3 border-2 border-sky-400 border-t-transparent rounded-full flex-shrink-0"
-                                                    style={{ animation: 'spin 1s linear infinite' }} />
-                                                <span className="text-sky-400 font-medium">Reviewing escalation...</span>
-                                            </p>
-                                        ) : hubAdvisoryStatus === "ready" && hubAdvisoryText ? (
-                                            <div className="space-y-1.5">
-                                                <p className="text-slate-400 text-xs leading-relaxed">
-                                                    <span className="text-sky-400 font-medium">Advisory · </span>{hubAdvisoryText}
-                                                </p>
-                                                {hubRecommendedAction && (
-                                                    <p className="text-slate-400 text-xs leading-relaxed">
-                                                        <span className="text-emerald-400 font-medium">Suggested action · </span>{hubRecommendedAction}
-                                                    </p>
-                                                )}
-                                            </div>
-                                        ) : (
-                                            <p className="text-slate-500 text-xs leading-relaxed italic">
-                                                {hubAdvisoryStatus === "fallback"
-                                                    ? "Automated review unavailable. Open Pipeline Monitor for full context and recovery options."
-                                                    : "Open Pipeline Monitor for full context and recovery options."}
-                                            </p>
-                                        )}
-                                        {/* P1 Stage G1: raw internal reason, demoted out of the headline into the disclosure. */}
-                                        {hubTriggerReason && (
-                                            <p className="text-slate-600 text-[11px] leading-relaxed font-mono pt-1.5 border-t border-[#2a3040]/40">
-                                                <span className="text-slate-500">Internal reason · </span>{hubTriggerReason}
-                                            </p>
-                                        )}
-                                    </div>
-                                )}
-                            </div>
-
-                            {/* 2. Recover group OR cap-reached notice */}
-                            {capReached ? (
-                                <p className="text-amber-500 text-xs px-1">
-                                    Recover unavailable · reset budget of 3 exhausted. Use Abandon Phase or Stop Pipeline to exit.
-                                </p>
-                            ) : (
-                                <div className="space-y-1.5">
-                                    <InfoGroupLabel hiddenItems={hubHiddenRecoverItems}>Recover</InfoGroupLabel>
-                                    {hubRecoverCmds.map(def => renderQueueEscalationButton(def))}
-                                </div>
-                            )}
-
-                            <div className="border-t border-[#2a2d31]" />
-
-                            {/* 3. Advance manually group */}
-                            <div className="space-y-1.5">
-                                <InfoGroupLabel hiddenItems={hubHiddenAdvanceItems}>Advance manually</InfoGroupLabel>
-                                {hubAdvanceCmds.map(def => renderQueueEscalationButton(def))}
-                            </div>
-
-                            <div className="border-t border-[#2a2d31]" />
-
-                            {/* 4. Stop Pipeline — standalone, red label via group='stop' in renderQueueEscalationButton */}
-                            {hubStopDef && renderQueueEscalationButton(hubStopDef)}
-
-                            {hubError && <p className="header-text text-xs text-red-400">{hubError}</p>}
+                            <EscalationCommandPanel
+                                pipeline_status="WAITING_FOR_HUMAN"
+                                escalation_trigger_reason={hubTriggerReason}
+                                escalation_headline={hubHeadline}
+                                escalation_message={escalationMsg}
+                                escalation_recommended_action={hubRecommendedAction}
+                                escalation_advisory_status={hubAdvisoryStatus}
+                                escalation_resets={hubEscalationResets}
+                                executor_output_exists={hubExecutorOutputExists}
+                                merge_probe_passed={hubMergeProbePassed}
+                                targetProjectPath={selected && selected.state === 'ESCALATION' && selected.project_path ? selected.project_path : null}
+                                onDispatched={fetchQueue}
+                            />
                             <div className="border-t border-[#2a2d31] pt-3 space-y-3">
                                 {dependsSelect}
                                 {removeBtn}
                                 {monitorBtn}
                             </div>
-
-                            {/* Confirmation modals — same components as monitor; onConfirm
-                                routes through hubModalConfirm which adds target_project_path
-                                for deferred queue dispatch (not the monitor's direct path). */}
-                            {hubModalCommand && hubModalCommand !== 'STOP' && (
-                                <ConfirmationModal
-                                    command={hubModalCommand}
-                                    onConfirm={hubModalConfirm}
-                                    onDismiss={hubModalDismiss}
-                                    busy={hubConfirmBusy}
-                                    escalationResets={hubEscalationResets}
-                                />
-                            )}
-                            {hubModalCommand === 'STOP' && (
-                                <StopConfirmModal
-                                    onConfirm={hubModalConfirm}
-                                    onDismiss={hubModalDismiss}
-                                    pipelineStatus="WAITING_FOR_HUMAN"
-                                />
-                            )}
                         </div>
                     );
                 }
@@ -9430,6 +9249,8 @@
                                 planner_output_exists={pState.planner_output_exists ?? true}
                                 phase_branch_exists={pState.phase_branch_exists ?? true}
                                 merge_probe_passed={pState.merge_probe_passed ?? false}
+                                showOrchestratorLifecycle={true}
+                                showCommandSentScreen={true}
                             />
                         </div>
 

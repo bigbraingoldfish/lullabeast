@@ -645,6 +645,41 @@ class TestPostCommandDeferred:
         assert data.get("deferred") is True
         assert (proj_a / ".autodev" / "pipeline" / "pending_escalation_command.json").exists()
 
+    def test_deferred_holds_stop_for_parked_project(self, client):
+        """P1 Stage G3: a STOP issued from the Queue for a parked ESCALATION project that is
+        NOT the active pipeline project must be HELD (written as pending_escalation_command),
+        not acted on immediately — so it fires when the orchestrator picks that project back
+        up. After G3 unified the escalation STOP onto /api/command, this is the path the Queue
+        view uses for STOP just like every other command."""
+        c, queue_file, base = client
+        proj_a = base / "parked_stop_a"
+        proj_a.mkdir()
+        proj_b = base / "active_b"
+        proj_b.mkdir()
+        symlink = base / "pipeline-project"
+        symlink.symlink_to(proj_b)
+        aid = str(uuid.uuid4())
+        bid = str(uuid.uuid4())
+        entries = [
+            {**_make_entry("a"), "id": aid, "project_path": str(proj_a), "state": "ESCALATION", "position": 1},
+            {**_make_entry("b"), "id": bid, "project_path": str(proj_b), "state": "ACTIVE", "position": 2},
+        ]
+        _write_queue(str(queue_file), entries)
+        state_file = base / "pipeline_state.json"
+        # Global status is RUNNING (NOT WAITING_FOR_HUMAN) — the deferred path must not
+        # depend on the global gate; it hardcodes WAITING_FOR_HUMAN for the parked entry.
+        with open(state_file, "w") as f:
+            json.dump({"project_path": str(proj_b), "pipeline_status": "RUNNING"}, f)
+
+        resp = c.post("/api/command", json={"command": "STOP", "target_project_path": str(proj_a)})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data.get("deferred") is True
+        pending = proj_a / ".autodev" / "pipeline" / "pending_escalation_command.json"
+        assert pending.exists()
+        with open(pending) as f:
+            assert json.load(f).get("command") == "STOP"
+
 
 # ---------------------------------------------------------------------------
 # DELETE /api/queue/{entry_id}
