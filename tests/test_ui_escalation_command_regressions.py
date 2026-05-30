@@ -40,7 +40,22 @@ def test_queue_escalation_command_routes_target_project_path(html_content):
     assert "target_project_path" in html_content
 
 
-def test_queue_escalation_message_effect_is_not_tied_to_queue_identity(html_content):
-    """Avoid refetch loops caused by useEffect dependency on queue array identity."""
-    assert "const selectedLiveForEscalationMsg = selectedId" in html_content
-    assert "selectedLiveForEscalationMsg," in html_content
+def test_queue_escalation_advisory_is_snapshot_sourced_not_api_state(html_content):
+    """Migrated from ``…_effect_is_not_tied_to_queue_identity``.
+
+    The original guarded a ``/api/state`` useEffect (+ ``selectedLiveForEscalationMsg``)
+    against re-triggering on queue-array identity. That whole effect is gone: the Queue
+    advisory is now derived from the per-entry snapshot, which already refreshes on
+    ``[selectedId, snapshotVersion]``. Assert the new world: the snapshot effect carries
+    that dependency, and the removed ``/api/state`` machinery (the effect's
+    ``selectedLiveForEscalationMsg`` helper and the ``setEscalationMsg`` setter) is gone.
+    """
+    assert "}, [selectedId, snapshotVersion]);" in html_content, (
+        "the snapshot effect must depend on [selectedId, snapshotVersion]"
+    )
+    assert "selectedLiveForEscalationMsg" not in html_content, (
+        "the /api/state effect's live-status helper must be removed"
+    )
+    assert "setEscalationMsg" not in html_content, (
+        "the /api/state-fed escalation message setter must be removed"
+    )

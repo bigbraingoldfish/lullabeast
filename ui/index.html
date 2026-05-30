@@ -7512,11 +7512,10 @@
             const [hubBusy, setHubBusy] = useState(false);
             const [hubError, setHubError] = useState('');
             const [revalidateChecks, setRevalidateChecks] = useState(null);
-            const [escalationMsg, setEscalationMsg] = useState('');
-            const [hubHeadline, setHubHeadline] = useState('');         // P1 Stage G1: clean headline
-            const [hubTriggerReason, setHubTriggerReason] = useState(''); // P1 Stage G1: raw reason (disclosure)
-            const [hubAdvisoryStatus, setHubAdvisoryStatus] = useState(null);
-            const [hubRecommendedAction, setHubRecommendedAction] = useState('');
+            // Escalation advisory fields are now derived from the per-entry `snapshot`
+            // (see QueueActionHub) — single-sourced with the command dispatch target.
+            // The former /api/state-fed useState hooks + useEffect were removed: they read
+            // the ACTIVE project's advisory while dispatching to the SELECTED one.
             const [displayRanks, setDisplayRanks] = useState({});
             const [reorderMode, setReorderMode] = useState(false);
             const [reorderSaveBusy, setReorderSaveBusy] = useState(false);
@@ -7665,53 +7664,6 @@
                     .catch(() => setSnapshot(null))
                     .finally(() => setSnapshotLoading(false));
             }, [selectedId, snapshotVersion]);
-
-            const selectedLiveForEscalationMsg = selectedId
-                ? (queue.find((e) => e.id === selectedId)?.live_pipeline_status ?? null)
-                : null;
-
-            // Fetch escalation context only when human-wait is true for the selection.
-            // Do not depend on `queue` by reference — every GET /api/queue creates a new array and
-            // was re-triggering this effect constantly (log spam) even when status strings were unchanged.
-            useEffect(() => {
-                const snapHuman =
-                    snapshot &&
-                    snapshot.is_active_project &&
-                    snapshot.pipeline_status === "WAITING_FOR_HUMAN";
-                const entryHuman = selectedLiveForEscalationMsg === "WAITING_FOR_HUMAN";
-                if (!snapHuman && !entryHuman) {
-                    setEscalationMsg("");
-                    setHubHeadline("");
-                    setHubTriggerReason("");
-                    setHubAdvisoryStatus(null);
-                    setHubRecommendedAction('');
-                    return;
-                }
-                let cancelled = false;
-                fetch("/api/state")
-                    .then((r) => r.json())
-                    .then((d) => {
-                        if (!cancelled) {
-                            // P1 Stage G1: escalationMsg is the advisory summary ONLY — no
-                            // fallback to escalation_trigger_reason (the blame string). The
-                            // clean headline and the raw reason are tracked as separate fields.
-                            setEscalationMsg(d.escalation_message || "");
-                            setHubHeadline(d.escalation_headline || "");
-                            setHubTriggerReason(d.escalation_trigger_reason || "");
-                            setHubAdvisoryStatus(d.escalation_advisory_status || null);
-                            setHubRecommendedAction(d.escalation_recommended_action || '');
-                        }
-                    })
-                    .catch(() => {});
-                return () => {
-                    cancelled = true;
-                };
-            }, [
-                selectedId,
-                selectedLiveForEscalationMsg,
-                snapshot && snapshot.is_active_project,
-                snapshot && snapshot.pipeline_status,
-            ]);
 
             const selected = queue.find(e => e.id === selectedId) || null;
             const activeEntry = queue.find(e => e.state === 'ACTIVE');
@@ -8090,12 +8042,22 @@
                     </button>
                 );
 
-                // Phase 2 eligibility fields from the active pipeline snapshot — fed to the shared
-                // EscalationCommandPanel as props (the Queue renders the same component as the
-                // Pipeline Monitor after the P1 Stage G3 consolidation).
+                // Eligibility + advisory fields from the per-entry `snapshot` — fed to the
+                // shared EscalationCommandPanel as props (the Queue renders the same
+                // component as the Pipeline Monitor after the P1 Stage G3 consolidation).
+                // The snapshot describes the SELECTED entry's project — the same project a
+                // command dispatched from the Queue targets — so the advisory the operator
+                // reads always matches the project the command acts on. (The G3 follow-up
+                // moved these off /api/state, which always described the ACTIVE project.)
                 const hubEscalationResets = (snapshot && snapshot.escalation_resets) || 0;
                 const hubExecutorOutputExists = snapshot ? (snapshot.executor_output_exists ?? true) : true;
                 const hubMergeProbePassed = snapshot ? (snapshot.merge_probe_passed ?? false) : false;
+                // P1 Stage G1 de-blamed advisory fields, now snapshot-derived (was /api/state).
+                const hubHeadline          = (snapshot && snapshot.escalation_headline) || '';
+                const hubTriggerReason     = (snapshot && snapshot.escalation_trigger_reason) || '';
+                const escalationMsg        = (snapshot && snapshot.escalation_message) || '';
+                const hubAdvisoryStatus    = (snapshot && snapshot.escalation_advisory_status) || null;
+                const hubRecommendedAction = (snapshot && snapshot.escalation_recommended_action) || '';
 
                 if (isEscalationWaiting) {
                     // The Queue renders the SAME EscalationCommandPanel as the Pipeline Monitor.

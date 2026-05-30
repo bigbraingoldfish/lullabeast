@@ -29,6 +29,16 @@ def _queue_action_hub_block(html):
     return m.group(0)
 
 
+def _queue_screen_block(html):
+    """The whole QueueScreen component (includes the nested QueueActionHub), bounded by
+    the next top-level screen function. ``/api/state`` legitimately appears in other
+    components (Pipeline Monitor, App bootstrap), so escalation-source assertions must be
+    scoped to this block."""
+    m = re.search(r"function QueueScreen\(\)(.*?)(?=\n\s+function PipelineScreen)", html, re.DOTALL)
+    assert m, "QueueScreen not found in index.html"
+    return m.group(0)
+
+
 # ── Structural consolidation: Queue renders the shared component ──────────────
 
 def test_queue_renders_shared_escalation_panel(html):
@@ -54,8 +64,9 @@ def test_queue_has_no_forked_inline_escalation_render(html):
 
 
 def test_queue_feeds_deblamed_fields_as_props(html):
-    """The Queue passes the /api/state-sourced de-blamed fields to the shared component
-    instead of rendering a header/advisory inline."""
+    """The Queue passes the per-entry-snapshot-sourced de-blamed fields to the shared
+    component instead of rendering a header/advisory inline. (Source changed from
+    /api/state to the snapshot in the G3 follow-up; the prop names are unchanged.)"""
     hub = _queue_action_hub_block(html)
     for prop in (
         "escalation_headline={hubHeadline}",
@@ -105,4 +116,31 @@ def test_queue_does_not_enable_orchestrator_lifecycle_chrome(html):
     )
     assert "showCommandSentScreen" not in hub, (
         "Queue must NOT enable showCommandSentScreen (chrome stays Monitor-only)"
+    )
+
+
+# ── Advisory is single-sourced from the per-entry snapshot (G3 follow-up) ─────
+
+def test_queuescreen_does_not_fetch_api_state_for_escalation(html):
+    """The Queue advisory is now sourced from the per-entry snapshot, which targets the
+    SELECTED project — the same project the command dispatch targets. The old
+    ``/api/state`` fetch read the ACTIVE symlink project's advisory (the bug), so the
+    QueueScreen must no longer fetch ``/api/state`` at all, and the state machinery that
+    fed it (``setEscalationMsg`` / ``selectedLiveForEscalationMsg``) must be gone.
+
+    Scoped to the QueueScreen block because ``/api/state`` is legitimately fetched by the
+    Pipeline Monitor and App bootstrap.
+    """
+    block = _queue_screen_block(html)
+    # Target the actual network call (either quote style), not bare prose — an explanatory
+    # comment mentioning the removed /api/state fetch is legitimate documentation.
+    assert 'fetch("/api/state")' not in block and "fetch('/api/state')" not in block, (
+        "QueueScreen must not fetch /api/state — read the per-entry snapshot, which "
+        "describes the SELECTED project (the dispatch target), not the active one"
+    )
+    assert "setEscalationMsg" not in block, (
+        "the /api/state-fed escalation message setter must be removed from QueueScreen"
+    )
+    assert "selectedLiveForEscalationMsg" not in block, (
+        "the /api/state effect's live-status helper must be removed from QueueScreen"
     )
