@@ -1357,7 +1357,7 @@ Complete JSON schemas for all pipeline data files. Schemas in §3–§6 define a
     "properties": {
       "user_observable": { "type": "string", "description": "One sentence in plain English describing what a human can do/see after this phase." },
       "how_to_check": { "type": "string", "description": "Concrete procedure the reviewer follows to exercise the artifact (route, command, file, etc.)." },
-      "failure_language": { "type": "string", "description": "One sentence the executor's retry feedback and escalation advisory surface when verification cannot be completed." }
+      "failure_language": { "type": "string", "description": "One sentence the executor's retry feedback and escalation advisory surface when verification cannot be completed. P1 Stage G1: the escalation advisory surfaces this on EVERY escalation that carries it — it is fed to the advisory LLM whenever present, not only on reviewer-rejection escalations (the old reviewer_retries >= 2 gate)." }
     }
   },
   "entry_criteria": { "type": "string", "description": "Stage D — body of the `**Entry Criteria:**` markdown block, verbatim." },
@@ -1402,11 +1402,14 @@ Complete JSON schemas for all pipeline data files. Schemas in §3–§6 define a
   "last_error_code": { "type": "string", "description": "Distinct codes for parse vs. structural failures" },
   "skill_injected": { "type": "string|null", "description": "Discipline name of the phase-prefix skill injected for the most recent agent turn (e.g. 'core-logic', 'infra-config'). null if no skill applied (prefix unmapped, phase_raw_id empty, source file missing, or kill switch suppressed injection). Written atomically by _record_injected_skill() immediately after each inject_skill() call." },
   "skill_agent": { "type": "string", "description": "Agent role for which the skill_injected value was recorded ('planner', 'executor', or 'reviewer'). Always written alongside skill_injected." },
-  "escalation_trigger_reason": { "type": "string", "description": "Human-readable reason the pipeline transitioned to WAITING_FOR_HUMAN. Written atomically immediately before transition_state('WAITING_FOR_HUMAN', ...) at all three escalation trigger points. Used by the UI command panel header and audit log. Preserved until phase_state.json is deleted at phase completion." }
+  "escalation_trigger_reason": { "type": "string", "description": "Internal, possibly blame-framed reason the pipeline transitioned to WAITING_FOR_HUMAN (e.g. the impl-blame-cap string). Written atomically immediately before transition_state('WAITING_FOR_HUMAN', ...) at all three escalation trigger points. P1 Stage G1: NO LONGER the UI command-panel headline — it is demoted into the panel's collapsible 'Internal reason' disclosure (and the audit log). Preserved until phase_state.json is deleted at phase completion." },
+  "escalation_headline": { "type": "string", "description": "P1 Stage G1 — clean, deterministic, non-blame headline for the escalation panel (e.g. 'Phase REND-E1 needs your input'). Derived from the phase id by _clean_escalation_headline(), so it can never echo the blame-cap string. Written alongside escalation_trigger_reason at every escalation trigger; served by GET /api/state. The UI renders the LLM advisory summary when escalation_advisory_status == 'ready', else this headline." }
 }
 ```
 
 > `phase_state.json` is deleted at phase completion and re-created lazily on first counter increment. On re-creation the fallback init includes `escalation_resets: 0` — so the counter genuinely resets only when a new phase begins, never on a phase reset.
+
+**P1 Stage G1 — escalation advisory de-blame.** The pre-escalation LLM advisory (`_generate_escalation_advisory`) is grounded only in user-facing failure data: `failure_context`, the project's `failure_language`, and the retry counts. The blame-framed keys `escalation_trigger_reason` and `prior_blame_attributions` are **not** sent to the advisory LLM, so the summary cannot parrot internal blame-attribution jargon. The `failure_language` block is included whenever `failure_context` carries it — regardless of `reviewer_retries` — so executor-self-failure escalations surface the project's user-voice copy too (previously gated on `reviewer_retries >= 2`). The advisory result is stored as `escalation_message` / `escalation_recommended_action`; the clean `escalation_headline` is what the UI shows as the panel headline (the advisory summary when `escalation_advisory_status == "ready"`, the headline otherwise). `run_blame_attribution()` is unchanged — G1 governs only what the advisory is *fed* and what the UI *renders*.
 
 **Counter reset matrix:**
 

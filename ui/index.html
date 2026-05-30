@@ -1388,6 +1388,7 @@
         function EscalationCommandPanel({
             pipeline_status,
             escalation_trigger_reason,
+            escalation_headline,
             escalation_message,
             escalation_recommended_action,
             escalation_advisory_status,
@@ -1441,7 +1442,7 @@
                 ? "Command submitted"
                 : !humanWait && showConfirmModal
                     ? "Confirm command (pipeline status changed — server will still validate)"
-                    : escalation_trigger_reason || last_action || "Awaiting human command";
+                    : escalation_headline || "Awaiting human command";
             const commandErrParts = commandError ? splitApiDetail(commandError) : null;
 
             const handleCommand = (command) => {
@@ -1670,7 +1671,9 @@
                                         style={{ animation: 'pulse 2s cubic-bezier(0.4,0,0.6,1) infinite' }}
                                     />
                                     <span className="header-text text-xs text-slate-300 flex-1 leading-snug">
-                                        {escalation_trigger_reason || last_action || "Awaiting escalation command"}
+                                        {escalation_advisory_status === "ready" && advisoryText
+                                            ? advisoryText
+                                            : (escalation_headline || "This phase needs your input")}
                                     </span>
                                     <span className="text-slate-500 text-xs ml-1 flex-shrink-0">
                                         {advisoryExpanded ? '▲' : '▼'}
@@ -1705,6 +1708,12 @@
                                                 {escalation_advisory_status === "fallback"
                                                     ? "Automated review unavailable — the analysis could not be generated. See Pipeline log for full context."
                                                     : "See Pipeline log for details."}
+                                            </p>
+                                        )}
+                                        {/* P1 Stage G1: raw internal reason, demoted out of the headline into the disclosure. */}
+                                        {escalation_trigger_reason && (
+                                            <p className="text-slate-600 text-[11px] leading-relaxed font-mono pt-1.5 border-t border-[#2a3040]/40">
+                                                <span className="text-slate-500">Internal reason · </span>{escalation_trigger_reason}
                                             </p>
                                         )}
                                     </div>
@@ -7466,6 +7475,8 @@
             const [hubConfirmBusy, setHubConfirmBusy] = useState(false);
             const [revalidateChecks, setRevalidateChecks] = useState(null);
             const [escalationMsg, setEscalationMsg] = useState('');
+            const [hubHeadline, setHubHeadline] = useState('');         // P1 Stage G1: clean headline
+            const [hubTriggerReason, setHubTriggerReason] = useState(''); // P1 Stage G1: raw reason (disclosure)
             const [hubAdvisoryStatus, setHubAdvisoryStatus] = useState(null);
             const [hubRecommendedAction, setHubRecommendedAction] = useState('');
             const [displayRanks, setDisplayRanks] = useState({});
@@ -7632,6 +7643,8 @@
                 const entryHuman = selectedLiveForEscalationMsg === "WAITING_FOR_HUMAN";
                 if (!snapHuman && !entryHuman) {
                     setEscalationMsg("");
+                    setHubHeadline("");
+                    setHubTriggerReason("");
                     setHubAdvisoryStatus(null);
                     setHubRecommendedAction('');
                     return;
@@ -7641,9 +7654,12 @@
                     .then((r) => r.json())
                     .then((d) => {
                         if (!cancelled) {
-                            setEscalationMsg(
-                                d.escalation_message || d.escalation_trigger_reason || ""
-                            );
+                            // P1 Stage G1: escalationMsg is the advisory summary ONLY — no
+                            // fallback to escalation_trigger_reason (the blame string). The
+                            // clean headline and the raw reason are tracked as separate fields.
+                            setEscalationMsg(d.escalation_message || "");
+                            setHubHeadline(d.escalation_headline || "");
+                            setHubTriggerReason(d.escalation_trigger_reason || "");
                             setHubAdvisoryStatus(d.escalation_advisory_status || null);
                             setHubRecommendedAction(d.escalation_recommended_action || '');
                         }
@@ -8101,7 +8117,11 @@
                 };
 
                 const hubAdvisoryText = escalationMsg || null;
-                const hubHeaderText   = escalationMsg || 'Awaiting escalation command';
+                // P1 Stage G1: show the advisory summary when ready, else the clean headline.
+                // Never the raw blame string (which lives in the Internal reason disclosure).
+                const hubHeaderText   = (hubAdvisoryStatus === "ready" && hubAdvisoryText)
+                    ? hubAdvisoryText
+                    : (hubHeadline || 'Awaiting escalation command');
                 const hubCounterText  = `Escalation loops: ${hubEscalationResets}/3`;
 
                 const hubRecoverCmds = ESCALATION_CMD_DEFS
@@ -8160,6 +8180,12 @@
                                                 {hubAdvisoryStatus === "fallback"
                                                     ? "Automated review unavailable. Open Pipeline Monitor for full context and recovery options."
                                                     : "Open Pipeline Monitor for full context and recovery options."}
+                                            </p>
+                                        )}
+                                        {/* P1 Stage G1: raw internal reason, demoted out of the headline into the disclosure. */}
+                                        {hubTriggerReason && (
+                                            <p className="text-slate-600 text-[11px] leading-relaxed font-mono pt-1.5 border-t border-[#2a3040]/40">
+                                                <span className="text-slate-500">Internal reason · </span>{hubTriggerReason}
                                             </p>
                                         )}
                                     </div>
@@ -9391,6 +9417,7 @@
                             <EscalationCommandPanel
                                 pipeline_status={status}
                                 escalation_trigger_reason={pState.escalation_trigger_reason}
+                                escalation_headline={pState.escalation_headline}
                                 escalation_message={pState.escalation_message}
                                 escalation_recommended_action={pState.escalation_recommended_action}
                                 escalation_advisory_status={pState.escalation_advisory_status}

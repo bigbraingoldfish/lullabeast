@@ -315,7 +315,7 @@ When `pipeline_status` is `WAITING_FOR_HUMAN`, the UI surfaces a command panel t
 
 The command panel appears as a prominent section within the Current Phase panel, visually distinct from the status display — a contained block with a border in the orange/warning palette to signal "human action required."
 
-Header: **"Escalation — Human Input Required"** with the trigger reason read from `escalation_trigger_reason` in `phase_state.json` (written by the orchestrator when transitioning to `WAITING_FOR_HUMAN` — see PATCH-2 in Pre-Implementation Orchestrator Patches). Falls back to `last_action` from `pipeline_state.json` if the field is absent.
+Header: **"Escalation — Human Input Required"**. The headline reads in plain English: the LLM advisory summary when `escalation_advisory_status === "ready"`, otherwise the clean, deterministic `escalation_headline` (e.g. *"Phase REND-E1 needs your input"*) served by `GET /api/state`. **P1 Stage G1 (de-blame):** the raw `escalation_trigger_reason` — often internal blame-attribution jargon (e.g. *"Impl blame cap reached (4x): [L3] … defaulting to impl."*) — is **no longer the headline**; it is demoted into the panel's collapsible "Internal reason" disclosure for operators who want the internal detail (preserved, not deleted). The de-blame is applied to **both** the Pipeline Monitor panel (`EscalationCommandPanel`) and the Queue view panel (`QueueActionHub`) by hand until G3 consolidates them into one shared component.
 
 Six command buttons, each labeled and described:
 
