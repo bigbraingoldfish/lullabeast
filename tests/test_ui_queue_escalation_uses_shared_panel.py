@@ -106,6 +106,28 @@ def test_queue_onDispatched_refreshes_queue(html):
     )
 
 
+# ── P1 Stage H: answered entries do NOT re-show the command panel ─────────────
+
+def test_answered_branch_renders_compact_card_not_command_panel(html):
+    """A parked project whose answer is already banked (ESCALATION_ANSWERED) must show a
+    compact 'Answer banked' status card — NOT the full EscalationCommandPanel (the operator
+    already answered; re-prompting would invite a conflicting second command). The branch
+    must also precede the isEscalationWaiting block so it wins for an answered entry."""
+    hub = _queue_action_hub_block(html)
+    assert "state === 'ESCALATION_ANSWERED'" in hub, "QueueActionHub needs an ESCALATION_ANSWERED branch"
+    answered_idx = hub.index("state === 'ESCALATION_ANSWERED'")
+    waiting_idx = hub.index("if (isEscalationWaiting)")
+    assert answered_idx < waiting_idx, (
+        "the ESCALATION_ANSWERED branch must come BEFORE the isEscalationWaiting block"
+    )
+    # The answered branch body (up to the isEscalationWaiting block) must not mount the panel.
+    answered_branch = hub[answered_idx:waiting_idx]
+    assert "Answer banked" in answered_branch
+    assert "<EscalationCommandPanel" not in answered_branch, (
+        "answered entries must not re-render the full command panel"
+    )
+
+
 # ── Lifecycle chrome stays OFF in the Queue (decision: 'Queue stays light') ───
 
 def test_queue_does_not_enable_orchestrator_lifecycle_chrome(html):

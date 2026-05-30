@@ -21,5 +21,5 @@ def test_progression_label_adjacent_to_mode_toggle():
     pos = html.index(marker)
     window = html[pos : pos + 1200]
     assert "Progression" in window
-    assert "handleModeToggle" in window
+    assert "handleModeSelect" in window
     assert "['auto', 'manual'].map" in window

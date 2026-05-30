@@ -275,6 +275,7 @@
                 'Preflight failed for this row (or a parent); clears automatically when checks pass.',
             FAILED: 'Gate failed; retries exhausted. See phase state for the specific gate.',
             ESCALATION: 'Awaiting your decision in the active phase.',
+            ESCALATION_ANSWERED: 'Your answer is banked. This project resumes when the queue reaches it again.',
         };
 
         /** P3: Depends on parent selector — set parent (H-05) + clear via None (H-06). */
@@ -393,6 +394,7 @@
             all_dependency_hold: 'Queue stalled — All waiting on parents.',
             mixed: 'Queue stalled — Multiple blockers.',
             all_completed: 'Queue stalled — No projects left to run.',
+            answered_pending_revival: 'Banked answer ready — click Resume to continue.',
         };
 
         const STATE_LABELS = {
@@ -425,6 +427,11 @@
                     className: 'bg-amber-500 text-slate-900',
                     title: P3_QUEUE_ONLY_PILL_TITLES.ESCALATION,
                 },
+                ESCALATION_ANSWERED: {
+                    label: 'Answer banked',
+                    className: 'bg-sky-700 text-sky-100',
+                    title: P3_QUEUE_ONLY_PILL_TITLES.ESCALATION_ANSWERED,
+                },
                 COMPLETED: { label: 'COMPLETED', className: 'bg-emerald-800 text-emerald-200', title: '' },
                 FAILED: {
                     label: 'FAILED',
@@ -446,6 +453,13 @@
         /** Primary queue list/detail pill: live pipeline_status overrides queue row state. */
         function queueRowDisplay(entry) {
             if (!entry) return { label: '', className: 'bg-slate-700 text-white', title: '' };
+            // P1 Stage H — a parked entry whose answer is banked reads "Answer banked" regardless of
+            // a stale live_pipeline_status (a parked WAITING_FOR_HUMAN or a global QUEUE_HALTED would
+            // otherwise mask it). Covers both the promoted ESCALATION_ANSWERED state and an
+            // ESCALATION row banked while the orchestrator was dead (not yet promoted).
+            if (entry.state === 'ESCALATION_ANSWERED' || (entry.state === 'ESCALATION' && entry.has_banked_answer)) {
+                return queueOnlyRowPill('ESCALATION_ANSWERED');
+            }
             const live = entry.live_pipeline_status;
             if (live != null && live !== '') {
                 if (live === 'WAITING_FOR_SENTINEL') {
@@ -7545,6 +7559,17 @@
                 reorderSnapshotRef.current !== null &&
                 queue.map((e) => e.id).join("\0") !== reorderSnapshotRef.current;
 
+            // P1 Stage H — parked projects whose answer is banked and waiting to resume.
+            // When the queue is halted with one of these, offer a Resume affordance that
+            // relaunches the orchestrator; its QUEUE_HALTED recovery hook revives the project.
+            // Includes ESCALATION rows banked while the orchestrator was dead (not yet promoted
+            // to ESCALATION_ANSWERED — promotion needs a running orchestrator), so the common
+            // QUEUE_HALTED-then-bank single-project case still surfaces the Resume button.
+            const answeredEntries = queue.filter((e) =>
+                e.state === 'ESCALATION_ANSWERED' || (e.state === 'ESCALATION' && e.has_banked_answer));
+            const queueHalted = pipelineStatus === 'QUEUE_HALTED';
+            const showReviveStalled = queueHalted && answeredEntries.length > 0;
+
             useEffect(() => {
                 reorderModeRef.current = reorderMode;
             }, [reorderMode]);
@@ -7686,14 +7711,18 @@
                 return null;
             };
 
-            const handleModeToggle = () => {
-                if (reorderDirty) return;
-                const newMode = queueMode === 'auto' ? 'manual' : 'auto';
+            const handleModeSelect = (newMode) => {
+                if (reorderDirty || queueMode === newMode) return;
                 fetch('/api/queue/mode', {
                     method: 'PATCH',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({queue_mode: newMode}),
-                }).then(() => setQueueMode(newMode)).catch(() => {});
+                })
+                    .then(() => {
+                        setQueueMode(newMode);
+                        fetchQueue({ force: true });
+                    })
+                    .catch(() => {});
             };
 
             const handleTriggerNext = () => {
@@ -8059,6 +8088,42 @@
                 const hubAdvisoryStatus    = (snapshot && snapshot.escalation_advisory_status) || null;
                 const hubRecommendedAction = (snapshot && snapshot.escalation_recommended_action) || '';
 
+                // P1 Stage H — a parked project whose answer is already banked. The operator
+                // has answered; do NOT re-show the full EscalationCommandPanel. Render a compact
+                // status card, plus a Resume button when the queue is halted (relaunch -> the
+                // orchestrator's QUEUE_HALTED recovery hook revives this project). Ordered BEFORE
+                // the isEscalationWaiting block so it wins over the deferred-bank panel: covers
+                // both the promoted ESCALATION_ANSWERED state and an ESCALATION row banked while
+                // the orchestrator was dead (has_banked_answer, not yet promoted). A parked
+                // ESCALATION row WITHOUT a banked answer still falls through to the panel below.
+                if (state === 'ESCALATION_ANSWERED' || (state === 'ESCALATION' && selected.has_banked_answer)) {
+                    return (
+                        <div className="space-y-3">
+                            <div className="rounded border border-sky-800/60 bg-sky-900/20 p-3">
+                                <p className="header-text text-xs text-sky-200 font-semibold">Answer banked</p>
+                                <p className="header-text text-xs text-slate-300 mt-1">
+                                    Your answer is saved. This project resumes when the queue reaches it again.
+                                </p>
+                                {queueHalted && (
+                                    <button type="button"
+                                        data-testid="queue-answered-resume"
+                                        onClick={() => handleRelaunch(selected.id)}
+                                        disabled={hubBusy || reorderDirty}
+                                        className="header-text text-xs px-3 py-1.5 mt-2 rounded bg-sky-700 text-white hover:bg-sky-600 disabled:opacity-50 w-full">
+                                        {hubBusy ? 'Resuming…' : 'Resume now'}
+                                    </button>
+                                )}
+                                {hubError && <p className="header-text text-xs text-red-400 mt-2">{hubError}</p>}
+                            </div>
+                            <div className="border-t border-[#2a2d31] pt-3 space-y-3">
+                                {dependsSelect}
+                                {removeBtn}
+                                {monitorBtn}
+                            </div>
+                        </div>
+                    );
+                }
+
                 if (isEscalationWaiting) {
                     // The Queue renders the SAME EscalationCommandPanel as the Pipeline Monitor.
                     // targetProjectPath routes a parked ESCALATION project's command through the
@@ -8360,7 +8425,7 @@
                                 </span>
                                 <div className="flex items-center gap-1 rounded-full bg-[#1a1d21] p-0.5 border border-[#2a2d31]">
                                     {['auto', 'manual'].map(m => (
-                                        <button key={m} onClick={handleModeToggle}
+                                        <button key={m} onClick={() => handleModeSelect(m)}
                                             disabled={reorderDirty}
                                             title={reorderDirty ? "Save or cancel reorder first" : undefined}
                                             className={`header-text text-xs px-3 py-1 rounded-full transition-colors disabled:opacity-40 ${
@@ -8378,6 +8443,17 @@
                                     title={getRunNextProjectDisabledReason() ?? undefined}
                                     className={`header-text text-xs px-3 py-1.5 rounded bg-emerald-700 text-white hover:bg-emerald-600 disabled:opacity-50${!runNextProjectDisabled ? ' run-pulse' : ''}`}>
                                     {triggerBusy ? 'Starting…' : 'Run next project'}
+                                </button>
+                            )}
+                            {showReviveStalled && (
+                                <button
+                                    type="button"
+                                    data-testid="queue-revive-stalled"
+                                    onClick={() => handleRelaunch(answeredEntries[0].id)}
+                                    disabled={hubBusy || reorderDirty}
+                                    title="A banked answer is waiting — relaunch the orchestrator to resume that project."
+                                    className="header-text text-xs px-3 py-1.5 rounded bg-sky-700 text-white hover:bg-sky-600 disabled:opacity-50 run-pulse">
+                                    {hubBusy ? 'Resuming…' : 'Resume banked answer'}
                                 </button>
                             )}
                             {triggerMsg && <span className="header-text text-xs text-amber-400">{triggerMsg}</span>}

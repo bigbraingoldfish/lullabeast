@@ -1,0 +1,16 @@
+{
+  "current_phase": 7,
+  "current_phase_raw_id": "INT-E1",
+  "current_agent": "escalation",
+  "planner_retries": 5,
+  "executor_retries": 0,
+  "executor_self_failure_retries": 0,
+  "executor_reviewer_rejection_retries": 0,
+  "reviewer_retries": 0,
+  "last_action": "queue revival (answered) -> calculator",
+  "last_action_timestamp": "2026-05-30T15:20:41.134958+00:00",
+  "pipeline_status": "WAITING_FOR_HUMAN",
+  "project_path": "/home/pi/projects/calculator",
+  "phase_base_commit": "3084a810ea52ec6be307ccca2727b1744cfff31b",
+  "phase_start_time": "2026-05-30T15:10:29.297692+00:00"
+}
