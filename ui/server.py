@@ -35,7 +35,10 @@ if _AUTODEV_UI_ROOT not in _sys.path:
 _AUTODEV_PIPELINE_DIR = os.path.join(_AUTODEV_UI_ROOT, "autodev", "pipeline")
 if _AUTODEV_PIPELINE_DIR not in _sys.path:
     _sys.path.insert(0, _AUTODEV_PIPELINE_DIR)
-from autodev.pipeline.queue_semantics import parent_blocks_child
+from autodev.pipeline.queue_semantics import (
+    parent_blocks_child,
+    ESCALATION_ANSWERED,
+)
 from autodev.pipeline.sentinel_poller import PollResult  # noqa: E402
 from env_resolvers import resolve_openclaw_root, resolve_pipeline_root  # noqa: E402
 from skill_manager import SkillManager  # noqa: E402  (W5-E: inline completion reviewer)
@@ -2613,7 +2616,7 @@ def post_command(request: dict):
                     break
             except OSError:
                 continue
-        if not match or match.get("state") != "ESCALATION":
+        if not match or match.get("state") not in ("ESCALATION", ESCALATION_ANSWERED):
             raise HTTPException(
                 status_code=409,
                 detail="Deferred command requires a parked queue entry (ESCALATION) for target_project_path.",
@@ -2649,7 +2652,7 @@ def post_command(request: dict):
                 continue
             if ep != active_real:
                 continue
-            if e.get("state") != "ESCALATION":
+            if e.get("state") not in ("ESCALATION", ESCALATION_ANSWERED):
                 continue
             if e.get("parked_pipeline_status") not in (None, "WAITING_FOR_HUMAN"):
                 continue
@@ -7020,15 +7023,46 @@ def get_queue_status():
     }
 
 
+def _entry_has_banked_answer(entry: dict) -> bool:
+    """True if a parked escalation entry has a banked (deferred) operator command waiting.
+
+    Read-only probe of the per-project ``pending_escalation_command.json`` — never writes the queue.
+    The orchestrator only promotes ESCALATION -> ESCALATION_ANSWERED on its next selection, so while
+    it is dead (e.g. QUEUE_HALTED) a banked answer leaves the row in ESCALATION; this lets the queue
+    surface (``has_banked_answer``) and the trigger-next halt-reason treat that row as recoverable.
+    Returns False for any non-escalation state.
+    """
+    if entry.get("state") not in ("ESCALATION", ESCALATION_ANSWERED):
+        return False
+    ep = entry.get("project_path", "")
+    if not ep:
+        return False
+    try:
+        pend = os.path.join(
+            _pipeline_artifacts_dir(os.path.realpath(os.path.expanduser(ep))),
+            "pending_escalation_command.json",
+        )
+        return os.path.exists(pend)
+    except OSError:
+        return False
+
+
 def _queue_trigger_next_halted_reason(entries: list) -> str:
     """Why POST /api/queue/trigger-next found no runnable row (orchestrator halt buckets, L-07)."""
-    non_terminal = [e.get("state") for e in entries if e.get("state") not in ("COMPLETED", "FAILED")]
+    non_terminal = [e for e in entries if e.get("state") not in ("COMPLETED", "FAILED")]
     if not non_terminal:
         return "all_completed"
+    # P1 Stage H — recoverable, not a dead stall: a parked ESCALATION_ANSWERED entry, OR an
+    # ESCALATION row with a banked answer the orchestrator has not promoted yet (it is dead, e.g.
+    # QUEUE_HALTED). Both are resolved by Resume/relaunch. Report distinctly (before all_blocked)
+    # so the toast matches the UI's has_banked_answer Resume affordance.
+    if any(e.get("state") == ESCALATION_ANSWERED or _entry_has_banked_answer(e) for e in non_terminal):
+        return "answered_pending_revival"
+    states = [e.get("state") for e in non_terminal]
     parked = frozenset({"BLOCKED", "ESCALATION"})
-    if all(s in parked for s in non_terminal):
+    if all(s in parked for s in states):
         return "all_blocked"
-    if all(s == "DEPENDENCY_HOLD" for s in non_terminal):
+    if all(s == "DEPENDENCY_HOLD" for s in states):
         return "all_dependency_hold"
     return "mixed"
 
@@ -7208,6 +7242,12 @@ def get_queue():
             else:
                 entry["live_pipeline_status"] = None
                 entry["live_current_agent"] = None
+
+        # P1 Stage H follow-up (B3ii): expose whether a parked escalation entry already has a
+        # banked answer so the UI can surface the "Answer banked" pill + Resume affordance even
+        # before the (possibly dead) orchestrator promotes ESCALATION -> ESCALATION_ANSWERED.
+        # Shared with the trigger-next halt-reason via _entry_has_banked_answer (read-only).
+        entry["has_banked_answer"] = _entry_has_banked_answer(entry)
 
         # W3-B: enrich ACTIVE entries with live roadmap phase counts
         if entry.get("state") == "ACTIVE":

@@ -1,0 +1,40 @@
+{
+  "queue": [
+    {
+      "id": "5c7a706b-e987-468c-a95c-5dce3952aecd",
+      "project_path": "/home/pi/projects/calculator",
+      "idea_id": null,
+      "name": "calculator",
+      "state": "ACTIVE",
+      "position": 1,
+      "parent_id": null,
+      "added_at": "2026-05-30T15:10:16.501968+00:00",
+      "started_at": "2026-05-30T15:20:41.126996+00:00",
+      "completed_at": null,
+      "blocked_at": null,
+      "skip_count": 0,
+      "preflight_validated_at": "2026-05-30T15:10:16.501968+00:00",
+      "completion_review": false,
+      "notes": ""
+    },
+    {
+      "id": "1b8b6975-1270-4687-9f15-b4de4687b872",
+      "project_path": "/home/pi/projects/val-h-stage-h-b",
+      "idea_id": null,
+      "name": "val-h-stage-h-b",
+      "state": "READY",
+      "position": 2,
+      "parent_id": null,
+      "added_at": "2026-05-30T15:10:16.762460+00:00",
+      "started_at": null,
+      "completed_at": null,
+      "blocked_at": null,
+      "skip_count": 0,
+      "preflight_validated_at": "2026-05-30T15:10:16.762460+00:00",
+      "completion_review": false,
+      "notes": ""
+    }
+  ],
+  "queue_mode": "auto",
+  "last_updated": "2026-05-30T15:50:08.915184+00:00"
+}

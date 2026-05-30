@@ -19,7 +19,7 @@ from webhook_client import (
 )
 from sentinel_poller import cleanup_output_files, initialize_activity_stamp, poll_for_sentinel
 from skill_manager import SkillManager
-from queue_semantics import parent_blocks_child
+from queue_semantics import parent_blocks_child, ESCALATION_ANSWERED, REVIVABLE_ANSWERED_STATES
 from env_resolvers import resolve_openclaw_root, resolve_pipeline_root
 
 # Route module-level logging.* calls (including those from webhook_client —
@@ -1269,6 +1269,38 @@ class Orchestrator:
         entries[:] = final
         return entries
 
+    def _promote_answered_escalations(self, queue_data) -> bool:
+        """P1 Stage H — flip parked ESCALATION rows whose answer has been banked.
+
+        The UI server banks a deferred answer by writing ``pending_escalation_command.json``
+        into the parked project's ``.autodev/pipeline/`` dir (a per-project file — it never
+        touches the queue). This orchestrator-owned pre-pass is the single writer that turns
+        "answer banked" into "revivable": an ESCALATION row whose project has that file is
+        promoted to ESCALATION_ANSWERED so the selection walk picks it up for revival. Keeping
+        the flip here (not in the server) preserves the single-writer queue model with no locks.
+
+        Returns True if any row was promoted (and the queue was rewritten).
+        """
+        changed = False
+        for entry in queue_data.get("queue", []):
+            if entry.get("state") != "ESCALATION":
+                continue
+            pp = entry.get("project_path")
+            if not pp:
+                continue
+            try:
+                root = os.path.realpath(os.path.expanduser(pp))
+            except OSError:
+                continue
+            pending = os.path.join(root, ".autodev", "pipeline", "pending_escalation_command.json")
+            if os.path.exists(pending):
+                entry["state"] = ESCALATION_ANSWERED
+                entry["answered_at"] = datetime.now(timezone.utc).isoformat()
+                changed = True
+        if changed:
+            self._write_queue(queue_data)
+        return changed
+
     def _select_next_queue_project(self, halt_if_no_eligible: bool = True):
         """Walk queue, find next eligible project, run preflight, start it.
 
@@ -1282,6 +1314,11 @@ class Orchestrator:
         success, not a halt).
         """
         queue_data = self._read_queue()
+        # P1 Stage H — promote parked ESCALATION rows whose answer has been banked
+        # (pending_escalation_command.json present) to ESCALATION_ANSWERED, so the
+        # eligibility walk below admits them for revival. Orchestrator-owned flip
+        # (the server only writes the per-project pending file) — single-writer safe.
+        self._promote_answered_escalations(queue_data)
         entries = queue_data["queue"]
         entries.sort(key=lambda e: e["position"])
         now = datetime.now(timezone.utc).isoformat()
@@ -1298,7 +1335,10 @@ class Orchestrator:
                 continue
             visited_ids.add(entry["id"])
 
-            if entry["state"] not in ("READY", "SKIPPED_PENDING"):
+            # Two eligible classes: a FRESH start (READY/SKIPPED_PENDING -> phase-0 reset)
+            # or a REVIVAL (ESCALATION_ANSWERED -> restore the parked phase pointer). P1 Stage H.
+            is_revival = entry["state"] in REVIVABLE_ANSWERED_STATES
+            if entry["state"] not in ("READY", "SKIPPED_PENDING") and not is_revival:
                 i += 1
                 continue
 
@@ -1314,6 +1354,13 @@ class Orchestrator:
 
             # Run lightweight preflight
             ok, reason = self._queue_preflight(entry["project_path"])
+            if not ok and is_revival:
+                # Don't downgrade a revival entry to SKIPPED_PENDING — that would lose the
+                # answered semantics and orphan the banked command. Leave it ESCALATION_ANSWERED
+                # (still revivable) so the operator can repair the project dir and retry.
+                print(f"[QUEUE] Preflight failed for revival '{entry['name']}': {reason} — leaving ESCALATION_ANSWERED")
+                i += 1
+                continue
             if not ok:
                 print(f"[QUEUE] Preflight failed for '{entry['name']}': {reason} — skip-and-requeue")
                 # Cascade SKIPPED_PENDING to all descendants before moving
@@ -1345,27 +1392,64 @@ class Orchestrator:
 
             entry["state"] = "ACTIVE"
             entry["started_at"] = now
+            # P1 Stage H — on a revival, capture the parked snapshot into a local BEFORE
+            # clearing the row, then strip all park metadata so a future re-park starts clean.
+            _revival_snapshot = None
+            if is_revival:
+                _revival_snapshot = dict(entry.get("parked_state_snapshot") or {})
+                for _stale in ("parked_state_snapshot", "parked_at", "parked_reason",
+                               "parked_pipeline_status", "answered_at"):
+                    entry.pop(_stale, None)
             self._write_queue(queue_data)
             _write_run_manifest(entry)  # W2-A
 
-            self.state = {
-                "current_phase": 0,
-                "current_phase_raw_id": "",
-                "current_agent": "planner",
-                "planner_retries": 0,
-                "executor_retries": 0,
-                "executor_self_failure_retries": 0,
-                "executor_reviewer_rejection_retries": 0,
-                "reviewer_retries": 0,
-                "last_action": f"queue auto-advance to {entry['name']}",
-                "last_action_timestamp": now,
-                "pipeline_status": "RUNNING",
-                "project_path": project_path,
-            }
+            # INVARIANT A: update_symlink (above) is shared and runs FIRST; only the
+            # self.state write splits between revival (restore) and fresh-start (reset).
+            if is_revival:
+                # Restore the escalated-phase pointer so the banked command (RESET_PHASE /
+                # PROCEED / SKIP / ...) acts on the right phase, not a blank phase 0.
+                snap = _revival_snapshot or {}
+                self.state = {
+                    "current_phase": snap.get("current_phase", 0),
+                    "current_phase_raw_id": snap.get("current_phase_raw_id", ""),
+                    "current_agent": "escalation",
+                    "planner_retries": snap.get("planner_retries", 0),
+                    "executor_retries": snap.get("executor_retries", 0),
+                    "executor_self_failure_retries": snap.get("executor_self_failure_retries", 0),
+                    "executor_reviewer_rejection_retries": snap.get("executor_reviewer_rejection_retries", 0),
+                    "reviewer_retries": snap.get("reviewer_retries", 0),
+                    "last_action": f"queue revival (answered) -> {entry['name']}",
+                    "last_action_timestamp": now,
+                    "pipeline_status": "RUNNING",
+                    "project_path": project_path,
+                }
+                if snap.get("phase_base_commit"):
+                    self.state["phase_base_commit"] = snap["phase_base_commit"]
+                if snap.get("phase_start_time"):
+                    self.state["phase_start_time"] = snap["phase_start_time"]
+            else:
+                self.state = {
+                    "current_phase": 0,
+                    "current_phase_raw_id": "",
+                    "current_agent": "planner",
+                    "planner_retries": 0,
+                    "executor_retries": 0,
+                    "executor_self_failure_retries": 0,
+                    "executor_reviewer_rejection_retries": 0,
+                    "reviewer_retries": 0,
+                    "last_action": f"queue auto-advance to {entry['name']}",
+                    "last_action_timestamp": now,
+                    "pipeline_status": "RUNNING",
+                    "project_path": project_path,
+                }
             # P0 Stage H — queue auto-advance starts a fresh project; the
             # retry-class tracker starts at "initial_attempt" same as __init__.
+            # (On a revival the banked RESET_* re-zeros counters anyway.)
             self._current_attempt_retry_class = "initial_attempt"
             self.write_state()
+            # Reused unchanged in both branches: converts a banked pending_escalation_command
+            # into escalation_output (+ sets WAITING_FOR_HUMAN / current_agent=escalation) so the
+            # next loop's escalation dispatch consumes it against the (now-restored) phase pointer.
             self._apply_pending_escalation_command(project_path)
             return True
 
@@ -1374,6 +1458,13 @@ class Orchestrator:
         _parked_states = frozenset({"BLOCKED", "ESCALATION"})
         if not non_terminal:
             reason = "all_completed"
+        elif any(s in REVIVABLE_ANSWERED_STATES for s in non_terminal):
+            # P1 Stage H — at least one parked entry has a banked answer waiting. This is
+            # recoverable (relaunch/resume), NOT a dead stall — keep it distinct from all_blocked
+            # so the UI offers a Resume affordance instead of the permanent-stall toast. Tested
+            # before all_blocked because an answered entry that slipped past selection (e.g. a
+            # revival preflight-fail) must not be miscategorised as blocked.
+            reason = "answered_pending_revival"
         elif all(s in _parked_states for s in non_terminal):
             reason = "all_blocked"
         elif all(s == "DEPENDENCY_HOLD" for s in non_terminal):
@@ -1437,6 +1528,25 @@ class Orchestrator:
             row["parked_at"] = now
             row["parked_reason"] = parked_reason
             row["parked_pipeline_status"] = self.state.get("pipeline_status")
+            # P1 Stage H — snapshot the GLOBAL pipeline_state fields that the queue
+            # advance overwrites (selection resets to a blank phase-0/planner state),
+            # so a later revival can restore the *escalated phase* pointer rather than
+            # restarting from scratch. phase_base_commit is load-bearing: reset_phase()
+            # guards its ``git reset --hard`` on it, so without it a revived RESET_PHASE
+            # would resume on a dirty tree. escalation_resets/reset_log are deliberately
+            # NOT snapshotted — they live in the per-project phase_state.json (survives
+            # via the symlink) and duplicating them would diverge from the reset-cap logic.
+            row["parked_state_snapshot"] = {
+                "current_phase": self.state.get("current_phase", 0),
+                "current_phase_raw_id": self.state.get("current_phase_raw_id", ""),
+                "planner_retries": self.state.get("planner_retries", 0),
+                "executor_retries": self.state.get("executor_retries", 0),
+                "executor_self_failure_retries": self.state.get("executor_self_failure_retries", 0),
+                "executor_reviewer_rejection_retries": self.state.get("executor_reviewer_rejection_retries", 0),
+                "reviewer_retries": self.state.get("reviewer_retries", 0),
+                "phase_base_commit": self.state.get("phase_base_commit", ""),
+                "phase_start_time": self.state.get("phase_start_time", ""),
+            }
             if extra_fields:
                 row.update(extra_fields)
             self._write_queue(queue_data)
@@ -1596,6 +1706,53 @@ class Orchestrator:
         to avoid repeatedly re-invoking escalation and flipping status back/forth.
         """
         return self.state.get("pipeline_status") not in ("WAITING_FOR_HUMAN", "QUEUE_HALTED")
+
+    def _pending_escalation_output_exists(self) -> bool:
+        """True if any escalation poll root already has an unconsumed escalation_output.done.
+
+        Used by the QUEUE_HALTED recovery hook to preserve the pre-existing
+        restart-with-an-in-place-answer path: if the operator answered in place and the
+        process died before the dispatch consumed it, the answer is in escalation_output
+        (not pending_escalation_command), so the main loop must still get a chance to consume it.
+        """
+        for root in self._escalation_poll_roots():
+            if os.path.exists(os.path.join(root, ".autodev", "pipeline", "escalation_output.done")):
+                return True
+        return False
+
+    def _maybe_revive_on_queue_halted(self) -> bool:
+        """P1 Stage H — QUEUE_HALTED recovery hook (INVARIANT B). Called once at run() startup,
+        BEFORE the current_agent-gated startup function.
+
+        A bare relaunch into QUEUE_HALTED is a silent no-op today: the state carries
+        ``current_agent="escalation"`` so the startup function returns ``enter_main_loop`` without
+        re-running selection, and QUEUE_HALTED is deliberately NOT in the main loop's exit set (the
+        loop legitimately polls for an *in-place* escalation answer). Result: the loop polls
+        ``escalation_output`` forever while a deferred banked answer sits in
+        ``pending_escalation_command.json``, never consumed.
+
+        This hook forces a recovery decision and returns whether run() should continue into the
+        loop (True) or exit cleanly (False):
+          (a) revived a parked-with-answer project -> True (loop consumes the banked command);
+          (b) nothing revived but an in-place escalation_output.done is already pending -> True
+              (preserve the legacy restart-recovery path — the loop consumes it);
+          (c) nothing to consume -> False (genuinely stuck; exit instead of spinning).
+
+        Promotion is run first so recovery does not depend on whether the orchestrator was alive
+        when the answer was banked. Returns True immediately when not QUEUE_HALTED (inert).
+        """
+        if self.state.get("pipeline_status") != "QUEUE_HALTED":
+            return True
+        queue_data = self._read_queue()
+        self._promote_answered_escalations(queue_data)
+        if self._select_next_queue_project(halt_if_no_eligible=False):
+            # Revival rewrote self.state to the escalated phase pointer; reload to be safe.
+            self.read_state()
+            return True
+        if self._pending_escalation_output_exists():
+            return True  # legacy in-place answer pending — let the loop consume it
+        print("[QUEUE] QUEUE_HALTED with no banked answer to revive — exiting cleanly.")
+        return False
 
     def _read_escalation_summary(self):
         """Read escalation agent's human-facing summary from project directory.
@@ -3817,6 +3974,16 @@ class Orchestrator:
                         {"failed_at": datetime.now(timezone.utc).isoformat()},
                     )
                 return  # Do not enter phase loop; finally block will release lock
+
+            # P1 Stage H — QUEUE_HALTED recovery (INVARIANT B). A relaunch into QUEUE_HALTED
+            # carries current_agent="escalation", so the startup function below returns
+            # enter_main_loop without re-running selection, and QUEUE_HALTED is deliberately not
+            # in the loop's exit set — the loop would poll escalation_output forever while a
+            # deferred banked answer sits unconsumed. This hook promotes banked answers and
+            # revives a parked project; if there is genuinely nothing to consume it returns False
+            # and run() exits cleanly instead of spinning. Inert when not QUEUE_HALTED.
+            if not self._maybe_revive_on_queue_halted():
+                return
 
             # --- Startup Phase Identification + branch checkout (may repeat after queue auto-advance) ---
             _startup_pass = 0

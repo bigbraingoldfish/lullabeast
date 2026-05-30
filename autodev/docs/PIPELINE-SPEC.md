@@ -609,6 +609,36 @@ Sequential, not parallel:
 - Detection is by absence — no Signal activity, pipeline idle — manual check required
 - No infinite notification retry loop — systematic failure will not be self-resolving
 
+### Parked-escalation revival (P1 Stage H)
+
+When a project escalates under an **auto-queue**, the orchestrator parks it (`_queue_park_active_entry("ESCALATION")`) and advances to the next eligible project. The operator may **bank** an answer for the parked project at any time via `POST /api/command` with `target_project_path`; the server writes only the per-project `pending_escalation_command.json` (it never writes `pipeline_queue.json`). The loop closes on the next selection:
+
+1. **Promote.** `_promote_answered_escalations` (a pre-pass at the top of `_select_next_queue_project`) flips any `ESCALATION` row whose project has a banked `pending_escalation_command.json` to `ESCALATION_ANSWERED`. This is the single writer of that transition — orchestrator-owned, so the queue's single-writer model is preserved with no locks.
+2. **Revive (restore, don't restart).** Selection admits `ESCALATION_ANSWERED` as a second eligible class. Because `pipeline_state.json` is global and a fresh start resets it to phase 0, the escalated phase pointer would otherwise be lost — so `_queue_park_active_entry` snapshots it into the entry's `parked_state_snapshot` at park time, and the revival branch **restores** that snapshot instead of the phase-0 reset.
+3. **Apply.** The revival branch reuses `_apply_pending_escalation_command`, which converts the banked file into `escalation_output` and sets `WAITING_FOR_HUMAN` / `current_agent="escalation"`; the next loop's escalation dispatch consumes the command against the restored phase.
+
+`parked_state_snapshot` schema (all fields the global-state reset would destroy):
+
+```json
+{
+  "current_phase": 4,
+  "current_phase_raw_id": "CORE-2",
+  "planner_retries": 0,
+  "executor_retries": 2,
+  "executor_self_failure_retries": 1,
+  "executor_reviewer_rejection_retries": 0,
+  "reviewer_retries": 2,
+  "phase_base_commit": "<sha>",
+  "phase_start_time": "<ISO 8601>"
+}
+```
+
+`phase_base_commit` is **load-bearing**: `reset_phase()` guards its `git reset --hard` on it, so a revived `RESET_PHASE` without it would resume on a dirty tree. `escalation_resets` / `reset_log` are **not** snapshotted — they live in the per-project `phase_state.json`, which survives via the `pipeline-project` symlink. **Invariant:** in the activation block `update_symlink` runs first and is shared by both the revival and fresh-start paths (the branch splits only the `self.state` write), so the restore and the banked command always act on the *revived* project's repo.
+
+**Bankable commands.** The six escalation-panel commands (`RESET_PHASE`, `RESET_EXECUTION`, `RESET_REVIEWER`, `PROCEED`, `SKIP`, `STOP`) — all phase-level. `RETRY` is **not** bankable (it is the `StoppedRecoveryPanel` flow, not an escalation-panel command), so no mid-agent fidelity is required in the snapshot.
+
+**`QUEUE_HALTED` recovery.** When the escalated project is the last entry, the orchestrator exits to `QUEUE_HALTED`. A *restart* into that state carries `current_agent="escalation"`, so the startup function skips selection, and `QUEUE_HALTED` is intentionally not in the main-loop exit set (the loop stays alive to poll for an *in-place* answer). `Orchestrator._maybe_revive_on_queue_halted()` runs once at `run()` startup, before the gated startup function: it promotes banked answers and revives a parked project; with nothing to consume it returns `False` and `run()` exits cleanly (no spin), but it continues into the loop when an in-place `escalation_output.done` is already pending. The `answered_pending_revival` halt-reason (set ahead of `all_blocked`) marks the queue recoverable; the dashboard surfaces a **Resume banked answer** control that reuses `POST /api/queue/{entry_id}/relaunch`.
+
 ---
 
 ## 7. Gate Scripts

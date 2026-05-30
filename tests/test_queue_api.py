@@ -139,6 +139,37 @@ class TestGetQueue:
             assert e.get("live_pipeline_status") is None
             assert e.get("live_current_agent") is None
 
+    def test_has_banked_answer_flag_for_parked_escalation(self, client):
+        """P1 Stage H follow-up (B3ii) — GET /api/queue exposes has_banked_answer so the UI can
+        offer recovery for a parked ESCALATION entry whose answer was banked while the
+        orchestrator was dead (before it can promote the row to ESCALATION_ANSWERED).
+        Display-only probe — it must NOT rewrite the queue."""
+        c, queue_file, base = client
+        banked = base / "banked"
+        (banked / ".autodev" / "pipeline").mkdir(parents=True)
+        (banked / ".autodev" / "pipeline" / "pending_escalation_command.json").write_text(
+            json.dumps({"command": "RESET_PHASE"})
+        )
+        waiting = base / "waiting"
+        (waiting / ".autodev" / "pipeline").mkdir(parents=True)  # parked, no banked answer
+        normal = base / "normal"
+        normal.mkdir()  # READY entry — not parked
+        entries = [
+            {**_make_entry("banked", state="ESCALATION", position=1), "project_path": str(banked)},
+            {**_make_entry("waiting", state="ESCALATION", position=2), "project_path": str(waiting)},
+            {**_make_entry("normal", state="READY", position=3), "project_path": str(normal)},
+        ]
+        _write_queue(str(queue_file), entries)
+        before = queue_file.read_bytes()
+
+        data = c.get("/api/queue").json()
+        by_name = {e["name"]: e for e in data["queue"]}
+        assert by_name["banked"]["has_banked_answer"] is True
+        assert by_name["waiting"]["has_banked_answer"] is False
+        assert by_name["normal"]["has_banked_answer"] is False
+        # Single-writer: a read-only GET must not rewrite the queue file.
+        assert queue_file.read_bytes() == before
+
     def test_live_pipeline_status_set_when_entry_path_matches_pipeline_state(self, client):
         c, queue_file, tmp_path = client
         pipeline_state_file = tmp_path / "pipeline_state.json"
@@ -680,6 +711,56 @@ class TestPostCommandDeferred:
         with open(pending) as f:
             assert json.load(f).get("command") == "STOP"
 
+    def test_deferred_accepts_already_answered_entry(self, client):
+        """P1 Stage H — re-banking a (new) command onto an entry the orchestrator already
+        promoted to ESCALATION_ANSWERED must still succeed (deferred:True), overwrite the
+        pending file, and NOT write the queue (single-writer: the server never touches it)."""
+        c, queue_file, base = client
+        proj_a = base / "answered_a"
+        proj_a.mkdir()
+        proj_b = base / "active_b"
+        proj_b.mkdir()
+        symlink = base / "pipeline-project"
+        symlink.symlink_to(proj_b)
+        entries = [
+            {**_make_entry("a"), "project_path": str(proj_a), "state": "ESCALATION_ANSWERED", "position": 1},
+            {**_make_entry("b"), "project_path": str(proj_b), "state": "ACTIVE", "position": 2},
+        ]
+        _write_queue(str(queue_file), entries)
+        (base / "pipeline_state.json").write_text(
+            json.dumps({"project_path": str(proj_b), "pipeline_status": "RUNNING"})
+        )
+        queue_bytes_before = queue_file.read_bytes()
+
+        resp = c.post("/api/command", json={"command": "RESET_PHASE", "target_project_path": str(proj_a)})
+        assert resp.status_code == 200
+        assert resp.json().get("deferred") is True
+        pending = proj_a / ".autodev" / "pipeline" / "pending_escalation_command.json"
+        assert json.loads(pending.read_text())["command"] == "RESET_PHASE"
+        # Single-writer invariant: the server did not rewrite the queue file.
+        assert queue_file.read_bytes() == queue_bytes_before
+
+    def test_parked_fallback_accepts_answered_state(self, client):
+        """The active-symlink deferred fallback (status moved off WAITING_FOR_HUMAN) must also
+        accept an ESCALATION_ANSWERED row, not only ESCALATION."""
+        c, queue_file, base = client
+        proj = base / "answered_active"
+        proj.mkdir()
+        symlink = base / "pipeline-project"
+        symlink.symlink_to(proj)
+        entries = [
+            {**_make_entry("a"), "project_path": str(proj), "state": "ESCALATION_ANSWERED", "position": 1},
+        ]
+        _write_queue(str(queue_file), entries)
+        (base / "pipeline_state.json").write_text(
+            json.dumps({"project_path": str(proj), "pipeline_status": "QUEUE_HALTED"})
+        )
+
+        resp = c.post("/api/command", json={"command": "RESET_PHASE"})
+        assert resp.status_code == 200
+        assert resp.json().get("deferred") is True
+        assert (proj / ".autodev" / "pipeline" / "pending_escalation_command.json").exists()
+
 
 # ---------------------------------------------------------------------------
 # DELETE /api/queue/{entry_id}
@@ -1005,6 +1086,62 @@ class TestPostQueueTriggerNext:
         data = resp.json()
         assert data.get("queue_halted") is True
         assert data.get("queue_halted_reason") == "all_dependency_hold"
+
+    def test_queue_halted_reason_answered_pending_revival(self, client):
+        """P1 Stage H — a parked ESCALATION_ANSWERED entry is recoverable, not a dead stall.
+        trigger-next reports 'answered_pending_revival' so the UI can offer the relaunch/resume
+        affordance instead of the plain stall toast."""
+        c, queue_file, _ = client
+        entries = [
+            _make_entry("a", state="ESCALATION_ANSWERED", position=1),
+            _make_entry("b", state="BLOCKED", position=2),
+        ]
+        _write_queue(str(queue_file), entries, queue_mode="manual")
+
+        resp = c.post("/api/queue/trigger-next")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data.get("queue_halted") is True
+        assert data.get("queue_halted_reason") == "answered_pending_revival"
+
+    def test_queue_halted_reason_revival_for_unpromoted_banked_escalation(self, client):
+        """P1 Stage H follow-up (B4) — a parked ESCALATION row whose answer was banked while the
+        orchestrator was dead (so it is NOT yet promoted to ESCALATION_ANSWERED) is still
+        recoverable. trigger-next must report 'answered_pending_revival' — matching the Resume
+        button the UI shows via has_banked_answer — not the generic 'all_blocked' stall."""
+        c, queue_file, base = client
+        banked = base / "banked"
+        (banked / ".autodev" / "pipeline").mkdir(parents=True)
+        (banked / ".autodev" / "pipeline" / "pending_escalation_command.json").write_text(
+            json.dumps({"command": "RESET_PHASE"})
+        )
+        entries = [
+            {**_make_entry("banked", state="ESCALATION", position=1), "project_path": str(banked)},
+            _make_entry("b", state="BLOCKED", position=2),
+        ]
+        _write_queue(str(queue_file), entries, queue_mode="manual")
+
+        resp = c.post("/api/queue/trigger-next")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data.get("queue_halted") is True
+        assert data.get("queue_halted_reason") == "answered_pending_revival"
+
+    def test_queue_halted_reason_all_blocked_when_no_banked_answer(self, client):
+        """Guard the B4 fix did not over-broaden: a parked ESCALATION with NO banked answer
+        (no pending file) must still report all_blocked."""
+        c, queue_file, base = client
+        waiting = base / "waiting"
+        (waiting / ".autodev" / "pipeline").mkdir(parents=True)  # parked, no pending file
+        entries = [
+            {**_make_entry("waiting", state="ESCALATION", position=1), "project_path": str(waiting)},
+            _make_entry("b", state="BLOCKED", position=2),
+        ]
+        _write_queue(str(queue_file), entries, queue_mode="manual")
+
+        resp = c.post("/api/queue/trigger-next")
+        assert resp.status_code == 200
+        assert resp.json().get("queue_halted_reason") == "all_blocked"
 
     def test_queue_halted_reason_mixed(self, client):
         c, queue_file, _ = client

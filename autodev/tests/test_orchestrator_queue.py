@@ -1007,3 +1007,455 @@ class TestQueueRestoreParkedEntryToActive:
         q = json.loads(queue_file.read_text())
         assert q["queue"][0]["state"] == "ACTIVE"
         assert q["queue"][0].get("completed_at") is None
+
+
+# ---------------------------------------------------------------------------
+# P1 Stage H — Parked-escalation revival (bank -> revive -> apply)
+# ---------------------------------------------------------------------------
+
+_SNAPSHOT_KEYS = (
+    "current_phase",
+    "current_phase_raw_id",
+    "planner_retries",
+    "executor_retries",
+    "executor_self_failure_retries",
+    "executor_reviewer_rejection_retries",
+    "reviewer_retries",
+    "phase_base_commit",
+    "phase_start_time",
+)
+
+
+def _escalated_state(project_path):
+    """A mid-phase escalated global state, as it would be just before parking."""
+    return {
+        "current_phase": 4,
+        "current_phase_raw_id": "CORE-2",
+        "current_agent": "escalation",
+        "planner_retries": 0,
+        "executor_retries": 2,
+        "executor_self_failure_retries": 1,
+        "executor_reviewer_rejection_retries": 0,
+        "reviewer_retries": 2,
+        "phase_base_commit": "abc123def",
+        "phase_start_time": "2026-05-30T00:00:00Z",
+        "last_action": "executor attempt failed",
+        "pipeline_status": "WAITING_FOR_HUMAN",
+        "project_path": project_path,
+    }
+
+
+def _snapshot(phase=4, raw_id="CORE-2"):
+    """A parked_state_snapshot as _queue_park_active_entry would have written it."""
+    return {
+        "current_phase": phase,
+        "current_phase_raw_id": raw_id,
+        "planner_retries": 0,
+        "executor_retries": 2,
+        "executor_self_failure_retries": 1,
+        "executor_reviewer_rejection_retries": 0,
+        "reviewer_retries": 2,
+        "phase_base_commit": "abc123def",
+        "phase_start_time": "2026-05-30T00:00:00Z",
+    }
+
+
+def _setup_answered_project(base, name, command, snapshot, state="ESCALATION"):
+    """Create a project dir with a banked pending_escalation_command + a parked entry."""
+    proj = base / name
+    art = proj / ".autodev" / "pipeline"
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "pending_escalation_command.json").write_text(json.dumps({"command": command}))
+    (art / "pending_escalation_command.done").write_text("")
+    entry = {
+        **_make_entry(name, state=state, position=1),
+        "project_path": str(proj),
+        "parked_state_snapshot": snapshot,
+        "parked_at": "2026-05-30T00:00:00Z",
+        "parked_reason": "escalation",
+        "parked_pipeline_status": "WAITING_FOR_HUMAN",
+    }
+    return proj, entry
+
+
+class TestParkedEscalationRevival:
+    """The full bank -> revive -> apply loop for parked ESCALATION queue entries."""
+
+    def test_park_captures_state_snapshot(self, orch, tmp_path, monkeypatch):
+        """Parking an ESCALATION row must snapshot the global phase pointer + retry
+        counters + phase_base_commit so revival can resume the escalated phase."""
+        inst, queue_file, _, _ = orch
+        proj = tmp_path / "esc_proj"
+        proj.mkdir()
+
+        entry = {**_make_entry("esc_proj", state="ACTIVE", position=1), "project_path": str(proj)}
+        _write_queue(queue_file, [entry])
+
+        import orchestrator as orch_mod
+        monkeypatch.setattr(orch_mod, "SYMLINK_TARGET", str(proj))
+        inst.state = _escalated_state(str(proj))
+
+        inst._queue_park_active_entry("ESCALATION", "escalation")
+
+        row = inst._read_queue()["queue"][0]
+        assert row["state"] == "ESCALATION"
+        assert row.get("parked_pipeline_status") == "WAITING_FOR_HUMAN"  # back-compat preserved
+        snap = row.get("parked_state_snapshot")
+        assert snap is not None, "park must persist parked_state_snapshot"
+        assert set(snap.keys()) == set(_SNAPSHOT_KEYS), f"snapshot keys drifted: {sorted(snap.keys())}"
+        assert snap["current_phase"] == 4
+        assert snap["current_phase_raw_id"] == "CORE-2"
+        assert snap["executor_retries"] == 2
+        assert snap["executor_self_failure_retries"] == 1
+        assert snap["reviewer_retries"] == 2
+        assert snap["phase_base_commit"] == "abc123def"
+        assert snap["phase_start_time"] == "2026-05-30T00:00:00Z"
+
+    def test_promote_answered_only_flips_escalation_with_pending_file(self, orch, tmp_path, monkeypatch):
+        """The orchestrator-owned promotion pre-pass flips ONLY ESCALATION rows whose
+        project has a banked pending_escalation_command.json. Everything else untouched."""
+        inst, queue_file, _, _ = orch
+
+        # ESCALATION with a banked answer -> should be promoted
+        answered = tmp_path / "answered"
+        (answered / ".autodev" / "pipeline").mkdir(parents=True)
+        (answered / ".autodev" / "pipeline" / "pending_escalation_command.json").write_text(
+            json.dumps({"command": "RESET_PHASE"})
+        )
+        # ESCALATION without a banked answer -> stays ESCALATION
+        waiting = tmp_path / "waiting"
+        waiting.mkdir()
+
+        e_answered = {**_make_entry("answered", state="ESCALATION", position=1), "project_path": str(answered)}
+        e_waiting = {**_make_entry("waiting", state="ESCALATION", position=2), "project_path": str(waiting)}
+        e_ready = _make_entry("ready", state="READY", position=3)
+        e_blocked = _make_entry("blocked", state="BLOCKED", position=4)
+        _write_queue(queue_file, [e_answered, e_waiting, e_ready, e_blocked])
+
+        changed = inst._promote_answered_escalations(inst._read_queue())
+        assert changed is True
+
+        by_id = {e["id"]: e for e in inst._read_queue()["queue"]}
+        assert by_id[e_answered["id"]]["state"] == "ESCALATION_ANSWERED"
+        assert by_id[e_answered["id"]].get("answered_at")  # stamped
+        assert by_id[e_waiting["id"]]["state"] == "ESCALATION"   # no pending file
+        assert by_id[e_ready["id"]]["state"] == "READY"
+        assert by_id[e_blocked["id"]]["state"] == "BLOCKED"
+
+    def test_promote_returns_false_when_nothing_to_flip(self, orch, tmp_path, monkeypatch):
+        inst, queue_file, _, _ = orch
+        waiting = tmp_path / "waiting"
+        waiting.mkdir()
+        e_waiting = {**_make_entry("waiting", state="ESCALATION", position=1), "project_path": str(waiting)}
+        _write_queue(queue_file, [e_waiting])
+        assert inst._promote_answered_escalations(inst._read_queue()) is False
+        assert inst._read_queue()["queue"][0]["state"] == "ESCALATION"
+
+    def test_revived_entry_restores_escalated_phase_pointer_not_phase_zero(self, orch, tmp_path, monkeypatch):
+        """RESUME-CORRECTNESS GATE: at the moment the banked command is applied, the global
+        state must be the RESTORED escalated-phase pointer (incl. phase_base_commit), never a
+        blank phase-0 reset. Otherwise a banked RESET_PHASE acts on the wrong phase/branch."""
+        inst, queue_file, _, _ = orch
+        proj, entry = _setup_answered_project(tmp_path, "proj_a", "RESET_PHASE", _snapshot(), state="ESCALATION_ANSWERED")
+        _write_queue(queue_file, [entry])
+
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "update_symlink", lambda p: True)
+        monkeypatch.setattr(inst, "write_state", lambda: None)
+        captured = {}
+        monkeypatch.setattr(inst, "_apply_pending_escalation_command",
+                            lambda project_path: captured.update(state=dict(inst.state)))
+
+        assert inst._select_next_queue_project() is True
+        s = captured["state"]
+        # Restored, not reset:
+        assert s["current_phase"] == 4
+        assert s["current_phase_raw_id"] == "CORE-2"
+        assert s["phase_base_commit"] == "abc123def"
+        assert s["reviewer_retries"] == 2
+        assert s["executor_self_failure_retries"] == 1
+        assert s["current_agent"] == "escalation"
+        assert s["pipeline_status"] == "RUNNING"
+        # Explicit negatives — this is NOT the phase-0 fresh-start reset:
+        assert s["current_phase"] != 0
+        assert s["current_phase_raw_id"] != ""
+
+    def test_revival_targets_symlink_of_revived_project(self, orch, tmp_path, monkeypatch):
+        """INVARIANT A: update_symlink stays first/shared, so when the banked command is applied
+        (and later when the dispatch runs git reset --hard on SYMLINK_TARGET) the symlink already
+        resolves to the REVIVED project — never the previously-active one. Guards against a refactor
+        moving the state-split above update_symlink (silent cross-project repo destruction)."""
+        inst, queue_file, _, _ = orch
+        import orchestrator as orch_mod
+
+        proj_a, entry = _setup_answered_project(tmp_path, "proj_a", "RESET_PHASE", _snapshot(), state="ESCALATION_ANSWERED")
+        proj_b = tmp_path / "proj_b"
+        proj_b.mkdir()
+        symlink = tmp_path / "pipeline-project"
+        symlink.symlink_to(proj_b)  # previously-active project
+        monkeypatch.setattr(orch_mod, "SYMLINK_TARGET", str(symlink))
+
+        def real_update(target):
+            if symlink.is_symlink() or symlink.exists():
+                symlink.unlink()
+            symlink.symlink_to(target)
+            return True
+
+        monkeypatch.setattr(inst, "update_symlink", real_update)
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "write_state", lambda: None)
+        recorded = {}
+        monkeypatch.setattr(inst, "_apply_pending_escalation_command",
+                            lambda project_path: recorded.update(at_apply=os.path.realpath(str(symlink))))
+        _write_queue(queue_file, [entry])
+
+        assert inst._select_next_queue_project() is True
+        assert recorded["at_apply"] == os.path.realpath(str(proj_a))  # symlink already on A at apply
+        assert os.path.realpath(str(symlink)) == os.path.realpath(str(proj_a))  # and after selection
+
+    def test_banking_answer_makes_parked_entry_selectable(self, orch, tmp_path, monkeypatch):
+        """A parked ESCALATION row with a banked answer is promoted then revived to ACTIVE."""
+        inst, queue_file, _, _ = orch
+        proj, entry = _setup_answered_project(tmp_path, "proj_a", "RESET_PHASE", _snapshot(), state="ESCALATION")
+        _write_queue(queue_file, [entry])
+
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "update_symlink", lambda p: True)
+        monkeypatch.setattr(inst, "write_state", lambda: None)
+        monkeypatch.setattr(inst, "_apply_pending_escalation_command", lambda project_path: None)
+
+        assert inst._select_next_queue_project() is True
+        assert inst._read_queue()["queue"][0]["state"] == "ACTIVE"
+
+    def test_revived_entry_applies_pending_command_on_selection(self, orch, tmp_path, monkeypatch):
+        """Letting _apply_pending_escalation_command run for real on the revival path:
+        the banked answer becomes escalation_output and the pipeline waits for dispatch."""
+        inst, queue_file, _, _ = orch
+        proj, entry = _setup_answered_project(tmp_path, "proj_a", "RESET_PHASE", _snapshot(), state="ESCALATION")
+        _write_queue(queue_file, [entry])
+
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "update_symlink", lambda p: True)
+        monkeypatch.setattr(inst, "write_state", lambda: None)
+
+        assert inst._select_next_queue_project() is True
+        art = proj / ".autodev" / "pipeline"
+        assert not (art / "pending_escalation_command.json").exists()  # consumed
+        assert (art / "escalation_output.done").exists()
+        out = json.loads((art / "escalation_output.json").read_text())
+        assert out["command"] == "RESET_PHASE"
+        assert inst.state["pipeline_status"] == "WAITING_FOR_HUMAN"
+        assert inst.state["current_agent"] == "escalation"
+        # pointer still the escalated phase (apply does not touch current_phase):
+        assert inst.state["current_phase"] == 4
+        assert inst.state["current_phase_raw_id"] == "CORE-2"
+
+    def test_revival_clears_park_metadata(self, orch, tmp_path, monkeypatch):
+        """After revival the now-ACTIVE row carries no stale park/snapshot/answered fields."""
+        inst, queue_file, _, _ = orch
+        proj, entry = _setup_answered_project(tmp_path, "proj_a", "RESET_PHASE", _snapshot(), state="ESCALATION_ANSWERED")
+        entry["answered_at"] = "2026-05-30T01:00:00Z"
+        _write_queue(queue_file, [entry])
+
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "update_symlink", lambda p: True)
+        monkeypatch.setattr(inst, "write_state", lambda: None)
+        monkeypatch.setattr(inst, "_apply_pending_escalation_command", lambda project_path: None)
+
+        assert inst._select_next_queue_project() is True
+        row = inst._read_queue()["queue"][0]
+        assert row["state"] == "ACTIVE"
+        for stale in ("parked_state_snapshot", "parked_at", "parked_reason", "parked_pipeline_status", "answered_at"):
+            assert row.get(stale) is None, f"stale {stale} survived revival"
+
+    def test_multi_project_park_advance_bank_resume_end_to_end(self, orch, tmp_path, monkeypatch):
+        """The headline loop: A escalates+parks -> advance to B -> bank A's answer ->
+        B completes -> next selection revives A and applies the banked command at A's phase."""
+        inst, queue_file, _, _ = orch
+        import orchestrator as orch_mod
+
+        proj_a = tmp_path / "proj_a"
+        (proj_a / ".autodev" / "pipeline").mkdir(parents=True)
+        proj_b = tmp_path / "proj_b"
+        proj_b.mkdir()
+        symlink = tmp_path / "pipeline-project"
+        symlink.symlink_to(proj_a)  # A currently active
+        monkeypatch.setattr(orch_mod, "SYMLINK_TARGET", str(symlink))
+
+        def real_update(target):
+            if symlink.is_symlink() or symlink.exists():
+                symlink.unlink()
+            symlink.symlink_to(target)
+            return True
+
+        monkeypatch.setattr(inst, "update_symlink", real_update)
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "write_state", lambda: None)
+
+        a = {**_make_entry("proj_a", state="ACTIVE", position=1), "project_path": str(proj_a)}
+        b = {**_make_entry("proj_b", state="READY", position=2), "project_path": str(proj_b)}
+        _write_queue(queue_file, [a, b])
+
+        # 1) A escalates mid-phase and parks
+        inst.state = _escalated_state(str(proj_a))
+        inst._queue_park_active_entry("ESCALATION", "escalation")
+        # 2) advance selects B (fresh phase-0 start)
+        assert inst._select_next_queue_project() is True
+        assert symlink.resolve() == proj_b.resolve()
+        by_id = {e["id"]: e for e in inst._read_queue()["queue"]}
+        assert by_id[a["id"]]["state"] == "ESCALATION"
+        assert by_id[b["id"]]["state"] == "ACTIVE"
+
+        # 3) operator banks A's answer (per-project file only; queue untouched by server)
+        (proj_a / ".autodev" / "pipeline" / "pending_escalation_command.json").write_text(json.dumps({"command": "RESET_PHASE"}))
+
+        # 4) B completes
+        qd = inst._read_queue()
+        for e in qd["queue"]:
+            if e["id"] == b["id"]:
+                e["state"] = "COMPLETED"
+        inst._write_queue(qd)
+
+        # 5) next selection promotes + revives A at its escalated phase
+        assert inst._select_next_queue_project(halt_if_no_eligible=False) is True
+        assert symlink.resolve() == proj_a.resolve()  # back on A
+        by_id = {e["id"]: e for e in inst._read_queue()["queue"]}
+        assert by_id[a["id"]]["state"] == "ACTIVE"
+        assert by_id[a["id"]].get("parked_state_snapshot") is None  # cleared
+        assert inst.state["current_phase"] == 4              # escalated phase, not 0
+        assert inst.state["current_phase_raw_id"] == "CORE-2"
+        assert inst.state["current_agent"] == "escalation"
+        art_a = proj_a / ".autodev" / "pipeline"
+        assert (art_a / "escalation_output.done").exists()   # banked command applied
+
+    def test_answered_entry_not_counted_all_blocked(self, orch, tmp_path, monkeypatch):
+        """An ESCALATION_ANSWERED entry that is skipped (e.g. revival preflight-fail) must yield
+        the recoverable 'answered_pending_revival' halt reason, NOT 'all_blocked' (a dead stall)."""
+        inst, queue_file, _, _ = orch
+        proj, entry = _setup_answered_project(tmp_path, "proj_a", "RESET_PHASE", _snapshot(), state="ESCALATION_ANSWERED")
+        _write_queue(queue_file, [entry])
+
+        # Revival preflight fails -> skip-without-downgrade -> stays ESCALATION_ANSWERED -> halt block
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (False, "fail"))
+        monkeypatch.setattr(inst, "update_symlink", lambda p: True)
+        monkeypatch.setattr(inst, "write_state", lambda: None)
+
+        assert inst._select_next_queue_project() is False
+        assert inst.state["queue_halted_reason"] == "answered_pending_revival"
+        # Not downgraded — still revivable on the next pass:
+        assert inst._read_queue()["queue"][0]["state"] == "ESCALATION_ANSWERED"
+
+    def test_queue_halted_startup_revives_answered_entry(self, orch, tmp_path, monkeypatch):
+        """INVARIANT B case (a): a QUEUE_HALTED restart with a banked answer revives the
+        parked project and signals run() to continue into the loop (which consumes the command)."""
+        inst, queue_file, _, _ = orch
+        proj, entry = _setup_answered_project(tmp_path, "proj_a", "RESET_PHASE", _snapshot(), state="ESCALATION")
+        _write_queue(queue_file, [entry])
+        inst.state["pipeline_status"] = "QUEUE_HALTED"
+        inst.state["current_agent"] = "escalation"
+
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "update_symlink", lambda p: True)
+        monkeypatch.setattr(inst, "write_state", lambda: None)
+        monkeypatch.setattr(inst, "read_state", lambda: None)  # state already in-memory
+
+        assert inst._maybe_revive_on_queue_halted() is True  # continue into loop
+        assert inst._read_queue()["queue"][0]["state"] == "ACTIVE"
+        assert inst.state["current_phase"] == 4
+        assert inst.state["current_phase_raw_id"] == "CORE-2"
+        assert (proj / ".autodev" / "pipeline" / "escalation_output.done").exists()
+
+    def test_queue_halted_no_answer_exits_clean_not_spin(self, orch, tmp_path, monkeypatch):
+        """INVARIANT B case (c): a genuinely-stuck QUEUE_HALTED (no banked answer, no pending
+        in-place escalation_output) must signal run() to EXIT, not fall into the poll loop."""
+        inst, queue_file, _, _ = orch
+        entries = [_make_entry("a", state="BLOCKED", position=1)]
+        _write_queue(queue_file, entries)
+        inst.state["pipeline_status"] = "QUEUE_HALTED"
+        inst.state["current_agent"] = "escalation"
+
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "update_symlink", lambda p: True)
+        monkeypatch.setattr(inst, "write_state", lambda: None)
+
+        assert inst._maybe_revive_on_queue_halted() is False  # exit cleanly, do not spin
+
+    def test_queue_halted_pending_inplace_output_continues(self, orch, tmp_path, monkeypatch):
+        """INVARIANT B case (b): no banked answer, but an in-place escalation_output.done is
+        already pending for a parked ESCALATION row -> continue so the loop consumes it
+        (preserves today's restart-with-in-place-answer recovery)."""
+        inst, queue_file, _, _ = orch
+        proj = tmp_path / "esc_proj"
+        art = proj / ".autodev" / "pipeline"
+        art.mkdir(parents=True)
+        (art / "escalation_output.json").write_text(json.dumps({"command": "RETRY"}))
+        (art / "escalation_output.done").write_text("")
+        # ESCALATION row (no pending_escalation_command -> promote won't flip it)
+        entry = {**_make_entry("esc_proj", state="ESCALATION", position=1), "project_path": str(proj)}
+        _write_queue(queue_file, [entry])
+        inst.state["pipeline_status"] = "QUEUE_HALTED"
+        inst.state["current_agent"] = "escalation"
+
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "update_symlink", lambda p: True)
+        monkeypatch.setattr(inst, "write_state", lambda: None)
+
+        assert inst._maybe_revive_on_queue_halted() is True  # continue: loop will consume in-place answer
+        assert inst._read_queue()["queue"][0]["state"] == "ESCALATION"  # untouched
+
+    def test_queue_halted_startup_selects_fresh_ready_entry(self, orch, tmp_path, monkeypatch):
+        """Latent-bug regression: QUEUE_HALTED + current_agent='escalation' + a fresh READY entry
+        -> the hook selects it (phase-0 start), so new work added during a halt is not stranded."""
+        inst, queue_file, _, _ = orch
+        proj = tmp_path / "fresh"
+        proj.mkdir()
+        entry = {**_make_entry("fresh", state="READY", position=1), "project_path": str(proj)}
+        _write_queue(queue_file, [entry])
+        inst.state["pipeline_status"] = "QUEUE_HALTED"
+        inst.state["current_agent"] = "escalation"
+
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "update_symlink", lambda p: True)
+        monkeypatch.setattr(inst, "write_state", lambda: None)
+        monkeypatch.setattr(inst, "read_state", lambda: None)
+        monkeypatch.setattr(inst, "_apply_pending_escalation_command", lambda project_path: None)
+
+        assert inst._maybe_revive_on_queue_halted() is True
+        assert inst._read_queue()["queue"][0]["state"] == "ACTIVE"
+        assert inst.state["current_agent"] == "planner"  # fresh phase-0 start
+        assert inst.state["current_phase"] == 0
+
+    def test_maybe_revive_noop_when_not_queue_halted(self, orch, tmp_path, monkeypatch):
+        """The hook is inert unless pipeline_status is QUEUE_HALTED."""
+        inst, queue_file, _, _ = orch
+        _write_queue(queue_file, [_make_entry("a", state="READY", position=1)])
+        inst.state["pipeline_status"] = "RUNNING"
+        called = []
+        monkeypatch.setattr(inst, "_select_next_queue_project", lambda **k: called.append(1) or True)
+        assert inst._maybe_revive_on_queue_halted() is True
+        assert called == []  # never touched selection
+
+    def test_revival_with_empty_snapshot_restores_phase_zero_gracefully(self, orch, tmp_path, monkeypatch):
+        """B6 regression: a project that escalated PRE-PHASE (repo-init / phase 0) parks with an
+        empty parked_state_snapshot — there is no escalated phase to resume. Reviving it must NOT
+        crash and must faithfully restore the phase-0 pointer (the banked command then re-resolves
+        from the planner). This is correct-by-design; the resume-correctness guarantee only applies
+        to MID-PHASE escalations, which capture a real snapshot (see
+        test_revived_entry_restores_escalated_phase_pointer_not_phase_zero and
+        test_park_captures_state_snapshot)."""
+        inst, queue_file, _, _ = orch
+        proj, entry = _setup_answered_project(tmp_path, "proj_a", "RESET_PHASE", {}, state="ESCALATION_ANSWERED")
+        _write_queue(queue_file, [entry])  # parked_state_snapshot == {} (pre-phase escalation)
+
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "update_symlink", lambda p: True)
+        monkeypatch.setattr(inst, "write_state", lambda: None)
+        captured = {}
+        monkeypatch.setattr(inst, "_apply_pending_escalation_command",
+                            lambda project_path: captured.update(state=dict(inst.state)))
+
+        assert inst._select_next_queue_project() is True  # does not raise
+        s = captured["state"]
+        assert s["current_phase"] == 0
+        assert s["current_phase_raw_id"] == ""
+        assert s["current_agent"] == "escalation"  # banked command re-resolves from here
