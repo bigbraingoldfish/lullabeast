@@ -538,7 +538,6 @@ DEFAULTS = {
     "poll_timeout": 900,  # ideas-message full-turn backstop. MUST equal the POLL_TIMEOUT constant below — load_config merges DEFAULTS so this value wins in production; the constant is only the fallback for tests that omit the key. 900 (not 180) because a thorough multi-call PRD turn exceeds 180s. Guarded by tests/test_config_defaults_consistency.py
     "poll_interval": 2,
     "ideas_idle_threshold": 300,  # max stamp silence after first activity → "stalled". 300s (not 120) because a single opaque model call (PRD draft) ran 118s silent live; matches pipeline stall philosophy
-    "ideas_startup_grace": 30,    # max wait for first stamp activity before declaring "no_first_activity"
     # When True, copy autodev/agents/* guidance into OPENCLAW_ROOT/workspace-* on each
     # UI server start (same mtime rules as install.sh). Set False to manage workspace
     # files only via ./install.sh (e.g. custom agent instructions).
@@ -664,17 +663,14 @@ def load_config(config_path=None):
     if _hooks_env:
         config["hooks_token"] = _hooks_env
 
-    # Ideas sentinel polling: env wins over file (same pattern as hooks token)
+    # Ideas sentinel polling: env wins over file (same pattern as hooks token).
+    # (Only the post-first-activity stall threshold is tunable; the chat send
+    # waits for the definitive stall/backstop verdict and does not fast-fail on
+    # a pre-first-activity startup grace.)
     _idle_env = os.environ.get("AUTODEV_IDEAS_IDLE_THRESHOLD", "").strip()
     if _idle_env:
         try:
             config["ideas_idle_threshold"] = float(_idle_env)
-        except ValueError:
-            pass
-    _grace_env = os.environ.get("AUTODEV_IDEAS_STARTUP_GRACE", "").strip()
-    if _grace_env:
-        try:
-            config["ideas_startup_grace"] = float(_grace_env)
         except ValueError:
             pass
 
@@ -3688,7 +3684,7 @@ async def _poll_sentinel_with_idle_detect(
     poll_timeout: float,
     poll_interval: float,
     stall_threshold: float,
-    startup_grace: float,
+    startup_grace: float | None,
 ) -> PollResult:
     """Poll for the turn ``.done`` sentinel, governed by the Tier A activity stamp.
 
@@ -3710,7 +3706,10 @@ async def _poll_sentinel_with_idle_detect(
     * ``"timeout"``           — ``poll_timeout`` infrastructure backstop fired
       (gateway unreachable, plugin missing, …).
     * ``"no_first_activity"`` — ``startup_grace`` elapsed without ever seeing
-      a fresh stamp.  Cold OpenClaw session failures land here.
+      a fresh stamp.  Cold OpenClaw session failures land here.  Pass
+      ``startup_grace=None`` to disable this early-fail (the Ideas chat send
+      does, so a slow cold start is never reported as a premature timeout —
+      only the definitive ``stalled`` / ``timeout`` verdicts can fire).
     * ``"stalled"``           — fresh stamp was seen at least once, then went
       silent for ``stall_threshold`` seconds.  This is the mid-turn-death
       signal (CORE-E6 pattern as it would manifest in Ideas).
@@ -3764,9 +3763,12 @@ async def _poll_sentinel_with_idle_detect(
                 last_fresh_mtime_ns = cur_mtime_ns
 
         if last_fresh_mtime_ns is None:
-            # Pre-first-activity window: tolerate a non-advancing stamp
-            # until ``startup_grace`` elapses.
-            if elapsed >= startup_grace:
+            # Pre-first-activity window: tolerate a non-advancing stamp until
+            # ``startup_grace`` elapses. ``startup_grace=None`` disables this
+            # early-fail entirely — the chat send opts out so a slow cold start
+            # is never declared a premature timeout; it waits for the definitive
+            # stall/backstop verdict instead.
+            if startup_grace is not None and elapsed >= startup_grace:
                 return PollResult(False, "no_first_activity", None)
         else:
             # Post-first-activity window: ``stall_threshold`` governs.
@@ -4305,22 +4307,17 @@ def _ideas_timeout_message(reason: str | None, poll_timeout: float) -> str:
     deliberate single-source design that avoids the dual-source drift which bit
     the timeout *values* (see ``tests/test_config_defaults_consistency.py``).
 
-    Reasons (from ``autodev/pipeline/sentinel_poller.py``):
+    The chat send waits for a DEFINITIVE verdict (it passes
+    ``startup_grace=None``), so only these two reasons reach this mapper:
 
-    * ``no_first_activity`` — the agent never produced a first activity stamp;
-      OpenClaw likely never picked up the request (gateway/session/provider-auth
-      issue), NOT a slow model.
     * ``stalled`` — the agent was active then went silent past the stall
       threshold; the model most likely stalled mid-response.
     * ``timeout`` — the full ``poll_timeout`` infra backstop elapsed without the
-      turn finishing; the request may be too large or the model very slow.
-    * anything else / ``None`` — fall back to the original generic copy.
+      turn finishing (this also covers "never produced any activity"); the
+      request may be too large or the model/gateway very slow.
+    * anything else / ``None`` (incl. a legacy ``no_first_activity``) — fall
+      back to the original generic copy.
     """
-    if reason == "no_first_activity":
-        return (
-            "The agent never started responding — OpenClaw may not have picked "
-            "up the request. Check that the gateway is running, then retry."
-        )
     if reason == "stalled":
         return (
             "The agent began working but went quiet partway through — the model "
@@ -4546,7 +4543,6 @@ async def post_ideas_message(idea_id: str, request: Request):
     poll_timeout = float(config.get("poll_timeout", POLL_TIMEOUT))
     poll_interval = float(config.get("poll_interval", POLL_INTERVAL))
     idle_threshold = float(config.get("ideas_idle_threshold", 300))
-    startup_grace = float(config.get("ideas_startup_grace", 30))
 
     try:
         await _post_agent_webhook(hooks_url, hooks_token, webhook_payload)
@@ -4571,7 +4567,13 @@ async def post_ideas_message(idea_id: str, request: Request):
         poll_timeout=poll_timeout,
         poll_interval=poll_interval,
         stall_threshold=idle_threshold,
-        startup_grace=startup_grace,
+        # The chat send waits for a DEFINITIVE timeout signal — a mid-response
+        # ``stalled`` (after first activity) or the hard ``poll_timeout``
+        # backstop. It deliberately does NOT fast-fail on startup grace: a 408
+        # only reaches the client after the webhook POST was accepted, so "no
+        # activity stamp yet" is almost always a slow cold start, not a dead
+        # turn. ``startup_grace=None`` disables the premature ``no_first_activity``.
+        startup_grace=None,
     )
     if not sentinel_found and _late_done_valid_for_attempt(done_path, _attempt_start_wall):
         sentinel_found = True

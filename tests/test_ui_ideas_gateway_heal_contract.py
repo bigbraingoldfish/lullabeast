@@ -8,13 +8,17 @@ def load_index_html():
         return f.read()
 
 
-def test_submit_message_late_heal_includes_502_and_503():
-    """502/503 should start the same session poll recovery as 408 (gateway vs stall)."""
+def test_submit_message_502_503_start_shared_heal_poll():
+    """502/503 (gateway down, agent never invoked) get the shared session-poll
+    recovery. They now live in their OWN branch — 408 is handled separately by
+    the deferred recovery poll (see ``test_ui_ideas_408_signal_based_revert``),
+    so this no longer asserts a combined ``(408 || 502 || 503)`` condition."""
     html = load_index_html()
+    assert "startSessionHealPoll" in html
     assert re.search(
-        r"if\s*\(\s*status\s*===\s*408\s*\|\|\s*status\s*===\s*502\s*\|\|\s*status\s*===\s*503\s*\)",
+        r"status\s*===\s*502\s*\|\|\s*status\s*===\s*503[\s\S]{0,700}?startSessionHealPoll",
         html,
-    ), "Expected late-heal branch to include 502 and 503 alongside 408"
+    ), "Expected the 502/503 branch to start the shared heal poll"
 
 
 def test_submit_message_gateway_failure_marks_ephemeral_pair_and_restores_input():

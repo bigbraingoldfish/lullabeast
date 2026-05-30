@@ -198,7 +198,6 @@ def test_config_example_empty_path_placeholders_still_derive(monkeypatch, tmp_pa
                 "poll_timeout": 180,
                 "poll_interval": 2,
                 "ideas_idle_threshold": 120,
-                "ideas_startup_grace": 30,
             }
         )
     )

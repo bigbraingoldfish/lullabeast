@@ -56,8 +56,11 @@ def test_abort_or_network_hands_off_to_recovery_poll_without_error():
     )
     # The recovery branch must early-return before the error-message path so no
     # error bubble / draft-restore fires while the server is still working.
+    # (Window widened: the recovery poll now also carries an `onResolved` hook
+    # — it restores the draft only on a DEFINITIVE backend error — so the
+    # startSessionHealPoll({...}) block before `return;` is legitimately larger.)
     assert re.search(
-        r'AbortError[\s\S]{0,1000}?startSessionHealPoll[\s\S]{0,1400}?return;',
+        r'AbortError[\s\S]{0,1200}?startSessionHealPoll[\s\S]{0,2600}?return;',
         html,
     ), "Expected the abort/network branch to start the recovery poll and return early"
 

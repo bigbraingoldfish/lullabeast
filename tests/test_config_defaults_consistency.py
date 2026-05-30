@@ -1,7 +1,7 @@
 """Guard against drift between the THREE places an Ideas-poll knob is declared.
 
-The Ideas chat timeout knobs (`poll_timeout`, `ideas_idle_threshold`,
-`ideas_startup_grace`) are declared in three spots that must agree:
+The Ideas chat timeout knobs (`poll_timeout`, `ideas_idle_threshold`) are
+declared in three spots that must agree:
 
 1. ``ui/server.py`` ``DEFAULTS`` dict — the production source of truth
    (``load_config`` does ``DEFAULTS.copy()`` then ``.update(user_config)``,
@@ -28,7 +28,7 @@ _CONFIG_EXAMPLE = _REPO_ROOT / "ui" / "config.example.json"
 
 # Knobs whose example value would OVERRIDE the code default on a fresh copy, so
 # the template must match DEFAULTS exactly.
-_TUNABLE_KEYS = ("poll_timeout", "ideas_idle_threshold", "ideas_startup_grace")
+_TUNABLE_KEYS = ("poll_timeout", "ideas_idle_threshold")
 
 
 @pytest.fixture(scope="module")
