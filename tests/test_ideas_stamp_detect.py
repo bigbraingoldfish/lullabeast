@@ -326,6 +326,57 @@ class TestPollSentinelStampDetect:
         assert result.success is False
         assert result.reason == "timeout"
 
+    def test_startup_grace_none_runs_to_backstop_not_no_first_activity(self, tmp_path):
+        """``startup_grace=None`` disables the pre-first-activity early-fail.
+
+        The Ideas chat *send* opts out of the 30 s ``no_first_activity`` check
+        (it passes ``startup_grace=None``) so a slow cold start is never
+        declared a premature timeout. With no stamp and no ``.done``, the poll
+        must keep waiting and ultimately report the **definitive** ``timeout``
+        backstop signal — NOT ``no_first_activity``.
+
+        Drives a fake monotonic clock so the loop reaches the pre-first-activity
+        branch (where ``no_first_activity`` would fire under a numeric grace)
+        BEFORE the ``poll_timeout`` backstop — proving the ``None`` guard, not
+        merely that the backstop wins a race.
+        """
+        poll = _get_poll()
+        done = tmp_path / "1.done"
+        stamp = tmp_path / "prd_creator_activity.stamp"  # never created
+
+        # start=0.0; iters at elapsed 0.1, 0.2 (both < poll_timeout 0.4, so the
+        # pre-first-activity branch is exercised), then 0.5 >= 0.4 -> timeout.
+        mono_seq = iter([0.0, 0.1, 0.2, 0.5])
+
+        def fake_monotonic():
+            try:
+                return next(mono_seq)
+            except StopIteration:
+                return 10.0
+
+        async def fast_sleep(_interval):
+            return None
+
+        with patch("ui.server.time.monotonic", fake_monotonic):
+            with patch("ui.server.asyncio.sleep", fast_sleep):
+                result = asyncio.run(
+                    poll(
+                        done_path=done,
+                        stamp_path=stamp,
+                        attempt_start_wall=time.time(),
+                        poll_timeout=0.4,
+                        poll_interval=0.01,
+                        stall_threshold=600.0,
+                        startup_grace=None,
+                    )
+                )
+        assert isinstance(result, PollResult)
+        assert result.success is False
+        assert result.reason == "timeout", (
+            "startup_grace=None must fall through to the poll_timeout backstop "
+            "(the definitive signal), not fire the premature no_first_activity check"
+        )
+
 
 def test_ideas_poll_defaults_accommodate_thorough_prd_drafts():
     """Production defaults must exceed the longest legitimate single model call.
@@ -350,10 +401,6 @@ def test_ideas_poll_defaults_accommodate_thorough_prd_drafts():
     assert DEFAULTS["ideas_idle_threshold"] >= 300, (
         f"stall threshold too tight for a single long model call: "
         f"{DEFAULTS['ideas_idle_threshold']}"
-    )
-    assert DEFAULTS["ideas_startup_grace"] == 30, (
-        "startup_grace should stay at 30s — first model_call_started arrives "
-        "in <1s; this knob only guards cold session-creation"
     )
 
 
@@ -452,18 +499,21 @@ def test_jsonl_and_artifact_helpers_are_deleted():
 
 
 def test_load_config_ideas_env_overrides(monkeypatch, tmp_path):
-    """AUTODEV_IDEAS_* env vars override merged config (same pattern as hooks token)."""
+    """AUTODEV_IDEAS_IDLE_THRESHOLD env var overrides merged config (same pattern as hooks token).
+
+    (The chat send no longer fast-fails on startup grace — it waits for the
+    definitive stall/backstop verdict — so there is no ``ideas_startup_grace``
+    knob to override.)
+    """
     monkeypatch.setenv("AUTODEV_IDEAS_IDLE_THRESHOLD", "999")
-    monkeypatch.setenv("AUTODEV_IDEAS_STARTUP_GRACE", "888")
     cfg_path = tmp_path / "config.json"
     cfg_path.write_text(
-        '{"ideas_idle_threshold": 1, "ideas_startup_grace": 2, "port": 18790}'
+        '{"ideas_idle_threshold": 1, "port": 18790}'
     )
     from ui.server import load_config
 
     cfg = load_config(config_path=str(cfg_path))
     assert cfg["ideas_idle_threshold"] == 999.0
-    assert cfg["ideas_startup_grace"] == 888.0
 
 
 def test_late_done_valid_accepts_sentinel_within_mtime_slack(tmp_path):

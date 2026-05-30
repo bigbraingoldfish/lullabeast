@@ -224,12 +224,13 @@ openclaw plugins inspect autodev-pipeline-signals --json
 
 The output should show `status: "loaded"`, `hookCount: 5`, and typed hooks for `agent_end`, `before_agent_finalize`, `model_call_started`, `model_call_ended`, and `after_tool_call`. During a live pipeline run, the active `{agent}_activity.stamp` mtime should advance with the matching session JSONL mtime.
 
-**Optional — Ideas chat poll (UI server).** With the same plugin, Project Ideas uses `prd_creator_activity.stamp` for idle detection. Override via environment (wins over `ui/config.json`) or config keys `ideas_idle_threshold` / `ideas_startup_grace`:
+**Optional — Ideas chat poll (UI server).** With the same plugin, Project Ideas uses `prd_creator_activity.stamp` for idle detection. Override via environment (wins over `ui/config.json`) or the config key `ideas_idle_threshold`:
 
 | Env | Default (seconds) | Role |
 | --- | ------------------ | ---- |
-| `AUTODEV_IDEAS_IDLE_THRESHOLD` | 300 | Max silence on stamp mtime **after first activity** before the chat request returns **408** stall. 300 s (not 120) because a thorough PRD-draft model call runs with the stamp silent for its whole duration (118 s measured live) |
-| `AUTODEV_IDEAS_STARTUP_GRACE` | 30 | Grace before treating a missing first-activity stamp as **no first activity** |
+| `AUTODEV_IDEAS_IDLE_THRESHOLD` | 300 | Max silence on stamp mtime **after first activity** before the chat turn is declared a definitive **stalled** timeout. 300 s (not 120) because a thorough PRD-draft model call runs with the stamp silent for its whole duration (118 s measured live) |
+
+The Ideas chat send has **no startup-grace knob**: it waits for a definitive timeout signal — a `stalled` (above) or the `poll_timeout` backstop (below) — rather than fast-failing if the agent is slow to produce its first activity stamp. The dashboard only reverts your typed message back into the composer when one of those definitive timeouts fires (married with the failure notice), never on a premature timer.
 
 The companion `poll_timeout` (full-turn infra backstop, `ui/config.json` `poll_timeout`, default **900 s**) bounds the total turn — a thorough PRD turn chains several model calls and can exceed the old 180 s ceiling.
 

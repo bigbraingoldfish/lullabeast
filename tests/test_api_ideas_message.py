@@ -687,7 +687,6 @@ class TestApiIdeasMessage:
         cfg = self._mock_config()
         cfg["openclaw_root"] = str(openclaw_root)
         cfg["ideas_idle_threshold"] = 0.3
-        cfg["ideas_startup_grace"] = 0.2
         cfg["poll_interval"] = 0.05
         return cfg
 
@@ -734,7 +733,7 @@ class TestApiIdeasMessage:
         # timeout messaging) rather than a flat string.
         detail = (response.json() or {}).get("detail") or {}
         assert isinstance(detail, dict), f"expected structured 408 detail, got {detail!r}"
-        assert detail.get("reason") in {"no_first_activity", "stalled", "timeout"}
+        assert detail.get("reason") in {"stalled", "timeout"}
         assert detail.get("message"), "408 detail must carry a user-facing message"
         assert elapsed < 6.0, f"expected ~3s poll budget, took {elapsed:.2f}s"
 

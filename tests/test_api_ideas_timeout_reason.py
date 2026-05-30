@@ -1,10 +1,12 @@
 """Reason-aware Ideas chat timeout messages.
 
 The chat poll (`_poll_sentinel_with_idle_detect`) returns a `PollResult` whose
-`reason` distinguishes WHY a turn failed — `no_first_activity` (agent never
-started), `stalled` (started then went silent), `timeout` (ran the full
-backstop). Before this change all three collapsed to a single generic "the
-model may be slow" message, discarding insight we already had.
+`reason` distinguishes WHY a turn failed. The chat *send* waits for a
+**definitive** verdict — `stalled` (the agent started then went silent) or
+`timeout` (it ran the full backstop). (It passes `startup_grace=None`, so the
+premature `no_first_activity` early-fail never fires on this path.) Before
+reason-awareness both collapsed to a single generic "the model may be slow"
+message, discarding insight we already had.
 
 `_ideas_timeout_message` is the SOLE author of the user-facing text: the 408
 response body and the persisted session placeholder both use it, and the
@@ -37,14 +39,6 @@ FAKE_CONFIG = {
 
 # ── unit: the message mapper ─────────────────────────────────────────────────
 
-def test_no_first_activity_message_points_at_infra_not_model():
-    msg = _ideas_timeout_message("no_first_activity", 900)
-    assert "never started" in msg.lower()
-    assert "gateway" in msg.lower()
-    # Must NOT blame the model — this reason is an infra/session failure.
-    assert "model may be slow" not in msg.lower()
-
-
 def test_stalled_message_describes_mid_response_stall():
     msg = _ideas_timeout_message("stalled", 900)
     low = msg.lower()
@@ -68,9 +62,9 @@ def test_unknown_reason_falls_back_to_generic():
 def test_each_reason_yields_a_distinct_message():
     msgs = {
         _ideas_timeout_message(r, 900)
-        for r in ("no_first_activity", "stalled", "timeout")
+        for r in ("stalled", "timeout")
     }
-    assert len(msgs) == 3, "each failure reason must produce distinct guidance"
+    assert len(msgs) == 2, "each failure reason must produce distinct guidance"
 
 
 # ── integration: the 408 carries reason + message; placeholder matches ───────
@@ -91,7 +85,7 @@ def _make_idea(ideas_dir: Path) -> str:
     return idea_id
 
 
-@pytest.mark.parametrize("reason", ["no_first_activity", "stalled", "timeout"])
+@pytest.mark.parametrize("reason", ["stalled", "timeout"])
 def test_408_body_and_placeholder_carry_reason_specific_message(tmp_path, reason):
     ideas_dir = tmp_path / "ideas"
     ideas_dir.mkdir()
