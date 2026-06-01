@@ -28,7 +28,7 @@ def _base_config(tmp_path: Path, pipeline_status: str = "PIPELINE_COMPLETE") -> 
     lock_path = tmp_path / "pipeline.lock"
     ps_path = tmp_path / "pipeline_state.json"
     ps_path.write_text(
-        json.dumps({"pipeline_status": pipeline_status, "status": pipeline_status}),
+        json.dumps({"pipeline_status": pipeline_status}),
         encoding="utf-8",
     )
     return {
@@ -86,6 +86,23 @@ class TestPostCompletionReviewTrigger:
         assert resp.status_code == 409
         data = resp.json()
         assert data.get("error") == "not_complete"
+
+    def test_completion_gate_reads_pipeline_status_without_status_fallback(self, tmp_path):
+        """Regression: the completion-review gate reads `pipeline_status` only.
+
+        Every real pipeline_state.json carries `pipeline_status`; the removed
+        `or _ps.get("status")` fallback was unreachable dead code. A state file with
+        ONLY `pipeline_status` must still gate correctly.
+        """
+        config = _base_config(tmp_path, pipeline_status="PIPELINE_COMPLETE")
+        ps = json.loads(Path(config["pipeline_state_path"]).read_text(encoding="utf-8"))
+        assert "status" not in ps, "fixture must not seed the removed legacy status field"
+        client = load_client()
+        patches = self._success_patches(config)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            resp = client.post("/api/completion-review/my-project")
+        assert resp.status_code == 200
+        assert resp.json().get("triggered") is True
 
     def _success_patches(self, config):
         """Common patch context for successful completion review trigger."""

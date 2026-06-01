@@ -58,7 +58,6 @@ class TestEscalationHeadlineInApiState:
         Fails today: server.py does not pass the field through."""
         paths = _state_paths(temp_project_dir)
         pipeline_state = {
-            "status": "WAITING_FOR_HUMAN",
             "pipeline_status": "WAITING_FOR_HUMAN",
             "current_agent": "escalation",
         }
@@ -87,7 +86,6 @@ class TestEscalationHeadlineInApiState:
         """phase_state without escalation_headline → field absent from response."""
         paths = _state_paths(temp_project_dir)
         pipeline_state = {
-            "status": "RUNNING",
             "pipeline_status": "RUNNING",
             "current_agent": "executor",
         }

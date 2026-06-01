@@ -41,7 +41,6 @@ def orch(tmp_path, monkeypatch):
         "current_agent": "planner",
         "pipeline_status": "RUNNING",
         "project_path": str(tmp_path / "current_proj"),
-        "status": "RUNNING",
     }
     inst.lock_fd = None
     inst.openclaw_config = {}

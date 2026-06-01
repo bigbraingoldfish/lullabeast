@@ -270,7 +270,6 @@ class TestResetExecutionStateSync:
             "current_phase": 1,
             "current_phase_raw_id": "CORE-E1",
             "project_path": str(tmp_path),
-            "status": "RUNNING",
             "pipeline_status": "RUNNING",
         }
         orch.openclaw_config = {}
@@ -314,7 +313,6 @@ class TestResetExecutionStateSync:
             "current_phase": 1,
             "current_phase_raw_id": "CORE-E1",
             "project_path": str(tmp_path),
-            "status": "RUNNING",
             "pipeline_status": "RUNNING",
             "current_agent": "executor",
         }

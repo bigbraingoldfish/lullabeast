@@ -50,7 +50,6 @@ class TestEscalationAdvisoryStatusInApiState:
         """phase_state with advisory fields → all three appear in /api/state response."""
         pipeline_art = os.path.join(temp_project_dir, ".autodev", "pipeline")
         pipeline_state = {
-            "status": "WAITING_FOR_HUMAN",
             "pipeline_status": "WAITING_FOR_HUMAN",
             "current_agent": "escalation",
         }
@@ -93,7 +92,6 @@ class TestEscalationAdvisoryStatusInApiState:
         """phase_state without advisory fields → fields absent from /api/state response."""
         pipeline_art = os.path.join(temp_project_dir, ".autodev", "pipeline")
         pipeline_state = {
-            "status": "RUNNING",
             "pipeline_status": "RUNNING",
             "current_agent": "executor",
         }

@@ -162,7 +162,6 @@ def _minimal_orchestrator(orch_mod, tmp_path):
                     orch = orch_mod.Orchestrator.__new__(orch_mod.Orchestrator)
                     orch.state = {
                         "pipeline_status": "RUNNING",
-                        "status": "RUNNING",
                         "current_agent": "executor",
                         "current_phase": 1,
                         "current_phase_raw_id": "CORE-E1",

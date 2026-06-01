@@ -1309,9 +1309,9 @@ This handles both first-run and restart cases safely.
 6. `JSON present + sentinel present` = safe to read
 7. `JSON present without sentinel` = agent still writing, do not parse
 
-Sentinel is a soft dependency on agent instruction-following — requires careful AGENTS.md guidance. Orchestrator enforces long per-agent infrastructure backstop timeouts, but normal completion is driven by the `agent_end` plugin hook writing `.done`.
+Sentinel is a soft dependency on agent instruction-following — requires careful AGENTS.md guidance. Orchestrator enforces long per-agent infrastructure backstop timeouts (4500 s / 75 min per agent), but normal completion is driven by the `agent_end` plugin hook writing `.done`.
 
-**Tier A stall detection (updated 2026-05-07):** For planner, executor, and reviewer, the orchestrator uses `sentinel_poller.poll_for_sentinel()` with `stall_detection_path={agent}_activity.stamp` and an agent-specific `stall_threshold_seconds`. The orchestrator seeds the stamp at attempt start so a missing first OpenClaw hook still becomes detectable; `autodev-pipeline-signals` then refreshes the stamp on `model_call_started`, `model_call_ended`, and `after_tool_call`. If the stamp mtime goes quiet beyond the threshold with no sentinel, the poll exits early (treated identically to timeout/stop → existing retry path). Defaults: planner 900s, executor 1800s, reviewer 900s; override with `AUTODEV_STALL_TIMEOUT_PLANNER`, `AUTODEV_STALL_TIMEOUT_EXECUTOR`, and `AUTODEV_STALL_TIMEOUT_REVIEWER`.
+**Tier A stall detection (updated 2026-05-07):** For planner, executor, and reviewer, the orchestrator uses `sentinel_poller.poll_for_sentinel()` with `stall_detection_path={agent}_activity.stamp` and an agent-specific `stall_threshold_seconds`. The orchestrator seeds the stamp at attempt start so a missing first OpenClaw hook still becomes detectable; `autodev-pipeline-signals` then refreshes the stamp on `model_call_started`, `model_call_ended`, and `after_tool_call`. If the stamp mtime goes quiet beyond the threshold with no sentinel, the poll exits early (treated identically to timeout/stop → existing retry path). Defaults: a 300 s stall threshold for all three agents (override `AUTODEV_STALL_TIMEOUT_PLANNER`, `AUTODEV_STALL_TIMEOUT_EXECUTOR`, `AUTODEV_STALL_TIMEOUT_REVIEWER`), plus a separate 600 s startup-grace window before first activity (override `AUTODEV_STARTUP_GRACE_PLANNER`, `AUTODEV_STARTUP_GRACE_EXECUTOR`, `AUTODEV_STARTUP_GRACE_REVIEWER`).
 
 Additionally, the orchestrator records a `min_sentinel_mtime` (wall-clock time captured immediately before `cleanup_output_files()`) and passes it to the poller. If a `.done` sentinel is found with an mtime older than this value, it is discarded as belonging to an orphaned prior session — this prevents stale sentinels from consuming retry budget while the reset-cleaned working tree causes an inevitable gate failure.
 
@@ -1340,8 +1340,8 @@ New attempt → new suffix in key → completely fresh session, zero prior conte
 
 Runs on Pi. Every 30 minutes (tunable to 15).
 
-- **Staggered Timeouts:** To prevent race conditions with the internal event loop, the cron's stuck-sentinel detection threshold is explicitly set to **15 minutes** (900 seconds), staggering it behind the Orchestrator's internal 10-minute circuit breaker timeout.
-- The Heartbeat Cron acts strictly as a safety net. It only intervenes if the lock is dead OR if the Orchestrator is alive but has been stuck in `WAITING_FOR_SENTINEL` for > 15 minutes, meaning the internal timeout failed.
+- **Crash recovery, restart-only:** The cron never SIGTERMs a live orchestrator. When the pipeline lock is held (orchestrator alive) it logs status and exits — no intervention. The earlier SIGTERM-on-15-min-`WAITING_FOR_SENTINEL` check was removed: `last_action_timestamp` is stamped once on entering `WAITING_FOR_SENTINEL` and not updated until the agent finishes, so a legitimately long phase would have been killed mid-work.
+- The Heartbeat Cron acts strictly as a safety net. It intervenes only when the lock is **free** (orchestrator dead) AND the state claims active work whose `last_action_timestamp` is older than `STALE_FLIGHT_THRESHOLD_MINUTES` (3 min) — then it restarts the orchestrator. A fresh-but-dead state is left for the next cycle.
 
 ```
 1. Attempt fcntl.flock(pipeline.lock, LOCK_EX | LOCK_NB)

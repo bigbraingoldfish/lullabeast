@@ -138,7 +138,6 @@ def routed_orchestrator(tmp_path, monkeypatch):
         "executor_retries": 0,
         "reviewer_retries": 0,
         "planner_output_preserved": True,
-        "status": "RUNNING",
         "pipeline_status": "RUNNING",
     }
     orch.openclaw_config = {}

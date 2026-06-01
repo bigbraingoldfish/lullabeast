@@ -32,7 +32,6 @@ def orch(tmp_path, monkeypatch):
         "current_agent": "planner",
         "current_phase": 0,
         "current_phase_raw_id": "",
-        "status": "RUNNING",
         "last_action": "test",
     }
     inst.lock_fd = None

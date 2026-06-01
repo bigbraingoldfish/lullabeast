@@ -147,7 +147,6 @@ def test_reset_phase_initialises_new_counters(monkeypatch, tmp_path):
         "executor_retries": 2,
         "reviewer_retries": 1,
         "planner_retries": 0,
-        "status": "RUNNING",
         "pipeline_status": "RUNNING",
         "project_path": str(tmp_path),
     }

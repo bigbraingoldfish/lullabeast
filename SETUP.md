@@ -341,7 +341,7 @@ To run as a background service, see `ui/autodev-ui.service` (Linux/WSL2 systemd 
 
 Tested against OpenClaw [VERSION] — earlier versions may have schema differences in `pipeline_state.json`. See openclaw.json requirements below.
 
-The fields AutoDev reads from `pipeline_state.json` are: `pipeline_status`, `status`, `current_agent`, `current_phase`, `current_phase_raw_id`, `planner_retries`, `executor_retries`, `reviewer_retries`, `last_action_timestamp`, and `project_path`. Values of **`current_phase_raw_id`** (for example `INT-E1`) are the same phase identifiers used in the project’s **`roadmap.md`**. If your OpenClaw version writes different field names, the UI status endpoint will return partial data.
+The fields AutoDev reads from `pipeline_state.json` are: `pipeline_status`, `current_agent`, `current_phase`, `current_phase_raw_id`, `planner_retries`, `executor_retries`, `reviewer_retries`, `last_action_timestamp`, and `project_path`. Values of **`current_phase_raw_id`** (for example `INT-E1`) are the same phase identifiers used in the project’s **`roadmap.md`**. If your OpenClaw version writes different field names, the UI status endpoint will return partial data.
 
 ---
 

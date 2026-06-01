@@ -217,7 +217,7 @@ VALID_STATES = [
 
 `QUEUE_HALTED` is written when the project queue is active but all remaining entries are blocked, in dependency hold, or fail preflight. The `pipeline_state.json` will additionally contain `queue_halted_reason: "all_blocked" | "all_dependency_hold" | "mixed" | "answered_pending_revival"`. In the dashboard, the **pipeline status pill** for this state is labeled **Queue stalled** (`ui/index.html` `PIPELINE_LIVE_PILL`). Do not confuse that with the header **Queue: halted** *chip* (navigation to the queue when `queue_halted` is true) — different control, different copy. `POST /api/queue/trigger-next` returns `queue_halted_reason` when it cannot start a project so the queue UI can show a matching **Queue stalled — …** toast. The orchestrator exits cleanly on an initial halt; an `answered_pending_revival` reason means a parked `ESCALATION_ANSWERED` entry has a banked answer and is recoverable via the **Resume banked answer** control (P1 Stage H — see the Queue System section for the restart-recovery hook).
 
-`pipeline_state.json` has **two** status fields: `status` and `pipeline_status`. Both must be updated together on any state transition — `transition_state()` writes both. Never update one without the other.
+`pipeline_state.json`'s canonical status field is **`pipeline_status`**. `transition_state()` is the only writer — it sets `pipeline_status`, and `write_state()` atomically persists it. There is no separate `status` field: a legacy `status` co-field was removed (it was written only by the git-recover path and read by no one), so all readers use `pipeline_status`.
 
 ### `transition_state()` — the only correct way to change state
 
@@ -233,7 +233,7 @@ def transition_state(self, new_status, action_description):
 
 ### State reset protocol
 
-When resetting `pipeline_state.json` to `IDLE` for a fresh run, set **both** `status` and `pipeline_status` to `"IDLE"`. Also set `current_agent` to `"planner"` and `current_phase` to `0`. If `current_agent` is `null`, the orchestrator exits immediately with `"Agent None logic not reached"`.
+When resetting `pipeline_state.json` to `IDLE` for a fresh run, set `pipeline_status` to `"IDLE"`. Also set `current_agent` to `"planner"` and `current_phase` to `0`. If `current_agent` is `null`, the orchestrator exits immediately with `"Agent None logic not reached"`.
 
 ### Terminal states
 
@@ -282,7 +282,7 @@ The primary function is `poll_for_sentinel()` in `sentinel_poller.py`. It watche
 ```python
 poll_for_sentinel(
     sentinel_path=...,
-    timeout_seconds=2700,                # infrastructure backstop (gateway-dead failsafe)
+    timeout_seconds=4500,                # 75-min infrastructure backstop (gateway-dead failsafe)
     stall_detection_path=...,            # {agent}_activity.stamp
     stall_threshold_seconds=300,         # post-first-hook silence → "stalled"
     startup_grace_seconds=600,           # pre-first-hook wait → "no_first_activity"
@@ -303,7 +303,7 @@ Returns a structured `PollResult` (truthy on success, `__bool__` delegates to `.
 **Inline abort on stall/no_first_activity/timeout.** When `poll_for_sentinel` returns `PollResult` with `reason in {"stalled", "no_first_activity", "timeout"}`, the orchestrator calls `_handle_stall_outcome(...)` which:
 1. Invokes `abort_agent_session` against the *current* attempt's session key. The helper itself retries up to `ABORT_MAX_ATTEMPTS` (3) times with `ABORT_RETRY_BACKOFF_SECONDS` (2.0 s) between attempts before declaring failure — a single 8-second WS handshake against a busy gateway proved too brittle in CORE-E6. The handshake is a 3-step dance (the OpenClaw gateway sends a `connect.challenge` event first, then accepts the `connect` request, then returns `hello-ok`); the helper waits for the challenge before sending `connect`. The HTTP-upgrade `Origin` header is suppressed (`suppress_origin=True`) because Python's `websocket-client` lib otherwise auto-adds one, and the gateway treats any non-empty `Origin` as a browser request and refuses to grant `operator.write` scope to the resulting session — even on loopback.
 2. Captures the return value and logs `[ABORT] result=ok|FAILED ...`.
-3. On a successful abort, calls `verify_session_stopped` to confirm the agent stopped streaming. If it has not (gateway acknowledged abort but stamp still advancing), the helper emits the `[ABORT][VERIFY_FAILED]` print and the `abort_verify_failed` pipeline event (so the activity feed shows the situation in red) and then **soft-continues** — the orchestrator launches the next attempt anyway. Rationale: 90%+ of long runs eventually resolve on retry, whereas a forced `HALTED_SILENT` state always requires human intervention. The `"timeout"` reason — the 45-minute infrastructure backstop firing — now also routes through this same helper; previously it bypassed abort+verify and let attempt N+1 launch on top of a still-streaming attempt N (the original CORE-E6 cascade). The retry-start abort block (`orchestrator.py:3916`) follows the same soft-continue contract.
+3. On a successful abort, calls `verify_session_stopped` to confirm the agent stopped streaming. If it has not (gateway acknowledged abort but stamp still advancing), the helper emits the `[ABORT][VERIFY_FAILED]` print and the `abort_verify_failed` pipeline event (so the activity feed shows the situation in red) and then **soft-continues** — the orchestrator launches the next attempt anyway. Rationale: 90%+ of long runs eventually resolve on retry, whereas a forced `HALTED_SILENT` state always requires human intervention. The `"timeout"` reason — the 75-minute infrastructure backstop firing — now also routes through this same helper; previously it bypassed abort+verify and let attempt N+1 launch on top of a still-streaming attempt N (the original CORE-E6 cascade). The retry-start abort block (`orchestrator.py:3916`) follows the same soft-continue contract.
 
 **Activity stamp bootstrap**: After `cleanup_output_files()` removes stale output and before the webhook is invoked, call `_init_activity_stamp_or_halt(agent)`. The return value is checked — a False result (workspace dir unwritable) transitions the orchestrator to `HALTED_SILENT` rather than silently disabling stall detection. The plugin refreshes this stamp on `model_call_started`, `model_call_ended`, and `after_tool_call`.
 
@@ -545,7 +545,6 @@ When resetting for a fresh run, all of these must be set:
 
 ```json
 {
-  "status": "IDLE",
   "pipeline_status": "IDLE",
   "current_agent": "planner",
   "current_phase": 0,
@@ -567,9 +566,9 @@ These values appear throughout the codebase. Do not change them without understa
 
 | Constant | Value | Where it matters |
 |----------|-------|-----------------|
-| Planner sentinel backstop | 3600 seconds | `poll_for_sentinel(timeout_seconds=3600)` — infrastructure-failure backstop; normal completion comes from `agent_end` |
-| Executor sentinel backstop | 7200 seconds | `poll_for_sentinel(timeout_seconds=7200)` — infrastructure-failure backstop; normal completion comes from `agent_end` |
-| Reviewer sentinel backstop | 3600 seconds | `poll_for_sentinel(timeout_seconds=3600)` — infrastructure-failure backstop; caps at 3 failed polls then escalates |
+| Planner sentinel backstop | 4500 seconds (75 min) | `poll_for_sentinel(timeout_seconds=4500)` — infrastructure-failure backstop; normal completion comes from `agent_end` |
+| Executor sentinel backstop | 4500 seconds (75 min) | `poll_for_sentinel(timeout_seconds=4500)` — infrastructure-failure backstop; normal completion comes from `agent_end` |
+| Reviewer sentinel backstop | 4500 seconds (75 min) | `poll_for_sentinel(timeout_seconds=4500)` — infrastructure-failure backstop; caps at 3 failed polls then escalates |
 | Heartbeat cron interval | 30 minutes | `cron/jobs.json`, `heartbeat_cron.py` |
 | Pipeline lock file | `pipeline.lock` | `fcntl.flock`, advisory, exclusive |
 | SSE heartbeat | 15 seconds | `/api/events/stream` keep-alive |
