@@ -1,0 +1,14 @@
+# AutoDev — full runtime dependencies (UI dashboard + orchestration pipeline).
+# Pinned for reproducible installs; run `pip-audit -r requirements.txt` periodically
+# and upgrade the pins after review. Install everything with:
+#     pip install -r requirements.txt
+#
+# UI server (FastAPI dashboard). `requests` and `websocket-client` are declared
+# there and are shared by the pipeline's webhook-invoke and session-abort paths.
+-r ui/requirements.txt
+
+# Pipeline orchestration direct import not otherwise pulled in by the UI server.
+# `autodev/pipeline/skill_manager.py` parses `skill_mapping.yaml`; without PyYAML,
+# per-phase skill injection silently disables. `uvicorn[standard]` also pulls PyYAML
+# transitively, but the pipeline depends on it directly, so declare it explicitly.
+PyYAML==6.0

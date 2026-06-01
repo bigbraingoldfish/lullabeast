@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "AutoDev pipeline completion hooks: authoritative session-end signals and structural pre-checks via agent_end and before_agent_finalize",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "openclaw": {
     "extensions": [
       "./src/index.ts"
