@@ -12,7 +12,9 @@ AutoDev is an autonomous development pipeline that runs on top of OpenClaw. It m
 
 **git.** The executor agent commits completed phases to the project repository. git must be on the PATH.
 
-**OpenClaw installed and running.** AutoDev does not bundle OpenClaw — it calls OpenClaw's webhook API to invoke agents and reads the session files OpenClaw writes. Install OpenClaw separately and confirm its gateway is running on `localhost:18789` before running install.sh.
+**Node.js (with npm), 22+ recommended.** `install.sh` builds the `autodev-pipeline-signals` OpenClaw plugin (an esbuild bundle) and provisions the Playwright MCP used for visual review of UI phases. If `npm` is missing the installer continues but warns — and without the signals plugin, agent activity stamps never refresh and stall detection is disabled, so install Node before a real run.
+
+**OpenClaw installed and running.** AutoDev does not bundle OpenClaw — it calls OpenClaw's webhook API to invoke agents and reads the session files OpenClaw writes. OpenClaw is also the **runtime that owns all model and provider configuration**: you pick each agent's model and supply any provider API keys in `openclaw.json`. AutoDev is model-agnostic and never reads a provider key directly. Install OpenClaw separately and confirm its gateway is running on `localhost:18789` before running install.sh.
 
 ---
 
@@ -210,9 +212,11 @@ To collapse the pipeline directory onto the OpenClaw directory, set
 
 | Env | Default (seconds) | Role |
 | --- | ------------------ | ---- |
-| `AUTODEV_STALL_TIMEOUT_PLANNER` | 900 | Planner poll |
-| `AUTODEV_STALL_TIMEOUT_EXECUTOR` | 1800 | Executor poll |
-| `AUTODEV_STALL_TIMEOUT_REVIEWER` | 900 | Reviewer poll |
+| `AUTODEV_STALL_TIMEOUT_PLANNER` | 300 | Planner poll (post-first-activity silence) |
+| `AUTODEV_STALL_TIMEOUT_EXECUTOR` | 300 | Executor poll (post-first-activity silence) |
+| `AUTODEV_STALL_TIMEOUT_REVIEWER` | 300 | Reviewer poll (post-first-activity silence) |
+
+The companion `AUTODEV_STARTUP_GRACE_{PLANNER,EXECUTOR,REVIEWER}` knobs (pre-first-activity wait, default **600 s**) are documented in `.env.example`; raise those for slow cold OpenClaw boots and the stall timeouts above for mid-turn silence.
 
 `install.sh` appends the same three variables to **`.env` as commented placeholders** (once per file; a marker line prevents duplicates). **`.env.example`** contains the same block for new copies. Uncomment a line and set an integer to override.
 
@@ -273,13 +277,13 @@ ls "$AUTODEV_REPO_PATH/autodev/pipeline/orchestrator.py"
 
 If `ui/config.json` exists and contains an `autodev_repo_path` key, that value takes precedence over the environment variable. Make sure it points to the repo root, not to `~/.openclaw`. The repository ships **`ui/config.example.json`** only; copy it to **`ui/config.json`** (gitignored) or let **`install.sh`** create `ui/config.json` on first run. For the OpenClaw webhook Bearer token, prefer **`AUTODEV_HOOKS_TOKEN`** in the environment so the secret is not committed in JSON.
 
-### 3. Missing conversion prompt file
+### 3. Conversion prompt file not found
 
-**What it looks like.** The `/api/ideas/{id}/convert` endpoint returns HTTP 500. The rest of the ideas system (creating sessions, sending messages, readiness assessment) works normally.
+**What it looks like.** The `/api/ideas/{id}/convert` endpoint returns an error. The rest of the ideas system (creating sessions, sending messages, readiness assessment) works normally.
 
-**What's happening.** When converting a PRD draft to a roadmap, the server reads a prompt template from `~/.openclaw/deployment-package/Updates/PRD to Roadmap*.txt`. If this file does not exist, the endpoint raises an unhandled exception.
+**What's happening.** Converting a PRD draft to a roadmap needs the conversion-instructions prompt. The server resolves it in this order: the `conversion_prompt_path` key in `ui/config.json` (if set), then the repo-bundled default at `<repo>/autodev/prompts/prd-to-roadmap-conversion.txt`, then a built-in inline fallback. The bundled file ships with the repo, so a fresh checkout converts out of the box — this only breaks if `conversion_prompt_path` is overridden to a path that does not exist, or the bundled file was deleted.
 
-**Where to put it.** The file must be in `~/.openclaw/deployment-package/Updates/` and its filename must match `PRD to Roadmap*.txt`. The exact filename does not matter beyond the prefix — the server takes the first match. `install.sh` step 9 checks for this file and warns if it is missing.
+**How to fix.** Leave `conversion_prompt_path` empty in `ui/config.json` to use the bundled prompt, or point it at a readable file. `install.sh` step 9 verifies the bundled prompt is present and warns if it is missing.
 
 ### 4. `pipeline-project` symlink out of sync with `pipeline_state.json`
 
@@ -339,7 +343,7 @@ To run as a background service, see `ui/autodev-ui.service` (Linux/WSL2 systemd 
 
 ## Known Compatible OpenClaw Version
 
-Tested against OpenClaw [VERSION] — earlier versions may have schema differences in `pipeline_state.json`. See openclaw.json requirements below.
+Tested against OpenClaw 2026.5.18 — earlier versions may have schema differences in `pipeline_state.json`. See openclaw.json requirements below.
 
 The fields AutoDev reads from `pipeline_state.json` are: `pipeline_status`, `current_agent`, `current_phase`, `current_phase_raw_id`, `planner_retries`, `executor_retries`, `reviewer_retries`, `last_action_timestamp`, and `project_path`. Values of **`current_phase_raw_id`** (for example `INT-E1`) are the same phase identifiers used in the project’s **`roadmap.md`**. If your OpenClaw version writes different field names, the UI status endpoint will return partial data.
 
