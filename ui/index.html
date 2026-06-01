@@ -4563,8 +4563,8 @@
             const chatScrollRef = useRef(null);
             const [isAtBottom, setIsAtBottom] = useState(true);
             const readinessPollRef = useRef(null);
-            const notificationPollRef = useRef(null);
             const lateHealPollRef = useRef(null);
+            const currentIdeaIdRef = useRef(null); // mirrors currentIdeaId; every idea-scoped async resolve compares against it to drop stale-idea writes after a switch
             const roadmapRecoverPollRef = useRef(null);
             const convertRequestSeqRef = useRef(0);
             const docPaneRef = useRef(null);
@@ -4604,39 +4604,6 @@
                 }
             };
 
-            const refreshMessages = (ideaId) => {
-                if (!ideaId) return;
-                fetch(`/api/ideas/${ideaId}/session`)
-                    .then((r) => r.json())
-                    .then((d) => {
-                        const rawMsgs = d.messages || [];
-                        setMessages(rawMsgs.map((m, idx) => ({
-                            ...m,
-                            id: m.id || `${m.role}-${idx}-${(m.ts || "").slice(0, 19) || idx}`,
-                        })));
-                    })
-                    .catch(() => {});
-            };
-
-            const stopNotificationPoll = () => {
-                if (notificationPollRef.current) {
-                    clearInterval(notificationPollRef.current);
-                    notificationPollRef.current = null;
-                }
-            };
-
-            const startNotificationPoll = (ideaId) => {
-                stopNotificationPoll();
-                if (!ideaId) return;
-                let pollCount = 0;
-                const maxPolls = 24; // 24 × 5s = 120s (UI-side cap; server ideas poll_timeout default is 180s)
-                notificationPollRef.current = setInterval(() => {
-                    pollCount += 1;
-                    refreshMessages(ideaId);
-                    if (pollCount >= maxPolls) stopNotificationPoll();
-                }, 5000);
-            };
-
             const stopLateHealPoll = () => {
                 if (lateHealPollRef.current) {
                     clearInterval(lateHealPollRef.current);
@@ -4656,7 +4623,12 @@
             // poller — the dual-source lesson). Watches GET /session every 5 s
             // until `resolveWhen(messages)` is true, then renders the server
             // state and runs the post-turn cleanup. `onExhausted` fires if
-            // `maxTicks` elapses first.
+            // `maxTicks` elapses first. Every loop exit (tick, resolve, reject)
+            // bails — stopLateHealPoll() + return, no state write — if the operator
+            // switched ideas mid-poll (ideaId !== currentIdeaIdRef.current), so a
+            // stale in-flight /session fetch can't flash the old idea's messages/PRD
+            // into the now-foreground idea (clearInterval can't cancel an already
+            // in-flight fetch's microtask).
             //   • 408/502/503 late-heal: resolveWhen = no assistant error remains
             //     (a late .done reconciled the error placeholder into a reply).
             //   • bounded-wait abort / network drop: resolveWhen = the turn's
@@ -4668,6 +4640,7 @@
                 let ticks = 0;
                 let fails = 0; // consecutive GET failures — bail fast if the server is actually down
                 lateHealPollRef.current = setInterval(() => {
+                    if (ideaId !== currentIdeaIdRef.current) { stopLateHealPoll(); return; }
                     ticks += 1;
                     if (ticks > maxTicks) {
                         stopLateHealPoll();
@@ -4677,6 +4650,7 @@
                     fetch(`/api/ideas/${ideaId}/session`)
                         .then((r) => r.json())
                         .then((d) => {
+                            if (ideaId !== currentIdeaIdRef.current) { stopLateHealPoll(); return; }
                             fails = 0;
                             const rawMsgs = d.messages || [];
                             if (!resolveWhen(rawMsgs)) return;
@@ -4707,6 +4681,7 @@
                             if (onResolved) onResolved(rawMsgs);
                         })
                         .catch(() => {
+                            if (ideaId !== currentIdeaIdRef.current) { stopLateHealPoll(); return; }
                             fails += 1;
                             if (fails >= 6) { // ~30s of unreachable server → stop waiting
                                 stopLateHealPoll();
@@ -4730,6 +4705,7 @@
                     fetch(`/api/ideas/${ideaId}/session`)
                         .then((r) => r.json())
                         .then((d) => {
+                            if (ideaId !== currentIdeaIdRef.current) return;
                             const rm = (d.roadmap_content || "").trim();
                             if (rm) {
                                 setRoadmapContent(d.roadmap_content || "");
@@ -4787,11 +4763,19 @@
                 messagesEndRef.current?.scrollIntoView({ behavior, block: "end" });
             };
 
+            // Idea-switch guards here (and in startRoadmapRecoverPoll) use a PLAIN
+            // `return`, not the heal poll's stopXPoll()+return: readinessPollRef is
+            // re-armed by the newly-selected idea, so a stale resolve calling
+            // stopReadinessPoll() would clear the NEW idea's poll. The poll lifecycle
+            // stays managed by the idea-load effect (not a [currentIdeaId] cleanup),
+            // so a background assessment can still finish and refresh the sidebar
+            // list after a switch — see refreshIdeas() in the nested resolve below.
             const startReadinessPoll = (ideaId) => {
                 stopReadinessPoll();
                 if (!ideaId) return;
                 let pollCount = 0;
                 readinessPollRef.current = setInterval(() => {
+                    if (ideaId !== currentIdeaIdRef.current) return;
                     pollCount += 1;
                     if (pollCount >= 60) {
                         stopReadinessPoll();
@@ -4803,20 +4787,23 @@
                     fetch(`/api/ideas/${ideaId}/readiness/poll`)
                         .then((r) => r.json())
                         .then((p) => {
+                            if (ideaId !== currentIdeaIdRef.current) return;
                             if (p.done) {
                                 stopReadinessPoll();
                                 fetch(`/api/ideas/${ideaId}/readiness`)
                                     .then((rr) => rr.json())
                                     .then((d) => {
+                                        // refreshIdeas() is GLOBAL (every idea's sidebar X/10), so it runs
+                                        // BEFORE the guard — a background assessment finishing after a switch
+                                        // still updates the list. Only the foreground strip below is idea-gated.
+                                        refreshIdeas();
+                                        if (ideaId !== currentIdeaIdRef.current) return;
                                         const nextStatus = d.status || "unavailable";
                                         const nextData = d.data || null;
                                         setReadinessStatus(nextStatus);
                                         setReadinessData(nextData);
                                         setReadinessTimedOut(false);
                                         if (nextStatus === "ready" && nextData) setHadReadyReadiness(true);
-                                        // Sidebar list shows readiness_score from GET /api/ideas — refresh
-                                        // after async assessment so operators see X/10 without switching ideas.
-                                        refreshIdeas();
                                     })
                                     .catch(() => {});
                             }
@@ -4848,12 +4835,16 @@
                 isLoadingRef.current = isLoading;
             }, [isLoading]);
 
+            useEffect(() => {
+                currentIdeaIdRef.current = currentIdeaId;
+            }, [currentIdeaId]);
+
             const fetchPrdSectionDiff = React.useCallback((ideaId) => {
                 if (!ideaId) return;
                 if (isLoadingRef.current) return;
                 fetch(`/api/ideas/${ideaId}/prd-section-diff`)
                     .then((r) => (r.ok ? r.json() : { sections: {} }))
-                    .then((data) => setPrdSectionDiff(data.sections || {}))
+                    .then((data) => { if (ideaId !== currentIdeaIdRef.current) return; setPrdSectionDiff(data.sections || {}); })
                     .catch(() => setPrdSectionDiff({}));
             }, []);
 
@@ -4922,13 +4913,12 @@
                 if (!ideaId) return;
                 fetch(`/api/ideas/${ideaId}/annotations`)
                     .then((r) => r.ok ? r.json() : [])
-                    .then((data) => setAnnotations(data || []))
+                    .then((data) => { if (ideaId !== currentIdeaIdRef.current) return; setAnnotations(data || []); })
                     .catch(() => setAnnotations([]));
             };
 
             useEffect(() => {
                 if (!currentIdeaId) return;
-                stopNotificationPoll();
                 setReadinessTimedOut(false);
                 setHadReadyReadiness(false);
                 setAnnotations([]);
@@ -4944,6 +4934,7 @@
                 fetch(`/api/ideas/${currentIdeaId}/session`)
                     .then((r) => r.json())
                     .then((d) => {
+                        if (currentIdeaId !== currentIdeaIdRef.current) return;
                         const rawMsgs = d.messages || [];
                         setMessages(
                             rawMsgs.map((m, idx) => ({
@@ -4972,6 +4963,7 @@
                 fetch(`/api/ideas/${currentIdeaId}/readiness`)
                     .then((r) => r.json())
                     .then((d) => {
+                        if (currentIdeaId !== currentIdeaIdRef.current) return;
                         const nextStatus = d.status || "unavailable";
                         const nextData = d.data || null;
                         setReadinessStatus(nextStatus);
