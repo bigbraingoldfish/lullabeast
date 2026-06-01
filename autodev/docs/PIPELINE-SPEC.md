@@ -991,7 +991,7 @@ Read `phase_state.json` for `executor_retries` and `reviewer_retries`; default t
 Append one JSON line to `pipeline-project/.autodev/pipeline/metrics.jsonl`:
 
 ```json
-{"ts": "<ISO 8601 UTC>", "phase": "<phase_raw_id>", "goal": "<detail from current_phase.json>", "executor_attempts": <int>, "executor_self_failures": <int>, "executor_reviewer_rejections": <int>, "reviewer_passes": <int>, "blame_fires": 0, "escalations": 0, "duration_seconds": null, "skill_used": "<discipline name or null>"}
+{"ts": "<ISO 8601 UTC>", "phase": "<phase_raw_id>", "goal": "<detail from current_phase.json>", "executor_attempts": <int>, "executor_self_failures": <int>, "executor_reviewer_rejections": <int>, "reviewer_passes": <int>, "blame_fires": 0, "escalations": 0, "duration_seconds": null, "skill_used": "<discipline name or null>", "escalation_resets": <int>, "nuclear_resets": <int>, "reviewer_unverified_retries": <int>, "reachability_summary": <obj|null>, "reset_log": [<entries>]}
 ```
 
 - `executor_attempts` = `executor_self_failure_retries + executor_reviewer_rejection_retries + 1` (P0 Stage H — lifetime, sourced from `phase_state.json`; reflects total attempts across reviewer-driven mid-phase resets)
@@ -1002,6 +1002,12 @@ Append one JSON line to `pipeline-project/.autodev/pipeline/metrics.jsonl`:
 - `blame_fires` / `escalations`: 0 unless definitive evidence otherwise
 - `duration_seconds`: `null` unless computable from timestamps
 - `skill_used`: discipline name string from `phase_state.json → skill_injected` (e.g. `"core-logic"`, `"infra-config"`), or `null` if no skill was injected. Written by the orchestrator's canonical post-merge row; read from `phase_state.json` before it is deleted at phase completion.
+- **Phase 3 — per-phase pain signals** (all read from `phase_state.json` at row-write time, on the reviewer-PASS path before that file is deleted on advance; additive, default-safe):
+  - `escalation_resets` / `nuclear_resets` / `reviewer_unverified_retries`: the per-phase reset/contract-retry counters (default `0`).
+  - `reset_log`: snapshot of the operator-reset audit trail (`[]` when none) — captured into the durable row because the live `reset_log` is wiped on phase advance.
+  - `reachability_summary`: compact `{kind, count?, files?, command?/reason?}` (or `null` when no advisory drained that phase) — stashed onto `phase_state.last_reachability_summary` by `_emit_reachability_advisory` before it removes the advisory file, then surfaced here.
+
+(The orchestrator's actual `canonical_row` also carries the W1-G token-accounting fields — `planner_tokens` / `executor_tokens` / `reviewer_tokens` / `cost_total` — and `blame_verdict`; they are omitted from this representative example.)
 
 The reviewer gate verifies that the last non-empty line of `metrics.jsonl` contains `phase_raw_id` — this confirms the row was written for the current phase, not a prior one.
 
@@ -1457,7 +1463,9 @@ Complete JSON schemas for all pipeline data files. Schemas in §3–§6 define a
   "skill_injected": { "type": "string|null", "description": "Discipline name of the phase-prefix skill injected for the most recent agent turn (e.g. 'core-logic', 'infra-config'). null if no skill applied (prefix unmapped, phase_raw_id empty, source file missing, or kill switch suppressed injection). Written atomically by _record_injected_skill() immediately after each inject_skill() call." },
   "skill_agent": { "type": "string", "description": "Agent role for which the skill_injected value was recorded ('planner', 'executor', or 'reviewer'). Always written alongside skill_injected." },
   "escalation_trigger_reason": { "type": "string", "description": "Internal, possibly blame-framed reason the pipeline transitioned to WAITING_FOR_HUMAN (e.g. the impl-blame-cap string). Written atomically immediately before transition_state('WAITING_FOR_HUMAN', ...) at all three escalation trigger points. P1 Stage G1: NO LONGER the UI command-panel headline — it is demoted into the panel's collapsible 'Internal reason' disclosure (and the audit log). Preserved until phase_state.json is deleted at phase completion." },
-  "escalation_headline": { "type": "string", "description": "P1 Stage G1 — clean, deterministic, non-blame headline for the escalation panel (e.g. 'Phase REND-E1 needs your input'). Derived from the phase id by _clean_escalation_headline(), so it can never echo the blame-cap string. Written alongside escalation_trigger_reason at every escalation trigger; served by GET /api/state. The UI renders the LLM advisory summary when escalation_advisory_status == 'ready', else this headline." }
+  "escalation_headline": { "type": "string", "description": "P1 Stage G1 — clean, deterministic, non-blame headline for the escalation panel (e.g. 'Phase REND-E1 needs your input'). Derived from the phase id by _clean_escalation_headline(), so it can never echo the blame-cap string. Written alongside escalation_trigger_reason at every escalation trigger; served by GET /api/state. The UI renders the LLM advisory summary when escalation_advisory_status == 'ready', else this headline." },
+  "last_phase_outcome": { "type": "string|null", "description": "Phase 3 — terminal phase outcome: 'completed' / 'escalated' / 'nuclear_reset' (absent while in-progress). Set by _record_phase_outcome ('completed', on the reviewer-PASS path right after the metrics row and before the audit archive copies phase_state) and directly at the single escalation chokepoint + the repo-init escalation block ('escalated') and in nuclear_reset_phase ('nuclear_reset'). Preserved across reset_phase() so a nuclear reset's outcome survives the reset it delegates to; cleared on genuine phase advance. DURABILITY: 'completed' is wiped when phase_state.json is deleted on advance — the canonical metrics row + phase_complete event are its durable record; 'escalated'/'nuclear_reset' persist live because those states do not advance." },
+  "last_reachability_summary": { "type": "object|null", "description": "Phase 3 — compact copy of the executor reachability advisory ({kind, count?, files?, command?/reason?}), stashed by _emit_reachability_advisory before it removes executor_advisory_detail.json so the canonical metrics row (written later on the reviewer-PASS path, after that file is gone) can surface it as reachability_summary. Absent when no advisory drained this phase." }
 }
 ```
 
@@ -1479,6 +1487,7 @@ Complete JSON schemas for all pipeline data files. Schemas in §3–§6 define a
 | `escalation_resets` | — | ✗ preserved | ✓ zeroed |
 | `nuclear_resets` (P1 Stage G2) | — | ✗ preserved | ✓ zeroed |
 | `reset_log` (P1 Stage G2) | — (appended) | ✗ preserved | ✓ cleared |
+| `last_phase_outcome` (Phase 3) | — | ✗ preserved | ✓ cleared |
 
 ### `pipeline_state.json`
 

@@ -49,6 +49,17 @@ def _make_orchestrator():
     return inst
 
 
+@pytest.fixture(autouse=True)
+def _isolate_phase_state(tmp_path, monkeypatch):
+    """Phase 3 — ``_emit_reachability_advisory`` now writes phase_state on a
+    finding (it stashes ``last_reachability_summary`` before removing the
+    advisory file). Point ``PHASE_STATE_FILE`` at tmp so the stash never touches
+    a real phase_state.json during the suite. Existing event/file-removal
+    assertions are unaffected; the stash content is covered by
+    test_phase3_reachability_stash.py."""
+    monkeypatch.setattr(orch_mod, "PHASE_STATE_FILE", str(tmp_path / "phase_state.json"))
+
+
 # ---------------------------------------------------------------------------
 # Behavioural — the method emits the right events and clears the file
 # ---------------------------------------------------------------------------
