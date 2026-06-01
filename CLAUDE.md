@@ -364,7 +364,7 @@ The UI server tails this file via `_poll_pipeline_events_file()` (`ui/server.py:
 | **`abort_verify_failed`**  | When `verify_session_stopped()` returns `False` (no longer halts — soft-continue) | `{session_key, stamp_path, agent_role, reason}`                                                       | 6.1.b |
 | **`reviewer_verdict`**     | On every reviewer-gate consumption                                 | `{verdict, pass_number, next_agent}`                                                                  | 6.1.c |
 | **`stamp_init_failed`**    | When `_init_activity_stamp_or_halt` returns False                  | `{agent_role, stamp_path, reason}`                                                                    | 6.1.d |
-| **`reachability_warning`** | On the executor PASS path, when `executor_advisory_detail.json` has a populated `reachability_summary` or non-empty `reachability_diagnostics`. One summary event per phase + one event per diagnostic. | `{kind, count?, files?, command?, file?, reason}` where `kind ∈ {unreachable_summary, no_resolver, resolver_limitation, resolver_error}` | P1 Stage F |
+| **`reachability_warning`** | On the executor PASS path, when `executor_advisory_detail.json` has a populated `reachability_summary` or non-empty `reachability_diagnostics`. One summary event per phase + one event per diagnostic. _(Phase 3: a compact copy of the drained advisory is also stashed to `phase_state.last_reachability_summary` and surfaced in the metrics row's `reachability_summary` field before the file is removed.)_ | `{kind, count?, files?, command?, file?, reason}` where `kind ∈ {unreachable_summary, no_resolver, resolver_limitation, resolver_error}` | P1 Stage F |
 | **`reachability_not_applicable`** | On the executor PASS path, when the entry-point command is a recognised test runner (pytest, jest, vitest, ...) | `{reason}` | P1 Stage F |
 | **`nuclear_reset`** | Inside `nuclear_reset_phase()`, after the `nuclear_resets` increment + `reset_log` append, before delegating to `reset_phase()` (so `phase` is the pre-reset escalated phase) | `{nuclear_resets, reason, phase}` (`reason` = `last_error_code`) | P2 Observability |
 | **`queue_halted`** | Inside `_select_next_queue_project()`, in the `if halt_if_no_eligible:` branch right after `transition_state("QUEUE_HALTED", …)` (the reason-clearing `else` does not emit) | `{reason}` (`all_blocked` / `all_dependency_hold` / `answered_pending_revival` / `mixed` / `all_completed`) | P2 Observability |
@@ -376,13 +376,16 @@ The bold entries are Section 6 additions; existing UI consumers handle them tran
 
 ### Phase-state outcome fields (Section 6.4)
 
-`phase_state.json` now also persists the latest poll/abort outcome so a restarted orchestrator and the dashboard can render "what happened last" without scraping logs. Written by `_record_phase_outcome(**fields)` (defined near `write_phase_state_atomic`):
+`phase_state.json` now also persists the latest poll/abort outcome **and the terminal phase outcome** so a restarted orchestrator and the dashboard can render "what happened last" without scraping logs. Written by `_record_phase_outcome(**fields)` (defined near `write_phase_state_atomic`):
 
 | Field                  | Values                                                                |
 |------------------------|-----------------------------------------------------------------------|
 | `last_poll_reason`     | `succeeded` / `stalled` / `no_first_activity` / `stopped` / `timeout` |
 | `last_abort_result`    | `ok` / `FAILED` / `verify_failed`                                     |
 | `last_attempt_summary` | Dense one-line string mirroring the `[ATTEMPT_END]` log line          |
+| `last_phase_outcome`   | `completed` / `escalated` / `nuclear_reset` (absent while in-progress; Phase 3) |
+
+**`last_phase_outcome` durability caveat (Phase 3).** The field persists live only for the *non-advancing* outcomes — `escalated` (set once at the single main-loop escalation chokepoint and at the repo-init escalation block) and `nuclear_reset` (set in `nuclear_reset_phase` and **preserved across `reset_phase`'s** re-init, otherwise the reset it delegates to would wipe it). On a `completed` phase, `phase_state.json` is deleted on advance, so the `completed` value — written right after the canonical metrics row and **before** the audit archive copies `phase_state.json` — survives only in the per-phase audit archive and a brief restart window. The **durable** completion record is the canonical metrics row + the `phase_complete` event; the dashboard reads completion from the metrics row, not live `phase_state`. Reachability is deliberately **not** an outcome value — it is non-terminal (a phase can be `completed` *and* carry a reachability advisory) and is captured by the metrics row's `reachability_summary` field instead.
 
 ### In-poll heartbeat (Section 6.2)
 
@@ -397,6 +400,8 @@ This distinguishes "alive, agent making progress" from "alive, agent stopped" fr
 ### Metrics history file (Section 6.0)
 
 `metrics.jsonl` write history is preserved in an orchestrator-private append-only file at `$AUTODEV_PIPELINE_ROOT/metrics_history/<project_name>.jsonl`, written by `_write_canonical_metrics_row()`. The agent cannot reach this directory; even if the executor overwrites the project's `metrics.jsonl` to a single row, the orchestrator rebuilds the full history on the next phase completion. On first deploy the file is bootstrapped from the live `metrics.jsonl` so existing history is preserved across the upgrade.
+
+**Canonical metrics row — Phase 3 pain-signal fields.** `_write_canonical_metrics_row()` also persists per-phase "pain signals" read from the fresh on-disk `phase_state` at row-write time. The row is written on the reviewer-PASS path **before** `phase_state.json` is deleted on advance, so these are still available: `escalation_resets`, `nuclear_resets`, `reviewer_unverified_retries` (counters, default `0`); `reset_log` (the operator-reset audit-trail snapshot — `[]` when none, bounded by the 3-escalation + 2-nuclear caps, captured here because the live `reset_log` is wiped on phase advance); and `reachability_summary` (compact `{kind, count?, files?, command?/reason?}`, or `null` when no advisory drained that phase — stashed onto `phase_state.last_reachability_summary` by `_emit_reachability_advisory` before it removes the advisory file, since that file is gone long before this row is written). All additive — the metrics reader and UI tolerate unknown fields, so no migration is needed.
 
 ---
 

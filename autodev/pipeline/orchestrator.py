@@ -2470,6 +2470,10 @@ class Orchestrator:
         result, and attempt summary so a restarted orchestrator (or the
         dashboard, which already reads ``phase_state.json``) can render
         "what happened last" without scraping ``/tmp/orchestrator.log``.
+        Phase 3 added ``last_phase_outcome`` (``completed`` / ``escalated``
+        / ``nuclear_reset``) for the terminal phase outcome; see the
+        durability caveat in CLAUDE.md (``completed`` is wiped on advance,
+        so the canonical metrics row is its durable record).
 
         Merge semantics: existing fields are preserved; only the supplied
         keyword arguments are written/overwritten.  Repeated calls form
@@ -2497,7 +2501,12 @@ class Orchestrator:
 
     def _emit_reachability_advisory(self, raw_id):
         """Drain executor_advisory_detail.json into one summary event + one
-        not_applicable event + N diagnostic events, then remove the file."""
+        not_applicable event + N diagnostic events, stash a compact summary
+        onto ``phase_state.last_reachability_summary`` (Phase 3 — so the
+        canonical metrics row, written later on the reviewer-PASS path after
+        this file is gone, can persist the reachability outcome), then remove
+        the file. The stash is best-effort and read-modify-write so it never
+        breaks event emission or clobbers sibling phase_state keys."""
         advisory_path = os.path.join(PROJECT_ARTIFACTS_DIR, "executor_advisory_detail.json")
         if not os.path.exists(advisory_path):
             return
@@ -2550,6 +2559,34 @@ class Orchestrator:
                         "file": d.get("file"),
                     },
                 )
+        # Phase 3 — stash a compact summary onto phase_state so the canonical
+        # metrics row (written later on the reviewer-PASS path, after this file
+        # is removed) can persist the reachability outcome. Read-modify-write
+        # preserves all other phase_state keys; every phase_state writer between
+        # here and the row write is read-modify-write, so this survives the
+        # reviewer run. Best-effort: a phase_state failure must never break event
+        # emission or the os.remove below. Compact (no reason_template / per-file
+        # diagnostic lists) — the full detail already rode out on the events.
+        try:
+            if isinstance(summary, dict) and summary.get("files"):
+                _reach_stash = {
+                    "kind": "unreachable_summary",
+                    "count": summary.get("count", len(summary["files"])),
+                    "files": summary["files"],
+                    "command": summary.get("command", ""),
+                }
+            elif isinstance(not_applicable, dict):
+                _reach_stash = {"kind": "not_applicable", "reason": not_applicable.get("reason", "")}
+            elif isinstance(diagnostics, list) and diagnostics:
+                _reach_stash = {"kind": "diagnostics", "count": len(diagnostics)}
+            else:
+                _reach_stash = None
+            if _reach_stash is not None:
+                _ps_reach = self.read_phase_state()
+                _ps_reach["last_reachability_summary"] = _reach_stash
+                self.write_phase_state_atomic(_ps_reach)
+        except Exception as _reach_err:
+            print(f"[WARN] _emit_reachability_advisory: stash failed: {_reach_err}")
         try:
             os.remove(advisory_path)
         except OSError:
@@ -2644,6 +2681,7 @@ class Orchestrator:
         preserved_escalation_resets = current_phase_state.get("escalation_resets", 0)
         preserved_nuclear_resets = current_phase_state.get("nuclear_resets", 0)
         preserved_reset_log = current_phase_state.get("reset_log", [])
+        preserved_last_phase_outcome = current_phase_state.get("last_phase_outcome")
 
         try:
             configured_base_branch = self.openclaw_config.get("pipeline", {}).get("base_branch", "").strip()
@@ -2693,6 +2731,11 @@ class Orchestrator:
             # P1 Stage G2 — operator-governance state survives the reset (see docstring).
             "nuclear_resets": preserved_nuclear_resets,
             "reset_log": preserved_reset_log,
+            # Phase 3 — preserve the terminal outcome across the re-init so a nuclear
+            # reset's outcome survives reset_phase() (which nuclear_reset_phase calls).
+            # A normal operator RESET_PHASE carries forward whatever was there; the next
+            # terminal event overwrites it.
+            "last_phase_outcome": preserved_last_phase_outcome,
         }
         self.write_phase_state_atomic(new_phase_state)
 
@@ -2761,6 +2804,7 @@ class Orchestrator:
             "reason": _reason,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
+        _ps["last_phase_outcome"] = "nuclear_reset"  # Phase 3 — preserved across reset_phase
         self.write_phase_state_atomic(_ps)
         print(f"[INFO] nuclear_reset_phase: nuclear_resets now {_ps['nuclear_resets']}, reason={_reason!r}.")
         # Phase 2 (observability) — record the destructive ACTION on the timeline. The dispatch
@@ -3604,6 +3648,16 @@ class Orchestrator:
         Idempotent within a phase: if called repeatedly for the same
         ``current_phase_raw_id`` the file ends up with exactly one row
         per phase (the latest canonical version).
+
+        Phase 3 — the row also carries per-phase "pain signals" read from
+        the fresh on-disk ``phase_state`` (``ps_m``): ``escalation_resets``,
+        ``nuclear_resets``, ``reviewer_unverified_retries`` (counters),
+        ``reset_log`` (the operator-reset audit-trail snapshot), and
+        ``reachability_summary`` (the compact copy stashed by
+        ``_emit_reachability_advisory``). This runs on the reviewer-PASS
+        path *before* ``phase_state.json`` is deleted on advance, so
+        ``reset_log`` + the counters are still present here — that ordering
+        is load-bearing for the durable record.
         """
         raw_id = self.state.get("current_phase_raw_id", "")
         if not raw_id:
@@ -3682,6 +3736,17 @@ class Orchestrator:
                 6,
             ),
             "duration_seconds": duration_seconds,
+            # Phase 3 — durable per-phase pain signals, sourced from ps_m (the
+            # fresh on-disk phase_state read above). This row is written on the
+            # reviewer-PASS path BEFORE phase_state.json is deleted on advance,
+            # so reset_log + the reset counters are still present here. The
+            # reachability_summary is the compact copy _emit_reachability_advisory
+            # stashed onto phase_state (null when no advisory drained this phase).
+            "escalation_resets": ps_m.get("escalation_resets", 0),
+            "nuclear_resets": ps_m.get("nuclear_resets", 0),
+            "reviewer_unverified_retries": ps_m.get("reviewer_unverified_retries", 0),
+            "reachability_summary": ps_m.get("last_reachability_summary"),
+            "reset_log": ps_m.get("reset_log", []),
         })
 
         # --- Resolve paths.  Two files:
@@ -4024,6 +4089,7 @@ class Orchestrator:
                 # non-blame headline. The raw reason stays in the details disclosure.
                 _ps["escalation_headline"] = "Repository setup needs your attention"
                 _ps["escalations"] = _ps.get("escalations", 0) + 1  # W1-B
+                _ps["last_phase_outcome"] = "escalated"  # Phase 3 — terminal outcome
                 _ps["waiting_for_human_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # W1-E
                 _ps["escalation_advisory_status"] = "generating"
                 self.write_phase_state_atomic(_ps)
@@ -5216,6 +5282,14 @@ class Orchestrator:
                                 f"{_metrics_err}"
                             )
 
+                        # Phase 3 — record the terminal outcome. phase_state.json is
+                        # deleted ~50 lines below on advance, so this value is durable
+                        # only via the audit archive (which copies phase_state.json just
+                        # below) and a restart landing before the delete. The DURABLE
+                        # completion record is the metrics row + phase_complete event;
+                        # the dashboard must read completion from the metrics row.
+                        self._record_phase_outcome(last_phase_outcome="completed")
+
                         # 3.5 Audit Archive
                         import shutil
                         archive_project_name = os.path.basename(os.path.realpath(SYMLINK_TARGET)) if os.path.exists(SYMLINK_TARGET) else "unknown-project"
@@ -5735,6 +5809,7 @@ class Orchestrator:
                         # the raw trigger reason (which is demoted into the details disclosure).
                         _ps["escalation_headline"] = self._clean_escalation_headline(raw_id)
                         _ps["escalations"] = _ps.get("escalations", 0) + 1  # W1-B
+                        _ps["last_phase_outcome"] = "escalated"  # Phase 3 — terminal outcome
                         _ps["waiting_for_human_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # W1-E
 
                         # Signal "generating" so the UI can show a spinner immediately
