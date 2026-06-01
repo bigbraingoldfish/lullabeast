@@ -1,0 +1,8 @@
+# AutoDev — development & test dependencies.
+# Installs the full runtime plus the test toolchain:
+#     pip install -r requirements-dev.txt
+-r requirements.txt
+
+# Test runner, plus the HTTP client that fastapi.testclient.TestClient requires.
+pytest==9.0.2
+httpx==0.28.1
