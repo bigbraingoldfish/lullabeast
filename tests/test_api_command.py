@@ -273,7 +273,7 @@ class TestPostApiCommand:
                 assert "Technical:" in detail
                 assert "symlink" in detail.lower()
 
-    @pytest.mark.parametrize("command", ["RETRY", "RESET_EXECUTION", "RESET_PHASE", "SKIP", "PROCEED", "STOP"])
+    @pytest.mark.parametrize("command", ["RETRY", "RESET_EXECUTION", "RESET_PHASE", "SKIP", "PROCEED", "STOP", "NUCLEAR_RESET"])
     def test_all_valid_commands_return_200(self, test_client, temp_project_dir, command):
         with patch("ui.server.load_config") as mock_config:
             mock_config.return_value = {
@@ -291,8 +291,56 @@ class TestPostApiCommand:
                 ]
                 
                 response = test_client.post("/api/command", json={"command": command})
-                
+
                 assert response.status_code == 200, f"Command {command} should return 200"
+
+    # ── P1 Stage G2 — NUCLEAR_RESET command (operator escape hatch, cap 2) ──────
+    def test_nuclear_reset_in_valid_commands_not_in_reset_cap_commands(self):
+        """NUCLEAR_RESET is a valid command but is NOT subject to the escalation
+        reset cap (escalation_resets >= 3) — it is governed by its own nuclear_resets
+        cap, and must remain available precisely when the escalation budget is spent."""
+        from ui.server import VALID_COMMANDS, RESET_CAP_COMMANDS
+        assert "NUCLEAR_RESET" in VALID_COMMANDS
+        assert "NUCLEAR_RESET" not in RESET_CAP_COMMANDS
+
+    def test_nuclear_reset_rejected_when_nuclear_resets_ge_2(self, test_client, temp_project_dir):
+        """The server enforces the nuclear cap: nuclear_resets >= 2 -> 409."""
+        with patch("ui.server.load_config") as mock_config:
+            mock_config.return_value = {
+                "pipeline_state_path": "/tmp/nonexistent_pipeline.json",
+                "phase_state_path": "/tmp/nonexistent_phase.json",
+                "project_dir_path": temp_project_dir,
+                "lock_path": "/tmp/nonexistent.lock",
+                "events_path": "/tmp/nonexistent_events.jsonl",
+            }
+            with patch("ui.server._read_json_file") as mock_read:
+                mock_read.side_effect = [
+                    {"pipeline_status": "WAITING_FOR_HUMAN"},
+                    {"escalation_resets": 3, "nuclear_resets": 2},
+                ]
+                response = test_client.post("/api/command", json={"command": "NUCLEAR_RESET"})
+                assert response.status_code == 409
+                assert "Nuclear reset cap reached" in response.json()["detail"]
+
+    def test_nuclear_reset_accepted_when_escalation_resets_ge_3(self, test_client, temp_project_dir):
+        """Spec-literal (Decision A): NUCLEAR_RESET is accepted even when the escalation
+        reset cap is fully spent — that is exactly when it must be available. Proves the
+        server does NOT gate it on escalation_resets."""
+        with patch("ui.server.load_config") as mock_config:
+            mock_config.return_value = {
+                "pipeline_state_path": "/tmp/nonexistent_pipeline.json",
+                "phase_state_path": "/tmp/nonexistent_phase.json",
+                "project_dir_path": temp_project_dir,
+                "lock_path": "/tmp/nonexistent.lock",
+                "events_path": "/tmp/nonexistent_events.jsonl",
+            }
+            with patch("ui.server._read_json_file") as mock_read:
+                mock_read.side_effect = [
+                    {"pipeline_status": "WAITING_FOR_HUMAN"},
+                    {"escalation_resets": 3, "nuclear_resets": 0},
+                ]
+                response = test_client.post("/api/command", json={"command": "NUCLEAR_RESET"})
+                assert response.status_code == 200
 
     def test_command_uses_parked_escalation_fallback_when_queue_halted(self, test_client, temp_project_dir):
         """When active status is QUEUE_HALTED but queue row is ESCALATION, defer command to parked files."""
