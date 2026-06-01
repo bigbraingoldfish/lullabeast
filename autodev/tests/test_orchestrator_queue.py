@@ -1459,3 +1459,136 @@ class TestParkedEscalationRevival:
         assert s["current_phase"] == 0
         assert s["current_phase_raw_id"] == ""
         assert s["current_agent"] == "escalation"  # banked command re-resolves from here
+
+
+# ---------------------------------------------------------------------------
+# Observability Phase 2 — SILENT queue-lifecycle transitions now emit events
+# ---------------------------------------------------------------------------
+
+def _read_events(tmp_path):
+    """Parse pipeline_events.jsonl written under the fixture's AUTODEV_PIPELINE_ROOT.
+
+    The ``orch`` fixture setenvs AUTODEV_PIPELINE_ROOT=tmp_path then reloads the
+    orchestrator module, so ``_write_pipeline_event`` appends here with no extra patch.
+    """
+    p = Path(str(tmp_path)) / "pipeline_events.jsonl"
+    if not p.exists():
+        return []
+    return [json.loads(ln) for ln in p.read_text().splitlines() if ln.strip()]
+
+
+class TestObservabilityPhase2Events:
+    """Phase 2: queue-lifecycle transitions emit timeline events so the activity feed
+    records WHEN/WHY the queue halted, parked, revived, or held — moments that were
+    previously SILENT (state changed with no event)."""
+
+    def test_queue_halted_emits_event(self, orch, tmp_path, monkeypatch):
+        """When the queue exhausts with every entry blocked, the halt transition must
+        emit one ``queue_halted`` event carrying the reason — recording the stall moment,
+        not just leaving the current QUEUE_HALTED status with no timeline trace."""
+        inst, queue_file, _, _ = orch
+        _write_queue(queue_file, [
+            _make_entry("a", state="BLOCKED", position=1),
+            _make_entry("b", state="BLOCKED", position=2),
+        ])
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "update_symlink", lambda p: True)
+
+        assert inst._select_next_queue_project() is False
+        halted = [e for e in _read_events(tmp_path) if e.get("event") == "queue_halted"]
+        assert len(halted) == 1, "the halt transition must emit exactly one queue_halted event"
+        assert halted[0].get("detail", {}).get("reason") == "all_blocked"
+
+    def test_queue_halted_not_emitted_when_halt_if_no_eligible_false(self, orch, tmp_path, monkeypatch):
+        """The PIPELINE_COMPLETE path calls selection with halt_if_no_eligible=False; it
+        does NOT transition to QUEUE_HALTED, so it must NOT emit queue_halted. Pins the
+        emit inside the ``if halt_if_no_eligible:`` branch (not the reason-clearing else)."""
+        inst, queue_file, _, _ = orch
+        _write_queue(queue_file, [_make_entry("a", state="COMPLETED", position=1)])
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "update_symlink", lambda p: True)
+        monkeypatch.setattr(inst, "write_state", lambda: None)
+        inst.state["pipeline_status"] = "PIPELINE_COMPLETE"
+
+        assert inst._select_next_queue_project(halt_if_no_eligible=False) is False
+        assert [e for e in _read_events(tmp_path) if e.get("event") == "queue_halted"] == []
+
+    def test_queue_parked_emits_event(self, orch, tmp_path, monkeypatch):
+        """Parking the active escalated project must emit one ``queue_parked`` event with
+        the reason, the escalated phase, and the entry identity — so the timeline shows the
+        project was set aside (queue advanced) rather than silently disappearing."""
+        inst, queue_file, _, _ = orch
+        proj = tmp_path / "esc_proj"
+        proj.mkdir()
+        entry = {**_make_entry("esc_proj", state="ACTIVE", position=1), "project_path": str(proj)}
+        _write_queue(queue_file, [entry])
+        import orchestrator as orch_mod
+        monkeypatch.setattr(orch_mod, "SYMLINK_TARGET", str(proj))
+        inst.state = _escalated_state(str(proj))
+
+        inst._queue_park_active_entry("ESCALATION", "escalation")
+
+        parked = [e for e in _read_events(tmp_path) if e.get("event") == "queue_parked"]
+        assert len(parked) == 1, "park must emit exactly one queue_parked event"
+        d = parked[0].get("detail", {})
+        assert d.get("reason") == "escalation"
+        assert d.get("phase") == "CORE-2"
+        assert d.get("entry_id") == entry["id"]
+        assert d.get("entry_name") == "esc_proj"
+
+    def test_queue_revived_emits_event(self, orch, tmp_path, monkeypatch):
+        """Reviving a parked project with a banked answer must emit one ``queue_revived``
+        event naming the entry and the banked command being applied. Mirrors
+        test_revived_entry_applies_pending_command_on_selection: ``_apply_pending_escalation_command``
+        runs for REAL (never stubbed) so the emit reads the actual applied command via the
+        helper's new return value."""
+        inst, queue_file, _, _ = orch
+        proj, entry = _setup_answered_project(tmp_path, "proj_a", "RESET_PHASE", _snapshot(), state="ESCALATION")
+        _write_queue(queue_file, [entry])
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "update_symlink", lambda p: True)
+        monkeypatch.setattr(inst, "write_state", lambda: None)
+
+        assert inst._select_next_queue_project() is True
+        revived = [e for e in _read_events(tmp_path) if e.get("event") == "queue_revived"]
+        assert len(revived) == 1, "revival must emit exactly one queue_revived event"
+        d = revived[0].get("detail", {})
+        assert d.get("entry_id") == entry["id"]
+        assert d.get("entry_name") == "proj_a"
+        assert d.get("command") == "RESET_PHASE"
+
+    def test_dependency_hold_emits_event(self, orch, tmp_path, monkeypatch):
+        """Holding a child whose parent has not completed must emit one ``dependency_hold``
+        event naming the parent and child — so the feed shows why the child isn't starting."""
+        inst, queue_file, _, _ = orch
+        parent_id = str(uuid.uuid4())
+        parent = {**_make_entry("parent", state="BLOCKED", position=1), "id": parent_id}
+        child = _make_entry("child", state="READY", position=2, parent_id=parent_id)
+        _write_queue(queue_file, [parent, child])
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "update_symlink", lambda p: True)
+
+        assert inst._select_next_queue_project() is False
+        held = [e for e in _read_events(tmp_path) if e.get("event") == "dependency_hold"]
+        assert len(held) == 1, "a READY->DEPENDENCY_HOLD transition must emit one dependency_hold event"
+        d = held[0].get("detail", {})
+        assert d.get("parent_id") == parent_id
+        assert d.get("entry_id") == child["id"]
+        assert d.get("entry_name") == "child"
+
+    def test_dependency_hold_does_not_re_emit_when_already_held(self, orch, tmp_path, monkeypatch):
+        """No-spam pin: an entry ALREADY in DEPENDENCY_HOLD is skipped by the gate at the
+        top of the selection walk (state not in READY/SKIPPED_PENDING) before the hold
+        assignment, so re-running selection must NOT emit another dependency_hold event.
+        Guards the no-spam property against a refactor that moves or weakens that gate."""
+        inst, queue_file, _, _ = orch
+        parent_id = str(uuid.uuid4())
+        parent = {**_make_entry("parent", state="BLOCKED", position=1), "id": parent_id}
+        child = {**_make_entry("child", state="DEPENDENCY_HOLD", position=2, parent_id=parent_id)}
+        _write_queue(queue_file, [parent, child])
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "update_symlink", lambda p: True)
+
+        assert inst._select_next_queue_project() is False
+        held = [e for e in _read_events(tmp_path) if e.get("event") == "dependency_hold"]
+        assert held == [], "an already-held entry must not re-emit dependency_hold"

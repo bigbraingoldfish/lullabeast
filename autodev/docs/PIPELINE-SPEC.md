@@ -386,6 +386,23 @@ After every FAIL-returning blocking check in `executor_gate.py` has passed, the 
 | `reachability_warning` | Orchestrator emits on the executor PASS path when `executor_advisory_detail.json` contains a populated `reachability_summary` or non-empty `reachability_diagnostics`. One summary event per phase + one event per diagnostic. | `{kind, count?, files?, command?, file?, reason}` where `kind ∈ {unreachable_summary, no_resolver, resolver_limitation, resolver_error}` |
 | `reachability_not_applicable` | Orchestrator emits when the gate signalled "consciously skipped" — entry command is a recognised test runner. | `{reason}` |
 
+### Pipeline event catalogue additions (P2 — queue-lifecycle & destructive events)
+
+These close the SILENT observability gaps: queue-lifecycle and destructive transitions that
+previously changed state with **no timeline record**. Emitted by `orchestrator.py`, rendered in
+the activity feed by `ui/index.html` (colour `getEventBadgeColor`, label `EVENT_TYPE_DISPLAY`,
+hover `EVENT_TYPE_DESCRIPTION`, prose `humanizeSummary`). The `agent` field is `"queue"` for the
+four queue events and `"escalation"` for `nuclear_reset`. Schema is additive — the UI SSE stream
+and ring buffer tolerate the new types with no migration.
+
+| Event | When | `detail` shape |
+|---|---|---|
+| `nuclear_reset` | `nuclear_reset_phase()` — after the `nuclear_resets` increment + `reset_log` append, before delegating to `reset_phase()` (so `phase` is the pre-reset escalated phase). Records the destructive *action*; `escalation_resolve` already records the *command*. | `{nuclear_resets, reason, phase}` (`reason` = `last_error_code`) |
+| `queue_halted` | `_select_next_queue_project()` — inside the `if halt_if_no_eligible:` branch, right after `transition_state("QUEUE_HALTED", …)`. The reason-clearing `else` (caller owns final status, e.g. PIPELINE_COMPLETE) does **not** emit. | `{reason}` where reason ∈ {`all_blocked`, `all_dependency_hold`, `answered_pending_revival`, `mixed`, `all_completed`} |
+| `queue_parked` | `_queue_park_active_entry()` — after the successful queue write. Single emit for all 4 call sites (BLOCKED/ESCALATION), once each. | `{reason, phase, entry_id, entry_name}` |
+| `queue_revived` | `_select_next_queue_project()` revival branch — after `_apply_pending_escalation_command()` (which now returns the applied command). Guarded on `is_revival` + a real command, so the fresh-start path never emits. | `{entry_id, entry_name, command}` |
+| `dependency_hold` | `_select_next_queue_project()` — after a genuine READY→DEPENDENCY_HOLD write. An already-held entry is skipped by the state gate at the top of the selection walk before reaching the assignment, so there is no re-emit. | `{parent_id, entry_id, entry_name}` |
+
 ---
 
 ## 4.5. Advisory Checks vs Blocking Gates
