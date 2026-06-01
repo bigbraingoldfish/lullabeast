@@ -9,9 +9,16 @@ _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
-from env_resolvers import resolve_openclaw_root  # noqa: E402
+from env_resolvers import resolve_openclaw_root, resolve_pipeline_root  # noqa: E402
 
 OPENCLAW_ROOT = resolve_openclaw_root()
+AUTODEV_REPO_PATH = os.environ.get(
+    "AUTODEV_REPO_PATH",
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+AUTODEV_PIPELINE_ROOT = resolve_pipeline_root(AUTODEV_REPO_PATH)
+
+# This cron's OWN log intentionally stays under OPENCLAW_ROOT, co-located with the
+# OpenClaw session state it prunes — unlike the pipeline runtime logs rotated below.
 LOG_FILE = os.path.join(OPENCLAW_ROOT, "session_cleanup.log")
 
 # Setup logging with simple log rotation (keep size small)
@@ -29,8 +36,21 @@ AGENTS = ["planner", "executor", "reviewer", "escalation"]
 TTL_DAYS = 30
 
 def rotate_pipeline_logs():
+    """Truncate the pipeline runtime logs to their last ~1000 lines past 5 MB.
+
+    ``heartbeat.log`` (heartbeat-cron stdout, operator-provisioned) and
+    ``orchestrator.log`` (orchestrator stdout, written by both
+    ``heartbeat_cron.start_orchestrator`` and the UI's ``_spawn_orchestrator``) both
+    live under ``AUTODEV_PIPELINE_ROOT`` — the ``.autodev`` pipeline-state directory —
+    not under ``OPENCLAW_ROOT``. Resolving them against the wrong root makes the size
+    check silently no-op, so the real logs grow unbounded (an SD-card-exhaustion risk
+    on the Pi). The ``os.path.exists`` guard provides the ``missingok`` tolerance
+    documented in PIPELINE-CONSTRAINTS.md §1: either file may be absent in a given
+    deployment. (``session_cleanup.log`` is this cron's own log and stays under
+    ``OPENCLAW_ROOT`` — see the ``LOG_FILE`` constant.)
+    """
     for log_name in ["heartbeat.log", "orchestrator.log"]:
-        log_path = os.path.join(OPENCLAW_ROOT, log_name)
+        log_path = os.path.join(AUTODEV_PIPELINE_ROOT, log_name)
         if os.path.exists(log_path):
             try:
                 # We use a simple strategy: if it exceeds 5MB, keep newest 1MB

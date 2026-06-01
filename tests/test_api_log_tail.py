@@ -190,17 +190,17 @@ class TestLogTailEndpoint:
         }
 
     def test_returns_200_when_log_absent(self, mock_cfg, tmp_path):
-        """Returns 200 with empty lines when orchestrator.spawn.log does not exist."""
+        """Returns 200 with empty lines when orchestrator.log does not exist."""
         with patch("ui.server.load_config", return_value=mock_cfg):
             r = client.get("/api/log/tail")
         assert r.status_code == 200
         data = r.json()
         assert data["lines"] == []
-        assert data["path"].endswith("orchestrator.spawn.log")
+        assert data["path"].endswith("orchestrator.log")
 
     def test_returns_lines_from_log_file(self, mock_cfg, tmp_path):
-        """Returns actual log lines when orchestrator.spawn.log exists."""
-        log = tmp_path / "orchestrator.spawn.log"
+        """Returns actual log lines when orchestrator.log exists."""
+        log = tmp_path / "orchestrator.log"
         log.write_text("\n".join(f"line {i}" for i in range(10)) + "\n")
         with patch("ui.server.load_config", return_value=mock_cfg):
             r = client.get("/api/log/tail")
@@ -211,7 +211,7 @@ class TestLogTailEndpoint:
 
     def test_respects_lines_query_param(self, mock_cfg, tmp_path):
         """?lines=20 returns at most 20 lines even when log has more."""
-        log = tmp_path / "orchestrator.spawn.log"
+        log = tmp_path / "orchestrator.log"
         log.write_text("\n".join(f"entry {i}" for i in range(600)) + "\n")
         with patch("ui.server.load_config", return_value=mock_cfg):
             r = client.get("/api/log/tail?lines=20")
@@ -235,3 +235,60 @@ class TestLogTailEndpoint:
         path = r.json()["path"]
         assert path != "/tmp/orchestrator.log"
         assert str(tmp_path) in path
+
+
+# ---------------------------------------------------------------------------
+# Regression: writer ↔ reader path agreement (the original streaming bug)
+# ---------------------------------------------------------------------------
+
+class TestOrchestratorLogPathAgreement:
+    """The live panel showed a stale orphan because _spawn_orchestrator wrote
+    /tmp/orchestrator.log while /api/log/tail read {pipeline_root}/orchestrator.spawn.log.
+    These tests pin both onto the single canonical {pipeline_root}/orchestrator.log."""
+
+    def test_helper_resolves_canonical_pipeline_root_path(self, tmp_path):
+        cfg = {"autodev_pipeline_root": str(tmp_path)}
+        assert server._orchestrator_log_path(cfg) == os.path.join(str(tmp_path), "orchestrator.log")
+
+    def test_helper_falls_back_to_tmp_when_no_pipeline_root(self):
+        assert server._orchestrator_log_path({}) == server.ORCHESTRATOR_SPAWN_LOG_PATH
+
+    def test_spawn_writes_log_into_pipeline_root_not_tmp(self, tmp_path):
+        """The file _spawn_orchestrator opens must be the canonical pipeline-root log."""
+        repo = tmp_path / "repo"
+        (repo / "autodev" / "pipeline").mkdir(parents=True)
+        (repo / "autodev" / "pipeline" / "orchestrator.py").write_text("")
+        proot = tmp_path / "state"
+        proot.mkdir()
+        cfg = {
+            "autodev_repo_path": str(repo),
+            "openclaw_root": str(tmp_path / "oc"),
+            "autodev_pipeline_root": str(proot),
+        }
+
+        class _FakePopen:
+            def __init__(self, *a, **k):
+                pass
+
+        with patch("subprocess.Popen", _FakePopen):
+            r = server._spawn_orchestrator(str(tmp_path / "proj"), config=cfg)
+        assert r["ok"], r
+        # open(..., "a") creates the file — it must be the canonical name, in the pipeline root.
+        assert (proot / "orchestrator.log").exists()
+        assert not (proot / "orchestrator.spawn.log").exists()
+
+    def test_reader_reads_what_spawn_wrote(self, tmp_path):
+        """End-to-end: /api/log/tail returns the lines the orchestrator process wrote."""
+        log = tmp_path / "orchestrator.log"
+        log.write_text("boot\nrunning\ndone\n")
+        cfg = {
+            "autodev_pipeline_root": str(tmp_path),
+            "pipeline_state_path": str(tmp_path / "pipeline_state.json"),
+            "events_path": str(tmp_path / "pipeline_events.jsonl"),
+        }
+        with patch("ui.server.load_config", return_value=cfg):
+            r = client.get("/api/log/tail")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["lines"] == ["boot", "running", "done"]
+        assert data["path"] == str(log)
