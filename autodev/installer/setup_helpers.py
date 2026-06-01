@@ -338,11 +338,11 @@ def ensure_dotenv_ideas_idle_hints(env_path: str) -> str:
         return "unchanged"
     block = f"""
 {DOTENV_IDEAS_IDLE_HINT_MARKER}
-# UI server Ideas chat: seconds before declaring stall (no Tier A stamp refresh)
-# and startup grace before requiring the activity stamp. Env overrides win over
-# ui/config.json. Defaults if unset: idle 300, grace 30.
+# UI server Ideas chat: seconds of stamp silence (after first activity) before the
+# chat turn is declared a definitive stall. Env override wins over ui/config.json.
+# Default if unset: 300. (No startup-grace knob — the chat send waits for a
+# definitive stall/backstop verdict rather than fast-failing a slow first hook.)
 # AUTODEV_IDEAS_IDLE_THRESHOLD=
-# AUTODEV_IDEAS_STARTUP_GRACE=
 """
     try:
         with open(path, "a", encoding="utf-8") as f:

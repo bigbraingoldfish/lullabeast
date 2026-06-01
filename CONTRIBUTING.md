@@ -64,7 +64,7 @@ Skills live in `autodev/skill-library/{discipline}/{agent_role}/SKILL.md`. The m
 
 Before adding a new discipline mapping to `skill_mapping.yaml`, confirm the relationship between the roadmap subsystem prefix and the discipline is direct and unambiguous — the YAML file's header comment is explicit that incorrect skill context is worse than no skill context.
 
-The skill token ceiling per file is [VERIFY — not confirmed in source; check PIPELINE-SPEC.md or PIPELINE-CONSTRAINTS.md before documenting a specific limit].
+Per-file skill size is bounded by OpenClaw's context-injection limits, configured in `openclaw.json` (see the [OpenClaw documentation](https://docs.openclaw.ai) for current caps).
 
 ## Code style
 
