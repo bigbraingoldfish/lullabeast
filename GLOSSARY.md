@@ -26,7 +26,7 @@ Orchestrator-valid values are `VALID_STATES` in `autodev/pipeline/orchestrator.p
 | `RUNNING` | **RUNNING** (pulsing) | Planner/executor/reviewer leg active. | Work continues until sentinel, human wait, or failure. |
 | `WAITING_FOR_SENTINEL` | **Running** or **Running {Agent}** (`formatWaitForSentinelLabel` from `current_agent`) | Waiting on agent output / sentinel file. | Advances when gate passes or retries. |
 | `WAITING_FOR_HUMAN` | **NEEDS YOUR INPUT** | Escalation / human decision path. | Use escalation command panel or external channel per your setup. |
-| `HALTED_SILENT` | **INTERVENTION REQUIRED** | Bad terminal; escalation path failed or unrecoverable error path. | Inspect orchestrator logs and project `escalation_failed.json` if present. |
+| `HALTED_SILENT` | **INTERVENTION REQUIRED** | Bad terminal; escalation *delivery* failed (all fallbacks exhausted). An invalid resume command now defaults to STOPPED, not here. | Inspect orchestrator logs and project `escalation_failed.json` if present. |
 | `BLOCKED` | **BLOCKED** | Pipeline blocked (gate or policy). | Resolve gate output / state; may need reset or manual fix. |
 | `PIPELINE_COMPLETE` | **COMPLETE** | Roadmap finished successfully. | New run or queue advance per configuration. |
 | `STOPPED` | **STOPPED** | Clean operator halt (e.g. stop sentinel / UI). | Resume or reset from UI when ready. |

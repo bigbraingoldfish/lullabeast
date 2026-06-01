@@ -4418,8 +4418,10 @@ class Orchestrator:
                     # Equally, an acknowledged abort (ok=true) is not sufficient
                     # proof the session stopped — verify_session_stopped confirms
                     # the plugin is no longer touching the activity stamp.  If it
-                    # still is, escalate to HALTED_SILENT rather than stack
-                    # attempt N+1 on top of a running attempt N.
+                    # still is, we emit abort_verify_failed and soft-continue
+                    # (launch attempt N+1 anyway): a forced HALTED_SILENT always
+                    # needs a human, whereas a retry usually resolves.  See the
+                    # _handle_stall_outcome docstring for the full rationale.
                     if retries > 0:
                         _prev_session_key = (
                             f"agent:executor:pipeline:phase-{phase}:{raw_id}"
@@ -5872,12 +5874,26 @@ class Orchestrator:
                                 self.transition_state("STOPPED", "Stop command received via escalation panel")
                                 break
                             else:
-                                _write_run_summary("HALTED_SILENT", f"Unrecognised escalation command: {command}")  # W2-B
-                                self.transition_state("HALTED_SILENT", f"Unrecognised escalation command: {command}")
-                                self._queue_update_active_entry(
-                                    "FAILED",
-                                    {"failed_at": datetime.now(timezone.utc).isoformat()},
+                                # Empty / missing / unrecognised command. Previously dead-ended to
+                                # HALTED_SILENT + queue FAILED (unrecoverable in the UI). Now emit a
+                                # loud signal and default to STOP — recoverable via the Resume control
+                                # — matching the JSON-parse fallback above and
+                                # _apply_pending_escalation_command. See PIPELINE-CONSTRAINTS.md §5.2.
+                                print(f"[WARN] Unrecognised escalation command {command!r}; defaulting to STOP.")
+                                _write_pipeline_event(
+                                    "escalation_command_invalid",
+                                    raw_id,
+                                    "escalation",
+                                    {"received_command": command, "defaulted_to": "STOP"},
                                 )
+                                stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
+                                try:
+                                    with open(stop_file, 'w') as _sf:
+                                        _sf.write("")
+                                except OSError as _e:
+                                    print(f"[WARN] STOP: could not write stop sentinel: {_e}")
+                                _write_run_summary("STOPPED", f"Unrecognised escalation command {command!r}; defaulted to STOP")  # W2-B
+                                self.transition_state("STOPPED", f"Unrecognised escalation command {command!r}; defaulted to STOP")
                                 break
                         else:
                             time.sleep(5)

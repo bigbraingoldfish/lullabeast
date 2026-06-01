@@ -371,7 +371,7 @@ model_alert_required = pipeline_status in ("RUNNING", "WAITING_FOR_SENTINEL")
 
 ---
 
-## 5.2 Escalation Agent Wrote Invalid Command → HALTED_SILENT (2026-03-09)
+## 5.2 ~~Escalation Agent Wrote Invalid Command → HALTED_SILENT~~ ✓ Resolved 2026-06-01 (incident 2026-03-09)
 
 **Symptom:** Pipeline went to `HALTED_SILENT` during CORE-4 escalation. Subsequent RESET_EXECUTION and RESET_PHASE commands sent by the human via Signal were written to `escalation_output.json` by the escalation agent but never consumed — the orchestrator was already dead.
 
@@ -379,7 +379,7 @@ model_alert_required = pipeline_status in ("RUNNING", "WAITING_FOR_SENTINEL")
 
 **Fix (2026-03-09):** Manual recovery — patched `pipeline_state.json` back to `RUNNING` with `current_agent=planner`, cleared stale `escalation_output.*` files, reset phase/pipeline state counters, and restarted the orchestrator to resume CORE-4 from the planner.
 
-**Recommended long-term fix:** Add input validation in the escalation agent's `AGENTS.md` making clear that `WAITING_FOR_HUMAN` is NOT a command. The valid command list should be explicitly enumerated in the escalation agent's workspace. Also consider adding a guard in the orchestrator: before hitting the `else` → `HALTED_SILENT` branch, log a clearly labeled "UNKNOWN COMMAND" warning and default to `STOP` rather than immediately transitioning to `HALTED_SILENT` — or re-prompt the escalation agent once (same ambiguous-reply protocol used for Signal DM replies).
+**Fix (shipped 2026-06-01):** Both halves of the recommended fix landed. **Orchestrator consumer** — the `else` branch no longer transitions to `HALTED_SILENT` or marks the queue entry `FAILED`. It now emits a `[WARN]` log + an `escalation_command_invalid` pipeline event (`{received_command, defaulted_to: "STOP"}`) and defaults to `STOP` — recoverable via the Resume control, and consistent with the sibling fallbacks (`_apply_pending_escalation_command`, JSON-parse failure) that already default to `STOP`. **Agent contract** — the escalation webhook default message (`webhook_client.py`) now names the `command` field and enumerates the offerable verbs (`RETRY`, `RESET_PHASE`, `RESET_EXECUTION`, `RESET_REVIEWER`, `PROCEED`, `STOP`) with `{"command": "STOP"}` as the no-instruction default; `AGENTS.md` adds a never-write-`.done`-without-a-valid-`command` rule. `WAITING_FOR_HUMAN` (the original incident value) now defaults to `STOP` instead of dead-ending. Guarded by `autodev/tests/test_orchestrator_escalation_invalid_command.py` and the new `test_webhook_client_default_messages.py` cases.
 
 ---
 

@@ -561,6 +561,8 @@ Pipeline completion is also notified via Signal (not just escalation).
 
 > **`RESTART PHASE` is a legacy alias for `RESET_PHASE`** — accepted by the orchestrator for backward compatibility with in-flight Signal conversations. Use `RESET_PHASE` in new invocations.
 
+> **Invalid / empty command → `STOP` (not a halt):** if the consumed `escalation_output.json` carries an empty, missing, or unrecognised `command`, the orchestrator emits an `escalation_command_invalid` event and defaults to `STOP` (recoverable via Resume) rather than `HALTED_SILENT`. This matches the sibling fallbacks (`_apply_pending_escalation_command`, JSON-parse failure), which already default to `STOP`. (Heals PIPELINE-CONSTRAINTS.md §5.2.)
+
 **Escalation reset cap:** `RESET_PHASE`, `RESET_EXECUTION`, and `RESET_REVIEWER` all share the same cap: `escalation_resets >= 3`. All three commands increment `escalation_resets`. After 3 escalation-triggered resets, the orchestrator sends a Signal notification and stays in `WAITING_FOR_HUMAN`. Only `PROCEED`, `SKIP`, or `STOP` can advance past the cap. The `escalation_resets` counter is NOT zeroed inside `reset_phase()` — it is only zeroed when the roadmap genuinely advances to a new phase. This prevents circumventing the cap by repeatedly triggering phase resets.
 
 **Nuclear reset cap (P1 Stage G2):** `NUCLEAR_RESET` is governed by a **separate** `nuclear_resets` counter, capped at **2**, *independent* of `escalation_resets`. It is available **precisely because** the escalation cap is exhausted, not in spite of it — the dashboard renders its button only when `escalation_resets >= 3` and hides it again at `nuclear_resets >= 2`. `nuclear_reset_phase()` increments `nuclear_resets` and appends a `reset_log` entry, then delegates to `reset_phase()`, which **preserves** `nuclear_resets` and `reset_log` across its re-init (alongside `escalation_resets`) — so the cap accumulates and the audit trail survives. Like `escalation_resets`, `nuclear_resets` is NOT zeroed inside `reset_phase()`; it zeroes only on genuine phase advance. After 2 nuclear resets the only remaining paths are `SKIP` (Abandon Phase) or `STOP` — a legible "something is genuinely wrong here" signal. The dispatch sends the same Signal "cap reached" notice the other resets use when `nuclear_resets >= 2`.
@@ -608,6 +610,7 @@ Sequential, not parallel:
 ### Silent Halt Behavior
 
 - `HALTED_SILENT` is written **only** when escalation delivery fails — all three fallbacks (escalation agent webhook, raw Signal webhook, direct write) have been exhausted. It is **not** the terminal state for clean pipeline completion; `PIPELINE_COMPLETE` is used for that.
+- An invalid / empty / unrecognised resume *command* (a consumed `escalation_output.json` whose `command` is unknown) is **not** a `HALTED_SILENT` trigger: the consumer emits `escalation_command_invalid` and defaults to `STOP` (recoverable). Only escalation *delivery* failure halts silently.
 - `HALTED_SILENT` prevents heartbeat from restarting orchestrator (same as `WAITING_FOR_HUMAN`)
 - Detection is by absence — no Signal activity, pipeline idle — manual check required
 - No infinite notification retry loop — systematic failure will not be self-resolving

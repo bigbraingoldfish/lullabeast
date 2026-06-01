@@ -237,7 +237,7 @@ When resetting `pipeline_state.json` to `IDLE` for a fresh run, set **both** `st
 
 ### Terminal states
 
-`HALTED_SILENT`, `BLOCKED`, and `PIPELINE_COMPLETE` are checked at the top of the main loop and cause the orchestrator to exit cleanly. `STOPPED` is a clean halt triggered by the stop sentinel file. The orchestrator does **not** attempt recovery from these states — only a manual reset or operator command resumes the pipeline.
+`HALTED_SILENT`, `BLOCKED`, and `PIPELINE_COMPLETE` are checked at the top of the main loop and cause the orchestrator to exit cleanly. `STOPPED` is a clean halt triggered by the stop sentinel file — or by the escalation consumer defaulting an empty / unrecognised resume command to STOP (emitting `escalation_command_invalid`) rather than dead-ending at `HALTED_SILENT`. The orchestrator does **not** attempt recovery from these states — only a manual reset or operator command resumes the pipeline.
 
 ---
 
@@ -355,6 +355,7 @@ The UI server tails this file via `_poll_pipeline_events_file()` (`ui/server.py:
 | `gate_fail`                | Planner/executor/reviewer gate returns non-`PASS`                  | `{exit_code}` / `{gate_result}` / `{retry_class}` (Stage H — executor: always present; reviewer: `"reviewer_rejection"` on ROUTE_EXECUTOR else `None`) | pre-existing + Stage H |
 | `escalation_trigger`       | Escalation agent invoked                                          | `{reason}`                                                                                           | pre-existing |
 | `escalation_resolve`       | Operator resume command consumed                                  | `{command}`                                                                                          | pre-existing |
+| **`escalation_command_invalid`** | Escalation consumer read an empty / missing / unrecognised `command`; defaulted to `STOP` (recoverable) instead of `HALTED_SILENT` | `{received_command, defaulted_to}` | escalation heal |
 | `phase_complete`           | Canonical metrics row written (post-merge)                        | `{executor_attempts, blame_fires}`                                                                   | pre-existing |
 | **`poll_start`**           | Before each `poll_for_sentinel()` invocation (3 sites)             | `{startup_grace, stall_threshold, infra_backstop, session_key, attempt}`                              | 6.1.a |
 | **`poll_outcome`**         | After `poll_for_sentinel()` returns (3 sites)                      | `{reason, stamp_mtime, duration_s, session_key, attempt}`                                            | 6.1.a |
