@@ -1972,7 +1972,7 @@ class Orchestrator:
             except Exception:
                 pass
         else:
-            phase_state = {"planner_retries": 0, "executor_retries": 0, "executor_self_failure_retries": 0, "executor_reviewer_rejection_retries": 0, "reviewer_retries": 0, "reviewer_rejected": False, "escalation_resets": 0}
+            phase_state = {"planner_retries": 0, "executor_retries": 0, "executor_self_failure_retries": 0, "executor_reviewer_rejection_retries": 0, "reviewer_retries": 0, "reviewer_rejected": False, "escalation_resets": 0, "nuclear_resets": 0}
 
         phase_state["planner_retries"] = phase_state.get("planner_retries", 0) + 1
         
@@ -2581,15 +2581,29 @@ class Orchestrator:
         IMPORTANT: escalation_resets is NOT zeroed here. It is only zeroed when the roadmap
         genuinely advances to a new phase. Zeroing it inside reset_phase() would allow the
         escalation agent to circumvent the cap by repeatedly triggering phase resets.
+
+        P1 Stage G2: nuclear_resets and reset_log are preserved here for the same reason —
+        they are operator-governance state, not per-attempt state. nuclear_resets is the
+        cap-bearing counter for NUCLEAR_RESET (see nuclear_reset_phase), which itself calls
+        this method; without preserving it the cap could never accumulate (the increment
+        would be wiped by the very reset it governs). reset_log is the append-only audit
+        trail of every operator reset; preserving it stops the silent wipe that previously
+        discarded the RESET_PHASE dispatch's own log entry. All three (escalation_resets,
+        nuclear_resets, reset_log) survive a phase reset and zero only on genuine phase
+        advance (phase_state.json is deleted and lazily re-created at 0).
         """
         phase = self.state.get("current_phase", 0)
         raw_id = self.state.get("current_phase_raw_id", "")
         branch = f"phase/{raw_id}" if raw_id else f"phase/{phase}"
         phase_base = self.state.get("phase_base_commit", "")
 
-        # Preserve escalation_resets before clearing phase state
+        # Preserve operator-governance state before clearing phase state: the reset caps
+        # (escalation_resets / nuclear_resets) and the reset_log audit trail must survive
+        # a phase reset so the caps accumulate and the post-mortem trail is not silently lost.
         current_phase_state = self.read_phase_state()
         preserved_escalation_resets = current_phase_state.get("escalation_resets", 0)
+        preserved_nuclear_resets = current_phase_state.get("nuclear_resets", 0)
+        preserved_reset_log = current_phase_state.get("reset_log", [])
 
         try:
             configured_base_branch = self.openclaw_config.get("pipeline", {}).get("base_branch", "").strip()
@@ -2636,6 +2650,9 @@ class Orchestrator:
             "reviewer_infra_recovery_attempts": 0,
             "planner_output_preserved": False,
             "escalation_resets": preserved_escalation_resets,
+            # P1 Stage G2 — operator-governance state survives the reset (see docstring).
+            "nuclear_resets": preserved_nuclear_resets,
+            "reset_log": preserved_reset_log,
         }
         self.write_phase_state_atomic(new_phase_state)
 
@@ -2673,6 +2690,40 @@ class Orchestrator:
             print("[WARN] reset_phase: no roadmap file found, current_phase.json not refreshed.")
 
         self.transition_state("RUNNING", f"RESET_PHASE: restarting phase {raw_id or phase} from planner")
+
+    def nuclear_reset_phase(self):
+        """P1 Stage G2 — operator escape hatch (cap 2). Destructive true-fresh-start.
+
+        A thin wrapper over reset_phase(): it reuses reset_phase's mechanics verbatim
+        (git reset --hard to the phase base commit, delete the phase branch, wipe all
+        phase outputs, zero every retry counter, clear prior_blame_attributions by the
+        wholesale phase_state replacement, re-plan from the planner with
+        _current_attempt_retry_class = "initial_attempt"). It does NOT re-list those
+        counters — they are cleared by reset_phase's fresh-dict write.
+
+        It differs from reset_phase ONLY in governance: it increments its own
+        nuclear_resets counter (cap 2, enforced by the dispatch branch and the server's
+        /api/command validation) instead of being blocked by the escalation_resets cap (3),
+        and appends a NUCLEAR_RESET reset_log entry. The increment + log are written
+        BEFORE delegating to reset_phase(), which then PRESERVES both nuclear_resets and
+        reset_log across its re-init (see reset_phase docstring) — so the final phase_state
+        carries the bumped counter and the new audit entry.
+
+        Note: the escalation_resolve pipeline event is already emitted for every command at
+        the top of the dispatch loop, so this method must not re-emit it.
+        """
+        _ps = self.read_phase_state()
+        _ps["nuclear_resets"] = _ps.get("nuclear_resets", 0) + 1
+        _reason = _ps.get("last_error_code", "unknown")
+        _ps.setdefault("reset_log", []).append({
+            "reset_number": _ps["nuclear_resets"],
+            "command": "NUCLEAR_RESET",
+            "reason": _reason,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+        self.write_phase_state_atomic(_ps)
+        print(f"[INFO] nuclear_reset_phase: nuclear_resets now {_ps['nuclear_resets']}, reason={_reason!r}.")
+        self.reset_phase()
 
     def reset_execution(self, caller: str):
         """Partial execution-level reset. Preserves planner output. Clears executor + reviewer outputs.
@@ -2929,7 +2980,7 @@ class Orchestrator:
             except Exception:
                 pass
         else:
-            phase_state = {"planner_retries": 0, "executor_retries": 0, "executor_self_failure_retries": 0, "executor_reviewer_rejection_retries": 0, "reviewer_retries": 0, "reviewer_rejected": False, "escalation_resets": 0}
+            phase_state = {"planner_retries": 0, "executor_retries": 0, "executor_self_failure_retries": 0, "executor_reviewer_rejection_retries": 0, "reviewer_retries": 0, "reviewer_rejected": False, "escalation_resets": 0, "nuclear_resets": 0}
 
         phase_state["executor_retries"] = phase_state.get("executor_retries", 0) + 1
         
@@ -3715,7 +3766,7 @@ class Orchestrator:
             except Exception:
                 pass
         else:
-            phase_state = {"planner_retries": 0, "executor_retries": 0, "executor_self_failure_retries": 0, "executor_reviewer_rejection_retries": 0, "reviewer_retries": 0, "reviewer_rejected": False, "escalation_resets": 0}
+            phase_state = {"planner_retries": 0, "executor_retries": 0, "executor_self_failure_retries": 0, "executor_reviewer_rejection_retries": 0, "reviewer_retries": 0, "reviewer_rejected": False, "escalation_resets": 0, "nuclear_resets": 0}
 
         phase_state["reviewer_retries"] = phase_state.get("reviewer_retries", 0) + 1
         
@@ -5759,6 +5810,20 @@ class Orchestrator:
                                     _ps.setdefault("reset_log", []).append(_entry)
                                     self.write_phase_state_atomic(_ps)
                                     self.reset_phase()
+                            elif command == "NUCLEAR_RESET":
+                                # P1 Stage G2 — operator escape hatch, governed by its OWN
+                                # nuclear_resets cap (2), independent of escalation_resets.
+                                # Available precisely BECAUSE the escalation cap is spent;
+                                # nuclear_reset_phase() does the increment + reset_log + the
+                                # destructive reset_phase mechanics.
+                                self._queue_restore_parked_entry_to_active()
+                                _ps = self.read_phase_state()
+                                if _ps.get("nuclear_resets", 0) >= 2:
+                                    self.send_signal_notification(
+                                        "Nuclear reset cap reached (2). Only Abandon Phase or Stop remain for this phase."
+                                    )
+                                else:
+                                    self.nuclear_reset_phase()
                             elif command == "RESET_EXECUTION":
                                 self._queue_restore_parked_entry_to_active()
                                 _ps = self.read_phase_state()

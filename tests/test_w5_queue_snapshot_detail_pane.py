@@ -188,6 +188,31 @@ def test_snapshot_returns_phase_state_fields_when_active(tmp_path):
     assert data["waiting_for_human_at"] == "2026-04-30T10:00:00Z"
 
 
+def test_snapshot_returns_nuclear_resets(tmp_path):
+    """P1 Stage G2 — the queue snapshot surfaces `nuclear_resets` via `_compute_escalation_view`
+    (the single helper shared with `/api/state`), so the nuclear-reset button gates identically
+    in the Queue view. Pins the B9 data path the live UI smoke left unconfirmed when the backend
+    died: the Queue panel reads `nuclear_resets` from the per-entry snapshot, not `/api/state`."""
+    proj = tmp_path / "myproj"
+    proj.mkdir()
+    (proj / "roadmap.md").write_text(ROADMAP_LONG_DESC)
+
+    cfg = _make_cfg(tmp_path, proj)
+    eid = str(uuid.uuid4())
+    _write_queue(cfg, [_make_entry(str(proj), entry_id=eid)])
+    _write_pipeline_state(cfg, proj)
+    _write_phase_state(proj, escalation_resets=3, nuclear_resets=1)
+
+    with patch("ui.server.load_config", return_value=cfg), \
+         patch("ui.server._check_orchestrator_liveness", return_value=True):
+        resp = client.get(f"/api/queue/{eid}/snapshot")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["nuclear_resets"] == 1, "queue snapshot must surface nuclear_resets for the Queue panel gate"
+    assert data["escalation_resets"] == 3
+
+
 def test_snapshot_phase_state_fields_from_own_project_when_not_active(tmp_path):
     """INVERTED from the former ``…_null_when_not_active`` (which asserted the bug).
 

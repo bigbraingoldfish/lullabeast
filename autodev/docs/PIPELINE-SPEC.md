@@ -557,10 +557,13 @@ Pipeline completion is also notified via Signal (not just escalation).
 | `SKIP` | Marks phase N as `[-]` skipped in roadmap and advances to N+1. The phase branch and artifacts are NOT cleaned up — git state is left as-is; manual repo cleanup required. | Only when manually verified the phase outcome is acceptable and cleanup will be handled manually |
 | `STOP` | Pipeline stays halted, full manual intervention required | Always valid |
 | `PROCEED` | Skips the merge step; marks phase `[x]` in roadmap, force-tags `phase-N-complete`, and advances to next phase. Does not append to `suggestions.md` or clear working files. | Phase branch already merged into base externally; use to advance after manual merge |
+| `NUCLEAR_RESET` | **Operator escape hatch (P1 Stage G2).** Thin wrapper over `reset_phase()` — same destructive mechanics (git reset to `phase_base_commit`, delete phase branch, wipe all outputs, zero retry counters, clear `prior_blame_attributions`, re-invoke planner). Differs only in governance: increments its own `nuclear_resets` counter (cap **2**) instead of `escalation_resets`, and appends a `reset_log` entry. | Every automatic retry and operator reset is spent (`escalation_resets >= 3`) but the operator fixed an *external* cause (infra/config, outside the repo) and wants a true fresh start |
 
 > **`RESTART PHASE` is a legacy alias for `RESET_PHASE`** — accepted by the orchestrator for backward compatibility with in-flight Signal conversations. Use `RESET_PHASE` in new invocations.
 
 **Escalation reset cap:** `RESET_PHASE`, `RESET_EXECUTION`, and `RESET_REVIEWER` all share the same cap: `escalation_resets >= 3`. All three commands increment `escalation_resets`. After 3 escalation-triggered resets, the orchestrator sends a Signal notification and stays in `WAITING_FOR_HUMAN`. Only `PROCEED`, `SKIP`, or `STOP` can advance past the cap. The `escalation_resets` counter is NOT zeroed inside `reset_phase()` — it is only zeroed when the roadmap genuinely advances to a new phase. This prevents circumventing the cap by repeatedly triggering phase resets.
+
+**Nuclear reset cap (P1 Stage G2):** `NUCLEAR_RESET` is governed by a **separate** `nuclear_resets` counter, capped at **2**, *independent* of `escalation_resets`. It is available **precisely because** the escalation cap is exhausted, not in spite of it — the dashboard renders its button only when `escalation_resets >= 3` and hides it again at `nuclear_resets >= 2`. `nuclear_reset_phase()` increments `nuclear_resets` and appends a `reset_log` entry, then delegates to `reset_phase()`, which **preserves** `nuclear_resets` and `reset_log` across its re-init (alongside `escalation_resets`) — so the cap accumulates and the audit trail survives. Like `escalation_resets`, `nuclear_resets` is NOT zeroed inside `reset_phase()`; it zeroes only on genuine phase advance. After 2 nuclear resets the only remaining paths are `SKIP` (Abandon Phase) or `STOP` — a legible "something is genuinely wrong here" signal. The dispatch sends the same Signal "cap reached" notice the other resets use when `nuclear_resets >= 2`.
 
 **Separation of counters:** `executor_retries` tracks automatic retry-path resets (incremented by `reset_execution("auto")`). `escalation_resets` tracks human-triggered resets via `RESET_PHASE`/`RESET_EXECUTION` (incremented by `reset_execution("escalation")` and the `RESET_PHASE` handler). Never both in one operation.
 
@@ -633,9 +636,9 @@ When a project escalates under an **auto-queue**, the orchestrator parks it (`_q
 }
 ```
 
-`phase_base_commit` is **load-bearing**: `reset_phase()` guards its `git reset --hard` on it, so a revived `RESET_PHASE` without it would resume on a dirty tree. `escalation_resets` / `reset_log` are **not** snapshotted — they live in the per-project `phase_state.json`, which survives via the `pipeline-project` symlink. **Invariant:** in the activation block `update_symlink` runs first and is shared by both the revival and fresh-start paths (the branch splits only the `self.state` write), so the restore and the banked command always act on the *revived* project's repo.
+`phase_base_commit` is **load-bearing**: `reset_phase()` guards its `git reset --hard` on it, so a revived `RESET_PHASE` (or `NUCLEAR_RESET`, which calls `reset_phase()`) without it would resume on a dirty tree. `escalation_resets` / `nuclear_resets` / `reset_log` are **not** snapshotted — they live in the per-project `phase_state.json`, which survives via the `pipeline-project` symlink. **Invariant:** in the activation block `update_symlink` runs first and is shared by both the revival and fresh-start paths (the branch splits only the `self.state` write), so the restore and the banked command always act on the *revived* project's repo.
 
-**Bankable commands.** The six escalation-panel commands (`RESET_PHASE`, `RESET_EXECUTION`, `RESET_REVIEWER`, `PROCEED`, `SKIP`, `STOP`) — all phase-level. `RETRY` is **not** bankable (it is the `StoppedRecoveryPanel` flow, not an escalation-panel command), so no mid-agent fidelity is required in the snapshot.
+**Bankable commands.** The seven escalation-panel commands (`RESET_PHASE`, `RESET_EXECUTION`, `RESET_REVIEWER`, `PROCEED`, `SKIP`, `STOP`, `NUCLEAR_RESET`) — all phase-level. `NUCLEAR_RESET` (P1 Stage G2) rides this same promote → revive → apply path with no Stage-H change: `_apply_pending_escalation_command` is command-agnostic, and because the revival restores the escalated-phase pointer (incl. `phase_base_commit`) before applying the banked command, a revived `NUCLEAR_RESET`'s `git reset --hard` lands on the *revived* project's repo. `RETRY` is **not** bankable (it is the `StoppedRecoveryPanel` flow, not an escalation-panel command), so no mid-agent fidelity is required in the snapshot.
 
 **`QUEUE_HALTED` recovery.** When the escalated project is the last entry, the orchestrator exits to `QUEUE_HALTED`. A *restart* into that state carries `current_agent="escalation"`, so the startup function skips selection, and `QUEUE_HALTED` is intentionally not in the main-loop exit set (the loop stays alive to poll for an *in-place* answer). `Orchestrator._maybe_revive_on_queue_halted()` runs once at `run()` startup, before the gated startup function: it promotes banked answers and revives a parked project; with nothing to consume it returns `False` and `run()` exits cleanly (no spin), but it continues into the loop when an in-place `escalation_output.done` is already pending. The `answered_pending_revival` halt-reason (set ahead of `all_blocked`) marks the queue recoverable; the dashboard surfaces a **Resume banked answer** control that reuses `POST /api/queue/{entry_id}/relaunch`.
 
@@ -1428,6 +1431,7 @@ Complete JSON schemas for all pipeline data files. Schemas in §3–§6 define a
   "reviewer_infra_recovery_succeeded": { "type": "boolean", "description": "RR-1: True when exit code was 0 or 2; false when exit code was 1 or SSH timed out." },
   "planner_output_preserved": { "type": "boolean", "default": false, "description": "RR-2: Set to true atomically after planner gate passes. Enables crash-recovery skip: if current_agent=planner, planner_retries=0, and this flag is true, the orchestrator skips planner re-invocation and advances directly to executor. Cleared by ROUTE_PLANNER (intentional reviewer-reject re-run) and by reset_phase(). Never set by reset_execution()." },
   "escalation_resets": { "type": "integer", "default": 0, "description": "Incremented by RESET_PHASE and RESET_EXECUTION resume commands. Cap: 3. NOT zeroed inside reset_phase() — only zeroed when roadmap genuinely advances to a new phase. Distinct from executor_retries." },
+  "nuclear_resets": { "type": "integer", "default": 0, "description": "P1 Stage G2. Incremented by the NUCLEAR_RESET command via nuclear_reset_phase(). Cap: 2, independent of escalation_resets. Preserved inside reset_phase() (like escalation_resets) so the cap accumulates; zeroed only on genuine phase advance. The dashboard shows the nuclear-reset button only when escalation_resets >= 3 and hides it at nuclear_resets >= 2." },
   "blame_context": { "type": "string", "description": "Appended by blame attribution" },
   "last_error_code": { "type": "string", "description": "Distinct codes for parse vs. structural failures" },
   "skill_injected": { "type": "string|null", "description": "Discipline name of the phase-prefix skill injected for the most recent agent turn (e.g. 'core-logic', 'infra-config'). null if no skill applied (prefix unmapped, phase_raw_id empty, source file missing, or kill switch suppressed injection). Written atomically by _record_injected_skill() immediately after each inject_skill() call." },
@@ -1437,7 +1441,7 @@ Complete JSON schemas for all pipeline data files. Schemas in §3–§6 define a
 }
 ```
 
-> `phase_state.json` is deleted at phase completion and re-created lazily on first counter increment. On re-creation the fallback init includes `escalation_resets: 0` — so the counter genuinely resets only when a new phase begins, never on a phase reset.
+> `phase_state.json` is deleted at phase completion and re-created lazily on first counter increment. On re-creation the fallback init includes `escalation_resets: 0` and `nuclear_resets: 0` — so both counters genuinely reset only when a new phase begins, never on a phase reset.
 
 **P1 Stage G1 — escalation advisory de-blame.** The pre-escalation LLM advisory (`_generate_escalation_advisory`) is grounded only in user-facing failure data: `failure_context`, the project's `failure_language`, and the retry counts. The blame-framed keys `escalation_trigger_reason` and `prior_blame_attributions` are **not** sent to the advisory LLM, so the summary cannot parrot internal blame-attribution jargon. The `failure_language` block is included whenever `failure_context` carries it — regardless of `reviewer_retries` — so executor-self-failure escalations surface the project's user-voice copy too (previously gated on `reviewer_retries >= 2`). The advisory result is stored as `escalation_message` / `escalation_recommended_action`; the clean `escalation_headline` is what the UI shows as the panel headline (the advisory summary when `escalation_advisory_status == "ready"`, the headline otherwise). `run_blame_attribution()` is unchanged — G1 governs only what the advisory is *fed* and what the UI *renders*.
 
@@ -1453,6 +1457,8 @@ Complete JSON schemas for all pipeline data files. Schemas in §3–§6 define a
 | `reviewer_infra_recovery_attempts` | ✗ preserved | ✓ zeroed | ✓ zeroed |
 | `planner_output_preserved` | — | ✓ cleared | ✓ cleared |
 | `escalation_resets` | — | ✗ preserved | ✓ zeroed |
+| `nuclear_resets` (P1 Stage G2) | — | ✗ preserved | ✓ zeroed |
+| `reset_log` (P1 Stage G2) | — (appended) | ✗ preserved | ✓ cleared |
 
 ### `pipeline_state.json`
 
@@ -1788,14 +1794,14 @@ Requests a clean halt of the running orchestrator. The orchestrator detects and 
 
 Issues a resume command to the escalation handler. Writes `escalation_output.json` then `escalation_output.done` atomically to the project directory (write order is critical — orchestrator reads `.done` as the signal that `.json` is complete).
 
-**Preconditions:** `pipeline_status` must be `WAITING_FOR_HUMAN`. `escalation_resets` must be `< 3` if the command is `RESET_PHASE` or `RESET_EXECUTION`.
+**Preconditions:** `pipeline_status` must be `WAITING_FOR_HUMAN`. `escalation_resets` must be `< 3` if the command is `RESET_PHASE` or `RESET_EXECUTION`. `nuclear_resets` must be `< 2` if the command is `NUCLEAR_RESET` (its own cap, independent of `escalation_resets` — `NUCLEAR_RESET` is intentionally NOT gated on the escalation cap server-side; the "only when `escalation_resets >= 3`" rule is enforced UI-side).
 
 **Request body:**
 ```json
 {"command": "RETRY"}
 ```
 
-**Valid commands:** `RETRY`, `RESET_EXECUTION`, `RESET_PHASE`, `SKIP`, `PROCEED`, `STOP`. Any other value returns HTTP 400.
+**Valid commands:** `RETRY`, `RESET_EXECUTION`, `RESET_PHASE`, `RESET_REVIEWER`, `SKIP`, `PROCEED`, `STOP`, `NUCLEAR_RESET`. Any other value returns HTTP 400.
 
 **Success response (HTTP 200):**
 ```json
@@ -1805,6 +1811,7 @@ Issues a resume command to the escalation handler. Writes `escalation_output.jso
 **Error responses:**
 - HTTP 409 — `{"error": "Pipeline is not waiting for human input"}` — status is not `WAITING_FOR_HUMAN`
 - HTTP 409 — `{"error": "Reset cap reached"}` — `escalation_resets >= 3` and command is `RESET_PHASE` or `RESET_EXECUTION`
+- HTTP 409 — `{"error": "Nuclear reset cap reached"}` — `nuclear_resets >= 2` and command is `NUCLEAR_RESET`
 - HTTP 400 — `{"error": "Unknown command"}` — unrecognized command token
 
 #### `POST /api/resume-ready`

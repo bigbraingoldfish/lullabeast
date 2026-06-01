@@ -2138,6 +2138,10 @@ def _compute_escalation_view(
                 view["last_error_code"] = phase_state["last_error_code"]
             if "escalation_resets" in phase_state:
                 view["escalation_resets"] = phase_state["escalation_resets"]
+            # P1 Stage G2 — single surfacing point for the nuclear cap counter; feeds the
+            # nuclear-reset button's visibility gate in BOTH the Monitor and Queue panels.
+            if "nuclear_resets" in phase_state:
+                view["nuclear_resets"] = phase_state["nuclear_resets"]
             if "skill_injected" in phase_state:
                 view["skill_injected"] = phase_state["skill_injected"]
             if "skill_agent" in phase_state:
@@ -2414,20 +2418,28 @@ def get_state():
 
 
 # Valid commands for escalation
-VALID_COMMANDS = {"RETRY", "RESET_EXECUTION", "RESET_PHASE", "RESET_REVIEWER", "SKIP", "PROCEED", "STOP"}
+VALID_COMMANDS = {"RETRY", "RESET_EXECUTION", "RESET_PHASE", "RESET_REVIEWER", "SKIP", "PROCEED", "STOP", "NUCLEAR_RESET"}
 
 
 RESET_CAP_COMMANDS = {"RESET_PHASE", "RESET_EXECUTION", "RESET_REVIEWER"}
 
+# P1 Stage G2 — NUCLEAR_RESET is governed by its OWN cap (nuclear_resets), independent of
+# the escalation_resets cap above. It is deliberately NOT in RESET_CAP_COMMANDS: it must
+# remain available precisely when escalation_resets >= 3 (the normal recover budget is spent).
+NUCLEAR_RESET_CAP = 2
 
-def _validate_command_request(project_dir_path, pipeline_status, escalation_resets, command):
+
+def _validate_command_request(project_dir_path, pipeline_status, escalation_resets, command, nuclear_resets=0):
     """Validate command request conditions.
 
     Args:
         project_dir_path: Path to the project directory.
         pipeline_status: Current pipeline status.
-        escalation_resets: Number of escalation resets.
+        escalation_resets: Number of escalation resets (caps RESET_CAP_COMMANDS at 3).
         command: The command being issued.
+        nuclear_resets: Number of nuclear resets (caps NUCLEAR_RESET at 2). Defaults to 0
+            so callers that cannot issue NUCLEAR_RESET (e.g. the STOP-only
+            /api/pipeline/stop path) need not supply it.
 
     Returns:
         Tuple of (is_valid, error_message, error_status_code).
@@ -2457,6 +2469,15 @@ def _validate_command_request(project_dir_path, pipeline_status, escalation_rese
         return False, (
             "Reset cap reached (3/3 resets used this phase). "
             "Use PROCEED to advance past this phase or STOP to halt the pipeline."
+        ), 409
+
+    # P1 Stage G2 — independent nuclear cap. NUCLEAR_RESET is intentionally NOT gated on
+    # escalation_resets here (it is available precisely when that budget is spent — the
+    # escalation_resets >= 3 visibility rule is enforced UI-side); only its own cap applies.
+    if command == "NUCLEAR_RESET" and nuclear_resets >= NUCLEAR_RESET_CAP:
+        return False, (
+            f"Nuclear reset cap reached ({NUCLEAR_RESET_CAP}/{NUCLEAR_RESET_CAP} for this phase). "
+            "Use Abandon Phase to skip or Stop to halt the pipeline."
         ), 409
 
     return True, None, None
@@ -2624,8 +2645,9 @@ def post_command(request: dict):
         tgt_phase = os.path.join(_pipeline_artifacts_dir(deferred_target), "phase_state.json")
         phase_state = _read_json_file(tgt_phase) if os.path.exists(tgt_phase) else {}
         escalation_resets = phase_state.get("escalation_resets", 0) if phase_state else 0
+        nuclear_resets = phase_state.get("nuclear_resets", 0) if phase_state else 0
         is_valid, error_msg, error_code = _validate_command_request(
-            deferred_target, "WAITING_FOR_HUMAN", escalation_resets, command
+            deferred_target, "WAITING_FOR_HUMAN", escalation_resets, command, nuclear_resets
         )
         if not is_valid:
             raise HTTPException(status_code=error_code, detail=error_msg)
@@ -2638,7 +2660,8 @@ def post_command(request: dict):
     
     pipeline_status = pipeline_state.get("pipeline_status") if pipeline_state else None
     escalation_resets = phase_state.get("escalation_resets", 0) if phase_state else 0
-    
+    nuclear_resets = phase_state.get("nuclear_resets", 0) if phase_state else 0
+
     # If status already moved off WAITING_FOR_HUMAN but the active queue row is parked
     # in ESCALATION for this same project, treat command as deferred. This avoids
     # monitor-screen race failures when queue-level status flips to QUEUE_HALTED.
@@ -2657,7 +2680,7 @@ def post_command(request: dict):
             if e.get("parked_pipeline_status") not in (None, "WAITING_FOR_HUMAN"):
                 continue
             is_valid, error_msg, error_code = _validate_command_request(
-                active_real, "WAITING_FOR_HUMAN", escalation_resets, command
+                active_real, "WAITING_FOR_HUMAN", escalation_resets, command, nuclear_resets
             )
             if not is_valid:
                 raise HTTPException(status_code=error_code, detail=error_msg)
@@ -2666,7 +2689,7 @@ def post_command(request: dict):
 
     # Validate request
     is_valid, error_msg, error_code = _validate_command_request(
-        project_dir_path, pipeline_status, escalation_resets, command
+        project_dir_path, pipeline_status, escalation_resets, command, nuclear_resets
     )
     
     if not is_valid:
@@ -7690,6 +7713,11 @@ def get_queue_entry_snapshot(entry_id: str):
     # Apply the snapshot's existing default conventions at the return-dict layer:
     # escalation_resets → 0; the other present-only fields → None.
     escalation_resets = _view.get("escalation_resets", 0)
+    # P1 Stage G2 — the snapshot return dict cherry-picks from _view (it does NOT spread it
+    # like /api/state), so nuclear_resets must be lifted out explicitly or the Queue panel's
+    # nuclear-button gate never sees it (and would never hide at the cap). Default 0, matching
+    # escalation_resets, so the Queue gate reads a number, not undefined.
+    nuclear_resets = _view.get("nuclear_resets", 0)
     last_error_code = _view.get("last_error_code")
     escalation_message = _view.get("escalation_message")
     escalation_trigger_reason = _view.get("escalation_trigger_reason")
@@ -7727,6 +7755,7 @@ def get_queue_entry_snapshot(entry_id: str):
         "orchestrator_alive": orchestrator_alive,
         "is_active_project": is_active_project,
         "escalation_resets": escalation_resets,
+        "nuclear_resets": nuclear_resets,
         "last_error_code": last_error_code,
         "escalation_message": escalation_message,
         "escalation_trigger_reason": escalation_trigger_reason,

@@ -327,10 +327,11 @@ Six command buttons, each labeled and described:
 | SKIP | `SKIP` | Mark phase as skipped, advance to next. Use only if outcome is acceptable. |
 | PROCEED | `PROCEED` | Human has resolved the issue externally. Run post-merge cleanup and advance. |
 | STOP | `STOP` | Halt pipeline. Full manual intervention required. |
+| RESET EVERYTHING & RESTART PHASE *(P1 Stage G2; conditional)* | `NUCLEAR_RESET` | **Operator escape hatch.** Destructive true-fresh-start: same mechanics as RESET PHASE (rewind git, delete branch, wipe output, re-plan), but governed by its own `nuclear_resets` cap (2). Rendered **only** when `escalation_resets >= 3` (the normal recover budget is spent) and hidden again at `nuclear_resets >= 2`. Use when an *external* cause (infra/config) was fixed after the retry budgets were exhausted. |
 
-**Destructive command confirmation:** RESET_PHASE, SKIP, and STOP require a confirmation step before executing — a modal or inline confirmation prompt: "Are you sure? This cannot be undone." RETRY, RESET_EXECUTION, and PROCEED execute immediately on click (they are recoverable or safe).
+**Destructive command confirmation:** RESET_PHASE, SKIP, STOP, and NUCLEAR_RESET require a confirmation step before executing — a modal or inline confirmation prompt. NUCLEAR_RESET uses a dedicated modal whose copy states all code on the phase branch is permanently discarded, with a **WARNING** on its own emphasized line that the same failure can recur if the underlying problem isn't addressed. RETRY, RESET_EXECUTION, and PROCEED execute immediately on click (they are recoverable or safe).
 
-**Reset cap awareness:** If `escalation_resets >= 3` (readable from `phase_state.json`), RESET_PHASE, RESET_EXECUTION, and RESET_REVIEWER buttons are disabled with a native `title` tooltip (visible labels **Proceed** / **Stop**, plus a short anti-loop / manual-repo hint) and an inline amber notice. This mirrors the orchestrator's own cap enforcement.
+**Reset cap awareness:** If `escalation_resets >= 3` (readable from `phase_state.json`), RESET_PHASE, RESET_EXECUTION, and RESET_REVIEWER buttons are disabled with a native `title` tooltip (visible labels **Proceed** / **Stop**, plus a short anti-loop / manual-repo hint) and an inline amber notice. This mirrors the orchestrator's own cap enforcement. **Nuclear escape hatch (P1 Stage G2):** at that same `escalation_resets >= 3` point — and *only* then — a destructive **"Reset Everything & Restart Phase"** (`NUCLEAR_RESET`) button appears, governed by its own `nuclear_resets` cap (2, read from `phase_state.json`); it disappears once `nuclear_resets >= 2`, leaving only Abandon Phase / Stop. It is surfaced by the same `_compute_escalation_view` helper, so it gates identically in the Pipeline Monitor and the Queue view.
 
 **Post-command behavior:** After a command is issued, the command panel shows a brief "Command sent — waiting for orchestrator..." state and transitions back to read-only as soon as `pipeline_status` changes away from `WAITING_FOR_HUMAN` (detected via the next state poll or SSE event).
 
@@ -348,6 +349,7 @@ Accepts a command and writes it through the same mechanism the escalation agent 
 - Reject if `pipeline_status` is not `WAITING_FOR_HUMAN` — return 409 with `{"error": "Pipeline is not waiting for human input"}`
 - Reject unknown command strings — return 400
 - Reject if `escalation_resets >= 3` and command is `RESET_PHASE`, `RESET_EXECUTION`, or `RESET_REVIEWER` — return 409 with `{"error": "Reset cap reached"}` (detail text names PROCEED / STOP for operators; UI copy uses button labels **Proceed** / **Stop**)
+- Reject if `nuclear_resets >= 2` and command is `NUCLEAR_RESET` — return 409 with `{"error": "Nuclear reset cap reached"}`. `NUCLEAR_RESET` is **not** subject to the `escalation_resets` cap (it is available precisely when that budget is spent); only its own `nuclear_resets` cap applies server-side. The "only visible when `escalation_resets >= 3`" rule is enforced UI-side (P1 Stage G2, Decision A)
 
 **File format written (matches escalation agent output exactly):**
 ```json

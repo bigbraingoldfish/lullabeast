@@ -1341,6 +1341,35 @@
             );
         }
 
+        // P1 Stage G2 — dedicated confirm modal for the destructive nuclear reset. Distinct
+        // from ConfirmationModal: a single back-against-the-wall action with its own WARNING
+        // line, only ever reachable past the escalation cap.
+        function NuclearResetConfirmModal({ onConfirm, onDismiss, busy }) {
+            return (
+                <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+                    <div className="bg-[#141618] border border-red-700 rounded-lg p-6 max-w-md mx-4">
+                        <h3 className="header-text text-lg font-semibold text-red-400 mb-3">
+                            Reset Everything &amp; Restart Phase
+                        </h3>
+                        <p className="text-slate-300 text-sm mb-3">
+                            All retries for this phase are exhausted. This permanently discards all code on this phase's branch and restarts the phase from scratch.
+                        </p>
+                        <p className="text-red-300 text-sm font-semibold mb-6">
+                            WARNING: This option should be used only as a last resort, as the same failure can recur if the underlying problem isn't addressed. Continue?
+                        </p>
+                        <div className="flex gap-3 justify-end">
+                            <button type="button" onClick={onDismiss} disabled={busy} className="px-4 py-2 rounded bg-[#1a1d21] text-slate-300 hover:bg-[#252830] transition-colors disabled:opacity-50">
+                                Cancel
+                            </button>
+                            <button type="button" onClick={onConfirm} disabled={busy} className="px-4 py-2 rounded bg-red-600 hover:bg-red-500 text-white font-medium transition-colors disabled:opacity-50">
+                                {busy ? "Sending…" : "Reset Everything"}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
         // ─── ESCALATION_CMD_DEFS ──────────────────────────────────────────────────
         // Single source of truth for escalation command metadata. Consumed by both
         // EscalationCommandPanel (monitor, immediate dispatch) and QueueActionHub
@@ -1366,6 +1395,11 @@
             { command: 'STOP',            label: 'Stop Pipeline',   group: 'stop',
               desc:  'Halts all pipeline activity immediately.',
               title: 'Halts the pipeline. No further phases will run. Current phase state is preserved.' },
+            // P1 Stage G2 — its own 'nuclear' group (NOT 'recover'): the recover group is hidden
+            // at the escalation cap, but the nuclear button must appear precisely then.
+            { command: 'NUCLEAR_RESET',   label: 'Reset Everything & Restart Phase', group: 'nuclear',
+              desc:  'Last resort · discards all code on this phase branch · re-plans from scratch.',
+              title: 'Destructive last resort: git reset --hard to the phase base, delete the phase branch, wipe all artifacts, re-plan from the planner. Governed by its own cap (2), independent of the reset budget.' },
         ];
 
         // ─── InfoGroupLabel ───────────────────────────────────────────────────────
@@ -1421,6 +1455,7 @@
             escalation_advisory_status,
             last_action,
             escalation_resets,
+            nuclear_resets = 0,
             orchestrator_alive,
             onOrchestratorRestarted,
             onResumeOrchestratorResponse,
@@ -1534,6 +1569,10 @@
             const capReached = escalation_resets >= 3;
             const showRerunReviewer = executor_output_exists;
             const showMarkComplete = merge_probe_passed;
+            // P1 Stage G2 — the nuclear escape hatch appears ONLY past the recover budget
+            // (escalation_resets >= 3) and disappears once its own cap (2) is spent. It is
+            // gated independently of the recover group, which is hidden at capReached.
+            const showNuclear = capReached && (nuclear_resets || 0) < 2;
 
             const hiddenRecoverItems = !showRerunReviewer
                 ? ["Re-run Reviewer — no executor output to review"]
@@ -1554,15 +1593,16 @@
             // group === 'stop' → red label (visually distinct, same component).
             const renderActionButton = ({ command, label, desc, title: cmdTitle, group }) => {
                 const isStop = group === 'stop';
+                const isNuclear = group === 'nuclear';  // P1 Stage G2 — destructive emphasis
                 return (
                     <button
                         key={command}
                         type="button"
-                        className="flex flex-col items-start text-left px-3 py-2 rounded bg-[#1a1d21] hover:bg-[#252830] transition-colors w-full"
+                        className={`flex flex-col items-start text-left px-3 py-2 rounded transition-colors w-full ${isNuclear ? 'bg-red-950/40 border border-red-800/60 hover:bg-red-900/40' : 'bg-[#1a1d21] hover:bg-[#252830]'}`}
                         title={cmdTitle}
                         onClick={() => handleCommand(command)}
                     >
-                        <span className={`header-text text-sm font-medium ${isStop ? 'text-red-400' : ''}`}>{label}</span>
+                        <span className={`header-text text-sm font-medium ${(isStop || isNuclear) ? 'text-red-400' : ''}`}>{label}</span>
                         {desc && <span className="text-slate-400 text-xs mt-0.5 leading-snug">{desc}</span>}
                     </button>
                 );
@@ -1583,6 +1623,7 @@
                 .filter(d => d.group === 'advance')
                 .filter(d => !(d.command === 'PROCEED' && (!showMarkComplete || capReached)));
             const stopDef = ESCALATION_CMD_DEFS.find(d => d.group === 'stop');
+            const nuclearDef = ESCALATION_CMD_DEFS.find(d => d.group === 'nuclear');  // P1 Stage G2
 
             const handleRestartOrchestrator = async () => {
                 setRestartError("");
@@ -1754,6 +1795,16 @@
                                 </div>
                             )}
 
+                            {/* 2b. P1 Stage G2 — nuclear escape hatch. Rendered OUTSIDE the
+                                capReached ternary above (which hides the recover group): it
+                                appears precisely when escalation_resets >= 3 and hides at its
+                                own cap (nuclear_resets >= 2). */}
+                            {showNuclear && nuclearDef && (
+                                <div className="space-y-1.5">
+                                    {renderActionButton(nuclearDef)}
+                                </div>
+                            )}
+
                             <div className="border-t border-[#2a2d31]" />
 
                             {/* 3. Advance manually group */}
@@ -1772,7 +1823,7 @@
                         <p className="text-slate-500 text-xs">Finish confirmation below, or cancel.</p>
                     ) : null}
 
-                    {showConfirmModal && modalCommand !== "STOP" && (
+                    {showConfirmModal && modalCommand !== "STOP" && modalCommand !== "NUCLEAR_RESET" && (
                         <ConfirmationModal
                             command={modalCommand}
                             onConfirm={modalConfirm}
@@ -1786,6 +1837,13 @@
                             onConfirm={modalConfirm}
                             onDismiss={modalDismiss}
                             pipelineStatus={pipeline_status}
+                        />
+                    )}
+                    {showConfirmModal && modalCommand === "NUCLEAR_RESET" && (
+                        <NuclearResetConfirmModal
+                            onConfirm={modalConfirm}
+                            onDismiss={modalDismiss}
+                            busy={confirmBusy}
                         />
                     )}
                 </div>
@@ -8079,6 +8137,7 @@
                 // reads always matches the project the command acts on. (The G3 follow-up
                 // moved these off /api/state, which always described the ACTIVE project.)
                 const hubEscalationResets = (snapshot && snapshot.escalation_resets) || 0;
+                const hubNuclearResets = (snapshot && snapshot.nuclear_resets) || 0;  // P1 Stage G2
                 const hubExecutorOutputExists = snapshot ? (snapshot.executor_output_exists ?? true) : true;
                 const hubMergeProbePassed = snapshot ? (snapshot.merge_probe_passed ?? false) : false;
                 // P1 Stage G1 de-blamed advisory fields, now snapshot-derived (was /api/state).
@@ -8140,6 +8199,7 @@
                                 escalation_recommended_action={hubRecommendedAction}
                                 escalation_advisory_status={hubAdvisoryStatus}
                                 escalation_resets={hubEscalationResets}
+                                nuclear_resets={hubNuclearResets}
                                 executor_output_exists={hubExecutorOutputExists}
                                 merge_probe_passed={hubMergeProbePassed}
                                 targetProjectPath={selected && selected.state === 'ESCALATION' && selected.project_path ? selected.project_path : null}
@@ -9341,6 +9401,7 @@
                                 escalation_advisory_status={pState.escalation_advisory_status}
                                 last_action={pState.last_action}
                                 escalation_resets={pState.escalation_resets || 0}
+                                nuclear_resets={pState.nuclear_resets || 0}
                                 orchestrator_alive={alive}
                                 onOrchestratorRestarted={fetchState}
                                 onResumeOrchestratorResponse={applyResumeOrchestratorClientResult}
