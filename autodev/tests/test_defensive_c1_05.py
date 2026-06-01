@@ -44,7 +44,6 @@ def orch(tmp_path, monkeypatch):
         "current_agent": "planner",
         "pipeline_status": "RUNNING",
         "project_path": str(tmp_path / "proj"),
-        "status": "RUNNING",
         "planner_retries": 0,
         "executor_retries": 0,
         "reviewer_retries": 0,
@@ -108,7 +107,6 @@ class TestC105PipelineStateCorrupt:
             "current_agent": "executor",
             "pipeline_status": "RUNNING",
             "project_path": "/some/project",
-            "status": "RUNNING",
         }
         state_file.write_text(json.dumps(valid_state), encoding="utf-8")
 

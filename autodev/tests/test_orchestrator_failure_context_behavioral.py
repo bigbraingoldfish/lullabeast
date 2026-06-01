@@ -62,7 +62,6 @@ def _bare_orchestrator(tmp_path, monkeypatch, raw_id="CORE-E1"):
         "planner_retries": 0,
         "executor_retries": 0,
         "reviewer_retries": 0,
-        "status": "RUNNING",
         "pipeline_status": "RUNNING",
     }
     orch.openclaw_config = {}

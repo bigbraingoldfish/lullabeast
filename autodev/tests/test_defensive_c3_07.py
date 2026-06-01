@@ -109,7 +109,7 @@ def test_gate_fails_when_pipeline_state_has_no_commit_key(tmp_path):
     # Write pipeline_state.json next to workspace (the location the gate reads:
     # ``os.path.dirname(WORKSPACE_DIR.rstrip("/"))/pipeline_state.json``).
     pipeline_state = workspace.parent / "pipeline_state.json"
-    pipeline_state.write_text(json.dumps({"status": "RUNNING", "current_phase": 1}))
+    pipeline_state.write_text(json.dumps({"pipeline_status": "RUNNING", "current_phase": 1}))
 
     with ExitStack() as stack:
         _patch_gate_paths(stack, workspace, artifacts_dir)

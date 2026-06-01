@@ -107,8 +107,8 @@ def run_heartbeat() -> None:
       → Log status and exit. No intervention.
 
       Rationale: with the agent_end plugin, poll_for_sentinel unblocks the moment an
-      agent session closes.  Long backstop timeouts (planner/reviewer 3600 s, executor
-      7200 s) remain for gateway-down cases.  Mid-session silence is additionally bounded
+      agent session closes.  Long backstop timeouts (4500 s / 75 min per agent)
+      remain for gateway-down cases.  Mid-session silence is additionally bounded
       by Tier A stall detection (activity stamp + ``poll_for_sentinel`` stall arguments in
       orchestrator) before those backstops elapse.
 

@@ -118,7 +118,6 @@ def reviewer_workspace(tmp_path, monkeypatch):
         "executor_retries": 0,
         "reviewer_retries": 3,            # the stale value the UI sees
         "project_path": str(project_dir),
-        "status": "RUNNING",
         "pipeline_status": "WAITING_FOR_HUMAN",
     }
     orch.openclaw_config = {}

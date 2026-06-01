@@ -34,7 +34,6 @@ def orch(tmp_path, monkeypatch):
         "current_agent": "executor",
         "current_phase": 1,
         "current_phase_raw_id": "INFRA-1",
-        "status": "RUNNING",
         "last_action": "test",
         "executor_retries": 0,
         "reviewer_retries": 0,

@@ -34,7 +34,6 @@ def setup(tmp_path, monkeypatch):
         "current_agent": "planner",
         "pipeline_status": "RUNNING",
         "project_path": str(tmp_path / "old_proj"),
-        "status": "RUNNING",
         "planner_retries": 0,
         "executor_retries": 0,
         "reviewer_retries": 0,

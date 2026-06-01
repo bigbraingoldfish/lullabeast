@@ -2762,7 +2762,6 @@ def post_pipeline_git_recover(request: dict):
         pipeline_state_file = os.path.expanduser(pipeline_state_path)
         state = _read_json_file(pipeline_state_file) or {}
         state["pipeline_status"] = "RUNNING"
-        state["status"] = "RUNNING"
         state["current_agent"] = "planner"
         state["last_action"] = f"Manual git recovery completed on branch {base_branch}"
         state["last_action_timestamp"] = datetime.now(timezone.utc).isoformat()
@@ -8671,7 +8670,7 @@ async def post_completion_review_trigger(project: str):
         try:
             with open(ps_path, "r", encoding="utf-8") as _f:
                 _ps = json.load(_f)
-            pipeline_status = _ps.get("pipeline_status") or _ps.get("status")
+            pipeline_status = _ps.get("pipeline_status")
         except Exception:
             pass
     if pipeline_status != "PIPELINE_COMPLETE":

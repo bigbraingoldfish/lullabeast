@@ -28,7 +28,6 @@ def test_git_recover_success_updates_pipeline_state(tmp_path: Path):
         json.dumps(
             {
                 "pipeline_status": "RUNNING",
-                "status": "RUNNING",
                 "current_agent": "escalation",
             }
         ),
@@ -65,7 +64,8 @@ def test_git_recover_success_updates_pipeline_state(tmp_path: Path):
 
     state = json.loads(state_path.read_text(encoding="utf-8"))
     assert state["pipeline_status"] == "RUNNING"
-    assert state["status"] == "RUNNING"
+    # git-recover must NOT (re)introduce the removed vestigial `status` field.
+    assert "status" not in state
     assert state["current_agent"] == "planner"
 
 

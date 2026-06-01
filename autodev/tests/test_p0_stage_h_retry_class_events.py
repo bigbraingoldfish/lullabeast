@@ -102,7 +102,6 @@ def test_reset_phase_resets_retry_class_tracker(tmp_path, monkeypatch):
         "executor_retries": 2,
         "reviewer_retries": 1,
         "planner_retries": 0,
-        "status": "RUNNING",
         "pipeline_status": "RUNNING",
         "project_path": str(tmp_path),
     }

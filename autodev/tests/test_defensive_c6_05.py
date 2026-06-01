@@ -41,7 +41,6 @@ def orch(tmp_path, monkeypatch):
         "last_action_timestamp": "2026-01-01T00:00:00Z",
         "pipeline_status": "RUNNING",
         "project_path": str(tmp_path / "proj"),
-        "status": "RUNNING",
     }
     inst.openclaw_config = {}
     inst.skill_manager = MagicMock()

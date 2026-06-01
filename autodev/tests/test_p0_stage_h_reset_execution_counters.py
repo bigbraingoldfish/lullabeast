@@ -60,7 +60,6 @@ def _bare_orch_with_state(tmp_path, monkeypatch, phase_state, self_state=None):
         "executor_retries": phase_state.get("executor_retries", 0),
         "reviewer_retries": phase_state.get("reviewer_retries", 0),
         "planner_retries": 0,
-        "status": "RUNNING",
         "pipeline_status": "RUNNING",
         "project_path": str(tmp_path),
     }
