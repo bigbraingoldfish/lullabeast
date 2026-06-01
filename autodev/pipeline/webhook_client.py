@@ -110,7 +110,10 @@ def invoke_agent_webhook(
         "escalation": (
             f"Pipeline needs human intervention. Read {_p}/phase_state.json and relevant output "
             f"files for context. Send a Signal notification, then write your assessment to "
-            f"{_p}/escalation_output.json and {_p}/escalation_output.done."
+            f"{_p}/escalation_output.json and {_p}/escalation_output.done. The JSON must contain a "
+            f'"command" field set to exactly one of: RETRY, RESET_PHASE, RESET_EXECUTION, '
+            f"RESET_REVIEWER, PROCEED, STOP. If you have no clear operator instruction, write "
+            f'{{"command": "STOP"}}.'
         ),
     }
     payload = {

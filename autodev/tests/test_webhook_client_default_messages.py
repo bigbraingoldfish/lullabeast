@@ -84,3 +84,33 @@ class TestDefaultMessageReferences:
             "Escalation default should not reference verification.md — "
             "escalation's input is phase_state.json + output files."
         )
+
+    def _escalation_msg(self):
+        src = _default_messages_source()
+        match = re.search(r'"escalation"\s*:\s*\((.*?)\)\s*,', src, re.DOTALL)
+        assert match, "Could not locate escalation default message"
+        return match.group(1)
+
+    def test_escalation_default_requires_command_field(self):
+        """The strengthened message must name the `command` field and the no-instruction STOP default,
+        so the agent never writes a command-less escalation_output.done."""
+        msg = self._escalation_msg()
+        assert "command" in msg, f"escalation default must require a command field; got: {msg!r}"
+        assert '"command": "STOP"' in msg, (
+            f"escalation default must instruct {{'command': 'STOP'}} when no clear instruction; got: {msg!r}"
+        )
+
+    def test_escalation_default_enumerates_offerable_verbs(self):
+        """The message must enumerate the six offerable verbs the agent may write."""
+        msg = self._escalation_msg()
+        for verb in ("RETRY", "RESET_PHASE", "RESET_EXECUTION", "RESET_REVIEWER", "PROCEED", "STOP"):
+            assert verb in msg, f"escalation default must name offerable verb {verb}; got: {msg!r}"
+
+    def test_escalation_default_omits_secret_menu_verbs(self):
+        """SKIP and NUCLEAR_RESET are not offerable at invocation: SKIP is on-request-only, and
+        NUCLEAR_RESET is surfaced conditionally (escalation_resets >= 3) per AGENTS.md, not statically."""
+        msg = self._escalation_msg()
+        assert "SKIP" not in msg, f"escalation default must NOT name SKIP (secret-menu); got: {msg!r}"
+        assert "NUCLEAR_RESET" not in msg, (
+            f"escalation default must NOT name NUCLEAR_RESET (cap-gated, surfaced by the agent); got: {msg!r}"
+        )
