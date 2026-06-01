@@ -332,6 +332,28 @@
                 "Inference provider rejected the request \u2014 check your API key, credits, or rate limits, then restart the pipeline.",
             ERR_SESSION_DEAD_ON_ARRIVAL:
                 "Inference provider rejected the session before it started \u2014 check your API key and provider status.",
+            ERR_STATUS_NOT_COMPLETE:
+                "Executor Error: the executor reported a status other than 'complete'. Discarded work. Attempting retry.",
+            ERR_TDD_COVERAGE_MISMATCH:
+                "Executor Error: the tests the plan required are missing from the execution output (TDD coverage mismatch). Discarded work. Attempting retry.",
+            ERR_MANIFEST_FILE_MISSING:
+                "Executor Error: a file listed in the change manifest was not found on disk. Discarded work. Attempting retry.",
+            ERR_PATH_TRAVERSAL:
+                "Executor Error: a manifest file path escaped the project directory and was blocked for safety. Discarded work. Attempting retry.",
+            ERR_MISSING_BASE_COMMIT:
+                "Executor Error: the phase base commit is unavailable, so file deletions cannot be verified. Action required: check the project's Git state.",
+            ERR_PRD_VERBATIM_MISSING:
+                "Executor Error: required PRD verbatim text is missing from the tracked source. Discarded work. Attempting retry.",
+            ERR_BEHAVIORAL_ARTIFACTS_MISSING:
+                "Executor Error: required behavioral smoke-test artifacts are missing or empty for a phase that requires them. Discarded work. Attempting retry.",
+            ERR_VISUAL_UNVERIFIED:
+                "Reviewer Error: visual verification artifacts are missing. Re-running the reviewer.",
+            ERR_BEHAVIORAL_UNVERIFIED:
+                "Reviewer Error: behavioral verification evidence is missing or insufficient. Re-running the reviewer.",
+            ERR_REGRESSION_UNVERIFIED:
+                "Reviewer Error: the prior-phase regression check could not be verified. Re-running the reviewer.",
+            ERR_REGRESSION_PRIOR_PHASE:
+                "Reviewer Error: this phase broke a feature from an earlier phase (regression is the only failing check). Sending back to the executor.",
         };
 
         function getLastErrorCodeTitle(errorCode, currentAgent) {
@@ -570,6 +592,10 @@
                 case 'reviewer_verdict':
                 case 'stamp_init_failed':
                     return 'bg-[#764cc5] text-white';
+                // Recoverable safety-heal (garbage resume command -> defaulted to STOP):
+                // amber warning family so it reads as "attention, recoverable", not the
+                // dark default badge.
+                case 'escalation_command_invalid': return 'bg-amber-600 text-white';
                 default: return 'bg-[#1a1d21] text-white';
             }
         }
@@ -591,6 +617,7 @@
             abort_verify_failed: 'Verify Fail',
             reviewer_verdict: 'Verdict',
             stamp_init_failed: 'Setup Fail',
+            escalation_command_invalid: 'Invalid Command',
             // P1 Stage F — advisory reachability events.
             reachability_warning: 'Reach Warn',
             reachability_not_applicable: 'Reach N/A',
@@ -611,9 +638,10 @@
             poll_outcome: 'Polling ended. Detail.reason is one of succeeded / stalled / no_first_activity / stopped / timeout.',
             attempt_end: 'One agent attempt finished. Dense summary mirroring the [ATTEMPT_END] log line.',
             abort_attempted: 'Orchestrator called abort_agent_session on the prior session. Detail.result is "ok" or "FAILED".',
-            abort_verify_failed: 'Gateway acknowledged the abort but the agent kept refreshing its activity stamp. Pipeline halts rather than launch the next attempt on top of a still-streaming session.',
-            reviewer_verdict: 'The reviewer-gate dispatch decision. Detail.verdict is PASS / ROUTE_EXECUTOR / ROUTE_PLANNER / ROUTE_ESCALATE / MISSING_ARTIFACTS / INFRA_FAILURE / VISUAL_UNVERIFIED.',
+            abort_verify_failed: 'Gateway acknowledged the abort but the agent kept refreshing its activity stamp. The orchestrator soft-continues — it launches the next attempt anyway rather than forcing the run to stop and wait for a human.',
+            reviewer_verdict: 'The reviewer-gate dispatch decision. Detail.verdict is PASS / ROUTE_EXECUTOR / ROUTE_PLANNER / ROUTE_ESCALATE / MISSING_ARTIFACTS / INFRA_FAILURE / VISUAL_UNVERIFIED / BEHAVIORAL_UNVERIFIED / REGRESSION_UNVERIFIED.',
             stamp_init_failed: 'Could not seed the agent activity stamp — workspace dir is missing or unwritable. Stall detection would be silently disabled; pipeline halts loudly instead.',
+            escalation_command_invalid: 'The escalation agent returned an empty or unrecognized resume command. The orchestrator defaulted to STOP (recoverable) instead of a silent dead-end — resume from the escalation panel to continue.',
             // P1 Stage F — advisory reachability events. Hedged copy: operators
             // must not infer "broken" from "unreachable" — it could just be
             // wiring landing in a different entry, or a dynamic-import pattern
@@ -680,11 +708,26 @@
                 case 'escalation_resolve': {
                     const cmds = {
                         RETRY: 'Human chose: retry current agent',
+                        RESET_EXECUTION: 'Human chose: restart the executor with a fresh session',
                         RESET_PHASE: 'Human chose: restart entire phase',
                         RESET_REVIEWER: 'Human chose: restart review step',
+                        // SKIP is a removed "secret-menu" verb. This is a post-hoc log line
+                        // only (it adds no control); risk-flagged on purpose so the record
+                        // reinforces SKIP's cascade danger rather than normalizing it.
+                        SKIP: 'Human chose: SKIP this phase — ⚠ may cascade on dependent phases',
+                        PROCEED: 'Human chose: accept current state and proceed',
+                        NUCLEAR_RESET: 'Human chose: NUCLEAR RESET — discarding all phase work and restarting from the base commit',
                         STOP: 'Human chose: stop pipeline',
                     };
                     return cmds[d.command] || `Human chose: ${d.command || 'unknown'}`;
+                }
+                case 'escalation_command_invalid': {
+                    // Recoverable safety-heal: the escalation agent returned an empty /
+                    // unrecognized command, so the orchestrator defaulted to STOP (not a
+                    // silent dead-end). Resume from the escalation panel to continue.
+                    const received = d.received_command ? `"${d.received_command}"` : 'an empty command';
+                    const fallback = d.defaulted_to || 'STOP';
+                    return `Unrecognized command ${received} — defaulted to ${fallback} (recoverable; resume to continue)`;
                 }
                 case 'status_changed':
                     return 'Pipeline state updated';
@@ -735,7 +778,7 @@
                 }
                 case 'abort_verify_failed': {
                     const role = d.agent_role || event.agent || 'agent';
-                    return `⚠ ${role[0].toUpperCase() + role.slice(1)} kept streaming after abort — pipeline halted to avoid stacking attempts`;
+                    return `⚠ ${role[0].toUpperCase() + role.slice(1)} kept streaming after abort — launching the next attempt anyway (soft-continue)`;
                 }
                 case 'reviewer_verdict': {
                     const v = d.verdict;
@@ -748,6 +791,8 @@
                     if (v === 'MISSING_ARTIFACTS') return `${passStr}Required output files missing — re-running executor`;
                     if (v === 'INFRA_FAILURE') return `${passStr}Reviewer infrastructure failure — retrying`;
                     if (v === 'VISUAL_UNVERIFIED') return `${passStr}Visual verification artifacts missing — re-running reviewer`;
+                    if (v === 'BEHAVIORAL_UNVERIFIED') return `${passStr}Behavioral verification evidence missing — re-running reviewer`;
+                    if (v === 'REGRESSION_UNVERIFIED') return `${passStr}Prior-phase regression check unverified — re-running reviewer`;
                     return v ? `${passStr}Verdict: ${v}` : `${passStr}Verdict recorded`;
                 }
                 case 'stamp_init_failed': {
