@@ -1349,6 +1349,14 @@ class Orchestrator:
                     if parent_blocks_child(parent_state):
                         entry["state"] = "DEPENDENCY_HOLD"
                         self._write_queue(queue_data)
+                        # Phase 2 (observability) — record the hold. Fires once per genuine
+                        # READY->DEPENDENCY_HOLD transition: an already-held entry is skipped by
+                        # the state gate at the top of this loop before reaching here, so no spam.
+                        _write_pipeline_event(
+                            "dependency_hold", "", "queue",
+                            {"parent_id": entry.get("parent_id"), "entry_id": entry.get("id"),
+                             "entry_name": entry.get("name")},
+                        )
                     i += 1
                     continue
 
@@ -1450,7 +1458,18 @@ class Orchestrator:
             # Reused unchanged in both branches: converts a banked pending_escalation_command
             # into escalation_output (+ sets WAITING_FOR_HUMAN / current_agent=escalation) so the
             # next loop's escalation dispatch consumes it against the (now-restored) phase pointer.
-            self._apply_pending_escalation_command(project_path)
+            applied_command = self._apply_pending_escalation_command(project_path)
+            # Phase 2 (observability) — record the revival of a parked project and the banked
+            # command being applied. Guarded on is_revival AND a real applied command, so the
+            # fresh-start path (no pending file) never emits.
+            if is_revival and applied_command:
+                _write_pipeline_event(
+                    "queue_revived",
+                    self.state.get("current_phase_raw_id", ""),
+                    "queue",
+                    {"entry_id": entry.get("id"), "entry_name": entry.get("name"),
+                     "command": applied_command},
+                )
             return True
 
         # No eligible project found — determine halted reason
@@ -1475,6 +1494,10 @@ class Orchestrator:
         if halt_if_no_eligible:
             self.state["queue_halted_reason"] = reason
             self.transition_state("QUEUE_HALTED", f"Queue halted: {reason}")
+            # Phase 2 (observability) — record WHEN/WHY the queue stalled, not just the
+            # resulting QUEUE_HALTED status. Stays inside this branch: the else path below
+            # (caller owns final status, e.g. PIPELINE_COMPLETE) is not a halt.
+            _write_pipeline_event("queue_halted", "", "queue", {"reason": reason})
         else:
             # Caller owns final status (e.g. PIPELINE_COMPLETE). Clear stale halt metadata.
             self.state.pop("queue_halted_reason", None)
@@ -1550,6 +1573,16 @@ class Orchestrator:
             if extra_fields:
                 row.update(extra_fields)
             self._write_queue(queue_data)
+            # Phase 2 (observability) — record that the active project was set aside and
+            # the queue advanced. Emitted only after a successful write (both early returns
+            # above are before it), so all four call sites route through one emit, once each.
+            _write_pipeline_event(
+                "queue_parked",
+                self.state.get("current_phase_raw_id", ""),
+                "queue",
+                {"reason": parked_reason, "phase": self.state.get("current_phase_raw_id", ""),
+                 "entry_id": row.get("id"), "entry_name": row.get("name")},
+            )
         except Exception as e:
             print(f"[QUEUE] Failed to park active entry ({queue_state}): {e}")
 
@@ -1646,7 +1679,13 @@ class Orchestrator:
         return None
 
     def _apply_pending_escalation_command(self, project_path):
-        """If UI deferred a command while another project was active, apply it now."""
+        """If UI deferred a command while another project was active, apply it now.
+
+        Returns the applied command string (e.g. "RESET_PHASE") when a banked command was
+        fully converted to escalation_output and state was mutated, else None (no pending
+        file, or a write failure). The return value is read by the queue_revived observability
+        emit in _select_next_queue_project; all other callers ignore it.
+        """
         root = os.path.realpath(os.path.expanduser(project_path))
         art = os.path.join(root, ".autodev", "pipeline")
         try:
@@ -1655,7 +1694,7 @@ class Orchestrator:
             pass
         pending_json = os.path.join(art, "pending_escalation_command.json")
         if not os.path.exists(pending_json):
-            return
+            return None
         try:
             with open(pending_json, "r") as f:
                 data = json.load(f)
@@ -1693,10 +1732,11 @@ class Orchestrator:
                 f.write("")
         except OSError as e:
             print(f"[QUEUE] Failed to apply deferred escalation command: {e}")
-            return
+            return None
         self.state["pipeline_status"] = "WAITING_FOR_HUMAN"
         self.state["current_agent"] = "escalation"
         self.write_state()
+        return command
 
     def _should_invoke_escalation_agent(self) -> bool:
         """True when escalation webhook should be invoked for current state.
@@ -2723,6 +2763,17 @@ class Orchestrator:
         })
         self.write_phase_state_atomic(_ps)
         print(f"[INFO] nuclear_reset_phase: nuclear_resets now {_ps['nuclear_resets']}, reason={_reason!r}.")
+        # Phase 2 (observability) — record the destructive ACTION on the timeline. The dispatch
+        # loop already emits escalation_resolve for the *command*; this captures that the phase
+        # work was actually discarded. Emit BEFORE reset_phase() wipes the phase pointer so the
+        # detail carries the escalated phase, not the post-reset blank.
+        _write_pipeline_event(
+            "nuclear_reset",
+            self.state.get("current_phase_raw_id", ""),
+            "escalation",
+            {"nuclear_resets": _ps["nuclear_resets"], "reason": _reason,
+             "phase": self.state.get("current_phase_raw_id", "")},
+        )
         self.reset_phase()
 
     def reset_execution(self, caller: str):

@@ -366,8 +366,13 @@ The UI server tails this file via `_poll_pipeline_events_file()` (`ui/server.py:
 | **`stamp_init_failed`**    | When `_init_activity_stamp_or_halt` returns False                  | `{agent_role, stamp_path, reason}`                                                                    | 6.1.d |
 | **`reachability_warning`** | On the executor PASS path, when `executor_advisory_detail.json` has a populated `reachability_summary` or non-empty `reachability_diagnostics`. One summary event per phase + one event per diagnostic. | `{kind, count?, files?, command?, file?, reason}` where `kind ∈ {unreachable_summary, no_resolver, resolver_limitation, resolver_error}` | P1 Stage F |
 | **`reachability_not_applicable`** | On the executor PASS path, when the entry-point command is a recognised test runner (pytest, jest, vitest, ...) | `{reason}` | P1 Stage F |
+| **`nuclear_reset`** | Inside `nuclear_reset_phase()`, after the `nuclear_resets` increment + `reset_log` append, before delegating to `reset_phase()` (so `phase` is the pre-reset escalated phase) | `{nuclear_resets, reason, phase}` (`reason` = `last_error_code`) | P2 Observability |
+| **`queue_halted`** | Inside `_select_next_queue_project()`, in the `if halt_if_no_eligible:` branch right after `transition_state("QUEUE_HALTED", …)` (the reason-clearing `else` does not emit) | `{reason}` (`all_blocked` / `all_dependency_hold` / `answered_pending_revival` / `mixed` / `all_completed`) | P2 Observability |
+| **`queue_parked`** | Inside `_queue_park_active_entry()`, after the successful queue write (all 4 call sites route through this single emit, once each) | `{reason, phase, entry_id, entry_name}` | P2 Observability |
+| **`queue_revived`** | Inside `_select_next_queue_project()` revival branch, after `_apply_pending_escalation_command()` returns the applied command (guarded on `is_revival` + a real command, so the fresh-start path never emits) | `{entry_id, entry_name, command}` | P2 Observability |
+| **`dependency_hold`** | Inside `_select_next_queue_project()`, after a genuine READY→DEPENDENCY_HOLD write (an already-held entry is skipped by the state gate before reaching here, so no re-emit) | `{parent_id, entry_id, entry_name}` | P2 Observability |
 
-The bold entries are Section 6 additions; existing UI consumers handle them transparently because the JSONL schema is additive.
+The bold entries are Section 6 additions; existing UI consumers handle them transparently because the JSONL schema is additive. The five **P2 Observability** rows make previously-SILENT queue-lifecycle / destructive transitions first-class events (emitted by `orchestrator.py`, rendered in the activity feed by `ui/index.html` — colour `getEventBadgeColor`, label `EVENT_TYPE_DISPLAY`, hover `EVENT_TYPE_DESCRIPTION`, prose `humanizeSummary`); the `agent` field is `"queue"` for the four queue events and `"escalation"` for `nuclear_reset`.
 
 ### Phase-state outcome fields (Section 6.4)
 

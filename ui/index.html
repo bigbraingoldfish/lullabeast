@@ -596,6 +596,15 @@
                 // amber warning family so it reads as "attention, recoverable", not the
                 // dark default badge.
                 case 'escalation_command_invalid': return 'bg-amber-600 text-white';
+                // Phase 2 — SILENT lifecycle/destructive events. nuclear_reset is the only
+                // truly destructive one (red, stronger than amber gate_fail); queue_halted is
+                // attention/recoverable (amber); revival is positive (green); park/hold are
+                // neutral lifecycle (slate).
+                case 'nuclear_reset': return 'bg-red-700 text-white';
+                case 'queue_halted': return 'bg-amber-600 text-white';
+                case 'queue_parked': return 'bg-slate-600 text-white';
+                case 'queue_revived': return 'bg-green-600 text-white';
+                case 'dependency_hold': return 'bg-slate-500 text-white';
                 default: return 'bg-[#1a1d21] text-white';
             }
         }
@@ -621,6 +630,12 @@
             // P1 Stage F — advisory reachability events.
             reachability_warning: 'Reach Warn',
             reachability_not_applicable: 'Reach N/A',
+            // Phase 2 — SILENT lifecycle/destructive events.
+            nuclear_reset: 'Nuclear Reset',
+            queue_halted: 'Queue Halted',
+            queue_parked: 'Parked',
+            queue_revived: 'Revived',
+            dependency_hold: 'Dep Hold',
         };
 
         // Hover descriptions for each event type (rendered as the badge
@@ -648,6 +663,12 @@
             // the static walk cannot follow.
             reachability_warning: 'A static reachability check found something worth surfacing — manifest files not reached from the entry point, no resolver for the project language, or a resolver limitation. Advisory only — the phase still passes; treat as "confirm intent," not "broken."',
             reachability_not_applicable: 'The verified entry point is a test runner (pytest, jest, vitest, ...); the reachability check was consciously skipped. Informational only — no problem detected.',
+            // Phase 2 — SILENT lifecycle/destructive events now recorded on the timeline.
+            nuclear_reset: 'Operator escape hatch (cap 2): all phase work on the branch was discarded and the phase restarted from its base commit. Destructive — distinct from the cap-3 escalation resets.',
+            queue_halted: 'The project queue stalled — no eligible project to start. Detail.reason is all_blocked / all_dependency_hold / answered_pending_revival / mixed / all_completed.',
+            queue_parked: 'The active project escalated (or hit a roadmap block) and was parked; the queue advanced to the next project. The escalated phase pointer is snapshotted for later revival.',
+            queue_revived: 'A parked project with a banked escalation answer was revived and resumed at its escalated phase, with the banked command applied.',
+            dependency_hold: 'A queued project was held because its parent project has not completed yet. It returns to READY when the parent completes.',
         };
 
         function getEventDescription(eventType) {
@@ -824,6 +845,38 @@
                 }
                 case 'reachability_not_applicable':
                     return `reachability skipped — ${d.reason || 'entry point is a test runner'}`;
+
+                // ─── Phase 2 — SILENT lifecycle/destructive events rendered as prose ───
+                case 'nuclear_reset': {
+                    const cap = d.nuclear_resets != null ? `${d.nuclear_resets}/2` : '';
+                    const reason = d.reason ? ` Reason: ${d.reason}` : '';
+                    return `Nuclear reset ${cap} — all phase work on this branch discarded; restarting from the base commit.${reason}`;
+                }
+                case 'queue_halted': {
+                    const reasons = {
+                        all_blocked: 'Queue stalled — all remaining projects are blocked',
+                        all_dependency_hold: 'Queue stalled — all remaining projects are waiting on a parent to complete',
+                        answered_pending_revival: 'Queue stalled — a banked escalation answer is pending revival (recoverable; resume to continue)',
+                        mixed: 'Queue stalled — remaining projects are blocked or on hold',
+                        all_completed: 'Queue drained — all projects complete',
+                    };
+                    return reasons[d.reason] || `Queue stalled${d.reason ? ` — ${d.reason}` : ''}`;
+                }
+                case 'queue_parked': {
+                    const name = d.entry_name || d.entry_id || 'project';
+                    const phase = d.phase ? ` at ${d.phase}` : '';
+                    return `Parked ${name}${phase} after escalation — queue advanced to the next project`;
+                }
+                case 'queue_revived': {
+                    const name = d.entry_name || d.entry_id || 'project';
+                    const cmd = d.command || 'banked answer';
+                    return `Revived ${name} with banked answer (${cmd}) — resuming at the parked phase`;
+                }
+                case 'dependency_hold': {
+                    const name = d.entry_name || d.entry_id || 'project';
+                    const parent = d.parent_id ? ` parent ${d.parent_id}` : ' its parent';
+                    return `${name} held — waiting on${parent} to complete`;
+                }
 
                 default:
                     return formatPipelineEventDetail(d) || type;

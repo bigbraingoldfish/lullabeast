@@ -337,3 +337,49 @@ def test_dispatch_nuclear_branch_enforces_cap_in_source():
         "the dispatch branch must gate on nuclear_resets >= 2, send the cap-reached notice in "
         "that branch, and call nuclear_reset_phase() only in the else (order-checked)"
     )
+
+
+# ---------------------------------------------------------------------------
+# 9. Observability Phase 2 — nuclear_reset emits a pipeline event
+# ---------------------------------------------------------------------------
+
+def _read_events(tmp_path):
+    """Parse the pipeline_events.jsonl emitted under the patched AUTODEV_PIPELINE_ROOT."""
+    p = os.path.join(str(tmp_path), "pipeline_events.jsonl")
+    if not os.path.exists(p):
+        return []
+    with open(p) as f:
+        return [json.loads(ln) for ln in f if ln.strip()]
+
+
+def test_nuclear_reset_emits_nuclear_reset_event(tmp_path, monkeypatch):
+    """Observability Phase 2: nuclear_reset_phase() must emit a ``nuclear_reset`` pipeline
+    event recording the destructive *action* on the timeline. The dispatch loop already
+    emits ``escalation_resolve`` for the *command*; this records that the phase work was
+    actually discarded — otherwise the nuke is invisible in the activity feed. Detail
+    carries the bumped counter, the reason (sourced from last_error_code), and the
+    escalated phase (read BEFORE reset_phase() wipes the pointer).
+
+    CRITICAL: ``_make_orch`` does NOT point ``AUTODEV_PIPELINE_ROOT`` at tmp_path (unlike
+    the queue fixture), so we patch it here — without it the event lands in the developer's
+    real pipeline events file.
+    """
+    orch, _mod, _ps_file, _run = _make_orch(
+        tmp_path, monkeypatch,
+        state={
+            "current_phase": 1, "current_phase_raw_id": "CORE-E1",
+            "current_agent": "escalation", "pipeline_status": "RUNNING",
+            "phase_base_commit": "abc123base", "last_action": "", "last_action_timestamp": "",
+        },
+        phase_state={"nuclear_resets": 0, "escalation_resets": 3, "last_error_code": "ERR_INFRA_FAILURE"},
+    )
+    monkeypatch.setattr(_mod, "AUTODEV_PIPELINE_ROOT", str(tmp_path))
+
+    orch.nuclear_reset_phase()
+
+    nukes = [e for e in _read_events(tmp_path) if e.get("event") == "nuclear_reset"]
+    assert len(nukes) == 1, "exactly one nuclear_reset event expected"
+    detail = nukes[0].get("detail", {})
+    assert detail.get("nuclear_resets") == 1, "detail.nuclear_resets must carry the bumped count"
+    assert detail.get("reason") == "ERR_INFRA_FAILURE", "detail.reason must come from last_error_code"
+    assert detail.get("phase") == "CORE-E1", "detail.phase must be the escalated phase (pre-reset)"
