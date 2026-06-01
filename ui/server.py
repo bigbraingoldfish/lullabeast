@@ -1155,6 +1155,29 @@ def _read_log_tail_lines(path: str, max_lines: int = 5, max_bytes: int = 65536) 
     return lines[-max_lines:]
 
 
+def _orchestrator_log_path(config: dict) -> str:
+    """Canonical path for the orchestrator's stdout/stderr log.
+
+    Both launchers append the orchestrator's output here — the UI's
+    ``_spawn_orchestrator`` and the crash-recovery ``heartbeat_cron.py`` (whose
+    ``LOG_FILE`` is ``{AUTODEV_PIPELINE_ROOT}/orchestrator.log``) — and both
+    readers read it: the Pipeline log tab via ``/api/log/tail`` and the B-04
+    crash-context tail in ``/api/state``. Co-locating it with pipeline state
+    (``{autodev_pipeline_root}/orchestrator.log``) gives one persistent,
+    reboot-surviving audit log that every party agrees on.
+
+    Falls back to ``ORCHESTRATOR_SPAWN_LOG_PATH`` (``/tmp/orchestrator.log``)
+    only when no pipeline root is configured. ``load_config`` always populates
+    ``autodev_pipeline_root`` (JSON key → ``AUTODEV_PIPELINE_ROOT`` env →
+    ``<repo>/.autodev``), so the fallback is reached only by callers that pass a
+    bare config dict without it.
+    """
+    pipeline_root = (config.get("autodev_pipeline_root") or "").strip()
+    if pipeline_root:
+        return os.path.join(os.path.expanduser(pipeline_root), "orchestrator.log")
+    return ORCHESTRATOR_SPAWN_LOG_PATH
+
+
 # Whitelisted filenames under project root for user-confirmed destructive repair (switch-project).
 _SWITCH_DESTRUCTIVE_WHITELIST = frozenset({"current_phase.json", "phase_state.json"})
 
@@ -1568,7 +1591,11 @@ def _spawn_orchestrator(project_path: str, config: dict | None = None) -> dict:
     orchestrator_script = os.path.join(autodev_repo_path, "autodev", "pipeline", ORCHESTRATOR_FILENAME)
     if not os.path.exists(orchestrator_script):
         return {"ok": False, "error": f"{ORCHESTRATOR_FILENAME} not found at {orchestrator_script}"}
-    log_file = open(ORCHESTRATOR_SPAWN_LOG_PATH, "a")
+    # Write the orchestrator's stdout/stderr to the canonical pipeline-root log so
+    # the Pipeline log tab (which reads the same file) streams it live. Previously
+    # this opened /tmp/orchestrator.log while the reader looked in the pipeline
+    # root — the two never met, so the live panel showed a stale orphan file.
+    log_file = open(_orchestrator_log_path(config), "a")
     env = os.environ.copy()
 
     openclaw_root_value = str(config.get("openclaw_root") or resolve_openclaw_root())
@@ -2057,10 +2084,12 @@ async def events_stream():
 def get_log_tail(lines: int = 500):
     """Return the last ``lines`` lines of the orchestrator pipeline log.
 
-    The pipeline log lives at {autodev_pipeline_root}/orchestrator.spawn.log and
-    captures stdout/stderr from the orchestrator process spawned by the UI.
-    This is distinct from ORCHESTRATOR_SPAWN_LOG_PATH (/tmp/orchestrator.log),
-    which is only used when no pipeline root is configured.
+    The pipeline log lives at {autodev_pipeline_root}/orchestrator.log and
+    captures stdout/stderr from the orchestrator process (spawned by the UI or
+    revived by heartbeat_cron — both append to the same file via
+    ``_orchestrator_log_path``). When no pipeline root is configured the writer
+    falls back to ORCHESTRATOR_SPAWN_LOG_PATH (/tmp/orchestrator.log), but this
+    endpoint still returns path="" in that case rather than surfacing a /tmp file.
 
     Returns {"lines": [...], "path": "<absolute_path_or_empty>"}.
     Missing or empty files return lines=[].
@@ -2069,7 +2098,7 @@ def get_log_tail(lines: int = 500):
     pipeline_root = (config.get("autodev_pipeline_root") or "").strip()
     if not pipeline_root:
         return {"lines": [], "path": ""}
-    log_path = os.path.join(pipeline_root, "orchestrator.spawn.log")
+    log_path = _orchestrator_log_path(config)
     result = _read_log_tail_lines(log_path, max_lines=lines, max_bytes=524288)
     return {"lines": result, "path": log_path}
 
@@ -2352,7 +2381,7 @@ def get_state():
         "RUNNING",
         "WAITING_FOR_SENTINEL",
     ):
-        tail = _read_log_tail_lines(ORCHESTRATOR_SPAWN_LOG_PATH, 5)
+        tail = _read_log_tail_lines(_orchestrator_log_path(config), 5)
     response["orchestrator_spawn_log_tail"] = tail
 
     # Event source

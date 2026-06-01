@@ -17,7 +17,7 @@
 
 ### SD Card Exhaustion (Raspberry Pi)
 
-- **Log Rotation** — The Raspberry Pi SD card is highly susceptible to exhaustion from unbounded log growth. `heartbeat.log`, `session_cleanup.log`, and `orchestrator.log` (or whatever target systemd uses for orchestrator stdout) must be included in the logrotate configuration. Use `missingok` since log files may not exist in all deployment configurations. Keep only the last ~5MB per log file. Without rotation, unbounded log growth risks SD card exhaustion on the Pi 5. This is a critical safety-of-hardware concern.
+- **Log Rotation** — The Raspberry Pi SD card is highly susceptible to exhaustion from unbounded log growth. `heartbeat.log`, `session_cleanup.log`, and `orchestrator.log` (or whatever target systemd uses for orchestrator stdout) must be included in the logrotate configuration. Use `missingok` since log files may not exist in all deployment configurations. Keep only the last ~5MB per log file. Without rotation, unbounded log growth risks SD card exhaustion on the Pi 5. This is a critical safety-of-hardware concern. The in-process fallback rotation in `session_cleanup.py` (`rotate_pipeline_logs`) resolves `heartbeat.log` and `orchestrator.log` against `AUTODEV_PIPELINE_ROOT` (the `.autodev` state dir — where both are actually written); `session_cleanup.log` stays under `OPENCLAW_ROOT`.
 
 ---
 
