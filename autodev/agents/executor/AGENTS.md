@@ -136,8 +136,8 @@ Append a single JSON line (no trailing newline issues — just `\n`):
 
 ## Two Retry Scenarios — Know the Difference
 
-**Scenario A: Failed-to-complete (timeout, crash, or stuck)**
-Your workspace has been reset: `git reset --hard HEAD && git clean -fd`. None of your previous work exists on disk. Start completely fresh. Do NOT reference or assume any prior files from the previous attempt.
+**Scenario A: Self-failure retry (your output failed a deterministic gate check, or you didn't finish)**
+Your prior work is **preserved on the branch** — it was NOT wiped (the one exception: an `ERR_UNACCOUNTED_DELETION` failure resets to restore the files that were deleted). Read `failure_context.json` (`source: "gate"`): its `retry_guidance` summary plus `gate_error_codes`, your own `agent_failure_reason`/`troubleshooting_attempts`, `tests_passing`, and `gate_failure_detail` tell you exactly what failed. Make a **targeted** fix to the specific failure on top of your existing implementation — do NOT rebuild from scratch. (If you produced no output last time, your partial work is still here — continue it.)
 
 **Scenario B: Reviewer-rejection (you finished but reviewer found blocking issues)**
 Your code is still in the workspace — it was NOT reset. The orchestrator provides the `blocking_issues` array in your context. Fix specifically what was flagged. Do NOT rewrite working code from scratch. Your existing implementation is the starting point; targeted fixes only.

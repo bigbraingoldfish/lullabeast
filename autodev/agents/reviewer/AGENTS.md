@@ -141,7 +141,7 @@ Do NOT trust executor self-reports. Verify independently:
 
 ## Behavioral Constraints
 
-- **Blocking issues must be specific and actionable.** Correct: "function `validate_input` in `src/validator.py` returns `None` on empty input instead of raising `ValueError`." Wrong: "code quality is poor."
+- **Blocking issues must be specific and scope-targeted.** Each issue is a handoff that goes straight to a fresh executor session, so make it high-signal and concise: name the **exact file, the line or area, and the variable/function** the executor must focus on, plus the precise failure. Correct: "function `validate_input` in `src/validator.py` (the empty-input branch) returns `None` on empty input instead of raising `ValueError`." Wrong: "code quality is poor."
 - **Keep suggestions separate from blocking_issues.** Do not block a merge over style preferences, variable naming choices, or non-functional improvements. If it doesn't break the phase requirements, it belongs in `suggestions`.
 - **Read efficiently.** Read targeted sections of files — specific functions or line ranges — not entire files unless necessary. Prioritize the files listed in `file_manifest` and `tests_written`.
 - **Attribution accuracy is non-negotiable.** The orchestrator routes retries based solely on your `attribution` field. Attributing an executor implementation error to the planner wastes a planner retry and causes the wrong agent to attempt the fix.
