@@ -290,10 +290,10 @@ After the sentinel polling window closes, the orchestrator classifies the execut
 
 ### Two Retry Scenarios
 
-**Failed-to-complete** (executor timed out / crashed / sentinel never appeared):
-- Fresh session, fresh key, initial task only
-- Partial work is noise, not signal
-- Working tree reset: `git reset --hard HEAD` then `git clean -fd`
+**Self-failure retry** (executor output failed the gate, or it timed out / crashed / sentinel never appeared):
+- Fresh session, fresh attempt key — no prior-attempt history loaded (prevents context overflow)
+- Working tree **PRESERVED** so the executor iterates on its prior work; the hard `git reset --hard HEAD` runs **only** on an `ERR_UNACCOUNTED_DELETION` failure (to restore deleted files) — Phase 2
+- On a gate failure, `failure_context.json` is preserved and tagged `source: "gate"` with a concise `retry_guidance` note plus the specific detail (`gate_error_codes`, the executor's `agent_failure_reason`, `tests_passing`, `gate_failure_detail`); the fresh session reads it and makes a targeted fix — symmetric with the reviewer-rejection path below
 
 **Reviewer-rejection** (executor completed, reviewer rejected):
 - Generate new attempt key dynamically (e.g., `pipeline:phase-N:executor-attempt-X`)
@@ -570,7 +570,7 @@ Pipeline completion is also notified via Signal (not just escalation).
 |---|---|---|
 | `RETRY` | Re-POST the exact webhook that failed, no state change | Any transient failure (network, timeout, fluke) |
 | `RESET_PHASE` | Full phase reset with cap enforcement. Resets git to `phase_base_commit`, deletes phase branch, clears all 6 output pairs, re-initializes `phase_state.json` (agent counters → 0, `escalation_resets` preserved), re-invokes planner. Increments `escalation_resets`. Cap: 3. | Plan is fundamentally flawed; start phase from scratch |
-| `RESET_EXECUTION` | Partial reset. Preserves planner output (`planner_output.json/done`). Clears executor and reviewer outputs, resets working tree to HEAD, re-invokes executor. Increments `escalation_resets`. Cap: 3. | Plan is sound but executor implementation failed; preserve the plan, retry execution |
+| `RESET_EXECUTION` | Partial reset. Preserves planner output (`planner_output.json/done`). Clears executor and reviewer outputs and **preserves the working tree** so the executor iterates on its prior work — the hard reset to HEAD runs only on an `ERR_UNACCOUNTED_DELETION` failure (Phase 2). Re-invokes executor. Increments `escalation_resets`. Cap: 3. (For a clean-slate restart, use `RESET_PHASE`.) | Plan is sound but executor implementation failed; preserve the plan, retry execution |
 | `SKIP` | Marks phase N as `[-]` skipped in roadmap and advances to N+1. The phase branch and artifacts are NOT cleaned up — git state is left as-is; manual repo cleanup required. | Only when manually verified the phase outcome is acceptable and cleanup will be handled manually |
 | `STOP` | Pipeline stays halted, full manual intervention required | Always valid |
 | `PROCEED` | Skips the merge step; marks phase `[x]` in roadmap, force-tags `phase-N-complete`, and advances to next phase. Does not append to `suggestions.md` or clear working files. | Phase branch already merged into base externally; use to advance after manual merge |

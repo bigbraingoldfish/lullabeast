@@ -2760,6 +2760,13 @@ class Orchestrator:
     def reset_execution(self, caller: str):
         """Partial execution-level reset. Preserves planner output. Clears executor + reviewer outputs.
 
+        Phase 2 — self-failure feedback parity: on an ordinary gate failure the
+        executor's WORKING TREE is PRESERVED (the hard ``git reset --hard HEAD``
+        runs only for ``ERR_UNACCOUNTED_DELETION``), and ``failure_context.json``
+        is kept (not cleared) so the fresh executor session reads the gate's note
+        (``source: "gate"`` + ``retry_guidance``) and makes a targeted fix —
+        mirroring the reviewer-rejection ROUTE_EXECUTOR path.
+
         caller='auto'       — from automatic executor retry path. Increments executor_retries
                               AND the lifetime executor_self_failure_retries counter (P0 Stage H).
                               Also sets self._current_attempt_retry_class = "executor_self_failure"
@@ -2778,10 +2785,22 @@ class Orchestrator:
         raw_id = self.state.get("current_phase_raw_id", "")
         branch = f"phase/{raw_id}" if raw_id else f"phase/{phase}"
 
+        # Phase 2 — gate-failure feedback parity. On an ordinary self-failure
+        # retry we PRESERVE the executor's working tree so the fresh session
+        # iterates on its prior work (mirrors the reviewer-rejection
+        # ROUTE_EXECUTOR path, which never resets). The full ``git reset --hard
+        # HEAD`` is kept ONLY for ERR_UNACCOUNTED_DELETION, where it restores
+        # committed files MiniMax deleted under context pressure.
+        _preserve_worktree = (
+            self.read_phase_state().get("last_error_code") != "ERR_UNACCOUNTED_DELETION"
+        )
         try:
             subprocess.run(["git", "checkout", branch], cwd=SYMLINK_TARGET, check=True)
-            subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=SYMLINK_TARGET, check=True)
-            print(f"[INFO] reset_execution({caller}): working tree reset on {branch}.")
+            if _preserve_worktree:
+                print(f"[INFO] reset_execution({caller}): working tree PRESERVED on {branch} (self-failure feedback path).")
+            else:
+                subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=SYMLINK_TARGET, check=True)
+                print(f"[INFO] reset_execution({caller}): hard reset on {branch} (unaccounted deletion — restoring deleted files).")
         except subprocess.CalledProcessError as e:
             print(f"[ERROR] reset_execution git operations failed: {e}")
 
@@ -2807,7 +2826,11 @@ class Orchestrator:
         for fname in [
             "executor_output.json", "executor_output.done",
             "reviewer_output.json", "reviewer_output.done",
-            "failure_context.json",
+            # Phase 2: failure_context.json is intentionally NOT cleared here — it
+            # carries the gate's note (source:"gate" + retry_guidance) into the
+            # next, FRESH executor session (which has no memory of this attempt).
+            # write_failure_context overwrites it on the next failure; reset_phase
+            # clears it on phase advance.
             "executor_gate_detail.json",
             # P1 Stage F — advisory channel; same per-phase artifact lifecycle.
             "executor_advisory_detail.json",
@@ -3302,6 +3325,11 @@ class Orchestrator:
         blame path), and reviewer gate fail.  Overwrites any prior failure_context.json
         — always reflects the most recent failure.  Non-blocking: errors are logged and
         swallowed so a write failure never crashes the pipeline.
+
+        Phase 2: tags the context ``source: "gate"`` and adds a concise
+        ``retry_guidance`` note (parallel to ``_write_reviewer_failure_context``'s
+        ``source: "reviewer"``); the executor reads both on a preserved-work
+        self-failure retry — see executor ``AGENTS.md`` Scenario A.
         """
         if not os.path.exists(SYMLINK_TARGET):
             print("[WARN] write_failure_context: SYMLINK_TARGET not found, skipping")
@@ -3419,6 +3447,31 @@ class Orchestrator:
                 os.remove(_gate_detail_path)
             except OSError:
                 pass
+
+        # Phase 2 — gate-failure feedback parity. Tag the deterministic-gate
+        # failure context (parallel to _write_reviewer_failure_context's
+        # ``source: "reviewer"``) and synthesise a concise, high-signal note so
+        # the FRESH executor session — which has no memory of the prior attempt —
+        # makes a targeted fix instead of rebuilding blind.
+        context["source"] = "gate"
+        _codes = ", ".join(gate_error_codes) if gate_error_codes else "(none reported)"
+        if "ERR_UNACCOUNTED_DELETION" in gate_error_codes:
+            _work_note = (
+                "Files you deleted without declaring them have been RESTORED from the "
+                "last commit; redo your change without removing tracked files (list any "
+                "intentional deletions in files_deleted)."
+            )
+        else:
+            _work_note = (
+                "Your prior work is PRESERVED on the branch — do not rebuild from "
+                "scratch; make a TARGETED fix to the specific failure."
+            )
+        context["retry_guidance"] = (
+            f"Your previous attempt was rejected by the deterministic gate ({_codes}). "
+            f"{_work_note} Read the detail in this file (gate_error_codes, "
+            f"agent_failure_reason, tests_passing, files_present_on_disk, "
+            f"gate_failure_detail)."
+        )
 
         _failure_context_path = os.path.join(PROJECT_ARTIFACTS_DIR, "failure_context.json")
         try:
