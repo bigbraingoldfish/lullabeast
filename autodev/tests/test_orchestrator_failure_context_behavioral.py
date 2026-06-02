@@ -11,7 +11,7 @@ Two surfaces under test:
         ``current_phase.behavioral_verification`` (the claimed contract).
   - ``_write_reviewer_failure_context`` enriches each blocking issue with
     ``criterion_source`` (the four-valued enum
-    ``"behavioral" | "test" | "prd_verbatim" | "free"``) and ``criterion_id``
+    ``"behavioral" | "test" | "regression_prior_phase" | "free"``) and ``criterion_id``
     when an anchor is supplied. Entries that arrive without ``criterion_source``
     get the explicit ``"free"`` label so downstream code can branch on a
     complete enum without None-checking.

@@ -115,7 +115,6 @@ def test_reviewer_verdict_handles_contract_shape_verdict(html, verdict):
 # ---------------------------------------------------------------------------
 
 NEW_ERROR_CODE_TITLES = [
-    "ERR_PRD_VERBATIM_MISSING",
     "ERR_REGRESSION_PRIOR_PHASE",
     "ERR_REGRESSION_UNVERIFIED",
     "ERR_BEHAVIORAL_UNVERIFIED",

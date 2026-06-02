@@ -707,15 +707,10 @@ IF any paths in tests_written or file_manifest attempt path
 IF git diff --diff-filter=D <phase_base_commit> HEAD reveals
     a deleted file absent from BOTH file_manifest AND
     files_deleted                                            → FAIL (ERR_UNACCOUNTED_DELETION)
-IF planner_output has any pass_criteria entry whose traces_to
-    is "prd_verbatim:<literal>" AND <literal> is absent from
-    every git-tracked file                                   → FAIL (ERR_PRD_VERBATIM_MISSING)
 ELSE                                                         → PASS
 ```
 
 **`ERR_UNACCOUNTED_DELETION`:** The gate runs `git diff --name-only --diff-filter=D <phase_base_commit> HEAD` in the workspace, plus `git ls-files --deleted` for uncommitted deletions, then cross-references the union against `file_manifest` and the optional `files_deleted` array. Any file that appears in neither list triggers this error. If `phase_base_commit` is absent from `pipeline_state.json`, the gate **fails closed** with exit code 1 and error code `ERR_MISSING_BASE_COMMIT` — it does not skip or warn. Without a base commit reference the deletion check cannot run, and a silent skip would allow MiniMax file-deletion to go undetected. The orchestrator retries with a fresh session on this error. (Older versions of this spec described the absent-`phase_base_commit` case as non-fatal and skipped with a warning — that behaviour was removed; see `autodev/tests/test_defensive_c3_07.py` for the fail-closed contract.) This catches models that delete files under token pressure and self-report `all_passing: true` — see PIPELINE-CONSTRAINTS.md §2 > MiniMax M2.5 File Deletion Under Token Pressure.
-
-**`ERR_PRD_VERBATIM_MISSING` (P1 Stage C):** The planner emits `pass_criteria[i].traces_to: "prd_verbatim:<literal>"` for criteria that must appear character-for-character in the build (a button label, error message, CLI flag name, endpoint path, tagline, exact API response string — see the four `traces_to` anchor forms in `autodev/agents/planner/AGENTS.md`). The executor gate enforces this contract: for every such anchor, the literal string after the colon must appear in at least one git-tracked file in the workspace. The check runs `git ls-files` to scope the search to tracked source (untracked artefacts like `node_modules/` are excluded) and `grep -F -l --` to match the anchor as a fixed string — regex metacharacters in the anchor are NOT interpreted. Files are passed to grep in chunks of 500 paths to stay under ARG_MAX on every POSIX shell the pipeline targets. Anchors are evaluated in declaration order; the first chunk that matches short-circuits subsequent chunks for that anchor. On failure the gate writes `executor_gate_detail.json` with `{"gate_error": "ERR_PRD_VERBATIM_MISSING", "missing_anchors": [...]}` so the orchestrator can merge `missing_anchors` into `failure_context.json` for the next executor retry. The check is a no-op when no `prd_verbatim:` anchors are declared and when `planner_output.json` is absent — it rides inside the existing `if planner_data is not None:` guard, so it shares the defensive shape of the tdd cross-check that precedes it. Attribution is `impl` — a missing literal points to executor implementation drift, not planner contract failure. The upstream contract: PRD authors list literal user-facing strings under a `### Verbatim Strings` subsection inside `## Functional Requirements` (NOT a 13th top-level section — see `autodev/agents/prd-creator/AGENTS.md`, the 12-section heading parser); the planner then emits `prd_verbatim:` anchors for the strings that must appear character-for-character in code.
 
 The `status` check runs first. An executor that self-reports `"stuck"` or `"failed"` is an immediate gate failure regardless of test results — see PIPELINE-CONSTRAINTS.md § Executor Status Corner Case for rationale.
 
@@ -745,8 +740,8 @@ Written atomically by the orchestrator **before every routing decision** that fo
   "agent_troubleshooting_attempts": ["<string>"],
   "blocking_issues": [{
     "description": "...", "attribution": "plan|impl", "affected_file": "...",
-    "criterion_source": "behavioral|test|prd_verbatim|regression_prior_phase|free",
-    "criterion_id": "behavioral_evidence[N] | tests/<path> | <prd substring> | <prior phase raw_id> (absent on free)"
+    "criterion_source": "behavioral|test|regression_prior_phase|free",
+    "criterion_id": "behavioral_evidence[N] | tests/<path> | <prior phase raw_id> (absent on free)"
   }],
   "behavioral_verification_evidence": {
     "verdict": "pass|fail|cannot_verify",
