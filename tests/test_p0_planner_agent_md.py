@@ -40,8 +40,8 @@ def test_inputs_section_lists_prd_md(agents_md_text):
 
 def test_inputs_section_lists_verification_md(agents_md_text):
     """verification.md carries project type + public surface — the planner
-    must reference it when authoring pass_criteria with prd_verbatim or
-    behavior anchors."""
+    must reference it when authoring pass_criteria with behavior
+    anchors."""
     assert "verification.md" in agents_md_text, (
         "planner/AGENTS.md must reference pipeline-project/verification.md "
         "as a required read alongside prd.md"
@@ -56,10 +56,10 @@ def test_pass_criteria_documents_traces_to_enum_values(agents_md_text):
         "planner/AGENTS.md must document the pass_criteria[].traces_to field"
     )
     for token in ("tdd:", "behavior:user_observable",
-                  "behavior:how_to_check", "prd_verbatim:"):
+                  "behavior:how_to_check"):
         assert token in agents_md_text, (
             f"planner/AGENTS.md must document the traces_to enum value "
-            f"{token!r} — every pass criterion must anchor to one of the four "
+            f"{token!r} — every pass criterion must anchor to one of the three "
             f"documented forms"
         )
 

@@ -145,14 +145,6 @@ The PRD must follow these 12 sections exactly. Use these as the section headers 
 
 **Heading format — do not add ordinal prefixes to the `##` line.** Write `## Problem Statement`, not `## 1. Problem Statement`. The dashboard parses `prd_draft.md` by matching the exact heading text to these 12 titles; a leading `1.` inside the `##` line causes the parser to miss the section, which silently drops the per-section Note, diff, and change-indicator UI for the entire PRD. The parsers now tolerate the numbered form as a fallback, but the correct contract remains the unnumbered `##` title — use it.
 
-### Verbatim Strings subsection (inside Functional Requirements)
-
-When the PRD specifies user-facing literal strings — taglines, button labels, error messages, CLI flag names, endpoint paths, exact API response strings — list every such literal under a `### Verbatim Strings` subsection nested inside `## Functional Requirements`. Each entry is a markdown list item that quotes the literal verbatim, optionally followed by a short note on where it appears (e.g., `- "Start the game" — main menu button`). The downstream contract is hard: the planner reads the PRD directly, emits `pass_criteria[].traces_to: "prd_verbatim:<literal>"` anchors for these strings, and the executor gate then runs `grep -F` over git-tracked source to confirm each literal appears character-for-character somewhere in the build. A drifted tagline or paraphrased button label fails the gate.
-
-**Do NOT add a 13th top-level `## Verbatim Strings` section.** The 12-section heading parser at the top of this document is exact-match; adding a 13th top-level heading silently drops the per-section UI for that block. The verbatim list MUST be a `### Verbatim Strings` subsection (three hashes) nested inside the existing `## Functional Requirements` section.
-
-When the PRD does not specify any literal strings, omit the subsection entirely — the planner has nothing to anchor and the gate is a no-op. Only list strings the user can read in the PRD and that must appear character-for-character in code. Strings that are merely described in prose (e.g., "the lobby should support up to four players") belong in the body of Functional Requirements; only their literal user-facing form belongs in `### Verbatim Strings`.
-
 ---
 
 ## Behavioral Contract — Conversational Role

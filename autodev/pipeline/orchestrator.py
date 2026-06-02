@@ -3453,7 +3453,7 @@ class Orchestrator:
 
         Does NOT overwrite a populated source. The gate's synthesis path
         already sets ``"behavioral"``; the reviewer agent's direct writes can
-        set ``"test"`` or ``"prd_verbatim"`` when anchored to a planner
+        set ``"test"`` when anchored to a planner
         ``traces_to`` value. ``criterion_id`` is intentionally omitted on
         ``"free"`` source — there is no anchor to point at, and writing an
         empty-string or null field would force downstream consumers to
@@ -3517,7 +3517,7 @@ class Orchestrator:
         existing["phase_id"] = self.state.get("current_phase_raw_id", "")
         # P0 Stage G + P1 Stage D: every blocking issue carries an explicit
         # ``criterion_source`` enum
-        # (``"behavioral" | "test" | "prd_verbatim" | "regression_prior_phase" | "free"``).
+        # (``"behavioral" | "test" | "regression_prior_phase" | "free"``).
         # Gate-synthesised behavioural and regression issues arrive pre-tagged;
         # reviewer-written free-form issues without an anchor get the explicit
         # ``"free"`` label here.
