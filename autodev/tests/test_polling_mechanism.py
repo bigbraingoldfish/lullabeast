@@ -3,7 +3,9 @@ Polling mechanism tests.
 
 Validates that:
   - Sentinel polling uses time.sleep(2) loops (NOT time.sleep(60) or inotify)
-  - wait_for_model_stable() is called between executor and reviewer handoff
+  - the executor→reviewer handoff transitions directly (no fixed time.sleep(60)
+    model-swap sleep, and no wait_for_model_stable() — retired with the
+    traffic-cop machinery; all pipeline agents are cloud-routed)
   - poll_for_sentinel detects completion before timeout (early exit)
   - Polling interval is not hardcoded to a fixed value that creates race conditions
   - Stale sentinel guard (min_sentinel_mtime) works in poll_for_sentinel
@@ -33,32 +35,30 @@ for _p in [GATE_SCRIPTS_DIR, OPENCLAW_DIR]:
 
 class TestPollingMechanism:
 
-    def test_polling_replaces_sleep_between_agent_invocations(self):
+    def test_handoff_to_reviewer_has_no_fixed_sleep_or_model_wait(self):
         """
-        Validates: Between executor and reviewer invocations, the orchestrator calls
-        wait_for_model_stable() rather than a fixed time.sleep(60).
+        Validates: between executor success and reviewer invocation the orchestrator
+        transitions straight to the reviewer — no fixed time.sleep(60) (the old
+        model-swap race sleep) and no wait_for_model_stable() (retired with the
+        traffic-cop machinery; all pipeline agents are cloud-routed, so there is no
+        local GPU model swap to wait on).
 
         FIND-ID: FIND-POLLING
         Spec Reference: PIPELINE-CONSTRAINTS.md §5.7 "Model Swap Race Condition [RESOLVED]"
+                        test_traffic_cop_retired.py (removal guards)
         """
         import orchestrator as orc_module
-        from orchestrator import Orchestrator
 
-        # wait_for_model_stable must exist on the Orchestrator
-        assert hasattr(Orchestrator, "wait_for_model_stable"), (
-            "Orchestrator must have wait_for_model_stable() method (OB-6 fix)."
-        )
-
-        # Inspect the executor branch: it must call wait_for_model_stable, not time.sleep(60)
         source = inspect.getsource(orc_module)
-        # The 60-second fixed sleep that was removed
         assert "time.sleep(60)" not in source, (
-            "orchestrator.py must not contain time.sleep(60) — this was the race-condition sleep "
-            "that wait_for_model_stable() replaced."
+            "orchestrator.py must not contain time.sleep(60) — the model-swap race sleep."
         )
-        # wait_for_model_stable must be called in the executor success path
-        assert "wait_for_model_stable" in source, (
-            "orchestrator.py must call wait_for_model_stable() between executor and reviewer."
+        assert "wait_for_model_stable" not in source, (
+            "wait_for_model_stable() was retired — the executor→reviewer handoff "
+            "transitions straight to the reviewer (cloud agents, no GPU swap)."
+        )
+        assert '"Executor passed, moving to reviewer"' in source, (
+            "the executor→reviewer handoff transition must remain."
         )
 
     def test_polling_interval_is_configurable(self):

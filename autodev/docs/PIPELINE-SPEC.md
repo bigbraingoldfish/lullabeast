@@ -60,7 +60,7 @@ OpenRouter is the inference provider for all cloud agents. An OpenRouter API key
 
 #### Configuration History / Original Intent
 
-This pipeline was originally designed as local-first, using llama.cpp on a local RTX 4090 for all agent inference. After smoke testing confirmed unacceptable latency for local planner/executor/reviewer inference and prohibitive cloud API costs via direct provider access, MiniMax M2.5 via OpenRouter was adopted for those three agents. The escalation agent remains on local inference. The local inference infrastructure is preserved and can be restored by updating the agent LLM config and re-enabling the SSH recovery path.
+This pipeline was originally designed as local-first, using llama.cpp on a local RTX 4090 for all agent inference. After smoke testing confirmed unacceptable latency for local planner/executor/reviewer inference and prohibitive cloud API costs via direct provider access, MiniMax M2.5 via OpenRouter was adopted for those three agents. The escalation agent remains on local inference. The local inference infrastructure is preserved and can be restored by updating the agent LLM config.
 
 ---
 
@@ -916,43 +916,20 @@ IF FAIL AND pass == 3                → escalation agent
 
 **INFRA_FAILURE pre-check (RR-1):**
 
-`reviewer_gate.py` returns `"INFRA_FAILURE"` when `reviewer_output.json` is missing or unparseable — indicating the reviewer never produced output, rather than that it rejected the work. The orchestrator distinguishes this from a genuine rejection:
+`reviewer_gate.py` returns `"INFRA_FAILURE"` when `reviewer_output.json` is missing or unparseable — indicating the reviewer never produced usable output, rather than that it rejected the work. The orchestrator self-heals by re-invoking the reviewer in a fresh session (a transient malformed-output fluke almost always clears on a clean re-run):
 
 ```
 IF gate_result == "INFRA_FAILURE":
-    IF traffic_cop_healthy():
-        reviewer_infra_retries += 1
-        IF reviewer_infra_retries >= 3  → escalation
-        ELSE                             → re-invoke reviewer (soft retry)
-    ELSE (unhealthy):
-        IF within 10-minute recovery cooldown:
-            reviewer_infra_recovery_attempts += 1
-            IF attempts >= 2  → escalation
-            ELSE              → wait_for_model_stable() → re-invoke reviewer
-        ELSE (outside cooldown — first time):
-            write timestamp to phase_state.json (atomic, before SSH)
-            invoke SSH recovery: ssh -i <key> <user>@<host> recovery
-            exit 0 → recovery succeeded → wait_for_model_stable() → re-invoke reviewer
-            exit 2 → already healthy → wait_for_model_stable() → re-invoke reviewer
-            exit 1 or timeout → escalation
+    reviewer_infra_retries += 1
+    IF reviewer_infra_retries >= 3  → escalation (INFRA_FAILURE_SOFT_RETRY_EXHAUSTED)
+    ELSE                            → re-invoke reviewer (soft retry)
 ```
 
-INFRA_FAILURE does NOT increment `reviewer_retries` — that counter is reserved for genuine LLM rejections. The separate `reviewer_infra_retries` and `reviewer_infra_recovery_attempts` counters are preserved across `reset_execution()` and only zeroed by `reset_phase()`.
+INFRA_FAILURE does NOT increment `reviewer_retries` — that counter is reserved for genuine LLM rejections. The `reviewer_infra_retries` soft-retry counter is preserved across `reset_execution()` and only zeroed by `reset_phase()`.
 
-**SSH recovery interface** (reads from `recovery` section of `openclaw.json`):
+There is no model-health probe and no SSH recovery. Agent/model liveness is owned by the OpenClaw activity-stamp hooks — `startup_grace` / `no_first_activity` for a cold start, `stalled` for a mid-turn death (`poll_for_sentinel`) — which fire identically for cloud and local agents, so a genuinely dead model surfaces as "no activity" and is caught there rather than by a pre-invocation probe.
 
-| Field | Value |
-|---|---|
-| User | (from `recovery.user` in `openclaw.json`) |
-| Host | (from `recovery.host`) |
-| Key | (from `recovery.key_path` — use mode `600`) |
-| Command | `recovery` (server-side script; `command=` restriction ignores arg, runs `restart_llama.sh`) |
-| Exit 0 | Recovery succeeded |
-| Exit 1 | Recovery failed |
-| Exit 2 | Already healthy / skipped |
-| Timeout | 70s subprocess timeout → treated as exit 1 |
-
-> **Note — cloud-routed agents (planner, executor, reviewer):** For these agents, infra failures present as HTTP errors, API timeouts, or malformed responses from OpenRouter rather than local process crashes. The SSH recovery script is not applicable for these failure modes. The soft retry and escalation paths remain valid. Rate limit errors (HTTP 429) should be treated as soft infra failures with a brief backoff before retry. The SSH recovery path remains active for the escalation agent, which runs on local inference.
+> **Historical note (retired 2026-06-01):** an earlier design branched on a local llama-server `/health` check and, when it reported "unhealthy", attempted an SSH restart of the GPU box (`recovery` section of `openclaw.json`) with a 10-minute cooldown and a `reviewer_infra_recovery_attempts` counter. That machinery was removed: all pipeline agents are cloud-routed (OpenRouter), so a local-GPU probe was inapplicable — in practice it false-negatived a healthy cloud reviewer (probing `127.0.0.1` while the model ran on the configured `llama-local` host) into a dead-end SSH path that escalated. See CHANGELOG.
 
 ---
 
@@ -1317,7 +1294,7 @@ Additionally, the orchestrator records a `min_sentinel_mtime` (wall-clock time c
 
 The `stop_sentinel_path` parameter is checked on every loop iteration — if the file exists the poll returns `False` immediately, and the caller's next main-loop iteration calls `_check_stop_requested()` to consume the sentinel and transition to `STOPPED`.
 
-**Executor → Reviewer model swap (OB-6 fix):** After the executor gate passes, the orchestrator calls `wait_for_model_stable()` before firing the reviewer webhook. This polls `GET http://<llama-server-host>:11434/v1/models` every 5s until all models report a stable status (`loaded` or `unloaded` — none transitioning). Timeout: 300s (proceeds anyway). Prevents HTTP 500 cascades caused by the traffic cop force-killing qwen3-coder-next mid-eviction if the GPU swap takes >10s. Replaces the prior fixed `time.sleep(60)`. Implemented in `Orchestrator.wait_for_model_stable()` (`orchestrator.py`); URL derived from `openclaw_config["models"]["providers"]["llama-local"]["baseUrl"]`.
+**Executor → Reviewer handoff:** After the executor gate passes, the orchestrator transitions straight to the reviewer. (Historical — OB-6: when pipeline agents ran on the local GPU, a `wait_for_model_stable()` poll guarded against an HTTP 500 cascade from the traffic cop swapping models mid-eviction. That wait was retired with the traffic-cop machinery — all pipeline agents are cloud-routed (OpenRouter), so there is no local GPU model swap between the executor and reviewer to wait on.)
 
 Sentinel files cleared by orchestrator at phase start alongside working JSONs.
 
@@ -1449,12 +1426,7 @@ Complete JSON schemas for all pipeline data files. Schemas in §3–§6 define a
   "executor_retries": { "type": "integer", "default": 0, "description": "Incremented by reset_execution('auto') — automatic retry path only." },
   "reviewer_retries": { "type": "integer", "default": 0, "description": "Genuine LLM rejection counter. Zeroed by reset_execution() and reset_phase(). Cap: 3 passes before escalation." },
   "reviewer_rejected": { "type": "boolean", "default": false, "description": "Set by reviewer gate on ROUTE_EXECUTOR. Cleared by reset_execution()." },
-  "reviewer_infra_retries": { "type": "integer", "default": 0, "description": "RR-4: Incremented when reviewer gate returns INFRA_FAILURE AND traffic cop is healthy (soft retry). Cap: 3. Zeroed by reset_phase() only — NOT by reset_execution(). Distinct from reviewer_retries (which tracks genuine LLM rejections)." },
-  "reviewer_infra_recovery_attempts": { "type": "integer", "default": 0, "description": "RR-4: Incremented when reviewer gate returns INFRA_FAILURE AND traffic cop is unhealthy AND within the 10-minute recovery cooldown. Cap: 2. Zeroed by reset_phase() only." },
-  "reviewer_infra_recovery_attempted": { "type": "boolean", "default": false, "description": "RR-1: Set to true before SSH recovery is attempted. Used with reviewer_infra_recovery_timestamp to enforce 10-minute cooldown preventing re-invocation storms." },
-  "reviewer_infra_recovery_timestamp": { "type": "string", "description": "RR-1: ISO 8601 UTC timestamp written atomically immediately before the SSH recovery subprocess is launched. Paired with reviewer_infra_recovery_attempted for cooldown enforcement." },
-  "reviewer_infra_recovery_exit_code": { "type": "integer", "description": "RR-1: SSH subprocess return code. 0 = success, 1 = failed, 2 = skipped/already-healthy. Written to phase_state after invocation for audit trail." },
-  "reviewer_infra_recovery_succeeded": { "type": "boolean", "description": "RR-1: True when exit code was 0 or 2; false when exit code was 1 or SSH timed out." },
+  "reviewer_infra_retries": { "type": "integer", "default": 0, "description": "Incremented on every reviewer-gate INFRA_FAILURE (missing/unparseable reviewer_output.json) as an unconditional soft retry — re-invoke the reviewer in a fresh session. Cap: 3 → escalation (INFRA_FAILURE_SOFT_RETRY_EXHAUSTED). Zeroed by reset_phase() only — NOT by reset_execution(). Distinct from reviewer_retries (which tracks genuine LLM rejections)." },
   "planner_output_preserved": { "type": "boolean", "default": false, "description": "RR-2: Set to true atomically after planner gate passes. Enables crash-recovery skip: if current_agent=planner, planner_retries=0, and this flag is true, the orchestrator skips planner re-invocation and advances directly to executor. Cleared by ROUTE_PLANNER (intentional reviewer-reject re-run) and by reset_phase(). Never set by reset_execution()." },
   "escalation_resets": { "type": "integer", "default": 0, "description": "Incremented by RESET_PHASE and RESET_EXECUTION resume commands. Cap: 3. NOT zeroed inside reset_phase() — only zeroed when roadmap genuinely advances to a new phase. Distinct from executor_retries." },
   "nuclear_resets": { "type": "integer", "default": 0, "description": "P1 Stage G2. Incremented by the NUCLEAR_RESET command via nuclear_reset_phase(). Cap: 2, independent of escalation_resets. Preserved inside reset_phase() (like escalation_resets) so the cap accumulates; zeroed only on genuine phase advance. The dashboard shows the nuclear-reset button only when escalation_resets >= 3 and hides it at nuclear_resets >= 2." },
@@ -1482,7 +1454,6 @@ Complete JSON schemas for all pipeline data files. Schemas in §3–§6 define a
 | `reviewer_retries` | ✓ zeroed | ✓ zeroed | ✓ zeroed |
 | `reviewer_rejected` | ✓ cleared | ✓ cleared | ✓ cleared |
 | `reviewer_infra_retries` | ✗ preserved | ✓ zeroed | ✓ zeroed |
-| `reviewer_infra_recovery_attempts` | ✗ preserved | ✓ zeroed | ✓ zeroed |
 | `planner_output_preserved` | — | ✓ cleared | ✓ cleared |
 | `escalation_resets` | — | ✗ preserved | ✓ zeroed |
 | `nuclear_resets` (P1 Stage G2) | — | ✗ preserved | ✓ zeroed |
