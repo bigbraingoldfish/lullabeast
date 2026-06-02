@@ -182,48 +182,51 @@
         .msg-md th { background: #1a1d21; color: #cbd5e1; }
 
         /* ── Dark-theme scrollbars (Webkit / Blink) ──────────────────────────
-           Track: matches the darkest panel bg (#0d0f11).
-           Thumb: mid-tone (#2a2d31) at rest → lighter (#3d4249) on hover.
-           Thin (6 px) so it feels unobtrusive; rounded for polish.
-           Firefox: scrollbar-color with the same values via * selector.
+           Overlay style: just the thumb — no track, no arrow buttons.
+           Auto-hide: the thumb is transparent at rest and only fades in
+           while the pointer is over the scrollable region (#2a2d31), then
+           brightens when the pointer is over the thumb itself (#3d4249).
+           Firefox: thin bar with a transparent track via scrollbar-color
+           (Firefox exposes no CSS hook to auto-hide, so there it stays
+           subtly visible rather than disappearing).
         ─────────────────────────────────────────────────────────────────────── */
         * {
             scrollbar-width: thin;
-            scrollbar-color: #2a2d31 #0d0f11;
+            scrollbar-color: #2a2d31 transparent;
         }
         ::-webkit-scrollbar {
-            width: 6px;
-            height: 6px;
+            width: 8px;
+            height: 8px;
+            background: transparent;
         }
         ::-webkit-scrollbar-track {
-            background: #0d0f11;
-            border-radius: 3px;
+            background: transparent;
         }
-        ::-webkit-scrollbar-thumb {
-            background: #2a2d31;
-            border-radius: 3px;
-        }
-        ::-webkit-scrollbar-thumb:hover {
-            background: #3d4249;
+        ::-webkit-scrollbar-button {
+            display: none;
+            width: 0;
+            height: 0;
         }
         ::-webkit-scrollbar-corner {
-            background: #0d0f11;
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: transparent;
+            border-radius: 4px;
+            transition: background 0.2s ease;
+        }
+        :hover::-webkit-scrollbar-thumb {
+            background: #2a2d31;
+        }
+        :hover::-webkit-scrollbar-thumb:hover {
+            background: #3d4249;
         }
 
-        /* Chats rail: scrollbar overlays content (no reserved gutter in Chromium). */
+        /* Chats rail: scrollbar overlays content (no reserved gutter in Chromium).
+           Thumb visibility now comes from the global auto-hide rules above. */
         .sidebar-scroll {
             overflow-y: auto;
             overflow-y: overlay;
-        }
-        .sidebar-scroll::-webkit-scrollbar-thumb {
-            background: transparent;
-            transition: background 0.15s;
-        }
-        .sidebar-scroll:hover::-webkit-scrollbar-thumb {
-            background: #2a2d31;
-        }
-        .sidebar-scroll:hover::-webkit-scrollbar-thumb:hover {
-            background: #3d4249;
         }
     </style>
 </head>
@@ -3193,11 +3196,8 @@
                     key: 'pipeline',
                     label: 'Pipeline Monitor',
                     icon: (
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4 flex-shrink-0">
-                            <rect x="3" y="3" width="7" height="7" rx="1"/>
-                            <rect x="14" y="3" width="7" height="7" rx="1"/>
-                            <rect x="3" y="14" width="7" height="7" rx="1"/>
-                            <rect x="14" y="14" width="7" height="7" rx="1"/>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4 flex-shrink-0">
+                            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
                         </svg>
                     )
                 },
@@ -3219,13 +3219,10 @@
                     key: 'preflight',
                     label: 'Setup & Preflight',
                     icon: (
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4 flex-shrink-0">
-                            <line x1="4" y1="6" x2="20" y2="6"/>
-                            <line x1="8" y1="12" x2="20" y2="12"/>
-                            <line x1="12" y1="18" x2="20" y2="18"/>
-                            <circle cx="4" cy="6" r="1.5" fill="currentColor" stroke="none"/>
-                            <circle cx="7" cy="12" r="1.5" fill="currentColor" stroke="none"/>
-                            <circle cx="11" cy="18" r="1.5" fill="currentColor" stroke="none"/>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4 flex-shrink-0">
+                            <rect x="8" y="2" width="8" height="4" rx="1" ry="1"/>
+                            <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
+                            <path d="m9 14 2 2 4-4"/>
                         </svg>
                     )
                 },

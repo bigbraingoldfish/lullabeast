@@ -2051,68 +2051,6 @@ class Orchestrator:
             print(f"[ERROR] Gate script failed: {e}")
             return False
 
-    def check_traffic_cop_health(self):
-        """Probe the traffic cop (llama-server) /health endpoint.
-
-        Returns True when the server responds 200, False on any network error or
-        non-200 status.  Returning False is intentional — callers treat it as
-        "unhealthy, skip GPU-dependent work" which is the correct safe default.
-        The exception is swallowed deliberately; a debug log is emitted so operators
-        can see probe failures in verbose mode without cluttering normal output.
-        """
-        try:
-            response = requests.get(f"{_LLAMA_ORIGIN}/health", timeout=5)
-            return response.status_code == 200
-        except requests.exceptions.RequestException as e:
-            print(f"[DEBUG] check_traffic_cop_health probe failed: {e}")
-            return False
-
-    def wait_for_model_stable(self, timeout: int = 300, poll_interval: int = 5) -> bool:
-        """Poll /v1/models until the GPU is in a stable state (no model mid-transition).
-
-        Stable = all reported models have status 'loaded' or 'unloaded' (none 'loading'/'unloading').
-        Returns True when stable, False if timeout expires (caller proceeds anyway).
-        """
-        import urllib.parse
-        base_url = (
-            self.openclaw_config
-            .get("models", {})
-            .get("providers", {})
-            .get("llama-local", {})
-            .get("baseUrl", f"{_LLAMA_ORIGIN}/v1")
-        )
-        parsed = urllib.parse.urlparse(base_url)
-        models_url = f"{parsed.scheme}://{parsed.netloc}/v1/models"
-
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                resp = requests.get(models_url, timeout=5)
-                if resp.status_code == 200:
-                    data = resp.json().get("data", [])
-                    transitioning = [
-                        m for m in data
-                        if m.get("status", {}).get("value") not in ("loaded", "unloaded")
-                    ]
-                    if not transitioning:
-                        print(f"[INFO] Traffic cop model state stable ({len(data)} model(s) reported). Proceeding to reviewer.")
-                        return True
-                    names = [m.get("id", "?") for m in transitioning]
-                    print(f"[INFO] Waiting for model swap — still transitioning: {names}")
-                else:
-                    print(f"[WARN] /v1/models returned {resp.status_code}, retrying...")
-            except requests.exceptions.RequestException as e:
-                print(f"[WARN] /v1/models unreachable ({e}), retrying...")
-            time.sleep(poll_interval)
-
-        # Intentional: proceed on timeout rather than blocking indefinitely.
-        # Returning False here is a soft signal — the caller (reviewer invocation path)
-        # logs the warning and continues.  If stricter "block until stable" behaviour is
-        # ever required, return a distinct sentinel (e.g. None / raise) and update the
-        # caller to decide; do not change this return value without updating callers.
-        print(f"[WARN] wait_for_model_stable timed out after {timeout}s — proceeding anyway.")
-        return False
-
     # -----------------------------------------------------------------------
     # FIND-EXECUTOR-COMPLETION-DETECTION: classify executor terminal state.
     # Returns one of: "executor_succeeded", "executor_crashed", "executor_preempted".
@@ -2710,8 +2648,8 @@ class Orchestrator:
                 pass
 
         # Re-initialize phase_state: agent counters → 0, escalation_resets preserved (cap intact).
-        # RR-4 (Phase 2): reviewer_infra_retries and reviewer_infra_recovery_attempts are
-        # zeroed on phase reset — they are per-phase attempt budgets, not global caps.
+        # RR-4 (Phase 2): reviewer_infra_retries is zeroed on phase reset — it is a
+        # per-phase soft-retry budget, not a global cap.
         # RR-2 (Phase 4): planner_output_preserved cleared — new phase, no preserved output.
         # P0 Stage H — reset_phase is the canonical boundary at which the
         # lifetime counters re-zero. Reviewer rejection and operator
@@ -2725,7 +2663,6 @@ class Orchestrator:
             "reviewer_retries": 0,
             "reviewer_rejected": False,
             "reviewer_infra_retries": 0,
-            "reviewer_infra_recovery_attempts": 0,
             "planner_output_preserved": False,
             "escalation_resets": preserved_escalation_resets,
             # P1 Stage G2 — operator-governance state survives the reset (see docstring).
@@ -2881,10 +2818,10 @@ class Orchestrator:
                 pass
 
         # RR-4 (Phase 2): reset_execution zeros reviewer_retries and reviewer_rejected so
-        # the next reviewer invocation starts at pass 1.  reviewer_infra_retries and
-        # reviewer_infra_recovery_attempts are NOT zeroed — they survive auto retries and
-        # only reset on a full phase reset (reset_phase).  executor_succeeded is cleared
-        # because we are re-running execution from scratch.
+        # the next reviewer invocation starts at pass 1.  reviewer_infra_retries is NOT
+        # zeroed — it survives auto retries and only resets on a full phase reset
+        # (reset_phase).  executor_succeeded is cleared because we are re-running
+        # execution from scratch.
         phase_state = self.read_phase_state()
         phase_state["reviewer_retries"] = 0
         phase_state["reviewer_rejected"] = False
@@ -4775,7 +4712,6 @@ class Orchestrator:
                             self.write_phase_state_atomic(_ps_ex)
                             self.state["current_agent"] = "reviewer"
                             self.transition_state("RUNNING", "Executor passed, moving to reviewer")
-                            self.wait_for_model_stable()
                             continue
                         else:
                             print("[ERROR] Executor gate failed")
@@ -4813,7 +4749,6 @@ class Orchestrator:
                             self.write_phase_state_atomic(_ps_ep)
                             self.state["current_agent"] = "reviewer"
                             self.transition_state("RUNNING", "Executor preempted but output valid — moving to reviewer")
-                            self.wait_for_model_stable()
                             continue
                         else:
                             # Preemption is an infrastructure event, NOT a code quality failure.
@@ -5558,138 +5493,33 @@ class Orchestrator:
                         continue
 
                     elif gate_result == "INFRA_FAILURE":
-                        # RR-1 (Phase 1): Infrastructure failure — LLM did not produce valid output.
-                        # Do NOT increment reviewer_retries — this is NOT a code quality rejection.
-                        # Discriminate by model health: unhealthy → recovery + retry; healthy → soft retry.
-                        print("[WARN] Reviewer gate returned INFRA_FAILURE — classifying by model health.")
+                        # Infrastructure failure: the reviewer produced no parseable
+                        # output (missing/malformed reviewer_output.json) — NOT a code-
+                        # quality rejection, so reviewer_retries is untouched. Self-heal
+                        # by re-invoking the reviewer in a fresh session (cap
+                        # reviewer_infra_retries); a transient malformed-output fluke
+                        # almost always clears on a clean re-run. Agent/model liveness is
+                        # covered by the OpenClaw activity-stamp hooks (startup-grace /
+                        # stall detection), so no model-health probe is performed.
                         _ps_if = self.read_phase_state()
-
-                        if self.check_traffic_cop_health():
-                            # Model is healthy: empty/fluke response.  Soft retry with cap.
-                            _infra_soft = _ps_if.get("reviewer_infra_retries", 0) + 1
-                            _ps_if["reviewer_infra_retries"] = _infra_soft
-                            self.write_phase_state_atomic(_ps_if)
-                            print(f"[WARN] Reviewer INFRA_FAILURE (healthy model) — soft retry {_infra_soft}/3.")
-                            if _infra_soft >= 3:
-                                self.state["current_agent"] = "escalation"
-                                self.transition_state(
-                                    "RUNNING",
-                                    f"Reviewer INFRA_FAILURE: soft retry cap reached ({_infra_soft}): INFRA_FAILURE_SOFT_RETRY_EXHAUSTED",
-                                )
-                            else:
-                                self.state["current_agent"] = "reviewer"
-                                self.transition_state(
-                                    "RUNNING",
-                                    f"Reviewer INFRA_FAILURE soft retry {_infra_soft} — re-invoking reviewer",
-                                )
-                            time.sleep(5)
-                            continue
-
+                        _infra_soft = _ps_if.get("reviewer_infra_retries", 0) + 1
+                        _ps_if["reviewer_infra_retries"] = _infra_soft
+                        self.write_phase_state_atomic(_ps_if)
+                        print(f"[WARN] Reviewer INFRA_FAILURE — soft retry {_infra_soft}/3.")
+                        if _infra_soft >= 3:
+                            self.state["current_agent"] = "escalation"
+                            self.transition_state(
+                                "RUNNING",
+                                f"Reviewer INFRA_FAILURE: soft retry cap reached ({_infra_soft}): INFRA_FAILURE_SOFT_RETRY_EXHAUSTED",
+                            )
                         else:
-                            # Model is unhealthy.  Check recovery cooldown (10 min).
-                            _attempted = _ps_if.get("reviewer_infra_recovery_attempted", False)
-                            _ts_str = _ps_if.get("reviewer_infra_recovery_timestamp", "")
-                            _within_cooldown = False
-                            if _attempted and _ts_str:
-                                try:
-                                    _ts = datetime.fromisoformat(_ts_str)
-                                    _elapsed = (datetime.now(timezone.utc) - _ts).total_seconds()
-                                    _within_cooldown = _elapsed < 600  # 10 minutes
-                                except Exception:
-                                    pass
-
-                            if _within_cooldown:
-                                # Recovery was attempted recently — do not re-invoke SSH.
-                                _rec_attempts = _ps_if.get("reviewer_infra_recovery_attempts", 0) + 1
-                                _ps_if["reviewer_infra_recovery_attempts"] = _rec_attempts
-                                self.write_phase_state_atomic(_ps_if)
-                                print(f"[WARN] Reviewer INFRA_FAILURE within recovery cooldown — attempt {_rec_attempts}/2.")
-                                if _rec_attempts >= 2:
-                                    self.state["current_agent"] = "escalation"
-                                    self.transition_state(
-                                        "RUNNING",
-                                        f"Reviewer INFRA_FAILURE: recovery cap reached ({_rec_attempts}): INFRA_FAILURE_RECOVERY_EXHAUSTED",
-                                    )
-                                else:
-                                    self.wait_for_model_stable()
-                                    self.state["current_agent"] = "reviewer"
-                                    self.transition_state(
-                                        "RUNNING",
-                                        f"Reviewer INFRA_FAILURE recovery cooldown — re-invoking reviewer (attempt {_rec_attempts})",
-                                    )
-                                time.sleep(5)
-                                continue
-
-                            else:
-                                # Recovery not attempted (or cooldown expired) — invoke recovery script.
-                                _now_ts = datetime.now(timezone.utc).isoformat()
-                                _ps_if["reviewer_infra_recovery_attempted"] = True
-                                _ps_if["reviewer_infra_recovery_timestamp"] = _now_ts
-                                self.write_phase_state_atomic(_ps_if)
-                                print("[INFO] Reviewer INFRA_FAILURE — model unhealthy, invoking recovery via SSH.")
-
-                                _rec_cfg = self.openclaw_config.get("recovery", {})
-                                _key_path = _rec_cfg.get("key_path", "")
-                                _user = _rec_cfg.get("user", "")
-                                _host = _rec_cfg.get("host", "")
-                                _recovery_exit_code = 1  # default: failed
-
-                                try:
-                                    _ssh_result = subprocess.run(
-                                        [
-                                            "ssh",
-                                            "-i", _key_path,
-                                            "-o", "StrictHostKeyChecking=no",
-                                            "-o", "ConnectTimeout=10",
-                                            f"{_user}@{_host}",
-                                            "recovery",
-                                        ],
-                                        timeout=70,
-                                        check=False,
-                                    )
-                                    _recovery_exit_code = _ssh_result.returncode
-                                except subprocess.TimeoutExpired:
-                                    _recovery_exit_code = 1
-                                    print("[ERROR] Recovery SSH call timed out after 70s.")
-                                except Exception as _ssh_err:
-                                    _recovery_exit_code = 1
-                                    print(f"[ERROR] Recovery SSH call failed: {_ssh_err}")
-
-                                _ps_after = self.read_phase_state()
-                                _ps_after["reviewer_infra_recovery_exit_code"] = _recovery_exit_code
-
-                                if _recovery_exit_code == 0:
-                                    print("[INFO] Recovery completed (exit 0). Waiting for model stable.")
-                                    _ps_after["reviewer_infra_recovery_succeeded"] = True
-                                    self.write_phase_state_atomic(_ps_after)
-                                    self.wait_for_model_stable()
-                                    self.state["current_agent"] = "reviewer"
-                                    self.transition_state(
-                                        "RUNNING",
-                                        "Reviewer INFRA_FAILURE — recovery succeeded (exit 0), re-invoking reviewer",
-                                    )
-                                elif _recovery_exit_code == 2:
-                                    print("[INFO] Recovery skipped — service already healthy (exit 2). Proceeding.")
-                                    _ps_after["reviewer_infra_recovery_succeeded"] = True
-                                    self.write_phase_state_atomic(_ps_after)
-                                    self.wait_for_model_stable()
-                                    self.state["current_agent"] = "reviewer"
-                                    self.transition_state(
-                                        "RUNNING",
-                                        "Reviewer INFRA_FAILURE — recovery skipped/healthy (exit 2), re-invoking reviewer",
-                                    )
-                                else:
-                                    print(f"[ERROR] Recovery failed (exit {_recovery_exit_code}). Escalating.")
-                                    _ps_after["reviewer_infra_recovery_succeeded"] = False
-                                    self.write_phase_state_atomic(_ps_after)
-                                    self.state["current_agent"] = "escalation"
-                                    self.transition_state(
-                                        "RUNNING",
-                                        f"Reviewer INFRA_FAILURE — recovery failed (exit {_recovery_exit_code}): INFRA_FAILURE_RECOVERY_FAILED",
-                                    )
-
-                                time.sleep(5)
-                                continue
+                            self.state["current_agent"] = "reviewer"
+                            self.transition_state(
+                                "RUNNING",
+                                f"Reviewer INFRA_FAILURE soft retry {_infra_soft} — re-invoking reviewer",
+                            )
+                        time.sleep(5)
+                        continue
 
                     elif gate_result in (
                         "VISUAL_UNVERIFIED",

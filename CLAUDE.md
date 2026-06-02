@@ -585,7 +585,7 @@ These values appear throughout the codebase. Do not change them without understa
 | `gateway_token` / `gateway_ws_url` | from `openclaw.json` → `gateway.auth.token` and `gateway.port` | Orchestrator `load_config()`; used by `abort_agent_session()` to authenticate Gateway WebSocket `sessions.abort` before a new executor attempt. Distinct from `hooks.token` (Bearer for `/hooks/agent`). |
 | Base branch override | optional `base_branch` config key (empty = auto-detect) | Used by orchestrator git checkout/reset paths, `/api/pipeline/git-recover`, and `GET /api/state` field **`git_recover_suggested_branch`** (UI prefills the recover dialog). **`git-recover`** stashes (including untracked) then **`git checkout`** — it does not run **`git reset`**. |
 | `prd-creator` agent ID | `"prd-creator"` | `WEBHOOK_AGENT_ID` in `ui/server.py` — used in all idea-to-PRD webhook calls |
-| `AUTODEV_LLAMA_BASE` | default `http://127.0.0.1:11434` | Orchestrator `check_traffic_cop_health`, `wait_for_model_stable`, blame L1, and `heartbeat_cron.py` — HTTP origin when `openclaw.json` has no `llama-local` `baseUrl` |
+| `AUTODEV_LLAMA_BASE` | default `http://127.0.0.1:11434` | Orchestrator blame-L1 analyst and failure analyst — HTTP origin (fallback) when `openclaw.json` has no `llama-local` `baseUrl`. (Formerly also read by the reviewer INFRA_FAILURE `check_traffic_cop_health` / `wait_for_model_stable` machinery, retired 2026-06-01.) |
 | `AUTODEV_AUDIT_ARCHIVE_DIR` | unset → `$OPENCLAW_ROOT/pipeline-audit`; empty string → disabled | Phase-complete snapshot copies in `orchestrator.py` |
 | `AUTODEV_HOOKS_TOKEN` | optional | Overrides `hooks_token` from `ui/config.json` / `DEFAULTS` for UI → OpenClaw webhook calls |
 | `agents.list[].bootstrapMaxChars` | `32000` (all six AutoDev agents) | Per-file bootstrap injection cap in `openclaw.json`. OpenClaw's default is `12000`, which truncated every pipeline role's `AGENTS.md` (planner 15.5k, executor 20.5k, reviewer 23k) and silently dropped the Stage A `## Always-Apply:` rules (they begin past byte ~10k). Seeded for new agents by `register_agent._build_new_entry`; ensured on existing agents (and the live config) by `setup_helpers.ensure_openclaw_context_limits` (install.sh step 8). Do not lower below the largest `AGENTS.md`. |
@@ -603,7 +603,7 @@ These values appear throughout the codebase. Do not change them without understa
 
 The lock uses `fcntl.flock(fd, LOCK_EX | LOCK_NB)`. This is an **advisory lock**, not a PID file. Liveness is determined by attempting to acquire the lock — if successful, the holder is dead. This is immune to PID reuse (a new process with the same PID will not have the file descriptor open). Do not replace this with PID-file locking.
 
-`heartbeat_cron.py` only queries the traffic cop when the pipeline lock is **free**. During an active pipeline run, the cron does nothing. This prevents unnecessary GPU load on the traffic cop machine during active runs.
+`heartbeat_cron.py` makes **no model or traffic-cop query** — its crash-recovery decision is purely lock-based: it tries to acquire `pipeline.lock`; if the lock is held the orchestrator is alive and the cron does nothing, otherwise it restarts the orchestrator when state looks stale-orphaned-midflight. During an active pipeline run the cron therefore does nothing and has zero GPU/model dependency.
 
 ---
 

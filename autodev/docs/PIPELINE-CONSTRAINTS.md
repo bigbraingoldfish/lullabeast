@@ -231,15 +231,14 @@ Same release: `apply_reviewer_routing` pass-2 routing tightened from `blocking_i
 
 ### Reviewer Counter Split (RR-4, 2026-03-12)
 
-The single `reviewer_retries` counter was split into three distinct counters to prevent conflation of genuine LLM rejections with infrastructure failures:
+The single `reviewer_retries` counter was split into two distinct counters to prevent conflation of genuine LLM rejections with infrastructure failures:
 
 | Counter | Tracks | Cap | Zeroed by `reset_execution()` | Zeroed by `reset_phase()` |
 |---|---|---|---|---|
 | `reviewer_retries` | Genuine LLM rejection (ROUTE_EXECUTOR, ROUTE_PLANNER, ROUTE_ESCALATE) | 3 passes | ✓ | ✓ |
-| `reviewer_infra_retries` | INFRA_FAILURE + model healthy (soft retry) | 3 | ✗ preserved | ✓ |
-| `reviewer_infra_recovery_attempts` | INFRA_FAILURE + model unhealthy + within cooldown | 2 | ✗ preserved | ✓ |
+| `reviewer_infra_retries` | INFRA_FAILURE (unconditional soft retry → re-invoke reviewer) | 3 | ✗ preserved | ✓ |
 
-`reviewer_infra_retries` and `reviewer_infra_recovery_attempts` are preserved across `reset_execution()` because executor retries do not fix an infrastructure problem. They are zeroed by `reset_phase()` because a phase reset constitutes a clean slate for all attempt budgets.
+`reviewer_infra_retries` is preserved across `reset_execution()` because executor retries do not fix an infrastructure problem. It is zeroed by `reset_phase()` because a phase reset constitutes a clean slate for all attempt budgets.
 
 ### Heartbeat Model Decision (B7, 2026-03-03) — Requires Main Machine Endpoint
 
@@ -329,7 +328,7 @@ Decisions made explicitly — not defaults to drift from. Preserved for human re
 
 **Current production configuration:** Cloud inference via OpenRouter — planner on MiniMax M2.7 (`openrouter/minimax/minimax-m2.7`); executor and reviewer on Kimi K2.6 / Moonshot AI (`openrouter/moonshotai/kimi-k2.6`). Local inference (Qwen3.6-27B, llama.cpp) retained for the escalation agent. This cloud-first configuration was adopted after smoke testing confirmed local inference latency was not viable for the development loop and direct cloud API costs were prohibitive. (`openclaw.json` is the live source of truth; the local-model registry and dated incident notes below describe the preserved local-first infrastructure and historical model states.)
 
-The local inference infrastructure is intentionally preserved. Returning to local-first operation requires only updating agent LLM config entries and re-enabling the SSH recovery path — no structural changes needed.
+The local inference infrastructure is intentionally preserved. Returning to local-first operation requires only updating agent LLM config entries — no structural changes needed.
 
 ### External Dependencies (Current Production)
 
@@ -490,6 +489,8 @@ This fix is **model-agnostic**: it applies to any current or future executor mod
 
 **Fix (2026-03-10):** Replaced fixed sleep with `wait_for_model_stable()` method on the Orchestrator class (`orchestrator.py`, line ~188). Polls `GET {llama-base}/v1/models` every 5s (URL from `openclaw_config["models"]["providers"]["llama-local"]["baseUrl"]`, with fallback from env `AUTODEV_LLAMA_BASE`). Stable state = no model in a transitioning status (all entries `loaded` or `unloaded`). Timeout: 300s (proceeds anyway on expiry — no pipeline stall). Replaces the fixed sleep entirely — proceeds as fast as the GPU allows rather than waiting a fixed 60s.
 
+**Update (2026-06-01) — mitigation retired:** `wait_for_model_stable()` was removed with the traffic-cop retirement. All pipeline agents are now cloud-routed (OpenRouter), so there is no executor→reviewer GPU model swap on the local llama-server and this race condition cannot occur; the handoff transitions directly. If pipeline agents are ever moved back to a shared local GPU, restore a swap-settle guard.
+
 ---
 
 ## 5.8 OpenClaw Native Heartbeat Disabled [2026-03-10]
@@ -504,45 +505,6 @@ This fix is **model-agnostic**: it applies to any current or future executor mod
 
 ---
 
-## 5.9 SSH Recovery Interface — Reviewer INFRA_FAILURE Handler (RR-1, 2026-03-12)
-
-**What this is:** When the reviewer gate returns `INFRA_FAILURE` AND `check_traffic_cop_health()` reports the model is unhealthy, the orchestrator can attempt automated recovery by invoking the llama-server restart script on the Main machine via SSH.
-
-**SSH invocation contract:**
-
-```python
-subprocess.run(
-    ["ssh", "-i", key_path, "-o", "StrictHostKeyChecking=no",
-     "-o", "ConnectTimeout=10",
-     f"{user}@{host}", "recovery"],
-    timeout=70, check=False
-)
-```
-
-Parameters are read from `openclaw.json` under the `recovery` section:
-
-```json
-"recovery": {
-  "user": "deploy",
-  "host": "gpu-host.example.com",
-  "key_path": "/path/to/ssh_recovery_key"
-}
-```
-
-**Exit code semantics (server-side `command=` restriction ignores the argument; runs `restart_llama.sh` unconditionally):**
-
-| Exit Code | Meaning | Orchestrator Action |
-|---|---|---|
-| 0 | Recovery succeeded — llama-server restarted | `wait_for_model_stable()` → re-invoke reviewer |
-| 1 | Recovery failed — restart script returned error | Route to escalation |
-| 2 | Skipped — model was already healthy when script ran | `wait_for_model_stable()` → re-invoke reviewer (treat as success) |
-| Timeout (70s) | SSH hung | Treat as exit 1 → escalation |
-
-**Cooldown enforcement:** The orchestrator writes `reviewer_infra_recovery_attempted=True` and `reviewer_infra_recovery_timestamp` to `phase_state.json` atomically BEFORE invoking SSH. A 10-minute cooldown (600s) prevents repeated recovery attempts if the restart keeps failing. Within cooldown: increment `reviewer_infra_recovery_attempts` (cap 2); at cap → escalation.
-
-**Key path requirement:** The file at `recovery.key_path` must have `600` permissions and authorize SSH access only to `recovery.user@recovery.host` for the forced command that runs the restart script. The `command=` restriction in `authorized_keys` ensures the recovery key cannot be used for general shell access.
-
----
 
 ## 6. Pre-Phase-14 Remediation Log
 
