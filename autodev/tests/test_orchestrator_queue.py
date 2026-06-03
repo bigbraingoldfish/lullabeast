@@ -495,21 +495,26 @@ class TestSelectNextQueueProject:
         inst._select_next_queue_project()
         assert inst.state["queue_halted_reason"] == "all_blocked"
 
-    def test_queue_halted_reason_all_blocked_includes_escalation(self, orch, tmp_path, monkeypatch):
-        """Parked ESCALATION rows count as all_blocked per TASK-03."""
+    def test_parked_escalation_revived_not_counted_all_blocked(self, orch, tmp_path, monkeypatch):
+        """F8 supersedes the prior 'parked ESCALATION counts as all_blocked' rule (TASK-03):
+        a parked ESCALATION alongside a BLOCKED entry is now REVIVED to WAITING_FOR_HUMAN
+        (answerable live), not halted as all_blocked. (A BLOCKED-only queue still halts —
+        see test_queue_halted_reason_all_blocked and test_genuinely_stuck_still_halts.)"""
         inst, queue_file, state_file, _ = orch
-        entries = [
-            {**_make_entry("a", state="ESCALATION", position=1)},
-            {**_make_entry("b", state="BLOCKED", position=2)},
-        ]
-        _write_queue(queue_file, entries)
+        a = {**_make_entry("a", state="ESCALATION", position=1)}
+        b = {**_make_entry("b", state="BLOCKED", position=2)}
+        _write_queue(queue_file, [a, b])
 
         monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
         monkeypatch.setattr(inst, "update_symlink", lambda p: True)
         monkeypatch.setattr(inst, "write_state", lambda: None)
 
-        inst._select_next_queue_project()
-        assert inst.state["queue_halted_reason"] == "all_blocked"
+        assert inst._select_next_queue_project() is True
+        assert inst.state["pipeline_status"] == "WAITING_FOR_HUMAN"
+        assert inst.state.get("queue_halted_reason") is None
+        by_id = {e["id"]: e for e in inst._read_queue()["queue"]}
+        assert by_id[a["id"]]["state"] == "ACTIVE"   # escalation revived to await human
+        assert by_id[b["id"]]["state"] == "BLOCKED"  # unchanged
 
     def test_apply_pending_escalation_sets_waiting_for_human(self, orch, tmp_path, monkeypatch):
         inst, queue_file, state_file, _ = orch
@@ -1380,10 +1385,13 @@ class TestParkedEscalationRevival:
 
         assert inst._maybe_revive_on_queue_halted() is False  # exit cleanly, do not spin
 
-    def test_queue_halted_pending_inplace_output_continues(self, orch, tmp_path, monkeypatch):
-        """INVARIANT B case (b): no banked answer, but an in-place escalation_output.done is
-        already pending for a parked ESCALATION row -> continue so the loop consumes it
-        (preserves today's restart-with-in-place-answer recovery)."""
+    def test_queue_halted_pending_inplace_output_revived_and_consumable(self, orch, tmp_path, monkeypatch):
+        """INVARIANT B case (b), post-F8: a parked ESCALATION with an in-place
+        escalation_output.done (operator answered in place before restart) is REVIVED to
+        WAITING_FOR_HUMAN (ACTIVE) and run() continues into the loop. F8 now revives the bare
+        ESCALATION (rather than leaving it parked), but the restart-with-in-place-answer
+        recovery is preserved: the in-place answer file survives untouched and the loop
+        consumes it."""
         inst, queue_file, _, _ = orch
         proj = tmp_path / "esc_proj"
         art = proj / ".autodev" / "pipeline"
@@ -1399,9 +1407,13 @@ class TestParkedEscalationRevival:
         monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
         monkeypatch.setattr(inst, "update_symlink", lambda p: True)
         monkeypatch.setattr(inst, "write_state", lambda: None)
+        monkeypatch.setattr(inst, "read_state", lambda: None)  # keep the in-memory revived state
 
-        assert inst._maybe_revive_on_queue_halted() is True  # continue: loop will consume in-place answer
-        assert inst._read_queue()["queue"][0]["state"] == "ESCALATION"  # untouched
+        assert inst._maybe_revive_on_queue_halted() is True  # continue into the loop
+        assert inst._read_queue()["queue"][0]["state"] == "ACTIVE"  # F8 revived it
+        assert inst.state["pipeline_status"] == "WAITING_FOR_HUMAN"
+        # the in-place answer is untouched, so the loop will consume it on the next iteration:
+        assert (art / "escalation_output.done").exists()
 
     def test_queue_halted_startup_selects_fresh_ready_entry(self, orch, tmp_path, monkeypatch):
         """Latent-bug regression: QUEUE_HALTED + current_agent='escalation' + a fresh READY entry
@@ -1459,6 +1471,226 @@ class TestParkedEscalationRevival:
         assert s["current_phase"] == 0
         assert s["current_phase_raw_id"] == ""
         assert s["current_agent"] == "escalation"  # banked command re-resolves from here
+
+
+# ---------------------------------------------------------------------------
+# F8 — A parked ESCALATION that is the next/only work is revived to
+# WAITING_FOR_HUMAN (answerable live) instead of stranding under QUEUE_HALTED
+# (single/last escalation) or PIPELINE_COMPLETE (an escalated sibling left after
+# the active project completes). Startable + ESCALATION_ANSWERED keep priority.
+# This supersedes the prior "parked ESCALATION counts as all_blocked" rule.
+# ---------------------------------------------------------------------------
+
+
+class TestF8EscalationRevivedToWaiting:
+    def _esc_entry(self, name, position, project_path, snapshot=None):
+        """A parked ESCALATION row WITH a snapshot (as _queue_park_active_entry writes)."""
+        return {
+            **_make_entry(name, state="ESCALATION", position=position),
+            "project_path": project_path,
+            "parked_state_snapshot": _snapshot() if snapshot is None else snapshot,
+            "parked_at": "2026-05-30T00:00:00Z",
+            "parked_reason": "escalation",
+            "parked_pipeline_status": "WAITING_FOR_HUMAN",
+        }
+
+    def test_single_escalation_stays_waiting_for_human(self, orch, tmp_path, monkeypatch):
+        """The live bug: a single/last project that escalates must sit in WAITING_FOR_HUMAN
+        (answerable from the dashboard), NOT flip to QUEUE_HALTED where a dashboard answer
+        is banked-but-never-consumed. Fails against the pre-F8 code (QUEUE_HALTED)."""
+        inst, queue_file, _, _ = orch
+        proj = tmp_path / "solo"
+        proj.mkdir()
+        _write_queue(queue_file, [self._esc_entry("solo", 1, str(proj))])
+
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "update_symlink", lambda p: True)
+        monkeypatch.setattr(inst, "write_state", lambda: None)
+
+        assert inst._select_next_queue_project() is True
+        assert inst.state["pipeline_status"] == "WAITING_FOR_HUMAN"
+        assert inst.state["current_agent"] == "escalation"
+        assert inst.state.get("queue_halted_reason") is None
+        # escalated phase restored from snapshot, not a phase-0 reset:
+        assert inst.state["current_phase"] == 4
+        assert inst.state["current_phase_raw_id"] == "CORE-2"
+        assert inst._read_queue()["queue"][0]["state"] == "ACTIVE"
+
+    def test_complete_with_escalated_sibling_revives_to_waiting(self, orch, tmp_path, monkeypatch):
+        """The owner's scenario: the active project completes and the only remaining work is
+        a DIFFERENT escalated project -> bring it up (repoint symlink + restore its escalated
+        phase) in WAITING_FOR_HUMAN, not PIPELINE_COMPLETE. Fails against pre-F8 (returns
+        False, leaving the sibling stranded)."""
+        inst, queue_file, _, _ = orch
+        proj_b = tmp_path / "sibling"
+        proj_b.mkdir()
+        a = _make_entry("done", state="COMPLETED", position=1)
+        b = self._esc_entry("sibling", 2, str(proj_b))
+        _write_queue(queue_file, [a, b])
+
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        symlinked = {}
+        monkeypatch.setattr(inst, "update_symlink", lambda p: symlinked.update(target=p) or True)
+        monkeypatch.setattr(inst, "write_state", lambda: None)
+        inst.state["pipeline_status"] = "PIPELINE_COMPLETE"  # the active project just completed
+
+        # completion path uses halt_if_no_eligible=False
+        assert inst._select_next_queue_project(halt_if_no_eligible=False) is True
+        assert os.path.realpath(symlinked["target"]) == os.path.realpath(str(proj_b))
+        assert inst.state["pipeline_status"] == "WAITING_FOR_HUMAN"
+        assert inst.state["current_agent"] == "escalation"
+        assert inst.state["current_phase_raw_id"] == "CORE-2"  # sibling's escalated phase
+        by_id = {e["id"]: e for e in inst._read_queue()["queue"]}
+        assert by_id[b["id"]]["state"] == "ACTIVE"
+        assert by_id[b["id"]].get("parked_state_snapshot") is None  # park metadata cleared
+
+    def test_ready_wins_over_parked_escalation(self, orch, tmp_path, monkeypatch):
+        """Priority pin: a startable READY entry is chosen over a parked ESCALATION (the
+        escalation is only the fallback when nothing startable remains). Guards against the
+        F8 fallback hijacking throughput."""
+        inst, queue_file, _, _ = orch
+        ready_proj = tmp_path / "ready"
+        ready_proj.mkdir()
+        a = _make_entry("done", state="COMPLETED", position=1)
+        b = self._esc_entry("esc", 2, str(tmp_path / "esc"))
+        r = {**_make_entry("ready", state="READY", position=3), "project_path": str(ready_proj)}
+        _write_queue(queue_file, [a, b, r])
+
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "update_symlink", lambda p: True)
+        monkeypatch.setattr(inst, "write_state", lambda: None)
+
+        assert inst._select_next_queue_project() is True
+        by_id = {e["id"]: e for e in inst._read_queue()["queue"]}
+        assert by_id[r["id"]]["state"] == "ACTIVE"        # READY started (fresh)
+        assert by_id[b["id"]]["state"] == "ESCALATION"    # escalation NOT revived
+        assert inst.state["current_agent"] == "planner"   # fresh phase-0 start, not escalation
+        assert inst.state["pipeline_status"] == "RUNNING"
+
+    def test_genuinely_stuck_still_halts(self, orch, tmp_path, monkeypatch):
+        """With no parked ESCALATION to revive (only BLOCKED remains), the queue still halts
+        cleanly to QUEUE_HALTED — the F8 fallback must not prevent genuine halts."""
+        inst, queue_file, _, _ = orch
+        _write_queue(queue_file, [
+            _make_entry("done", state="COMPLETED", position=1),
+            _make_entry("blocked", state="BLOCKED", position=2),
+        ])
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "update_symlink", lambda p: True)
+        monkeypatch.setattr(inst, "write_state", lambda: None)
+
+        assert inst._select_next_queue_project() is False
+        assert inst.state["pipeline_status"] == "QUEUE_HALTED"
+        assert inst.state["queue_halted_reason"] == "all_blocked"
+
+
+# ---------------------------------------------------------------------------
+# F2 — `--revive <entry_id>`: relaunch resumes a SPECIFIC parked entry through the
+# revival path (restore escalated phase + apply banked command), NOT
+# apply_cli_project_path's phase-0 reset (which orphaned the banked command).
+# ---------------------------------------------------------------------------
+
+
+class TestF2ReviveFlag:
+    def test_target_entry_id_revives_only_that_entry(self, orch, tmp_path, monkeypatch):
+        """_select_next_queue_project(target_entry_id=X) revives X even when a lower-position
+        revivable entry exists — the relaunch button targets a specific row, so selection
+        must not silently revive a different one."""
+        inst, queue_file, _, _ = orch
+        _yp, y = _setup_answered_project(
+            tmp_path, "y", "RESET_PHASE", _snapshot(phase=2, raw_id="Y-1"), state="ESCALATION_ANSWERED"
+        )
+        _xp, x = _setup_answered_project(
+            tmp_path, "x", "RESET_PHASE", _snapshot(phase=7, raw_id="X-9"), state="ESCALATION_ANSWERED"
+        )
+        y["position"] = 1
+        x["position"] = 2
+        _write_queue(queue_file, [y, x])
+
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "update_symlink", lambda p: True)
+        monkeypatch.setattr(inst, "write_state", lambda: None)
+        monkeypatch.setattr(inst, "_apply_pending_escalation_command", lambda project_path: None)
+
+        assert inst._select_next_queue_project(halt_if_no_eligible=False, target_entry_id=x["id"]) is True
+        by_id = {e["id"]: e for e in inst._read_queue()["queue"]}
+        assert by_id[x["id"]]["state"] == "ACTIVE"               # targeted entry revived
+        assert by_id[y["id"]]["state"] == "ESCALATION_ANSWERED"  # lower-position one untouched
+        assert inst.state["current_phase_raw_id"] == "X-9"       # X's escalated phase restored
+
+    def test_target_entry_id_none_is_unchanged_behavior(self, orch, tmp_path, monkeypatch):
+        """Regression: with target_entry_id=None (default), selection is unchanged — the
+        lowest-position eligible entry wins."""
+        inst, queue_file, _, _ = orch
+        proj = tmp_path / "r"
+        proj.mkdir()
+        e = {**_make_entry("r", state="READY", position=1), "project_path": str(proj)}
+        _write_queue(queue_file, [e])
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "update_symlink", lambda p: True)
+        monkeypatch.setattr(inst, "write_state", lambda: None)
+        assert inst._select_next_queue_project() is True
+        assert inst._read_queue()["queue"][0]["state"] == "ACTIVE"
+
+    def test_apply_cli_revive_restores_and_applies_bank(self, tmp_path, monkeypatch):
+        """apply_cli_revive(orch, entry_id) on a parked+banked entry restores the escalated
+        phase and applies the banked command (escalation_output written) — NOT a phase-0
+        reset. This is the dead-orchestrator relaunch path that F2 fixes."""
+        import importlib
+
+        monkeypatch.setenv("OPENCLAW_ROOT", str(tmp_path))
+        monkeypatch.setenv("AUTODEV_PIPELINE_ROOT", str(tmp_path))
+        import orchestrator as orch_mod
+
+        importlib.reload(orch_mod)
+        from orchestrator import Orchestrator as FreshOrch, apply_cli_revive
+
+        (tmp_path / "openclaw.json").write_text(
+            '{"hooks_url": "http://localhost:18789/hooks/agent", "hooks_token": "test-token", '
+            '"gateway": {"port": 18789, "auth": {"token": "gw-test-token"}}}'
+        )
+        for _role in ("planner", "executor", "reviewer"):
+            (tmp_path / f"workspace-{_role}").mkdir(exist_ok=True)
+
+        proj, entry = _setup_answered_project(tmp_path, "proj_a", "RESET_PHASE", _snapshot(), state="ESCALATION")
+        _write_queue(str(Path(orch_mod.QUEUE_FILE)), [entry])
+
+        orch = FreshOrch()
+        monkeypatch.setattr(orch, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(orch, "update_symlink", lambda p: True)
+        monkeypatch.setattr(orch, "read_state", lambda: None)  # keep the revived in-memory state
+
+        apply_cli_revive(orch, entry["id"])
+
+        assert orch.state["current_phase"] == 4               # escalated phase, not 0
+        assert orch.state["current_phase_raw_id"] == "CORE-2"
+        assert orch.state["current_agent"] == "escalation"
+        art = proj / ".autodev" / "pipeline"
+        assert (art / "escalation_output.done").exists()      # banked command applied
+        out = json.loads((art / "escalation_output.json").read_text())
+        assert out["command"] == "RESET_PHASE"
+
+    def test_apply_cli_revive_unknown_entry_noop(self, tmp_path, monkeypatch):
+        """apply_cli_revive with an unknown entry id must not raise (graceful no-op)."""
+        import importlib
+
+        monkeypatch.setenv("OPENCLAW_ROOT", str(tmp_path))
+        monkeypatch.setenv("AUTODEV_PIPELINE_ROOT", str(tmp_path))
+        import orchestrator as orch_mod
+
+        importlib.reload(orch_mod)
+        from orchestrator import Orchestrator as FreshOrch, apply_cli_revive
+
+        (tmp_path / "openclaw.json").write_text(
+            '{"hooks_url": "http://localhost:18789/hooks/agent", "hooks_token": "test-token", '
+            '"gateway": {"port": 18789, "auth": {"token": "gw-test-token"}}}'
+        )
+        for _role in ("planner", "executor", "reviewer"):
+            (tmp_path / f"workspace-{_role}").mkdir(exist_ok=True)
+        _write_queue(str(Path(orch_mod.QUEUE_FILE)), [_make_entry("a", state="READY", position=1)])
+
+        orch = FreshOrch()
+        apply_cli_revive(orch, "no-such-id")  # must not raise
 
 
 # ---------------------------------------------------------------------------
