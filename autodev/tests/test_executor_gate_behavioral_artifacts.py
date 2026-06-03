@@ -1,12 +1,21 @@
-"""P0 Stage F — executor-gate behavioural artifact validation.
+"""Executor-gate behavioural-artifact invariants that survive the Phase 3 demotion.
 
-When ``current_phase.json`` carries a populated Behavioral Verification block,
-the executor must produce ``executor_output.behavioral_smoke_artifacts`` —
-an array of ``{path, description}`` entries whose paths resolve to files on
-disk under the workspace. The executor gate validates this.
+Phase 3 (gate-feedback methodology) demoted the *interpretive* behavioural-artifact
+checks — empty / absent / malformed-shape / path-missing-on-disk — from hard
+**FAIL**s to non-blocking **warnings** the reviewer adjudicates. Those PASS+warning
+cases now live in ``test_executor_gate_demoted_warnings.py``.
 
-Pattern mirrors the existing file_manifest validation in executor_gate.py
-(``os.path.commonpath`` workspace-bound check + ``os.path.exists``).
+This file retains only the behavioural-specific invariants that are NOT part of
+the demotion:
+
+* **E1** — a phase with no behavioural block requires no artifacts (PASS).
+* **E3** — the workspace-boundary guard is a security check, NOT interpretive: a
+  behavioural-artifact path escaping the workspace still hard-FAILs with
+  ``ERR_PATH_TRAVERSAL`` (CLAUDE.md Security Constraints — must not be demoted).
+* **E4** — valid behavioural artifacts pass cleanly with no warning.
+
+Idiom: patch the workspace globals, stub ``subprocess.run`` so the deletion
+check is a no-op, and call ``evaluate_executor`` directly.
 """
 
 import json
@@ -84,7 +93,7 @@ def _make_artifact(workspace, rel_path):
 def _executor_output(workspace, *, behavioral_artifacts=None,
                      include_planner_files=True):
     """Baseline executor output. The gate validates file_manifest existence;
-    create the files so we don't trip an unrelated check."""
+    create the files so we don't trip an unrelated warning."""
     file_manifest = ["src/module.py"] if include_planner_files else []
     for rel in file_manifest:
         abs_p = os.path.join(workspace, rel)
@@ -149,74 +158,14 @@ def test_no_behavioral_block_means_no_artifact_requirement(tmp_workspace, monkey
 
 
 # ---------------------------------------------------------------------------
-# E2 — block present, artifacts missing → ERR_BEHAVIORAL_ARTIFACTS_MISSING
-# ---------------------------------------------------------------------------
-
-
-def test_missing_behavioral_smoke_artifacts_when_required_fails(
-    tmp_workspace, monkeypatch
-):
-    _write_current_phase_with_behavioral(tmp_workspace)
-    _write_pipeline_state(tmp_workspace)
-    _write_planner_output(tmp_workspace)
-
-    out = _executor_output(tmp_workspace, behavioral_artifacts=None)
-    output_path = os.path.join(tmp_workspace, "executor_output.json")
-    with open(output_path, "w") as f:
-        json.dump(out, f)
-
-    import subprocess
-    class _Sub:
-        returncode = 0
-        stdout = ""
-        stderr = ""
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Sub())
-
-    with _patch_workspace(tmp_workspace):
-        result = executor_gate_module.evaluate_executor(output_path)
-    assert result == "FAIL"
-
-    with open(os.path.join(tmp_workspace, "phase_state.json")) as f:
-        state = json.load(f)
-    assert state.get("last_error_code") == "ERR_BEHAVIORAL_ARTIFACTS_MISSING"
-
-
-def test_empty_behavioral_smoke_artifacts_when_required_fails(
-    tmp_workspace, monkeypatch
-):
-    _write_current_phase_with_behavioral(tmp_workspace)
-    _write_pipeline_state(tmp_workspace)
-    _write_planner_output(tmp_workspace)
-
-    out = _executor_output(tmp_workspace, behavioral_artifacts=[])
-    output_path = os.path.join(tmp_workspace, "executor_output.json")
-    with open(output_path, "w") as f:
-        json.dump(out, f)
-
-    import subprocess
-    class _Sub:
-        returncode = 0
-        stdout = ""
-        stderr = ""
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Sub())
-
-    with _patch_workspace(tmp_workspace):
-        result = executor_gate_module.evaluate_executor(output_path)
-    assert result == "FAIL"
-
-    with open(os.path.join(tmp_workspace, "phase_state.json")) as f:
-        state = json.load(f)
-    assert state.get("last_error_code") == "ERR_BEHAVIORAL_ARTIFACTS_MISSING"
-
-
-# ---------------------------------------------------------------------------
-# E3 — path safety
+# E3 — path safety (security guard — NOT demoted by Phase 3)
 # ---------------------------------------------------------------------------
 
 
 def test_behavioral_artifact_path_traversal_rejected(tmp_workspace, monkeypatch):
     """Workspace-bound check must reject ``../escape.txt`` — same guard
-    pattern as file_manifest validation."""
+    pattern as file_manifest validation. This is a security boundary and
+    stays a hard FAIL even though the existence/shape checks are now warnings."""
     _write_current_phase_with_behavioral(tmp_workspace)
     _write_pipeline_state(tmp_workspace)
     _write_planner_output(tmp_workspace)
@@ -245,34 +194,6 @@ def test_behavioral_artifact_path_traversal_rejected(tmp_workspace, monkeypatch)
         f"Path traversal in behavioral_smoke_artifacts must be rejected with "
         f"the same code as file_manifest traversal; got {state.get('last_error_code')!r}"
     )
-
-
-def test_behavioral_artifact_path_missing_on_disk_fails(tmp_workspace, monkeypatch):
-    _write_current_phase_with_behavioral(tmp_workspace)
-    _write_pipeline_state(tmp_workspace)
-    _write_planner_output(tmp_workspace)
-
-    out = _executor_output(tmp_workspace, behavioral_artifacts=[
-        {"path": "behavioral-smoke/does-not-exist.png", "description": "ghost"},
-    ])
-    output_path = os.path.join(tmp_workspace, "executor_output.json")
-    with open(output_path, "w") as f:
-        json.dump(out, f)
-
-    import subprocess
-    class _Sub:
-        returncode = 0
-        stdout = ""
-        stderr = ""
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Sub())
-
-    with _patch_workspace(tmp_workspace):
-        result = executor_gate_module.evaluate_executor(output_path)
-    assert result == "FAIL"
-
-    with open(os.path.join(tmp_workspace, "phase_state.json")) as f:
-        state = json.load(f)
-    assert state.get("last_error_code") == "ERR_BEHAVIORAL_ARTIFACTS_MISSING"
 
 
 # ---------------------------------------------------------------------------
@@ -307,36 +228,5 @@ def test_valid_behavioral_smoke_artifacts_pass(tmp_workspace, monkeypatch):
     assert result == "PASS", (
         f"Valid behavioral_smoke_artifacts must pass the gate; got {result!r}"
     )
-
-
-# ---------------------------------------------------------------------------
-# E5 — malformed entry shape
-# ---------------------------------------------------------------------------
-
-
-def test_artifact_entry_not_dict_rejected(tmp_workspace, monkeypatch):
-    _write_current_phase_with_behavioral(tmp_workspace)
-    _write_pipeline_state(tmp_workspace)
-    _write_planner_output(tmp_workspace)
-
-    out = _executor_output(tmp_workspace, behavioral_artifacts=[
-        "behavioral-smoke/whatever.txt",  # string instead of dict
-    ])
-    output_path = os.path.join(tmp_workspace, "executor_output.json")
-    with open(output_path, "w") as f:
-        json.dump(out, f)
-
-    import subprocess
-    class _Sub:
-        returncode = 0
-        stdout = ""
-        stderr = ""
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Sub())
-
-    with _patch_workspace(tmp_workspace):
-        result = executor_gate_module.evaluate_executor(output_path)
-    assert result == "FAIL"
-
-    with open(os.path.join(tmp_workspace, "phase_state.json")) as f:
-        state = json.load(f)
-    assert state.get("last_error_code") == "ERR_BEHAVIORAL_ARTIFACTS_MISSING"
+    # A fully-valid behavioural phase emits no warning.
+    assert not os.path.exists(os.path.join(tmp_workspace, "gate_warnings.json"))

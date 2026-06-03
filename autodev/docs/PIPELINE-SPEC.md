@@ -421,6 +421,8 @@ P1 Stage F establishes the first formal *advisory check* pattern in the pipeline
 
 Until all three hold, the check stays advisory. Promotion is a deliberate per-check decision, not a default trajectory.
 
+**Reviewer-facing variant (Phase 3, gate-feedback methodology).** The reachability advisory is consumed by the orchestrator (events only) and its file is removed after draining. A second variant of the two-channel rule demotes *interpretive blocking* checks to warnings consumed by the **reviewer**: the executor gate writes `ERR_MANIFEST_FILE_MISSING` / `ERR_TDD_COVERAGE_MISMATCH` / `ERR_BEHAVIORAL_ARTIFACTS_MISSING` to `gate_warnings.json` and PASSes, and the reviewer adjudicates (accept, or reject into a `blocking_issue`). The only structural differences from the reachability advisory are the consumer (reviewer, not orchestrator) and the lifecycle (`_emit_gate_warnings` **preserves** the file for the reviewer rather than removing it). See **§ Executor Output Gate** for the full check list and the safety carve-out for `ERR_PATH_TRAVERSAL`.
+
 ---
 
 ## 5. Reviewer Agent
@@ -696,19 +698,26 @@ IF FAIL AND retries >= 3   → escalation agent
 
 **Validation checks:**
 ```
+# --- Blocking checks (return FAIL) ---
 IF executor_output.json does NOT exist                       → FAIL
 IF status != "complete"                                      → FAIL
-IF tests_written: NOT all tests from tdd_test_structure
-    present on disk                                          → FAIL
 IF test_results.all_passing != true                          → FAIL
-IF file_manifest: NOT all expected files exist on disk       → FAIL
 IF any paths in tests_written or file_manifest attempt path
-    traversal outside the shared workspace                   → FAIL
+    traversal outside the shared workspace                   → FAIL (ERR_PATH_TRAVERSAL)
 IF git diff --diff-filter=D <phase_base_commit> HEAD reveals
     a deleted file absent from BOTH file_manifest AND
     files_deleted                                            → FAIL (ERR_UNACCOUNTED_DELETION)
+
+# --- Interpretive checks (Phase 3: non-blocking WARNINGS, not FAIL) ---
+# Recorded in gate_warnings.json and adjudicated by the reviewer; the gate PASSes.
+IF file_manifest: an expected file is absent on disk         → WARN (ERR_MANIFEST_FILE_MISSING)
+IF a tdd_test_structure entry is absent from tests_written   → WARN (ERR_TDD_COVERAGE_MISMATCH)
+IF behavioral block present AND behavioral_smoke_artifacts
+    missing / empty / malformed / not-on-disk                → WARN (ERR_BEHAVIORAL_ARTIFACTS_MISSING)
 ELSE                                                         → PASS
 ```
+
+**Interpretive checks are warnings, not FAILs (Phase 3, gate-feedback methodology).** The three checks above marked `WARN` formerly returned `FAIL` and burned an executor retry before the reviewer ever saw the work. They are now recorded as non-blocking warnings in `gate_warnings.json` (`{phase_raw_id, warnings: [{code, detail, files?/missing_tests?}]}`); the gate PASSes and the reviewer adjudicates — accept-and-proceed, or reject-with-specifics into a `blocking_issue` on the existing ROUTE_EXECUTOR loop. This is the reviewer-facing variant of the §4.5 advisory pattern: `_emit_gate_warnings` drains the file into a `gate_warning` event and a `phase_state.last_gate_warnings` stash but, unlike the reachability advisory, **preserves** the file for the reviewer to read. **The `ERR_PATH_TRAVERSAL` boundary check is NOT demoted** — it shares the manifest/behavioral loops but a path escaping the workspace is a safety failure and stays a hard `FAIL`. The reviewer's own independent checks (file_manifest existence, test quality, `behavioral_verification`) are the backstop the demotion relies on.
 
 **`ERR_UNACCOUNTED_DELETION`:** The gate runs `git diff --name-only --diff-filter=D <phase_base_commit> HEAD` in the workspace, plus `git ls-files --deleted` for uncommitted deletions, then cross-references the union against `file_manifest` and the optional `files_deleted` array. Any file that appears in neither list triggers this error. If `phase_base_commit` is absent from `pipeline_state.json`, the gate **fails closed** with exit code 1 and error code `ERR_MISSING_BASE_COMMIT` — it does not skip or warn. Without a base commit reference the deletion check cannot run, and a silent skip would allow MiniMax file-deletion to go undetected. The orchestrator retries with a fresh session on this error. (Older versions of this spec described the absent-`phase_base_commit` case as non-fatal and skipped with a warning — that behaviour was removed; see `autodev/tests/test_defensive_c3_07.py` for the fail-closed contract.) This catches models that delete files under token pressure and self-report `all_passing: true` — see PIPELINE-CONSTRAINTS.md §2 > MiniMax M2.5 File Deletion Under Token Pressure.
 

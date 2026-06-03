@@ -47,6 +47,17 @@ EXECUTOR_GATE_DETAIL_JSON = "executor_gate_detail.json"
 # (consumed by _emit_reachability_advisory for events). The two channels
 # never co-tenant.
 EXECUTOR_ADVISORY_DETAIL_JSON = "executor_advisory_detail.json"
+# Phase 3 (gate-feedback methodology) — reviewer-facing PASS channel. Three
+# interpretive checks (manifest-file-missing, tdd-coverage-mismatch,
+# behavioral-artifacts-missing) that used to hard-FAIL the gate are now
+# NON-blocking warnings recorded here. Distinct from both sibling channels:
+# executor_gate_detail.json is the executor-facing FAIL channel (drained +
+# removed by write_failure_context); executor_advisory_detail.json is the
+# reachability advisory (drained + removed by _emit_reachability_advisory).
+# gate_warnings.json is the only PASS channel the orchestrator drains but does
+# NOT remove — the reviewer reads it to adjudicate the warnings. Cleared at the
+# top of every evaluate_executor() run; written only on PASS when warnings exist.
+GATE_WARNINGS_JSON = "gate_warnings.json"
 
 
 def _executor_gate_detail_path():
@@ -55,6 +66,10 @@ def _executor_gate_detail_path():
 
 def _executor_advisory_detail_path():
     return os.path.join(ARTIFACTS_DIR, EXECUTOR_ADVISORY_DETAIL_JSON)
+
+
+def _gate_warnings_path():
+    return os.path.join(ARTIFACTS_DIR, GATE_WARNINGS_JSON)
 
 
 def _clear_executor_gate_detail():
@@ -95,6 +110,44 @@ def _write_advisory_detail(payload: dict) -> None:
     dest = _executor_advisory_detail_path()
     os.makedirs(ARTIFACTS_DIR, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=ARTIFACTS_DIR.rstrip(os.sep), prefix="executor_advisory_detail_")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(payload, f, indent=2)
+        os.replace(tmp, dest)
+    except Exception:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+def _clear_gate_warnings():
+    """Remove gate_warnings.json if it exists; ignore errors.
+
+    Called at the top of every evaluate_executor() run so a fresh attempt never
+    inherits a prior attempt's warnings. Because the executor gate runs in every
+    phase before the reviewer, this start-clear is what guarantees the reviewer
+    only ever reads warnings from the current attempt — even though the
+    orchestrator (unlike the FAIL/advisory channels) deliberately does NOT remove
+    this file after draining it.
+    """
+    try:
+        os.remove(_gate_warnings_path())
+    except FileNotFoundError:
+        pass
+
+
+def _write_gate_warnings(payload: dict) -> None:
+    """Atomic write to gate_warnings.json — the reviewer-facing PASS channel.
+
+    Same atomic mkstemp+os.replace shape as the sibling detail writers. Unlike
+    them, this file is NOT removed by the gate on PASS: the reviewer reads it to
+    adjudicate the demoted warnings (accept-and-proceed or reject-with-specifics).
+    """
+    dest = _gate_warnings_path()
+    os.makedirs(ARTIFACTS_DIR, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=ARTIFACTS_DIR.rstrip(os.sep), prefix="gate_warnings_")
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(payload, f, indent=2)
@@ -231,6 +284,13 @@ def evaluate_executor(output_path=None):
         output_path = os.path.join(ARTIFACTS_DIR, "executor_output.json")
 
     _clear_executor_gate_detail()
+    _clear_gate_warnings()
+
+    # Phase 3 — demoted interpretive checks (manifest-missing, tdd-mismatch,
+    # behavioral-artifacts) accumulate here as non-blocking warnings instead of
+    # returning "FAIL". On PASS a non-empty list is written to gate_warnings.json
+    # for the reviewer to adjudicate; hard-keep checks below still return "FAIL".
+    warnings = []
 
     data = load_json_safe(output_path, "executor")
     if data is None: return "FAIL"
@@ -248,10 +308,13 @@ def evaluate_executor(output_path=None):
     expected_files = data.get("file_manifest", []) + data.get("tests_written", [])
     workspace_abs = os.path.abspath(WORKSPACE_DIR)
 
+    _missing_manifest_files = []
     for relative_path in expected_files:
         target_abs = os.path.abspath(os.path.join(WORKSPACE_DIR, relative_path))
 
-        # Absolute bounds checking
+        # Absolute bounds checking — SECURITY guard, NOT demoted by Phase 3.
+        # A path escaping the workspace stays a hard FAIL (CLAUDE.md Security
+        # Constraints; do not weaken).
         try:
             if os.path.commonpath([workspace_abs, target_abs]) != workspace_abs:
                 record_error_code_only("executor", "ERR_PATH_TRAVERSAL")
@@ -260,12 +323,25 @@ def evaluate_executor(output_path=None):
             record_error_code_only("executor", "ERR_PATH_TRAVERSAL")
             return "FAIL"
 
+        # Phase 3 — a declared-but-absent (in-bounds) file is now a warning the
+        # reviewer adjudicates, not a hard FAIL. The reviewer independently
+        # re-verifies file_manifest existence (reviewer/AGENTS.md "What to
+        # Actually Review"), so this is a focusing hint, not the sole safety net.
         if not os.path.exists(target_abs):
-            record_error_code_only("executor", "ERR_MANIFEST_FILE_MISSING")
-            return "FAIL"
+            _missing_manifest_files.append(relative_path)
+
+    if _missing_manifest_files:
+        warnings.append({
+            "code": "ERR_MANIFEST_FILE_MISSING",
+            "detail": (
+                "File(s) listed in file_manifest/tests_written are not present "
+                "on disk. The reviewer must confirm each declared file exists "
+                "and contains real implementation."
+            ),
+            "files": _missing_manifest_files,
+        })
 
     # Cross-reference tests_written against planner's tdd_test_structure.
-    # Orchestrator owns the retry increment on FAIL, so we use record_error_code_only.
     planner_output_path = os.path.join(ARTIFACTS_DIR, "planner_output.json")
     planner_data = load_json_safe(planner_output_path, "executor")
     if planner_data is not None:
@@ -273,73 +349,101 @@ def evaluate_executor(output_path=None):
         tests_written = data.get("tests_written", [])
         missing = [t for t in planned_tests if t not in tests_written]
         if missing:
-            record_error_code_only("executor", "ERR_TDD_COVERAGE_MISMATCH")
-            print(f"[GATE FAIL] Missing planned tests: {missing}", file=sys.stderr)
-            return "FAIL"
+            # Phase 3 — a coverage gap is a warning the reviewer adjudicates
+            # (the reviewer independently inspects tests_written for real
+            # assertions), not a hard FAIL.
+            print(f"[GATE WARN] Planned tests not in tests_written: {missing}", file=sys.stderr)
+            warnings.append({
+                "code": "ERR_TDD_COVERAGE_MISMATCH",
+                "detail": (
+                    "Planner tdd_test_structure entries are missing from "
+                    "tests_written. The reviewer must confirm coverage of the "
+                    "planned behaviour."
+                ),
+                "missing_tests": missing,
+            })
 
     # ------------------------------------------------------------------
-    # FIND-BEHAVIORAL-ARTIFACTS: P0 Stage F. Phases whose current_phase.json
-    # carries a populated behavioral_verification block (effectively every
-    # P0 phase) must report behavioral_smoke_artifacts proving the executor
-    # ran the phase's how_to_check procedure. Path-safety rules are the
-    # same as file_manifest: workspace-bounded via os.path.commonpath, and
-    # each listed path must exist on disk.
+    # FIND-BEHAVIORAL-ARTIFACTS: P0 Stage F + Phase 3. Phases whose
+    # current_phase.json carries a populated behavioral_verification block
+    # (effectively every P0 phase) are expected to report
+    # behavioral_smoke_artifacts proving the executor ran the phase's
+    # how_to_check procedure. As of Phase 3, a missing / empty / malformed /
+    # not-on-disk artifact list is a NON-blocking warning the reviewer
+    # adjudicates (the reviewer is the independent producer of
+    # behavioral_verification evidence) — NOT a gate FAIL. The
+    # workspace-boundary check stays a hard FAIL: a path escaping the workspace
+    # is a security issue, not an interpretive one.
     # ------------------------------------------------------------------
     _current_phase = _load_current_phase()
     if phase_has_behavioral_block(_current_phase):
         behavioral_artifacts = data.get("behavioral_smoke_artifacts") or []
         if not isinstance(behavioral_artifacts, list) or len(behavioral_artifacts) == 0:
-            record_error_code_only("executor", "ERR_BEHAVIORAL_ARTIFACTS_MISSING")
             print(
-                "[GATE FAIL] behavioral_smoke_artifacts missing or empty on a "
-                "phase with a populated behavioral_verification block. "
-                "Capture the output of current_phase.behavioral_verification.how_to_check "
-                "under pipeline-project/.autodev/pipeline/behavioral-smoke/ and "
-                "list it in executor_output.behavioral_smoke_artifacts.",
+                "[GATE WARN] behavioral_smoke_artifacts missing or empty on a "
+                "phase with a populated behavioral_verification block.",
                 file=sys.stderr,
             )
-            return "FAIL"
-        for i, entry in enumerate(behavioral_artifacts):
-            if not isinstance(entry, dict):
-                record_error_code_only("executor", "ERR_BEHAVIORAL_ARTIFACTS_MISSING")
-                print(
-                    f"[GATE FAIL] behavioral_smoke_artifacts[{i}] is not an object "
-                    f"(got {type(entry).__name__}). Each entry must be "
-                    f"{{path, description}}.",
-                    file=sys.stderr,
-                )
-                return "FAIL"
-            path = entry.get("path")
-            if not path or not isinstance(path, str):
-                record_error_code_only("executor", "ERR_BEHAVIORAL_ARTIFACTS_MISSING")
-                print(
-                    f"[GATE FAIL] behavioral_smoke_artifacts[{i}] missing path",
-                    file=sys.stderr,
-                )
-                return "FAIL"
-            target_abs = os.path.abspath(os.path.join(WORKSPACE_DIR, path))
-            try:
-                if os.path.commonpath([workspace_abs, target_abs]) != workspace_abs:
+            warnings.append({
+                "code": "ERR_BEHAVIORAL_ARTIFACTS_MISSING",
+                "detail": (
+                    "behavioral_smoke_artifacts is missing or empty on a phase "
+                    "with a behavioral_verification block. The reviewer must "
+                    "produce its own evidence by running "
+                    "current_phase.behavioral_verification.how_to_check."
+                ),
+            })
+        else:
+            for i, entry in enumerate(behavioral_artifacts):
+                if not isinstance(entry, dict):
+                    print(
+                        f"[GATE WARN] behavioral_smoke_artifacts[{i}] is not an "
+                        f"object (got {type(entry).__name__}).",
+                        file=sys.stderr,
+                    )
+                    warnings.append({
+                        "code": "ERR_BEHAVIORAL_ARTIFACTS_MISSING",
+                        "detail": f"behavioral_smoke_artifacts[{i}] is not a {{path, description}} object.",
+                    })
+                    continue
+                path = entry.get("path")
+                if not path or not isinstance(path, str):
+                    print(
+                        f"[GATE WARN] behavioral_smoke_artifacts[{i}] missing path",
+                        file=sys.stderr,
+                    )
+                    warnings.append({
+                        "code": "ERR_BEHAVIORAL_ARTIFACTS_MISSING",
+                        "detail": f"behavioral_smoke_artifacts[{i}] is missing its path.",
+                    })
+                    continue
+                target_abs = os.path.abspath(os.path.join(WORKSPACE_DIR, path))
+                # Workspace-boundary check — SECURITY guard, NOT demoted.
+                try:
+                    if os.path.commonpath([workspace_abs, target_abs]) != workspace_abs:
+                        record_error_code_only("executor", "ERR_PATH_TRAVERSAL")
+                        print(
+                            f"[GATE FAIL] behavioral_smoke_artifacts[{i}] path escapes workspace: {path}",
+                            file=sys.stderr,
+                        )
+                        return "FAIL"
+                except ValueError:
                     record_error_code_only("executor", "ERR_PATH_TRAVERSAL")
                     print(
                         f"[GATE FAIL] behavioral_smoke_artifacts[{i}] path escapes workspace: {path}",
                         file=sys.stderr,
                     )
                     return "FAIL"
-            except ValueError:
-                record_error_code_only("executor", "ERR_PATH_TRAVERSAL")
-                print(
-                    f"[GATE FAIL] behavioral_smoke_artifacts[{i}] path escapes workspace: {path}",
-                    file=sys.stderr,
-                )
-                return "FAIL"
-            if not os.path.exists(target_abs):
-                record_error_code_only("executor", "ERR_BEHAVIORAL_ARTIFACTS_MISSING")
-                print(
-                    f"[GATE FAIL] behavioral_smoke_artifacts[{i}] path does not exist on disk: {path}",
-                    file=sys.stderr,
-                )
-                return "FAIL"
+                if not os.path.exists(target_abs):
+                    print(
+                        f"[GATE WARN] behavioral_smoke_artifacts[{i}] path does not exist on disk: {path}",
+                        file=sys.stderr,
+                    )
+                    warnings.append({
+                        "code": "ERR_BEHAVIORAL_ARTIFACTS_MISSING",
+                        "detail": f"behavioral_smoke_artifacts[{i}] path does not exist on disk: {path}",
+                        "files": [path],
+                    })
 
     # ------------------------------------------------------------------
     # FIND-DELETION-CHECK: Detect unaccounted file deletions.
@@ -514,6 +618,18 @@ def evaluate_executor(output_path=None):
             os.remove(_tmp)
 
     _clear_executor_gate_detail()
+
+    # Phase 3 — surface the demoted interpretive checks to the reviewer. Written
+    # only on PASS and deliberately NOT removed here (the orchestrator drains it
+    # for events but preserves it; the reviewer reads it to adjudicate). The
+    # start-of-run _clear_gate_warnings() already removed any stale file, so an
+    # absent file unambiguously means "no warnings this attempt".
+    if warnings:
+        _write_gate_warnings({
+            "phase_raw_id": (_current_phase or {}).get("raw_id", ""),
+            "warnings": warnings,
+        })
+
     return "PASS"
 
 if __name__ == "__main__":

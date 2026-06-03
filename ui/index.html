@@ -582,6 +582,10 @@
                 // informational, not a problem.
                 case 'reachability_warning': return 'bg-yellow-500 text-black';
                 case 'reachability_not_applicable': return 'bg-slate-500 text-white';
+                // Phase 3 (gate-feedback methodology) — demoted interpretive
+                // checks surfaced as non-blocking warnings. Yellow like
+                // reachability_warning: visible and attention-worthy, never blocking.
+                case 'gate_warning': return 'bg-yellow-500 text-black';
                 // Section 6 diagnostic event family — operator-specified
                 // purple so poll / abort / verdict / setup events read as
                 // one cohesive group in the Activity Feed.
@@ -631,6 +635,8 @@
             // P1 Stage F — advisory reachability events.
             reachability_warning: 'Reach Warn',
             reachability_not_applicable: 'Reach N/A',
+            // Phase 3 — demoted gate checks surfaced as advisory warnings.
+            gate_warning: 'Gate Warn',
             // Phase 2 — SILENT lifecycle/destructive events.
             nuclear_reset: 'Nuclear Reset',
             queue_halted: 'Queue Halted',
@@ -664,6 +670,8 @@
             // the static walk cannot follow.
             reachability_warning: 'A static reachability check found something worth surfacing — manifest files not reached from the entry point, no resolver for the project language, or a resolver limitation. Advisory only — the phase still passes; treat as "confirm intent," not "broken."',
             reachability_not_applicable: 'The verified entry point is a test runner (pytest, jest, vitest, ...); the reachability check was consciously skipped. Informational only — no problem detected.',
+            // Phase 3 (gate-feedback methodology) — interpretive checks the executor gate used to hard-fail are now non-blocking warnings.
+            gate_warning: 'The executor gate found something interpretive (a declared file not on disk, a planned test missing from tests_written, or missing behavioural-smoke artifacts) and recorded it as a NON-blocking warning instead of failing the phase. Advisory only — the phase still passes; the reviewer reads gate_warnings.json and decides whether to accept it or convert it into a blocking issue.',
             // Phase 2 — SILENT lifecycle/destructive events now recorded on the timeline.
             nuclear_reset: 'Operator escape hatch (cap 2): all phase work on the branch was discarded and the phase restarted from its base commit. Destructive — distinct from the cap-3 escalation resets.',
             queue_halted: 'The project queue stalled — no eligible project to start. Detail.reason is all_blocked / all_dependency_hold / answered_pending_revival / mixed / all_completed.',
@@ -846,6 +854,19 @@
                 }
                 case 'reachability_not_applicable':
                     return `reachability skipped — ${d.reason || 'entry point is a test runner'}`;
+
+                // ─── Phase 3 (gate-feedback methodology) — demoted gate warnings ───
+                case 'gate_warning': {
+                    const codes = Array.isArray(d.codes) ? d.codes : [];
+                    const count = typeof d.count === 'number' ? d.count : codes.length;
+                    // Reuse the kept P3_LAST_ERROR_CODE_TITLES map (these codes are
+                    // now warning identifiers, not last_error_code values).
+                    const friendly = codes
+                        .map((c) => getLastErrorCodeTitle(c, event.agent) || c)
+                        .join(', ');
+                    const tail = friendly ? ` — ${friendly}` : '';
+                    return `Gate raised ${count} non-blocking warning(s)${tail}. Advisory — the reviewer will adjudicate (accept, or convert to a blocking issue).`;
+                }
 
                 // ─── Phase 2 — SILENT lifecycle/destructive events rendered as prose ───
                 case 'nuclear_reset': {
