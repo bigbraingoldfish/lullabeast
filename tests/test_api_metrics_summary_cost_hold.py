@@ -5,8 +5,8 @@ Verifies:
 - Top-level totals (cost, hold, active) computed correctly.
 - Hold derivation from pipeline_events.jsonl pairs trigger→resolve by phase.
 - Unrelated escalation events for other projects are excluded.
-- Falls back to summed phase durations when run_summary.json is absent.
-- Prefers run_summary.json total_duration_seconds when present.
+- Total duration is always the sum of per-phase durations.
+- run_summary.json total_duration_seconds (calendar wall-clock) is ignored.
 """
 import json
 import os
@@ -152,7 +152,7 @@ def test_metrics_summary_includes_cost_and_hold_fields(temp_dir):
     assert body["executor_cost_total"] == pytest.approx(0.32, abs=1e-6)
     assert body["reviewer_cost_total"] == pytest.approx(0.11, abs=1e-6)
     assert body["total_hold_seconds"] == 7200
-    # Without run_summary.json, total duration falls back to phase sum (60+300=360).
+    # Total duration is always the sum of per-phase durations (60+300=360).
     assert body["total_duration_seconds"] == 360
     assert body["total_active_seconds"] == max(0, 360 - 7200)
 
@@ -190,12 +190,15 @@ def test_metrics_summary_zero_when_no_cost_or_escalation(temp_dir):
         assert p["cost_total"] == 0.0
 
 
-def test_metrics_summary_uses_max_of_run_summary_and_phase_sum(temp_dir):
-    """total_duration_seconds = max(phase sum, run_summary wall-clock).
+def test_metrics_summary_ignores_run_summary_duration(temp_dir):
+    """total_duration_seconds is ALWAYS the sum of per-phase durations.
 
-    run_summary.json is rewritten on every orchestrator boot — a "complete on
-    startup" no-op shrinks total_duration_seconds to the boot window. Taking
-    max() with the phase-row sum keeps the honest cumulative number visible.
+    run_summary.json's total_duration_seconds is CALENDAR wall-clock
+    (run_start→run_end) and spans idle gaps across days, so it is deliberately
+    NOT consulted here — even when it is larger than the phase sum. This pins the
+    fix for the inflated "Total Time" (svg-pic2 showed 74h21m calendar vs 19h21m
+    of real phase work). Direction-independent: a larger OR smaller run_summary
+    must not move the number off the phase sum.
     """
     project_dir = os.path.join(temp_dir, "proj-a")
     art = os.path.join(project_dir, ".autodev", "pipeline")
@@ -211,16 +214,52 @@ def test_metrics_summary_uses_max_of_run_summary_and_phase_sum(temp_dir):
         "events_path": os.path.join(pipeline_root, "pipeline_events.jsonl"),
     }
 
-    # Case A: run_summary.json larger → it wins.
+    # run_summary.json LARGER than the phase sum → still ignored. This is the
+    # exact case the old max() got wrong (it returned 9999).
     with open(os.path.join(art, "run_summary.json"), "w") as f:
         json.dump({"total_duration_seconds": 9999}, f)
     with patch("ui.server.load_config", return_value=fake_config):
         body = client.get("/api/metrics-summary").json()
-    assert body["total_duration_seconds"] == 9999
+    assert body["total_duration_seconds"] == 360  # phase sum 60+300, NOT 9999
 
-    # Case B: run_summary.json shrunk by a noop startup → phase sum wins.
+    # run_summary.json smaller → also ignored; same phase sum.
     with open(os.path.join(art, "run_summary.json"), "w") as f:
         json.dump({"total_duration_seconds": 106}, f)
     with patch("ui.server.load_config", return_value=fake_config):
         body = client.get("/api/metrics-summary").json()
-    assert body["total_duration_seconds"] == 360  # phase sum 60+300
+    assert body["total_duration_seconds"] == 360
+
+
+def test_metrics_summary_active_clamped_when_hold_exceeds_duration(temp_dir):
+    """active_seconds clamps to 0 when hold exceeds the summed phase durations.
+
+    A phase can record an escalation hold (paired from the event log) while
+    contributing little or no summed duration — e.g. a repo-init escalation on a
+    phase that never completes. With total time now sourced purely from summed
+    phase durations (no calendar wall-clock floor), hold can exceed total, and
+    active = max(0, total - hold) must degrade to 0 rather than go negative. This
+    pins the clamp, which became load-bearing once run_summary was dropped.
+    """
+    project_dir = os.path.join(temp_dir, "proj-a")
+    os.makedirs(project_dir)
+    _write_metrics_jsonl(project_dir, [
+        _make_phase_row("CORE-E1", duration=100, executor=1),
+    ])
+    pipeline_root = os.path.join(temp_dir, "pipeline_root")
+    # Hold spans 600 s — far more than the phase's 100 s duration.
+    _write_events_jsonl(pipeline_root, [
+        {"ts": "2026-05-19T00:00:00Z", "event": "escalation_trigger",
+         "project": "proj-a", "phase": "CORE-E1"},
+        {"ts": "2026-05-19T00:10:00Z", "event": "escalation_resolve",
+         "project": "proj-a", "phase": "CORE-E1"},
+    ])
+    fake_config = {
+        "project_dir_path": project_dir,
+        "events_path": os.path.join(pipeline_root, "pipeline_events.jsonl"),
+    }
+    with patch("ui.server.load_config", return_value=fake_config):
+        body = client.get("/api/metrics-summary").json()
+    assert body["total_duration_seconds"] == 100
+    assert body["total_hold_seconds"] == 600
+    assert body["total_hold_seconds"] > body["total_duration_seconds"]
+    assert body["total_active_seconds"] == 0
