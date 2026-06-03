@@ -101,7 +101,7 @@ Returns merged current state from `pipeline_state.json` and `phase_state.json`. 
   "last_action_timestamp": "2026-03-14T10:23:01Z",
   "project_path": "/path/to/your-project/myproject",
   "orchestrator_alive": true,
-  "last_error_code": "ERR_MANIFEST_FILE_MISSING",
+  "last_error_code": "ERR_TESTS_FAILING",
   "escalation_resets": 1,
   "event_source": "synthetic"
 }

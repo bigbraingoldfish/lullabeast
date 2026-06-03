@@ -35,8 +35,8 @@ Write your output to: `pipeline-project/.autodev/pipeline/planner_output.json`
 All three fields are REQUIRED. Gate validation rules:
 
 - `implementation_plan` — non-empty array of strings. Each string is a concrete, actionable task in implementation order.
-- `tdd_test_structure` — non-empty array of file paths. These MUST be actual file paths (e.g., `tests/test_auth_login.py`), NOT descriptions (NOT "test the login flow"). The executor gate cross-references this list against what the executor actually wrote — path mismatches cause gate failure.
-  - **CRITICAL: paths must be project-root-relative. NEVER prefix with `pipeline-project/`.** The gate resolves paths as `~/.openclaw/pipeline-project/<path>`. Writing `pipeline-project/tests/foo.py` creates a double-prefix (`~/.openclaw/pipeline-project/pipeline-project/tests/foo.py`) that does not exist on disk and causes `ERR_MANIFEST_FILE_MISSING`. Correct: `tests/foo.py`. Wrong: `pipeline-project/tests/foo.py`.
+- `tdd_test_structure` — non-empty array of file paths. These MUST be actual file paths (e.g., `tests/test_auth_login.py`), NOT descriptions (NOT "test the login flow"). The executor gate cross-references this list against what the executor actually wrote — path mismatches are flagged as an `ERR_TDD_COVERAGE_MISMATCH` gate warning the reviewer adjudicates (it confirms coverage independently and may reject), so keep the paths accurate.
+  - **CRITICAL: paths must be project-root-relative. NEVER prefix with `pipeline-project/`.** The gate resolves paths as `~/.openclaw/pipeline-project/<path>`. Writing `pipeline-project/tests/foo.py` creates a double-prefix (`~/.openclaw/pipeline-project/pipeline-project/tests/foo.py`) that does not exist on disk and raises an `ERR_MANIFEST_FILE_MISSING` gate warning the reviewer adjudicates. Correct: `tests/foo.py`. Wrong: `pipeline-project/tests/foo.py`.
 - `pass_criteria` — array with ≥1 item. Each item MUST have a `condition` string field AND a `traces_to` anchor (see the four valid forms below). Conditions must be verifiable — machine-checkable is strongly preferred over subjective.
 
 ### `pass_criteria[].traces_to` — the three valid anchor forms

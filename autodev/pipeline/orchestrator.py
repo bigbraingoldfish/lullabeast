@@ -2530,6 +2530,69 @@ class Orchestrator:
         except OSError:
             pass
 
+    def _emit_gate_warnings(self, raw_id):
+        """Drain gate_warnings.json (the executor gate's reviewer-facing PASS
+        channel) into one summarising ``gate_warning`` event and a compact
+        ``last_gate_warnings`` stash on phase_state — but, unlike
+        ``_emit_reachability_advisory``, **do NOT remove the file**. The reviewer
+        reads it next to adjudicate the demoted warnings (accept-and-proceed or
+        reject-with-specifics). The executor gate's start-of-run clear is what
+        prevents stale warnings; removing it here would starve the reviewer.
+
+        On the clean-pass common case (no file) this clears any stale
+        ``last_gate_warnings`` so the metrics row never reports a prior attempt's
+        warnings. Best-effort + read-modify-write throughout so a phase_state
+        hiccup never breaks the PASS path or clobbers sibling keys."""
+        warnings_path = os.path.join(PROJECT_ARTIFACTS_DIR, "gate_warnings.json")
+        if not os.path.exists(warnings_path):
+            # Clean pass — drop any stale stash so the row's gate_warnings is null.
+            try:
+                _ps = self.read_phase_state()
+                if _ps.pop("last_gate_warnings", None) is not None:
+                    self.write_phase_state_atomic(_ps)
+            except Exception as _gw_err:
+                print(f"[WARN] _emit_gate_warnings: stale-stash clear failed: {_gw_err}")
+            return
+        try:
+            with open(warnings_path, "r") as f:
+                doc = json.load(f)
+        except Exception as e:
+            print(f"[WARN] _emit_gate_warnings: could not read gate_warnings: {e}")
+            return
+        if not isinstance(doc, dict):
+            return
+        warns = doc.get("warnings")
+        if not isinstance(warns, list) or not warns:
+            return
+        codes = sorted({
+            w.get("code") for w in warns
+            if isinstance(w, dict) and w.get("code")
+        })
+        files = []
+        for w in warns:
+            if not isinstance(w, dict):
+                continue
+            for _k in ("files", "missing_tests"):
+                _v = w.get(_k)
+                if isinstance(_v, list):
+                    files.extend(str(x) for x in _v)
+        _write_pipeline_event(
+            "gate_warning",
+            raw_id,
+            "executor",
+            {"count": len(warns), "codes": codes, "files": files},
+        )
+        # Stash a compact summary so the canonical metrics row (written later on
+        # the reviewer-PASS path) can persist the warning outcome. Read-modify-
+        # write preserves sibling phase_state keys. The file is intentionally
+        # left on disk for the reviewer.
+        try:
+            _ps = self.read_phase_state()
+            _ps["last_gate_warnings"] = {"count": len(warns), "codes": codes}
+            self.write_phase_state_atomic(_ps)
+        except Exception as _gw_err:
+            print(f"[WARN] _emit_gate_warnings: stash failed: {_gw_err}")
+
     def _record_injected_skill(self, agent_role: str) -> None:
         """Write skill_injected and skill_agent to phase_state.json after inject_skill().
 
@@ -2641,6 +2704,10 @@ class Orchestrator:
             "executor_gate_detail.json",
             # P1 Stage F — advisory channel; same per-phase artifact lifecycle.
             "executor_advisory_detail.json",
+            # Phase 3 — reviewer-facing gate-warnings channel; same per-phase
+            # artifact lifecycle. _emit_gate_warnings preserves it for the
+            # reviewer on the PASS path; these reset/exclude sites wipe it.
+            "gate_warnings.json",
         ]:
             try:
                 os.remove(os.path.join(PROJECT_ARTIFACTS_DIR, fname))
@@ -2834,6 +2901,10 @@ class Orchestrator:
             "executor_gate_detail.json",
             # P1 Stage F — advisory channel; same per-phase artifact lifecycle.
             "executor_advisory_detail.json",
+            # Phase 3 — reviewer-facing gate-warnings channel; same per-phase
+            # artifact lifecycle. _emit_gate_warnings preserves it for the
+            # reviewer on the PASS path; these reset/exclude sites wipe it.
+            "gate_warnings.json",
         ]:
             try:
                 os.remove(os.path.join(PROJECT_ARTIFACTS_DIR, fname))
@@ -3374,6 +3445,10 @@ class Orchestrator:
             "executor_gate_detail.json",
             # P1 Stage F — advisory channel; same per-phase artifact lifecycle.
             "executor_advisory_detail.json",
+            # Phase 3 — reviewer-facing gate-warnings channel; same per-phase
+            # artifact lifecycle. _emit_gate_warnings preserves it for the
+            # reviewer on the PASS path; these reset/exclude sites wipe it.
+            "gate_warnings.json",
         }
         files_present_on_disk = []
         try:
@@ -3736,6 +3811,11 @@ class Orchestrator:
             "nuclear_resets": ps_m.get("nuclear_resets", 0),
             "reviewer_unverified_retries": ps_m.get("reviewer_unverified_retries", 0),
             "reachability_summary": ps_m.get("last_reachability_summary"),
+            # Phase 3 (gate-feedback methodology) — compact copy of the demoted
+            # gate warnings, stashed onto phase_state by _emit_gate_warnings on
+            # the executor-PASS path (null when the attempt that passed raised no
+            # warnings). Durable record of "what the gate flagged for the reviewer."
+            "gate_warnings": ps_m.get("last_gate_warnings"),
             "reset_log": ps_m.get("reset_log", []),
         })
 
@@ -4760,6 +4840,11 @@ class Orchestrator:
                             # Drains executor_advisory_detail.json into pipeline
                             # events so the UI shows reachability findings.
                             self._emit_reachability_advisory(raw_id)
+                            # Phase 3 — drain gate_warnings.json into a gate_warning
+                            # event + phase_state stash. Preserves the file (the
+                            # reviewer reads it next); clears a stale stash on a
+                            # clean pass. Never affects the gate verdict.
+                            self._emit_gate_warnings(raw_id)
                             _ps_ex = self.read_phase_state()
                             _ps_ex.pop("last_error_code", None)
                             self.write_phase_state_atomic(_ps_ex)

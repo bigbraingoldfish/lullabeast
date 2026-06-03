@@ -92,6 +92,33 @@ def test_evidence_minimum_three_documented(agents_md_text):
     )
 
 
+def test_gate_warnings_input_documented(agents_md_text):
+    """Phase 3 (gate-feedback methodology) — the reviewer must be told to read
+    gate_warnings.json. The executor gate's demoted interpretive checks reach
+    the reviewer ONLY through this file (no webhook message); if the doc stops
+    naming it, the warnings silently go unread and the demotion loses its
+    safety net."""
+    assert "gate_warnings.json" in agents_md_text, (
+        "reviewer/AGENTS.md must list gate_warnings.json as an input — it is the "
+        "channel the demoted executor-gate warnings travel on"
+    )
+
+
+def test_gate_warnings_adjudication_documented(agents_md_text):
+    """The reviewer must be instructed HOW to adjudicate a gate warning: either
+    accept-and-proceed or reject-with-specifics into a blocking_issue. Without
+    this, a reviewer might treat a warning as an automatic block (re-introducing
+    the hard-fail the demotion removed) or ignore it entirely."""
+    lowered = agents_md_text.lower()
+    assert "accept-and-proceed" in lowered, (
+        "reviewer/AGENTS.md must document the accept-and-proceed adjudication path"
+    )
+    assert "reject-with-specifics" in lowered, (
+        "reviewer/AGENTS.md must document the reject-with-specifics adjudication path "
+        "(convert the warning into a blocking_issue)"
+    )
+
+
 def test_phase_intent_validated_removed(agents_md_text):
     """The legacy phase_intent_validated boolean is replaced by the
     structured behavioral_verification object in Stage F. Any lingering
