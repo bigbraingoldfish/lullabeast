@@ -7247,11 +7247,26 @@ def _queue_run_trigger_next_logic(config: dict) -> dict:
     }
 
 
-def _maybe_auto_kick_queue_after_manual_to_auto(config: dict) -> dict:
-    """When switching manual→auto: one Trigger-next-equivalent start if safe (TASK-03 UX).
+def _maybe_autostart_queue(config: dict) -> dict:
+    """Start the next eligible queue project when ``queue_mode="auto"`` and the pipeline is idle.
 
-    Skips if orchestrator holds pipeline.lock, pipeline is mid-run, or queue already has ACTIVE.
+    Shared by the manual→auto mode toggle and the three READY-making endpoints
+    (``add`` / ``parent``-clear / ``revalidate``) so an eligible project starts without a
+    manual ``POST /api/queue/trigger-next`` or a mode toggle. Self-guarding and
+    **non-raising**: it returns a status dict and never propagates an ``HTTPException``, so
+    callers can surface the result as an additive ``auto_start`` field without risking the
+    originating request.
+
+    Returns ``{"attempted": False, "reason": ...}`` when it does nothing —
+    ``not_auto_mode`` (queue not in auto), ``orchestrator_lock_held`` (a live orchestrator
+    holds pipeline.lock), ``pipeline_status_busy`` (an agent is mid-run), or
+    ``queue_has_active`` (a project is already ACTIVE). On an attempt it returns
+    ``{"attempted": True, **_queue_run_trigger_next_logic(...)}`` (carrying ``ok``/``started``
+    or ``queue_halted``), or, if the start raised, ``{"attempted": True, "ok": False,
+    "reason": "already_active"|"spawn_failed"|"start_error", "error": ...}``.
     """
+    if _read_queue_file(config).get("queue_mode") != "auto":
+        return {"attempted": False, "reason": "not_auto_mode"}
     lp = _expand_lock_path(config)
     if lp and _check_orchestrator_liveness(lp):
         return {"attempted": False, "reason": "orchestrator_lock_held"}
@@ -7264,7 +7279,11 @@ def _maybe_auto_kick_queue_after_manual_to_auto(config: dict) -> dict:
     q = _read_queue_file(config)
     if any(e["state"] == "ACTIVE" for e in q.get("queue", [])):
         return {"attempted": False, "reason": "queue_has_active"}
-    out = _queue_run_trigger_next_logic(config)
+    try:
+        out = _queue_run_trigger_next_logic(config)
+    except HTTPException as e:
+        reason = {409: "already_active", 500: "spawn_failed"}.get(e.status_code, "start_error")
+        return {"attempted": True, "ok": False, "reason": reason, "error": e.detail}
     return {"attempted": True, **out}
 
 
@@ -7298,8 +7317,10 @@ async def patch_queue_mode(request: Request):
     q["queue_mode"] = mode
     _write_queue_file(q_path, q)
     response: dict = {"ok": True, "queue_mode": mode}
+    # Transition guard stays: only a manual→auto switch kicks (auto→auto must not re-kick).
+    # The helper additionally self-gates on queue_mode=="auto" for the other call sites.
     if mode == "auto" and prev_mode == "manual":
-        response["auto_advance"] = _maybe_auto_kick_queue_after_manual_to_auto(config)
+        response["auto_advance"] = _maybe_autostart_queue(config)
     return response
 
 
@@ -7525,7 +7546,18 @@ async def post_queue_add(request: Request):
     entries.append(entry)
     q["queue"] = entries
     _write_queue_file(q_path, q)
-    return entry
+    # Auto-start the next eligible project when the queue is in auto mode and the pipeline
+    # is idle (server-owned; replaces the former client-side post-add trigger shim).
+    # Best-effort and non-raising — a failed start surfaces in auto_start, never 500s the add.
+    auto_start = _maybe_autostart_queue(config)
+    # Re-read so the returned state is truthful (ACTIVE if this row started, READY if an
+    # earlier-position row started or nothing did, FAILED on spawn failure). Entry fields
+    # stay top-level (callers read addD.id); only auto_start is additive.
+    refreshed = next(
+        (e for e in _read_queue_file(config).get("queue", []) if e.get("id") == entry["id"]),
+        entry,
+    )
+    return {**refreshed, "auto_start": auto_start}
 
 
 @app.delete("/api/queue/{entry_id}")
@@ -7683,10 +7715,12 @@ async def patch_queue_parent(entry_id: str, request: Request):
 
     target["parent_id"] = parent_id
 
+    cleared_to_ready = False
     if parent_id is None:
         # Clearing parent: restore to READY if currently in DEPENDENCY_HOLD
         if target.get("state") == "DEPENDENCY_HOLD":
             target["state"] = "READY"
+            cleared_to_ready = True
     else:
         # Setting parent: hold only if parent is in a blocking state
         parent_entry = next((e for e in entries if e["id"] == parent_id), None)
@@ -7708,7 +7742,14 @@ async def patch_queue_parent(entry_id: str, request: Request):
 
     q["queue"] = entries
     _write_queue_file(q_path, q)
-    return target
+    # Auto-start only when a parent-clear just made this row READY (scope: clear→READY);
+    # the set-parent branch never autostarts. Additive auto_start; target fields stay top-level.
+    auto_start = (
+        _maybe_autostart_queue(config)
+        if cleared_to_ready
+        else {"attempted": False, "reason": "not_ready_transition"}
+    )
+    return {**target, "auto_start": auto_start}
 
 
 @app.get("/api/queue/{entry_id}/snapshot")
@@ -7924,7 +7965,10 @@ async def post_queue_entry_revalidate(entry_id: str):
 
     q["queue"] = entries
     _write_queue_file(q_path, q)
-    return {"ok": True, "checks": checks, "entry": target}
+    # Auto-start if this revalidation left an eligible READY row in an idle auto queue
+    # (no-op when the row stayed SKIPPED_PENDING / not in auto mode). Non-raising; additive.
+    auto_start = _maybe_autostart_queue(config)
+    return {"ok": True, "checks": checks, "entry": target, "auto_start": auto_start}
 
 
 # Agent IDs and relative paths kept in sync with install.sh (agent workspace deploy step).
