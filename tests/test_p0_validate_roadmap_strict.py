@@ -8,9 +8,10 @@ operator surfaced as cutover regression pins:
 * multi-phase happy path (existing coverage is single-phase only)
 * empty-body cases for **How we'll check** and **If this fails** (existing
   coverage pins only the **User-observable** empty body)
-* inclusive/exclusive boundaries on ``_BV_SEARCH_WINDOW = 30`` (existing
-  coverage tests well-within / well-outside; the boundary itself is not
-  pinned)
+* phase-bounded BV-block detection — a complete block is accepted anywhere in
+  its own phase section (the fixed 30-line ``_BV_SEARCH_WINDOW`` was retired
+  because it conflicted with the canonical 'BV block last' structure on long
+  phases), and a block belonging to the next phase does not satisfy this one
 * duplicate phase IDs with BV blocks present (existing duplicate test in
   ``tests/test_api_setup_validate_roadmap.py`` is BV-block-free)
 * phase ID appearing in an Entry Criteria body must not register as a
@@ -226,20 +227,12 @@ class TestValidateRoadmapStrict:
             for e in result["errors"]
         ), f"Expected an error mentioning the missing failure-language sub-bullet; got: {result['errors']}"
 
-    def test_bv_block_ending_at_phase_plus_30_passes(self):
-        """A full 4-line BV block whose LAST sub-bullet sits on
-        ``phase_line + 30`` (the inclusive edge of the 30-line window)
-        must be accepted.
+    def test_bv_block_deep_in_phase_passes(self):
+        """A full 4-line BV block whose LAST sub-bullet sits ~30 lines below the
+        phase header is accepted — it is within the (single) phase's section.
 
-        Stage C's ``test_block_within_30_lines_accepted`` only covered
-        well-inside placements (block ends at phase+25). This test pins
-        the actual inclusive edge — the validator requires the *whole*
-        block (header + 3 sub-bullets) to fit within the window, not just
-        the header.
-
-        Construction: phase on line 1, test on line 2, 25 filler lines
-        (3-27), BV header on line 28, sub-bullets on 29/30/31.
-        Block ends at line 31 == phase_line + 30.
+        Construction: phase on line 1, test on line 2, 25 filler lines (3-27),
+        BV header on line 28, sub-bullets on 29/30/31.
         """
         filler = "\n".join(["  > Note: filler"] * 25)
         content = (
@@ -250,26 +243,20 @@ class TestValidateRoadmapStrict:
         )
         result = _validate_roadmap_content(content)
         assert result["valid"] is True, (
-            f"BV block ending exactly at phase+30 (inclusive edge of the 30-line "
-            f"window) must be accepted; got errors: {result['errors']}"
+            f"a complete BV block within the phase section must be accepted; "
+            f"got errors: {result['errors']}"
         )
 
-    def test_bv_block_ending_at_phase_plus_31_fails(self):
-        """A full 4-line BV block whose LAST sub-bullet sits on
-        ``phase_line + 31`` (one past the inclusive edge) must be rejected.
-
-        Stage C's ``test_block_beyond_30_lines_fails`` only covered far-
-        outside placements (header at phase+33). This test pins the
-        first-line-past-the-edge case so an off-by-one regression on the
-        window (e.g. extending it to 31 lines or shifting body_end) fires
-        here, not silently miscoded into prod.
-
-        Construction: phase on line 1, test on line 2, 26 filler lines
-        (3-28), BV header on line 29, sub-bullets on 30/31/32.
-        Block ends at line 32 == phase_line + 31 — third sub-bullet falls
-        outside the window and is not detected.
+    def test_bv_block_far_past_old_window_passes_within_phase(self):
+        """A complete BV block ~31+ lines below the header — one past the retired
+        30-line window — must now be ACCEPTED, because it is still within the
+        phase's own section. This is the exact live Tick-Tac-Toe TEST-E1 shape (a
+        long Done-Criteria list pushing the canonical 'BV block last' just past
+        the old window). Pins the phase-bounded model that replaced the fixed
+        window; the prior ``test_bv_block_ending_at_phase_plus_31_fails`` asserted
+        the opposite and was retired with the window.
         """
-        filler = "\n".join(["  > Note: filler"] * 26)
+        filler = "\n".join(["  - [ ] done criterion"] * 30)
         content = (
             _PHASE_E1 + "\n"
             + _TEST_E1 + "\n"
@@ -277,15 +264,27 @@ class TestValidateRoadmapStrict:
             + _full_bv_block()
         )
         result = _validate_roadmap_content(content)
+        assert result["valid"] is True, (
+            f"a complete BV block past the old 30-line window but within its phase "
+            f"section must be accepted; got errors: {result['errors']}"
+        )
+
+    def test_bv_block_in_next_phase_does_not_satisfy_prior_phase(self):
+        """Phase-boundary guard: the search is bounded by the phase section, so a
+        block that belongs to the NEXT phase cannot be borrowed to satisfy a prior
+        phase that has none of its own."""
+        content = (
+            _PHASE_E1 + "\n" + _TEST_E1 + "\n\n"
+            + _PHASE_E2 + "\n" + _TEST_E2 + "\n" + _full_bv_block()
+        )
+        result = _validate_roadmap_content(content)
         assert result["valid"] is False, (
-            "BV block ending at phase+31 (one past the inclusive edge) must be "
-            "rejected — the third sub-bullet sits outside the window and the "
-            "validator must flag it. This guards against an off-by-one "
-            "regression on _BV_SEARCH_WINDOW."
+            "UI-E1 has no BV block in its own section; UI-E2's must not count"
         )
-        assert any("Behavioral Verification" in e["message"] for e in result["errors"]), (
-            f"Expected a Behavioral Verification error; got: {result['errors']}"
-        )
+        assert any(
+            "UI-E1" in e["message"] and "Behavioral Verification" in e["message"]
+            for e in result["errors"]
+        ), f"Expected a missing-BV error attributed to UI-E1; got: {result['errors']}"
 
     def test_duplicate_phase_ids_with_bv_blocks_returns_duplicate_error(self):
         """Two phases sharing a phase ID, both carrying full BV blocks.

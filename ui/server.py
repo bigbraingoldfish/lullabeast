@@ -3452,23 +3452,6 @@ POLL_INTERVAL = 2   # seconds between sentinel checks
 IDEAS_LATE_DONE_MTIME_SLACK_SEC: float = 2.0
 
 
-def _idea_roadmap_done_sentinel_fresh(
-    done_path: Path, not_before_wall: float, slack_sec: float = IDEAS_LATE_DONE_MTIME_SLACK_SEC
-) -> bool:
-    """True if ``done_path`` exists and its mtime is at/after ``not_before_wall`` (minus slack).
-
-    Used after unlinking a stale ``roadmap_draft.done`` so the poll loop cannot ``break`` on a
-    sentinel left from a prior run or another race (same idea as orchestrator ``min_sentinel_mtime``).
-    """
-    if not done_path.exists():
-        return False
-    try:
-        mt = os.path.getmtime(done_path)
-    except OSError:
-        return False
-    return mt >= not_before_wall - slack_sec
-
-
 IDEAS_WEBHOOK_POST_TIMEOUT = aiohttp.ClientTimeout(total=120)
 
 IDEAS_ATTACHMENT_MAX_BYTES = 10_000_000
@@ -3817,6 +3800,8 @@ async def _poll_sentinel_with_idle_detect(
     poll_interval: float,
     stall_threshold: float,
     startup_grace: float | None,
+    rescue_stranded_reply_md: bool = True,
+    extra_done_paths: tuple[Path, ...] = (),
 ) -> PollResult:
     """Poll for the turn ``.done`` sentinel, governed by the Tier A activity stamp.
 
@@ -3846,6 +3831,23 @@ async def _poll_sentinel_with_idle_detect(
       silent for ``stall_threshold`` seconds.  This is the mid-turn-death
       signal (CORE-E6 pattern as it would manifest in Ideas).
 
+    Two opt-in knobs let the roadmap/clarity flows reuse this helper instead of
+    duplicating the poll logic (the only behaviour they need to vary):
+
+    * ``rescue_stranded_reply_md`` (default ``True``) — when ``True`` a fresh
+      ``done_path.with_suffix(".md")`` at the stall/timeout exits is surfaced as
+      ``"succeeded"`` (the agent wrote the reply but not the sentinel).  This is
+      valid ONLY when the ``.md`` is authored solely by the agent (the chat
+      ``turns/{n}.md``).  ``post_ideas_fix_roadmap_format`` PRE-WRITES the
+      malformed ``roadmap_draft.md`` before the agent runs, so it (and the other
+      roadmap flows) pass ``False`` to avoid surfacing that server-co-authored
+      pre-write as a completed reply.
+    * ``extra_done_paths`` (default ``()``) — additional sentinels that must
+      ALSO exist before ``"succeeded"`` is returned.  ``post_ideas_convert``
+      produces two artefacts and passes ``(verification_draft.done,)`` so the
+      poll cannot report success until both the roadmap AND verification
+      sentinels have landed.
+
     Caller side: ``PollResult.__bool__`` delegates to ``success``, so existing
     ``if not sentinel_found:`` checks continue working unchanged.
     """
@@ -3864,7 +3866,9 @@ async def _poll_sentinel_with_idle_detect(
             return False
 
     while True:
-        if Path(done_path).exists():
+        if Path(done_path).exists() and all(
+            Path(p).exists() for p in extra_done_paths
+        ):
             last_mtime_s = (
                 last_fresh_mtime_ns / 1e9 if last_fresh_mtime_ns is not None else None
             )
@@ -3877,8 +3881,9 @@ async def _poll_sentinel_with_idle_detect(
                 last_fresh_mtime_ns / 1e9 if last_fresh_mtime_ns is not None else None
             )
             # Backstop hit without a .done — but if the agent left a fresh reply
-            # .md, surface it rather than failing the turn.
-            if _fresh_reply_md_present():
+            # .md, surface it rather than failing the turn.  Skipped when the
+            # caller co-authors the .md (rescue_stranded_reply_md=False).
+            if rescue_stranded_reply_md and _fresh_reply_md_present():
                 return PollResult(True, "succeeded", last_mtime_s)
             return PollResult(False, "timeout", last_mtime_s)
 
@@ -3908,8 +3913,9 @@ async def _poll_sentinel_with_idle_detect(
             if silence_seconds >= stall_threshold:
                 # The agent has gone silent. If it left a fresh reply .md
                 # (written but .done never landed), that output is final now —
-                # surface it instead of declaring a stall.
-                if _fresh_reply_md_present():
+                # surface it instead of declaring a stall.  Skipped when the
+                # caller co-authors the .md (rescue_stranded_reply_md=False).
+                if rescue_stranded_reply_md and _fresh_reply_md_present():
                     return PollResult(True, "succeeded", last_fresh_mtime_ns / 1e9)
                 return PollResult(
                     False, "stalled", last_fresh_mtime_ns / 1e9
@@ -5261,8 +5267,12 @@ async def post_ideas_clarity_check(idea_id: str):
     """Trigger the PRD clarity check agent and poll for its result.
 
     Reads current prd_content from session.json, sends a webhook POST to
-    hooks_url, then polls for clarity_result.done (2s interval, 60s timeout).
-    Returns the contents of clarity_result.json on success, 504 on timeout.
+    hooks_url, then waits via the shared idle-detection poll
+    (``_poll_sentinel_with_idle_detect`` on ``prd_creator_activity.stamp``):
+    ``CLARITY_TIMEOUT`` infra backstop, ``ideas_idle_threshold`` stall window.
+    Returns the contents of clarity_result.json on success, 504 on a stall or
+    backstop. The result is ephemeral (not persisted), so a late result is
+    simply re-run by the caller.
     """
     config = load_config()
     ideas_dir = Path(config.get("ideas_dir") or "")
@@ -5304,23 +5314,39 @@ async def post_ideas_clarity_check(idea_id: str):
     }
 
     # Send webhook POST
+    _attempt_start_wall = time.time()
     headers = {"Authorization": f"Bearer {hooks_token}"}
     async with aiohttp.ClientSession() as session:
         resp = await session.post(hooks_url, json=webhook_payload, headers=headers)
         if resp.status >= 400:
             raise HTTPException(status_code=502, detail=f"Webhook returned {resp.status}")
 
-    # Poll for clarity_result.done
+    # Idle-detection poll on the shared activity stamp — same machinery as the
+    # chat send (replaces the prior 60 s hard cap, which sat below the measured
+    # 118 s single-call floor and could false-time-out a healthy run).
+    # clarity_result is JSON with no sibling .md, so the stranded-.md rescue is
+    # moot but disabled explicitly. ``startup_grace=None`` waits for a definitive
+    # stall/backstop verdict. The result is ephemeral (returned inline, not
+    # persisted), so a late result is simply re-run by the caller — there is no
+    # durable artefact to salvage, unlike the roadmap flows.
     done_path = idea_dir / "clarity_result.done"
     result_path = idea_dir / "clarity_result.json"
-    deadline = datetime.utcnow().timestamp() + 60
-
-    while datetime.utcnow().timestamp() < deadline:
-        if done_path.exists():
-            break
-        await asyncio.sleep(2)
-    else:
-        raise HTTPException(status_code=504, detail="Clarity check timed out after 60s")
+    idle_threshold = float(config.get("ideas_idle_threshold", 300))
+    poll_result = await _poll_sentinel_with_idle_detect(
+        done_path=done_path,
+        stamp_path=idea_dir / "prd_creator_activity.stamp",
+        attempt_start_wall=_attempt_start_wall,
+        poll_timeout=CLARITY_TIMEOUT,
+        poll_interval=CLARITY_POLL_INTERVAL,
+        stall_threshold=idle_threshold,
+        startup_grace=None,
+        rescue_stranded_reply_md=False,
+    )
+    if not poll_result:
+        raise HTTPException(
+            status_code=504,
+            detail=f"Clarity check timed out after {CLARITY_TIMEOUT}s",
+        )
 
     if not result_path.exists():
         raise HTTPException(status_code=500, detail="clarity_result.done exists but clarity_result.json is missing")
@@ -5337,8 +5363,18 @@ CONVERT_TIMEOUT = 480   # seconds; patchable in tests. Bumped from 300 in P0
                         # roadmap_draft.md AND verification_draft.md in the
                         # same session, which needs ~60% more headroom.
 CONVERT_POLL_INTERVAL = 2  # seconds between sentinel checks
-FORMAT_CORRECTION_TIMEOUT = 180  # seconds; patchable in tests
+FORMAT_CORRECTION_TIMEOUT = 600  # infra backstop (s); patchable in tests. Was a
+                        # 180 s hard cap; now the idle-detection stall threshold
+                        # (ideas_idle_threshold) is the primary failure signal and
+                        # this is only the gateway-dead failsafe, so it must clear
+                        # one stall window comfortably (mirrors POLL_TIMEOUT).
 FORMAT_CORRECTION_POLL_INTERVAL = 2  # seconds between sentinel checks
+CLARITY_TIMEOUT = 600   # infra backstop (s); patchable in tests. Was a 60 s hard
+                        # cap — below the measured 118 s single-call floor, so it
+                        # could false-time-out a healthy clarity run. Idle
+                        # detection (ideas_idle_threshold) is now the primary
+                        # signal; this is only the gateway-dead failsafe.
+CLARITY_POLL_INTERVAL = 2  # seconds between sentinel checks
 
 
 @app.get("/api/ideas/{idea_id}/readiness")
@@ -5402,10 +5438,14 @@ async def post_ideas_convert(idea_id: str):
     Injects the roadmap-generation skill, then sends a webhook to the
     roadmap-converter agent. The agent produces TWO artefacts in the same
     session: ``roadmap_draft.md`` and ``verification_draft.md`` (the
-    project-level Verification document). This endpoint polls BOTH sentinels
-    — ``roadmap_draft.done`` AND ``verification_draft.done`` — at
-    ``CONVERT_POLL_INTERVAL`` s intervals for up to ``CONVERT_TIMEOUT`` s,
-    then atomically stores both contents in session.json and returns them.
+    project-level Verification document). This endpoint waits via the shared
+    idle-detection poll (``_poll_sentinel_with_idle_detect``) requiring BOTH
+    sentinels — ``roadmap_draft.done`` AND ``verification_draft.done`` — via
+    ``extra_done_paths``: ``ideas_idle_threshold`` is the stall window and
+    ``CONVERT_TIMEOUT`` the infra backstop. On success it atomically stores both
+    contents in session.json and returns them. A late pair (agent finishes after
+    a stall/backstop) is salvaged on the next ``GET /session`` and the frontend
+    recovery poll, so output is never lost.
 
     Returns 404 if the idea is not found.
     Returns 422 if prd_content is empty.
@@ -5455,7 +5495,7 @@ async def post_ideas_convert(idea_id: str):
     }
 
     # Send webhook POST
-    op_start = datetime.utcnow().timestamp()
+    _attempt_start_wall = time.time()
     headers = {"Authorization": f"Bearer {hooks_token}"}
     async with aiohttp.ClientSession() as session:
         resp = await session.post(hooks_url, json=webhook_payload, headers=headers)
@@ -5464,27 +5504,39 @@ async def post_ideas_convert(idea_id: str):
 
     done_path = idea_dir / "roadmap_draft.done"
     verification_done_path = idea_dir / "verification_draft.done"
+    # Scrub stale sentinels from a prior run so the poll's existence checks below
+    # cannot latch onto them — this unlink subsumes the freshness guard the prior
+    # loop used (same role as the orchestrator's min_sentinel_mtime capture).
     done_path.unlink(missing_ok=True)
     verification_done_path.unlink(missing_ok=True)
 
-    # Poll for BOTH sentinels (must not latch onto stale sentinels from a prior run).
-    # ``not_before`` is captured after both unlinks so only sentinels touched this
-    # attempt count toward completion.
-    poll_started = time.time()
-    deadline = poll_started + CONVERT_TIMEOUT
-
-    while time.time() < deadline:
-        if (_idea_roadmap_done_sentinel_fresh(done_path, poll_started)
-                and _idea_roadmap_done_sentinel_fresh(verification_done_path, poll_started)):
-            break
-        await asyncio.sleep(CONVERT_POLL_INTERVAL)
-    else:
+    # Idle-detection poll on the shared activity stamp — same machinery as the
+    # chat send. The converter writes TWO artefacts, so success requires BOTH
+    # sentinels (``extra_done_paths``); the agent co-authors roadmap_draft.md so
+    # the stranded-.md rescue is disabled. ``startup_grace=None`` waits for a
+    # definitive verdict; CONVERT_TIMEOUT is the infra backstop and
+    # ideas_idle_threshold the primary stall signal. A late pair after a
+    # stall/backstop is salvaged on GET /session (the _merge_*_draft helpers) and
+    # surfaced by the frontend recovery poll, so late output is never lost.
+    idle_threshold = float(config.get("ideas_idle_threshold", 300))
+    poll_result = await _poll_sentinel_with_idle_detect(
+        done_path=done_path,
+        stamp_path=idea_dir / "prd_creator_activity.stamp",
+        attempt_start_wall=_attempt_start_wall,
+        poll_timeout=CONVERT_TIMEOUT,
+        poll_interval=CONVERT_POLL_INTERVAL,
+        stall_threshold=idle_threshold,
+        startup_grace=None,
+        rescue_stranded_reply_md=False,
+        extra_done_paths=(verification_done_path,),
+    )
+    if not poll_result:
         raise HTTPException(
             status_code=408,
             detail=f"Conversion timed out after {CONVERT_TIMEOUT}s"
         )
 
-    _record_operation_metric("roadmap_generation", datetime.utcnow().timestamp() - op_start, config)
+    _record_operation_metric("roadmap_generation", time.time() - _attempt_start_wall, config)
 
     # Read both contents
     roadmap_draft_path = idea_dir / "roadmap_draft.md"
@@ -5523,13 +5575,19 @@ async def post_ideas_fix_roadmap_format(idea_id: str, body: FixRoadmapFormatRequ
     where content is passed directly). Falls back to session.json roadmap_content.
 
     Injects the format-correction skill, sends a webhook to the roadmap-converter
-    agent, polls for roadmap_draft.done (``FORMAT_CORRECTION_POLL_INTERVAL`` s
-    interval, up to ``FORMAT_CORRECTION_TIMEOUT`` s), reads the corrected content,
-    stores it in session.json, and returns it.
+    agent, then waits via the shared idle-detection poll
+    (``_poll_sentinel_with_idle_detect`` on ``prd_creator_activity.stamp``):
+    ``ideas_idle_threshold`` stall window, ``FORMAT_CORRECTION_TIMEOUT`` infra
+    backstop. The malformed input is pre-written to ``roadmap_draft.md``, so the
+    stranded-``.md`` rescue is disabled (``rescue_stranded_reply_md=False``) —
+    completion hinges on ``roadmap_draft.done``. On success it reads the corrected
+    content and stores it in session.json. On a 408 the corrected roadmap is
+    salvaged on the next ``GET /session`` and the frontend recovery poll picks it
+    up, so a slow correction's output is never lost.
 
     Returns 404 if the idea is not found or session.json is missing.
     Returns 422 if no roadmap content is available to correct.
-    Returns 408 if polling times out.
+    Returns 408 on a stall or the infra backstop (the frontend then recovers).
     Returns 200 with {"roadmap_content": str} on success.
     """
     config = load_config()
@@ -5593,28 +5651,40 @@ async def post_ideas_fix_roadmap_format(idea_id: str, body: FixRoadmapFormatRequ
     }
 
     # Send webhook POST
-    op_start = datetime.utcnow().timestamp()
+    _attempt_start_wall = time.time()
     headers = {"Authorization": f"Bearer {hooks_token}"}
     async with aiohttp.ClientSession() as session:
         resp = await session.post(hooks_url, json=webhook_payload, headers=headers)
         if resp.status >= 400:
             raise HTTPException(status_code=502, detail=f"Webhook returned {resp.status}")
 
-    # Poll for roadmap_draft.done (mtime must be from this attempt — same as PRD convert).
-    poll_started = time.time()
-    deadline = poll_started + FORMAT_CORRECTION_TIMEOUT
-
-    while time.time() < deadline:
-        if _idea_roadmap_done_sentinel_fresh(done_path, poll_started):
-            break
-        await asyncio.sleep(FORMAT_CORRECTION_POLL_INTERVAL)
-    else:
+    # Idle-detection poll on the shared activity stamp — same machinery as the
+    # chat send. ``roadmap_draft.md`` is server-pre-written above, so the
+    # stranded-``.md`` rescue is disabled (``rescue_stranded_reply_md=False``);
+    # completion hinges on ``roadmap_draft.done``. ``startup_grace=None`` waits
+    # for a definitive stall/backstop verdict rather than fast-failing a slow
+    # cold start. A late ``.done`` after a stall/backstop is salvaged on
+    # GET /session (``_merge_roadmap_draft_into_session_data``) and surfaced by
+    # the frontend recovery poll, so output generated late is never lost.
+    idle_threshold = float(config.get("ideas_idle_threshold", 300))
+    poll_result = await _poll_sentinel_with_idle_detect(
+        done_path=done_path,
+        stamp_path=idea_dir / "prd_creator_activity.stamp",
+        attempt_start_wall=_attempt_start_wall,
+        poll_timeout=FORMAT_CORRECTION_TIMEOUT,
+        poll_interval=FORMAT_CORRECTION_POLL_INTERVAL,
+        stall_threshold=idle_threshold,
+        startup_grace=None,
+        rescue_stranded_reply_md=False,
+    )
+    if not poll_result:
+        _reason = getattr(poll_result, "reason", None) or "timeout"
         raise HTTPException(
             status_code=408,
-            detail=f"Format correction timed out after {FORMAT_CORRECTION_TIMEOUT}s",
+            detail=f"Format correction {_reason} after {FORMAT_CORRECTION_TIMEOUT}s",
         )
 
-    _record_operation_metric("format_correction", datetime.utcnow().timestamp() - op_start, config)
+    _record_operation_metric("format_correction", time.time() - _attempt_start_wall, config)
 
     # Read corrected roadmap
     corrected_content = roadmap_draft_path.read_text() if roadmap_draft_path.exists() else roadmap_content
@@ -5853,8 +5923,6 @@ _BV_SUBBULLET_LABELS = {
     "how_to_check": "How we'll check",
     "failure_language": "If this fails, the user sees",
 }
-# Scan window for the block after each phase header (P0 §2.2: "within 30 lines").
-_BV_SEARCH_WINDOW = 30
 
 
 def _validate_roadmap_content(content: str) -> dict:
@@ -5863,9 +5931,10 @@ def _validate_roadmap_content(content: str) -> dict:
     Checks:
     1. Phase lines match the required format.
     2. Each phase has a '> Test:' line within 10 lines.
-    3. Each phase has a Behavioral Verification block within 30 lines, with
-       three sub-bullets (User-observable / How we'll check / If this fails,
-       the user sees), each non-empty. Strict — no opt-out per P0 §2.9.
+    3. Each phase has a Behavioral Verification block within its own section
+       (phase header → next phase header / EOF), with three sub-bullets
+       (User-observable / How we'll check / If this fails, the user sees), each
+       non-empty. Strict — no opt-out per P0 §2.9.
     4. No duplicate phase IDs.
     5. At least one phase line exists.
 
@@ -5903,12 +5972,23 @@ def _validate_roadmap_content(content: str) -> dict:
                 "message": f"Phase {phase_id} (line {line_num}) is missing a '> Test:' line",
             })
 
-    # Check Behavioral Verification block + its three sub-bullets within
-    # _BV_SEARCH_WINDOW lines of each phase header. Strict per §2.9.
-    for line_num, phase_id, line_content in phase_matches:
-        window_end = min(line_num + _BV_SEARCH_WINDOW, len(lines))
+    # Check the Behavioral Verification block + its three sub-bullets within each
+    # phase's own section (phase header → next phase header, or EOF for the last
+    # phase). The block is canonically the LAST element of a phase (after
+    # Entry/Exit/TDD/Done Criteria — see roadmap-generation SKILL.md), so its
+    # distance from the header scales with the phase's length; bounding by the
+    # phase section (not a fixed line window) accepts a complete block at any depth
+    # while still rejecting a missing/incomplete one, and prevents a neighbouring
+    # phase's block from satisfying this one. Strict per §2.9.
+    phase_start_lines = [pm[0] for pm in phase_matches]
+    for idx, (line_num, phase_id, line_content) in enumerate(phase_matches):
+        section_end = (
+            phase_start_lines[idx + 1] - 1
+            if idx + 1 < len(phase_start_lines)
+            else len(lines)
+        )
         block_line = None
-        for j in range(line_num, window_end + 1):
+        for j in range(line_num, section_end + 1):
             if _BV_BLOCK_HEADER_RE.match(lines[j - 1]):
                 block_line = j
                 break
@@ -5922,14 +6002,8 @@ def _validate_roadmap_content(content: str) -> dict:
                 ),
             })
             continue
-        # Scan the body after the block header (until next phase header or window end).
-        body_end = window_end
-        for j in range(block_line + 1, len(lines) + 1):
-            if _PHASE_LINE_RE.match(lines[j - 1]):
-                body_end = j - 1
-                break
         found = {key: False for key in _BV_SUBBULLETS}
-        for j in range(block_line + 1, body_end + 1):
+        for j in range(block_line + 1, section_end + 1):
             for key, pat in _BV_SUBBULLETS.items():
                 m = pat.match(lines[j - 1])
                 if m and m.group(1).strip():

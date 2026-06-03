@@ -377,6 +377,183 @@ class TestPollSentinelStampDetect:
             "(the definitive signal), not fire the premature no_first_activity check"
         )
 
+    # ── opt-out of the stranded-.md rescue (Phase A) ─────────────────────────
+    #
+    # The rescue surfaces ``done_path.with_suffix(".md")`` when the agent wrote
+    # the reply but never the ``.done`` sentinel. It is valid ONLY when the
+    # ``.md`` is authored solely by the agent (the chat ``turns/{n}.md``). The
+    # roadmap flows PRE-WRITE ``roadmap_draft.md`` (server-co-authored), so they
+    # pass ``rescue_stranded_reply_md=False`` to avoid surfacing that pre-write
+    # as a completed reply.
+
+    def test_rescue_default_true_surfaces_fresh_md_on_stall(self, tmp_path):
+        """Default (rescue on): a fresh stranded ``.md`` at the stall exit → ``succeeded``.
+
+        Pins the chat-path behavior the chat send relies on (it passes no
+        opt-out): the agent wrote ``turns/{n}.md`` then went silent without the
+        sentinel; because that ``.md`` is agent-authored, surfacing it is right.
+        Backward-compat guard for the new default-True parameter.
+        """
+        poll = _get_poll()
+        done = tmp_path / "1.done"
+        (tmp_path / "1.md").write_text("the agent reply")  # fresh stranded reply
+        stamp = tmp_path / "prd_creator_activity.stamp"
+
+        attempt_start = time.time() - 10.0
+        _touch_stamp(stamp, mtime=attempt_start + 0.1)  # fresh for attempt, now-silent
+
+        result = self._run(
+            poll(
+                done_path=done,
+                stamp_path=stamp,
+                attempt_start_wall=attempt_start,
+                poll_timeout=900.0,
+                poll_interval=0.01,
+                stall_threshold=1.0,
+                startup_grace=600.0,
+            )
+        )
+        assert result.reason == "succeeded"
+        assert bool(result) is True
+
+    def test_rescue_disabled_returns_stalled_even_with_fresh_md(self, tmp_path):
+        """``rescue_stranded_reply_md=False``: a fresh ``.md`` must NOT mask a stall.
+
+        Format-correction pre-writes the MALFORMED ``roadmap_draft.md`` before
+        the agent runs, so the sibling-``.md`` heuristic is unsafe — surfacing it
+        would return the uncorrected roadmap as success. With the opt-out the
+        poll reports the genuine ``stalled`` instead.
+        """
+        poll = _get_poll()
+        done = tmp_path / "roadmap_draft.done"
+        (tmp_path / "roadmap_draft.md").write_text("PRE-WRITTEN MALFORMED INPUT")
+        stamp = tmp_path / "prd_creator_activity.stamp"
+
+        attempt_start = time.time() - 10.0
+        _touch_stamp(stamp, mtime=attempt_start + 0.1)
+
+        result = self._run(
+            poll(
+                done_path=done,
+                stamp_path=stamp,
+                attempt_start_wall=attempt_start,
+                poll_timeout=900.0,
+                poll_interval=0.01,
+                stall_threshold=1.0,
+                startup_grace=600.0,
+                rescue_stranded_reply_md=False,
+            )
+        )
+        assert result.success is False
+        assert result.reason == "stalled", (
+            "with rescue disabled, a server-pre-written .md must not be surfaced "
+            "as a completed reply — the poll must report the real stall"
+        )
+
+    def test_rescue_disabled_returns_timeout_even_with_fresh_md(self, tmp_path):
+        """``rescue_stranded_reply_md=False``: a fresh ``.md`` must NOT mask the backstop.
+
+        Same opt-out, exercised at the ``poll_timeout`` exit. Fake monotonic
+        crosses the deadline on the first iteration.
+        """
+        poll = _get_poll()
+        done = tmp_path / "roadmap_draft.done"
+        (tmp_path / "roadmap_draft.md").write_text("PRE-WRITTEN MALFORMED INPUT")
+        stamp = tmp_path / "prd_creator_activity.stamp"
+        _touch_stamp(stamp)  # fresh now
+
+        mono_seq = iter([0.0, 1.0])
+
+        def fake_monotonic():
+            try:
+                return next(mono_seq)
+            except StopIteration:
+                return 100.0
+
+        async def fast_sleep(_interval):
+            return None
+
+        with patch("ui.server.time.monotonic", fake_monotonic):
+            with patch("ui.server.asyncio.sleep", fast_sleep):
+                result = asyncio.run(
+                    poll(
+                        done_path=done,
+                        stamp_path=stamp,
+                        attempt_start_wall=time.time() - 1.0,
+                        poll_timeout=0.5,
+                        poll_interval=0.05,
+                        stall_threshold=600.0,
+                        startup_grace=600.0,
+                        rescue_stranded_reply_md=False,
+                    )
+                )
+        assert result.success is False
+        assert result.reason == "timeout"
+
+    def test_extra_done_paths_require_all_sentinels(self, tmp_path):
+        """``extra_done_paths``: success requires the primary AND every extra ``.done``.
+
+        Convert produces two artefacts (``roadmap_draft`` + ``verification_draft``)
+        and must not report ``succeeded`` until BOTH sentinels exist. Only-primary
+        must NOT short-circuit (runs to the ``timeout`` backstop here); both
+        present succeeds immediately. Pins the dual-artefact contract.
+        """
+        poll = _get_poll()
+        primary = tmp_path / "roadmap_draft.done"
+        extra = tmp_path / "verification_draft.done"
+        stamp = tmp_path / "prd_creator_activity.stamp"
+        _touch_stamp(stamp)  # fresh now (neither no_first_activity nor stalled)
+
+        # Only the primary exists → must not succeed; drive to timeout backstop.
+        primary.write_text("done")
+        mono_seq = iter([0.0, 1.0])
+
+        def fake_monotonic():
+            try:
+                return next(mono_seq)
+            except StopIteration:
+                return 100.0
+
+        async def fast_sleep(_interval):
+            return None
+
+        with patch("ui.server.time.monotonic", fake_monotonic):
+            with patch("ui.server.asyncio.sleep", fast_sleep):
+                only_primary = asyncio.run(
+                    poll(
+                        done_path=primary,
+                        stamp_path=stamp,
+                        attempt_start_wall=time.time() - 1.0,
+                        poll_timeout=0.5,
+                        poll_interval=0.05,
+                        stall_threshold=600.0,
+                        startup_grace=600.0,
+                        extra_done_paths=(extra,),
+                        rescue_stranded_reply_md=False,
+                    )
+                )
+        assert only_primary.reason == "timeout", (
+            "missing verification_draft.done must block the success short-circuit"
+        )
+
+        # Both present → immediate success.
+        extra.write_text("done")
+        both = self._run(
+            poll(
+                done_path=primary,
+                stamp_path=stamp,
+                attempt_start_wall=time.time(),
+                poll_timeout=5.0,
+                poll_interval=0.05,
+                stall_threshold=120.0,
+                startup_grace=2.0,
+                extra_done_paths=(extra,),
+                rescue_stranded_reply_md=False,
+            )
+        )
+        assert both.reason == "succeeded"
+        assert bool(both) is True
+
 
 def test_ideas_poll_defaults_accommodate_thorough_prd_drafts():
     """Production defaults must exceed the longest legitimate single model call.

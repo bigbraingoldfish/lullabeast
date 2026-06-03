@@ -192,3 +192,38 @@ class TestFormatCorrectionEndpointSmoke:
         # Independent confirmation: the corrected content really would fail validation.
         validation = _validate_roadmap_content(body["roadmap_content"])
         assert validation["valid"] is False
+
+    def test_fix_roadmap_format_408_on_stall_does_not_surface_prewritten_malformed(self):
+        """A genuine stall returns 408 and does NOT surface the pre-written malformed roadmap.
+
+        The endpoint pre-writes the malformed input to ``roadmap_draft.md``
+        before invoking the agent. If the idle-detection poll stalls (agent
+        active then silent, no ``.done``), the endpoint must 408 — NOT read
+        ``roadmap_draft.md`` back as a "corrected" result, and must not mutate
+        ``session.json``. Regression guard for the ``rescue_stranded_reply_md``
+        opt-out: without it the helper's sibling-``.md`` rescue would surface the
+        server-pre-written malformed roadmap as a successful correction.
+        """
+        from autodev.pipeline.sentinel_poller import PollResult
+
+        client = _load_client()
+        idea_dir = self._write_session("fix-stall", roadmap_content=_PRE_P0_ROADMAP_FIXTURE)
+        mock_cls, _ = self._make_mock_aiohttp()
+
+        with patch("ui.server.load_config", return_value=self._mock_config()), \
+             patch("ui.server.aiohttp.ClientSession", mock_cls), \
+             patch("ui.server._inject_converter_skill"), \
+             patch(
+                 "ui.server._poll_sentinel_with_idle_detect",
+                 AsyncMock(return_value=PollResult(False, "stalled")),
+             ):
+            r = client.post("/api/ideas/fix-stall/fix-roadmap-format")
+
+        assert r.status_code == 408, f"a stall must 408; got {r.status_code} body={r.text}"
+        assert "stalled" in r.text, "the 408 detail should carry the poll reason"
+        # session.json roadmap_content must NOT have been overwritten with the
+        # pre-written malformed input as if it were a successful correction.
+        session = json.loads((idea_dir / "session.json").read_text())
+        assert session.get("roadmap_content") == _PRE_P0_ROADMAP_FIXTURE, (
+            "a stalled correction must not mutate session roadmap_content"
+        )

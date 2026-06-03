@@ -25,7 +25,6 @@ import {
   isIdeasSession,
   isPipelineSession,
   PIPELINE_AGENT_IDS,
-  PRD_CREATOR_AGENT_ID,
   parsePipelineAgentIdFromSessionKey,
   resolveArtifactsDir,
   resolveIdeasRootFromWorkspace,
@@ -73,7 +72,16 @@ export function recordPipelineActivity(
     }
   }
 
-  if (agentId === PRD_CREATOR_AGENT_ID && isIdeasSession(sessionKey)) {
+  // Ideas branch — gate on the session-key namespace ALONE, not a specific
+  // agentId. Ideas sessions run as either prd-creator (chat / readiness /
+  // clarity) OR roadmap-converter (convert / format-correction); both must
+  // refresh prd_creator_activity.stamp so the UI server's idle-detection poll
+  // (`_poll_sentinel_with_idle_detect`) works for every one-click flow. The
+  // agent-event-stream path below already gates only on `isIdeasSession`; this
+  // keeps the typed-hook path symmetric — it previously required prd-creator and
+  // silently skipped the roadmap-converter convert/format-correction sessions,
+  // leaving their idle detection dependent on the event-stream path alone.
+  if (isIdeasSession(sessionKey)) {
     const key = sessionKey as string;
     const ideaId = extractIdeasIdFromSessionKey(key);
     if (!ideaId) return;
