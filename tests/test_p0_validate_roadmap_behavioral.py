@@ -1,8 +1,9 @@
 """Tests for the Behavioral Verification extension to _validate_roadmap_content (Stage C).
 
 Every phase in the roadmap must declare a Behavioral Verification block within
-30 lines of its checkbox header. The block has exactly three sub-bullets, in
-any order, each with non-empty body. Strict from day one — no legacy opt-out.
+its own section (from the phase header up to the next phase header, or EOF for
+the last phase). The block has exactly three sub-bullets, in any order, each
+with non-empty body. Strict from day one — no legacy opt-out.
 """
 
 import inspect
@@ -39,20 +40,45 @@ class TestBehavioralPresent:
         assert result["valid"] is True, f"Expected valid; errors: {result['errors']}"
         assert result["errors"] == []
 
-    def test_block_within_30_lines_accepted(self):
-        """Block 25 lines after phase header is still found (within the 30-line window)."""
+    def test_block_deep_in_phase_accepted(self):
+        """Block 20+ lines after the header is still found — it lives within the
+        phase's own section. The BV block is canonically last (after Entry/Exit/
+        TDD/Done Criteria), so its depth scales with the phase's length."""
         filler = "\n".join(["  > Note: filler"] * 20)
         content = PHASE_LINE + "\n" + TEST_LINE + "\n" + filler + "\n" + BEHAVIORAL_BLOCK
         result = _validate_roadmap_content(content)
         assert result["valid"] is True, f"Expected valid; errors: {result['errors']}"
 
-    def test_block_beyond_30_lines_fails(self):
-        """Block placed past the 30-line window is missed and fails."""
-        filler = "\n".join(["  > Note: filler"] * 31)
+    def test_block_far_beyond_old_window_still_accepted_within_phase(self):
+        """A complete block far below the header (well past the retired 30-line
+        window) is accepted as long as it is within the phase's own section — the
+        canonical 'BV block last' structure on a phase with a long Done-Criteria
+        list (the live Tick-Tac-Toe TEST-E1 case). Validation is phase-bounded,
+        not line-count-bounded."""
+        filler = "\n".join(["  - [ ] done criterion"] * 40)
         content = PHASE_LINE + "\n" + TEST_LINE + "\n" + filler + "\n" + BEHAVIORAL_BLOCK
         result = _validate_roadmap_content(content)
-        assert result["valid"] is False
-        assert any("Behavioral Verification" in e["message"] for e in result["errors"])
+        assert result["valid"] is True, f"Expected valid; errors: {result['errors']}"
+
+    def test_block_in_next_phase_not_borrowed_for_prior_phase(self):
+        """Phase-boundary guard: a BV block belonging to the NEXT phase must not
+        satisfy the prior phase. UI-E1 has no block of its own; the immediately
+        following UI-E2 does — UI-E1 must still fail. The search is bounded by the
+        phase section, so a neighbour's block a few lines away can't be borrowed."""
+        second = "- [ ] `UI-E2` | LOW | Second screen"
+        second_test = "  > Test: Second screen renders."
+        content = (
+            PHASE_LINE + "\n" + TEST_LINE + "\n\n"
+            + second + "\n" + second_test + "\n" + BEHAVIORAL_BLOCK
+        )
+        result = _validate_roadmap_content(content)
+        assert result["valid"] is False, (
+            "UI-E1 has no BV block in its own section; UI-E2's block must not count"
+        )
+        assert any(
+            "UI-E1" in e["message"] and "Behavioral Verification" in e["message"]
+            for e in result["errors"]
+        ), f"expected a missing-BV error for UI-E1; got {result['errors']}"
 
     def test_subbullets_in_any_order_accepted(self):
         """Sub-bullets do not need to appear in a fixed order."""

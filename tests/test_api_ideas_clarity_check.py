@@ -111,33 +111,26 @@ class TestClarityCheckSuccess:
 
 
 class TestClarityCheckTimeout:
-    """pass_criteria: POST /api/ideas/{id}/clarity-check returns 504 when
-    clarity_result.done is not created within 60 seconds."""
+    """pass_criteria: POST /api/ideas/{id}/clarity-check returns 504 when the
+    idle-detection poll reports a non-success verdict (stall or infra backstop).
+
+    The endpoint now polls via the shared ``_poll_sentinel_with_idle_detect``
+    (same machinery as the chat send) instead of a 60 s ``datetime`` deadline
+    loop, so the timeout contract is exercised by patching that helper to return
+    a failing ``PollResult`` — no Path-interception gymnastics required.
+    """
 
     def test_returns_504_on_timeout(self, ideas_dir, idea_with_prd):
-        """Returns 504 when clarity_result.done is not created within 60 seconds.
+        from autodev.pipeline.sentinel_poller import PollResult
 
-        Patches done_path.exists() to always return False via a targeted mock so
-        other Path.exists() calls (session_path, etc.) are unaffected.
-        """
         async def mock_post(*args, **kwargs):
             return MagicMock(status=200)
 
-        async def fast_sleep(duration):
-            # No-op: returns immediately so the deadline-driven while loop
-            # runs without real delay and triggers the 60s timeout path.
-            return
-
-        done_path_real = ideas_dir / idea_with_prd / "clarity_result.done"
-        done_path_mock = MagicMock(spec=Path)
-        done_path_mock.exists = lambda: False
-        done_path_mock.__truediv__ = done_path_real.__truediv__
-
-        # Session path is real — must exist for the endpoint to read prd_content
-        session_path_real = ideas_dir / idea_with_prd / "session.json"
-
         with patch("ui.server.load_config") as mock_config, \
-             patch("ui.server.asyncio.sleep", new=fast_sleep):
+             patch(
+                 "ui.server._poll_sentinel_with_idle_detect",
+                 AsyncMock(return_value=PollResult(False, "timeout")),
+             ):
 
             mock_config.return_value = {
                 "ideas_dir": str(ideas_dir),
@@ -145,21 +138,33 @@ class TestClarityCheckTimeout:
                 "hooks_token": "secret",
             }
 
-            # Intercept Path() calls — return done_path_mock only for the done_path,
-            # real paths for everything else
-            original_path_new = Path.__new__
-
-            def fake_path_new(cls, *args, **kwargs):
-                if args and "clarity_result.done" in str(args[0]):
-                    return done_path_mock
-                return original_path_new(cls, *args, **kwargs)
-
-            with patch.object(Path, "__new__", new=fake_path_new):
-                with patch("aiohttp.ClientSession.post", new=mock_post):
-                    response = client.post(f"/api/ideas/{idea_with_prd}/clarity-check")
+            with patch("aiohttp.ClientSession.post", new=mock_post):
+                response = client.post(f"/api/ideas/{idea_with_prd}/clarity-check")
 
         assert response.status_code == 504
         assert "timed out" in response.json()["detail"]
+
+    def test_returns_504_on_stall(self, ideas_dir, idea_with_prd):
+        """A mid-run stall (agent active then silent) also yields the 504 contract."""
+        from autodev.pipeline.sentinel_poller import PollResult
+
+        async def mock_post(*args, **kwargs):
+            return MagicMock(status=200)
+
+        with patch("ui.server.load_config") as mock_config, \
+             patch(
+                 "ui.server._poll_sentinel_with_idle_detect",
+                 AsyncMock(return_value=PollResult(False, "stalled")),
+             ):
+            mock_config.return_value = {
+                "ideas_dir": str(ideas_dir),
+                "hooks_url": "http://localhost:18789/hooks/agent",
+                "hooks_token": "secret",
+            }
+            with patch("aiohttp.ClientSession.post", new=mock_post):
+                response = client.post(f"/api/ideas/{idea_with_prd}/clarity-check")
+
+        assert response.status_code == 504
 
 
 class TestClarityCheckNoPrdContent:

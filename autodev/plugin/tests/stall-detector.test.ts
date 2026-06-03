@@ -375,7 +375,15 @@ test("prd-creator writes ideas stamp for ideas:convert key shape", () => {
   }
 });
 
-test("non-prd-creator does not write ideas stamp even for ideas session key", () => {
+test("roadmap-converter writes the ideas chat stamp for an ideas convert key (typed-hook symmetry)", () => {
+  // The convert / format-correction flows run as the ``roadmap-converter``
+  // agent, not prd-creator. The typed-hook path previously required
+  // ``agentId === "prd-creator"`` and so SKIPPED these sessions — leaving their
+  // idle detection dependent on the agent-event-stream path alone. The Ideas
+  // branch now gates on the session-key namespace (``isIdeasSession``) only, so
+  // roadmap-converter refreshes ``prd_creator_activity.stamp`` too. This is the
+  // inversion of the prior "non-prd-creator does not write" test, which pinned
+  // the asymmetry we are deliberately removing.
   const tmpDir = makeTmpDir();
   const openclawRoot = path.join(tmpDir, "openclaw");
   const workspaceDir = path.join(openclawRoot, "workspace-roadmap-converter");
@@ -388,7 +396,34 @@ test("non-prd-creator does not write ideas stamp even for ideas session key", ()
       sessionKey: "ideas:z:convert-1",
       workspaceDir,
     });
-    assert.equal(fs.existsSync(stampPath), false);
+    assert.equal(
+      fs.existsSync(stampPath),
+      true,
+      "roadmap-converter must refresh the ideas chat stamp so the UI " +
+        "idle-detection poll works for convert/format-correction",
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("roadmap-converter writes the ideas stamp for the production agent:-prefixed format-correction key", () => {
+  // Same fix must cover the gateway-normalised ``agent:{role}:`` prefix and the
+  // format-correction session shape (the user's reported flow).
+  const tmpDir = makeTmpDir();
+  const openclawRoot = path.join(tmpDir, "openclaw");
+  const workspaceDir = path.join(openclawRoot, "workspace-roadmap-converter");
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  const ideaId = "fmt-idea";
+  const stampPath = path.join(openclawRoot, "ideas", ideaId, "prd_creator_activity.stamp");
+
+  try {
+    recordPipelineActivity({
+      agentId: "roadmap-converter",
+      sessionKey: `agent:roadmap-converter:ideas:${ideaId}:format-correction-1700000000001`,
+      workspaceDir,
+    });
+    assert.equal(fs.existsSync(stampPath), true);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

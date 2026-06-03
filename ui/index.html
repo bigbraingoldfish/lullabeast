@@ -4818,7 +4818,7 @@
                 }
             };
 
-            const startRoadmapRecoverPoll = (ideaId) => {
+            const startRoadmapRecoverPoll = (ideaId, onRecovered) => {
                 stopRoadmapRecoverPoll();
                 if (!ideaId) return;
                 const pollOnce = () => {
@@ -4833,6 +4833,10 @@
                                 setConvertError("");
                                 refreshIdeas();
                                 stopRoadmapRecoverPoll();
+                                // Optional caller hook (format-correction): continue
+                                // setup with the FRESH recovered roadmap, since the
+                                // setRoadmapContent above has not flushed to state yet.
+                                if (onRecovered) onRecovered(d.roadmap_content || "");
                             }
                         })
                         .catch(() => {});
@@ -5494,7 +5498,7 @@
                 const MIN_ROADMAP_GENERATING_UI_MS = 1500;
                 fetch(`/api/ideas/${ideaId}/convert`, { method: "POST" })
                     .then((r) => {
-                        if (!r.ok) return r.text().then((t) => { throw new Error(t); });
+                        if (!r.ok) return r.text().then((t) => { const e = new Error(t); e.status = r.status; throw e; });
                         return r.json();
                     })
                     .then((d) => {
@@ -5519,6 +5523,7 @@
                         setConvertError(msg);
                         setConvertLoading(false);
                         if (
+                            e.status === 408 ||
                             msg.includes("Conversion timed out") ||
                             msg.includes("timed out") ||
                             msg.includes("408")
@@ -5542,8 +5547,12 @@
             const _roadmapBehindPrdStorageKey = (ideaId) =>
                 `${ROADMAP_BEHIND_PRD_DISMISS_PREFIX}${ideaId}`;
 
-            const _continueSetupAfterStalenessOk = () => {
-                const rm = roadmapContent || "";
+            const _continueSetupAfterStalenessOk = (contentOverride) => {
+                // Honor contentOverride only when it's a string. The "Continue to
+                // Setup" button is wired onClick={continueSetup}, so React passes a
+                // SyntheticEvent as the first arg — a `!= null` check would treat that
+                // event object as a roadmap override and throw in rm.includes(...).
+                const rm = (typeof contentOverride === "string" ? contentOverride : roadmapContent) || "";
                 if (rm.includes("Transformation Aborted")) {
                     setFormatInvalidDetail(
                         "The roadmap contains a 'Transformation Aborted' phase and cannot be used for setup. Generate a valid roadmap first.",
@@ -5583,8 +5592,12 @@
                     });
             };
 
-            const continueSetup = () => {
-                const rm = roadmapContent || "";
+            const continueSetup = (contentOverride) => {
+                // Honor contentOverride only when it's a string. The "Continue to
+                // Setup" button is wired onClick={continueSetup}, so React passes a
+                // SyntheticEvent as the first arg — a `!= null` check would treat that
+                // event object as a roadmap override and throw in rm.includes(...).
+                const rm = (typeof contentOverride === "string" ? contentOverride : roadmapContent) || "";
                 if (rm.includes("Transformation Aborted")) {
                     setFormatInvalidDetail(
                         "The roadmap contains a 'Transformation Aborted' phase and cannot be used for setup. Generate a valid roadmap first.",
@@ -5593,7 +5606,7 @@
                     return;
                 }
                 if (!currentIdeaId) {
-                    _continueSetupAfterStalenessOk();
+                    _continueSetupAfterStalenessOk(contentOverride);
                     return;
                 }
                 setContinueNavPending(true);
@@ -5607,7 +5620,7 @@
                         }
                         if (!r.ok) {
                             setContinueNavPending(false);
-                            _continueSetupAfterStalenessOk();
+                            _continueSetupAfterStalenessOk(contentOverride);
                             return;
                         }
                         if (
@@ -5629,7 +5642,7 @@
                             }
                             if (dismissed) {
                                 setContinueNavPending(false);
-                                _continueSetupAfterStalenessOk();
+                                _continueSetupAfterStalenessOk(contentOverride);
                                 return;
                             }
                             setRoadmapBehindPrdMeta({
@@ -5641,24 +5654,25 @@
                             return;
                         }
                         setContinueNavPending(false);
-                        _continueSetupAfterStalenessOk();
+                        _continueSetupAfterStalenessOk(contentOverride);
                     })
                     .catch(() => {
                         setContinueNavPending(false);
-                        _continueSetupAfterStalenessOk();
+                        _continueSetupAfterStalenessOk(contentOverride);
                     });
             };
 
             const doFixRoadmapFormat = () => {
                 if (!currentIdeaId) return;
+                const ideaId = currentIdeaId;
                 setFixFormatLoading(true);
-                fetch(`/api/ideas/${currentIdeaId}/fix-roadmap-format`, {
+                fetch(`/api/ideas/${ideaId}/fix-roadmap-format`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ roadmap_content: roadmapContent }),
                 })
                     .then((r) => {
-                        if (!r.ok) return r.text().then((t) => { throw new Error(t); });
+                        if (!r.ok) return r.text().then((t) => { const e = new Error(t); e.status = r.status; throw e; });
                         return r.json();
                     })
                     .then((d) => {
@@ -5666,12 +5680,26 @@
                         setShowFormatInvalidModal(false);
                         if (d.roadmap_content) {
                             setRoadmapContent(d.roadmap_content);
-                            continueSetup();
+                            // Pass the fresh content explicitly — setRoadmapContent
+                            // has not flushed to state yet this tick.
+                            continueSetup(d.roadmap_content);
                         }
                     })
                     .catch((e) => {
                         setFixFormatLoading(false);
-                        setFormatInvalidDetail(`Fix Format failed: ${e.message || e}`);
+                        // 408 = the correction is slow but still running (the agent
+                        // is a different, slower model than the chat). Keep the modal
+                        // open with a non-blocking notice and pick up the corrected
+                        // roadmap when it lands (mirrors convert's recovery), then
+                        // continue with the FRESH content. Output is never stranded.
+                        if (e && e.status === 408) {
+                            setFormatInvalidDetail(
+                                "Format correction is taking longer than usual — it's still finishing in the background. We'll continue automatically as soon as it's ready.",
+                            );
+                            startRoadmapRecoverPoll(ideaId, (rm) => continueSetup(rm));
+                        } else {
+                            setFormatInvalidDetail(`Fix Format failed: ${e.message || e}`);
+                        }
                     });
             };
 
