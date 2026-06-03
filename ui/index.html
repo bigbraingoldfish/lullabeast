@@ -329,8 +329,8 @@
             ERR_TESTS_FAILING: "Executor Error: tests failed. Discarded work. Attempting retry.",
             ERR_GIT_DIFF_FAILED:
                 "Executor Error: a required Git check could not run in the project. Action required: fix Git in the working tree (corrupt repo, lock, or permissions) — the pipeline will not get past this step until Git commands succeed. Automatic retries alone will not fix a broken repository.",
-            ERR_INFRA_FAILURE:
-                "Reviewer output error: missing or unreadable review file. Retrying or recovering automatically.",
+            ERR_REVIEWER_CONTRACT_FAILURE:
+                "Reviewer produced no usable review output (the session ended without a readable reviewer_output.json). Retrying in a fresh session with a corrective directive.",
             ERR_PROVIDER_REJECTED:
                 "Inference provider rejected the request \u2014 check your API key, credits, or rate limits, then restart the pipeline.",
             ERR_SESSION_DEAD_ON_ARRIVAL:
@@ -661,7 +661,7 @@
             attempt_end: 'One agent attempt finished. Dense summary mirroring the [ATTEMPT_END] log line.',
             abort_attempted: 'Orchestrator called abort_agent_session on the prior session. Detail.result is "ok" or "FAILED".',
             abort_verify_failed: 'Gateway acknowledged the abort but the agent kept refreshing its activity stamp. The orchestrator soft-continues — it launches the next attempt anyway rather than forcing the run to stop and wait for a human.',
-            reviewer_verdict: 'The reviewer-gate dispatch decision. Detail.verdict is PASS / ROUTE_EXECUTOR / ROUTE_PLANNER / ROUTE_ESCALATE / MISSING_ARTIFACTS / INFRA_FAILURE / VISUAL_UNVERIFIED / BEHAVIORAL_UNVERIFIED / REGRESSION_UNVERIFIED.',
+            reviewer_verdict: 'The reviewer-gate dispatch decision. Detail.verdict is PASS / ROUTE_EXECUTOR / ROUTE_PLANNER / ROUTE_ESCALATE / MISSING_ARTIFACTS / CONTRACT_FAILURE / VISUAL_UNVERIFIED / BEHAVIORAL_UNVERIFIED / REGRESSION_UNVERIFIED.',
             stamp_init_failed: 'Could not seed the agent activity stamp — workspace dir is missing or unwritable. Stall detection would be silently disabled; pipeline halts loudly instead.',
             escalation_command_invalid: 'The escalation agent returned an empty or unrecognized resume command. The orchestrator defaulted to STOP (recoverable) instead of a silent dead-end — resume from the escalation panel to continue.',
             // P1 Stage F — advisory reachability events. Hedged copy: operators
@@ -819,7 +819,7 @@
                     if (v === 'ROUTE_PLANNER') return `${passStr}Sending back to planner (attribution: plan)`;
                     if (v === 'ROUTE_ESCALATE') return `${passStr}Escalating to human after repeated rejections`;
                     if (v === 'MISSING_ARTIFACTS') return `${passStr}Required output files missing — re-running executor`;
-                    if (v === 'INFRA_FAILURE') return `${passStr}Reviewer infrastructure failure — retrying`;
+                    if (v === 'CONTRACT_FAILURE') return `${passStr}Reviewer produced no usable output — retrying in a fresh session`;
                     if (v === 'VISUAL_UNVERIFIED') return `${passStr}Visual verification artifacts missing — re-running reviewer`;
                     if (v === 'BEHAVIORAL_UNVERIFIED') return `${passStr}Behavioral verification evidence missing — re-running reviewer`;
                     if (v === 'REGRESSION_UNVERIFIED') return `${passStr}Prior-phase regression check unverified — re-running reviewer`;
@@ -943,8 +943,16 @@
 
         /**
          * L-28 per-slot states: 'neutral' | 'blue' | 'green' | 'red'
+         *
+         * Reviewer contract-failure honesty: a reviewer CONTRACT_FAILURE soft-retry never
+         * increments reviewer_retries, so the reviewer row is folded with
+         * allRetries.reviewerContract (reviewer_contract_retries) into an effective failure
+         * count — otherwise a reviewer that failed to emit a verdict (and then escalated)
+         * would render a green ✓. The fold is gated on revContract > 0, so every existing
+         * attempt-dot path is unchanged when no contract failures occurred.
          * @param {string} agentRole planner|executor|reviewer
          * @param {number|null|undefined} rowRetries failure count for this row
+         * @param {object} allRetries {planner, executor, reviewer, reviewerContract}
          */
         function getAgentAttemptDotStates(agentRole, rowRetries, currentAgent, pipelineStatus, allRetries) {
             const ORDER = ['planner', 'executor', 'reviewer'];
@@ -957,6 +965,17 @@
             const p = Math.min(Math.max(Number(allRetries?.planner) || 0, 0), 3);
             const e = Math.min(Math.max(Number(allRetries?.executor) || 0, 0), 3);
             const rev = Math.min(Math.max(Number(allRetries?.reviewer) || 0, 0), 3);
+            const revContract = Math.min(Math.max(Number(allRetries?.reviewerContract) || 0, 0), 3);
+            // CONTRACT_FAILURE soft-retries never bump reviewer_retries, so without folding
+            // the contract count into the reviewer row's failure tally the row renders a
+            // green ✓ on a contract failure (and on the exhausted-then-escalated case where
+            // reviewer_retries is still 0). Fold it in for the reviewer row only; no-op when
+            // revContract === 0, so every existing attempt-dot path is unchanged when no
+            // contract failures occurred.
+            const revEff = revContract > 0 ? Math.min(rev + revContract, 3) : rev;
+            const rEff = (agentRole === 'reviewer' && revContract > 0)
+                ? Math.min(r + revContract, 3)
+                : r;
 
             const terminalNoBlue = new Set([
                 'STOPPED',
@@ -1016,9 +1035,9 @@
                 }
                 if (agentRole === 'reviewer') {
                     if (p >= 3 || e >= 3) return slotStates();
-                    if (rev >= 3) return threeRed();
-                    if (terminalNoBlue.has(ps)) return activeRow(rev, false);
-                    return completedLeg(rev);
+                    if (revEff >= 3) return threeRed();
+                    if (terminalNoBlue.has(ps)) return activeRow(revEff, false);
+                    return completedLeg(revEff);
                 }
             }
 
@@ -1026,12 +1045,12 @@
 
             if (rowIdx > activeIdx) return slotStates();
 
-            if (rowIdx < activeIdx) return completedLeg(r);
+            if (rowIdx < activeIdx) return completedLeg(rEff);
 
             // rowIdx === activeIdx
-            if (ps === 'WAITING_FOR_HUMAN' && r >= 3) return threeRed();
-            if (!allowBlue) return activeRow(r, false);
-            return activeRow(r, true);
+            if (ps === 'WAITING_FOR_HUMAN' && rEff >= 3) return threeRed();
+            if (!allowBlue) return activeRow(rEff, false);
+            return activeRow(rEff, true);
         }
 
         /**
@@ -1131,13 +1150,16 @@
             return null;
         }
 
-        function AgentAttemptRow({ count, label, agentRole, currentAgent, pipelineStatus, planner_retries, executor_retries, reviewer_retries }) {
+        function AgentAttemptRow({ count, label, agentRole, currentAgent, pipelineStatus, planner_retries, executor_retries, reviewer_retries, reviewer_contract_retries }) {
             const maxSlots = 3;
             if (count === undefined || count === null) return null;
             const allRetries = {
                 planner: planner_retries,
                 executor: executor_retries,
                 reviewer: reviewer_retries,
+                // CONTRACT_FAILURE never bumps reviewer_retries, so the reviewer row would
+                // otherwise render green ✓ on a contract failure / exhausted escalation.
+                reviewerContract: reviewer_contract_retries,
             };
             const states = getAgentAttemptDotStates(agentRole, count, currentAgent, pipelineStatus, allRetries).slice(0, maxSlots);
             const n = computeAgentAttemptFractionN(states);
@@ -2262,6 +2284,7 @@
             planner_retries,
             executor_retries,
             reviewer_retries,
+            reviewer_contract_retries,
             last_action_timestamp,
             sentinel_wait_started_at,
             orchestrator_alive,
@@ -2361,6 +2384,7 @@
                             planner_retries={planner_retries}
                             executor_retries={executor_retries}
                             reviewer_retries={reviewer_retries}
+                            reviewer_contract_retries={reviewer_contract_retries}
                         />
                         <AgentAttemptRow
                             agentRole="executor"
@@ -2371,6 +2395,7 @@
                             planner_retries={planner_retries}
                             executor_retries={executor_retries}
                             reviewer_retries={reviewer_retries}
+                            reviewer_contract_retries={reviewer_contract_retries}
                         />
                         <AgentAttemptRow
                             agentRole="reviewer"
@@ -2381,6 +2406,7 @@
                             planner_retries={planner_retries}
                             executor_retries={executor_retries}
                             reviewer_retries={reviewer_retries}
+                            reviewer_contract_retries={reviewer_contract_retries}
                         />
                     </div>
                 </div>
@@ -8775,6 +8801,7 @@
                 planner_retries: null,
                 executor_retries: null,
                 reviewer_retries: null,
+                reviewer_contract_retries: null,
                 last_action_timestamp: null,
                 sentinel_wait_started_at: null,
                 escalation_trigger_reason: null,
@@ -9476,6 +9503,7 @@
                                 planner_retries={pState.planner_retries}
                                 executor_retries={pState.executor_retries}
                                 reviewer_retries={pState.reviewer_retries}
+                                reviewer_contract_retries={pState.reviewer_contract_retries}
                                 last_action_timestamp={pState.last_action_timestamp}
                                 sentinel_wait_started_at={pState.sentinel_wait_started_at}
                                 orchestrator_alive={alive}

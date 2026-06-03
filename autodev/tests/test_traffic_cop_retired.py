@@ -1,20 +1,19 @@
 """Traffic-cop retirement guards (source-level).
 
-The reviewer ``INFRA_FAILURE`` "model health → SSH recovery" machinery and the
-executor→reviewer ``wait_for_model_stable()`` model-swap wait were retired. The
-pipeline runs all agents on cloud providers (only the escalation agent is
-local), and agent/model liveness is owned by the OpenClaw activity-stamp hooks
-(startup-grace / stall detection in ``poll_for_sentinel``). ``INFRA_FAILURE``
-now collapses to an unconditional soft-retry of the reviewer (cap
-``reviewer_infra_retries``) → escalate ``INFRA_FAILURE_SOFT_RETRY_EXHAUSTED``.
+The reviewer "model health → SSH recovery" machinery and the executor→reviewer
+``wait_for_model_stable()`` model-swap wait were retired. The pipeline runs all
+agents on cloud providers (only the escalation agent is local), and agent/model
+liveness is owned by the OpenClaw activity-stamp hooks (startup-grace / stall
+detection in ``poll_for_sentinel``). The reviewer no-parseable-output branch
+(formerly ``INFRA_FAILURE``, now ``CONTRACT_FAILURE``) collapses to an
+unconditional soft-retry of the reviewer (cap ``reviewer_contract_retries``) →
+escalate ``CONTRACT_FAILURE_SOFT_RETRY_EXHAUSTED``.
 
-Background: a cloud reviewer (``openrouter/...``) emitted malformed JSON →
-``INFRA_FAILURE``; the old handler probed the *local* ``127.0.0.1:11434``
-``/health`` endpoint, got a false "unhealthy" (the real llama host is the
-configured ``llama-local`` baseUrl), took the SSH-recovery branch with empty
-``recovery`` config → ``ssh`` exit 255 → false human escalation, bypassing the
-self-healing soft-retry. Removing the probe + SSH branch makes the soft-retry
-unconditional.
+Background: a cloud reviewer (``openrouter/...``) emitted malformed JSON; the
+old handler probed the *local* ``127.0.0.1:11434`` ``/health`` endpoint, got a
+false "unhealthy", took the SSH-recovery branch with empty ``recovery`` config →
+``ssh`` exit 255 → false human escalation, bypassing the self-healing
+soft-retry. Removing the probe + SSH branch makes the soft-retry unconditional.
 
 These are source-level guards: the in-``run()`` handler is not extractable
 without a refactor, so the repo idiom for pinning it is source inspection
@@ -35,24 +34,24 @@ _ORCH_SRC = open(
 ).read()
 
 
-def _infra_failure_block() -> str:
-    """Return the source slice of the reviewer ``INFRA_FAILURE`` handler.
+def _contract_failure_block() -> str:
+    """Return the source slice of the reviewer ``CONTRACT_FAILURE`` handler.
 
     Bounded by the next reviewer-gate branch, the pooled contract-shape handler
     ``elif gate_result in (`` (VISUAL/BEHAVIORAL/REGRESSION_UNVERIFIED).
     """
-    start = _ORCH_SRC.find('elif gate_result == "INFRA_FAILURE":')
-    assert start != -1, "INFRA_FAILURE handler not found in orchestrator.py"
+    start = _ORCH_SRC.find('elif gate_result == "CONTRACT_FAILURE":')
+    assert start != -1, "CONTRACT_FAILURE handler not found in orchestrator.py"
     end = _ORCH_SRC.find("elif gate_result in (", start)
-    assert end != -1, "could not bound the INFRA_FAILURE block"
+    assert end != -1, "could not bound the CONTRACT_FAILURE block"
     return _ORCH_SRC[start:end]
 
 
 def test_check_traffic_cop_health_removed():
     assert "def check_traffic_cop_health" not in _ORCH_SRC, (
         "check_traffic_cop_health() must be removed — the local /health probe "
-        "false-negatived a cloud reviewer and routed INFRA_FAILURE into a dead-end "
-        "SSH recovery (the svg-pic2/INFRA-E1 false escalation)."
+        "false-negatived a cloud reviewer and routed the no-output branch into a "
+        "dead-end SSH recovery (the svg-pic2/INFRA-E1 false escalation)."
     )
 
 
@@ -66,8 +65,8 @@ def test_wait_for_model_stable_removed():
     )
 
 
-def test_infra_failure_branch_has_no_ssh_recovery():
-    block = _infra_failure_block()
+def test_contract_failure_branch_has_no_ssh_recovery():
+    block = _contract_failure_block()
     for forbidden in (
         "subprocess",
         '"recovery"',
@@ -77,18 +76,20 @@ def test_infra_failure_branch_has_no_ssh_recovery():
         "wait_for_model_stable",
     ):
         assert forbidden not in block, (
-            f"INFRA_FAILURE handler must not contain {forbidden!r} — the SSH "
+            f"CONTRACT_FAILURE handler must not contain {forbidden!r} — the SSH "
             f"recovery / model-health branch was retired."
         )
 
 
-def test_infra_failure_branch_soft_retries():
-    block = _infra_failure_block()
-    assert "reviewer_infra_retries" in block, (
-        "INFRA_FAILURE must self-heal via the reviewer_infra_retries soft-retry counter."
+def test_contract_failure_branch_soft_retries():
+    block = _contract_failure_block()
+    assert "reviewer_contract_retries" in block, (
+        "CONTRACT_FAILURE must self-heal via the reviewer_contract_retries "
+        "soft-retry counter."
     )
-    assert "INFRA_FAILURE_SOFT_RETRY_EXHAUSTED" in block, (
-        "INFRA_FAILURE must escalate with INFRA_FAILURE_SOFT_RETRY_EXHAUSTED at the cap."
+    assert "CONTRACT_FAILURE_SOFT_RETRY_EXHAUSTED" in block, (
+        "CONTRACT_FAILURE must escalate with CONTRACT_FAILURE_SOFT_RETRY_EXHAUSTED "
+        "at the cap."
     )
 
 

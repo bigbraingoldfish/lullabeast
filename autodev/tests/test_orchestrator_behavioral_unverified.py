@@ -86,22 +86,75 @@ def test_behavioral_unverified_uses_pooled_counter_not_per_flavour():
     )
 
 
-def test_unified_handler_writes_unverified_instruction_to_phase_state():
+def test_unified_handler_writes_reviewer_retry_directive_to_phase_state():
     """The handler must persist a remediation instruction so the next reviewer
-    invocation sees what was missing. Stage D renames ``behavioral_instruction``
-    (per-flavour) to ``unverified_instruction`` (pooled) — the per-flavour
-    field is dead behaviour after consolidation."""
+    invocation sees what was missing. The Phase-4 directive-channel unification
+    writes the instruction to the unified ``reviewer_retry_directive`` field
+    (shared with the CONTRACT_FAILURE branch and DELIVERED to the reviewer via
+    the webhook ``message=`` at the invocation site). The old
+    ``unverified_instruction`` field was written but never delivered — a dead
+    write that left these retries blind. It must be gone."""
     window = _unverified_handler_window()
-    assert "unverified_instruction" in window, (
-        "Parameterised handler must write an unverified_instruction field to "
-        "phase_state so the re-invoked reviewer sees what was missing. "
-        "Stage D replaces the per-flavour visual_instruction / "
-        "behavioral_instruction fields with this single pooled field."
+    assert "reviewer_retry_directive" in window, (
+        "Parameterised handler must write the unified reviewer_retry_directive "
+        "field to phase_state so the re-invoked reviewer is actually fed what "
+        "was missing (delivered via message= by _invoke_reviewer)."
+    )
+    assert "unverified_instruction" not in window, (
+        "The dead unverified_instruction field must be gone — it was written to "
+        "phase_state but never delivered to the reviewer (the dead-write bug the "
+        "Phase-4 directive channel retires)."
     )
     assert "behavioral_instruction" not in window, (
         "Per-flavour behavioral_instruction must NOT appear in the consolidated "
-        "handler — it's the dead phase-state field Stage D removes."
+        "handler — it's the dead phase-state field Stage D removed."
     )
+
+
+def test_unverified_directive_delivered_to_reviewer_via_message():
+    """R-C delivery proof for the UNVERIFIED path: a reviewer_retry_directive set by
+    the UNVERIFIED handler must REACH invoke_agent_webhook as ``message=`` on the next
+    reviewer invocation — not merely sit unread in phase_state (the dead-write trap
+    that hid the old unverified_instruction). The delivery seam ``_invoke_reviewer`` is
+    shared with the CONTRACT_FAILURE branch, so this also guards the UNVERIFIED case."""
+    import json
+    import tempfile
+    from unittest.mock import MagicMock, patch
+
+    import orchestrator as orc_module
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ps_path = os.path.join(tmp, "phase_state.json")
+        with open(ps_path, "w") as f:
+            json.dump(
+                {"reviewer_retry_directive": "VISUAL VERIFICATION REQUIRED: ..."}, f
+            )
+
+        with (
+            patch.object(orc_module, "PHASE_STATE_FILE", ps_path),
+            patch.object(orc_module, "SYMLINK_TARGET", tmp),
+        ):
+            from orchestrator import Orchestrator
+
+            orch = Orchestrator.__new__(Orchestrator)
+            orch.lock_fd = None
+            orch.openclaw_config = {"hooks": {"token": "tok"}}
+            orch.state = {"current_phase": 1, "current_phase_raw_id": "UI-1"}
+            orch.write_state = MagicMock()
+            orch.transition_state = MagicMock()
+
+            with patch.object(orc_module, "invoke_agent_webhook") as mock_hook:
+                mock_hook.return_value = "SUCCESS"
+                orch._invoke_reviewer(
+                    "pipeline:phase-1:UI-1:reviewer-attempt-1", "tok"
+                )
+
+        assert mock_hook.called
+        _, kwargs = mock_hook.call_args
+        assert "VISUAL VERIFICATION REQUIRED" in (kwargs.get("message") or ""), (
+            "the UNVERIFIED remediation directive must reach invoke_agent_webhook as "
+            "message=, proving delivery rather than a dead phase_state write"
+        )
 
 
 def test_unified_handler_caps_pooled_counter_at_two_then_escalates():

@@ -325,7 +325,7 @@ class TestVisualVerificationNotRequiredOnNonVisualPhases:
 
 
 class TestVisualVerificationDoesNotBreakExistingChecks:
-    """The new gate logic must not affect existing INFRA_FAILURE / MISSING_ARTIFACTS paths."""
+    """The new gate logic must not affect existing CONTRACT_FAILURE / MISSING_ARTIFACTS paths."""
 
     def test_missing_artifacts_still_takes_precedence(self, tmp_workspace):
         """If phase archive is missing, MISSING_ARTIFACTS wins over visual check."""

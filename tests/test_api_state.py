@@ -843,3 +843,66 @@ class TestMergeProbePassed:
         data = response.json()
         assert "merge_probe_passed" in data
         assert data["merge_probe_passed"] is False
+
+
+class TestGetStateReviewerContractRetries:
+    """Phase 5 (UI attempts honesty): GET /api/state must surface
+    reviewer_contract_retries so the attempt dots can render reviewer contract
+    failures honestly (red), not green. reviewer_retries comes from
+    pipeline_state, but reviewer_contract_retries lives ONLY in phase_state — so
+    without this plumbing the frontend never sees it and a reviewer that failed to
+    emit a verdict (then escalated) renders as a green 'passed' slot."""
+
+    def test_api_state_exposes_reviewer_contract_retries(self, temp_dir):
+        project_root = os.path.join(temp_dir, "pipeline_project")
+        os.makedirs(project_root, exist_ok=True)
+        with open(os.path.join(temp_dir, "pipeline_state.json"), "w") as f:
+            json.dump(
+                {
+                    "pipeline_status": "RUNNING",
+                    "current_agent": "escalation",
+                    "current_phase": 2,
+                    "reviewer_retries": 0,
+                },
+                f,
+            )
+        with open(os.path.join(temp_dir, "phase_state.json"), "w") as f:
+            json.dump({"reviewer_contract_retries": 2, "escalation_resets": 1}, f)
+        cfg = {
+            "pipeline_state_path": os.path.join(temp_dir, "pipeline_state.json"),
+            "phase_state_path": os.path.join(temp_dir, "phase_state.json"),
+            "lock_path": os.path.join(temp_dir, "pipeline.lock"),
+            "events_path": os.path.join(temp_dir, "pipeline_events.jsonl"),
+            "project_dir_path": project_root,
+        }
+        with patch("ui.server.load_config", return_value=cfg):
+            response = client.get("/api/state")
+
+        assert response.status_code == 200
+        assert response.json().get("reviewer_contract_retries") == 2, (
+            "GET /api/state must surface reviewer_contract_retries from phase_state "
+            "so the UI attempt dots can render reviewer contract failures (not green)."
+        )
+
+    def test_api_state_reviewer_contract_retries_defaults_zero(self, temp_dir):
+        """When phase_state has no reviewer_contract_retries, the field defaults to 0
+        (so the UI's gate-on-revContract>0 honesty branch is a no-op — preserving all
+        existing attempt-dot behaviour)."""
+        project_root = os.path.join(temp_dir, "pipeline_project")
+        os.makedirs(project_root, exist_ok=True)
+        with open(os.path.join(temp_dir, "pipeline_state.json"), "w") as f:
+            json.dump({"pipeline_status": "RUNNING", "current_agent": "reviewer"}, f)
+        with open(os.path.join(temp_dir, "phase_state.json"), "w") as f:
+            json.dump({"escalation_resets": 0}, f)
+        cfg = {
+            "pipeline_state_path": os.path.join(temp_dir, "pipeline_state.json"),
+            "phase_state_path": os.path.join(temp_dir, "phase_state.json"),
+            "lock_path": os.path.join(temp_dir, "pipeline.lock"),
+            "events_path": os.path.join(temp_dir, "pipeline_events.jsonl"),
+            "project_dir_path": project_root,
+        }
+        with patch("ui.server.load_config", return_value=cfg):
+            response = client.get("/api/state")
+
+        assert response.status_code == 200
+        assert response.json().get("reviewer_contract_retries") == 0

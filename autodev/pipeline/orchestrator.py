@@ -2251,6 +2251,56 @@ class Orchestrator:
         )
         return True
 
+    def _reviewer_session_key(self, phase, raw_id, reviewer_retries, contract_retries):
+        """Build the reviewer session key for an attempt.
+
+        The base key encodes the code-quality pass (``reviewer-attempt-N``). A
+        CONTRACT_FAILURE soft-retry does NOT bump ``reviewer_retries``, so without a
+        discriminator successive contract retries would reuse one key. Append a
+        ``-c{N}`` suffix only when ``contract_retries > 0`` so each contract retry gets
+        a deterministic, distinct key (the common, non-contract path stays
+        byte-identical to the legacy shape).
+
+        This is hygiene, not a resume fix: the prior reviewer session has already
+        ended (its ``agent_end`` wrote the ``.done`` that brought us to the gate
+        verdict), so a re-invoke starts a fresh session regardless — the suffix just
+        keeps keys distinct and avoids ``sessions.json`` key-collision confusion.
+        """
+        base = f"pipeline:phase-{phase}:{raw_id}:reviewer-attempt-{reviewer_retries + 1}"
+        if contract_retries:
+            base = f"{base}-c{contract_retries}"
+        return base
+
+    def _invoke_reviewer(self, session_key, token):
+        """Invoke the reviewer webhook, delivering a one-shot corrective directive.
+
+        The unified ``reviewer_retry_directive`` phase-state field — written by the
+        CONTRACT_FAILURE branch and the UNVERIFIED handler — carries a concise,
+        self-contained instruction for the *next* reviewer session. Deliver it here as
+        the webhook ``message=`` (overriding the reviewer's default message, which only
+        the prompt can do) and clear it immediately so it is one-shot: a later normal
+        pass must not re-inject a stale directive. When absent, the reviewer receives
+        its default message.
+
+        This is the reviewer's single directive channel — the delivered counterpart of
+        the executor's file-based ``failure_context.json``. Structured data the agent
+        *analyzes* goes in a file (``failure_context.json`` / ``gate_warnings.json``); a
+        one-shot directive that *frames* the invocation goes in ``message=``. (See
+        PIPELINE-SPEC.md §7.)
+        """
+        directive = None
+        try:
+            _ps = self.read_phase_state()
+            directive = _ps.get("reviewer_retry_directive")
+            if directive:
+                _ps.pop("reviewer_retry_directive", None)
+                self.write_phase_state_atomic(_ps)
+        except Exception:
+            directive = None
+        return invoke_agent_webhook(
+            "reviewer", session_key, token, message=directive or None
+        )
+
     # -----------------------------------------------------------------------
     # FIND-PLANNER-PRESERVE: check if valid planner output already exists on disk.
     # Allows restart path to skip re-invocation when output is intact.
@@ -2715,7 +2765,7 @@ class Orchestrator:
                 pass
 
         # Re-initialize phase_state: agent counters → 0, escalation_resets preserved (cap intact).
-        # RR-4 (Phase 2): reviewer_infra_retries is zeroed on phase reset — it is a
+        # RR-4 (Phase 2): reviewer_contract_retries is zeroed on phase reset — it is a
         # per-phase soft-retry budget, not a global cap.
         # RR-2 (Phase 4): planner_output_preserved cleared — new phase, no preserved output.
         # P0 Stage H — reset_phase is the canonical boundary at which the
@@ -2729,7 +2779,7 @@ class Orchestrator:
             "executor_reviewer_rejection_retries": 0,
             "reviewer_retries": 0,
             "reviewer_rejected": False,
-            "reviewer_infra_retries": 0,
+            "reviewer_contract_retries": 0,
             "planner_output_preserved": False,
             "escalation_resets": preserved_escalation_resets,
             # P1 Stage G2 — operator-governance state survives the reset (see docstring).
@@ -2912,7 +2962,7 @@ class Orchestrator:
                 pass
 
         # RR-4 (Phase 2): reset_execution zeros reviewer_retries and reviewer_rejected so
-        # the next reviewer invocation starts at pass 1.  reviewer_infra_retries is NOT
+        # the next reviewer invocation starts at pass 1.  reviewer_contract_retries is NOT
         # zeroed — it survives auto retries and only resets on a full phase reset
         # (reset_phase).  executor_succeeded is cleared because we are re-running
         # execution from scratch.
@@ -4910,7 +4960,11 @@ class Orchestrator:
                     phase = self.state.get("current_phase", 0)
                     raw_id = self.state.get("current_phase_raw_id", "unknown")
                     retries = self.state.get("reviewer_retries", 0)
-                    session_key = f"pipeline:phase-{phase}:{raw_id}:reviewer-attempt-{retries + 1}"
+                    # A CONTRACT_FAILURE soft-retry does not bump reviewer_retries, so
+                    # mix the contract-retry count into the key for a fresh, distinct
+                    # session per contract retry (see _reviewer_session_key).
+                    _contract_retries = self.read_phase_state().get("reviewer_contract_retries", 0)
+                    session_key = self._reviewer_session_key(phase, raw_id, retries, _contract_retries)
                     
                     sentinel_path = os.path.join(PROJECT_ARTIFACTS_DIR, "reviewer_output.done")
                     token = self.openclaw_config.get("hooks", {}).get("token", "")
@@ -4945,7 +4999,10 @@ class Orchestrator:
                         _verify_symlinks_consistent(
                             self.state.get("project_path", ""), self.update_symlink
                         )
-                        webhook_status = invoke_agent_webhook("reviewer", session_key, token)
+                        # _invoke_reviewer delivers (and clears) any one-shot
+                        # reviewer_retry_directive as the webhook message; otherwise the
+                        # reviewer's default message applies.
+                        webhook_status = self._invoke_reviewer(session_key, token)
 
                         if webhook_status != "SUCCESS":
                             self.state["current_agent"] = "escalation"
@@ -5130,7 +5187,7 @@ class Orchestrator:
                         "ROUTE_PLANNER": "planner",
                         "ROUTE_ESCALATE": "escalation",
                         "MISSING_ARTIFACTS": "executor",
-                        "INFRA_FAILURE": "reviewer",
+                        "CONTRACT_FAILURE": "reviewer",
                         "VISUAL_UNVERIFIED": "reviewer",
                         "BEHAVIORAL_UNVERIFIED": "reviewer",
                         "REGRESSION_UNVERIFIED": "reviewer",
@@ -5151,7 +5208,7 @@ class Orchestrator:
                     if gate_result != "PASS":
                         # P0 Stage H — only ROUTE_EXECUTOR creates an executor
                         # retry; other non-PASS verdicts (ROUTE_PLANNER,
-                        # ROUTE_ESCALATE, MISSING_ARTIFACTS, INFRA_FAILURE,
+                        # ROUTE_ESCALATE, MISSING_ARTIFACTS, CONTRACT_FAILURE,
                         # VISUAL_UNVERIFIED, BEHAVIORAL_UNVERIFIED) don't.
                         # retry_class is always present on the event for
                         # schema stability — None when not applicable so the
@@ -5630,31 +5687,52 @@ class Orchestrator:
                         time.sleep(5)
                         continue
 
-                    elif gate_result == "INFRA_FAILURE":
-                        # Infrastructure failure: the reviewer produced no parseable
-                        # output (missing/malformed reviewer_output.json) — NOT a code-
-                        # quality rejection, so reviewer_retries is untouched. Self-heal
-                        # by re-invoking the reviewer in a fresh session (cap
-                        # reviewer_infra_retries); a transient malformed-output fluke
-                        # almost always clears on a clean re-run. Agent/model liveness is
-                        # covered by the OpenClaw activity-stamp hooks (startup-grace /
-                        # stall detection), so no model-health probe is performed.
+                    elif gate_result == "CONTRACT_FAILURE":
+                        # Contract failure: the reviewer session ended without a parseable
+                        # reviewer_output.json (the agent_end backstop wrote .done on a
+                        # give-up OR an abort/crash). NOT a code-quality rejection, so
+                        # reviewer_retries is untouched. Genuine transport/provider
+                        # failures are peeled off upstream (stall / dead-on-arrival /
+                        # provider-rejected); a cheap defensive re-check here catches the
+                        # recognizable-provider-error subset before we treat this as a
+                        # contract breach. Otherwise self-heal: re-invoke the reviewer in a
+                        # FRESH session with a self-contained corrective directive (cap
+                        # reviewer_contract_retries). Recovery is identical for give-up vs
+                        # abort, so the cause is diagnostic-not-routing — no model-health
+                        # probe (agent/model liveness is owned by the activity-stamp hooks).
+                        if self._escalate_if_provider_rejected(_jsonl_path, "Reviewer"):
+                            time.sleep(5)
+                            continue
                         _ps_if = self.read_phase_state()
-                        _infra_soft = _ps_if.get("reviewer_infra_retries", 0) + 1
-                        _ps_if["reviewer_infra_retries"] = _infra_soft
+                        _contract_soft = _ps_if.get("reviewer_contract_retries", 0) + 1
+                        _ps_if["reviewer_contract_retries"] = _contract_soft
+                        if _contract_soft < 3:
+                            # One-shot directive delivered to the fresh reviewer session by
+                            # _invoke_reviewer as the webhook message (overrides the default).
+                            # Self-contained: it must re-assert the inputs to read AND the
+                            # output contract, because it replaces the default message.
+                            _ps_if["reviewer_retry_directive"] = (
+                                "Your previous reviewer session ended without a parseable "
+                                "reviewer_output.json (none written, or missing/malformed). "
+                                "This is a fresh session. Read your standard inputs — "
+                                "pipeline-project/prd.md, pipeline-project/verification.md, and "
+                                "current_phase.json — review the phase, then emit a complete "
+                                "reviewer_output.json, and only then write reviewer_output.done "
+                                "(JSON first, sentinel second)."
+                            )
                         self.write_phase_state_atomic(_ps_if)
-                        print(f"[WARN] Reviewer INFRA_FAILURE — soft retry {_infra_soft}/3.")
-                        if _infra_soft >= 3:
+                        print(f"[WARN] Reviewer CONTRACT_FAILURE — contract retry {_contract_soft}/3.")
+                        if _contract_soft >= 3:
                             self.state["current_agent"] = "escalation"
                             self.transition_state(
                                 "RUNNING",
-                                f"Reviewer INFRA_FAILURE: soft retry cap reached ({_infra_soft}): INFRA_FAILURE_SOFT_RETRY_EXHAUSTED",
+                                f"Reviewer CONTRACT_FAILURE: contract retry cap reached ({_contract_soft}): CONTRACT_FAILURE_SOFT_RETRY_EXHAUSTED — reviewer ended without a verdict (gave up or was cut off)",
                             )
                         else:
                             self.state["current_agent"] = "reviewer"
                             self.transition_state(
                                 "RUNNING",
-                                f"Reviewer INFRA_FAILURE soft retry {_infra_soft} — re-invoking reviewer",
+                                f"Reviewer CONTRACT_FAILURE contract retry {_contract_soft} — re-invoking reviewer with corrective directive",
                             )
                         time.sleep(5)
                         continue
@@ -5673,6 +5751,13 @@ class Orchestrator:
                         # ``reviewer_retries`` budget; a legitimate
                         # ROUTE_EXECUTOR rejection on the following pass is
                         # preserved.
+                        #
+                        # Phase 4: the verdict-specific instruction is written to the
+                        # unified ``reviewer_retry_directive`` field and DELIVERED to the
+                        # next reviewer session by ``_invoke_reviewer`` as the webhook
+                        # message (overriding the default). The prior write-only field
+                        # this replaced was never read or delivered — a dead write that
+                        # left these retries blind.
                         _UNVERIFIED_INSTRUCTIONS = {
                             "VISUAL_UNVERIFIED": (
                                 "VISUAL VERIFICATION REQUIRED: Before writing "
@@ -5713,7 +5798,7 @@ class Orchestrator:
                         _ps_uv = self.read_phase_state()
                         _uv_retries = _ps_uv.get("reviewer_unverified_retries", 0) + 1
                         _ps_uv["reviewer_unverified_retries"] = _uv_retries
-                        _ps_uv["unverified_instruction"] = _UNVERIFIED_INSTRUCTIONS[gate_result]
+                        _ps_uv["reviewer_retry_directive"] = _UNVERIFIED_INSTRUCTIONS[gate_result]
                         self.write_phase_state_atomic(_ps_uv)
                         print(
                             f"[WARN] Reviewer gate: {gate_result} "
