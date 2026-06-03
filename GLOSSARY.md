@@ -42,7 +42,7 @@ Each row in `pipeline_queue.json` has a `state`. Labels below are the queue-only
 
 | `state` (enum) | Typical pill label | Meaning (short) | What clears or advances it |
 | -------------- | -------------------- | --------------- | --------------------------- |
-| `READY` | **READY** | Eligible to run when selected and dependencies met. | **`Run next project`** / auto queue advance; may become `ACTIVE`. |
+| `READY` | **READY** | Eligible to run when selected and dependencies met. | **`Run next project`** / auto queue advance; may become `ACTIVE`. In `queue_mode=auto` with an **idle** pipeline it auto-starts immediately (server `_maybe_autostart_queue`); in manual mode it waits for `Run next project` or the manual→auto toggle. |
 | `ACTIVE` | **ACTIVE** (or live pipeline pill when `live_pipeline_status` set) | This row is the current queue slot for a project path. | Completes to `COMPLETED` / `FAILED`, or demoted when stale. |
 | `BLOCKED` | **QUEUE BLOCKED** | Row blocked (dependency / gate / policy). | Operator fixes underlying issue; may return to `READY` after revalidation. |
 | `SKIPPED_PENDING` | **Preflight failed** | Preflight failed for this path or a cascaded descendant; not removed from queue. | Preflight passes again (often after fixing repo); can return to `READY`. |

@@ -10435,15 +10435,8 @@
                         );
                         return;
                     }
-                    // Auto-trigger if queue is in auto mode and this is the only ready entry
-                    const qr = await fetch('/api/queue').then(r => r.json()).catch(() => ({}));
-                    const entries = qr.queue || [];
-                    const isAuto = qr.queue_mode === 'auto';
-                    const hasActive = entries.some(e => e.state === 'ACTIVE');
-                    const readyCount = entries.filter(e => ['READY','SKIPPED_PENDING'].includes(e.state)).length;
-                    if (isAuto && !hasActive && readyCount === 1) {
-                        await fetch('/api/queue/trigger-next', {method: 'POST'}).catch(() => {});
-                    }
+                    // Auto-start is server-owned: POST /api/queue/add runs _maybe_autostart_queue,
+                    // so an idle auto-mode queue starts the project without a client-side trigger.
                     setCurrentScreen('queue');
                 } finally {
                     setAddToQueueBusy(false);

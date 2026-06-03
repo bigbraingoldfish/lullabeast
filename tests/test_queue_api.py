@@ -106,6 +106,22 @@ def client(tmp_path, monkeypatch):
     return TestClient(app), queue_file, tmp_path
 
 
+@pytest.fixture(autouse=True)
+def _no_real_orchestrator_spawn(monkeypatch):
+    """Belt-and-suspenders for this file's auto-start-opt-in classes: never spawn a REAL
+    orchestrator. ``_spawn_orchestrator`` resolves the real ``OPENCLAW_ROOT`` / pipeline root,
+    so a real spawn would mutate the live ``pipeline_state.json`` and repoint the live
+    ``pipeline-project`` symlink. Stub it by default; tests that assert spawn behavior override
+    this with their own ``monkeypatch.setattr`` (last write wins).
+
+    (The auto-start helper itself is disabled suite-wide by conftest's
+    ``_disable_queue_autostart`` for every class that does not set ``_uses_real_autostart``.)
+    """
+    monkeypatch.setattr(
+        "ui.server._spawn_orchestrator", lambda path, cfg=None: {"ok": True, "error": None}
+    )
+
+
 # ---------------------------------------------------------------------------
 # GET /api/queue
 # ---------------------------------------------------------------------------
@@ -1163,6 +1179,8 @@ class TestPostQueueTriggerNext:
 # ---------------------------------------------------------------------------
 
 class TestPatchQueueMode:
+    _uses_real_autostart = True  # exercises the manual→auto auto-kick via the real helper
+
     def test_sets_manual(self, client):
         c, queue_file, _ = client
         _write_queue(str(queue_file), [], queue_mode="auto")
@@ -1566,3 +1584,279 @@ class TestQueueEntrySnapshotPhaseStatePath:
         resp = c.get(f"/api/queue/{eid}/snapshot")
         assert resp.status_code == 200
         assert resp.json().get("escalation_resets") == 4
+
+
+class TestQueueAutostartOnReady:
+    """queue_mode='auto' + idle pipeline → the three READY-making endpoints
+    (add / parent-clear / revalidate) auto-start the next eligible project via the
+    shared ``_maybe_autostart_queue`` helper. TDD — written before implementation.
+
+    Each test fails against current code because: (a) the endpoints do not expose an
+    ``auto_start`` field, and (b) nothing starts the project when the pipeline is idle.
+    """
+
+    _uses_real_autostart = True  # opt out of the autouse autostart stub — these test it
+
+    @staticmethod
+    def _pass_preflight(monkeypatch):
+        monkeypatch.setattr(
+            "ui.server._run_preflight_checks",
+            lambda p, cfg=None: [{"check": "ok", "status": "pass", "message": "ok"}],
+        )
+
+    @staticmethod
+    def _record_spawn(monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            "ui.server._spawn_orchestrator",
+            lambda path, cfg=None: (calls.append(path) or {"ok": True, "error": None}),
+        )
+        return calls
+
+    @staticmethod
+    def _idle_state(tmp, proj):
+        with open(tmp / "pipeline_state.json", "w") as f:
+            json.dump({"pipeline_status": "PIPELINE_COMPLETE", "project_path": str(proj)}, f)
+
+    # ----------------------------- add -----------------------------
+    def test_add_auto_idle_autostarts(self, client, monkeypatch, tmp_path):
+        c, queue_file, tmp = client
+        proj = tmp_path / "proj"; proj.mkdir()
+        self._idle_state(tmp, proj)
+        self._pass_preflight(monkeypatch)
+        calls = self._record_spawn(monkeypatch)
+        resp = c.post("/api/queue/add", json={"project_path": str(proj)})
+        assert resp.status_code == 200
+        d = resp.json()
+        assert d["auto_start"]["attempted"] is True
+        assert d["auto_start"]["ok"] is True
+        assert d["auto_start"]["started"] == "proj"
+        assert d["state"] == "ACTIVE"          # re-read → truthful post-start state
+        assert "id" in d and "position" in d   # entry fields stay top-level (non-breaking)
+        assert len(calls) == 1
+        with open(queue_file) as f:
+            assert json.load(f)["queue"][0]["state"] == "ACTIVE"
+
+    def test_add_manual_does_not_autostart(self, client, monkeypatch, tmp_path):
+        c, queue_file, tmp = client
+        proj = tmp_path / "proj"; proj.mkdir()
+        _write_queue(str(queue_file), [], queue_mode="manual")
+        self._idle_state(tmp, proj)
+        self._pass_preflight(monkeypatch)
+        calls = self._record_spawn(monkeypatch)
+        resp = c.post("/api/queue/add", json={"project_path": str(proj)})
+        assert resp.status_code == 200
+        assert resp.json()["auto_start"]["attempted"] is False
+        assert resp.json()["auto_start"]["reason"] == "not_auto_mode"
+        assert calls == []
+        with open(queue_file) as f:
+            assert json.load(f)["queue"][0]["state"] == "READY"
+
+    def test_add_auto_skips_when_pipeline_running(self, client, monkeypatch, tmp_path):
+        c, queue_file, tmp = client
+        proj = tmp_path / "proj"; proj.mkdir()
+        with open(tmp / "pipeline_state.json", "w") as f:
+            json.dump({"pipeline_status": "RUNNING"}, f)
+        self._pass_preflight(monkeypatch)
+        calls = self._record_spawn(monkeypatch)
+        resp = c.post("/api/queue/add", json={"project_path": str(proj)})
+        assert resp.status_code == 200
+        assert resp.json()["auto_start"]["reason"] == "pipeline_status_busy"
+        assert calls == []
+        with open(queue_file) as f:
+            assert json.load(f)["queue"][0]["state"] == "READY"
+
+    def test_add_auto_skips_when_waiting_for_sentinel(self, client, monkeypatch, tmp_path):
+        c, queue_file, tmp = client
+        proj = tmp_path / "proj"; proj.mkdir()
+        with open(tmp / "pipeline_state.json", "w") as f:
+            json.dump({"pipeline_status": "WAITING_FOR_SENTINEL"}, f)
+        self._pass_preflight(monkeypatch)
+        calls = self._record_spawn(monkeypatch)
+        resp = c.post("/api/queue/add", json={"project_path": str(proj)})
+        assert resp.status_code == 200
+        assert resp.json()["auto_start"]["reason"] == "pipeline_status_busy"
+        assert calls == []
+
+    def test_add_auto_skips_when_queue_has_active(self, client, monkeypatch, tmp_path):
+        c, queue_file, tmp = client
+        active_dir = tmp_path / "busy"; active_dir.mkdir()
+        active = {**_make_entry("busy", state="ACTIVE", position=1), "project_path": str(active_dir)}
+        _write_queue(str(queue_file), [active], queue_mode="auto")
+        proj = tmp_path / "proj"; proj.mkdir()
+        self._pass_preflight(monkeypatch)
+        calls = self._record_spawn(monkeypatch)
+        resp = c.post("/api/queue/add", json={"project_path": str(proj)})
+        assert resp.status_code == 200
+        assert resp.json()["auto_start"]["reason"] == "queue_has_active"
+        assert calls == []
+
+    def test_add_auto_skips_when_lock_held(self, client, monkeypatch, tmp_path):
+        c, queue_file, tmp = client
+        proj = tmp_path / "proj"; proj.mkdir()
+        self._idle_state(tmp, proj)
+        monkeypatch.setattr("ui.server._check_orchestrator_liveness", lambda _lp: True)
+        self._pass_preflight(monkeypatch)
+        calls = self._record_spawn(monkeypatch)
+        resp = c.post("/api/queue/add", json={"project_path": str(proj)})
+        assert resp.status_code == 200
+        assert resp.json()["auto_start"]["reason"] == "orchestrator_lock_held"
+        assert calls == []
+        with open(queue_file) as f:
+            assert json.load(f)["queue"][0]["state"] == "READY"
+
+    def test_add_auto_blocked_parent_nothing_eligible(self, client, monkeypatch, tmp_path):
+        c, queue_file, tmp = client
+        parent = _make_entry("par", state="BLOCKED", position=1)
+        _write_queue(str(queue_file), [parent], queue_mode="auto")
+        proj = tmp_path / "child"; proj.mkdir()
+        self._idle_state(tmp, proj)
+        self._pass_preflight(monkeypatch)
+        calls = self._record_spawn(monkeypatch)
+        resp = c.post("/api/queue/add", json={"project_path": str(proj), "parent_id": parent["id"]})
+        assert resp.status_code == 200
+        d = resp.json()
+        assert d["state"] == "DEPENDENCY_HOLD"
+        assert d["auto_start"]["attempted"] is True
+        assert d["auto_start"].get("queue_halted") is True
+        assert d["auto_start"].get("started") is None
+        assert calls == []
+
+    def test_add_auto_spawn_failure_is_non_raising_and_marks_failed(self, client, monkeypatch, tmp_path):
+        c, queue_file, tmp = client
+        proj = tmp_path / "proj"; proj.mkdir()
+        self._idle_state(tmp, proj)
+        self._pass_preflight(monkeypatch)
+        monkeypatch.setattr(
+            "ui.server._spawn_orchestrator", lambda path, cfg=None: {"ok": False, "error": "boom"}
+        )
+        resp = c.post("/api/queue/add", json={"project_path": str(proj)})
+        assert resp.status_code == 200  # non-raising: a failed auto-start must not 500 the add
+        d = resp.json()
+        assert d["auto_start"]["attempted"] is True
+        assert d["auto_start"]["ok"] is False
+        assert d["auto_start"]["reason"] == "spawn_failed"
+        assert d["state"] == "FAILED"   # _queue_run_trigger_next_logic marks the row FAILED on spawn fail
+        with open(queue_file) as f:
+            assert json.load(f)["queue"][0]["state"] == "FAILED"
+
+    def test_add_auto_already_active_race_is_non_raising(self, client, monkeypatch, tmp_path):
+        from fastapi import HTTPException
+        c, queue_file, tmp = client
+        proj = tmp_path / "proj"; proj.mkdir()
+        self._idle_state(tmp, proj)
+        self._pass_preflight(monkeypatch)
+
+        def _raise_409(config):
+            raise HTTPException(status_code=409, detail="A project is already ACTIVE in the queue")
+
+        monkeypatch.setattr("ui.server._queue_run_trigger_next_logic", _raise_409)
+        resp = c.post("/api/queue/add", json={"project_path": str(proj)})
+        assert resp.status_code == 200
+        d = resp.json()
+        assert d["auto_start"]["attempted"] is True
+        assert d["auto_start"]["ok"] is False
+        assert d["auto_start"]["reason"] == "already_active"
+
+    def test_add_response_preserves_entry_fields(self, client, monkeypatch, tmp_path):
+        c, queue_file, tmp = client
+        proj = tmp_path / "proj"; proj.mkdir()
+        _write_queue(str(queue_file), [], queue_mode="manual")  # manual → isolate shape from autostart
+        self._pass_preflight(monkeypatch)
+        self._record_spawn(monkeypatch)
+        resp = c.post("/api/queue/add", json={"project_path": str(proj)})
+        assert resp.status_code == 200
+        d = resp.json()
+        for k in ("id", "name", "state", "position", "project_path"):
+            assert k in d, f"missing top-level entry field: {k}"
+        assert "auto_start" in d
+
+    # -------------------------- revalidate --------------------------
+    def test_revalidate_to_ready_autostarts_when_auto_idle(self, client, monkeypatch, tmp_path):
+        c, queue_file, tmp = client
+        proj = tmp_path / "skp"; proj.mkdir()
+        eid = str(uuid.uuid4())
+        entry = {**_make_entry("skp", state="SKIPPED_PENDING", position=1, entry_id=eid),
+                 "project_path": str(proj)}
+        _write_queue(str(queue_file), [entry], queue_mode="auto")
+        self._idle_state(tmp, proj)
+        self._pass_preflight(monkeypatch)
+        calls = self._record_spawn(monkeypatch)
+        resp = c.post(f"/api/queue/{eid}/revalidate")
+        assert resp.status_code == 200
+        d = resp.json()
+        assert d["auto_start"]["attempted"] is True
+        assert d["auto_start"]["started"] == "skp"
+        assert len(calls) == 1
+        with open(queue_file) as f:
+            assert json.load(f)["queue"][0]["state"] == "ACTIVE"
+
+    def test_revalidate_manual_does_not_autostart(self, client, monkeypatch, tmp_path):
+        c, queue_file, tmp = client
+        proj = tmp_path / "skp"; proj.mkdir()
+        eid = str(uuid.uuid4())
+        entry = {**_make_entry("skp", state="SKIPPED_PENDING", position=1, entry_id=eid),
+                 "project_path": str(proj)}
+        _write_queue(str(queue_file), [entry], queue_mode="manual")
+        self._pass_preflight(monkeypatch)
+        calls = self._record_spawn(monkeypatch)
+        resp = c.post(f"/api/queue/{eid}/revalidate")
+        assert resp.status_code == 200
+        assert resp.json()["auto_start"]["reason"] == "not_auto_mode"
+        assert calls == []
+        with open(queue_file) as f:
+            assert json.load(f)["queue"][0]["state"] == "READY"  # SKIPPED→READY still happens
+
+    # ------------------------- parent clear -------------------------
+    def test_clear_parent_to_ready_autostarts_when_auto_idle(self, client, monkeypatch, tmp_path):
+        c, queue_file, tmp = client
+        child_dir = tmp_path / "child"; child_dir.mkdir()
+        pid = str(uuid.uuid4()); cid = str(uuid.uuid4())
+        parent = _make_entry("par", state="COMPLETED", position=1, entry_id=pid)
+        child = {**_make_entry("child", state="DEPENDENCY_HOLD", position=2, parent_id=pid, entry_id=cid),
+                 "project_path": str(child_dir)}
+        _write_queue(str(queue_file), [parent, child], queue_mode="auto")
+        self._idle_state(tmp, child_dir)
+        self._pass_preflight(monkeypatch)
+        calls = self._record_spawn(monkeypatch)
+        resp = c.patch(f"/api/queue/{cid}/parent", json={"parent_id": None})
+        assert resp.status_code == 200
+        assert resp.json()["auto_start"]["attempted"] is True
+        assert resp.json()["auto_start"]["started"] == "child"
+        assert len(calls) == 1
+        with open(queue_file) as f:
+            q = {e["id"]: e for e in json.load(f)["queue"]}
+        assert q[cid]["state"] == "ACTIVE"
+
+    def test_clear_parent_manual_does_not_autostart(self, client, monkeypatch, tmp_path):
+        c, queue_file, tmp = client
+        child_dir = tmp_path / "child"; child_dir.mkdir()
+        pid = str(uuid.uuid4()); cid = str(uuid.uuid4())
+        parent = _make_entry("par", state="COMPLETED", position=1, entry_id=pid)
+        child = {**_make_entry("child", state="DEPENDENCY_HOLD", position=2, parent_id=pid, entry_id=cid),
+                 "project_path": str(child_dir)}
+        _write_queue(str(queue_file), [parent, child], queue_mode="manual")
+        calls = self._record_spawn(monkeypatch)
+        resp = c.patch(f"/api/queue/{cid}/parent", json={"parent_id": None})
+        assert resp.status_code == 200
+        assert resp.json()["auto_start"]["reason"] == "not_auto_mode"
+        assert calls == []
+        with open(queue_file) as f:
+            q = {e["id"]: e for e in json.load(f)["queue"]}
+        assert q[cid]["state"] == "READY"
+
+    def test_set_parent_does_not_autostart(self, client, monkeypatch, tmp_path):
+        c, queue_file, tmp = client
+        child_dir = tmp_path / "child"; child_dir.mkdir()
+        pid = str(uuid.uuid4()); cid = str(uuid.uuid4())
+        parent = _make_entry("par", state="COMPLETED", position=1, entry_id=pid)
+        child = {**_make_entry("child", state="READY", position=2, entry_id=cid),
+                 "project_path": str(child_dir)}
+        _write_queue(str(queue_file), [parent, child], queue_mode="auto")
+        self._idle_state(tmp, child_dir)
+        calls = self._record_spawn(monkeypatch)
+        resp = c.patch(f"/api/queue/{cid}/parent", json={"parent_id": pid})
+        assert resp.status_code == 200
+        assert resp.json()["auto_start"]["attempted"] is False
+        assert resp.json()["auto_start"]["reason"] == "not_ready_transition"
+        assert calls == []
