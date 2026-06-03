@@ -1595,6 +1595,7 @@
             escalation_message,
             escalation_recommended_action,
             escalation_advisory_status,
+            waiting_for_human_at,
             last_action,
             escalation_resets,
             nuclear_resets = 0,
@@ -1890,11 +1891,15 @@
                                             {counterText}
                                         </p>
                                         {escalation_advisory_status === "generating" ? (
-                                            <p className="text-slate-400 text-xs leading-relaxed flex items-center gap-2">
-                                                <span className="inline-block w-3 h-3 border-2 border-sky-400 border-t-transparent rounded-full flex-shrink-0"
-                                                    style={{ animation: 'spin 1s linear infinite' }} />
-                                                <span className="text-sky-400 font-medium">Reviewing escalation...</span>
-                                            </p>
+                                            // Loader UX: the escalation advisory is generating (≤30s). Reuse the
+                                            // Ideas-chat pending loader (animated backdrop + elapsed timer) so the
+                                            // operator sees the agent is working, not a frozen panel. waiting_for_human_at
+                                            // (set when status flips to "generating") drives the elapsed counter.
+                                            <div className="relative overflow-hidden rounded min-h-[52px] flex items-center gap-2 px-2 py-1.5">
+                                                <PendingBubbleLifeBackdrop />
+                                                <span className="relative z-10 text-sky-400 font-medium text-xs">Reviewing escalation...</span>
+                                                <span className="relative z-10 ml-auto"><ChatElapsedSeconds startTs={waiting_for_human_at} /></span>
+                                            </div>
                                         ) : escalation_advisory_status === "ready" && advisoryText ? (
                                             <div className="space-y-1.5">
                                                 <p className="text-slate-400 text-xs leading-relaxed">
@@ -1909,10 +1914,15 @@
                                                 )}
                                             </div>
                                         ) : (
-                                            <p className="text-slate-500 text-xs leading-relaxed italic">
-                                                {escalation_advisory_status === "fallback"
-                                                    ? "Automated review unavailable — the analysis could not be generated. See the pipeline log for full context."
-                                                    : "See the pipeline log for details."}
+                                            // Fallback: the advisory hung/failed. escalation_message now carries an
+                                            // honest, deterministic reason (orchestrator _compose_fallback_reason);
+                                            // render it, falling back to the generic line only if it is empty.
+                                            <p className="text-slate-400 text-xs leading-relaxed italic">
+                                                {escalation_message
+                                                    ? escalation_message
+                                                    : (escalation_advisory_status === "fallback"
+                                                        ? "Automated review unavailable — the analysis could not be generated. See the pipeline log for full context."
+                                                        : "See the pipeline log for details.")}
                                             </p>
                                         )}
                                         {/* P1 Stage G1: raw internal reason, demoted out of the headline into the disclosure. */}
@@ -8364,6 +8374,7 @@
                                 escalation_message={escalationMsg}
                                 escalation_recommended_action={hubRecommendedAction}
                                 escalation_advisory_status={hubAdvisoryStatus}
+                                waiting_for_human_at={(snapshot && snapshot.waiting_for_human_at) || null}
                                 escalation_resets={hubEscalationResets}
                                 nuclear_resets={hubNuclearResets}
                                 executor_output_exists={hubExecutorOutputExists}
@@ -9567,6 +9578,7 @@
                                 escalation_message={pState.escalation_message}
                                 escalation_recommended_action={pState.escalation_recommended_action}
                                 escalation_advisory_status={pState.escalation_advisory_status}
+                                waiting_for_human_at={pState.waiting_for_human_at}
                                 last_action={pState.last_action}
                                 escalation_resets={pState.escalation_resets || 0}
                                 nuclear_resets={pState.nuclear_resets || 0}

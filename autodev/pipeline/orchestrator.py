@@ -1985,6 +1985,94 @@ class Orchestrator:
             print(f"[ADVISORY] Advisory generation failed: {_e}")
             return None
 
+    def _compose_fallback_reason(self, ps):
+        """Deterministic, factual escalation reason for when the LLM advisory is
+        unavailable (hung / timed out / failed) — NO LLM call, NO fabrication.
+
+        Sourced only from hard signals already on hand: ``ps["last_error_code"]``,
+        ``ps["escalation_trigger_reason"]`` (which 6244f3a made honest for the
+        CONTRACT_FAILURE case: "reviewer ended without a verdict — gave up or was
+        cut off"), and ``failure_context.json`` when present (``failing_agent``,
+        ``gate_error_codes``, ``attempt_number``). It deliberately does NOT surface
+        the phase's ``current_phase_behavioral_verification.failure_language`` as
+        observed reality — presenting that expected-failure description as "what
+        happened" is the fabrication that produced the misleading "blank white
+        page" escalation message. Always points the operator at the log.
+
+        Returns a short string; degrades to a minimal generic line when no signal
+        is available. Never raises.
+        """
+        ps = ps or {}
+        last_err = str(ps.get("last_error_code") or "").strip()
+        trigger = str(ps.get("escalation_trigger_reason") or "").strip()
+
+        # failure_context.json — same source the advisory reads; optional.
+        fc = {}
+        try:
+            _fc_path = os.path.join(PROJECT_ARTIFACTS_DIR, "failure_context.json")
+            if os.path.isfile(_fc_path):
+                with open(_fc_path, "r") as f:
+                    fc = json.load(f) or {}
+        except Exception:
+            fc = {}
+
+        failing_agent = str(fc.get("failing_agent") or "").strip()
+        codes = fc.get("gate_error_codes") or ([last_err] if last_err else [])
+        code_str = codes[0] if codes else ""
+        attempt = fc.get("attempt_number")
+
+        tail = "Automated summary unavailable; see the pipeline log for full context."
+
+        # CONTRACT_FAILURE: the reviewer session ended without a verdict. The trigger
+        # reason is already honest (6244f3a) — surface a clean, factual version.
+        if last_err == "ERR_REVIEWER_CONTRACT_FAILURE" or "CONTRACT_FAILURE" in trigger:
+            return (
+                "The reviewer ended without a usable verdict (it gave up or was cut "
+                "off) after repeated fresh-session retries "
+                f"(ERR_REVIEWER_CONTRACT_FAILURE). {tail}"
+            )
+
+        # General case: name the failing agent + error code + attempt from failure_context.
+        if failing_agent or code_str:
+            who = (failing_agent or "an agent").capitalize()
+            line = f"{who} failed"
+            if attempt:
+                line += f" on attempt {attempt}"
+            if code_str:
+                line += f" ({code_str})"
+            return f"{line}. {tail}"
+
+        # Last resort: the (already de-blamed) trigger reason, else a generic line.
+        if trigger:
+            return f"{trigger}. {tail}"
+        return f"The pipeline escalated and needs your input. {tail}"
+
+    def _generate_and_record_advisory(self, ps):
+        """Generate the escalation advisory and record it into ``ps``.
+
+        On success records ``escalation_message`` / ``escalation_recommended_action``
+        / ``escalation_advisory_status="ready"``; on failure (hang / timeout / None)
+        records an honest deterministic ``escalation_message`` via
+        ``_compose_fallback_reason`` and ``escalation_advisory_status="fallback"``.
+        Persists ``ps`` atomically and returns the advisory dict (or None).
+
+        Reorder contract: callers must already have transitioned to
+        ``WAITING_FOR_HUMAN`` with ``escalation_advisory_status="generating"`` BEFORE
+        calling this, so the dashboard shows the "reviewing escalation" loader for
+        the duration of the (≤30s) advisory call. The returned dict is still
+        available to build the escalation webhook message.
+        """
+        advisory = self._generate_escalation_advisory()
+        if advisory:
+            ps["escalation_message"] = advisory["summary"]
+            ps["escalation_recommended_action"] = advisory["recommended_action"]
+            ps["escalation_advisory_status"] = "ready"
+        else:
+            ps["escalation_message"] = self._compose_fallback_reason(ps)
+            ps["escalation_advisory_status"] = "fallback"
+        self.write_phase_state_atomic(ps)
+        return advisory
+
     def _check_stop_requested(self) -> bool:
         """Check for the stop sentinel file written by the UI server.
 
@@ -4211,21 +4299,18 @@ class Orchestrator:
                 _ps["escalations"] = _ps.get("escalations", 0) + 1  # W1-B
                 _ps["last_phase_outcome"] = "escalated"  # Phase 3 — terminal outcome
                 _ps["waiting_for_human_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # W1-E
+                # Reorder (loader UX): transition to WAITING_FOR_HUMAN with
+                # status="generating" FIRST so the panel shows the loader, THEN
+                # generate the advisory (≤30s). _advisory still precedes the
+                # webhook-message build below.
                 _ps["escalation_advisory_status"] = "generating"
-                self.write_phase_state_atomic(_ps)
-
-                _advisory = self._generate_escalation_advisory()
-                if _advisory:
-                    _ps["escalation_message"] = _advisory["summary"]
-                    _ps["escalation_recommended_action"] = _advisory["recommended_action"]
-                    _ps["escalation_advisory_status"] = "ready"
-                else:
-                    _ps["escalation_advisory_status"] = "fallback"
                 self.write_phase_state_atomic(_ps)
 
                 _write_pipeline_event("escalation_trigger", raw_id, "escalation", {"reason": _ps.get("escalation_trigger_reason")})  # W1-F
                 self.transition_state("WAITING_FOR_HUMAN", "Invoking Escalation Agent: repo init check failed")
                 self._queue_park_active_entry("ESCALATION", "escalation")
+
+                _advisory = self._generate_and_record_advisory(_ps)
                 # Note: park-and-advance is not applied here — the next queued project must pass
                 # repo init on a fresh orchestrator run; advancing without re-check would be unsafe.
                 _p = PROJECT_ARTIFACTS_DIR
@@ -5865,24 +5950,21 @@ class Orchestrator:
                         _ps["last_phase_outcome"] = "escalated"  # Phase 3 — terminal outcome
                         _ps["waiting_for_human_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # W1-E
 
-                        # Signal "generating" so the UI can show a spinner immediately
+                        # Reorder (loader UX): the escalation panel renders only at
+                        # WAITING_FOR_HUMAN, so transition FIRST with status="generating"
+                        # to surface the "reviewing escalation" loader, THEN generate the
+                        # advisory (≤30s). _advisory still precedes the webhook-message
+                        # build below, so the operator notification is unchanged.
                         _ps["escalation_advisory_status"] = "generating"
-                        self.write_phase_state_atomic(_ps)
-
-                        # Generate LLM advisory before the webhook fires so the UI and
-                        # the agent's outbound notification both carry human-readable context
-                        _advisory = self._generate_escalation_advisory()
-                        if _advisory:
-                            _ps["escalation_message"] = _advisory["summary"]
-                            _ps["escalation_recommended_action"] = _advisory["recommended_action"]
-                            _ps["escalation_advisory_status"] = "ready"
-                        else:
-                            _ps["escalation_advisory_status"] = "fallback"
                         self.write_phase_state_atomic(_ps)
 
                         _write_pipeline_event("escalation_trigger", raw_id, "escalation", {"reason": _ps.get("escalation_trigger_reason")})  # W1-F
                         self.transition_state("WAITING_FOR_HUMAN", "Invoking Escalation Agent")
                         self._queue_park_active_entry("ESCALATION", "escalation")
+
+                        # Generate + record the advisory (or an honest fallback) now that
+                        # the loader is showing; returns the advisory dict for the webhook.
+                        _advisory = self._generate_and_record_advisory(_ps)
 
                         # Build webhook message — include advisory so the escalation agent
                         # can relay it via the operator's configured notification channel
@@ -6098,20 +6180,17 @@ class Orchestrator:
                     _ps["escalation_trigger_reason"] = f"Escalated after unhandled exception: {exc_description}"
                     # P1 Stage G1: clean headline for the UI (raw reason stays in the disclosure).
                     _ps["escalation_headline"] = self._clean_escalation_headline(raw_id)
-                    # Advisory generated AFTER webhook in the crash handler — the webhook
-                    # must not be delayed by an LLM call in this last-resort path
-                    _exc_advisory = self._generate_escalation_advisory()
-                    if _exc_advisory:
-                        _ps["escalation_message"] = _exc_advisory["summary"]
-                        _ps["escalation_recommended_action"] = _exc_advisory["recommended_action"]
-                        _ps["escalation_advisory_status"] = "ready"
-                    else:
-                        _ps["escalation_advisory_status"] = "fallback"
+                    # Webhook already fired (this last-resort path must not wait on the LLM).
+                    # Transition to WAITING_FOR_HUMAN with status="generating" so the panel
+                    # shows the loader, THEN generate + record the advisory (honest fallback
+                    # on failure).
+                    _ps["escalation_advisory_status"] = "generating"
                     self.write_phase_state_atomic(_ps)
                     self.transition_state(
                         "WAITING_FOR_HUMAN",
                         f"Escalated after unhandled exception: {exc_description}",
                     )
+                    self._generate_and_record_advisory(_ps)
                 else:
                     raise RuntimeError(f"Escalation webhook failed: {webhook_status}")
             except Exception as escalation_err:
