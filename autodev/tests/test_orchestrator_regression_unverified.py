@@ -151,8 +151,12 @@ def test_legacy_counter_names_absent_from_orchestrator_source():
     orchestrator.py after consolidation. Catches a future change that
     reintroduces per-flavour counters.
 
-    Likewise ``visual_instruction`` and ``behavioral_instruction`` field
-    names are replaced by the pooled ``unverified_instruction``."""
+    Likewise the per-flavour ``visual_instruction`` / ``behavioral_instruction``
+    field names AND the intermediate pooled ``unverified_instruction`` field are
+    all replaced by the unified, actually-delivered ``reviewer_retry_directive``
+    (Phase 4 directive channel). ``unverified_instruction`` was written to
+    phase_state but never read/delivered — a dead write that left the UNVERIFIED
+    retries blind; it must be gone."""
     assert "reviewer_visual_retries" not in _ORCH_SRC, (
         "reviewer_visual_retries must be deleted from orchestrator.py — the "
         "pooled reviewer_unverified_retries replaces it. Comments and code "
@@ -164,10 +168,16 @@ def test_legacy_counter_names_absent_from_orchestrator_source():
     )
     assert "visual_instruction" not in _ORCH_SRC, (
         "visual_instruction phase-state field replaced by "
-        "unverified_instruction — leaving the old field name is dead-code "
+        "reviewer_retry_directive — leaving the old field name is dead-code "
         "residue that confuses operators reading phase_state.json."
     )
     assert "behavioral_instruction" not in _ORCH_SRC, (
         "behavioral_instruction phase-state field replaced by "
-        "unverified_instruction — same removal-completeness rule."
+        "reviewer_retry_directive — same removal-completeness rule."
+    )
+    assert "unverified_instruction" not in _ORCH_SRC, (
+        "unverified_instruction phase-state field replaced by the unified, "
+        "delivered reviewer_retry_directive — it was a dead write (never read by "
+        "any reader, never delivered to the reviewer), so it must be removed, not "
+        "left as residue."
     )

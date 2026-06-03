@@ -3,7 +3,7 @@
 The reviewer gate (``autodev/pipeline/gate_scripts/reviewer_gate.py``) can
 emit nine distinct verdicts: ``PASS``, ``ROUTE_EXECUTOR``,
 ``ROUTE_PLANNER``, ``ROUTE_ESCALATE``, ``MISSING_ARTIFACTS``,
-``INFRA_FAILURE``, ``VISUAL_UNVERIFIED``, ``BEHAVIORAL_UNVERIFIED``
+``CONTRACT_FAILURE``, ``VISUAL_UNVERIFIED``, ``BEHAVIORAL_UNVERIFIED``
 (P0 Stage F), and ``REGRESSION_UNVERIFIED`` (P1 Stage D). The orchestrator's
 ``if/elif`` chain had explicit handlers for the first six and silently fell
 through on ``VISUAL_UNVERIFIED`` — ``current_agent`` stayed ``"reviewer"``
@@ -57,7 +57,7 @@ KNOWN_VERDICTS = (
     "ROUTE_PLANNER",
     "ROUTE_ESCALATE",
     "MISSING_ARTIFACTS",
-    "INFRA_FAILURE",
+    "CONTRACT_FAILURE",
     "VISUAL_UNVERIFIED",
     "BEHAVIORAL_UNVERIFIED",
     "REGRESSION_UNVERIFIED",
@@ -157,8 +157,8 @@ def test_unknown_verdict_transitions_to_halted_silent():
     idx = _ORCH_SRC.find("run_reviewer_output_gate()")
     assert idx != -1, "Could not locate reviewer-gate consumption block"
     # Slice up to the next major branch (escalation agent block) — the
-    # reviewer-gate dispatch chain is large (~700 lines) due to INFRA_FAILURE
-    # recovery branching, so a fixed character window is too narrow.
+    # reviewer-gate dispatch chain is large (~700 lines) due to CONTRACT_FAILURE
+    # and unverified branching, so a fixed character window is too narrow.
     end = _ORCH_SRC.find('elif current_agent == "escalation"', idx)
     if end == -1:
         end = idx + 20000

@@ -194,8 +194,8 @@ def test_reviewer_gate_fail_emit_includes_retry_class_key():
     ``gate_result == "ROUTE_EXECUTOR"``, ``None`` otherwise — chosen
     shape for schema stability)."""
     rev_start = _ORCH_SRC.find('elif current_agent == "reviewer"')
-    # Slice forward 30000 chars — reviewer branch is large with INFRA_FAILURE
-    # recovery.
+    # Slice forward 30000 chars — reviewer branch is large (CONTRACT_FAILURE
+    # and unverified handling).
     rev_block = _ORCH_SRC[rev_start : rev_start + 30000]
     gate_fail_idx = rev_block.find('"gate_fail"')
     assert gate_fail_idx != -1, "Reviewer branch must contain a gate_fail emit"

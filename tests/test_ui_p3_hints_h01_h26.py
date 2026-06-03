@@ -131,9 +131,10 @@ H23_ERR_GIT_DIFF = (
     "working tree (corrupt repo, lock, or permissions) — the pipeline will not get past this step until "
     "Git commands succeed. Automatic retries alone will not fix a broken repository."
 )
-H23_ERR_INFRA = (
-    "Reviewer output error: missing or unreadable review file. "
-    "Retrying or recovering automatically."
+H23_ERR_REVIEWER_CONTRACT = (
+    "Reviewer produced no usable review output (the session ended without a "
+    "readable reviewer_output.json). Retrying in a fresh session with a "
+    "corrective directive."
 )
 H23_ERR_PROVIDER_REJECTED = (
     "Inference provider rejected the request \\u2014 check your API key, credits, or rate limits, "
@@ -156,7 +157,7 @@ def test_last_error_code_titles_h23(html_content):
     assert H23_ERR_UNACCOUNTED in html_content
     assert H23_ERR_TESTS in html_content
     assert H23_ERR_GIT_DIFF in html_content
-    assert H23_ERR_INFRA in html_content
+    assert H23_ERR_REVIEWER_CONTRACT in html_content
     assert H23_ERR_PROVIDER_REJECTED in html_content
     assert H23_ERR_SESSION_DEAD_ON_ARRIVAL in html_content
     assert H23_V_PLANNER in html_content

@@ -2365,6 +2365,12 @@ def get_state():
                 response["last_action_timestamp"] = _ps_extra["last_action_timestamp"]
             if "waiting_for_human_resolved_at" in _ps_extra:
                 response["waiting_for_human_resolved_at"] = _ps_extra["waiting_for_human_resolved_at"]
+            # reviewer_contract_retries lives ONLY in phase_state (reviewer_retries is in
+            # pipeline_state). The attempt-dot UI needs it to render reviewer contract
+            # failures honestly (red, not green ✓) — CONTRACT_FAILURE never bumps
+            # reviewer_retries. Default 0 so the UI's gate-on-revContract>0 honesty branch
+            # is a no-op when no contract failures occurred.
+            response["reviewer_contract_retries"] = _ps_extra.get("reviewer_contract_retries", 0)
 
     # Add server-derived fields
     # Orchestrator liveness

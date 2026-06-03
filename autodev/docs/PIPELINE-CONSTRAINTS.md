@@ -231,14 +231,14 @@ Same release: `apply_reviewer_routing` pass-2 routing tightened from `blocking_i
 
 ### Reviewer Counter Split (RR-4, 2026-03-12)
 
-The single `reviewer_retries` counter was split into two distinct counters to prevent conflation of genuine LLM rejections with infrastructure failures:
+The single `reviewer_retries` counter was split into two distinct counters to prevent conflation of genuine LLM rejections with reviewer output-contract failures:
 
 | Counter | Tracks | Cap | Zeroed by `reset_execution()` | Zeroed by `reset_phase()` |
 |---|---|---|---|---|
 | `reviewer_retries` | Genuine LLM rejection (ROUTE_EXECUTOR, ROUTE_PLANNER, ROUTE_ESCALATE) | 3 passes | ✓ | ✓ |
-| `reviewer_infra_retries` | INFRA_FAILURE (unconditional soft retry → re-invoke reviewer) | 3 | ✗ preserved | ✓ |
+| `reviewer_contract_retries` | CONTRACT_FAILURE (reviewer ended without a parseable verdict → re-invoke reviewer in a fresh session with a corrective directive) | 3 | ✗ preserved | ✓ |
 
-`reviewer_infra_retries` is preserved across `reset_execution()` because executor retries do not fix an infrastructure problem. It is zeroed by `reset_phase()` because a phase reset constitutes a clean slate for all attempt budgets.
+`reviewer_contract_retries` (renamed from `reviewer_infra_retries` 2026-06-02 — the "INFRA" label was a misnomer, since genuine transport/provider failures are peeled off upstream) is preserved across `reset_execution()` because executor retries do not fix a reviewer that failed to emit a verdict. It is zeroed by `reset_phase()` because a phase reset constitutes a clean slate for all attempt budgets.
 
 ### Heartbeat Model Decision (B7, 2026-03-03) — Requires Main Machine Endpoint
 

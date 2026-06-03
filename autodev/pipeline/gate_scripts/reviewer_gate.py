@@ -409,11 +409,18 @@ def evaluate_reviewer(output_path=None):
 
     data = load_json_safe(output_path, "reviewer")
     if data is None:
-        # Missing file or JSON parse error: infrastructure failure, NOT a reviewer rejection.
-        # The reviewer never examined the code — do not consume reviewer retry budget.
-        # FIND-REVIEWER-INFRA: distinct from valid rejection path.
-        record_error_code_only("reviewer", "ERR_INFRA_FAILURE")
-        return "INFRA_FAILURE"
+        # The reviewer session ended without a parseable reviewer_output.json
+        # (missing or malformed). This is a CONTRACT failure, NOT a code-quality
+        # rejection: the reviewer never produced a usable verdict, so reviewer_retries
+        # is untouched. It is also NOT an "infrastructure" outage — genuine
+        # transport/provider failures are peeled off upstream by the orchestrator
+        # (stall detection, dead-on-arrival, provider-rejected) before this verdict is
+        # consumed, and the plugin's agent_end backstop writes the .done sentinel
+        # unconditionally, so the session may have given up cleanly OR been
+        # aborted/crashed. Either way the reviewer breached its output contract.
+        # FIND-REVIEWER-CONTRACT: distinct from the valid-rejection path.
+        record_error_code_only("reviewer", "ERR_REVIEWER_CONTRACT_FAILURE")
+        return "CONTRACT_FAILURE"
 
     # ------------------------------------------------------------------
     # FIND-VISUAL-VERIFICATION: On phases that produce user-visible output,

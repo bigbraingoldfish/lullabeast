@@ -423,3 +423,78 @@ def test_api_state_includes_phase_state_fields(html_content):
         assert has_timestamp, "server.py should include last_action_timestamp"
         assert has_skill_injected, "server.py should include skill_injected from phase_state"
         assert has_skill_agent, "server.py should include skill_agent from phase_state"
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — reviewer contract-failure attempt-dot honesty
+# ---------------------------------------------------------------------------
+
+def _dot_states_body(html_content):
+    start = html_content.find("function getAgentAttemptDotStates")
+    assert start != -1, "getAgentAttemptDotStates not found"
+    end = html_content.find("function formatDuration", start)
+    assert end != -1, "end boundary for getAgentAttemptDotStates slice not found"
+    return html_content[start:end]
+
+
+def test_agent_attempt_row_plumbs_reviewer_contract_retries(html_content):
+    """AgentAttemptRow must accept reviewer_contract_retries and forward it into
+    getAgentAttemptDotStates (via allRetries). Without the signal the reviewer row
+    is rendered from reviewer_retries alone, which CONTRACT_FAILURE never increments —
+    the false-green bug Phase 5 fixes."""
+    sig_start = html_content.find("function AgentAttemptRow")
+    assert sig_start != -1, "AgentAttemptRow not found"
+    sig = html_content[sig_start:sig_start + 400]
+    assert "reviewer_contract_retries" in sig, (
+        "AgentAttemptRow must destructure reviewer_contract_retries"
+    )
+    body = _dot_states_body(html_content)
+    assert "reviewer_contract_retries" in body or "revContract" in body, (
+        "getAgentAttemptDotStates must read the reviewer contract-retry signal "
+        "(reviewer_contract_retries / revContract) so contract failures are not green"
+    )
+
+
+def test_reviewer_row_uses_contract_signal_not_just_reviewer_retries(html_content):
+    """The reviewer-row dot logic must fold the contract-retry count into its effective
+    failure count, so an exhausted-then-escalated reviewer (reviewer_retries==0,
+    reviewer_contract_retries==3) renders red, not a green 'passed' slot."""
+    body = _dot_states_body(html_content)
+    assert "revContract" in body, (
+        "getAgentAttemptDotStates must derive a revContract value for the reviewer row"
+    )
+    # The honesty branch must be gated so it is a no-op when there are no contract
+    # failures (revContract === 0 → existing behaviour preserved).
+    assert re.search(r"revContract\s*>\s*0", body), (
+        "the reviewer contract-failure honesty branch must be gated on revContract > 0 "
+        "so existing attempt-dot behaviour is unchanged when no contract failures occurred"
+    )
+
+
+def test_render_call_sites_pass_reviewer_contract_retries(html_content):
+    """The CurrentPhasePanel must pass reviewer_contract_retries into the reviewer
+    AgentAttemptRow so the plumbed prop is actually populated."""
+    assert re.search(r"reviewer_contract_retries=\{", html_content), (
+        "AgentAttemptRow render sites must bind reviewer_contract_retries={...}"
+    )
+
+
+def test_humanize_summary_maps_contract_failure_not_infra(html_content):
+    """humanizeSummary's reviewer_verdict case must map CONTRACT_FAILURE and must no
+    longer reference the renamed-away INFRA_FAILURE verdict."""
+    assert "CONTRACT_FAILURE" in html_content, "UI must humanize the CONTRACT_FAILURE verdict"
+    assert "INFRA_FAILURE" not in html_content, (
+        "INFRA_FAILURE must be gone from index.html — the verdict was renamed to "
+        "CONTRACT_FAILURE (a green test for the old label would be a liability)"
+    )
+
+
+def test_error_code_title_renamed_to_contract_failure(html_content):
+    """The P3_LAST_ERROR_CODE_TITLES map key must be the renamed
+    ERR_REVIEWER_CONTRACT_FAILURE, not the old ERR_INFRA_FAILURE."""
+    assert "ERR_REVIEWER_CONTRACT_FAILURE" in html_content, (
+        "the error-code title map must carry ERR_REVIEWER_CONTRACT_FAILURE"
+    )
+    assert "ERR_INFRA_FAILURE" not in html_content, (
+        "ERR_INFRA_FAILURE must be removed from index.html (renamed)"
+    )

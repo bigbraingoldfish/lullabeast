@@ -107,7 +107,7 @@ class TestDoneFileLogic:
                                                                     valid_executor_output):
         """
         Validates: After the executor gate passes, phase_state.json must record
-        executor_succeeded = True.  If the reviewer subsequently fails (infra failure
+        executor_succeeded = True.  If the reviewer subsequently fails (contract failure
         or rejection), this flag must remain True so the orchestrator knows the
         executor's work was valid.
 
@@ -154,10 +154,10 @@ class TestDoneFileLogic:
                                                         valid_planner_output,
                                                         valid_executor_output):
         """
-        Validates: When the reviewer returns an infrastructure failure (empty output),
+        Validates: When the reviewer returns a contract failure (no parseable output),
         the orchestrator state must reflect 'reviewer_failed' — not 'executor_failed'.
 
-        Concretely: after reviewer infra failure, executor_succeeded must remain True
+        Concretely: after a reviewer contract failure, executor_succeeded must remain True
         in phase_state.json and the last_error_code must indicate a reviewer problem,
         not an executor problem.
 
@@ -179,7 +179,7 @@ class TestDoneFileLogic:
                 "escalation_resets": 0,
             }, f)
 
-        # Reviewer output is absent — simulates infra failure (empty LLM response)
+        # Reviewer output is absent — simulates a contract failure (empty LLM response)
         reviewer_output_path = os.path.join(tmp_workspace, "reviewer_output.json")
         assert not os.path.exists(reviewer_output_path)
 
@@ -196,9 +196,9 @@ class TestDoneFileLogic:
         with stack:
             gate_result = reviewer_gate_module.evaluate_reviewer(reviewer_output_path)
 
-        # Gate must return INFRA_FAILURE (not route executor)
-        assert gate_result == "INFRA_FAILURE", (
-            f"Reviewer infra failure must return INFRA_FAILURE, got {gate_result!r}"
+        # Gate must return CONTRACT_FAILURE (not route executor)
+        assert gate_result == "CONTRACT_FAILURE", (
+            f"Reviewer no-parseable-output must return CONTRACT_FAILURE, got {gate_result!r}"
         )
 
         # executor_succeeded must still be True — executor is NOT at fault
@@ -206,14 +206,14 @@ class TestDoneFileLogic:
             state_after = json.load(f)
 
         assert state_after.get("executor_succeeded") is True, (
-            "executor_succeeded must remain True after reviewer infra failure. "
-            "The orchestrator must not treat reviewer infra failure as executor failure."
+            "executor_succeeded must remain True after a reviewer contract failure. "
+            "The orchestrator must not treat a reviewer contract failure as executor failure."
         )
 
-        # last_error_code must indicate reviewer/infra problem
-        assert state_after.get("last_error_code") == "ERR_INFRA_FAILURE", (
-            f"last_error_code must be ERR_INFRA_FAILURE after reviewer infra failure, "
-            f"got {state_after.get('last_error_code')!r}"
+        # last_error_code must indicate the reviewer contract problem
+        assert state_after.get("last_error_code") == "ERR_REVIEWER_CONTRACT_FAILURE", (
+            f"last_error_code must be ERR_REVIEWER_CONTRACT_FAILURE after a reviewer "
+            f"contract failure, got {state_after.get('last_error_code')!r}"
         )
 
     def test_done_file_detection_on_orchestrator_restart(self, tmp_workspace,

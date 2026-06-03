@@ -918,18 +918,21 @@ IF FAIL AND pass == 2                → check attribution field:
 IF FAIL AND pass == 3                → escalation agent
 ```
 
-**INFRA_FAILURE pre-check (RR-1):**
+**CONTRACT_FAILURE pre-check (RR-1):** *(renamed from `INFRA_FAILURE` 2026-06-02 — the "INFRA" label was a misnomer; see the rename note below.)*
 
-`reviewer_gate.py` returns `"INFRA_FAILURE"` when `reviewer_output.json` is missing or unparseable — indicating the reviewer never produced usable output, rather than that it rejected the work. The orchestrator self-heals by re-invoking the reviewer in a fresh session (a transient malformed-output fluke almost always clears on a clean re-run):
+`reviewer_gate.py` returns `"CONTRACT_FAILURE"` when `reviewer_output.json` is missing or unparseable — the reviewer session **ended without producing a usable verdict**, a breach of its output contract, rather than a rejection of the work. Crucially, this branch is reached whenever the session ends without a parseable output **for any reason** (a clean give-up OR an abort/crash/limit-hit): the `autodev-pipeline-signals` plugin's `agent_end` handler (`autodev/plugin/src/agent-end-handler.ts`) writes the `{agent}_output.done` sentinel **unconditionally** (no `event.success` guard) to unblock the poll backstop, so the sentinel's presence does **not** prove a clean final action — only that `agent_end` fired. The recovery is identical for give-up and abort, so the cause is **diagnostic, not routing**: the orchestrator self-heals by re-invoking the reviewer in a FRESH session with a self-contained corrective directive (delivered as the webhook `message=` by `_invoke_reviewer`):
 
 ```
-IF gate_result == "INFRA_FAILURE":
-    reviewer_infra_retries += 1
-    IF reviewer_infra_retries >= 3  → escalation (INFRA_FAILURE_SOFT_RETRY_EXHAUSTED)
-    ELSE                            → re-invoke reviewer (soft retry)
+IF gate_result == "CONTRACT_FAILURE":
+    IF provider-rejected (defensive re-check)  → escalation (ERR_PROVIDER_REJECTED)
+    reviewer_contract_retries += 1
+    IF reviewer_contract_retries >= 3  → escalation (CONTRACT_FAILURE_SOFT_RETRY_EXHAUSTED)
+    ELSE                               → set reviewer_retry_directive; re-invoke reviewer (fresh session)
 ```
 
-INFRA_FAILURE does NOT increment `reviewer_retries` — that counter is reserved for genuine LLM rejections. The `reviewer_infra_retries` soft-retry counter is preserved across `reset_execution()` and only zeroed by `reset_phase()`.
+Genuine transport/provider failures (case a) are **partly** peeled off upstream — stall detection (`_handle_stall_outcome`), dead-on-arrival (`_check_session_dead_on_arrival`), and provider-rejection (`_escalate_if_provider_rejected`, also re-checked defensively at the top of this branch). Aborts/crashes that match none of those heuristics still land here and recover identically (fresh session + directive), which is why "ambiguous → default to contract" is safe. There is **no readable give-up-vs-abort signal** today (the plugin only logs `event.success`); if one is added later it should only enrich the escalation message, never gate behaviour.
+
+CONTRACT_FAILURE does NOT increment `reviewer_retries` — that counter is reserved for genuine LLM rejections. The `reviewer_contract_retries` soft-retry counter is preserved across `reset_execution()` and only zeroed by `reset_phase()`.
 
 There is no model-health probe and no SSH recovery. Agent/model liveness is owned by the OpenClaw activity-stamp hooks — `startup_grace` / `no_first_activity` for a cold start, `stalled` for a mid-turn death (`poll_for_sentinel`) — which fire identically for cloud and local agents, so a genuinely dead model surfaces as "no activity" and is caught there rather than by a pre-invocation probe.
 
@@ -1430,7 +1433,8 @@ Complete JSON schemas for all pipeline data files. Schemas in §3–§6 define a
   "executor_retries": { "type": "integer", "default": 0, "description": "Incremented by reset_execution('auto') — automatic retry path only." },
   "reviewer_retries": { "type": "integer", "default": 0, "description": "Genuine LLM rejection counter. Zeroed by reset_execution() and reset_phase(). Cap: 3 passes before escalation." },
   "reviewer_rejected": { "type": "boolean", "default": false, "description": "Set by reviewer gate on ROUTE_EXECUTOR. Cleared by reset_execution()." },
-  "reviewer_infra_retries": { "type": "integer", "default": 0, "description": "Incremented on every reviewer-gate INFRA_FAILURE (missing/unparseable reviewer_output.json) as an unconditional soft retry — re-invoke the reviewer in a fresh session. Cap: 3 → escalation (INFRA_FAILURE_SOFT_RETRY_EXHAUSTED). Zeroed by reset_phase() only — NOT by reset_execution(). Distinct from reviewer_retries (which tracks genuine LLM rejections)." },
+  "reviewer_contract_retries": { "type": "integer", "default": 0, "description": "Incremented on every reviewer-gate CONTRACT_FAILURE (session ended without a parseable reviewer_output.json — give-up or abort/crash). Soft retry: re-invoke the reviewer in a FRESH session with a one-shot reviewer_retry_directive. Cap: 3 → escalation (CONTRACT_FAILURE_SOFT_RETRY_EXHAUSTED). Zeroed by reset_phase() only — NOT by reset_execution(). Distinct from reviewer_retries (which tracks genuine LLM rejections). Renamed from reviewer_infra_retries 2026-06-02." },
+  "reviewer_retry_directive": { "type": "string|null", "description": "One-shot corrective instruction delivered to the NEXT reviewer session as the webhook message= (overriding the default), written by the CONTRACT_FAILURE branch and the UNVERIFIED handler and consumed+cleared by _invoke_reviewer. The reviewer's single directive channel; absent when no retry directive is pending." },
   "planner_output_preserved": { "type": "boolean", "default": false, "description": "RR-2: Set to true atomically after planner gate passes. Enables crash-recovery skip: if current_agent=planner, planner_retries=0, and this flag is true, the orchestrator skips planner re-invocation and advances directly to executor. Cleared by ROUTE_PLANNER (intentional reviewer-reject re-run) and by reset_phase(). Never set by reset_execution()." },
   "escalation_resets": { "type": "integer", "default": 0, "description": "Incremented by RESET_PHASE and RESET_EXECUTION resume commands. Cap: 3. NOT zeroed inside reset_phase() — only zeroed when roadmap genuinely advances to a new phase. Distinct from executor_retries." },
   "nuclear_resets": { "type": "integer", "default": 0, "description": "P1 Stage G2. Incremented by the NUCLEAR_RESET command via nuclear_reset_phase(). Cap: 2, independent of escalation_resets. Preserved inside reset_phase() (like escalation_resets) so the cap accumulates; zeroed only on genuine phase advance. The dashboard shows the nuclear-reset button only when escalation_resets >= 3 and hides it at nuclear_resets >= 2." },
@@ -1457,7 +1461,7 @@ Complete JSON schemas for all pipeline data files. Schemas in §3–§6 define a
 | `executor_retries` | — (auto only increments, does not zero) | ✓ zeroed | ✓ zeroed |
 | `reviewer_retries` | ✓ zeroed | ✓ zeroed | ✓ zeroed |
 | `reviewer_rejected` | ✓ cleared | ✓ cleared | ✓ cleared |
-| `reviewer_infra_retries` | ✗ preserved | ✓ zeroed | ✓ zeroed |
+| `reviewer_contract_retries` | ✗ preserved | ✓ zeroed | ✓ zeroed |
 | `planner_output_preserved` | — | ✓ cleared | ✓ cleared |
 | `escalation_resets` | — | ✗ preserved | ✓ zeroed |
 | `nuclear_resets` (P1 Stage G2) | — | ✗ preserved | ✓ zeroed |
