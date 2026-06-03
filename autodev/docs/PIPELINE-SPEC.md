@@ -1761,6 +1761,8 @@ Reads `metrics.jsonl` from `project_dir_path`. Deduplicates phase entries (keepi
 
 If `metrics.jsonl` is absent or empty, returns all-zero totals with an empty `phases` array. `null` duration values count as 0 in the sum.
 
+**Total time semantics.** `total_duration_seconds` is the **sum** of per-phase `duration_seconds` — each phase's `phase_start`→PASS wall-clock, which already includes that phase's in-phase escalation hold. It is deliberately **not** `run_summary.json`'s calendar wall-clock (`run_start`→`run_end`); that span includes idle gaps across days and would inflate the figure (e.g. 74h calendar vs ~19h of real phase work). The response also carries `total_hold_seconds` (escalation waits, paired from `escalation_trigger`/`escalation_resolve` events in `pipeline_events.jsonl`) and `total_active_seconds = max(0, total_duration_seconds − total_hold_seconds)`. **Known limitation:** a phase's duration counts retried/reset work as active (it is real time the operator experienced), and the rare *non-escalation* mid-phase downtime (a hard crash, a manual STOP, or machine sleep while a phase is mid-flight) is also counted as active rather than excluded.
+
 **UI usage:** Displayed in the Current Phase panel when `pipeline_status` is `PIPELINE_COMPLETE`, and in expanded rows of completed phases in the Roadmap panel.
 
 ### Pipeline Control

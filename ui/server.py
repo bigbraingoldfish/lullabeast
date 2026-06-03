@@ -3159,29 +3159,6 @@ def _derive_hold_seconds_per_phase(events_path: str, project_name: str) -> dict[
     return holds
 
 
-def _read_run_summary_duration(project_dir_path: str) -> int | None:
-    """Read total_duration_seconds from <project>/.autodev/pipeline/run_summary.json.
-
-    Returns None when the file is missing, unreadable, or lacks the field.
-    Wall-clock (manifest start → terminal run_end) is preferred over a sum of
-    per-phase durations when available.
-    """
-    if not project_dir_path:
-        return None
-    path = os.path.join(_pipeline_artifacts_dir(project_dir_path), "run_summary.json")
-    if not os.path.exists(path):
-        return None
-    try:
-        with open(path, "r") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return None
-    val = data.get("total_duration_seconds")
-    if isinstance(val, (int, float)) and val >= 0:
-        return int(val)
-    return None
-
-
 @app.get("/api/metrics-summary")
 def get_metrics_summary():
     """Return aggregated run metrics from metrics.jsonl in the project directory.
@@ -3189,6 +3166,10 @@ def get_metrics_summary():
     Reads ``{project_dir_path}/.autodev/pipeline/metrics.jsonl``. Deduplicates by phase (keeps last row
     per phase, so cumulative attempt counts are correct even if a phase was reset
     and re-run). Returns sensible zeros if the file is absent or empty.
+
+    ``total_duration_seconds`` is the SUM of per-phase ``duration_seconds`` (real
+    phase work, in-phase holds included) — never run_summary.json's calendar
+    wall-clock, which spans idle gaps across days and inflates the figure.
     """
     config = load_config()
     project_dir_path = config.get("project_dir_path")
@@ -3231,14 +3212,14 @@ def get_metrics_summary():
     total_blame = sum((p.get("blame_fires") or 0) for p in phases)
     total_escalations = sum((p.get("escalations") or 0) for p in phases)
 
-    # Prefer whichever of (sum of phase durations, run_summary wall-clock) is
-    # larger.  Per-phase ``duration_seconds`` already include in-phase holds and
-    # are the most reliable cumulative figure.  ``run_summary.json`` is rewritten
-    # every time the orchestrator boots — a "complete on startup" no-op shrinks
-    # ``total_duration_seconds`` to the boot window (e.g. 106s) and clobbers the
-    # true run wall-clock.  Taking max() keeps the honest number visible.
-    run_summary_duration = _read_run_summary_duration(project_dir_path) or 0
-    total_duration = max(total_duration_summed, run_summary_duration)
+    # TOTAL TIME is the sum of per-phase wall-clock durations. Each phase's
+    # duration_seconds is its phase_start→PASS span and already includes that
+    # phase's in-phase escalation holds, so the sum is the real work time.
+    # We deliberately do NOT consult run_summary.json's total_duration_seconds:
+    # that is CALENDAR wall-clock (run_start→run_end) and spans idle nights across
+    # days, inflating the figure far above actual work (svg-pic2: 74h21m calendar
+    # vs 19h21m of phase work).
+    total_duration = total_duration_summed
 
     def _role_cost(p: dict, role_key: str) -> float:
         role_obj = p.get(role_key) or {}
@@ -3267,6 +3248,9 @@ def get_metrics_summary():
     project_name = os.path.basename(os.path.realpath(project_dir_path)) if project_dir_path else ""
     hold_per_phase = _derive_hold_seconds_per_phase(events_path, project_name)
     total_hold_seconds = sum(hold_per_phase.values())
+    # Clamp: holds from phases that never completed (e.g. a repo-init escalation
+    # then STOP) are paired from the event log but contribute no summed duration,
+    # so hold can exceed total — degrade to 0 active rather than go negative.
     total_active_seconds = max(0, total_duration - total_hold_seconds)
 
     return {
