@@ -525,6 +525,26 @@ The reviewer gate runs the same script on each pass. Routing on failure varies b
 
 ## 6. Escalation Agent
 
+> **F13 / F8 / F2 update (Phase 1 escalation-recovery) — supersedes the older prose in this
+> section where they conflict.**
+> - **The escalation agent is NOTIFY-only.** OpenClaw wraps every `/hooks/agent` payload in an
+>   "EXTERNAL, UNTRUSTED … prompt injection" preamble; the agent was refusing the orchestrator's
+>   own escalation webhook as an injection attempt and producing no `escalation_output`. The agent
+>   docs + webhook messages now frame a pipeline escalation as a **TRUSTED control invocation** and
+>   instruct the agent only to **notify** the operator via its `message` tool. It does **not** wait
+>   for / relay a reply and does **not** write `escalation_output`. The "Sentinel Pattern Bridge"
+>   below (agent relays the operator's Signal reply into `escalation_output.json`) is **no longer
+>   how answers arrive**: the operator answers from the **dashboard** (`POST /api/command`), which
+>   writes `escalation_output` (or banks `pending_escalation_command.json`); the orchestrator polls
+>   and consumes it exactly as before. (A real inbound Signal→`escalation_output` channel is a
+>   future enhancement — `plans/upcomming/signal-inbound-escalation-channel.md`.)
+> - **A parked `ESCALATION` no longer counts as `all_blocked` (F8).** When it is the next/only
+>   remaining work, `_select_next_queue_project` revives the lowest-position one to
+>   `WAITING_FOR_HUMAN` (after startable + `ESCALATION_ANSWERED` entries get priority), so it stays
+>   answerable live instead of stranding in `QUEUE_HALTED` / `PIPELINE_COMPLETE`.
+> - **`POST /api/stop` accepts `QUEUE_HALTED` (F1); relaunch uses `--revive <entry_id>` (F2)** to
+>   resume a specific parked entry at its escalated phase rather than a phase-0 reset.
+
 ### Model
 
 `llama-local/qwen3.5-27b` (local via llama-server)

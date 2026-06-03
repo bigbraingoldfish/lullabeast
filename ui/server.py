@@ -1568,8 +1568,14 @@ def _validate_queue_entry_ids_order(entries, entry_ids):
     return None
 
 
-def _spawn_orchestrator(project_path: str, config: dict | None = None) -> dict:
+def _spawn_orchestrator(project_path: str, config: dict | None = None, revive_entry_id: str | None = None) -> dict:
     """Start orchestrator.py with --project-path. Returns {"ok": bool, "error": str|None}.
+
+    When *revive_entry_id* is supplied (F2 — the dashboard 'Resume' control for a parked
+    queue entry), ``--revive <id>`` is added. The orchestrator then resumes that entry via the
+    revival path (restore the escalated phase + apply any banked command) instead of the
+    phase-0 reset ``--project-path`` would trigger on a project switch; it falls back to
+    ``--project-path`` if the entry turns out not to be revivable.
 
     Env construction rules (canonical names only — no legacy aliases):
       * ``OPENCLAW_ROOT`` is always set from ``config["openclaw_root"]``.
@@ -1615,8 +1621,11 @@ def _spawn_orchestrator(project_path: str, config: dict | None = None) -> dict:
     ):
         env.pop(legacy, None)
 
+    cmd = [sys.executable, orchestrator_script, "--project-path", project_path]
+    if revive_entry_id:
+        cmd += ["--revive", str(revive_entry_id)]
     subprocess.Popen(
-        [sys.executable, orchestrator_script, "--project-path", project_path],
+        cmd,
         cwd=autodev_repo_path,
         stdout=log_file,
         stderr=subprocess.STDOUT,
@@ -5806,7 +5815,9 @@ def _orchestrator_alive_from_config(config: dict) -> bool:
 def post_stop():
     """Request pipeline halt: sentinel file for active agents, or escalation STOP when waiting for human.
 
-    - RUNNING / WAITING_FOR_SENTINEL: writes ``pipeline_stop_requested`` under ``.autodev/pipeline/``.
+    - RUNNING / WAITING_FOR_SENTINEL / QUEUE_HALTED: writes ``pipeline_stop_requested`` under
+      ``.autodev/pipeline/`` (the orchestrator consumes it at the top of its loop in all three
+      states, so a genuinely-stuck queue can always be halted from the UI).
     - WAITING_FOR_HUMAN: validates and writes ``escalation_output.json`` + ``escalation_output.done``
       (same contract as ``POST /api/command`` with STOP).
 
@@ -5831,7 +5842,12 @@ def post_stop():
     status = pipeline_state.get("pipeline_status")
     alive = _orchestrator_alive_from_config(config)
 
-    if status in ("RUNNING", "WAITING_FOR_SENTINEL"):
+    if status in ("RUNNING", "WAITING_FOR_SENTINEL", "QUEUE_HALTED"):
+        # QUEUE_HALTED (F1): the orchestrator stays alive in this state and calls
+        # _check_stop_requested() at the top of every loop iteration, so a stop
+        # sentinel written here IS consumed and the pipeline halts cleanly. Without
+        # QUEUE_HALTED in this branch a genuinely-stuck queue (only BLOCKED / dead
+        # DEPENDENCY_HOLD entries left) could not be halted from the UI.
         stop_file = Path(_pipeline_artifacts_dir(project_dir_path)) / "pipeline_stop_requested"
         stop_file.parent.mkdir(parents=True, exist_ok=True)
         stop_file.touch()
@@ -7909,9 +7925,12 @@ def get_queue_entry_snapshot(entry_id: str):
 def post_queue_entry_relaunch(entry_id: str):
     """Spawn orchestrator for an existing queue entry without resetting pipeline state.
 
-    Used when the orchestrator process has died and needs to be restarted.
-    Does NOT call _run_init_project or reset pipeline_state.json.
-    Returns 409 if orchestrator is already alive.
+    Used when the orchestrator process has died and needs to be restarted (e.g. the
+    dashboard 'Resume banked answer' control for a parked escalation). Does NOT call
+    _run_init_project or reset pipeline_state.json. Spawns with ``--revive <entry_id>`` (F2)
+    so a parked entry resumes its ESCALATED phase and applies any banked command — instead of
+    the phase-0 reset ``--project-path`` alone would trigger, which orphaned the banked
+    command. Returns 409 if orchestrator is already alive.
     """
     config = load_config()
     q = _read_queue_file(config)
@@ -7929,7 +7948,7 @@ def post_queue_entry_relaunch(entry_id: str):
         except Exception:
             pass
 
-    result = _spawn_orchestrator(entry["project_path"], config)
+    result = _spawn_orchestrator(entry["project_path"], config, revive_entry_id=entry_id)
     if not result.get("ok"):
         raise HTTPException(status_code=500, detail=result.get("error", "Failed to spawn orchestrator"))
     return {"ok": True}

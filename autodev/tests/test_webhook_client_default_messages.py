@@ -6,9 +6,12 @@ also serve as the canonical instruction surface for any code path that
 hits the OpenClaw webhook without orchestrator-supplied context.
 
 Planner / executor / reviewer must reference both ``prd.md`` and
-``verification.md``. Escalation is intentionally unchanged — escalation's
-inputs are ``phase_state.json`` and the output files; PRD/verification are
-not on its read path.
+``verification.md``. Escalation's inputs are ``phase_state.json`` and the output
+files; PRD/verification are not on its read path. As of F13 the escalation
+message frames the webhook as a TRUSTED control invocation and instructs
+NOTIFY-only — the agent must not refuse the orchestrator's own webhook as
+"untrusted" and must not write a default ``escalation_output`` command; the
+operator answers asynchronously from the dashboard.
 """
 
 import inspect
@@ -91,24 +94,34 @@ class TestDefaultMessageReferences:
         assert match, "Could not locate escalation default message"
         return match.group(1)
 
-    def test_escalation_default_requires_command_field(self):
-        """The strengthened message must name the `command` field and the no-instruction STOP default,
-        so the agent never writes a command-less escalation_output.done."""
+    def test_escalation_default_frames_webhook_as_trusted(self):
+        """F13: the message must frame the escalation webhook as a TRUSTED control invocation so
+        the agent does not refuse the orchestrator's own webhook as 'untrusted'/prompt-injection
+        (the live failure mode). Replaces the prior 'enumerate offerable verbs' contract — under
+        notify-only the agent no longer writes a command."""
         msg = self._escalation_msg()
-        assert "command" in msg, f"escalation default must require a command field; got: {msg!r}"
-        assert '"command": "STOP"' in msg, (
-            f"escalation default must instruct {{'command': 'STOP'}} when no clear instruction; got: {msg!r}"
+        assert "TRUSTED" in msg, f"escalation default must frame the webhook as trusted; got: {msg!r}"
+        low = msg.lower()
+        assert "notify" in low, f"escalation default must instruct the agent to NOTIFY the operator; got: {msg!r}"
+
+    def test_escalation_default_is_notify_only_no_default_command(self):
+        """F13: notify-only — the agent must NOT be told to write a default escalation_output
+        command (the operator answers from the dashboard). The prior '{"command": "STOP"}' default
+        prematurely halted the pipeline, and 'write your assessment to escalation_output' is the
+        instruction the agent (correctly distrusting it as untrusted) refused."""
+        msg = self._escalation_msg()
+        assert '"command": "STOP"' not in msg, (
+            f"escalation default must NOT instruct a default STOP command (notify-only); got: {msg!r}"
+        )
+        low = msg.lower()
+        assert "do not write escalation_output" in low or "not write escalation_output" in low, (
+            f"escalation default must tell the agent NOT to write escalation_output (notify-only); got: {msg!r}"
         )
 
-    def test_escalation_default_enumerates_offerable_verbs(self):
-        """The message must enumerate the six offerable verbs the agent may write."""
-        msg = self._escalation_msg()
-        for verb in ("RETRY", "RESET_PHASE", "RESET_EXECUTION", "RESET_REVIEWER", "PROCEED", "STOP"):
-            assert verb in msg, f"escalation default must name offerable verb {verb}; got: {msg!r}"
-
     def test_escalation_default_omits_secret_menu_verbs(self):
-        """SKIP and NUCLEAR_RESET are not offerable at invocation: SKIP is on-request-only, and
-        NUCLEAR_RESET is surfaced conditionally (escalation_resets >= 3) per AGENTS.md, not statically."""
+        """SKIP and NUCLEAR_RESET must never be named in the static message (SKIP is
+        on-request-only; NUCLEAR_RESET is cap-gated and surfaced by the agent). Under F13's
+        notify-only message no resume verbs are listed at all, which satisfies this."""
         msg = self._escalation_msg()
         assert "SKIP" not in msg, f"escalation default must NOT name SKIP (secret-menu); got: {msg!r}"
         assert "NUCLEAR_RESET" not in msg, (

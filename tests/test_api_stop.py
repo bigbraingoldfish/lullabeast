@@ -72,6 +72,41 @@ class TestPostApiStop:
         assert r.status_code == 200
         assert (proj / ".autodev" / "pipeline" / "pipeline_stop_requested").exists()
 
+    def test_stop_queue_halted_creates_stop_file(self, test_client, tmp_path):
+        """QUEUE_HALTED must be stoppable from the UI (F1).
+
+        The orchestrator's main loop calls _check_stop_requested() at the top of
+        EVERY iteration, including while alive in QUEUE_HALTED, so a stop sentinel
+        written here is consumed and the pipeline halts cleanly. Before this fix
+        post_stop returned 409 for QUEUE_HALTED, leaving a genuinely-stuck queue
+        (only BLOCKED / dead DEPENDENCY_HOLD entries remaining) with no UI halt.
+
+        This test fails against the pre-F1 code (409) and passes once QUEUE_HALTED
+        joins RUNNING/WAITING_FOR_SENTINEL in the sentinel-writing branch.
+        """
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        ps = tmp_path / "pipeline_state.json"
+        ps.write_text(
+            json.dumps(
+                {"pipeline_status": "QUEUE_HALTED", "queue_halted_reason": "all_blocked"}
+            ),
+            encoding="utf-8",
+        )
+        cfg = {
+            "pipeline_state_path": str(ps),
+            "project_dir_path": str(proj),
+            "lock_path": str(tmp_path / "noop.lock"),
+        }
+        with patch("ui.server.load_config", return_value=cfg), patch(
+            "ui.server._orchestrator_alive_from_config", return_value=True
+        ):
+            r = test_client.post("/api/stop")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["ok"] is True
+        assert (proj / ".autodev" / "pipeline" / "pipeline_stop_requested").exists()
+
     def test_stop_waiting_for_human_writes_escalation_files(self, test_client, tmp_path):
         proj = tmp_path / "proj"
         proj.mkdir()

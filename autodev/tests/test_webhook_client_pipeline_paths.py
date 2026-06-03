@@ -20,14 +20,19 @@ def test_default_messages_use_autodev_pipeline_subdir():
     assert "_PIPELINE_ARTIFACTS" in src, (
         "webhook function must reference _PIPELINE_ARTIFACTS so paths stay in sync"
     )
+    # F13: the escalation default message is now NOTIFY-only — it no longer references
+    # escalation_output.json (the operator answers from the dashboard; the server writes the
+    # command). The data-plane agents still produce their output files under .autodev/pipeline.
     for filename in (
         "planner_output.json",
         "planner_output.done",
         "executor_output.json",
         "reviewer_output.json",
-        "escalation_output.json",
     ):
         assert filename in src, f"expected {filename!r} in webhook default message construction"
+    assert "escalation_output.json" not in src, (
+        "F13: escalation default message must be notify-only (no escalation_output.json write instruction)"
+    )
 
     # Must not hard-code bare root-level sentinel paths (they must go through _p / _PIPELINE_ARTIFACTS)
     bare_done = 'pipeline-project/planner_output.done"'
