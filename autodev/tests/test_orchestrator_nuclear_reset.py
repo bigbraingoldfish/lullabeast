@@ -263,6 +263,11 @@ def test_banked_nuclear_reset_revives_correctly(tmp_path, monkeypatch):
         "id": "q1", "name": "A", "position": 0,
         "project_path": str(proj), "state": "ESCALATION",
     }], "queue_mode": "auto"}
+    # F9: _promote_answered_escalations commits via the version-CAS, which re-reads the queue
+    # file to merge against any concurrent write — so the queue must be on disk (production
+    # callers always read it from disk immediately before calling). Seed it here.
+    with open(str(tmp_path / "pipeline_queue.json"), "w") as f:
+        json.dump(queue_data, f)
     changed = orch._promote_answered_escalations(queue_data)
     assert changed is True
     assert queue_data["queue"][0]["state"] == ESCALATION_ANSWERED, (

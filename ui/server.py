@@ -38,6 +38,12 @@ if _AUTODEV_PIPELINE_DIR not in _sys.path:
 from autodev.pipeline.queue_semantics import (
     parent_blocks_child,
     ESCALATION_ANSWERED,
+    QUEUE_MAX_CAS_RETRIES,
+    QueueAbort,
+    QueueVersionConflict,
+    bump_queue_version,
+    mutate_queue,
+    read_queue_version,
 )
 from autodev.pipeline.sentinel_poller import PollResult  # noqa: E402
 from env_resolvers import resolve_openclaw_root, resolve_pipeline_root  # noqa: E402
@@ -884,6 +890,17 @@ from fastapi.staticfiles import StaticFiles
 app.mount("/static", StaticFiles(directory="ui/static"), name="static")
 
 
+@app.exception_handler(QueueVersionConflict)
+async def _queue_version_conflict_handler(_request: Request, exc: QueueVersionConflict):
+    """F9 — a queue mutation lost the optimistic-concurrency race past the bounded retry budget.
+    This is transient (the orchestrator was writing concurrently), so surface 503 (retryable),
+    not a 4xx client error. Single handler for every queue-mutation endpoint."""
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Queue is being updated concurrently; please retry.", "error": str(exc)},
+    )
+
+
 @app.get("/health")
 def health():
     """Health check endpoint."""
@@ -1225,10 +1242,39 @@ def _read_queue_file(config=None):
 
 
 def _write_queue_file(path: str, data: dict) -> None:
-    """Atomic write (reuses _write_json_atomic pattern)."""
+    """Atomic write of pipeline_queue.json (stamp next version, then _write_json_atomic).
+
+    The atomic-replace primitive. ``bump_queue_version`` stamps ``base+1`` here (the single
+    increment site); the compare-and-swap that makes concurrent UI + orchestrator writes safe
+    lives in ``_mutate_queue_file`` — route queue mutations through that, not bare
+    ``_write_queue_file``. See the orchestrator ``_read_queue`` docstring for the F9 model.
+    """
     from datetime import datetime, timezone as tz
+    bump_queue_version(data)
     data["last_updated"] = datetime.now(tz.utc).isoformat()
     _write_json_atomic(path, data)
+
+
+def _peek_queue_version(config) -> int:
+    """Cheap read of the on-disk queue_version (the CAS "compare" half). 0 if absent."""
+    return read_queue_version(_read_queue_file(config))
+
+
+def _mutate_queue_file(config, mutate_fn, *, max_retries=QUEUE_MAX_CAS_RETRIES):
+    """Compare-and-swap wrapper around ``_read_queue_file``/``_write_queue_file`` for the server.
+
+    ``mutate_fn(data)`` applies a pure, idempotent, id-keyed change to a freshly-read queue and
+    returns the call's result (or raises ``QueueAbort`` to commit nothing). On exhausted
+    contention ``mutate_queue`` raises ``QueueVersionConflict``; queue endpoints map that to
+    HTTP 503. See ``queue_semantics.mutate_queue`` for the full contract.
+    """
+    path = os.path.expanduser(config.get("pipeline_queue_path") or "")
+    return mutate_queue(
+        lambda: _read_queue_file(config),
+        lambda d: _write_queue_file(path, d),
+        lambda: _peek_queue_version(config),
+        mutate_fn, max_retries=max_retries,
+    )
 
 
 def _queue_demote_stale_active_entries(config: dict, canonical_real: str) -> bool:
@@ -1250,35 +1296,42 @@ def _queue_demote_stale_active_entries(config: dict, canonical_real: str) -> boo
     q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
     if not q_path:
         return False
-    q = _read_queue_file(config)
-    entries = q.get("queue", [])
-    if not entries:
-        return False
 
-    changed = False
-    for e in entries:
-        if e.get("state") != "ACTIVE":
-            continue
-        ep = (e.get("project_path") or "").strip()
-        if not ep:
-            e["state"] = "READY"
-            e["started_at"] = None
-            changed = True
-            continue
-        try:
-            er = os.path.realpath(os.path.expanduser(ep))
-        except OSError:
-            e["state"] = "READY"
-            e["started_at"] = None
-            changed = True
-            continue
-        if er != target:
-            e["state"] = "READY"
-            e["started_at"] = None
-            changed = True
-    if changed:
-        _write_queue_file(q_path, q)
-    return changed
+    def _apply(q):
+        entries = q.get("queue", [])
+        if not entries:
+            raise QueueAbort()
+        changed = False
+        for e in entries:
+            if e.get("state") != "ACTIVE":
+                continue
+            ep = (e.get("project_path") or "").strip()
+            if not ep:
+                e["state"] = "READY"
+                e["started_at"] = None
+                changed = True
+                continue
+            try:
+                er = os.path.realpath(os.path.expanduser(ep))
+            except OSError:
+                e["state"] = "READY"
+                e["started_at"] = None
+                changed = True
+                continue
+            if er != target:
+                e["state"] = "READY"
+                e["started_at"] = None
+                changed = True
+        if not changed:
+            raise QueueAbort()
+        return True
+
+    try:
+        # Best-effort alignment: a CAS exhaustion (astronomically unlikely with two writers)
+        # must not 503 the caller — treat it as "did not demote this cycle".
+        return _mutate_queue_file(config, _apply) is True
+    except QueueVersionConflict:
+        return False
 
 
 def _queue_demote_stale_active_from_pipeline_state(config: dict) -> bool:
@@ -1322,58 +1375,65 @@ def _queue_mark_matching_entry_active(config: dict, project_real: str) -> None:
     q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
     if not q_path:
         return
-    q = _read_queue_file(config)
-    entries = q.get("queue", [])
-    if not entries:
-        return
 
     now = datetime.now(tz.utc).isoformat()
-    changed = False
 
-    for e in entries:
-        if e.get("state") != "ACTIVE":
-            continue
-        er = _queue_entry_realpath(e)
-        if er is None:
-            e["state"] = "READY"
-            e["started_at"] = None
-            changed = True
-            continue
-        if er != target:
-            e["state"] = "READY"
-            e["started_at"] = None
-            changed = True
-
-    by_position = sorted(entries, key=lambda x: x.get("position") or 0)
-    matching = []
-    non_matching = []
-    for e in by_position:
-        er = _queue_entry_realpath(e)
-        if er is not None and er == target:
-            matching.append(e)
-        else:
-            non_matching.append(e)
-
-    for e in matching:
-        if e.get("state") != "ACTIVE":
-            e["state"] = "ACTIVE"
-            changed = True
-        if not e.get("started_at"):
-            e["started_at"] = now
-            changed = True
-
-    if matching:
-        new_order = matching + non_matching
-        for i, e in enumerate(new_order, start=1):
-            if e.get("position") != i:
+    def _apply(q):
+        entries = q.get("queue", [])
+        if not entries:
+            raise QueueAbort()
+        changed = False
+        for e in entries:
+            if e.get("state") != "ACTIVE":
+                continue
+            er = _queue_entry_realpath(e)
+            if er is None:
+                e["state"] = "READY"
+                e["started_at"] = None
                 changed = True
-            e["position"] = i
-        q["queue"] = new_order
-    elif changed:
-        q["queue"] = by_position
+                continue
+            if er != target:
+                e["state"] = "READY"
+                e["started_at"] = None
+                changed = True
 
-    if changed:
-        _write_queue_file(q_path, q)
+        by_position = sorted(entries, key=lambda x: x.get("position") or 0)
+        matching = []
+        non_matching = []
+        for e in by_position:
+            er = _queue_entry_realpath(e)
+            if er is not None and er == target:
+                matching.append(e)
+            else:
+                non_matching.append(e)
+
+        for e in matching:
+            if e.get("state") != "ACTIVE":
+                e["state"] = "ACTIVE"
+                changed = True
+            if not e.get("started_at"):
+                e["started_at"] = now
+                changed = True
+
+        if matching:
+            new_order = matching + non_matching
+            for i, e in enumerate(new_order, start=1):
+                if e.get("position") != i:
+                    changed = True
+                e["position"] = i
+            q["queue"] = new_order
+        elif changed:
+            q["queue"] = by_position
+
+        if not changed:
+            raise QueueAbort()
+        return True
+
+    try:
+        # Best-effort alignment — a CAS exhaustion must not 503 the spawn caller.
+        _mutate_queue_file(config, _apply)
+    except QueueVersionConflict:
+        pass
 
 
 def _queue_entries_active_first_by_pipeline_state(ordered: list, ps_real: str) -> list:
@@ -7212,7 +7272,6 @@ def _queue_run_trigger_next_logic(config: dict) -> dict:
     Returns:
         {"ok": True, "started": name} or {"queue_halted": True, "error": str}.
     """
-    q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
     q = _read_queue_file(config)
     entries = q.get("queue", [])
 
@@ -7236,26 +7295,47 @@ def _queue_run_trigger_next_logic(config: dict) -> dict:
             continue
         checks = _run_preflight_checks(entry["project_path"])
         if any(c.get("status") == "fail" for c in checks):
-            entry["state"] = "SKIPPED_PENDING"
-            entry["skip_count"] = entry.get("skip_count", 0) + 1
-            desc_ids = _get_all_descendants(entries, entry["id"])
-            for desc_id in desc_ids:
-                desc = next((e for e in entries if e["id"] == desc_id), None)
-                if desc and desc["state"] not in ("ACTIVE", "COMPLETED"):
-                    desc["state"] = "SKIPPED_PENDING"
-                    desc["skip_count"] = desc.get("skip_count", 0) + 1
-            group_size = 1 + len(desc_ids)
-            new_pos = min(entry["position"] + group_size, len(entries))
-            _move_group_atomically(entries, entry["id"], new_pos)
-            _write_queue_file(q_path, q)
+            # F9 — CAS the skip-and-requeue by id on fresh data (no lost update).
+            def _skip(qd, _eid=entry["id"]):
+                es = qd.get("queue", [])
+                t = next((e for e in es if e["id"] == _eid), None)
+                if t is None:
+                    raise QueueAbort()
+                t["state"] = "SKIPPED_PENDING"
+                t["skip_count"] = t.get("skip_count", 0) + 1
+                desc_ids = _get_all_descendants(es, _eid)
+                for desc_id in desc_ids:
+                    desc = next((e for e in es if e["id"] == desc_id), None)
+                    if desc and desc["state"] not in ("ACTIVE", "COMPLETED"):
+                        desc["state"] = "SKIPPED_PENDING"
+                        desc["skip_count"] = desc.get("skip_count", 0) + 1
+                group_size = 1 + len(desc_ids)
+                new_pos = min(t["position"] + group_size, len(es))
+                _move_group_atomically(es, _eid, new_pos)
+                return True
+            _mutate_queue_file(config, _skip)
+            entry["state"] = "SKIPPED_PENDING"  # keep the walk snapshot roughly aligned
             continue
-        entry["state"] = "ACTIVE"
-        entry["started_at"] = now
-        _write_queue_file(q_path, q)
+
+        # F9 — commit ACTIVE via CAS, THEN spawn (exactly once, only after the commit lands).
+        def _activate(qd, _eid=entry["id"]):
+            t = next((e for e in qd.get("queue", []) if e["id"] == _eid), None)
+            if t is None or t.get("state") not in ("READY", "SKIPPED_PENDING"):
+                raise QueueAbort()  # the picked row changed under us
+            t["state"] = "ACTIVE"
+            t["started_at"] = now
+            return True
+        if _mutate_queue_file(config, _activate) is None:
+            continue  # re-pick on the next call
         result = _spawn_orchestrator(entry["project_path"], config)
         if not result.get("ok"):
-            entry["state"] = "FAILED"
-            _write_queue_file(q_path, q)
+            def _fail(qd, _eid=entry["id"]):
+                t = next((e for e in qd.get("queue", []) if e["id"] == _eid), None)
+                if t is None:
+                    raise QueueAbort()
+                t["state"] = "FAILED"
+                return True
+            _mutate_queue_file(config, _fail)
             raise HTTPException(status_code=500, detail=result.get("error", "Failed to spawn orchestrator"))
         return {"ok": True, "started": entry["name"]}
 
@@ -7304,6 +7384,10 @@ def _maybe_autostart_queue(config: dict) -> dict:
     except HTTPException as e:
         reason = {409: "already_active", 500: "spawn_failed"}.get(e.status_code, "start_error")
         return {"attempted": True, "ok": False, "reason": reason, "error": e.detail}
+    except QueueVersionConflict as e:
+        # F9 — a CAS exhaustion during best-effort autostart must NOT 503 the originating
+        # request (whose own write already committed). Surface it in the additive field instead.
+        return {"attempted": True, "ok": False, "reason": "queue_busy", "error": str(e)}
     return {"attempted": True, **out}
 
 
@@ -7331,11 +7415,12 @@ async def patch_queue_mode(request: Request):
     if mode not in ("auto", "manual"):
         raise HTTPException(status_code=422, detail="queue_mode must be 'auto' or 'manual'")
     config = load_config()
-    q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
-    q = _read_queue_file(config)
-    prev_mode = q.get("queue_mode", "auto")
-    q["queue_mode"] = mode
-    _write_queue_file(q_path, q)
+
+    def _apply(q):
+        prev = q.get("queue_mode", "auto")
+        q["queue_mode"] = mode
+        return prev
+    prev_mode = _mutate_queue_file(config, _apply)
     response: dict = {"ok": True, "queue_mode": mode}
     # Transition guard stays: only a manual→auto switch kicks (auto→auto must not re-kick).
     # The helper additionally self-gates on queue_mode=="auto" for the other call sites.
@@ -7436,29 +7521,27 @@ def get_queue():
 @app.put("/api/queue/order")
 async def put_queue_order(request: Request):
     """Replace queue order atomically. Body: {"entry_ids": [uuid, ...]} — full permutation of current entries."""
-    from datetime import datetime, timezone as tz
-
     body = await request.json()
     entry_ids = body.get("entry_ids")
     if not isinstance(entry_ids, list):
         raise HTTPException(status_code=422, detail="entry_ids must be an array")
 
     config = load_config()
-    q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
-    q = _read_queue_file(config)
-    entries = q.get("queue", [])
 
-    err = _validate_queue_entry_ids_order(entries, entry_ids)
-    if err:
-        raise HTTPException(status_code=400, detail=err)
-
-    by_id = {e["id"]: e for e in entries}
-    new_queue = [by_id[uid] for uid in entry_ids]
-    for i, e in enumerate(new_queue, 1):
-        e["position"] = i
-    q["queue"] = new_queue
-    q["last_updated"] = datetime.now(tz.utc).isoformat()
-    _write_queue_file(q_path, q)
+    def _apply(q):
+        entries = q.get("queue", [])
+        # Re-validate against the fresh queue: if a concurrent add/remove changed the set, the
+        # client's permutation is stale -> 400 (re-fetch and retry).
+        err = _validate_queue_entry_ids_order(entries, entry_ids)
+        if err:
+            raise HTTPException(status_code=400, detail=err)
+        by_id = {e["id"]: e for e in entries}
+        new_queue = [by_id[uid] for uid in entry_ids]
+        for i, e in enumerate(new_queue, 1):
+            e["position"] = i
+        q["queue"] = new_queue
+        return True
+    _mutate_queue_file(config, _apply)
     return {"ok": True}
 
 
@@ -7507,65 +7590,68 @@ async def post_queue_add(request: Request):
     append_recent_project(repo_abs)
 
     config = load_config()
-    q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
-    q = _read_queue_file(config)
-    entries = q.get("queue", [])
-
     new_real = repo_abs
     _terminal_queue_states = frozenset({"COMPLETED", "FAILED"})
-    for e in entries:
-        ep = (e.get("project_path") or "").strip()
-        if not ep:
-            continue
-        try:
-            existing_real = os.path.realpath(os.path.expanduser(ep))
-        except OSError:
-            continue
-        if existing_real != new_real:
-            continue
-        if e.get("state") not in _terminal_queue_states:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Project already in queue ({e.get('name', 'unknown')}, {e.get('state')}). "
-                    "Remove it or wait until COMPLETED/FAILED before adding again."
-                ),
-            )
 
-    # Circular dependency check
-    if parent_id and _detect_circular_dependency(entries, None, parent_id):
-        raise HTTPException(status_code=400, detail="Circular dependency detected")
+    def _apply(q):
+        entries = q.get("queue", [])
+        # Re-derive all queue-level validation on the FRESH queue so a concurrent add of the
+        # same project (409) or a parent state change is honoured, not lost.
+        for e in entries:
+            ep = (e.get("project_path") or "").strip()
+            if not ep:
+                continue
+            try:
+                existing_real = os.path.realpath(os.path.expanduser(ep))
+            except OSError:
+                continue
+            if existing_real != new_real:
+                continue
+            if e.get("state") not in _terminal_queue_states:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Project already in queue ({e.get('name', 'unknown')}, {e.get('state')}). "
+                        "Remove it or wait until COMPLETED/FAILED before adding again."
+                    ),
+                )
 
-    # Initial state: DEPENDENCY_HOLD only when parent is in a blocking queue state
-    initial_state = "READY"
-    if parent_id:
-        parent_entry = next((e for e in entries if e["id"] == parent_id), None)
-        if parent_entry is None:
-            raise HTTPException(status_code=400, detail="parent_id does not reference an existing queue entry")
-        if parent_entry.get("state") != "COMPLETED" and parent_blocks_child(parent_entry.get("state")):
-            initial_state = "DEPENDENCY_HOLD"
+        # Circular dependency check
+        if parent_id and _detect_circular_dependency(entries, None, parent_id):
+            raise HTTPException(status_code=400, detail="Circular dependency detected")
 
-    now = datetime.now(tz.utc).isoformat()
-    entry = {
-        "id": str(_uuid.uuid4()),
-        "project_path": repo_abs,
-        "idea_id": idea_id,
-        "name": os.path.basename(project_path.rstrip("/")) or project_path,
-        "state": initial_state,
-        "position": len(entries) + 1,
-        "parent_id": parent_id,
-        "added_at": now,
-        "started_at": None,
-        "completed_at": None,
-        "blocked_at": None,
-        "skip_count": 0,
-        "preflight_validated_at": now,
-        "completion_review": completion_review,
-        "notes": "",
-    }
-    entries.append(entry)
-    q["queue"] = entries
-    _write_queue_file(q_path, q)
+        # Initial state: DEPENDENCY_HOLD only when parent is in a blocking queue state
+        initial_state = "READY"
+        if parent_id:
+            parent_entry = next((e for e in entries if e["id"] == parent_id), None)
+            if parent_entry is None:
+                raise HTTPException(status_code=400, detail="parent_id does not reference an existing queue entry")
+            if parent_entry.get("state") != "COMPLETED" and parent_blocks_child(parent_entry.get("state")):
+                initial_state = "DEPENDENCY_HOLD"
+
+        now = datetime.now(tz.utc).isoformat()
+        new_entry = {
+            "id": str(_uuid.uuid4()),
+            "project_path": repo_abs,
+            "idea_id": idea_id,
+            "name": os.path.basename(project_path.rstrip("/")) or project_path,
+            "state": initial_state,
+            "position": len(entries) + 1,
+            "parent_id": parent_id,
+            "added_at": now,
+            "started_at": None,
+            "completed_at": None,
+            "blocked_at": None,
+            "skip_count": 0,
+            "preflight_validated_at": now,
+            "completion_review": completion_review,
+            "notes": "",
+        }
+        entries.append(new_entry)
+        q["queue"] = entries
+        return new_entry
+
+    entry = _mutate_queue_file(config, _apply)
     # Auto-start the next eligible project when the queue is in auto mode and the pipeline
     # is idle (server-owned; replaces the former client-side post-add trigger shim).
     # Best-effort and non-raising — a failed start surfaces in auto_start, never 500s the add.
@@ -7601,34 +7687,33 @@ def delete_queue_entry(entry_id: str):
             ),
         )
     config = load_config()
-    q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
-    q = _read_queue_file(config)
-    entries = q.get("queue", [])
+    ps_path = os.path.expanduser(config.get("pipeline_state_path") or "")
 
-    target = next((e for e in entries if e["id"] == entry_id), None)
-    if target is None:
-        raise HTTPException(status_code=404, detail="Queue entry not found")
-    if target["state"] == "ACTIVE":
-        ps_path = os.path.expanduser(config.get("pipeline_state_path") or "")
-        ps = _read_json_file(ps_path) if os.path.exists(ps_path) else None
-        if ps:
-            try:
-                ps_real = os.path.realpath(ps.get("project_path", "") or "")
-                ep_real = os.path.realpath((target.get("project_path") or "").strip() or "")
-            except OSError:
-                ps_real, ep_real = "", ""
-            if ps_real and ep_real and ps_real == ep_real:
-                pst = ps.get("pipeline_status")
-                if pst in ("RUNNING", "WAITING_FOR_SENTINEL"):
-                    raise HTTPException(
-                        status_code=409,
-                        detail="Cannot remove: pipeline is mid-flight for this project",
-                    )
-
-    entries = [e for e in entries if e["id"] != entry_id]
-    _resequence_positions(entries)
-    q["queue"] = entries
-    _write_queue_file(q_path, q)
+    def _apply(q):
+        entries = q.get("queue", [])
+        target = next((e for e in entries if e["id"] == entry_id), None)
+        if target is None:
+            raise HTTPException(status_code=404, detail="Queue entry not found")
+        if target["state"] == "ACTIVE":
+            ps = _read_json_file(ps_path) if os.path.exists(ps_path) else None
+            if ps:
+                try:
+                    ps_real = os.path.realpath(ps.get("project_path", "") or "")
+                    ep_real = os.path.realpath((target.get("project_path") or "").strip() or "")
+                except OSError:
+                    ps_real, ep_real = "", ""
+                if ps_real and ep_real and ps_real == ep_real:
+                    pst = ps.get("pipeline_status")
+                    if pst in ("RUNNING", "WAITING_FOR_SENTINEL"):
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Cannot remove: pipeline is mid-flight for this project",
+                        )
+        new_entries = [e for e in entries if e["id"] != entry_id]
+        _resequence_positions(new_entries)
+        q["queue"] = new_entries
+        return True
+    _mutate_queue_file(config, _apply)
     return {"ok": True}
 
 
@@ -7648,19 +7733,18 @@ async def post_queue_clear(request: Request):
     force = bool(body.get("force"))
 
     config = load_config()
-    q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
-    q = _read_queue_file(config)
-    entries = q.get("queue", [])
-    cleared = len(entries)
 
-    if any(e.get("state") == "ACTIVE" for e in entries) and not force:
-        raise HTTPException(
-            status_code=409,
-            detail='Queue has an ACTIVE entry; pass {"force": true} to clear anyway.',
-        )
-
-    q["queue"] = []
-    _write_queue_file(q_path, q)
+    def _apply(q):
+        entries = q.get("queue", [])
+        if any(e.get("state") == "ACTIVE" for e in entries) and not force:
+            raise HTTPException(
+                status_code=409,
+                detail='Queue has an ACTIVE entry; pass {"force": true} to clear anyway.',
+            )
+        n = len(entries)
+        q["queue"] = []
+        return n
+    cleared = _mutate_queue_file(config, _apply)
     return {"ok": True, "cleared": cleared}
 
 
@@ -7673,45 +7757,45 @@ async def patch_queue_position(entry_id: str, request: Request):
         raise HTTPException(status_code=422, detail="position is required")
 
     config = load_config()
-    q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
-    q = _read_queue_file(config)
-    entries = q.get("queue", [])
 
-    target = next((e for e in entries if e["id"] == entry_id), None)
-    if target is None:
-        raise HTTPException(status_code=404, detail="Queue entry not found")
-    if target["state"] in ("ACTIVE", "COMPLETED"):
-        raise HTTPException(status_code=409, detail=f"Cannot reorder a {target['state']} entry")
-    if target.get("parent_id"):
-        raise HTTPException(
-            status_code=409,
-            detail="Child projects cannot be repositioned independently. Move the parent project instead.",
-        )
+    def _apply(q):
+        entries = q.get("queue", [])
+        target = next((e for e in entries if e["id"] == entry_id), None)
+        if target is None:
+            raise HTTPException(status_code=404, detail="Queue entry not found")
+        if target["state"] in ("ACTIVE", "COMPLETED"):
+            raise HTTPException(status_code=409, detail=f"Cannot reorder a {target['state']} entry")
+        if target.get("parent_id"):
+            raise HTTPException(
+                status_code=409,
+                detail="Child projects cannot be repositioned independently. Move the parent project instead.",
+            )
 
-    # Clamp position to valid range
-    new_pos = max(1, min(int(new_pos), len(entries)))
-    old_pos = target["position"]
-    if new_pos == old_pos:
-        return {"ok": True}
+        # Clamp position to the fresh range.
+        np = max(1, min(int(new_pos), len(entries)))
+        old_pos = target["position"]
+        if np == old_pos:
+            raise QueueAbort()  # no-op move — commit nothing
 
-    # If this entry has dependents, move the entire group atomically
-    if _get_all_descendants(entries, entry_id):
-        _move_group_atomically(entries, entry_id, new_pos)
-    else:
-        # Shift entries between old and new positions (single-entry move)
-        if new_pos < old_pos:
-            for e in entries:
-                if new_pos <= e["position"] < old_pos and e["id"] != entry_id:
-                    e["position"] += 1
+        # If this entry has dependents, move the entire group atomically
+        if _get_all_descendants(entries, entry_id):
+            _move_group_atomically(entries, entry_id, np)
         else:
-            for e in entries:
-                if old_pos < e["position"] <= new_pos and e["id"] != entry_id:
-                    e["position"] -= 1
-        target["position"] = new_pos
-        _resequence_positions(entries)
+            # Shift entries between old and new positions (single-entry move)
+            if np < old_pos:
+                for e in entries:
+                    if np <= e["position"] < old_pos and e["id"] != entry_id:
+                        e["position"] += 1
+            else:
+                for e in entries:
+                    if old_pos < e["position"] <= np and e["id"] != entry_id:
+                        e["position"] -= 1
+            target["position"] = np
+            _resequence_positions(entries)
 
-    q["queue"] = entries
-    _write_queue_file(q_path, q)
+        q["queue"] = entries
+        return True
+    _mutate_queue_file(config, _apply)
     return {"ok": True}
 
 
@@ -7722,51 +7806,53 @@ async def patch_queue_parent(entry_id: str, request: Request):
     parent_id = body.get("parent_id")  # None to clear
 
     config = load_config()
-    q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
-    q = _read_queue_file(config)
-    entries = q.get("queue", [])
 
-    target = next((e for e in entries if e["id"] == entry_id), None)
-    if target is None:
-        raise HTTPException(status_code=404, detail="Queue entry not found")
+    def _apply(q):
+        entries = q.get("queue", [])
+        target = next((e for e in entries if e["id"] == entry_id), None)
+        if target is None:
+            raise HTTPException(status_code=404, detail="Queue entry not found")
 
-    if _detect_circular_dependency(entries, entry_id, parent_id):
-        raise HTTPException(status_code=400, detail="Circular dependency detected")
+        if _detect_circular_dependency(entries, entry_id, parent_id):
+            raise HTTPException(status_code=400, detail="Circular dependency detected")
 
-    target["parent_id"] = parent_id
+        target["parent_id"] = parent_id
 
-    cleared_to_ready = False
-    if parent_id is None:
-        # Clearing parent: restore to READY if currently in DEPENDENCY_HOLD
-        if target.get("state") == "DEPENDENCY_HOLD":
-            target["state"] = "READY"
-            cleared_to_ready = True
-    else:
-        # Setting parent: hold only if parent is in a blocking state
-        parent_entry = next((e for e in entries if e["id"] == parent_id), None)
-        if parent_entry and parent_entry.get("state") != "COMPLETED":
-            target["state"] = (
-                "DEPENDENCY_HOLD"
-                if parent_blocks_child(parent_entry.get("state"))
-                else "READY"
-            )
+        cleared_to_ready = False
+        if parent_id is None:
+            # Clearing parent: restore to READY if currently in DEPENDENCY_HOLD
+            if target.get("state") == "DEPENDENCY_HOLD":
+                target["state"] = "READY"
+                cleared_to_ready = True
+        else:
+            # Setting parent: hold only if parent is in a blocking state
+            parent_entry = next((e for e in entries if e["id"] == parent_id), None)
+            if parent_entry and parent_entry.get("state") != "COMPLETED":
+                target["state"] = (
+                    "DEPENDENCY_HOLD"
+                    if parent_blocks_child(parent_entry.get("state"))
+                    else "READY"
+                )
 
-        # Auto-reposition: place child immediately after parent's last existing sibling
-        parent_pos = next((e["position"] for e in entries if e["id"] == parent_id), None)
-        if parent_pos is not None:
-            siblings = [e for e in entries if e.get("parent_id") == parent_id and e["id"] != entry_id]
-            max_sibling_pos = max((e["position"] for e in siblings), default=parent_pos)
-            new_child_pos = max_sibling_pos + 1
-            _move_group_atomically(entries, entry_id, new_child_pos)
-            _resequence_positions(entries)
+            # Auto-reposition: place child immediately after parent's last existing sibling
+            parent_pos = next((e["position"] for e in entries if e["id"] == parent_id), None)
+            if parent_pos is not None:
+                siblings = [e for e in entries if e.get("parent_id") == parent_id and e["id"] != entry_id]
+                max_sibling_pos = max((e["position"] for e in siblings), default=parent_pos)
+                new_child_pos = max_sibling_pos + 1
+                _move_group_atomically(entries, entry_id, new_child_pos)
+                _resequence_positions(entries)
 
-    q["queue"] = entries
-    _write_queue_file(q_path, q)
+        q["queue"] = entries
+        return {"target": dict(target), "cleared_to_ready": cleared_to_ready}
+
+    result = _mutate_queue_file(config, _apply)
+    target = result["target"]
     # Auto-start only when a parent-clear just made this row READY (scope: clear→READY);
     # the set-parent branch never autostarts. Additive auto_start; target fields stay top-level.
     auto_start = (
         _maybe_autostart_queue(config)
-        if cleared_to_ready
+        if result["cleared_to_ready"]
         else {"attempted": False, "reason": "not_ready_transition"}
     )
     return {**target, "auto_start": auto_start}
@@ -7969,25 +8055,28 @@ async def post_queue_entry_revalidate(entry_id: str):
     from datetime import datetime, timezone as tz
 
     config = load_config()
-    q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
-    q = _read_queue_file(config)
-    entries = q.get("queue", [])
-    target = next((e for e in entries if e["id"] == entry_id), None)
-    if target is None:
+    # Resolve the target's project path once for the (expensive) preflight — project_path is
+    # immutable after add, so this read need not be inside the CAS loop.
+    target0 = next((e for e in _read_queue_file(config).get("queue", []) if e["id"] == entry_id), None)
+    if target0 is None:
         raise HTTPException(status_code=404, detail="Queue entry not found")
 
-    checks = _run_preflight_checks(target["project_path"])
-    now = datetime.now(tz.utc).isoformat()
-    target["preflight_validated_at"] = now
-
+    checks = _run_preflight_checks(target0["project_path"])
     has_fail = any(c.get("status") == "fail" for c in checks)
-    if has_fail and target.get("state") == "READY":
-        target["state"] = "SKIPPED_PENDING"
-    elif not has_fail and target.get("state") == "SKIPPED_PENDING":
-        target["state"] = "READY"
+    now = datetime.now(tz.utc).isoformat()
 
-    q["queue"] = entries
-    _write_queue_file(q_path, q)
+    def _apply(q):
+        target = next((e for e in q.get("queue", []) if e["id"] == entry_id), None)
+        if target is None:
+            raise HTTPException(status_code=404, detail="Queue entry not found")
+        target["preflight_validated_at"] = now
+        if has_fail and target.get("state") == "READY":
+            target["state"] = "SKIPPED_PENDING"
+        elif not has_fail and target.get("state") == "SKIPPED_PENDING":
+            target["state"] = "READY"
+        return dict(target)
+
+    target = _mutate_queue_file(config, _apply)
     # Auto-start if this revalidation left an eligible READY row in an idle auto queue
     # (no-op when the row stayed SKIPPED_PENDING / not in auto mode). Non-raising; additive.
     auto_start = _maybe_autostart_queue(config)
@@ -8688,54 +8777,52 @@ async def post_setup_launch(request: Request):
     # _queue_mark_matching_entry_active early-returns when the queue is empty
     # (Launch Now with no prior Add to Queue call), leaving no entry for the
     # orchestrator to read the flag from. Synthesize a minimal entry in that case.
-    try:
-        import uuid as _uuid_mod
-        from datetime import datetime, timezone as _tz
-        _q = _read_queue_file(config)
-        _entries = _q.get("queue", [])
-        _has_active = any(
-            e.get("state") == "ACTIVE"
-            and os.path.realpath(os.path.expanduser(e.get("project_path", ""))) == project_real
-            for e in _entries
-        )
-        if not _has_active:
-            _now = datetime.now(_tz.utc).isoformat()
-            _synthetic = {
-                "id": str(_uuid_mod.uuid4()),
-                "project_path": project_real,
-                "idea_id": None,
-                "name": os.path.basename(project_real),
-                "state": "ACTIVE",
-                "position": len(_entries) + 1,
-                "parent_id": None,
-                "added_at": _now,
-                "started_at": _now,
-                "completed_at": None,
-                "blocked_at": None,
-                "skip_count": 0,
-                "preflight_validated_at": _now,
-                "completion_review": completion_review,
-                "notes": "",
-            }
-            _entries.append(_synthetic)
-            _q["queue"] = _entries
-            _q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
-            if _q_path:
-                _write_queue_file(_q_path, _q)
-        else:
-            # Entry exists — update the completion_review flag on it
-            _q_path = os.path.expanduser(config.get("pipeline_queue_path") or "")
-            if _q_path:
-                for _e in _entries:
-                    if (
-                        _e.get("state") == "ACTIVE"
-                        and os.path.realpath(os.path.expanduser(_e.get("project_path", ""))) == project_real
-                    ):
-                        _e["completion_review"] = completion_review
+    if os.path.expanduser(config.get("pipeline_queue_path") or ""):
+        try:
+            import uuid as _uuid_mod
+            from datetime import datetime, timezone as _tz
+
+            def _apply(_q):
+                _entries = _q.get("queue", [])
+                _has_active = any(
+                    e.get("state") == "ACTIVE"
+                    and os.path.realpath(os.path.expanduser(e.get("project_path", ""))) == project_real
+                    for e in _entries
+                )
+                if not _has_active:
+                    _now = datetime.now(_tz.utc).isoformat()
+                    _entries.append({
+                        "id": str(_uuid_mod.uuid4()),
+                        "project_path": project_real,
+                        "idea_id": None,
+                        "name": os.path.basename(project_real),
+                        "state": "ACTIVE",
+                        "position": len(_entries) + 1,
+                        "parent_id": None,
+                        "added_at": _now,
+                        "started_at": _now,
+                        "completed_at": None,
+                        "blocked_at": None,
+                        "skip_count": 0,
+                        "preflight_validated_at": _now,
+                        "completion_review": completion_review,
+                        "notes": "",
+                    })
+                else:
+                    # Entry exists — update the completion_review flag on it
+                    for _e in _entries:
+                        if (
+                            _e.get("state") == "ACTIVE"
+                            and os.path.realpath(os.path.expanduser(_e.get("project_path", ""))) == project_real
+                        ):
+                            _e["completion_review"] = completion_review
                 _q["queue"] = _entries
-                _write_queue_file(_q_path, _q)
-    except Exception:
-        pass
+                return True
+
+            # Best-effort (a CAS exhaustion is swallowed like any other error below).
+            _mutate_queue_file(config, _apply)
+        except Exception:
+            pass
 
     return {"ok": True, "error": None}
 

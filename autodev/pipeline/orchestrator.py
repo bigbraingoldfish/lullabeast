@@ -19,7 +19,11 @@ from webhook_client import (
 )
 from sentinel_poller import cleanup_output_files, initialize_activity_stamp, poll_for_sentinel
 from skill_manager import SkillManager
-from queue_semantics import parent_blocks_child, ESCALATION_ANSWERED, REVIVABLE_ANSWERED_STATES
+from queue_semantics import (
+    parent_blocks_child, ESCALATION_ANSWERED, REVIVABLE_ANSWERED_STATES,
+    QUEUE_MAX_CAS_RETRIES, QUEUE_VERSION_KEY, QueueAbort, QueueVersionConflict,
+    bump_queue_version, mutate_queue, read_queue_version,
+)
 from env_resolvers import resolve_openclaw_root, resolve_pipeline_root
 
 # Route module-level logging.* calls (including those from webhook_client —
@@ -1136,14 +1140,17 @@ class Orchestrator:
     def _read_queue(self):
         """Read pipeline_queue.json; returns empty structure if absent.
 
-        SINGLE-WRITER ASSUMPTION: This file is written by two parties —
-        the UI server (human-initiated moments: add, reorder, parent, remove) and
-        the orchestrator (state transitions: ACTIVE, COMPLETED, BLOCKED, SKIPPED).
-        These writes are NOT protected by a file lock; concurrent writes are
-        considered safe enough at this risk level because the UI and orchestrator
-        operate in alternating windows (UI writes while idle; orchestrator writes
-        while running).  If this assumption is ever violated, add an advisory flock
-        or a version/ETag field before relaxing the single-writer model.
+        CONCURRENCY (F9): this file is written by two independent processes — the UI server
+        (add/delete/reorder/parent/mode) and this orchestrator (ACTIVE/COMPLETED/park/promote)
+        — with NO file lock. Writes go through ``_mutate_queue`` (read → apply → compare-and-swap
+        on ``queue_version`` → retry on conflict), so an interleaved UI + orchestrator write no
+        longer loses an update (the stale writer re-reads and re-applies). ``os.replace`` keeps
+        each write atomic; the version is the optimistic-concurrency token. A legacy file with no
+        ``queue_version`` reads as version 0 (additive schema, no migration). Residual: a
+        microsecond window between the pre-write version check and ``os.replace`` that lock-free
+        CAS cannot fully close without a lock or a per-write nonce — negligible for two
+        low-frequency writers on one host, and the deferred ``queue_write_token`` nonce is the
+        documented way to close it.
 
         If the file exists but is corrupt (invalid JSON or unreadable), it is
         quarantined by renaming to pipeline_queue.json.corrupt.<timestamp> and a
@@ -1169,11 +1176,14 @@ class Orchestrator:
             ) from e
 
     def _write_queue(self, data):
-        """Atomically write pipeline_queue.json (mkstemp + os.replace).
+        """Atomically persist pipeline_queue.json (stamp next version, mkstemp + os.replace).
 
-        See _read_queue for the single-writer assumption that makes this safe
-        without an explicit file lock.
+        The atomic-replace primitive. ``bump_queue_version`` stamps ``base+1`` here (the single
+        increment site), so a direct caller still advances the version; the compare-and-swap that
+        makes concurrent writes safe lives in ``_mutate_queue`` — route queue mutations through
+        that, not through bare ``_write_queue``. See ``_read_queue`` for the F9 concurrency model.
         """
+        bump_queue_version(data)
         data["last_updated"] = datetime.now(timezone.utc).isoformat()
         os.makedirs(AUTODEV_PIPELINE_ROOT, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=AUTODEV_PIPELINE_ROOT, prefix="queue_")
@@ -1186,6 +1196,34 @@ class Orchestrator:
             if os.path.exists(tmp):
                 os.remove(tmp)
             raise
+
+    def _peek_queue_version(self):
+        """Cheap read of the on-disk queue_version (the CAS "compare" half).
+
+        Returns 0 if the file is absent. On a transient read/parse error returns -1 so the CAS
+        comparison can never spuriously match a real base (>=0) — the next ``_read_queue`` in the
+        retry loop quarantines a genuinely-corrupt file via the existing path. Deliberately does
+        NOT quarantine here: this runs once per write attempt and must stay side-effect-free.
+        """
+        try:
+            if not os.path.exists(QUEUE_FILE):
+                return 0
+            with open(QUEUE_FILE, "r") as f:
+                return read_queue_version(json.load(f))
+        except (json.JSONDecodeError, OSError):
+            return -1
+
+    def _mutate_queue(self, mutate_fn, *, max_retries=QUEUE_MAX_CAS_RETRIES):
+        """Compare-and-swap wrapper around ``_read_queue``/``_write_queue`` for this process.
+
+        ``mutate_fn(data)`` applies a pure, idempotent, id-keyed change to a freshly-read queue
+        and returns the call's result (or raises ``QueueAbort`` to commit nothing). See
+        ``queue_semantics.mutate_queue`` for the full contract.
+        """
+        return mutate_queue(
+            self._read_queue, self._write_queue, self._peek_queue_version,
+            mutate_fn, max_retries=max_retries,
+        )
 
     def _queue_preflight(self, project_path):
         """Lightweight queue preflight: dir exists, is git repo, has roadmap*.md.
@@ -1280,26 +1318,81 @@ class Orchestrator:
         the flip here (not in the server) preserves the single-writer queue model with no locks.
 
         Returns True if any row was promoted (and the queue was rewritten).
+
+        F9: the write goes through the CAS loop (re-find each candidate by id AND re-check its
+        pending file on the fresh read), then the caller's in-memory ``queue_data`` is rebased to
+        the committed result so the selection walk that follows sees the promotions. The CAS round
+        here and the selection's own ACTIVE-commit CAS are SEQUENTIAL, never nested.
         """
-        changed = False
-        for entry in queue_data.get("queue", []):
-            if entry.get("state") != "ESCALATION":
-                continue
+        def _has_banked_answer(entry):
             pp = entry.get("project_path")
             if not pp:
-                continue
+                return False
             try:
                 root = os.path.realpath(os.path.expanduser(pp))
             except OSError:
-                continue
+                return False
             pending = os.path.join(root, ".autodev", "pipeline", "pending_escalation_command.json")
-            if os.path.exists(pending):
-                entry["state"] = ESCALATION_ANSWERED
-                entry["answered_at"] = datetime.now(timezone.utc).isoformat()
-                changed = True
-        if changed:
-            self._write_queue(queue_data)
-        return changed
+            return os.path.exists(pending)
+
+        eligible_ids = {
+            e["id"] for e in queue_data.get("queue", [])
+            if e.get("state") == "ESCALATION" and _has_banked_answer(e)
+        }
+        if not eligible_ids:
+            return False
+        now = datetime.now(timezone.utc).isoformat()
+
+        def _apply(data):
+            promoted = False
+            for entry in data.get("queue", []):
+                if (entry.get("id") in eligible_ids
+                        and entry.get("state") == "ESCALATION"
+                        and _has_banked_answer(entry)):
+                    entry["state"] = ESCALATION_ANSWERED
+                    entry["answered_at"] = now
+                    promoted = True
+            if not promoted:
+                raise QueueAbort()
+            return data
+
+        committed = self._mutate_queue(_apply)
+        if committed is None:
+            return False
+        # Rebase the caller's snapshot to the authoritative post-CAS queue (in place, preserving
+        # the list object the caller already aliased) so the ensuing walk sees the promotions.
+        queue_data["queue"][:] = committed["queue"]
+        queue_data[QUEUE_VERSION_KEY] = read_queue_version(committed)
+        return True
+
+    def _skip_and_requeue_group(self, entries, entry_id, reason, visited_ids=None):
+        """Mark *entry_id* + its descendants SKIPPED_PENDING (skip_count++), set skip_reason,
+        and move the whole group past the next independent entry. Mutates *entries* in place.
+
+        Returns True if applied, False if *entry_id* is no longer present (the CAS re-apply path
+        turns that False into a QueueAbort). When *visited_ids* is given, descendant ids are added
+        to it so the selection walk does not try to start a child of a just-skipped parent.
+
+        Shared by the in-memory walk update and the CAS re-apply closure so the skip logic lives
+        in exactly one place (F9).
+        """
+        entry = next((e for e in entries if e["id"] == entry_id), None)
+        if entry is None:
+            return False
+        desc_ids = self._get_all_descendants(entries, entry_id)
+        for e in entries:
+            if e["id"] in desc_ids and e["state"] not in ("ACTIVE", "COMPLETED"):
+                e["state"] = "SKIPPED_PENDING"
+                e["skip_count"] = e.get("skip_count", 0) + 1
+                if visited_ids is not None:
+                    visited_ids.add(e["id"])
+        entry["state"] = "SKIPPED_PENDING"
+        entry["skip_count"] = entry.get("skip_count", 0) + 1
+        entry["skip_reason"] = reason
+        group_size = 1 + len(desc_ids)
+        new_pos = min(entry["position"] + group_size, len(entries))
+        self._move_group_atomically(entries, entry_id, new_pos)
+        return True
 
     def _select_next_queue_project(self, halt_if_no_eligible: bool = True, target_entry_id: str | None = None):
         """Walk queue, find next eligible project, run preflight, start it.
@@ -1358,16 +1451,24 @@ class Orchestrator:
                 parent_state = state_by_id.get(entry["parent_id"])
                 if parent_state != "COMPLETED":
                     if parent_blocks_child(parent_state):
-                        entry["state"] = "DEPENDENCY_HOLD"
-                        self._write_queue(queue_data)
-                        # Phase 2 (observability) — record the hold. Fires once per genuine
-                        # READY->DEPENDENCY_HOLD transition: an already-held entry is skipped by
-                        # the state gate at the top of this loop before reaching here, so no spam.
-                        _write_pipeline_event(
-                            "dependency_hold", "", "queue",
-                            {"parent_id": entry.get("parent_id"), "entry_id": entry.get("id"),
-                             "entry_name": entry.get("name")},
-                        )
+                        entry["state"] = "DEPENDENCY_HOLD"  # in-memory, for the walk
+
+                        def _hold_cas(data, _eid=entry["id"]):
+                            fresh = next((e for e in data["queue"] if e["id"] == _eid), None)
+                            if fresh is None:
+                                raise QueueAbort()  # entry deleted concurrently
+                            fresh["state"] = "DEPENDENCY_HOLD"
+                            return True
+                        # Phase 2 (observability) — record the hold. Emitted once, only if the
+                        # CAS actually committed (a concurrently-deleted entry yields None). Fires
+                        # once per genuine READY->DEPENDENCY_HOLD: an already-held entry is skipped
+                        # by the state gate at the top of this loop before reaching here.
+                        if self._mutate_queue(_hold_cas):
+                            _write_pipeline_event(
+                                "dependency_hold", "", "queue",
+                                {"parent_id": entry.get("parent_id"), "entry_id": entry.get("id"),
+                                 "entry_name": entry.get("name")},
+                            )
                     i += 1
                     continue
 
@@ -1382,21 +1483,18 @@ class Orchestrator:
                 continue
             if not ok:
                 print(f"[QUEUE] Preflight failed for '{entry['name']}': {reason} — skip-and-requeue")
-                # Cascade SKIPPED_PENDING to all descendants before moving
-                desc_ids = self._get_all_descendants(entries, entry["id"])
-                for e in entries:
-                    if e["id"] in desc_ids and e["state"] not in ("ACTIVE", "COMPLETED"):
-                        e["state"] = "SKIPPED_PENDING"
-                        e["skip_count"] = e.get("skip_count", 0) + 1
-                        visited_ids.add(e["id"])  # prevent re-processing descendants
-                entry["state"] = "SKIPPED_PENDING"
-                entry["skip_count"] = entry.get("skip_count", 0) + 1
-                entry["skip_reason"] = reason
-                # Skip-and-requeue: move entire group past next independent entry
-                group_size = 1 + len(desc_ids)
-                new_pos = min(entry["position"] + group_size, len(entries))
-                self._move_group_atomically(entries, entry["id"], new_pos)
-                self._write_queue(queue_data)
+                # Apply in-memory for the walk's continuation (moves the group + marks descendants
+                # visited so a child of a skipped parent is not started)...
+                self._skip_and_requeue_group(entries, entry["id"], reason, visited_ids)
+
+                # ...and CAS the same change to disk by id, so a concurrent UI write is merged
+                # rather than clobbered. skip_count++ is applied once per committed write (on the
+                # freshly-read row), so it cannot double-count.
+                def _skip_cas(data, _eid=entry["id"], _reason=reason):
+                    if not self._skip_and_requeue_group(data["queue"], _eid, _reason):
+                        raise QueueAbort()  # entry deleted concurrently
+                    return True
+                self._mutate_queue(_skip_cas)
                 # Do NOT increment i — entry at this position shifted; visited_ids prevents re-trying
                 continue
 
@@ -1409,17 +1507,34 @@ class Orchestrator:
                 print(f"[QUEUE] Symlink update failed for '{entry['name']}' — leaving entry READY.")
                 return False
 
+            # F9 — commit ACTIVE via CAS (re-find by id on fresh data). update_symlink (above)
+            # and write_state / manifest / banked-command (below) are the non-idempotent side
+            # effects and stay OUTSIDE this closure, so a version-conflict retry never re-fires
+            # them. P1 Stage H — on a revival, capture the parked snapshot from the FRESH row
+            # before stripping its park metadata, so a future re-park starts clean.
+            _expected = REVIVABLE_ANSWERED_STATES if is_revival else frozenset({"READY", "SKIPPED_PENDING"})
+            _commit = {"snapshot": None}
+
+            def _activate(data, _eid=entry["id"], _expected=_expected):
+                fresh = next((e for e in data["queue"] if e["id"] == _eid), None)
+                if fresh is None or fresh.get("state") not in _expected:
+                    raise QueueAbort()  # the picked entry vanished/changed under us
+                fresh["state"] = "ACTIVE"
+                fresh["started_at"] = now
+                if is_revival:
+                    _commit["snapshot"] = dict(fresh.get("parked_state_snapshot") or {})
+                    for _stale in ("parked_state_snapshot", "parked_at", "parked_reason",
+                                   "parked_pipeline_status", "answered_at"):
+                        fresh.pop(_stale, None)
+                return True
+
+            if self._mutate_queue(_activate) is None:
+                print(f"[QUEUE] Picked entry '{entry['name']}' changed before activation — re-selecting next cycle.")
+                return False
+            # Keep the in-memory entry consistent for the manifest/event below.
             entry["state"] = "ACTIVE"
             entry["started_at"] = now
-            # P1 Stage H — on a revival, capture the parked snapshot into a local BEFORE
-            # clearing the row, then strip all park metadata so a future re-park starts clean.
-            _revival_snapshot = None
-            if is_revival:
-                _revival_snapshot = dict(entry.get("parked_state_snapshot") or {})
-                for _stale in ("parked_state_snapshot", "parked_at", "parked_reason",
-                               "parked_pipeline_status", "answered_at"):
-                    entry.pop(_stale, None)
-            self._write_queue(queue_data)
+            _revival_snapshot = _commit["snapshot"]
             _write_run_manifest(entry)  # W2-A
 
             # INVARIANT A: update_symlink (above) is shared and runs FIRST; only the
@@ -1513,15 +1628,29 @@ class Orchestrator:
             if not self.update_symlink(project_path):
                 print(f"[QUEUE] Symlink update failed reviving escalation '{_esc['name']}'.")
                 continue
-            snap = dict(_esc.get("parked_state_snapshot") or {})
-            _esc["state"] = "ACTIVE"
-            _esc["started_at"] = now
-            for _stale in (
-                "parked_state_snapshot", "parked_at", "parked_reason",
-                "parked_pipeline_status", "answered_at",
-            ):
-                _esc.pop(_stale, None)
-            self._write_queue(queue_data)
+            # F9 — commit ACTIVE via CAS (re-find by id on fresh data); update_symlink (above)
+            # and the write_state below stay outside the closure (run once). Capture the parked
+            # snapshot from the FRESH row before stripping it.
+            _esc_commit = {"snapshot": {}}
+
+            def _activate_esc(data, _eid=_esc["id"]):
+                fresh = next((e for e in data["queue"] if e["id"] == _eid), None)
+                if fresh is None or fresh.get("state") != "ESCALATION":
+                    raise QueueAbort()
+                _esc_commit["snapshot"] = dict(fresh.get("parked_state_snapshot") or {})
+                fresh["state"] = "ACTIVE"
+                fresh["started_at"] = now
+                for _stale in (
+                    "parked_state_snapshot", "parked_at", "parked_reason",
+                    "parked_pipeline_status", "answered_at",
+                ):
+                    fresh.pop(_stale, None)
+                return True
+
+            if self._mutate_queue(_activate_esc) is None:
+                print(f"[QUEUE] Escalation '{_esc['name']}' changed before revive — skipping.")
+                continue
+            snap = _esc_commit["snapshot"]
             # Restore the escalated-phase pointer (empty snapshot -> phase 0, the pre-phase
             # escalation case) and sit in WAITING_FOR_HUMAN. No banked command to apply —
             # the operator answers via the dashboard (delivered live since status is
@@ -1586,32 +1715,36 @@ class Orchestrator:
 
     def _queue_promote_children_after_parent_completed(self, parent_entry_id):
         """Set DEPENDENCY_HOLD children to READY when parent reaches COMPLETED."""
-        try:
-            queue_data = self._read_queue()
+        def _apply(data):
             changed = False
-            for e in queue_data["queue"]:
+            for e in data["queue"]:
                 if e.get("parent_id") == parent_entry_id and e.get("state") == "DEPENDENCY_HOLD":
                     e["state"] = "READY"
                     changed = True
-            if changed:
-                self._write_queue(queue_data)
+            if not changed:
+                raise QueueAbort()  # nothing to promote -> commit nothing
+            return True
+        try:
+            self._mutate_queue(_apply)
         except Exception as e:
             print(f"[QUEUE] Failed to promote children after parent completed: {e}")
 
     def _queue_update_active_entry(self, new_state, extra_fields=None):
         """Find the ACTIVE queue entry for this project and update its state."""
-        try:
-            queue_data = self._read_queue()
-            if not queue_data["queue"]:
-                return
-            idx, entry = self._find_active_queue_entry(queue_data)
+        def _apply(data):
+            if not data["queue"]:
+                raise QueueAbort()
+            idx, entry = self._find_active_queue_entry(data)
             if idx is None:
-                return
-            parent_id_completed = entry.get("id") if new_state == "COMPLETED" else None
-            queue_data["queue"][idx]["state"] = new_state
+                raise QueueAbort()
+            data["queue"][idx]["state"] = new_state
             if extra_fields:
-                queue_data["queue"][idx].update(extra_fields)
-            self._write_queue(queue_data)
+                data["queue"][idx].update(extra_fields)
+            # Returned so the caller can run the children-promote as a SEPARATE sequential CAS
+            # AFTER this write commits (it must not re-fire on a retry of THIS mutation).
+            return entry.get("id") if new_state == "COMPLETED" else None
+        try:
+            parent_id_completed = self._mutate_queue(_apply)
             if parent_id_completed:
                 self._queue_promote_children_after_parent_completed(parent_id_completed)
         except Exception as e:
@@ -1619,51 +1752,57 @@ class Orchestrator:
 
     def _queue_park_active_entry(self, queue_state, parked_reason, extra_fields=None):
         """Park the ACTIVE queue row (escalation or roadmap blocked) with metadata."""
-        try:
-            queue_data = self._read_queue()
-            if not queue_data.get("queue"):
-                return
-            idx, _entry = self._find_active_queue_entry(queue_data)
+        now = datetime.now(timezone.utc).isoformat()
+        # P1 Stage H — snapshot the GLOBAL pipeline_state fields that the queue
+        # advance overwrites (selection resets to a blank phase-0/planner state),
+        # so a later revival can restore the *escalated phase* pointer rather than
+        # restarting from scratch. phase_base_commit is load-bearing: reset_phase()
+        # guards its ``git reset --hard`` on it, so without it a revived RESET_PHASE
+        # would resume on a dirty tree. escalation_resets/reset_log are deliberately
+        # NOT snapshotted — they live in the per-project phase_state.json (survives
+        # via the symlink) and duplicating them would diverge from the reset-cap logic.
+        # Computed once from self.state (stable for this call); copied per CAS attempt.
+        snapshot = {
+            "current_phase": self.state.get("current_phase", 0),
+            "current_phase_raw_id": self.state.get("current_phase_raw_id", ""),
+            "planner_retries": self.state.get("planner_retries", 0),
+            "executor_retries": self.state.get("executor_retries", 0),
+            "executor_self_failure_retries": self.state.get("executor_self_failure_retries", 0),
+            "executor_reviewer_rejection_retries": self.state.get("executor_reviewer_rejection_retries", 0),
+            "reviewer_retries": self.state.get("reviewer_retries", 0),
+            "phase_base_commit": self.state.get("phase_base_commit", ""),
+            "phase_start_time": self.state.get("phase_start_time", ""),
+        }
+
+        def _apply(data):
+            if not data.get("queue"):
+                raise QueueAbort()
+            idx, _entry = self._find_active_queue_entry(data)
             if idx is None:
-                return
-            now = datetime.now(timezone.utc).isoformat()
-            row = queue_data["queue"][idx]
+                raise QueueAbort()
+            row = data["queue"][idx]
             row["state"] = queue_state
             row["parked_at"] = now
             row["parked_reason"] = parked_reason
             row["parked_pipeline_status"] = self.state.get("pipeline_status")
-            # P1 Stage H — snapshot the GLOBAL pipeline_state fields that the queue
-            # advance overwrites (selection resets to a blank phase-0/planner state),
-            # so a later revival can restore the *escalated phase* pointer rather than
-            # restarting from scratch. phase_base_commit is load-bearing: reset_phase()
-            # guards its ``git reset --hard`` on it, so without it a revived RESET_PHASE
-            # would resume on a dirty tree. escalation_resets/reset_log are deliberately
-            # NOT snapshotted — they live in the per-project phase_state.json (survives
-            # via the symlink) and duplicating them would diverge from the reset-cap logic.
-            row["parked_state_snapshot"] = {
-                "current_phase": self.state.get("current_phase", 0),
-                "current_phase_raw_id": self.state.get("current_phase_raw_id", ""),
-                "planner_retries": self.state.get("planner_retries", 0),
-                "executor_retries": self.state.get("executor_retries", 0),
-                "executor_self_failure_retries": self.state.get("executor_self_failure_retries", 0),
-                "executor_reviewer_rejection_retries": self.state.get("executor_reviewer_rejection_retries", 0),
-                "reviewer_retries": self.state.get("reviewer_retries", 0),
-                "phase_base_commit": self.state.get("phase_base_commit", ""),
-                "phase_start_time": self.state.get("phase_start_time", ""),
-            }
+            row["parked_state_snapshot"] = dict(snapshot)
             if extra_fields:
                 row.update(extra_fields)
-            self._write_queue(queue_data)
+            return {"id": row.get("id"), "name": row.get("name")}
+
+        try:
+            parked = self._mutate_queue(_apply)
             # Phase 2 (observability) — record that the active project was set aside and
-            # the queue advanced. Emitted only after a successful write (both early returns
-            # above are before it), so all four call sites route through one emit, once each.
-            _write_pipeline_event(
-                "queue_parked",
-                self.state.get("current_phase_raw_id", ""),
-                "queue",
-                {"reason": parked_reason, "phase": self.state.get("current_phase_raw_id", ""),
-                 "entry_id": row.get("id"), "entry_name": row.get("name")},
-            )
+            # the queue advanced. Emitted once AFTER the commit (outside the retried closure
+            # so a CAS retry cannot double-emit); the QueueAbort early-returns yield None.
+            if parked is not None:
+                _write_pipeline_event(
+                    "queue_parked",
+                    self.state.get("current_phase_raw_id", ""),
+                    "queue",
+                    {"reason": parked_reason, "phase": self.state.get("current_phase_raw_id", ""),
+                     "entry_id": parked["id"], "entry_name": parked["name"]},
+                )
         except Exception as e:
             print(f"[QUEUE] Failed to park active entry ({queue_state}): {e}")
 
@@ -1674,25 +1813,25 @@ class Orchestrator:
         RESET_REVIEWER, SKIP, PROCEED) so that downstream _queue_update_active_entry calls
         can find the row after _queue_park_active_entry set it to a non-ACTIVE state.
         """
-        try:
-            queue_data = self._read_queue()
-            if not queue_data.get("queue"):
-                return
-            # Resolve the current project path.
-            proj_path = None
-            if os.path.exists(SYMLINK_TARGET):
-                try:
-                    proj_path = os.path.realpath(SYMLINK_TARGET)
-                except OSError:
-                    pass
-            if not proj_path and self.state.get("project_path"):
-                try:
-                    proj_path = os.path.realpath(self.state["project_path"])
-                except OSError:
-                    pass
-            if not proj_path:
-                return
-            for i, entry in enumerate(queue_data["queue"]):
+        # Resolve the current project path (read-only, stable) OUTSIDE the CAS closure.
+        proj_path = None
+        if os.path.exists(SYMLINK_TARGET):
+            try:
+                proj_path = os.path.realpath(SYMLINK_TARGET)
+            except OSError:
+                pass
+        if not proj_path and self.state.get("project_path"):
+            try:
+                proj_path = os.path.realpath(self.state["project_path"])
+            except OSError:
+                pass
+        if not proj_path:
+            return
+
+        def _apply(data):
+            if not data.get("queue"):
+                raise QueueAbort()
+            for entry in data["queue"]:
                 if entry.get("state") not in ("ESCALATION", "BLOCKED"):
                     continue
                 try:
@@ -1704,8 +1843,11 @@ class Orchestrator:
                 entry.pop("parked_at", None)
                 entry.pop("parked_reason", None)
                 entry.pop("parked_pipeline_status", None)
-                self._write_queue(queue_data)
-                return
+                return True
+            raise QueueAbort()  # no matching parked row -> commit nothing
+
+        try:
+            self._mutate_queue(_apply)
         except Exception as e:
             print(f"[QUEUE] Failed to restore parked entry to ACTIVE: {e}")
 
