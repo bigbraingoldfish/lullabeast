@@ -554,7 +554,19 @@ def evaluate_executor(output_path=None):
                 record_error_code_only("executor", "ERR_GIT_DIFF_FAILED")
                 return "FAIL"
         except Exception as _del_err:
-            print(f"[GATE WARN] Deletion check error: {_del_err} — skipping.", file=sys.stderr)
+            # Fail closed: if the deletion check itself crashes (git missing,
+            # killed, timeout, OSError) we cannot verify deletions, so the MiniMax
+            # deletion guard is effectively disabled. Skipping-and-PASSing would
+            # silently destroy the only automated defence against the model
+            # deleting project files — match the missing-base / git-rc!=0 siblings
+            # and FAIL so the orchestrator retries with a fresh session.
+            print(
+                f"[GATE FAIL] Deletion check crashed: {_del_err!r} — failing closed "
+                "to protect the MiniMax deletion guard.",
+                file=sys.stderr,
+            )
+            record_error_code_only("executor", "ERR_DELETION_CHECK_CRASHED")
+            return "FAIL"
 
     # P1 Stage F — reachability advisory. Pure addition; never fails the gate.
     # Short-circuits on non-COMPLETE phases, so this is near-zero cost on the

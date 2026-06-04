@@ -15,7 +15,7 @@ These tests pin both the refactor structure (source-grep: the three callers
 delegate; the inline resolver-outcome handling is gone from the PASS branch and
 the buggy SKIP/PROCEED tails are gone) and the helper's per-outcome behaviour
 (unit: PENDING starts the next phase, PIPELINE_COMPLETE/BLOCKED return the right
-signal, a resolver error returns ``"break"``).
+signal, a resolver error escalates and returns ``"continue"``).
 """
 
 import json
@@ -121,9 +121,10 @@ class _ResolverRun:
     """subprocess.run stub: simulates phase_resolver (configurable rc/stdout,
     optionally writing current_phase.json) + benign git ops."""
 
-    def __init__(self, *, rc, stdout, artifacts_dir, current_phase_json=None):
+    def __init__(self, *, rc, stdout, artifacts_dir, current_phase_json=None, stderr=""):
         self.rc = rc
         self.stdout = stdout
+        self.stderr = stderr
         self.artifacts_dir = artifacts_dir
         self.current_phase_json = current_phase_json
         self.calls = []
@@ -135,7 +136,7 @@ class _ResolverRun:
             if self.current_phase_json is not None:
                 with open(os.path.join(self.artifacts_dir, "current_phase.json"), "w") as f:
                     json.dump(self.current_phase_json, f)
-            return _R(self.rc, self.stdout)
+            return _R(self.rc, self.stdout, self.stderr)
         if isinstance(cmd, list) and cmd[:2] == ["git", "rev-parse"]:
             return _R(0, "base123commit\n")
         return _R(0, "")  # git checkout / tag / anything else
@@ -250,16 +251,47 @@ def test_advance_blocked_parks_and_returns_signal(tmp_path, monkeypatch):
     )
 
 
-def test_advance_resolver_error_returns_break(tmp_path, monkeypatch):
-    """Resolver rc 1 / unexpected output: the helper makes no phase start and
-    returns 'break' (preserving today's behaviour; F4 in Phase 3 will make this
-    escalate uniformly for all three callers)."""
-    run = _ResolverRun(rc=1, stdout="ERROR: roadmap not found", artifacts_dir=str(tmp_path))
+def test_advance_resolver_error_routes_to_escalation(tmp_path, monkeypatch):
+    """Resolver rc 1: the helper records an honest escalation reason (carrying the
+    rc and the resolver's stderr), routes ``current_agent`` to ``"escalation"``,
+    transitions RUNNING, and returns ``"continue"`` so the caller re-enters the
+    loop and the main-loop escalation dispatch fires (F4). Catches a regression to
+    the old silent fall-through (a dead ``"break"`` leaving status RUNNING,
+    current_phase=0, and no operator signal)."""
+    run = _ResolverRun(
+        rc=1, stdout="ERROR: roadmap not found", artifacts_dir=str(tmp_path),
+        stderr="Traceback: roadmap.md not found",
+    )
     orch = _make_advance_orch(tmp_path, monkeypatch, run=run)
 
     sig = orch._advance_to_next_pending_phase(trigger="phase_complete")
 
-    assert sig == "break"
-    # No next phase was started.
-    assert orch.state.get("current_phase") == 0
-    assert orch.state.get("current_phase_raw_id") == ""
+    assert sig == "continue"
+    assert orch.state["current_agent"] == "escalation"
+    assert orch.state["pipeline_status"] == "RUNNING"
+    ps = orch.read_phase_state()
+    assert ps.get("last_error_code") == "ERR_PHASE_RESOLVER_FAILED"
+    reason = ps.get("escalation_trigger_reason") or ""
+    assert "rc=1" in reason, "the escalation reason must surface the resolver rc"
+    assert "roadmap.md not found" in reason, (
+        "the escalation reason must surface the resolver's stderr so the advisory "
+        "is honest about the real cause"
+    )
+
+
+def test_advance_resolver_unexpected_output_escalates(tmp_path, monkeypatch):
+    """Resolver rc 0 but stdout matches none of PENDING / PIPELINE_COMPLETE /
+    BLOCKED: the helper must treat the unrecognised verdict as a failure and
+    escalate, not fall through to a blind ``"break"``. Catches the subtle case
+    where the rc is fine but the resolver emitted garbage."""
+    run = _ResolverRun(
+        rc=0, stdout="garbage not a known token", artifacts_dir=str(tmp_path),
+    )
+    orch = _make_advance_orch(tmp_path, monkeypatch, run=run)
+
+    sig = orch._advance_to_next_pending_phase(trigger="proceed")
+
+    assert sig == "continue"
+    assert orch.state["current_agent"] == "escalation"
+    assert orch.state["pipeline_status"] == "RUNNING"
+    assert orch.read_phase_state().get("last_error_code") == "ERR_PHASE_RESOLVER_FAILED"
