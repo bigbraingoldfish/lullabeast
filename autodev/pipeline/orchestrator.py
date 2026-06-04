@@ -243,6 +243,12 @@ WEBHOOK_AGENT_ID_PRD = "prd-creator"
 # Hard cap for gate script subprocess.run — prevents hung gates from stalling the orchestrator.
 GATE_SUBPROCESS_TIMEOUT = 60
 
+# Canonical pipeline_status values. transition_state() — the ONLY writer — rejects
+# (raises ValueError on) anything not in this list. `IDLE` is intentionally absent:
+# it is a reset/entry status written ONLY by external resetters (the UI / tooling)
+# via a direct atomic write to pipeline_state.json, never a transition_state target.
+# At startup the orchestrator treats IDLE as non-terminal; the first real transition
+# (e.g. "Invoking Planner" -> WAITING_FOR_SENTINEL) overwrites it. Do not add IDLE here.
 VALID_STATES = [
     "RUNNING",
     "WAITING_FOR_SENTINEL",
@@ -1102,11 +1108,21 @@ class Orchestrator:
             raise
 
     def transition_state(self, new_status, action_description):
-        """Helper to cleanly transition and write state before action."""
+        """Helper to cleanly transition and write state before action.
+
+        Raises ValueError if ``new_status`` is not in VALID_STATES. This is a
+        loud failure by design (an invalid target is a programming error): in the
+        live loop the raise is caught by run()'s top-level except handler and
+        routed to escalation; outside the loop (CLI/startup) it surfaces as a
+        traceback. Both are strictly better than the former silent no-op, which
+        left a caller's prior ``self.state`` mutation neither persisted nor
+        rolled back. `IDLE` is deliberately NOT a valid target — see VALID_STATES.
+        """
         if new_status not in VALID_STATES:
-            print(f"[ERROR] Invalid state transition requested: {new_status}")
-            return
-            
+            raise ValueError(
+                f"Invalid state transition target {new_status!r} not in VALID_STATES"
+            )
+
         self.state["pipeline_status"] = new_status
         self.state["last_action"] = action_description
         if new_status != "WAITING_FOR_SENTINEL":

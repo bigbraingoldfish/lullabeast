@@ -231,9 +231,13 @@ def transition_state(self, new_status, action_description):
 
 **Do not** call `self.state["pipeline_status"] = "..."` and then act without calling `write_state()`. Any code that updates state dict fields must end with a `write_state()` or `transition_state()` call.
 
+**F12 — an invalid target fails loudly.** `transition_state()` **raises `ValueError`** when `new_status` is not in `VALID_STATES`, rather than the former silent `print` + `return` no-op (which left a caller's prior `self.state` mutation — e.g. a `current_agent="escalation"` set just before the call — neither persisted nor rolled back). In the live loop the raise is caught by `run()`'s top-level `except` and routed to escalation; outside the loop (CLI / startup) it surfaces as a traceback. No real caller passes an invalid literal, so this only converts a latent silent failure into a visible one.
+
 ### State reset protocol
 
 When resetting `pipeline_state.json` to `IDLE` for a fresh run, set `pipeline_status` to `"IDLE"`. Also set `current_agent` to `"planner"` and `current_phase` to `0`. If `current_agent` is `null`, the orchestrator exits immediately with `"Agent None logic not reached"`.
+
+**F5 — `IDLE` is external-only and deliberately absent from `VALID_STATES`.** It is a reset/entry status written **only** by external resetters (the UI / tooling) via a direct atomic write to `pipeline_state.json` — it is **never** a `transition_state()` target (which now raises on any status outside `VALID_STATES`, see above). There is no explicit `IDLE → RUNNING` resolution at startup: the orchestrator treats `IDLE` as non-terminal, and the first real `transition_state` (typically `"Invoking Planner"` → `WAITING_FOR_SENTINEL`) overwrites it. The `VALID_STATES` list in `orchestrator.py` carries a matching code comment so the exclusion reads as deliberate.
 
 ### Terminal states
 
