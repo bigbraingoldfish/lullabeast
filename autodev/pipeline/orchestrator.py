@@ -2650,6 +2650,37 @@ class Orchestrator:
             "reviewer", session_key, token, message=directive or None
         )
 
+    def _invoke_executor(self, session_key, token):
+        """Invoke the executor webhook, delivering a one-shot corrective directive.
+
+        The ``executor_retry_directive`` phase-state field — written by the
+        reviewer-gate MISSING_ARTIFACTS handler — carries a concise, self-contained
+        instruction for the *next* executor session (produce the missing completion
+        artifacts). Deliver it here as the webhook ``message=`` (overriding the
+        executor's default message, which only the prompt can do) and clear it
+        immediately so it is one-shot: a later normal/self-failure retry must not
+        re-inject a stale directive. When absent, the executor receives its default
+        message and reads ``failure_context.json`` from disk as usual — the file-based
+        self-failure channel is independent of this message-side directive channel.
+
+        Counterpart of the reviewer's ``reviewer_retry_directive``: structured data the
+        agent *analyzes* goes in a file (``failure_context.json`` / ``gate_warnings.json``);
+        a one-shot directive that *frames* the invocation goes in ``message=``.
+        (See PIPELINE-SPEC.md §7.)
+        """
+        directive = None
+        try:
+            _ps = self.read_phase_state()
+            directive = _ps.get("executor_retry_directive")
+            if directive:
+                _ps.pop("executor_retry_directive", None)
+                self.write_phase_state_atomic(_ps)
+        except Exception:
+            directive = None
+        return invoke_agent_webhook(
+            "executor", session_key, token, message=directive or None
+        )
+
     # -----------------------------------------------------------------------
     # FIND-PLANNER-PRESERVE: check if valid planner output already exists on disk.
     # Allows restart path to skip re-invocation when output is intact.
@@ -5300,7 +5331,10 @@ class Orchestrator:
                     _verify_symlinks_consistent(
                         self.state.get("project_path", ""), self.update_symlink
                     )
-                    webhook_status = invoke_agent_webhook("executor", session_key, token)
+                    # _invoke_executor delivers (and clears) any one-shot
+                    # executor_retry_directive as the webhook message; otherwise the
+                    # executor's default message applies.
+                    webhook_status = self._invoke_executor(session_key, token)
 
                     if webhook_status != "SUCCESS":
                         self.state["current_agent"] = "escalation"
@@ -6143,17 +6177,25 @@ class Orchestrator:
                                 f"Reviewer MISSING_ARTIFACTS: artifact retry cap reached ({_ma_retries})",
                             )
                         else:
-                            # Re-invoke executor with mandatory artifact instruction.
+                            # Re-invoke executor; the directive is delivered as the
+                            # webhook message= by _invoke_executor (one-shot). It must be
+                            # self-contained because message= replaces the executor's
+                            # default prompt — so it re-asserts that prior work is
+                            # preserved and points the fresh session at what to record.
                             _raw_id = self.state.get("current_phase_raw_id", "this phase")
-                            _artifact_instruction = (
-                                f"MISSING COMPLETION ARTIFACTS: Before writing executor_output.done, "
-                                f"you MUST produce two mandatory artifacts: "
-                                f"(1) Write the phase archive to .autodev/pipeline/phases/{_raw_id}.md using the format "
-                                f"in your AGENTS.md. "
-                                f"(2) Append a metrics row to .autodev/pipeline/metrics.jsonl using the format in your "
-                                f"AGENTS.md. Write the archive first, metrics second, sentinel last."
+                            _executor_directive = (
+                                f"MISSING COMPLETION ARTIFACTS: Your implementation for this phase is already "
+                                f"complete and PRESERVED on the branch — do NOT re-implement or rebuild it. This "
+                                f"is a fresh session re-invoked solely to add the two completion artifacts the "
+                                f"reviewer found missing. Read current_phase.json and your existing work on the "
+                                f"branch for what to record, then, before writing executor_output.done, you MUST "
+                                f"produce both: "
+                                f"(1) Write the phase archive to .autodev/pipeline/phases/{_raw_id}.md using the "
+                                f"format in your AGENTS.md. "
+                                f"(2) Append a metrics row to .autodev/pipeline/metrics.jsonl using the format in "
+                                f"your AGENTS.md. Write the archive first, metrics second, sentinel last."
                             )
-                            _ps_ma["artifact_instruction"] = _artifact_instruction
+                            _ps_ma["executor_retry_directive"] = _executor_directive
                             self.write_phase_state_atomic(_ps_ma)
                             self.state["current_agent"] = "executor"
                             self.state["executor_retries"] = 0
