@@ -2238,8 +2238,8 @@ class Orchestrator:
             return "executor_preempted"
         return "executor_crashed"
 
-    def _init_activity_stamp_or_halt(self, agent_role: str) -> bool:
-        """Seed the agent activity stamp; escalate loudly on failure.
+    def _init_activity_stamp_or_escalate(self, agent_role: str) -> bool:
+        """Seed the agent activity stamp; route to escalation on failure.
 
         ``initialize_activity_stamp`` returns ``False`` when the workspace
         directory is missing or unwritable.  Silently discarding that
@@ -2248,16 +2248,28 @@ class Orchestrator:
         ``os.path.exists(stall_detection_path)`` against a file that
         never gets created — the stall branch is skipped on every poll
         iteration and a hung agent is invisible until the infrastructure
-        backstop fires.  Loud halt is strictly better than silent stall
-        blindness.
+        backstop fires.
+
+        On failure this routes to the escalation agent (sets
+        ``current_agent = "escalation"`` + ``transition_state("RUNNING", …)``)
+        rather than dead-ending at a silent ``HALTED_SILENT``.  Escalation is
+        the only path that notifies the operator (advisory + Signal via the
+        escalation agent) and offers a dashboard recovery — "the operator was
+        notified" and "the pipeline escalated" are the same event.  If the
+        workspace is so broken that the escalation dispatch's own
+        ``phase_state`` write also fails, the run degrades to the existing
+        escalation-delivery-failed ``HALTED_SILENT`` — an honest silent halt
+        because we truly could not reach anyone (the ``stamp_init_failed``
+        event is still recorded for the activity feed).
 
         Returns
         -------
         bool
             ``True`` if the stamp was successfully seeded — caller may
             proceed into ``poll_for_sentinel``.  ``False`` if the helper
-            escalated to ``HALTED_SILENT`` — caller MUST short-circuit
-            (``return``) to avoid running with stall detection broken.
+            routed to escalation — caller MUST ``continue`` the main loop so
+            the next iteration fires the escalation dispatch (a ``return``
+            would exit the process before escalation runs).
         """
         ok = initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, agent_role)
         if ok:
@@ -2266,9 +2278,9 @@ class Orchestrator:
             PROJECT_ARTIFACTS_DIR, f"{agent_role}_activity.stamp"
         )
         print(
-            f"[FATAL] activity stamp init failed for {agent_role} at {stamp_path}. "
+            f"[WARN] activity stamp init failed for {agent_role} at {stamp_path}. "
             f"Workspace directory missing or unwritable — stall detection would "
-            f"be silently disabled.  Refusing to proceed."
+            f"be silently disabled.  Routing to escalation."
         )
         _write_pipeline_event(
             "stamp_init_failed",
@@ -2280,9 +2292,11 @@ class Orchestrator:
                 "reason": "workspace_unwritable_or_missing",
             },
         )
+        self.state["current_agent"] = "escalation"
         self.transition_state(
-            "HALTED_SILENT",
-            f"activity stamp init failed for {agent_role}",
+            "RUNNING",
+            f"activity stamp init failed for {agent_role} — workspace missing "
+            f"or unwritable; escalating for operator review",
         )
         return False
 
@@ -3315,6 +3329,147 @@ class Orchestrator:
                 raise
         except Exception as _e:
             print(f"[WARN] _mark_roadmap_phase: could not update roadmap for {raw_id!r}: {_e}")
+
+    def _advance_to_next_pending_phase(self, *, trigger: str) -> str:
+        """Resolve the roadmap and advance to the next pending phase.
+
+        Shared by the reviewer-PASS phase-complete path and the SKIP / PROCEED
+        escalation commands so the three sites cannot drift (F3).  The caller
+        must have ALREADY recorded phase closure in the roadmap (PASS via the
+        merge commit; PROCEED marks ``[x]`` + git-tags; SKIP marks ``[-]``);
+        this helper only advances pipeline state.
+
+        It wipes the per-phase artifacts, clears ``current_phase_raw_id``, re-runs
+        ``phase_resolver``, and acts on the outcome:
+
+          * PENDING            — load the resolver-written ``current_phase.json``,
+                                 set the new phase/raw_id, zero the planner /
+                                 executor / reviewer retry counters, stamp
+                                 ``phase_start_time``, capture ``phase_base_commit``
+                                 (``git rev-parse HEAD`` — ``reset_phase`` rewinds
+                                 to it), checkout ``phase/{raw}`` and transition to
+                                 RUNNING.
+          * PIPELINE_COMPLETE  — clear ``current_agent``, run the opt-in completion
+                                 review, mark the active queue entry COMPLETED, and
+                                 auto-advance the queue if eligible.
+          * BLOCKED (rc 2)     — park the active queue entry BLOCKED and try to
+                                 advance the queue.
+          * resolver error / unexpected rc — no state change beyond the raw_id
+                                 clear (preserves today's behaviour; F4 will make
+                                 this escalate uniformly for all three callers).
+
+        Returns
+        -------
+        str
+            ``"continue"`` — the caller must ``continue`` the main loop (next
+            phase started, or the queue advanced to a new project / parked entry).
+            ``"break"``    — the caller must ``break`` the main loop (pipeline
+            complete with nothing queued, blocked with no advance, or a resolver
+            error).
+
+        ``trigger`` (``"phase_complete"`` / ``"skip"`` / ``"proceed"``) is used
+        only for the log line so post-mortems can tell which path advanced.
+        """
+        phase = self.state.get("current_phase", 0)
+        # Working-file cleanup: close out the just-finished phase's artifacts so
+        # no stale failure_context / outputs leak into the next phase.
+        targets = [
+            "phase_state.json", "planner_output.json", "planner_output.done",
+            "executor_output.json", "executor_output.done",
+            "reviewer_output.json", "reviewer_output.done",
+            "current_phase.json", "failure_context.json",
+            "executor_gate_detail.json",
+            # P1 Stage F — advisory channel; same per-phase artifact lifecycle.
+            "executor_advisory_detail.json",
+        ]
+        for t in targets:
+            try:
+                os.remove(os.path.join(PROJECT_ARTIFACTS_DIR, t))
+            except FileNotFoundError:
+                pass
+
+        print(f"[INFO] Phase {phase} closed (trigger={trigger}). Resolving next pending phase.")
+        self.state["current_agent"] = "planner"  # reset to start
+        self.state["current_phase"] = 0
+        self.state["current_phase_raw_id"] = ""
+        # Phase identification is a pure script.
+        gate_script = os.path.join(AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts", "phase_resolver.py")
+        try:
+            # Pass nothing to use default locator
+            result = subprocess.run([sys.executable, gate_script], capture_output=True, text=True)
+            output = result.stdout.strip()
+            if result.returncode == 0 and "PENDING: Phase" in output:
+                # Start next phase correctly.
+                # The current_phase.json is written by phase_resolver.py
+                if os.path.exists(os.path.join(PROJECT_ARTIFACTS_DIR, "current_phase.json")):
+                    with open(os.path.join(PROJECT_ARTIFACTS_DIR, "current_phase.json"), 'r') as f:
+                        new_phase = json.load(f)
+                    self.state["current_phase"] = new_phase.get("phase_number", 0)
+                    self.state["current_phase_raw_id"] = new_phase.get("raw_id", "")
+                    self.state["planner_retries"] = 0
+                    self.state["executor_retries"] = 0
+                    self.state["reviewer_retries"] = 0
+                    # Record start time for the new phase so post-merge can compute duration_seconds.
+                    self.state["phase_start_time"] = datetime.now(timezone.utc).isoformat()
+                    # phase_state.json is deleted at phase end; it will be
+                    # re-created with escalation_resets=0 on first use in new phase.
+
+                    # Capture HEAD before branch creation — stored as phase_base_commit
+                    # so reset_phase() can rewind to the pre-phase state.
+                    _base_result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=SYMLINK_TARGET, capture_output=True, text=True)
+                    if _base_result.returncode == 0:
+                        self.state["phase_base_commit"] = _base_result.stdout.strip()
+
+                    # Checkout new phase branch — use raw_id to avoid int-suffix collisions
+                    _next_raw = self.state.get("current_phase_raw_id", "")
+                    branch = f"phase/{_next_raw}" if _next_raw else f"phase/{self.state['current_phase']}"
+                    try:
+                        subprocess.run(f"git checkout {branch} 2>/dev/null || git checkout -b {branch}", shell=True, cwd=SYMLINK_TARGET, check=True)
+                    except subprocess.CalledProcessError as e:
+                        print(f"[ERROR] Failed to checkout new phase branch: {e}")
+
+                    self.transition_state("RUNNING", f"Started Phase {self.state['current_phase']}")
+                    time.sleep(2)
+                    return "continue"
+            elif result.returncode == 0 and "PIPELINE_COMPLETE" in output:
+                print("[INFO] Pipeline fully complete!")
+                self.state["current_phase_raw_id"] = ""
+                self.state["current_agent"] = None
+                # W5-B: completion review (opt-in via queue entry flag, never gates PIPELINE_COMPLETE)
+                _cr_queue = self._read_queue()
+                _, _cr_entry = self._find_active_queue_entry(_cr_queue)
+                if _cr_entry and _cr_entry.get("completion_review"):
+                    _run_completion_review(self, project_basename=os.path.basename(SYMLINK_TARGET))
+                _write_run_summary("PIPELINE_COMPLETE", "Pipeline fully complete")  # W2-B
+                self.transition_state("PIPELINE_COMPLETE", "Pipeline fully complete")
+                # Queue integration: mark entry COMPLETED and auto-advance
+                self._queue_update_active_entry(
+                    "COMPLETED",
+                    {"completed_at": datetime.now(timezone.utc).isoformat()}
+                )
+                queue_data = self._read_queue()
+                if queue_data["queue"] and queue_data.get("queue_mode", "auto") == "auto":
+                    advanced = self._select_next_queue_project(halt_if_no_eligible=False)
+                    if advanced:
+                        return "continue"  # restart loop for the new project
+                return "break"
+            elif result.returncode == 2 and "BLOCKED" in output:
+                print(f"[INFO] Roadmap blocked. Halting.")
+                _blk = datetime.now(timezone.utc).isoformat()
+                _write_run_summary("BLOCKED", "Roadmap blocked")  # W2-B
+                self.transition_state("BLOCKED", "Roadmap blocked")
+                self._queue_park_active_entry(
+                    "BLOCKED",
+                    "roadmap_blocked",
+                    {"blocked_at": _blk},
+                )
+                if self._queue_after_park_maybe_advance():
+                    return "continue"
+                return "break"
+        except subprocess.CalledProcessError as e:
+            print(f"[ERROR] Roadmap parser failed: {e}")
+
+        return "break"
 
     def increment_executor_retries(self):
         phase_state = {}
@@ -4526,9 +4681,11 @@ class Orchestrator:
                         self.state.get("current_phase_raw_id", ""), "planner", self.openclaw_config
                     )
                     self._record_injected_skill("planner")
-                    _stamp_ok = self._init_activity_stamp_or_halt("planner")
+                    _stamp_ok = self._init_activity_stamp_or_escalate("planner")
                     if not _stamp_ok:
-                        return
+                        # Workspace unwritable — helper routed to escalation;
+                        # let the loop fire the escalation dispatch next iteration.
+                        continue
 
                     self.state["sentinel_wait_started_at"] = datetime.now(timezone.utc).isoformat()
                     self.transition_state("WAITING_FOR_SENTINEL", "Invoking Planner via webhook")
@@ -4894,9 +5051,11 @@ class Orchestrator:
                         self.state.get("current_phase_raw_id", ""), "executor", self.openclaw_config
                     )
                     self._record_injected_skill("executor")
-                    _stamp_ok = self._init_activity_stamp_or_halt("executor")
+                    _stamp_ok = self._init_activity_stamp_or_escalate("executor")
                     if not _stamp_ok:
-                        return
+                        # Workspace unwritable — helper routed to escalation;
+                        # let the loop fire the escalation dispatch next iteration.
+                        continue
                     self.state["sentinel_wait_started_at"] = datetime.now(timezone.utc).isoformat()
                     self.transition_state("WAITING_FOR_SENTINEL", f"Invoking Executor ({attempt_label}) - Attempt {retries + 1}")
 
@@ -5160,9 +5319,11 @@ class Orchestrator:
                             self.state.get("current_phase_raw_id", ""), "reviewer", self.openclaw_config
                         )
                         self._record_injected_skill("reviewer")
-                        _stamp_ok = self._init_activity_stamp_or_halt("reviewer")
+                        _stamp_ok = self._init_activity_stamp_or_escalate("reviewer")
                         if not _stamp_ok:
-                            return
+                            # Workspace unwritable — helper routed to escalation;
+                            # let the loop fire the escalation dispatch next iteration.
+                            continue
                         self.state["sentinel_wait_started_at"] = datetime.now(timezone.utc).isoformat()
                         self.transition_state("WAITING_FOR_SENTINEL", f"Invoking Reviewer - Attempt {retries + 1}")
 
@@ -5361,7 +5522,7 @@ class Orchestrator:
                         "VISUAL_UNVERIFIED": "reviewer",
                         "BEHAVIORAL_UNVERIFIED": "reviewer",
                         "REGRESSION_UNVERIFIED": "reviewer",
-                    }.get(gate_result, "halted")
+                    }.get(gate_result, "escalation")  # F10(b): unknown verdict now escalates (was a silent halt)
                     print(
                         f"[REVIEWER_GATE] verdict={gate_result} "
                         f"pass={_rev_pass} next_agent={_rev_next}"
@@ -5633,103 +5794,12 @@ class Orchestrator:
                                 "(AUTODEV_AUDIT_ARCHIVE_DIR is set to empty string)"
                             )
                             
-                        # 4. Working File Cleanup and Loop Back
-                        targets = [
-                            "phase_state.json", "planner_output.json", "planner_output.done",
-                            "executor_output.json", "executor_output.done",
-                            "reviewer_output.json", "reviewer_output.done",
-                            "current_phase.json", "failure_context.json",
-                            "executor_gate_detail.json",
-                            # P1 Stage F — advisory channel; same per-phase artifact lifecycle.
-                            "executor_advisory_detail.json",
-                        ]
-                        for t in targets:
-                            try:
-                                os.remove(os.path.join(PROJECT_ARTIFACTS_DIR, t))
-                            except FileNotFoundError:
-                                pass
-                                
-                        print(f"[INFO] Phase {phase} complete. Looping back to identify next phase.")
-                        self.state["current_agent"] = "planner"  # reset to start
-                        self.state["current_phase"] = 0
-                        self.state["current_phase_raw_id"] = ""
-                        # Actually, phase identification is a pure script. Let's run it.
-                        gate_script = os.path.join(AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts", "phase_resolver.py")
-                        try:
-                            # Pass nothing to use default locator
-                            result = subprocess.run([sys.executable, gate_script], capture_output=True, text=True)
-                            output = result.stdout.strip()
-                            if result.returncode == 0 and "PENDING: Phase" in output:
-                                # Start next phase correctly
-                                # The current_phase.json is written by phase_resolver.py
-                                if os.path.exists(os.path.join(PROJECT_ARTIFACTS_DIR, "current_phase.json")):
-                                    with open(os.path.join(PROJECT_ARTIFACTS_DIR, "current_phase.json"), 'r') as f:
-                                        new_phase = json.load(f)
-                                    self.state["current_phase"] = new_phase.get("phase_number", 0)
-                                    self.state["current_phase_raw_id"] = new_phase.get("raw_id", "")
-                                    self.state["planner_retries"] = 0
-                                    self.state["executor_retries"] = 0
-                                    self.state["reviewer_retries"] = 0
-                                    # Record start time for the new phase so post-merge can compute duration_seconds.
-                                    self.state["phase_start_time"] = datetime.now(timezone.utc).isoformat()
-                                    # phase_state.json is deleted at phase end; it will be
-                                    # re-created with escalation_resets=0 on first use in new phase.
-
-                                    # Capture HEAD before branch creation — stored as phase_base_commit
-                                    # so reset_phase() can rewind to the pre-phase state.
-                                    _base_result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=SYMLINK_TARGET, capture_output=True, text=True)
-                                    if _base_result.returncode == 0:
-                                        self.state["phase_base_commit"] = _base_result.stdout.strip()
-
-                                    # Checkout new phase branch — use raw_id to avoid int-suffix collisions
-                                    _next_raw = self.state.get("current_phase_raw_id", "")
-                                    branch = f"phase/{_next_raw}" if _next_raw else f"phase/{self.state['current_phase']}"
-                                    try:
-                                        subprocess.run(f"git checkout {branch} 2>/dev/null || git checkout -b {branch}", shell=True, cwd=SYMLINK_TARGET, check=True)
-                                    except subprocess.CalledProcessError as e:
-                                        print(f"[ERROR] Failed to checkout new phase branch: {e}")
-
-                                    self.transition_state("RUNNING", f"Started Phase {self.state['current_phase']}")
-                                    time.sleep(2)
-                                    continue
-                            elif result.returncode == 0 and "PIPELINE_COMPLETE" in output:
-                                print("[INFO] Pipeline fully complete!")
-                                self.state["current_phase_raw_id"] = ""
-                                self.state["current_agent"] = None
-                                # W5-B: completion review (opt-in via queue entry flag, never gates PIPELINE_COMPLETE)
-                                _cr_queue = self._read_queue()
-                                _, _cr_entry = self._find_active_queue_entry(_cr_queue)
-                                if _cr_entry and _cr_entry.get("completion_review"):
-                                    _run_completion_review(self, project_basename=os.path.basename(SYMLINK_TARGET))
-                                _write_run_summary("PIPELINE_COMPLETE", "Pipeline fully complete")  # W2-B
-                                self.transition_state("PIPELINE_COMPLETE", "Pipeline fully complete")
-                                # Queue integration: mark entry COMPLETED and auto-advance
-                                self._queue_update_active_entry(
-                                    "COMPLETED",
-                                    {"completed_at": datetime.now(timezone.utc).isoformat()}
-                                )
-                                queue_data = self._read_queue()
-                                if queue_data["queue"] and queue_data.get("queue_mode", "auto") == "auto":
-                                    advanced = self._select_next_queue_project(halt_if_no_eligible=False)
-                                    if advanced:
-                                        continue  # restart loop for the new project
-                                break
-                            elif result.returncode == 2 and "BLOCKED" in output:
-                                print(f"[INFO] Roadmap blocked. Halting.")
-                                _blk = datetime.now(timezone.utc).isoformat()
-                                _write_run_summary("BLOCKED", "Roadmap blocked")  # W2-B
-                                self.transition_state("BLOCKED", "Roadmap blocked")
-                                self._queue_park_active_entry(
-                                    "BLOCKED",
-                                    "roadmap_blocked",
-                                    {"blocked_at": _blk},
-                                )
-                                if self._queue_after_park_maybe_advance():
-                                    continue
-                                break
-                        except subprocess.CalledProcessError as e:
-                            print(f"[ERROR] Roadmap parser failed: {e}")
-                            
+                        # 4. Identify and advance to the next pending phase
+                        #    (shared with SKIP / PROCEED via
+                        #    _advance_to_next_pending_phase so the three sites cannot drift — F3).
+                        _sig = self._advance_to_next_pending_phase(trigger="phase_complete")
+                        if _sig == "continue":
+                            continue
                         break
                     elif gate_result == "ROUTE_EXECUTOR":
                         self.set_reviewer_rejected()
@@ -5998,25 +6068,32 @@ class Orchestrator:
 
                     else:
                         # Unknown / unrecognised reviewer-gate verdict.  The
-                        # previous open-elif chain silently fell through here,
+                        # original open-elif chain silently fell through here,
                         # leaving ``current_agent`` as "reviewer" — the next
-                        # loop iteration would re-invoke the reviewer in a
-                        # fresh session, producing the CORE-E6 reviewer→
-                        # reviewer loop symptom.  Fail loudly instead so an
-                        # operator sees the problem in /tmp/orchestrator.log
-                        # and a future-added gate verdict cannot regress to
-                        # a silent loop.
+                        # loop iteration re-invoked the reviewer in a fresh
+                        # session (the CORE-E6 reviewer→reviewer loop symptom).
+                        # Route to the escalation agent instead — the same idiom
+                        # the CONTRACT_FAILURE and *_UNVERIFIED retry caps use
+                        # above.  The next loop iteration fires the escalation
+                        # dispatch, which reads this honest reason as
+                        # escalation_trigger_reason and surfaces it to the
+                        # operator (advisory + Signal notification via the
+                        # escalation agent + a dashboard answer path).  The
+                        # former HALTED_SILENT dead-end gave the operator no
+                        # notification and no recovery short of git-recover.
                         print(
-                            f"[FATAL] Unknown reviewer-gate verdict "
-                            f"{gate_result!r}.  Refusing to silently re-invoke "
-                            f"the reviewer.  Escalating to HALTED_SILENT so "
-                            f"an operator can add the missing handler."
+                            f"[WARN] Unknown reviewer-gate verdict "
+                            f"{gate_result!r}.  Routing to escalation rather "
+                            f"than silently re-invoking the reviewer."
                         )
+                        self.state["current_agent"] = "escalation"
                         self.transition_state(
-                            "HALTED_SILENT",
-                            f"Unknown reviewer-gate verdict: {gate_result!r}",
+                            "RUNNING",
+                            f"Unknown reviewer-gate verdict: {gate_result!r} — "
+                            f"no handler; escalating for operator review",
                         )
-                        return
+                        time.sleep(5)
+                        continue
 
                 elif current_agent == "escalation":
                     if self._should_invoke_escalation_agent():
@@ -6204,18 +6281,26 @@ class Orchestrator:
                                 _skip_raw = self.state.get("current_phase_raw_id", "")
                                 if _skip_raw:
                                     self._mark_roadmap_phase(_skip_raw, "-")
-                                self.state["current_agent"] = "planner"
-                                self.state["current_phase"] = 0
-                                self.transition_state("RUNNING", "Manual SKIP triggered")
+                                # Re-resolve and advance via the shared helper so the
+                                # planner targets the NEXT pending phase, not the just-
+                                # skipped one (F3). continue → next phase; break → done.
+                                _sig = self._advance_to_next_pending_phase(trigger="skip")
+                                if _sig == "continue":
+                                    continue
+                                break
                             elif command == "PROCEED":
                                 self._queue_restore_parked_entry_to_active()
                                 _proc_raw = self.state.get("current_phase_raw_id", "") or str(self.state.get("current_phase", ""))
                                 if _proc_raw:
                                     self._mark_roadmap_phase(_proc_raw, "x")
                                 subprocess.run(["git", "tag", "--force", f"phase-{_proc_raw.lower()}-complete"], cwd=SYMLINK_TARGET, check=False)
-                                self.state["current_agent"] = "planner"
-                                self.state["current_phase"] = 0
-                                self.transition_state("RUNNING", "Manual PROCEED triggered")
+                                # Re-resolve and advance via the shared helper so PROCEED
+                                # genuinely moves PAST this phase (not a re-run that can loop
+                                # back to escalation) (F3). continue → next phase; break → done.
+                                _sig = self._advance_to_next_pending_phase(trigger="proceed")
+                                if _sig == "continue":
+                                    continue
+                                break
                             elif command == "STOP":
                                 stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
                                 try:

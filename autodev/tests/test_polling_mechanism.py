@@ -348,7 +348,7 @@ class TestPollingMechanism:
     def test_orchestrator_bootstraps_activity_stamp_for_all_pipeline_agents(self):
         """Planner/executor/reviewer must seed the stamp after cleanup and before polling.
 
-        Section 5a routed the seeding through ``_init_activity_stamp_or_halt``
+        Section 5a routed the seeding through ``_init_activity_stamp_or_escalate``
         so the False return value is honoured (the helper still calls
         ``initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, agent_role)``
         internally).  Accept either the direct call or the helper call.
@@ -360,10 +360,10 @@ class TestPollingMechanism:
         source = inspect.getsource(orchestrator)
         for agent in ("planner", "executor", "reviewer"):
             direct = f'initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, "{agent}")'
-            via_helper = f'_init_activity_stamp_or_halt("{agent}")'
+            via_helper = f'_init_activity_stamp_or_escalate("{agent}")'
             assert direct in source or via_helper in source, (
                 f"orchestrator must seed the {agent} activity stamp via either "
-                f"the direct call or _init_activity_stamp_or_halt(...)"
+                f"the direct call or _init_activity_stamp_or_escalate(...)"
             )
         # Helper itself must still call the underlying initializer so the
         # actual workspace write happens.

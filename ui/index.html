@@ -2171,6 +2171,7 @@
         // ─── StoppedRecoveryPanel ─────────────────────────────────────────────────
 
         function StoppedRecoveryPanel({
+            pipeline_status,
             current_phase_raw_id,
             escalation_resets,
             onResumeSent,
@@ -2228,9 +2229,9 @@
                     <div className="flex items-center gap-2">
                         <span className="text-red-400 text-lg">◼</span>
                         <div>
-                            <h3 className="header-text text-base font-semibold text-red-400">Pipeline Stopped</h3>
+                            <h3 className="header-text text-base font-semibold text-red-400">{pipeline_status === 'HALTED_SILENT' ? 'Intervention Required' : 'Pipeline Stopped'}</h3>
                             {current_phase_raw_id && (
-                                <p className="text-slate-400 text-xs">Stopped during phase <span className="font-mono text-slate-300">{current_phase_raw_id}</span></p>
+                                <p className="text-slate-400 text-xs">{pipeline_status === 'HALTED_SILENT' ? 'Halted during phase' : 'Stopped during phase'} <span className="font-mono text-slate-300">{current_phase_raw_id}</span></p>
                             )}
                         </div>
                     </div>
@@ -2320,9 +2321,10 @@
                     generateDocsError={generateDocsError}
                 />;
             }
-            if (pipeline_status === 'STOPPED') {
+            if (pipeline_status === 'STOPPED' || pipeline_status === 'HALTED_SILENT') {
                 return (
                     <StoppedRecoveryPanel
+                        pipeline_status={pipeline_status}
                         current_phase_raw_id={current_phase_raw_id}
                         escalation_resets={escalation_resets}
                         onResumeSent={onResumeSent}
@@ -8393,13 +8395,15 @@
 
                 const isActiveStopped =
                     state === 'ACTIVE' &&
-                    (selLive === 'STOPPED' ||
-                        (snapshot && snapshot.is_active_project && snapshot.pipeline_status === 'STOPPED'));
+                    ((selLive === 'STOPPED' || selLive === 'HALTED_SILENT') ||
+                        (snapshot && snapshot.is_active_project &&
+                            (snapshot.pipeline_status === 'STOPPED' || snapshot.pipeline_status === 'HALTED_SILENT')));
 
                 if (isActiveStopped) {
                     return (
                         <div className="space-y-3">
                             <StoppedRecoveryPanel
+                                pipeline_status={(snapshot && snapshot.pipeline_status) || selLive}
                                 current_phase_raw_id={snapshot && snapshot.current_phase_raw_id}
                                 escalation_resets={(snapshot && snapshot.escalation_resets) || 0}
                                 onResumeSent={() => {
@@ -9268,7 +9272,7 @@
             const showStopButton = ["RUNNING", "WAITING_FOR_SENTINEL", "WAITING_FOR_HUMAN"].includes(
                 status
             );
-            const showResumeButton = status === "STOPPED";
+            const showResumeButton = status === "STOPPED" || status === "HALTED_SILENT";
             const showRestartOrchestratorButton =
                 !alive && (status === "RUNNING" || status === "WAITING_FOR_SENTINEL");
             const queueHaltedEscalationForRecovery =

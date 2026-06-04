@@ -39,7 +39,7 @@ def test_initialize_activity_stamp_return_value_is_captured(agent):
     Accepts either:
       * A direct ``var = initialize_activity_stamp(PROJECT_ARTIFACTS_DIR, "agent")``
         assignment, or
-      * A call through ``_init_activity_stamp_or_halt("agent")`` which
+      * A call through ``_init_activity_stamp_or_escalate("agent")`` which
         wraps the initializer and centralises the loud-failure path.
 
     A bare ``initialize_activity_stamp(...)`` call with no assignment is
@@ -51,14 +51,14 @@ def test_initialize_activity_stamp_return_value_is_captured(agent):
         re.MULTILINE,
     )
     helper_capture = re.compile(
-        r"^[ \t]*[\w_]+\s*=\s*self\._init_activity_stamp_or_halt\(\s*['\"]"
+        r"^[ \t]*[\w_]+\s*=\s*self\._init_activity_stamp_or_escalate\(\s*['\"]"
         + agent + r"['\"]\s*\)",
         re.MULTILINE,
     )
     assert direct_capture.search(_ORCH_SRC) or helper_capture.search(_ORCH_SRC), (
         f"orchestrator must capture the return value of "
         f"initialize_activity_stamp(..., {agent!r}) — either directly or "
-        f"via _init_activity_stamp_or_halt({agent!r}); a bare call "
+        f"via _init_activity_stamp_or_escalate({agent!r}); a bare call "
         f"discards the False signal and silently disables stall detection"
     )
 
@@ -74,30 +74,42 @@ def test_initialize_activity_stamp_return_value_is_captured(agent):
     )
 
 
-def test_orchestrator_logs_fatal_on_stamp_init_failure():
-    """A ``[FATAL]`` log line referencing activity-stamp init must exist so
-    operators see the failure mode in /tmp/orchestrator.log."""
-    # The literal is locked so future grep-based monitoring can rely on it.
-    assert "[FATAL]" in _ORCH_SRC and "activity stamp" in _ORCH_SRC, (
-        "orchestrator must emit a '[FATAL] activity stamp init failed ...' "
+def test_orchestrator_logs_on_stamp_init_failure():
+    """A log line referencing activity-stamp init failure must exist so
+    operators see the failure mode in /tmp/orchestrator.log.
+
+    F10(a): the severity moved from ``[FATAL]`` to ``[WARN]`` because the
+    failure now routes to escalation (recoverable) rather than dead-ending at a
+    silent halt; the message text is the locked part."""
+    assert "[WARN] activity stamp init failed for" in _ORCH_SRC, (
+        "orchestrator must emit a '[WARN] activity stamp init failed for ...' "
         "log line when initialize_activity_stamp returns False"
     )
 
 
-def test_orchestrator_escalates_to_halted_silent_on_stamp_init_failure():
-    """The fatal stamp-init failure must transition to ``HALTED_SILENT``
-    (mirrors the verify-failed escalation in Section 0/2) rather than
-    proceeding into ``poll_for_sentinel`` with broken stall detection."""
-    # Find the [FATAL] activity-stamp message and check a HALTED_SILENT
-    # transition appears within ~400 chars of it.
-    idx = _ORCH_SRC.find("activity stamp init")
+def test_orchestrator_routes_stamp_init_failure_to_escalation():
+    """F10(a): a stamp-init failure must route to the escalation agent
+    (``current_agent = "escalation"`` + ``transition_state("RUNNING", …)``) so
+    the operator is notified (advisory + Signal via the escalation agent) and
+    can recover from the dashboard — NOT dead-end at the old silent
+    ``HALTED_SILENT``. Replaces the prior HALTED_SILENT assertion (a passing
+    test for removed behavior)."""
+    idx = _ORCH_SRC.find("activity stamp init failed for")
     assert idx != -1, (
-        "Could not find '[FATAL] activity stamp init failed ...' message"
+        "Could not find the 'activity stamp init failed for ...' message"
     )
-    window = _ORCH_SRC[idx : idx + 600]
-    assert "HALTED_SILENT" in window, (
-        "Stamp-init failure must escalate to HALTED_SILENT rather than "
-        "silently proceed with stall detection disabled"
+    end = _ORCH_SRC.find("\n    def ", idx)
+    window = _ORCH_SRC[idx : end if end != -1 else idx + 1500]
+    assert re.search(r'current_agent"\]\s*=\s*"escalation"', window), (
+        "stamp-init failure must set current_agent = 'escalation'"
+    )
+    assert re.search(r'transition_state\(\s*"RUNNING"', window), (
+        "stamp-init failure must transition_state('RUNNING', …) so the "
+        "escalation branch fires on the next loop iteration"
+    )
+    assert not re.search(r'transition_state\(\s*"HALTED_SILENT"', window), (
+        "stamp-init failure must no longer transition to HALTED_SILENT — "
+        "F10(a) routes it to escalation instead"
     )
 
 

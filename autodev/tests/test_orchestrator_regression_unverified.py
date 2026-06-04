@@ -69,8 +69,8 @@ def test_unified_handler_dispatches_regression_unverified():
     VISUAL_UNVERIFIED and BEHAVIORAL_UNVERIFIED.
 
     Without this, REGRESSION_UNVERIFIED falls through to the unknown-verdict
-    HALTED_SILENT branch — every regression-shape failure halts the pipeline
-    instead of re-invoking the reviewer."""
+    escalation branch — every regression-shape failure escalates instead of
+    re-invoking the reviewer."""
     window = _unverified_handler_window()
     # The tuple is in the elif header itself; grab the header line and verify
     # all three verdicts appear there.
@@ -140,8 +140,8 @@ def test_verdict_to_agent_table_includes_regression_unverified():
         "orchestrator.py verdict→next-agent dispatch table must include "
         '"REGRESSION_UNVERIFIED": "reviewer" so the [REVIEWER_GATE] '
         "diagnostic log line names the right next_agent. Without this, "
-        "operators see 'next_agent=halted' even though the handler "
-        "re-invokes the reviewer."
+        "operators see 'next_agent=escalation' (the unknown-verdict default) "
+        "even though the handler re-invokes the reviewer."
     )
 
 

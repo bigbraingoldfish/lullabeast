@@ -2787,11 +2787,13 @@ def post_pipeline_git_recover(request: dict):
 
 @app.post("/api/resume-ready")
 def post_resume_ready():
-    """Transition pipeline from STOPPED to WAITING_FOR_HUMAN so /api/command can be used.
+    """Transition pipeline from STOPPED or HALTED_SILENT to WAITING_FOR_HUMAN so /api/command can be used.
 
-    Reads pipeline_state.json, confirms pipeline_status is STOPPED, then atomically
-    writes pipeline_status: WAITING_FOR_HUMAN (all other fields preserved).
-    Returns 409 if pipeline is not in STOPPED state.
+    Reads pipeline_state.json, confirms pipeline_status is STOPPED or HALTED_SILENT,
+    then atomically writes pipeline_status: WAITING_FOR_HUMAN + current_agent:
+    escalation (all other fields preserved). This is the clean operator recovery
+    from a silent halt (F11) — git-recover remains the heavy, phase-destroying
+    fallback. Returns 409 if pipeline is not in STOPPED or HALTED_SILENT state.
     """
     config = load_config()
     pipeline_state_path = config.get("pipeline_state_path")
@@ -2810,10 +2812,12 @@ def post_resume_ready():
             detail="Failed to read pipeline_state.json — it may be corrupt or empty. Check the file at the configured path.",
         )
 
-    if pipeline_state.get("pipeline_status") != "STOPPED":
+    _status = pipeline_state.get("pipeline_status")
+    if _status not in ("STOPPED", "HALTED_SILENT"):
         raise HTTPException(
             status_code=409,
-            detail=f"Pipeline is not in STOPPED state (current: {pipeline_state.get('pipeline_status')})"
+            detail=f"Pipeline is not in a resumable state (current: {_status}). "
+                   f"Resume is available from STOPPED or HALTED_SILENT.",
         )
 
     pipeline_state["pipeline_status"] = "WAITING_FOR_HUMAN"
