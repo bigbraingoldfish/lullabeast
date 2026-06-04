@@ -3354,18 +3354,23 @@ class Orchestrator:
                                  auto-advance the queue if eligible.
           * BLOCKED (rc 2)     — park the active queue entry BLOCKED and try to
                                  advance the queue.
-          * resolver error / unexpected rc — no state change beyond the raw_id
-                                 clear (preserves today's behaviour; F4 will make
-                                 this escalate uniformly for all three callers).
+          * resolver error / unexpected rc / unrecognised output — route to the
+                                 escalation agent (``current_agent="escalation"``,
+                                 an honest ``escalation_trigger_reason`` recording
+                                 the rc + stderr, ``last_error_code=
+                                 ERR_PHASE_RESOLVER_FAILED``, transition RUNNING)
+                                 and return ``"continue"`` so the caller re-enters
+                                 the loop and the main-loop escalation dispatch
+                                 fires the webhook + advisory + queue-park (F4).
 
         Returns
         -------
         str
             ``"continue"`` — the caller must ``continue`` the main loop (next
-            phase started, or the queue advanced to a new project / parked entry).
+            phase started, the queue advanced to a new project / parked entry, or
+            a resolver failure routed to escalation).
             ``"break"``    — the caller must ``break`` the main loop (pipeline
-            complete with nothing queued, blocked with no advance, or a resolver
-            error).
+            complete with nothing queued, or blocked with no queue advance).
 
         ``trigger`` (``"phase_complete"`` / ``"skip"`` / ``"proceed"``) is used
         only for the log line so post-mortems can tell which path advanced.
@@ -3394,6 +3399,8 @@ class Orchestrator:
         self.state["current_phase_raw_id"] = ""
         # Phase identification is a pure script.
         gate_script = os.path.join(AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts", "phase_resolver.py")
+        result = None
+        output = ""
         try:
             # Pass nothing to use default locator
             result = subprocess.run([sys.executable, gate_script], capture_output=True, text=True)
@@ -3467,9 +3474,32 @@ class Orchestrator:
                     return "continue"
                 return "break"
         except subprocess.CalledProcessError as e:
-            print(f"[ERROR] Roadmap parser failed: {e}")
+            print(f"[ERROR] phase_resolver subprocess raised: {e}")
 
-        return "break"
+        # F4 — reached only when the resolver produced no actionable verdict:
+        # rc 1 (roadmap not found / non-absolute path / write failure), an
+        # unexpected rc/stdout, a CalledProcessError, or a PENDING verdict with no
+        # current_phase.json on disk. Route to escalation rather than dead-ending
+        # at a silent "break" that would leave the orchestrator RUNNING with no
+        # phase and no operator signal. Returning "continue" re-enters the main
+        # loop, whose escalation dispatch (current_agent == "escalation") fires the
+        # webhook + advisory + queue-park.
+        if result is not None:
+            _detail = (
+                f"rc={result.returncode} output={output!r} "
+                f"stderr={(result.stderr or '')[-500:]!r}"
+            )
+        else:
+            _detail = "phase_resolver subprocess raised before returning a verdict"
+        reason = f"phase_resolver produced no actionable verdict (trigger={trigger}): {_detail}"
+        print(f"[ERROR] {reason} — routing to escalation.", file=sys.stderr)
+        _ps = self.read_phase_state()
+        _ps["last_error_code"] = "ERR_PHASE_RESOLVER_FAILED"
+        _ps["escalation_trigger_reason"] = reason
+        self.write_phase_state_atomic(_ps)
+        self.state["current_agent"] = "escalation"
+        self.transition_state("RUNNING", reason)
+        return "continue"
 
     def increment_executor_retries(self):
         phase_state = {}
@@ -4396,10 +4426,20 @@ class Orchestrator:
     def _run_startup_planner_phase_zero_and_branch(self):
         """Phase-0 phase_resolver, queue completion/advance, and feature-branch checkout.
 
+        If phase_resolver produces no actionable verdict — rc 1 (roadmap not found
+        / non-absolute path / write failure), an unexpected rc/stdout, or the
+        subprocess crashing — the method routes to the escalation agent
+        (``current_agent="escalation"`` + honest ``escalation_trigger_reason``,
+        ``last_error_code=ERR_PHASE_RESOLVER_FAILED``, transition RUNNING) and
+        returns ``"enter_main_loop"`` so the main-loop escalation dispatch fires,
+        rather than proceeding to a blind planner run with an empty raw_id (F4).
+
         Returns:
             "exit_run" — leave run() entirely (orchestrator stops).
             "retry_startup" — symlink/project may have changed; re-run this method.
-            "enter_main_loop" — proceed to the main while True loop.
+            "enter_main_loop" — proceed to the main while True loop (also the
+                resolver-failure escalation path; current_agent is then
+                "escalation").
         """
         if self.state.get("current_agent", "planner") != "planner":
             return "enter_main_loop"
@@ -4408,6 +4448,9 @@ class Orchestrator:
             gate_script = os.path.join(
                 AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts", "phase_resolver.py"
             )
+            # F4 — set by the rc-1/unexpected ``else`` or the crash ``except``; a
+            # non-None value triggers the shared escalation block after the try.
+            startup_resolver_reason = None
             try:
                 result = subprocess.run([sys.executable, gate_script], capture_output=True, text=True)
                 output = result.stdout.strip()
@@ -4455,8 +4498,37 @@ class Orchestrator:
                         self.read_state()
                         return "retry_startup"
                     return "exit_run"
+                else:
+                    # F4 — resolver produced no actionable verdict (rc 1: roadmap
+                    # not found / non-absolute path / write failure; or an
+                    # unexpected rc/stdout). Record the reason and fall to the
+                    # escalation block below instead of proceeding to a blind
+                    # planner run with an empty raw_id and no current_phase.json.
+                    startup_resolver_reason = (
+                        f"Startup phase_resolver produced no actionable verdict: "
+                        f"rc={result.returncode} output={output!r} "
+                        f"stderr={(result.stderr or '')[-500:]!r}"
+                    )
             except Exception as startup_err:
-                print(f"[WARN] Startup phase identification failed: {startup_err}. Proceeding; planner must self-orient.")
+                # F4 (B2) — the resolver subprocess itself crashed. Escalate too:
+                # proceeding here would invoke the planner blind (empty raw_id, no
+                # current_phase.json), the same dead condition one layer over.
+                startup_resolver_reason = f"Startup phase_resolver crashed: {startup_err}"
+
+            if startup_resolver_reason is not None:
+                # F4 — escalate via the established idiom: record an honest reason,
+                # route current_agent to escalation, transition RUNNING, and return
+                # "enter_main_loop" so the main-loop escalation dispatch fires the
+                # webhook + advisory + queue-park. Do NOT fall through to the
+                # branch-checkout / blind-planner path below.
+                print(f"[ERROR] {startup_resolver_reason} — routing to escalation.", file=sys.stderr)
+                _ps = self.read_phase_state()
+                _ps["last_error_code"] = "ERR_PHASE_RESOLVER_FAILED"
+                _ps["escalation_trigger_reason"] = startup_resolver_reason
+                self.write_phase_state_atomic(_ps)
+                self.state["current_agent"] = "escalation"
+                self.transition_state("RUNNING", startup_resolver_reason)
+                return "enter_main_loop"
 
         _startup_raw = self.state.get("current_phase_raw_id", "")
         _startup_num = self.state.get("current_phase", 0)

@@ -241,25 +241,31 @@ When resetting `pipeline_state.json` to `IDLE` for a fresh run, set `pipeline_st
 
 **F10 — the two former *silent* `HALTED_SILENT` sinks now escalate.** An unknown/unrecognised reviewer-gate verdict (F10(b)) and an activity-stamp-init failure (F10(a), `_init_activity_stamp_or_escalate`) previously dead-ended at `HALTED_SILENT` with no operator notification. Both now route to escalation instead (set `current_agent="escalation"` + `transition_state("RUNNING", …)`; the next loop iteration fires the escalation dispatch). Because outbound Signal is owned solely by the escalation agent, notifying the operator and escalating are the same event — there is no "halt-and-notify". `HALTED_SILENT` is therefore now reached only by genuine escalation-**delivery** failure (webhook + raw-signal both fail) or an unhandled exception.
 
+**F4 — a `phase_resolver` failure escalates instead of running blind.** `phase_resolver` exits `1` on roadmap-not-found / non-absolute path / write failure. Previously neither consumer handled exit `1`: at startup the planner was invoked **blind** (empty `raw_id`, no `current_phase.json`); on phase-advance the orchestrator dead-ended at a silent `RUNNING` with no phase and no operator signal. Both the startup resolver (`_run_startup_planner_phase_zero_and_branch`) and the shared advance helper (`_advance_to_next_pending_phase`, used by phase-complete / SKIP / PROCEED) now route an unactionable resolver verdict — exit `1`, an unexpected rc/output, **or** the resolver subprocess crashing — to escalation (`current_agent="escalation"` + honest `escalation_trigger_reason` carrying the rc + stderr, `last_error_code=ERR_PHASE_RESOLVER_FAILED`, `transition_state("RUNNING")`; the advance helper returns `"continue"` and the startup returns `"enter_main_loop"` so the next loop iteration fires the escalation dispatch). Same notify ⟺ escalate model as F10.
+
 **F11 — `HALTED_SILENT` has a clean UI resume.** `POST /api/resume-ready` accepts `STOPPED` **or** `HALTED_SILENT` (it transitions to `WAITING_FOR_HUMAN` + `current_agent="escalation"`), so the operator can issue a recovery command from the dashboard's recovery panel (reused for both states, with distinct "Intervention Required" copy for `HALTED_SILENT`) without the phase-destroying `git-recover` (which stays as the heavy fallback).
 
 ---
 
 ## Gate Script Interface Contract
 
-Gate scripts are in `autodev/pipeline/gate_scripts/`. They are invoked by the orchestrator via `subprocess.run()`. All communication is via exit codes and stdout.
+Gate scripts in `autodev/pipeline/gate_scripts/` are invoked by the orchestrator via `subprocess.run()`. **There are two distinct signalling conventions — do not assume one universal exit-code contract.**
 
-### Exit codes
+### Verdict gates — `planner_gate.py`, `executor_gate.py`, `reviewer_gate.py`
+
+These always **exit 0**; the verdict is a **stdout string**, not an exit code. The runner reads `result.stdout.strip()` and matches it: planner/executor emit `PASS` / `FAIL`; the reviewer emits `PASS` or a route token (`ROUTE_EXECUTOR` / `ROUTE_PLANNER` / `ROUTE_ESCALATE` / `*_UNVERIFIED` / `MISSING_ARTIFACTS` / `CONTRACT_FAILURE`). Failure **detail does not ride stdout** — it flows on side channels: `executor_gate_detail.json` (the FAIL-detail channel consumed by `write_failure_context`), `gate_warnings.json` (demoted interpretive warnings the reviewer adjudicates — see the Second PASS channel below), and `last_error_code` in `phase_state.json` (written by `record_error_code_only`). A **non-zero** exit from a verdict gate means the gate *script itself* crashed (an uncaught Python traceback); the runner wrappers treat that as a safe failure — `run_planner_output_gate` / `run_executor_output_gate` return `False`, `run_reviewer_output_gate` returns `ROUTE_ESCALATE` (they do not parse a crashed gate's stdout).
+
+### Resolver / init gates — `phase_resolver.py`, `repo_init_check.py`
+
+These signal via **exit codes** (this is the protocol the old single-contract text described):
 
 | Exit code | Meaning |
 |-----------|---------|
-| `0` | Pass — agent output accepted, advance pipeline |
-| `1` | Fail — agent output rejected, JSON error detail on stdout |
+| `0` | Proceed — `phase_resolver`: `PENDING` / `PIPELINE_COMPLETE` on stdout; `repo_init_check`: all checks passed |
+| `1` | Error — roadmap not found / non-absolute path / write failure (`phase_resolver`); a failed init precondition (`repo_init_check`). Human-readable / JSON detail on stdout |
 | `2` | Blocked — roadmap phase is marked `[!]` (only `phase_resolver.py`) |
 
-### Stdout protocol
-
-On exit 1, the gate must print a JSON object to stdout. The orchestrator reads stdout only when exit code is non-zero. The JSON is written to `failure_context.json` for the next retry attempt. Gate scripts must **not** print partial or malformed JSON on failure.
+On a `phase_resolver` exit 1 (or an unexpected rc/output) the orchestrator **routes to escalation** — both at startup and on phase-advance — rather than running the planner blind or dead-ending at a silent `RUNNING` (F4; see State Machine Rules).
 
 ### Advisory output channel (P1 Stage F)
 
@@ -520,9 +526,9 @@ Qwen3.5-27B and Qwen3-Coder-Next both require specific llama-server flags to sup
 
 **The bug:** MiniMax M2.x models delete existing project files when approaching their context window limit. This is not a gate misconfiguration — the model actively removes files as a context-management strategy.
 
-**The guard:** `executor_gate.py` runs `git diff --diff-filter=D` after the executor completes to detect files that were in the manifest but are no longer present. If any unaccounted deletions are found, the gate returns `ERR_UNACCOUNTED_DELETION` (exit 1 with this error code in the JSON). The executor retry mechanism then creates a fresh session and retries.
+**The guard:** `executor_gate.py` runs `git diff --diff-filter=D` after the executor completes to detect files that were in the manifest but are no longer present. If any unaccounted deletions are found, the gate returns the verdict string `FAIL` (exit 0) with `last_error_code=ERR_UNACCOUNTED_DELETION` in `phase_state.json` (the executor gate is a verdict gate — see the Gate Script Interface Contract; it does **not** signal via exit codes). The executor retry mechanism then creates a fresh session and retries.
 
-**Do not remove or weaken this check.** It is the only automated defence against the model silently destroying project state. If `executor_gate.py`'s git diff check is removed, MiniMax will occasionally leave the project repository in an irreparable state mid-pipeline.
+**Do not remove or weaken this check.** It is the only automated defence against the model silently destroying project state. If `executor_gate.py`'s git diff check is removed, MiniMax will occasionally leave the project repository in an irreparable state mid-pipeline. The guard **fails closed on every error class** — a missing `phase_base_commit` (`ERR_MISSING_BASE_COMMIT`), a `git diff` returning non-zero (`ERR_GIT_DIFF_FAILED`), and the deletion check itself crashing — git missing, killed, or timing out (`ERR_DELETION_CHECK_CRASHED`, **F6**) — all return `FAIL` (fresh-session retry); none skip-and-PASS. The crash path previously printed `[GATE WARN] … skipping` and fell through to `PASS`, silently disabling the guard whenever git raised; it now records `ERR_DELETION_CHECK_CRASHED` and fails closed like its two siblings.
 
 **Executor retry and OpenClaw:** When `executor_retries` > 0 and the orchestrator is about to invoke attempt N+1, it first calls `abort_agent_session()` (best-effort, with the 3x retry loop described above) to stop attempt N in the OpenClaw gateway via WebSocket `sessions.abort`, so the prior run does not keep streaming or refreshing `executor_activity.stamp` after the orchestrator has moved on. If the abort succeeds but `verify_session_stopped` reports the stamp is still advancing, the orchestrator emits `abort_verify_failed` and launches attempt N+1 anyway (soft-continue, same contract as `_handle_stall_outcome`).
 

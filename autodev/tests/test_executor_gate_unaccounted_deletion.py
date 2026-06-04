@@ -166,3 +166,73 @@ def test_git_diff_failure_returns_fail_not_skip(tmp_path):
     if os.path.exists(ps_path):
         ps = json.loads(Path(ps_path).read_text(encoding="utf-8"))
         assert ps.get("last_error_code") == "ERR_GIT_DIFF_FAILED"
+
+
+def test_deletion_check_crash_returns_fail_not_skip(tmp_path):
+    """F6: When the deletion-check git invocation RAISES (FileNotFoundError /
+    TimeoutExpired / OSError — git missing, killed, or timing out), the gate must
+    fail CLOSED, not print '[GATE WARN] ... skipping' and PASS.
+
+    The surrounding `except Exception` previously swallowed the error and let the
+    gate fall through to `return "PASS"`, silently disabling the MiniMax deletion
+    guard whenever git itself crashed. This test pins the fail-closed contract:
+    return FAIL + record ERR_DELETION_CHECK_CRASHED, matching the rc!=0 and
+    missing-base siblings.
+    """
+    root = tmp_path
+    workspace = root / "pipeline-project"
+    workspace.mkdir()
+    ws_str = str(workspace) + os.sep
+
+    # A truthy phase_base_commit so the guard enters the git-diff `try` (past the
+    # missing-base fail-closed branch); the value is irrelevant because the git
+    # call is mocked to raise before it is used.
+    (root / "pipeline_state.json").write_text(
+        json.dumps({"phase_base_commit": "deadbeef0000000000000000000000000000000000"}),
+        encoding="utf-8",
+    )
+
+    art = workspace / ".autodev" / "pipeline"
+    art.mkdir(parents=True)
+    art_str = str(art) + os.sep
+
+    planner = {"implementation_plan": [], "tdd_test_structure": [], "pass_criteria": []}
+    (art / "planner_output.json").write_text(json.dumps(planner), encoding="utf-8")
+
+    executor_payload = {
+        "status": "complete",
+        "tests_written": [],
+        "test_results": {"all_passing": True},
+        "file_manifest": [],
+        "files_deleted": [],
+    }
+    exec_path = art / "executor_output.json"
+    exec_path.write_text(json.dumps(executor_payload), encoding="utf-8")
+
+    ps_path = str(art / "phase_state.json")
+
+    # The deletion-check git diff (executor_gate.py:487) is the FIRST subprocess.run
+    # reached in evaluate_executor, so a blanket side_effect raises exactly there.
+    import subprocess as _subprocess
+
+    stack = ExitStack()
+    stack.enter_context(patch.object(utils_module, "WORKSPACE_DIR", ws_str))
+    stack.enter_context(patch.object(utils_module, "ARTIFACTS_DIR", art_str))
+    stack.enter_context(patch.object(utils_module, "PHASE_STATE_FILE", ps_path))
+    stack.enter_context(patch.object(executor_gate_module, "WORKSPACE_DIR", ws_str))
+    stack.enter_context(patch.object(executor_gate_module, "ARTIFACTS_DIR", art_str))
+    stack.enter_context(patch.object(executor_gate_module, "PHASE_STATE_FILE", ps_path))
+    stack.enter_context(
+        patch.object(_subprocess, "run", side_effect=OSError("git: command not found"))
+    )
+
+    with stack:
+        result = executor_gate_module.evaluate_executor(str(exec_path))
+
+    assert result == "FAIL", (
+        "a crashed deletion-check git invocation must fail closed, not skip the "
+        "guard and PASS"
+    )
+    assert os.path.exists(ps_path), "the gate must record an error code on crash"
+    ps = json.loads(Path(ps_path).read_text(encoding="utf-8"))
+    assert ps.get("last_error_code") == "ERR_DELETION_CHECK_CRASHED"
