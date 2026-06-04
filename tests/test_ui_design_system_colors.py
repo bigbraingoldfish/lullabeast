@@ -4,18 +4,18 @@ import re
 
 
 def test_background_color_is_near_black():
-    """Background color should be #0d0f12 or within #0d0f12-#0a0c10 range."""
+    """Background color should be the Lullabeast deep indigo-black #0b0a12 (or near)."""
     with open("ui/index.html", "r") as f:
         content = f.read()
-    
+
     # Check body background color
     body_bg_match = re.search(r'background-color:\s*(#[0-9a-fA-F]+)', content)
     assert body_bg_match, "No body background-color found"
-    
+
     bg_color = body_bg_match.group(1).lower()
-    # Accept #0d0f12 or range #0d0f12-#0a0c10
-    assert bg_color in ["#0d0f12", "#0c0e11", "#0b0d10", "#0a0c10"], \
-        f"Background color {bg_color} not in allowed range (#0d0f12-#0a0c10)"
+    # Lullabeast night-sky base (#0b0a12); legacy near-black values still tolerated.
+    assert bg_color in ["#0b0a12", "#0d0f12", "#0c0e11", "#0b0d10", "#0a0c10"], \
+        f"Background color {bg_color} not the Lullabeast base #0b0a12"
 
 
 def test_panel_backgrounds():
@@ -94,17 +94,17 @@ def test_muted_green_for_complete():
         "Green color not found for complete states"
 
 
-def test_primary_accent_is_cyan_teal():
-    """Primary accent color should be #00b4d8 or within range."""
+def test_primary_accent_is_lamplight_gold():
+    """Primary accent is the Lullabeast lamplight gold #e2b14c (cyan was retired)."""
     with open("ui/index.html", "r") as f:
         content = f.read()
-    
+
     # Check Tailwind config for accent color
     accent_match = re.search(r"'accent':\s*'#([0-9a-fA-F]+)'", content)
     if accent_match:
-        accent_color = "#" + accent_match.group(1)
-        assert accent_color in ["#00b4d8", "#00a0c0"], \
-            f"Accent color {accent_color} not in allowed range (#00b4d8-#00a0c0)"
+        accent_color = "#" + accent_match.group(1).lower()
+        assert accent_color in ["#e2b14c", "#f0c56b", "#c7973a"], \
+            f"Accent color {accent_color} not the Lullabeast lamplight gold #e2b14c"
 
 
 def test_current_phase_highlight_uses_accent():
@@ -122,11 +122,7 @@ def test_progress_bar_uses_accent():
     with open("ui/index.html", "r") as f:
         content = f.read()
     
-    # Progress bar should use accent color
-    progress_bar_match = re.search(r'<div\s+class=".*?bg-blue-500.*?"', content)
-    if progress_bar_match:
-        # This is correct - using blue (which should be replaced with cyan)
-        pass
-    # Also check for cyan
-    assert "bg-cyan-500" in content or "bg-blue-500" in content, \
+    # Progress bar should use the accent color. Lullabeast repointed this to the
+    # gold `bg-accent` token (cyan/blue were retired); legacy names still tolerated.
+    assert "bg-accent" in content or "bg-cyan-500" in content or "bg-blue-500" in content, \
         "Progress bar not using accent color"

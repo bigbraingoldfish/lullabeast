@@ -5,13 +5,14 @@ import pytest
 import re
 
 
-def test_autodev_wordmark_exists():
-    """Header contains 'AUTODEV' wordmark in JetBrains Mono or Space Mono font."""
+def test_lullabeast_wordmark_exists():
+    """Header contains the lowercase split 'lulla'+'beast' wordmark in JetBrains/Space Mono."""
     with open('ui/index.html', 'r') as f:
         content = f.read()
-    
-    # Check for AUTODEV wordmark
-    assert 'AUTODEV' in content, "Header should contain 'AUTODEV' wordmark"
+
+    # Check for the split lowercase wordmark: lulla (white) + beast (gold)
+    assert '>lulla</span>' in content and '>beast</span>' in content, \
+        "Header should contain the split 'lulla'+'beast' wordmark"
     
     # Check for JetBrains Mono or Space Mono font
     assert 'JetBrains Mono' in content or 'Space Mono' in content, \
@@ -19,15 +20,15 @@ def test_autodev_wordmark_exists():
 
 
 def test_status_pill_with_running_state():
-    """Status pill uses RUNNING label with teal #0d9488 + run-pulse (active compute)."""
+    """RUNNING is a calm brand-green tinted pill (#4fd98c) with a glowing dot (.pill-glow)."""
     with open('ui/index.html', 'r') as f:
         content = f.read()
-    assert re.search(r"RUNNING:\s*\{[^}]*run-pulse", content), "RUNNING should use run-pulse"
-    assert re.search(r"RUNNING:\s*\{[^}]*#0d9488", content), "RUNNING should use teal surface bg-[#0d9488]"
+    assert re.search(r"RUNNING:\s*\{[^}]*pill-glow", content), "RUNNING should use the .pill-glow glowing-dot pill"
+    assert re.search(r"RUNNING:\s*\{[^}]*#4fd98c", content), "RUNNING should use the calm brand green #4fd98c"
 
 
 def test_status_pill_waiting_for_sentinel():
-    """WAITING_FOR_SENTINEL uses static teal (no pulse); base label Running + formatWaitForSentinelLabel (L-02/L-30)."""
+    """WAITING_FOR_SENTINEL uses the same calm green pill (#4fd98c) + glowing dot; base label Running + formatWaitForSentinelLabel (L-02/L-30)."""
     with open('ui/index.html', 'r') as f:
         content = f.read()
     assert re.search(
@@ -35,11 +36,11 @@ def test_status_pill_waiting_for_sentinel():
         content,
     ), "Sentinel wait base label is Running"
     assert "formatWaitForSentinelLabel" in content
-    assert re.search(r"WAITING_FOR_SENTINEL:\s*\{[^}]*#0d9488", content), \
-        "Sentinel wait pill should use teal surface bg-[#0d9488]"
+    assert re.search(r"WAITING_FOR_SENTINEL:\s*\{[^}]*#4fd98c", content), \
+        "Sentinel wait pill should use the calm brand green #4fd98c"
     assert 'current_agent' in content, "Should reference current_agent for waiting header"
     assert not re.search(r"WAITING_FOR_SENTINEL:\s*\{[^}]*run-pulse", content), \
-        "Sentinel wait must not use run-pulse in pipeline pill map"
+        "Sentinel wait must not use the legacy run-pulse fill (it uses the .pill-glow dot)"
 
 
 def test_status_pill_pipeline_complete_emerald():
@@ -141,7 +142,7 @@ def test_state_polls_every_3_seconds():
 
 
 def test_amber_pulse_animation():
-    """Teal run-pulse is used for RUNNING; amber keyframes may remain for legacy non-pipeline UI."""
+    """Green run-pulse is used for RUNNING; amber keyframes may remain for legacy non-pipeline UI."""
     with open('ui/index.html', 'r') as f:
         content = f.read()
     assert '@keyframes' in content and 'teal-pulse' in content, "teal-pulse keyframes expected"

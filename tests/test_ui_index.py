@@ -67,11 +67,13 @@ def test_google_fonts_header_present(html_content):
 
 
 def test_google_fonts_body_present(html_content):
-    """Google Fonts link includes IBM Plex Sans or DM Sans."""
+    """Google Fonts link includes the humanist chrome sans (Hanken Grotesk; IBM Plex / DM Sans tolerated)."""
+    has_hanken = bool(re.search(r'hanken.*grotesk', html_content, re.IGNORECASE))
     has_ibm_plex = bool(re.search(r'ibm.*plex.*sans', html_content, re.IGNORECASE))
     has_dm_sans = bool(re.search(r'dm.*sans', html_content, re.IGNORECASE))
-    
-    assert has_ibm_plex or has_dm_sans, "IBM Plex Sans or DM Sans font not found in Google Fonts"
+
+    assert has_hanken or has_ibm_plex or has_dm_sans, \
+        "Humanist chrome sans (Hanken Grotesk) not found in Google Fonts"
 
 
 def test_inline_script_for_react_app(html_content):

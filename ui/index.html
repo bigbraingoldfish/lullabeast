@@ -3,12 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AutoDev Pipeline</title>
+    <title>Lullabeast Pipeline</title>
     
-    <!-- Google Fonts: JetBrains Mono for headers, IBM Plex Sans for body -->
+    <!-- Google Fonts: Hanken Grotesk for chrome (wordmark + prose), JetBrains Mono for data -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
     
     <!-- React and ReactDOM UMD -->
     <script src="/static/react.min.js"></script>
@@ -27,23 +27,79 @@
                 extend: {
                     fontFamily: {
                         'header': ['"JetBrains Mono"', 'monospace'],
-                        'body': ['"IBM Plex Sans"', 'sans-serif'],
+                        'body': ['"Hanken Grotesk"', 'sans-serif'],
                     },
                     colors: {
-                        'header-bg': '#1e293b',
-                        'panel-bg': '#141618',
-                        'accent': '#00b4d8',
-                    }
+                        // ── Lullabeast theme ──────────────────────────────────────────
+                        //  Chrome accents repointed to deep indigo + lamplight gold.
+                        //  Semantic greens / ambers / oranges / reds are deliberately left
+                        //  on Tailwind defaults — they are load-bearing status colors.
+                        'header-bg': '#1c1829',
+                        'panel-bg': '#15121f',
+                        'accent': '#e2b14c',        // lamplight gold — brand + primary CTA
+                        // Neutral ramp → night-sky indigo (was cool slate-grey)
+                        slate: {
+                            50:  '#f6f5fb', 100: '#eceaf4', 200: '#d9d5e6', 300: '#c1bbd5',
+                            400: '#a9a2c0', 500: '#6e6788', 600: '#494360', 700: '#3a3352',
+                            800: '#2a2540', 900: '#15121f', 950: '#0b0a12',
+                        },
+                        // Cyan retired (the strongest "generic dev tool" signal) →
+                        // recedes into the neutral lavender family so gold stays scarce.
+                        cyan: {
+                            50: '#f6f5fb', 100: '#eceaf4', 200: '#d9d5e6', 300: '#c1bbd5',
+                            400: '#a9a2c0', 500: '#8b84a4', 600: '#6e6788', 700: '#494360',
+                            800: '#2a2540', 900: '#1c1829', 950: '#15121f',
+                        },
+                        // Sky → soft indigo (informational / "answer banked")
+                        sky: {
+                            50: '#f1edfb', 100: '#e7e1f7', 200: '#d3c9f0', 300: '#b9aae6',
+                            400: '#9b88d8', 500: '#7d68c4', 600: '#6450ad', 700: '#4f3f8f',
+                            800: '#2c2358', 900: '#1e1840', 950: '#150f2e',
+                        },
+                        // Teal → green (running / active-compute family)
+                        teal: {
+                            300: '#4fd98c', 400: '#34d39e', 500: '#2ea043', 600: '#2ea043',
+                            700: '#1f7a38', 800: '#163524', 900: '#10261a',
+                        },
+                    },
+                    borderRadius: {
+                        DEFAULT: '0.5rem',   // 8px — softer than Tailwind's default 4px
+                        'lg': '0.625rem',    // 10px — buttons / segmented controls
+                    },
                 }
             }
         }
     </script>
     
     <style>
+        :root {
+            --ll-bg-base: #0B0A12;
+            --ll-bg-panel: #15121F;
+            --ll-bg-panel-2: #221B36;
+            --ll-border: #2A2540;
+            --ll-border-soft: rgba(96,86,140,0.14);
+            --ll-brand: #E2B14C;
+            --ll-brand-tint: #241D10;
+            --ll-running: #4FD98C;
+        }
+        /* Two-source eased night-sky gradient on the shell — multi-stop falloff
+           avoids a hard "ring" edge. Applied to body + every full-screen shell. */
+        .app-sky,
         body {
-            font-family: 'IBM Plex Sans', sans-serif;
-            background-color: #0d0f12;
-            color: #e2e8f0;
+            background-color: #0B0A12;
+            background:
+                radial-gradient(1500px 950px at 90% -25%,
+                    rgba(38,28,76,.55) 0%, rgba(30,23,60,.22) 33%,
+                    rgba(21,16,42,.10) 50%, rgba(11,10,18,0) 76%),
+                radial-gradient(1280px 840px at -12% 122%,
+                    rgba(26,20,56,.48) 0%, rgba(17,14,36,.11) 46%,
+                    rgba(11,10,18,0) 74%),
+                #0B0A12;
+            background-attachment: fixed;
+        }
+        body {
+            font-family: 'Hanken Grotesk', sans-serif;
+            color: #eceaf4;
             margin: 0;
             padding: 0;
             height: 100vh;
@@ -53,7 +109,43 @@
             height: 100vh;
             overflow: hidden;
         }
+        /* Raised surfaces read as lit objects: a faint top-to-bottom gradient, an
+           indigo hairline, an inset top-edge highlight (the key line), and a soft
+           drop shadow. Swap an opaque bg-[#15121f]/bg-[#221b36] for `ll-panel`. */
+        .ll-panel {
+            background: linear-gradient(180deg, #1C1630 0%, #14101F 100%);
+            border: 1px solid #322B4C;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 8px 24px -14px rgba(0,0,0,.7);
+        }
+        /* The "lit object" top-edge highlight (the key line) on every solid raised
+           surface — matched via the Tailwind panel-surface tokens so we don't touch
+           hundreds of elements. Translucent (/NN) variants opt out by design. */
+        [class~="bg-[#15121f]"],
+        [class~="bg-[#221b36]"] {
+            box-shadow: inset 0 1px 0 rgba(255,255,255,.05);
+        }
+        /* One fixed grain overlay dithers 8-bit banding so the dark gradients read
+           smooth, not rigid. Above the canvas, below modals; never eats clicks. */
+        .ll-grain {
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            z-index: 40;
+            opacity: .05;
+            mix-blend-mode: soft-light;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+            background-size: 160px 160px;
+        }
+        /* Chrome = humanist sans (headers, nav, buttons, labels, prose).
+           Data stays mono via the Tailwind `font-mono` utility (IDs, timers,
+           paths, metrics, tables) — those elements opt in explicitly. */
         .header-text {
+            font-family: 'Hanken Grotesk', sans-serif;
+        }
+        /* When an element opts into mono explicitly, mono always wins over the
+           sans chrome default above (deterministic, regardless of Tailwind's
+           injected-stylesheet order). */
+        .header-text.font-mono {
             font-family: 'JetBrains Mono', monospace;
         }
         
@@ -69,15 +161,16 @@
             }
         }
 
-        /* Teal pulse — pipeline RUNNING only (active compute) */
+        /* Running pulse — pipeline RUNNING only (active compute). Lullabeast: green,
+           replacing the retired teal (keyframe name kept for stability). */
         @keyframes teal-pulse {
             0%, 100% {
-                background-color: #0d9488;
-                box-shadow: 0 0 0 0 rgba(20, 184, 166, 0.55);
+                background-color: #2ea043;
+                box-shadow: 0 0 0 0 rgba(79, 217, 140, 0.55);
             }
             50% {
-                background-color: #14b8a6;
-                box-shadow: 0 0 0 8px rgba(20, 184, 166, 0);
+                background-color: #4fd98c;
+                box-shadow: 0 0 0 8px rgba(79, 217, 140, 0);
             }
         }
 
@@ -87,6 +180,32 @@
 
         .run-pulse {
             animation: teal-pulse 2s ease-in-out infinite;
+        }
+
+        /* Lullabeast live-status pills: calm tinted pills whose leading dot carries the
+           state colour via currentColor (so the dot always matches the pill's own text).
+           .pill-dot = static dot; .pill-glow adds a soft pulse for the "alive / needs you"
+           states (running, needs-input, intervention) — the dot signals, not the whole pill. */
+        .pill-dot::before,
+        .pill-glow::before {
+            content: '';
+            display: inline-block;
+            width: 7px;
+            height: 7px;
+            margin-right: 6px;
+            border-radius: 9999px;
+            background-color: currentColor;
+            vertical-align: middle;
+        }
+        .pill-glow::before {
+            animation: pill-dot-glow 2.4s ease-in-out infinite;
+        }
+        @keyframes pill-dot-glow {
+            0%, 100% { box-shadow: 0 0 3px 0 currentColor; opacity: 0.7; }
+            50% { box-shadow: 0 0 8px 0 currentColor; opacity: 1; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .pill-glow::before { animation: none; }
         }
 
 
@@ -126,7 +245,7 @@
             transition: background-color 0.15s ease-in-out;
         }
         .event-row:hover {
-            background-color: rgba(51, 65, 85, 0.5);
+            background-color: rgba(34, 29, 49, 0.6);
         }
 
         /* Shared markdown rendering for conversation and document panes */
@@ -135,64 +254,64 @@
             margin: 0.65em 0 0.35em;
         }
         /* h2 = top-level category grouper in PRD sections → white */
-        .msg-md h1, .msg-md h2 { color: #e2e8f0; }
+        .msg-md h1, .msg-md h2 { color: #eceaf4; }
         /* h3/h4 = actual subsection headers → slate (teal reserved for section labels only) */
-        .msg-md h3, .msg-md h4 { color: #94a3b8; margin: 0.9em 0 0.4em; }
+        .msg-md h3, .msg-md h4 { color: #a9a2c0; margin: 0.9em 0 0.4em; }
         .msg-md h1 { font-size: 1.2rem; }
         .msg-md h2 { font-size: 1.05rem; }
         .msg-md h3 { font-size: 0.98rem; }
         .msg-md p, .msg-md li, .msg-md blockquote {
-            color: #e2e8f0;
+            color: #eceaf4;
             margin: 0.5em 0;
             line-height: 1.45;
         }
-        .msg-md em { color: #64748b; }
+        .msg-md em { color: #6e6788; }
         .msg-md ul, .msg-md ol { margin: 0.5em 0; padding-left: 1.25rem; }
         .msg-md code {
-            background: #2a2d31;
-            color: #e2e8f0;
+            background: #2a2540;
+            color: #eceaf4;
             padding: 0.1em 0.35em;
             border-radius: 0.25rem;
             font-size: 0.85em;
         }
         .msg-md pre {
-            background: #1a1d21;
+            background: #1c1829;
             padding: 0.75rem;
             border-radius: 0.35rem;
             overflow-x: auto;
             margin: 0.5em 0;
-            border: 1px solid #2a2d31;
+            border: 1px solid #2a2540;
         }
-        .msg-md pre code { background: transparent; padding: 0; color: #e2e8f0; }
-        .msg-md a { color: #00b4d8; }
+        .msg-md pre code { background: transparent; padding: 0; color: #eceaf4; }
+        .msg-md a { color: #e2b14c; }
         .msg-md table {
             border-collapse: collapse;
             width: 100%;
             margin: 0.6em 0;
-            border: 1px solid #2a2d31;
-            background: #141618;
+            border: 1px solid #2a2540;
+            background: #15121f;
         }
         .msg-md th, .msg-md td {
-            border: 1px solid #2a2d31;
+            border: 1px solid #2a2540;
             padding: 0.4rem 0.5rem;
             text-align: left;
-            color: #e2e8f0;
+            color: #eceaf4;
             font-size: 0.85rem;
         }
-        .msg-md th { background: #1a1d21; color: #cbd5e1; }
+        .msg-md th { background: #1c1829; color: #d9d5e6; }
 
         /* ── Dark-theme scrollbars (Webkit / Blink) ──────────────────────────
            Overlay style: just the thumb — no track, no arrow buttons.
            Auto-hide: the thumb is transparent at rest and only fades in
-           while the pointer is over the scrollable region (#2a2d31), then
-           brightens when the pointer is over the thumb itself (#3d4249).
+           while the pointer is over the scrollable region (#2a2540), then
+           brightens when the pointer is over the thumb itself (#3a3352).
            Firefox: thin bar with a transparent track via scrollbar-color
            (Firefox exposes no CSS hook to auto-hide, so there it stays
            subtly visible rather than disappearing).
         ─────────────────────────────────────────────────────────────────────── */
         * {
             scrollbar-width: thin;
-            scrollbar-color: #2a2d31 transparent;
+            scrollbar-color: #2a2540 transparent;
         }
         ::-webkit-scrollbar {
             width: 8px;
@@ -216,10 +335,10 @@
             transition: background 0.2s ease;
         }
         :hover::-webkit-scrollbar-thumb {
-            background: #2a2d31;
+            background: #2a2540;
         }
         :hover::-webkit-scrollbar-thumb:hover {
-            background: #3d4249;
+            background: #3a3352;
         }
 
         /* Chats rail: scrollbar overlays content (no reserved gutter in Chromium).
@@ -370,10 +489,10 @@
 
         /** Tailwind defaults for live pills — keep in sync with AGENT_ATTEMPT_DOT_HEX (dots use inline hex). */
         const PIPELINE_STATUS_PILL_HEX = {
-            teal600: '#0d9488',
+            teal600: '#2ea043',
             red600: '#dc2626',
             successGreen: '#2DEB1E',
-            slate600: '#475569',
+            slate600: '#494360',
         };
 
         /**
@@ -390,25 +509,25 @@
 
         /** Live pipeline_status from GET /api/queue → single pill (shared with Pipeline Monitor header). */
         const PIPELINE_LIVE_PILL = {
-            RUNNING: { label: 'RUNNING', className: 'bg-[#0d9488] text-white run-pulse', title: '' },
-            WAITING_FOR_SENTINEL: { label: 'Running', className: 'bg-[#0d9488] text-white', title: '' },
-            WAITING_FOR_HUMAN: { label: 'NEEDS YOUR INPUT', className: 'bg-orange-500 text-white', title: '' },
+            RUNNING: { label: 'RUNNING', className: 'bg-[rgba(79,217,140,0.13)] text-[#4fd98c] border border-[rgba(79,217,140,0.38)] pill-glow', title: '' },
+            WAITING_FOR_SENTINEL: { label: 'Running', className: 'bg-[rgba(79,217,140,0.13)] text-[#4fd98c] border border-[rgba(79,217,140,0.38)] pill-glow', title: '' },
+            WAITING_FOR_HUMAN: { label: 'NEEDS YOUR INPUT', className: 'bg-[#2a1808] text-orange-300 border border-orange-500/40 pill-glow', title: '' },
             HALTED_SILENT: {
                 label: 'INTERVENTION REQUIRED',
-                className: 'bg-red-600 text-white',
+                className: 'bg-[#2a1015] text-[#f0697c] border border-[#f0697c]/40 pill-glow',
                 title:
                     'Pipeline halted — escalation path failed; check orchestrator logs and project escalation_failed.json.',
             },
-            BLOCKED: { label: 'BLOCKED', className: 'bg-red-600 text-white', title: PIPELINE_BLOCKED_TOOLTIP },
+            BLOCKED: { label: 'BLOCKED', className: 'bg-[#2a1015] text-[#f0697c] border border-[#f0697c]/30 pill-dot', title: PIPELINE_BLOCKED_TOOLTIP },
             PIPELINE_COMPLETE: {
                 label: 'COMPLETE',
-                className: 'bg-emerald-950 text-emerald-400 border border-emerald-700/60',
+                className: 'bg-emerald-950 text-emerald-400 border border-emerald-700/60 pill-dot',
                 title: '',
             },
-            STOPPED: { label: 'STOPPED', className: 'bg-red-600 text-white', title: '' },
-            QUEUE_HALTED: { label: 'Queue stalled', className: 'bg-amber-600 text-slate-900', title: '' },
-            IDLE: { label: 'IDLE', className: 'bg-slate-600 text-slate-200', title: '' },
-            UNKNOWN: { label: 'UNKNOWN', className: 'bg-slate-600 text-slate-200', title: '' },
+            STOPPED: { label: 'STOPPED', className: 'bg-[#221b36] text-slate-300 border border-[#2a2540] pill-dot', title: '' },
+            QUEUE_HALTED: { label: 'Queue stalled', className: 'bg-[#2a1808] text-orange-300 border border-orange-500/30 pill-dot', title: '' },
+            IDLE: { label: 'IDLE', className: 'bg-[#221b36] text-slate-300 border border-[#2a2540] pill-dot', title: '' },
+            UNKNOWN: { label: 'UNKNOWN', className: 'bg-[#221b36] text-slate-300 border border-[#2a2540] pill-dot', title: '' },
         };
 
         /** POST /api/queue/trigger-next `queue_halted_reason` → one-line user message (L-07). */
@@ -526,9 +645,9 @@
         }
 
         const AGENT_COLORS = {
-            'PLANNER': 'bg-[#1a1d21] text-white',
+            'PLANNER': 'bg-[#221b36] text-white',
             'EXECUTOR': 'bg-emerald-600 text-white',
-            'REVIEWER': 'bg-[#00b4d8] text-white',
+            'REVIEWER': 'bg-indigo-600 text-white',
             'ESCALATION': 'bg-amber-600 text-white'
         };
 
@@ -560,35 +679,47 @@
         function getStatusClasses(status) {
             switch (status) {
                 case 'complete': return 'opacity-60 text-slate-400';
-                case 'in_progress': return 'border-l-4 border-cyan-500 bg-[#141618]/50';
+                case 'in_progress': return 'border-l-4 border-accent bg-[#15121f]/50';
                 case 'blocked': return 'bg-red-900/30 border-l-4 border-red-600';
                 case 'skipped': return 'opacity-50 text-slate-500';
                 default: return 'text-slate-300';
             }
         }
 
+        // Activity-feed event DOT color (Lullabeast). Events are categories, not alerts —
+        // each renders as a neutral chip with one small keyed dot, so color means something:
+        //   green  = success/positive   ·  rose  = escalation/destructive
+        //   amber  = warning/recoverable ·  lavender = info / diagnostic / lifecycle (quiet default)
+        // Returns a hex used as the dot's backgroundColor (NOT a pill fill class).
         function getEventBadgeColor(eventType) {
             const raw = (eventType || '').toLowerCase();
             switch (raw) {
-                case 'gate_pass': return 'bg-green-600 text-white';
-                case 'gate_fail': return 'bg-amber-600 text-white';
-                case 'escalation_trigger': return 'bg-orange-600 text-white';
-                case 'escalation_resolve': return 'bg-blue-600 text-white';
-                case 'phase_complete': return 'bg-green-600 text-white';
-                case 'status_changed': return 'bg-slate-600 text-white';
-                // P1 Stage F — advisory reachability events. Yellow for findings
-                // (visible signal worth attention but never blocking); slate for
-                // "consciously skipped" (test-runner entry) so it reads as
-                // informational, not a problem.
-                case 'reachability_warning': return 'bg-yellow-500 text-black';
-                case 'reachability_not_applicable': return 'bg-slate-500 text-white';
-                // Phase 3 (gate-feedback methodology) — demoted interpretive
-                // checks surfaced as non-blocking warnings. Yellow like
-                // reachability_warning: visible and attention-worthy, never blocking.
-                case 'gate_warning': return 'bg-yellow-500 text-black';
-                // Section 6 diagnostic event family — operator-specified
-                // purple so poll / abort / verdict / setup events read as
-                // one cohesive group in the Activity Feed.
+                // success / positive
+                case 'gate_pass':
+                case 'phase_complete':
+                case 'queue_revived':
+                    return '#4fd98c';
+                // escalation / destructive
+                case 'escalation_trigger':
+                case 'nuclear_reset':
+                    return '#f0697c';
+                // warning / retry / parked — recoverable, worth attention (amber)
+                case 'gate_fail':
+                case 'reachability_warning':
+                case 'gate_warning':
+                case 'escalation_command_invalid':
+                case 'queue_halted':
+                case 'queue_parked':
+                    return '#e8893e';
+                // secondary-info — lifecycle / relational (periwinkle)
+                case 'escalation_resolve':
+                case 'dependency_hold':
+                    return '#7c86c8';
+                // info / diagnostic — the quiet muted-lavender default. Covers the
+                // Section 6 diagnostic family (poll / abort / verdict / stamp), status
+                // changes, and advisory skips.
+                case 'status_changed':
+                case 'reachability_not_applicable':
                 case 'poll_start':
                 case 'poll_outcome':
                 case 'attempt_end':
@@ -596,21 +727,8 @@
                 case 'abort_verify_failed':
                 case 'reviewer_verdict':
                 case 'stamp_init_failed':
-                    return 'bg-[#764cc5] text-white';
-                // Recoverable safety-heal (garbage resume command -> defaulted to STOP):
-                // amber warning family so it reads as "attention, recoverable", not the
-                // dark default badge.
-                case 'escalation_command_invalid': return 'bg-amber-600 text-white';
-                // Phase 2 — SILENT lifecycle/destructive events. nuclear_reset is the only
-                // truly destructive one (red, stronger than amber gate_fail); queue_halted is
-                // attention/recoverable (amber); revival is positive (green); park/hold are
-                // neutral lifecycle (slate).
-                case 'nuclear_reset': return 'bg-red-700 text-white';
-                case 'queue_halted': return 'bg-amber-600 text-white';
-                case 'queue_parked': return 'bg-slate-600 text-white';
-                case 'queue_revived': return 'bg-green-600 text-white';
-                case 'dependency_hold': return 'bg-slate-500 text-white';
-                default: return 'bg-[#1a1d21] text-white';
+                    return '#8e88ae';
+                default: return '#8e88ae';
             }
         }
 
@@ -936,7 +1054,7 @@
         /** L-28 palette — inline hex for attempt cells. In-flight `blue` uses mock-like blue (not pipeline teal) so it does not read like success lime. */
         const AGENT_ATTEMPT_DOT_HEX = {
             neutral: PIPELINE_STATUS_PILL_HEX.slate600,
-            blue: '#3b82f6',
+            blue: '#e2b14c',
             green: PIPELINE_STATUS_PILL_HEX.successGreen,
             red: PIPELINE_STATUS_PILL_HEX.red600,
         };
@@ -1117,7 +1235,7 @@
 
         function AgentBadge({ agent }) {
             if (!agent) return null;
-            const colorClass = AGENT_COLORS[agent] || 'bg-[#1a1d21] text-white';
+            const colorClass = AGENT_COLORS[agent] || 'bg-[#221b36] text-white';
             return (
                 <span className={`header-text px-2 py-0.5 rounded text-xs font-medium ${colorClass}`}>
                     {agent}
@@ -1178,7 +1296,7 @@
                                 let cellStyle = {};
                                 if (st === 'neutral') {
                                     cellClass += ' border-slate-600 text-slate-400';
-                                    cellStyle = { backgroundColor: 'rgba(148, 163, 184, 0.06)' };
+                                    cellStyle = { backgroundColor: 'rgba(169, 162, 192, 0.06)' };
                                 } else if (st === 'red') {
                                     cellClass += ' border';
                                     cellStyle = {
@@ -1194,7 +1312,7 @@
                                 } else if (st === 'blue') {
                                     cellClass += ' agent-attempt-cell--inflight border-2';
                                     cellStyle = {
-                                        backgroundColor: 'rgba(59, 130, 246, 0.14)',
+                                        backgroundColor: 'rgba(226, 177, 76, 0.14)',
                                         borderColor: hx.blue,
                                     };
                                 }
@@ -1427,7 +1545,7 @@
             }
             return (
                 <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-                    <div className="bg-[#141618] border border-[#1a1d21] rounded-lg p-6 max-w-sm mx-4">
+                    <div className="bg-[#15121f] border border-[#1c1829] rounded-lg p-6 max-w-sm mx-4">
                         <h3 className="header-text text-lg font-semibold text-amber-400 mb-3">
                             {title}
                         </h3>
@@ -1439,7 +1557,7 @@
                                 type="button"
                                 onClick={onDismiss}
                                 disabled={busy}
-                                className="px-4 py-2 rounded bg-[#1a1d21] text-slate-300 hover:bg-[#252830] transition-colors disabled:opacity-50"
+                                className="px-4 py-2 rounded bg-[#221b36] text-slate-300 hover:bg-[#221d31] transition-colors disabled:opacity-50"
                             >
                                 Cancel
                             </button>
@@ -1461,7 +1579,7 @@
             const escalationStop = pipelineStatus === "WAITING_FOR_HUMAN";
             return (
                 <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-                    <div className="bg-[#141618] border border-[#1a1d21] rounded-lg p-6 max-w-sm mx-4">
+                    <div className="bg-[#15121f] border border-[#1c1829] rounded-lg p-6 max-w-sm mx-4">
                         <h3 className="header-text text-lg font-semibold text-red-400 mb-3">
                             {escalationStop ? "Stop (human prompt)?" : "Stop Pipeline?"}
                         </h3>
@@ -1471,7 +1589,7 @@
                                 : "Note that the stop will only take place after the current agent has finished their turn."}
                         </p>
                         <div className="flex gap-3 justify-end">
-                            <button onClick={onDismiss} className="px-4 py-2 rounded bg-[#1a1d21] text-slate-300 hover:bg-[#252830] transition-colors">
+                            <button onClick={onDismiss} className="px-4 py-2 rounded bg-[#221b36] text-slate-300 hover:bg-[#221d31] transition-colors">
                                 Cancel
                             </button>
                             <button onClick={onConfirm} className="px-4 py-2 rounded bg-orange-600 hover:bg-orange-500 text-white font-medium transition-colors">
@@ -1489,7 +1607,7 @@
         function NuclearResetConfirmModal({ onConfirm, onDismiss, busy }) {
             return (
                 <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-                    <div className="bg-[#141618] border border-red-700 rounded-lg p-6 max-w-md mx-4">
+                    <div className="bg-[#15121f] border border-red-700 rounded-lg p-6 max-w-md mx-4">
                         <h3 className="header-text text-lg font-semibold text-red-400 mb-3">
                             Reset Everything &amp; Restart Phase
                         </h3>
@@ -1500,7 +1618,7 @@
                             WARNING: This option should be used only as a last resort, as the same failure can recur if the underlying problem isn't addressed. Continue?
                         </p>
                         <div className="flex gap-3 justify-end">
-                            <button type="button" onClick={onDismiss} disabled={busy} className="px-4 py-2 rounded bg-[#1a1d21] text-slate-300 hover:bg-[#252830] transition-colors disabled:opacity-50">
+                            <button type="button" onClick={onDismiss} disabled={busy} className="px-4 py-2 rounded bg-[#221b36] text-slate-300 hover:bg-[#221d31] transition-colors disabled:opacity-50">
                                 Cancel
                             </button>
                             <button type="button" onClick={onConfirm} disabled={busy} className="px-4 py-2 rounded bg-red-600 hover:bg-red-500 text-white font-medium transition-colors disabled:opacity-50">
@@ -1559,11 +1677,11 @@
                                 type="button"
                                 onMouseEnter={() => setShowTip(true)}
                                 onMouseLeave={() => setShowTip(false)}
-                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-slate-400, #94a3b8)', fontSize: 12, lineHeight: 1, padding: 0 }}
+                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-slate-400, #a9a2c0)', fontSize: 12, lineHeight: 1, padding: 0 }}
                                 aria-label="Hidden items info"
                             >ⓘ</button>
                             {showTip && (
-                                <span style={{ position: 'absolute', left: '100%', top: '50%', transform: 'translateY(-50%)', marginLeft: 8, background: '#212936', border: '1px solid #3a4a60', borderRadius: 4, padding: '3px 8px', fontSize: 11, color: '#cbd5e1', whiteSpace: 'nowrap', zIndex: 20, boxShadow: '0 2px 8px rgba(0,0,0,0.4)', pointerEvents: 'none' }}>
+                                <span style={{ position: 'absolute', left: '100%', top: '50%', transform: 'translateY(-50%)', marginLeft: 8, background: '#1c1829', border: '1px solid #3a3352', borderRadius: 4, padding: '3px 8px', fontSize: 11, color: '#d9d5e6', whiteSpace: 'nowrap', zIndex: 20, boxShadow: '0 2px 8px rgba(0,0,0,0.4)', pointerEvents: 'none' }}>
                                     {hiddenItems[0]}
                                 </span>
                             )}
@@ -1741,7 +1859,7 @@
                     <button
                         key={command}
                         type="button"
-                        className={`flex flex-col items-start text-left px-3 py-2 rounded transition-colors w-full ${isNuclear ? 'bg-red-950/40 border border-red-800/60 hover:bg-red-900/40' : 'bg-[#1a1d21] hover:bg-[#252830]'}`}
+                        className={`flex flex-col items-start text-left px-3 py-2 rounded transition-colors w-full ${isNuclear ? 'bg-red-950/40 border border-red-800/60 hover:bg-red-900/40' : 'bg-[#221b36] hover:bg-[#221d31]'}`}
                         title={cmdTitle}
                         onClick={() => handleCommand(command)}
                     >
@@ -1808,7 +1926,7 @@
 
             return (
                 <div
-                    className={`border-2 rounded-lg p-4 mt-4 bg-[#141618]/50 ${
+                    className={`border-2 rounded-lg p-4 mt-4 bg-[#15121f]/50 ${
                         capReached ? "border-red-500" : "border-orange-500"
                     }`}
                 >
@@ -1866,7 +1984,7 @@
                         <div className="space-y-3">
 
                             {/* 1. Collapsible advisory block */}
-                            <div className="rounded border border-[#2a3040] bg-[#111418]/60">
+                            <div className="rounded border border-[#2a2540] bg-[#100d1a]/60">
                                 <button
                                     type="button"
                                     className="w-full flex items-center gap-2 px-3 py-2 text-left"
@@ -1886,7 +2004,7 @@
                                     </span>
                                 </button>
                                 {advisoryExpanded && (
-                                    <div className="px-3 pb-3 space-y-1.5 border-t border-[#2a3040]/60">
+                                    <div className="px-3 pb-3 space-y-1.5 border-t border-[#2a2540]/60">
                                         <p className="text-slate-500 text-xs pt-2 font-mono">
                                             {counterText}
                                         </p>
@@ -1927,7 +2045,7 @@
                                         )}
                                         {/* P1 Stage G1: raw internal reason, demoted out of the headline into the disclosure. */}
                                         {escalation_trigger_reason && (
-                                            <p className="text-slate-600 text-[11px] leading-relaxed font-mono pt-1.5 border-t border-[#2a3040]/40">
+                                            <p className="text-slate-600 text-[11px] leading-relaxed font-mono pt-1.5 border-t border-[#2a2540]/40">
                                                 <span className="text-slate-500">Internal reason · </span>{escalation_trigger_reason}
                                             </p>
                                         )}
@@ -1957,7 +2075,7 @@
                                 </div>
                             )}
 
-                            <div className="border-t border-[#2a2d31]" />
+                            <div className="border-t border-[#2a2540]" />
 
                             {/* 3. Advance manually group */}
                             <div className="space-y-1.5">
@@ -1965,7 +2083,7 @@
                                 {advanceCmds.map(def => renderActionButton(def))}
                             </div>
 
-                            <div className="border-t border-[#2a2d31]" />
+                            <div className="border-t border-[#2a2540]" />
 
                             {/* 4. Stop Pipeline — standalone, red label via group==='stop' */}
                             {stopDef && renderActionButton(stopDef)}
@@ -2039,7 +2157,7 @@
                     {metricsSummary && (
                         <>
                             <div className={totalCost > 0 ? "grid grid-cols-2 gap-2 pt-1" : "pt-1"}>
-                                <div className="bg-[#1a1d21] rounded p-2">
+                                <div className="bg-[#221b36] rounded p-2">
                                     <div className="text-slate-500 text-xs mb-0.5 header-text uppercase tracking-wide">Total Time</div>
                                     <div className="header-text text-lg font-semibold text-slate-200 font-mono">{formatDuration(metricsSummary.total_duration_seconds)}</div>
                                     {totalHold > 0 && (
@@ -2050,7 +2168,7 @@
                                     )}
                                 </div>
                                 {totalCost > 0 && (
-                                    <div className="bg-[#1a1d21] rounded p-2">
+                                    <div className="bg-[#221b36] rounded p-2">
                                         <div className="text-slate-500 text-xs mb-0.5 header-text uppercase tracking-wide">Total Cost</div>
                                         <div className="header-text text-lg font-semibold text-slate-200 font-mono">{fmtUSD(totalCost)}</div>
                                         <div className="mt-1 space-y-0.5 text-xs">
@@ -2065,8 +2183,8 @@
                             {phases.length > 0 && (
                                 <div>
                                     <div className="text-slate-500 text-xs mb-1 header-text uppercase tracking-wide">Per-phase</div>
-                                    <div className="border border-[#1a1d21] rounded">
-                                        <div className="flex items-center gap-2 px-2 py-1 text-[10px] header-text uppercase tracking-wide text-slate-500 border-b border-[#1a1d21]">
+                                    <div className="border border-[#1c1829] rounded">
+                                        <div className="flex items-center gap-2 px-2 py-1 text-[10px] header-text uppercase tracking-wide text-slate-500 border-b border-[#1c1829]">
                                             <span className="w-16 flex-shrink-0">Phase</span>
                                             <span className="w-14 flex-shrink-0 text-right">Duration</span>
                                             <span className="w-10 flex-shrink-0 text-right">Execs</span>
@@ -2079,7 +2197,7 @@
                                                 ? 'text-red-400'
                                                 : (badge.muted ? 'text-slate-500' : 'text-emerald-400');
                                             return (
-                                                <div key={idx} className="flex items-center gap-2 px-2 py-1.5 text-xs border-b border-[#1a1d21] last:border-b-0">
+                                                <div key={idx} className="flex items-center gap-2 px-2 py-1.5 text-xs border-b border-[#1c1829] last:border-b-0">
                                                     <span className="header-text font-semibold text-slate-300 w-16 flex-shrink-0 font-mono">{phase.phase}</span>
                                                     <span className="text-slate-400 w-14 flex-shrink-0 text-right font-mono">{formatDuration(phase.duration_seconds)}</span>
                                                     <span className="text-slate-400 w-10 flex-shrink-0 text-right font-mono">{phase.executor_attempts}</span>
@@ -2097,9 +2215,9 @@
                             {totalEscalations > 0 && (
                                 <div>
                                     <div className="text-slate-500 text-xs mb-1 header-text uppercase tracking-wide">Escalation</div>
-                                    <div className="border border-[#1a1d21] rounded">
+                                    <div className="border border-[#1c1829] rounded">
                                         {phases.filter(p => Number(p.hold_seconds) > 0).map((phase, idx) => (
-                                            <div key={idx} className="flex items-center gap-2 px-2 py-1.5 text-xs border-b border-[#1a1d21] last:border-b-0">
+                                            <div key={idx} className="flex items-center gap-2 px-2 py-1.5 text-xs border-b border-[#1c1829] last:border-b-0">
                                                 <span className="header-text font-semibold text-slate-300 font-mono">{phase.phase}</span>
                                                 <span className="text-slate-500">·</span>
                                                 <span className="text-slate-400 font-mono">{formatDuration(phase.hold_seconds)} hold</span>
@@ -2113,7 +2231,7 @@
 
                     {/* W5-F: completion doc generation — only shown when completionReport.found is false (pipelineStatus === PIPELINE_COMPLETE required via CurrentPhasePanel) */}
                     {(!completionReport || !completionReport.found) && (
-                        <div className="mt-4 pt-3 border-t border-[#1a1d21]">
+                        <div className="mt-4 pt-3 border-t border-[#1c1829]">
                             <p className="text-slate-400 text-xs mb-2">Want a summary and next steps for this project?</p>
                             {generateDocsError && (
                                 <p className="text-red-400 text-xs mb-2">{generateDocsError}</p>
@@ -2122,7 +2240,7 @@
                             <button
                                 onClick={onGenerateDocs}
                                 disabled={generateDocsBusy}
-                                className="px-3 py-1.5 text-xs rounded bg-emerald-700 hover:bg-emerald-600 text-white disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                className="px-3 py-1.5 text-xs rounded bg-[#e2b14c] hover:bg-[#f0c56b] text-slate-900 font-semibold disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                             >
                                 {generateDocsBusy ? 'Generating…' : 'Generate Docs'}
                             </button>
@@ -2256,10 +2374,10 @@
                                         }
                                         className={`w-full text-left px-3 py-2.5 rounded border transition-colors ${
                                             disabled
-                                                ? 'border-[#1a1d21] bg-[#0f1012] text-slate-600 cursor-not-allowed'
+                                                ? 'border-[#1c1829] bg-[#0b0a12] text-slate-600 cursor-not-allowed'
                                                 : command === 'RETRY'
                                                     ? 'border-emerald-800 bg-emerald-950/40 hover:bg-emerald-950/70 text-emerald-300'
-                                                    : 'border-[#1a1d21] bg-[#1a1d21]/50 hover:bg-[#252830] text-slate-300'
+                                                    : 'border-[#1c1829] bg-[#221b36]/50 hover:bg-[#221d31] text-slate-300'
                                         }`}
                                     >
                                         <div className="header-text text-xs font-semibold mb-0.5">{label}</div>
@@ -2356,7 +2474,7 @@
                 <div className="space-y-3">
                     <div className="flex items-center gap-3">
                         <span
-                            className="header-text text-sm font-semibold text-slate-300"
+                            className="font-mono text-sm font-semibold text-slate-300"
                             title={P3_PIPELINE_PHASE_RAW_ID_TITLE}
                         >
                             {current_phase_raw_id}
@@ -2455,7 +2573,7 @@
                     '<div class="completion-code-wrap relative my-2">' +
                         '<button type="button" data-testid="completion-report-copy-button" ' +
                         'class="completion-copy-btn absolute top-1 right-1 px-2 py-0.5 text-[10px] rounded ' +
-                        'bg-[#181a1c] hover:bg-slate-700 text-slate-200 border border-slate-600 z-10" ' +
+                        'bg-[#15121f] hover:bg-slate-700 text-slate-200 border border-slate-600 z-10" ' +
                         'aria-label="Copy to clipboard">Copy</button>' +
                         '<pre class="pr-14"><code' + (lang ? ' class="language-' + lang + '"' : '') + '>' +
                         escapedHtml +
@@ -2566,16 +2684,16 @@
                             <span>Progress</span>
                             <span>{completeCount} / {totalPhases} complete</span>
                         </div>
-                        <div className="w-full bg-[#1a1d21] rounded-full h-2">
+                        <div className="w-full bg-[#221b36] rounded-full h-2">
                             <div
-                                className="bg-cyan-500 h-2 rounded-full transition-all duration-300"
+                                className="bg-accent h-2 rounded-full transition-all duration-300"
                                 style={{ width: `${percentage}%` }}
                             ></div>
                         </div>
                     </div>
 
                     {metricsSummary && metricsSummary.total_phases > 0 && (
-                        <p className="header-text text-xs text-slate-500">
+                        <p className="font-mono text-xs text-slate-500">
                             Run so far: {metricsSummary.total_phases} phases · {metricsSummary.total_executor_attempts} exec attempts · {formatDuration(metricsSummary.total_duration_seconds)}{metricsSummary.total_cost > 0 ? ` · $${metricsSummary.total_cost.toFixed(2)}` : ''}
                         </p>
                     )}
@@ -2594,17 +2712,17 @@
                                     tabIndex={0}
                                     aria-label={`${phase.id}: ${phase.goal || ''}`}
                                     aria-expanded={isExpanded}
-                                    className={`p-3 rounded border border-[#1a1d21] cursor-pointer transition-colors ${getStatusClasses(phase.status)} ${isExpanded ? 'bg-[#1a1d21]' : ''}`}
+                                    className={`p-3 rounded border border-[#1c1829] cursor-pointer transition-colors ${getStatusClasses(phase.status)} ${isExpanded ? 'bg-[#221b36]' : ''}`}
                                     onClick={() => handlePhaseClick(phase.id)}
                                     onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') handlePhaseClick(phase.id); }}
                                 >
                                     <div className="flex items-start gap-2">
                                         <span className="text-lg flex-shrink-0">{getStatusIcon(phase.status)}</span>
                                         <div className="flex-1 min-w-0">
-                                            <div className="header-text text-sm font-semibold text-slate-300 flex items-center gap-2">
+                                            <div className="font-mono text-sm font-semibold text-slate-300 flex items-center gap-2">
                                                 {phase.id}
                                                 {isExpanded ? (
-                                                    <span className="text-blue-400 text-xs">▼</span>
+                                                    <span className="text-accent text-xs">▼</span>
                                                 ) : (
                                                     <span className="text-slate-500 text-xs">▶</span>
                                                 )}
@@ -2616,12 +2734,12 @@
                                             )}
                                             {/* Expanded: exit criteria (all phases) */}
                                             {isExpanded && phase.exit_criteria && phase.exit_criteria.length > 0 && (
-                                                <div className="mt-3 pt-2 border-t border-[#1a1d21]">
+                                                <div className="mt-3 pt-2 border-t border-[#1c1829]">
                                                     <div className="text-xs font-semibold text-slate-400 mb-1">Exit Criteria:</div>
                                                     <ul className="text-xs text-slate-400 space-y-1">
                                                         {phase.exit_criteria.map((criteria, idx) => (
                                                             <li key={idx} className="flex items-start gap-1">
-                                                                <span className="text-blue-400">•</span>
+                                                                <span className="text-accent">•</span>
                                                                 <span>{criteria}</span>
                                                             </li>
                                                         ))}
@@ -2630,19 +2748,19 @@
                                             )}
                                             {/* Expanded: Behavioral Verification (P0 Stage J — null for pre-P0 phases) */}
                                             {isExpanded && phase.behavioral_verification && (
-                                                <div className="mt-3 pt-2 border-t border-[#1a1d21]">
+                                                <div className="mt-3 pt-2 border-t border-[#1c1829]">
                                                     <div className="text-xs font-semibold text-slate-400 mb-1">Behavioral Verification:</div>
                                                     <ul className="text-xs text-slate-400 space-y-1">
                                                         <li className="flex items-start gap-1">
-                                                            <span className="text-blue-400">•</span>
+                                                            <span className="text-accent">•</span>
                                                             <span><span className="text-slate-500">User-observable: </span>{phase.behavioral_verification.user_observable}</span>
                                                         </li>
                                                         <li className="flex items-start gap-1">
-                                                            <span className="text-blue-400">•</span>
+                                                            <span className="text-accent">•</span>
                                                             <span><span className="text-slate-500">How we'll check: </span>{phase.behavioral_verification.how_to_check}</span>
                                                         </li>
                                                         <li className="flex items-start gap-1">
-                                                            <span className="text-blue-400">•</span>
+                                                            <span className="text-accent">•</span>
                                                             <span><span className="text-slate-500">If this fails, you see: </span>{phase.behavioral_verification.failure_language}</span>
                                                         </li>
                                                     </ul>
@@ -2650,7 +2768,7 @@
                                             )}
                                             {/* Expanded: run metrics for completed phases */}
                                             {isExpanded && phase.status === 'complete' && (
-                                                <div className="mt-3 pt-2 border-t border-[#1a1d21]">
+                                                <div className="mt-3 pt-2 border-t border-[#1c1829]">
                                                     {phaseMeta ? (
                                                         <div>
                                                             <div className="text-xs font-semibold text-slate-400 mb-2">Run Metrics:</div>
@@ -2659,7 +2777,7 @@
                                                                 <div className="space-y-1">
                                                                     <div>
                                                                         <span className="text-slate-500">Duration: </span>
-                                                                        <span className="text-slate-300">{formatDuration(phaseMeta.duration_seconds)}</span>
+                                                                        <span className="text-slate-300 font-mono">{formatDuration(phaseMeta.duration_seconds)}</span>
                                                                     </div>
                                                                     <div>
                                                                         <span className="text-slate-500">Skill: </span>
@@ -2676,7 +2794,7 @@
                                                                 <div className="space-y-1">
                                                                     <div>
                                                                         <span className="text-slate-500">Exec attempts: </span>
-                                                                        <span className="text-slate-300">{formatExecAttemptsBreakdown(
+                                                                        <span className="text-slate-300 font-mono">{formatExecAttemptsBreakdown(
                                                                             phaseMeta.executor_attempts,
                                                                             phaseMeta.executor_self_failures,
                                                                             phaseMeta.executor_reviewer_rejections
@@ -2684,11 +2802,11 @@
                                                                     </div>
                                                                     <div>
                                                                         <span className="text-slate-500">Reviewer passes: </span>
-                                                                        <span className="text-slate-300">{phaseMeta.reviewer_passes}</span>
+                                                                        <span className="text-slate-300 font-mono">{phaseMeta.reviewer_passes}</span>
                                                                     </div>
                                                                     <div>
                                                                         <span className="text-slate-500">Escalations: </span>
-                                                                        <span className="text-slate-300">{phaseMeta.escalations}</span>
+                                                                        <span className="text-slate-300 font-mono">{phaseMeta.escalations}</span>
                                                                     </div>
                                                                 </div>
                                                             </div>
@@ -2697,9 +2815,9 @@
                                                         <div className="text-xs text-slate-500 italic">No metrics available</div>
                                                     )}
                                                     {/* Git branch reference */}
-                                                    <div className="mt-2 pt-2 border-t border-[#1a1d21]">
+                                                    <div className="mt-2 pt-2 border-t border-[#1c1829]">
                                                         <span className="text-slate-500 text-xs">Branch: </span>
-                                                        <code className="font-mono text-xs text-cyan-400">phase/{phase.id}</code>
+                                                        <code className="font-mono text-xs text-accent">phase/{phase.id}</code>
                                                         <span className="text-slate-600 text-xs ml-2">
                                                             restore via: <code className="font-mono text-slate-600">git checkout phase/{phase.id}</code>
                                                         </span>
@@ -2811,7 +2929,7 @@
             return (
                 <div
                     className={
-                        "event-row p-2 border-b border-[#1a1d21] cursor-pointer rounded" +
+                        "event-row p-2 border-b border-[#1c1829] cursor-pointer rounded" +
                         (isDimmed ? ' opacity-70' : '') +
                         (isNew ? " event-row-fade-in" : "")
                     }
@@ -2828,8 +2946,9 @@
                             <span
                                 data-event-type={rawType || 'unknown'}
                                 title={getEventDescription(rawType) || labelText}
-                                className={`px-2 py-0.5 rounded text-xs font-medium whitespace-nowrap ${badgeColor}`}
+                                className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap bg-[rgba(169,162,192,0.06)] text-[#a9a2c0] border border-[#2a2540]"
                             >
+                                <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{backgroundColor: badgeColor}}></span>
                                 {labelText}
                             </span>
                         </span>
@@ -2842,7 +2961,7 @@
                         </span>
                     </div>
                     {isExpanded && (
-                        <div className="mt-2 ml-14 text-xs bg-[#141618] p-3 rounded border border-[#1a1d21]">
+                        <div className="mt-2 ml-14 text-xs bg-[#15121f] p-3 rounded border border-[#1c1829]">
                             <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
                                 <span className="text-slate-500">Type</span>
                                 <span className="text-slate-300">{labelText} ({rawType})</span>
@@ -2858,13 +2977,13 @@
                                 </>}
                             </div>
                             {summary && (
-                                <div className="mt-2 pt-2 border-t border-[#1a1d21]">
+                                <div className="mt-2 pt-2 border-t border-[#1c1829]">
                                     <div className="text-slate-500 mb-1">Detail</div>
                                     <div className="text-slate-300 whitespace-pre-wrap">{summary}</div>
                                 </div>
                             )}
                             {rawPairs.length > 0 && (
-                                <div className="mt-2 pt-2 border-t border-[#1a1d21]">
+                                <div className="mt-2 pt-2 border-t border-[#1c1829]">
                                     <div className="text-slate-500 mb-1">Raw data</div>
                                     <div className="font-mono text-[11px] text-slate-500">
                                         {rawPairs.map(([k, v]) => (
@@ -2946,7 +3065,7 @@
                         const manualResolved = !resolve && isRoadmapPhaseComplete(phaseId, roadmap);
                         const isInProgress = !resolve && !manualResolved;
                         return (
-                            <div key={index} className="p-3 bg-[#141618] rounded border border-[#1a1d21]">
+                            <div key={index} className="p-3 bg-[#15121f] rounded border border-[#1c1829]">
                                 <div className="flex items-center gap-3 mb-2">
                                     <span className="header-text text-sm font-semibold text-slate-300">
                                         {pair.phase || '—'}
@@ -3134,8 +3253,8 @@
                     title={tabTitle}
                     className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
                         activityTab === tab
-                            ? 'bg-blue-600 text-white'
-                            : 'bg-[#1a1d21] text-slate-300 hover:bg-[#252830]'
+                            ? 'bg-[#241d10] text-[#e2b14c] ring-1 ring-inset ring-[#e2b14c]/30'
+                            : 'bg-[#221b36] text-slate-300 hover:bg-[#221d31]'
                     }`}
                 >
                     {label}
@@ -3158,7 +3277,7 @@
                             <div className="text-slate-500 italic text-sm">No events yet. Events appear here as the pipeline runs.</div>
                         ) : (
                             <div className="space-y-1">
-                                <div className="sticky top-0 z-10 bg-[#141618] flex items-center gap-3 px-2 pt-1 pb-1 mb-1 text-[10px] text-slate-600 uppercase tracking-wider select-none border-b border-[#1a1d21]">
+                                <div className="sticky top-0 z-10 bg-[#15121f] flex items-center gap-3 px-2 pt-1 pb-1 mb-1 text-[10px] text-slate-600 uppercase tracking-wider select-none border-b border-[#1c1829]">
                                     <span className="w-14 flex-shrink-0">Time</span>
                                     <span className="w-40 flex-shrink-0">Project / Phase</span>
                                     <span className="w-20 flex-shrink-0">Event</span>
@@ -3306,28 +3425,28 @@
                 <div
                     className={`${
                         sidebarCollapsed ? "w-14" : expW
-                    } relative flex-shrink-0 bg-[#141618] border-r border-[#1a1d21] flex flex-col h-full min-h-0 max-h-full transition-[width] duration-200 ease-out`}
+                    } relative flex-shrink-0 bg-[#15121f] border-r border-[#1c1829] flex flex-col h-full min-h-0 max-h-full transition-[width] duration-200 ease-out`}
                 >
-                    <div className="px-2 py-4 border-b border-[#1a1d21] flex items-center gap-1 min-h-[52px] flex-shrink-0">
+                    <div className="px-2 py-4 border-b border-[#1c1829] flex items-center gap-1 min-h-[52px] flex-shrink-0">
                         {sidebarCollapsed ? (
                             <button
                                 type="button"
                                 onClick={() => setSidebarCollapsed(false)}
-                                className="w-full flex flex-col items-center justify-center rounded border border-[#2a2d31] bg-[#1a1d21]/80 py-2.5 hover:border-[#00b4d8]/40 hover:bg-[#1a1d21] focus:outline-none focus-visible:ring-1 focus-visible:ring-[#00b4d8]"
+                                className="w-full flex flex-col items-center justify-center rounded border border-[#2a2540] bg-[#221b36]/80 py-2.5 hover:border-[#e2b14c]/40 hover:bg-[#221b36] focus:outline-none focus-visible:ring-1 focus-visible:ring-[#e2b14c]"
                                 title="Expand sidebar"
                                 aria-label="Expand sidebar"
                             >
-                                <span className="header-text text-[11px] font-bold text-amber-400 tracking-tight leading-none">AD</span>
+                                <span className="font-body text-[12px] font-bold tracking-tight leading-none"><span className="text-white">l</span><span className="text-accent">b</span></span>
                             </button>
                         ) : (
                             <>
-                                <h1 className="header-text text-base font-bold text-amber-400 tracking-widest flex-1 text-center truncate px-1 min-w-0">
-                                    AUTODEV
+                                <h1 className="font-body text-lg font-bold tracking-tight flex-1 text-center truncate px-1 min-w-0">
+                                    <span className="font-light text-white">lulla</span><span className="font-bold text-accent">beast</span>
                                 </h1>
                                 <button
                                     type="button"
                                     onClick={() => setSidebarCollapsed(true)}
-                                    className="shrink-0 w-7 h-7 flex items-center justify-center rounded border border-[#2a2d31] bg-[#1a1d21] text-slate-400 hover:text-slate-200 hover:border-slate-500 text-sm leading-none"
+                                    className="shrink-0 w-7 h-7 flex items-center justify-center rounded border border-[#2a2540] bg-[#221b36] text-slate-400 hover:text-slate-200 hover:border-slate-500 text-sm leading-none"
                                     title="Collapse sidebar"
                                     aria-label="Collapse sidebar"
                                 >
@@ -3353,8 +3472,8 @@
                                     onClick={() => onNavigate(item.key)}
                                     className={`w-full flex items-center gap-2.5 px-3 py-2.5 text-left transition-colors ${
                                         isActive
-                                            ? "text-[#00b4d8] bg-[#00b4d8]/10 border-r-2 border-[#00b4d8]"
-                                            : "text-slate-400 hover:text-slate-200 hover:bg-[#1a1d21]"
+                                            ? "text-[#e2b14c] bg-[#e2b14c]/10 border-r-2 border-[#e2b14c]"
+                                            : "text-slate-400 hover:text-slate-200 hover:bg-[#221b36]"
                                     } ${sidebarCollapsed ? "justify-center px-0" : ""}`}
                                 >
                                     {item.icon}
@@ -3521,7 +3640,7 @@
                         aria-expanded={open}
                         aria-controls={listId}
                         onClick={() => setOpen((v) => !v)}
-                        className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-[#141618]/50 transition-colors"
+                        className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-[#15121f]/50 transition-colors"
                     >
                         <span className="text-amber-300/90 text-xs font-medium header-text truncate min-w-0">
                             {label}
@@ -3533,7 +3652,7 @@
                     {open && (
                         <ul
                             id={listId}
-                            className="border-t border-[#2a2d31] bg-[#0d0f11]/90 px-3 py-2 space-y-1.5 text-xs text-slate-400 list-none"
+                            className="border-t border-[#2a2540] bg-[#100d1a]/90 px-3 py-2 space-y-1.5 text-xs text-slate-400 list-none"
                         >
                             {assumptions.map((text, i) => (
                                 <li key={i} className="flex gap-2">
@@ -3591,7 +3710,7 @@
             };
 
             return (
-                <div className="rounded-xl border border-[#2a2d31] bg-[#1a1d21] p-4 space-y-3 w-full min-w-0">
+                <div className="rounded-xl border border-[#2a2540] bg-[#221b36] p-4 space-y-3 w-full min-w-0">
                     <div className="flex items-start justify-between gap-2">
                         <p className="text-sm text-slate-200 font-medium leading-snug">{q.text}</p>
                         <div className="flex items-center gap-1 shrink-0 mt-0.5">
@@ -3611,8 +3730,8 @@
                                     onKeyDown={(e) => { if (e.key === " ") { e.preventDefault(); toggleOption(opt); } }}
                                     className={`w-full text-left text-xs px-3 py-2 rounded-lg border transition-colors ${
                                         active
-                                            ? "border-[#00b4d8]/50 bg-[#00b4d8]/10 text-slate-100"
-                                            : "border-[#2a2d31] bg-[#141618] text-slate-400 hover:border-slate-500 hover:text-slate-300"
+                                            ? "border-[#e2b14c]/50 bg-[#e2b14c]/10 text-slate-100"
+                                            : "border-[#2a2540] bg-[#15121f] text-slate-400 hover:border-slate-500 hover:text-slate-300"
                                     }`}
                                 >
                                     {q.type === "single" ? (active ? "● " : "○ ") : (active ? "☑ " : "☐ ")}{opt}
@@ -3627,7 +3746,7 @@
                             onChange={(e) => setFreeTexts((prev) => ({ ...prev, [index]: e.target.value }))}
                             onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); advance(); } }}
                             placeholder="Or add your own answer…"
-                            className="w-full bg-[#141618] border border-[#2a2d31] rounded px-3 py-1.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-500"
+                            className="w-full bg-[#15121f] border border-[#2a2540] rounded px-3 py-1.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-500"
                         />
                     </div>
                     <div className="flex justify-end">
@@ -3635,7 +3754,7 @@
                             type="button"
                             onClick={advance}
                             disabled={!hasAnswer}
-                            className="header-text text-xs px-4 py-1.5 rounded border border-[#00b4d8]/50 bg-[#00b4d8] text-[#0d0f11] font-semibold hover:brightness-110 disabled:bg-[#2a2d31] disabled:text-slate-600 disabled:border-[#2a2d31] disabled:cursor-not-allowed"
+                            className="header-text text-xs px-4 py-1.5 rounded border border-[#e2b14c]/50 bg-[#e2b14c] text-[#100d1a] font-semibold hover:brightness-110 disabled:bg-[#2a2540] disabled:text-slate-600 disabled:border-[#2a2540] disabled:cursor-not-allowed"
                         >
                             {isLast ? "Submit Answers" : "Next →"}
                         </button>
@@ -3684,9 +3803,9 @@
                 if (!container || !canvas) return undefined;
 
                 const CELL = 4;
-                const LIVE_COLOR = "#23262a";
-                const DEAD_COLOR = "#1a1d21";
-                const FADE_RGBA = "rgba(26, 29, 33, 0.18)";
+                const LIVE_COLOR = "#1c1829";
+                const DEAD_COLOR = "#1c1829";
+                const FADE_RGBA = "rgba(28, 24, 41, 0.18)";
 
                 let cols = 0, rows = 0, w = 0, h = 0;
                 let dpr = window.devicePixelRatio || 1;
@@ -5870,7 +5989,7 @@
                 ReactDOM.createPortal(
                     <div
                         role="tooltip"
-                        className="fixed z-[60] w-[280px] rounded-lg border border-[#2a2d31] bg-[#1a1d21] p-3 pointer-events-auto"
+                        className="fixed z-[60] w-[280px] rounded-lg border border-[#2a2540] bg-[#221b36] p-3 pointer-events-auto"
                         style={{ top: hoverCardTop, left: sidebarLeftPx + 8 }}
                         onMouseEnter={onHoverCardMouseEnter}
                         onMouseLeave={onHoverCardMouseLeave}
@@ -5899,7 +6018,7 @@
                                         <span className="header-text text-[10px] text-slate-500 shrink-0">PRD Readiness</span>
                                         {rsNum != null ? (
                                             <>
-                                                <div className="flex-1 h-[3px] rounded-full bg-[#2a2d31] overflow-hidden">
+                                                <div className="flex-1 h-[3px] rounded-full bg-[#2a2540] overflow-hidden">
                                                     <div
                                                         className={`h-full rounded-full ${ideaScoreBarClass(rsNum)}`}
                                                         style={{ width: `${(rsNum / 10) * 100}%` }}
@@ -5973,7 +6092,7 @@
                             onClick={() => setRevertConfirmSlug(null)}
                         >
                             <div
-                                className="max-w-md w-full rounded-lg border border-[#2a2d31] bg-[#141618] p-4"
+                                className="max-w-md w-full rounded-lg border border-[#2a2540] bg-[#15121f] p-4"
                                 onClick={(e) => e.stopPropagation()}
                             >
                                 <p id="prd-revert-confirm-title" className="text-sm text-slate-200 mb-3">
@@ -5982,7 +6101,7 @@
                                 <div className="flex justify-end gap-2">
                                     <button
                                         type="button"
-                                        className="text-xs px-3 py-1.5 rounded border border-[#2a2d31] text-slate-400"
+                                        className="text-xs px-3 py-1.5 rounded border border-[#2a2540] text-slate-400"
                                         onClick={() => setRevertConfirmSlug(null)}
                                     >
                                         Cancel
@@ -6002,7 +6121,7 @@
                             </div>
                         </div>
                     )}
-                    {/* M2 ideas merged: one column — AUTODEV + nav, then Chats (not a sibling rail) */}
+                    {/* M2 ideas merged: one column — lullabeast + nav, then Chats (not a sibling rail) */}
                     <PrimaryNavColumn
                         currentScreen={currentScreen}
                         onNavigate={safeNav}
@@ -6011,13 +6130,13 @@
                         expandedWidthClass="w-[240px]"
                         belowNav={
                             !sidebarCollapsed ? (
-                                <div className="flex flex-col flex-1 min-h-0 bg-[#141618] border-t border-[#1a1d21] pt-3">
+                                <div className="flex flex-col flex-1 min-h-0 bg-[#15121f] border-t border-[#1c1829] pt-3">
                                 <div className="flex-shrink-0 flex items-center justify-between gap-2 px-3 pb-2">
                                     <span className="header-text text-xs text-slate-400 uppercase tracking-wide">Chats</span>
                                     <button
                                         type="button"
                                         onClick={newIdea}
-                                        className="header-text text-xs font-medium text-[#00b4d8] bg-transparent border-0 p-0 cursor-pointer hover:text-[#33c3e0] hover:underline shrink-0"
+                                        className="header-text text-xs font-medium text-[#e2b14c] bg-transparent border-0 p-0 cursor-pointer hover:text-[#f0c56b] hover:underline shrink-0"
                                     >
                                         + New
                                     </button>
@@ -6029,13 +6148,13 @@
                                         onChange={(e) => setFilterText(e.target.value)}
                                         placeholder="Search by title"
                                         aria-label="Search projects by title"
-                                        className="w-full min-w-0 rounded border border-[#2a2d31] bg-[#101214] px-2 py-1.5 text-xs text-slate-300 placeholder-slate-500 focus:outline-none focus:border-[#00b4d8]/50"
+                                        className="w-full min-w-0 rounded border border-[#2a2540] bg-[#100d1a] px-2 py-1.5 text-xs text-slate-300 placeholder-slate-500 focus:outline-none focus:border-[#e2b14c]/50"
                                     />
                                     {filterText.length > 0 ? (
                                         <button
                                             type="button"
                                             onClick={() => setFilterText("")}
-                                            className="shrink-0 px-1.5 py-0.5 text-slate-500 hover:text-slate-300 text-sm leading-none rounded hover:bg-[#1a1d21]"
+                                            className="shrink-0 px-1.5 py-0.5 text-slate-500 hover:text-slate-300 text-sm leading-none rounded hover:bg-[#221b36]"
                                             aria-label="Clear filter"
                                             title="Clear"
                                         >
@@ -6047,22 +6166,22 @@
                                     {ideasLoading ? (
                                         <>
                                             {[0, 1, 2].map((idx) => (
-                                                <div key={`idea-skel-${idx}`} className="rounded border border-[#1a1d21] bg-[#1a1d21] px-2 py-2 animate-pulse">
-                                                    <div className="h-2.5 w-3/4 rounded bg-[#2a2d31]"></div>
-                                                    <div className="mt-2 h-2 w-1/3 rounded bg-[#24282d]"></div>
+                                                <div key={`idea-skel-${idx}`} className="rounded border border-[#1c1829] bg-[#221b36] px-2 py-2 animate-pulse">
+                                                    <div className="h-2.5 w-3/4 rounded bg-[#2a2540]"></div>
+                                                    <div className="mt-2 h-2 w-1/3 rounded bg-[#221b36]"></div>
                                                 </div>
                                             ))}
                                         </>
                                     ) : (
                                         <>
                                     {showUnlistedSession ? (
-                                        <div className="rounded border border-dashed border-[#2a2d31] bg-[#141618]/50">
+                                        <div className="rounded border border-dashed border-[#2a2540] bg-[#15121f]/50">
                                             <button
                                                 type="button"
                                                 onClick={() => selectIdeaFromRail(currentIdeaId)}
                                                 className={`w-full text-left px-2 py-2 rounded border ${
                                                     currentIdeaId && !listedIds.has(currentIdeaId)
-                                                        ? "border-[#2d5a63] bg-[#1a1d21]/60"
+                                                        ? "border-[#5a4a22] bg-[#221b36]/60"
                                                         : "border-transparent"
                                                 }`}
                                             >
@@ -6077,8 +6196,8 @@
                                             data-idea-hover-row={it.id}
                                             className={`group flex rounded border ${
                                                 currentIdeaId === it.id
-                                                    ? "border-[#2d5a63] bg-[#1a1d21]"
-                                                    : "border-transparent hover:bg-[#1a1d21]/60"
+                                                    ? "border-[#5a4a22] bg-[#221b36]"
+                                                    : "border-transparent hover:bg-[#221b36]/60"
                                             }`}
                                             onMouseEnter={(e) => onIdeaRowMouseEnter(it, e)}
                                             onMouseLeave={onIdeaRowMouseLeave}
@@ -6099,12 +6218,12 @@
                                                 <div className="text-slate-500 truncate text-[11px]">{it.updated ? relativeTime(it.updated) : "—"}</div>
                                             </button>
                                             {renamingIdeaId === it.id ? (
-                                                <div className="flex flex-col gap-1 px-1.5 py-1 border-l border-[#1a1d21] bg-[#141618]/80 shrink-0 min-w-[180px]">
+                                                <div className="flex flex-col gap-1 px-1.5 py-1 border-l border-[#1c1829] bg-[#15121f]/80 shrink-0 min-w-[180px]">
                                                     <input
                                                         type="text"
                                                         value={renameDraft}
                                                         autoFocus
-                                                        className="w-full rounded border border-[#2a2d31] bg-[#101214] px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-[#00b4d8]/60"
+                                                        className="w-full rounded border border-[#2a2540] bg-[#100d1a] px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-[#e2b14c]/60"
                                                         onChange={(e) => {
                                                             setRenameDraft(e.target.value);
                                                             setRenameError("");
@@ -6124,7 +6243,7 @@
                                                     <div className="flex gap-2">
                                                         <button
                                                             type="button"
-                                                            className="text-[11px] text-[#00b4d8] hover:underline"
+                                                            className="text-[11px] text-[#e2b14c] hover:underline"
                                                             onClick={(e) => {
                                                                 e.stopPropagation();
                                                                 submitRename(it.id);
@@ -6148,7 +6267,7 @@
                                                     ) : null}
                                                 </div>
                                             ) : deleteConfirmId === it.id ? (
-                                                <div className="flex flex-col gap-1 px-1.5 py-1 border-l border-[#1a1d21] bg-[#141618]/80 shrink-0 min-w-[88px]">
+                                                <div className="flex flex-col gap-1 px-1.5 py-1 border-l border-[#1c1829] bg-[#15121f]/80 shrink-0 min-w-[88px]">
                                                     <span className="text-[10px] text-slate-400 header-text">Delete?</span>
                                                     <div className="flex gap-1 flex-wrap">
                                                         <button
@@ -6177,7 +6296,7 @@
                                                 <div className="relative shrink-0">
                                                     <button
                                                         type="button"
-                                                        className="px-2 text-slate-500 hover:text-slate-200 hover:bg-[#141618] text-sm opacity-40 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+                                                        className="px-2 text-slate-500 hover:text-slate-200 hover:bg-[#15121f] text-sm opacity-40 group-hover:opacity-100 focus:opacity-100 transition-opacity"
                                                         onClick={(e) => {
                                                             e.stopPropagation();
                                                             setActiveIdeaMenuId((id) => (id === it.id ? null : it.id));
@@ -6187,10 +6306,10 @@
                                                         ⋮
                                                     </button>
                                                     {activeIdeaMenuId === it.id && (
-                                                        <div className="absolute right-1 top-7 z-30 min-w-[120px] rounded border border-[#2a2d31] bg-[#141618]">
+                                                        <div className="absolute right-1 top-7 z-30 min-w-[120px] rounded border border-[#2a2540] bg-[#15121f]">
                                                             <button
                                                                 type="button"
-                                                                className="w-full text-left px-3 py-2 text-xs text-slate-200 hover:bg-[#1a1d21]"
+                                                                className="w-full text-left px-3 py-2 text-xs text-slate-200 hover:bg-[#221b36]"
                                                                 onClick={(e) => {
                                                                     e.stopPropagation();
                                                                     beginRename(it);
@@ -6200,7 +6319,7 @@
                                                             </button>
                                                             <button
                                                                 type="button"
-                                                                className="w-full text-left px-3 py-2 text-xs text-red-400 hover:bg-[#1a1d21]"
+                                                                className="w-full text-left px-3 py-2 text-xs text-red-400 hover:bg-[#221b36]"
                                                                 onClick={(e) => {
                                                                     e.stopPropagation();
                                                                     setDeleteConfirmId(it.id);
@@ -6227,8 +6346,8 @@
                     />
 
                     <div ref={containerRef} className="flex flex-1 min-w-0">
-                    <div style={{ width: splitPct + "%" }} className="relative flex-shrink-0 flex flex-col min-w-0 bg-[#141618] overflow-hidden">
-                        <div className="flex-shrink-0 border-b border-[#1a1d21] px-3 py-2 flex items-center justify-between gap-2">
+                    <div style={{ width: splitPct + "%" }} className="relative flex-shrink-0 flex flex-col min-w-0 bg-[#15121f] overflow-hidden">
+                        <div className="flex-shrink-0 border-b border-[#1c1829] px-3 py-2 flex items-center justify-between gap-2">
                             <span className="header-text text-xs text-slate-500 truncate">{currentIdeaName}</span>
                         </div>
                         <div
@@ -6252,7 +6371,7 @@
                                 <div key={msg.id || i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
                                     {msg.role === "user" ? (
                                         <div className="max-w-[95%] flex flex-col items-end gap-1">
-                                            <div className="rounded-xl px-3 py-2 text-sm bg-[#00b4d8]/20 text-slate-100 whitespace-pre-wrap leading-[1.6]">
+                                            <div className="rounded-xl px-3 py-2 text-sm bg-[#e2b14c]/20 text-slate-100 whitespace-pre-wrap leading-[1.6]">
                                                 {msg.content}
                                             </div>
                                             {msg.sent_context && (msg.sent_context.notes || msg.sent_context.attachment) ? (
@@ -6274,7 +6393,7 @@
                                                         const attFname = msg.sent_context.attachment.filename;
                                                         const isImgAtt = /\.(png|jpg|jpeg|gif|webp)$/i.test(attFname);
                                                         return (
-                                                            <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-[#1a1d21] border border-[#2a2d31] text-xs text-slate-400">
+                                                            <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-[#221b36] border border-[#2a2540] text-xs text-slate-400">
                                                                 {isImgAtt ? (
                                                                     <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
                                                                 ) : (
@@ -6287,7 +6406,7 @@
                                                 </div>
                                             ) : null}
                                             {msg.attachment_label && !msg.sent_context ? (
-                                                <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-[#1a1d21] border border-[#2a2d31] text-xs text-slate-400">
+                                                <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-[#221b36] border border-[#2a2540] text-xs text-slate-400">
                                                     <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
                                                     <span>{msg.attachment_label}</span>
                                                 </div>
@@ -6312,15 +6431,15 @@
                                                     msg.error
                                                         ? "rounded-xl border border-red-900/60 bg-red-950/40 overflow-hidden w-full min-w-0"
                                                         : msg.pending
-                                                          ? "rounded-xl border border-slate-600/50 bg-[#1a1d21] overflow-hidden w-full min-w-0 relative min-h-[70px] flex items-center"
-                                                          : "rounded-xl border border-[#2a2d31] bg-[#1a1d21] overflow-hidden w-full min-w-0";
+                                                          ? "rounded-xl border border-slate-600/50 bg-[#221b36] overflow-hidden w-full min-w-0 relative min-h-[70px] flex items-center"
+                                                          : "rounded-xl border border-[#2a2540] bg-[#221b36] overflow-hidden w-full min-w-0";
                                                 const proseAssumptionsDivider =
                                                     hasAssumptions
                                                         ? msg.error
                                                             ? "border-b border-red-900/50"
                                                             : msg.pending
                                                               ? "border-b border-slate-600/40"
-                                                              : "border-b border-[#2a2d31]"
+                                                              : "border-b border-[#2a2540]"
                                                         : "";
                                                 return (
                                                     <>
@@ -6384,7 +6503,7 @@
                                 onClick={() => scrollChatToBottom("smooth")}
                                 aria-label="Scroll to latest message"
                                 title="Scroll to latest"
-                                className="absolute bottom-24 left-1/2 -translate-x-1/2 z-20 w-7 h-7 flex items-center justify-center rounded-full bg-[#1a1d21]/80 border border-[#2a2d31] text-slate-400 hover:text-slate-200 hover:border-slate-500 backdrop-blur-sm shadow-md transition-colors"
+                                className="absolute bottom-24 left-1/2 -translate-x-1/2 z-20 w-7 h-7 flex items-center justify-center rounded-full bg-[#221b36]/80 border border-[#2a2540] text-slate-400 hover:text-slate-200 hover:border-slate-500 backdrop-blur-sm shadow-md transition-colors"
                             >
                                 <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
                                     <path strokeLinecap="round" strokeLinejoin="round" d="M19 14l-7 7m0 0l-7-7" />
@@ -6392,7 +6511,7 @@
                             </button>
                         ) : null}
                         <div
-                            className={`flex-shrink-0 border-t p-3 space-y-2.5 bg-[#141618] transition-colors ${isDraggingOver ? "border-cyan-500 bg-cyan-950/20" : "border-[#1a1d21]"}`}
+                            className={`flex-shrink-0 border-t p-3 space-y-2.5 bg-[#15121f] transition-colors ${isDraggingOver ? "border-accent bg-[#241d10]" : "border-[#1c1829]"}`}
                             onDragOver={(e) => {
                                 if (!currentIdeaId || isLoading) return;
                                 if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files")) {
@@ -6424,7 +6543,7 @@
                             {(stagedAttachment || visibleDraftAnnotations.length > 0) && (
                                 <div className="flex flex-wrap gap-1.5">
                                     {stagedAttachment && (
-                                        <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-[#1a1d21] border border-[#2a2d31] text-xs text-slate-300">
+                                        <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-[#221b36] border border-[#2a2540] text-xs text-slate-300">
                                             {stagedAttachment.is_image ? (
                                                 <img src={stagedAttachment.content} alt="" className="w-6 h-6 object-cover rounded shrink-0" />
                                             ) : (
@@ -6451,7 +6570,7 @@
                                     onChange={(e) => { setInputText(e.target.value); adjustTa(); }}
                                     onKeyDown={onKeyDown}
                                     placeholder={userFirstTurnPending && messages.filter((m) => m.role === "user").length === 0 ? "Describe what you're building…" : "Type a message…"}
-                                    className="w-full min-w-0 bg-[#1a1d21] border border-[#2a2d31] rounded px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-slate-500 resize-none max-h-[160px] overflow-y-auto"
+                                    className="w-full min-w-0 bg-[#221b36] border border-[#2a2540] rounded px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-slate-500 resize-none max-h-[160px] overflow-y-auto"
                                 />
                                 <div className="flex items-center justify-between gap-2">
                                     <button
@@ -6459,7 +6578,7 @@
                                         disabled={!currentIdeaId || isLoading}
                                         onClick={() => attachFileRef.current && attachFileRef.current.click()}
                                         title="Attach a file (or drag and drop into the message area)"
-                                        className="flex items-center gap-1.5 px-2 py-1.5 rounded border border-[#2a2d31] bg-[#1a1d21] text-slate-400 hover:text-slate-200 hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors text-xs header-text shrink-0"
+                                        className="flex items-center gap-1.5 px-2 py-1.5 rounded border border-[#2a2540] bg-[#221b36] text-slate-400 hover:text-slate-200 hover:border-slate-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors text-xs header-text shrink-0"
                                     >
                                         <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
                                             <path strokeLinecap="round" strokeLinejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
@@ -6472,7 +6591,7 @@
                                         disabled={!currentIdeaId || !inputText.trim() || isLoading}
                                         aria-busy={isLoading}
                                         aria-disabled={!currentIdeaId || !inputText.trim() || isLoading}
-                                        className="header-text px-3 py-1.5 shrink-0 rounded border border-[#00b4d8]/50 bg-[#00b4d8] text-[#0d0f11] text-xs font-semibold hover:brightness-110 disabled:bg-[#2a2d31] disabled:text-slate-600 disabled:border-[#2a2d31] disabled:cursor-not-allowed"
+                                        className="header-text px-3 py-1.5 shrink-0 rounded border border-[#e2b14c]/50 bg-[#e2b14c] text-[#100d1a] text-xs font-semibold hover:brightness-110 disabled:bg-[#2a2540] disabled:text-slate-600 disabled:border-[#2a2540] disabled:cursor-not-allowed"
                                     >
                                         {isLoading ? "Sending…" : "Send"}
                                     </button>
@@ -6482,16 +6601,16 @@
                     </div>
                     <div
                         onMouseDown={(e) => { e.preventDefault(); dragRef.current.dragging = true; }}
-                        className="w-1 flex-shrink-0 cursor-col-resize bg-[#1a1d21] hover:bg-[#00b4d8]/30 transition-colors"
+                        className="w-1 flex-shrink-0 cursor-col-resize bg-[#221b36] hover:bg-[#e2b14c]/30 transition-colors"
                     />
-                    <div className="flex-1 flex flex-col min-w-0 bg-[#141618] overflow-hidden">
+                    <div className="flex-1 flex flex-col min-w-0 bg-[#15121f] overflow-hidden">
                         {draftingIndicator && (
-                            <div className="flex-shrink-0 border-b border-[#1a1d21] px-4 py-1.5 bg-[#0d0f11]">
-                                <p className="text-xs text-[#00b4d8] header-text animate-pulse">✏ Drafting {draftingIndicator}…</p>
+                            <div className="flex-shrink-0 border-b border-[#1c1829] px-4 py-1.5 bg-[#100d1a]">
+                                <p className="text-xs text-[#e2b14c] header-text animate-pulse">✏ Drafting {draftingIndicator}…</p>
                             </div>
                         )}
                         {/* Tab header */}
-                        <div style={{display:'flex', borderBottom:'1px solid #1a1d21', background:'#0d0f11', flexShrink:0}}>
+                        <div style={{display:'flex', borderBottom:'1px solid #1c1829', background:'#100d1a', flexShrink:0}}>
                             {[
                                 {id:'prd', label:'PRD'},
                                 {id:'roadmap', label:'Roadmap'},
@@ -6503,33 +6622,33 @@
                                     style={{
                                         padding:'10px 16px', fontSize:'13px',
                                         fontWeight: activeDocTab === tab.id ? 600 : 400,
-                                        color: activeDocTab === tab.id ? '#fff' : '#94a3b8',
-                                        borderBottom: activeDocTab === tab.id ? '2px solid #00b4d8' : '2px solid transparent',
+                                        color: activeDocTab === tab.id ? '#fff' : '#a9a2c0',
+                                        borderBottom: activeDocTab === tab.id ? '2px solid #e2b14c' : '2px solid transparent',
                                         background:'transparent', border:'none',
                                         cursor: 'pointer',
                                         display:'flex', alignItems:'center', gap:'6px',
                                     }}
                                 >
-                                    <span className={tabIsRegenerating(tab.id, convertLoading) ? 'animate-pulse text-[#00b4d8]' : ''}>{tab.label}</span>
+                                    <span className={tabIsRegenerating(tab.id, convertLoading) ? 'animate-pulse text-[#e2b14c]' : ''}>{tab.label}</span>
                                 </button>
                             ))}
                         </div>
-                        {activeDocTab === 'prd' && <div ref={docPaneRef} className={`flex-1 overflow-y-auto px-6 py-4 bg-[#141618] min-h-0 ${isLoading && !prdContent.trim() ? "flex flex-col" : ""}`}>
+                        {activeDocTab === 'prd' && <div ref={docPaneRef} className={`flex-1 overflow-y-auto px-6 py-4 bg-[#15121f] min-h-0 ${isLoading && !prdContent.trim() ? "flex flex-col" : ""}`}>
                             {isLoading && !prdContent.trim() ? (
-                                <div className="flex-1 flex items-center justify-center rounded border border-[#2a2d31] bg-[#16191c] min-h-[240px] mb-4">
+                                <div className="flex-1 flex items-center justify-center rounded border border-[#2a2540] bg-[#15121f] min-h-[240px] mb-4">
                                     <p className="text-xs text-slate-500 header-text">Updating PRD draft…</p>
                                 </div>
                             ) : null}
                             {isLoading && prdContent.trim() ? (
-                                <div className="mb-3 rounded border border-[#2a2d31] bg-[#16191c] px-3 py-2">
+                                <div className="mb-3 rounded border border-[#2a2540] bg-[#15121f] px-3 py-2">
                                     <p className="text-xs text-slate-500">Updating PRD draft…</p>
                                 </div>
                             ) : null}
                             {(prdContent.trim() || hasRemovedInDiff) ? (
-                                <h1 className="text-slate-100 text-lg font-semibold mb-4 pb-2 border-b border-[#1a1d21]">{currentIdeaName}</h1>
+                                <h1 className="text-slate-100 text-lg font-semibold mb-4 pb-2 border-b border-[#1c1829]">{currentIdeaName}</h1>
                             ) : null}
                             {(prdContent.trim() || hasRemovedInDiff) ? (
-                                <div className="mb-6 border-b border-[#1a1d21] pb-4">
+                                <div className="mb-6 border-b border-[#1c1829] pb-4">
                                     {hasAnyPrdBody || hasRemovedInDiff ? (
                                         PRD_SECTION_TITLES.map((title) => {
                                             const slug = slugifySectionName(title);
@@ -6567,12 +6686,12 @@
                                                 <div
                                                     key={title}
                                                     id={`prd-sec-${slug}`}
-                                                    className={`mb-6 group/section ${draftingIndicator === title ? "ring-1 ring-[#00b4d8]/20 rounded" : ""} ${isRemovedDiff ? "rounded border border-dashed border-slate-600/80 bg-[#0d0f11]/50 p-3 opacity-90" : ""}`}
+                                                    className={`mb-6 group/section ${draftingIndicator === title ? "ring-1 ring-[#e2b14c]/20 rounded" : ""} ${isRemovedDiff ? "rounded border border-dashed border-slate-600/80 bg-[#100d1a]/50 p-3 opacity-90" : ""}`}
                                                 >
                                                     {/* Section header row: title/badge left, controls right */}
                                                     <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                                                         <div className="flex items-center gap-2 min-w-[180px]">
-                                                            <span className="header-text text-sm font-semibold text-[#00b4d8]">
+                                                            <span className="header-text text-sm font-semibold text-[#e2b14c]">
                                                                 {title}
                                                             </span>
                                                             {showNewBadge ? (
@@ -6603,10 +6722,10 @@
                                                                     {sectionAnnotation.submitted ? "✓ Submitted" : "✎ note"}
                                                                 </button>
                                                                 {openAnnotationBubble === title && !sectionAnnotation.submitted && (
-                                                                    <div className="absolute right-0 top-7 z-10 w-64 rounded border border-[#2a2d31] bg-[#0d0f11] p-3 space-y-2">
+                                                                    <div className="absolute right-0 top-7 z-10 w-64 rounded border border-[#2a2540] bg-[#100d1a] p-3 space-y-2">
                                                                         <p className="text-xs text-slate-400 italic">{sectionAnnotation.comment}</p>
                                                                         <div className="flex gap-2">
-                                                                            <button type="button" onClick={() => { setEditingAnnotationSection(title); setAnnotationDraft(sectionAnnotation.comment); setOpenAnnotationBubble(null); }} className="text-xs text-[#00b4d8] hover:underline">Edit</button>
+                                                                            <button type="button" onClick={() => { setEditingAnnotationSection(title); setAnnotationDraft(sectionAnnotation.comment); setOpenAnnotationBubble(null); }} className="text-xs text-[#e2b14c] hover:underline">Edit</button>
                                                                             <button type="button" onClick={() => {
                                                                                 fetch(`/api/ideas/${currentIdeaId}/annotations/${sectionAnnotation.id}`, { method: "DELETE" })
                                                                                     .then(() => refreshAnnotations(currentIdeaId));
@@ -6621,13 +6740,13 @@
                                                                 type="button"
                                                                 onClick={() => { setEditingAnnotationSection(title); setAnnotationDraft(""); }}
                                                                 title="Add a note for the agent (sent with your next message)"
-                                                                className="text-[11px] text-[#64748b] hover:text-slate-300 px-1.5 py-0.5 rounded border border-[#2a2d31] hover:border-slate-600 shrink-0 header-text"
+                                                                className="text-[11px] text-[#6e6788] hover:text-slate-300 px-1.5 py-0.5 rounded border border-[#2a2540] hover:border-slate-600 shrink-0 header-text"
                                                             >Note</button>
                                                         )}
                                                         {showShowDiffBtn ? (
                                                             <button
                                                                 type="button"
-                                                                className="text-[11px] text-[#64748b] hover:text-slate-300 px-1.5 py-0.5 rounded border border-[#2a2d31] hover:border-slate-600 shrink-0 header-text"
+                                                                className="text-[11px] text-[#6e6788] hover:text-slate-300 px-1.5 py-0.5 rounded border border-[#2a2540] hover:border-slate-600 shrink-0 header-text"
                                                                 onClick={() =>
                                                                     setExpandedDiffSlugs((p) =>
                                                                         p.includes(slug)
@@ -6642,7 +6761,7 @@
                                                         {showUndoBtn ? (
                                                             <button
                                                                 type="button"
-                                                                className="text-[11px] text-[#64748b] hover:text-[#00b4d8] px-1.5 py-0.5 shrink-0 header-text"
+                                                                className="text-[11px] text-[#6e6788] hover:text-[#e2b14c] px-1.5 py-0.5 shrink-0 header-text"
                                                                 onClick={() => postSectionRevert(slug, true)}
                                                             >
                                                                 Undo
@@ -6664,20 +6783,20 @@
                                                                         document.body.removeChild(ta);
                                                                     }
                                                                 }}
-                                                                className="text-[11px] text-[#64748b] hover:text-slate-300 px-1.5 py-0.5 rounded border border-[#2a2d31] hover:border-slate-600 shrink-0 header-text"
+                                                                className="text-[11px] text-[#6e6788] hover:text-slate-300 px-1.5 py-0.5 rounded border border-[#2a2540] hover:border-slate-600 shrink-0 header-text"
                                                             >{copiedSection === title ? "Copied" : "⎘"}</button>
                                                         )}
                                                         </div>
                                                     </div>
                                                     {/* Inline comment input */}
                                                     {isEditing && (
-                                                        <div className="mb-2 rounded border border-[#2a2d31] bg-[#1a1d21] p-2 space-y-2">
+                                                        <div className="mb-2 rounded border border-[#2a2540] bg-[#221b36] p-2 space-y-2">
                                                             <textarea
                                                                 rows={2}
                                                                 value={annotationDraft}
                                                                 onChange={(e) => setAnnotationDraft(e.target.value)}
                                                                 placeholder={`Note for the agent about "${title}"…`}
-                                                                className="w-full bg-[#0d0f11] border border-[#2a2d31] rounded px-2 py-1.5 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-slate-500 resize-none"
+                                                                className="w-full bg-[#100d1a] border border-[#2a2540] rounded px-2 py-1.5 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-slate-500 resize-none"
                                                             />
                                                             <div className="flex gap-2">
                                                                 <button
@@ -6698,24 +6817,24 @@
                                                                         setEditingAnnotationSection(null);
                                                                         setAnnotationDraft("");
                                                                     }}
-                                                                    className="header-text text-xs px-3 py-1 rounded bg-[#00b4d8]/20 border border-[#00b4d8]/40 text-[#00b4d8] disabled:opacity-40 disabled:cursor-not-allowed"
+                                                                    className="header-text text-xs px-3 py-1 rounded bg-[#e2b14c]/20 border border-[#e2b14c]/40 text-[#e2b14c] disabled:opacity-40 disabled:cursor-not-allowed"
                                                                 >Save</button>
                                                                 <button type="button" onClick={() => { setEditingAnnotationSection(null); setAnnotationDraft(""); }} className="text-xs text-slate-500 hover:text-slate-300">Cancel</button>
                                                             </div>
                                                         </div>
                                                     )}
                                                     {draftingIndicator === title && (
-                                                        <p className="text-[11px] text-[#00b4d8] header-text animate-pulse mb-1">✏ Updating…</p>
+                                                        <p className="text-[11px] text-[#e2b14c] header-text animate-pulse mb-1">✏ Updating…</p>
                                                     )}
                                                     {sectionRevertError && sectionRevertError.slug === slug ? (
                                                         <p className="text-[11px] text-red-400 mb-1">{sectionRevertError.message}</p>
                                                     ) : null}
                                                     {diffExpanded && diffEntry ? (
-                                                        <div className="mb-2 rounded border border-[#2a2d31] bg-[#0d0f11]">
-                                                            <div className="flex items-center justify-between px-2 py-1 border-b border-[#2a2d31]">
+                                                        <div className="mb-2 rounded border border-[#2a2540] bg-[#100d1a]">
+                                                            <div className="flex items-center justify-between px-2 py-1 border-b border-[#2a2540]">
                                                                 <button
                                                                     type="button"
-                                                                    className="text-[11px] text-[#64748b] hover:text-[#00b4d8] header-text"
+                                                                    className="text-[11px] text-[#6e6788] hover:text-[#e2b14c] header-text"
                                                                     onClick={() => setExpandedDiffSlugs((p) => p.filter((x) => x !== slug))}
                                                                 >
                                                                     Close
@@ -6789,9 +6908,9 @@
                             ) : null}
                         </div>}
                         {activeDocTab === 'prd' && (
-                            <div className="flex-shrink-0 border-t border-[#1a1d21] px-4 py-2 flex justify-end gap-2">
+                            <div className="flex-shrink-0 border-t border-[#1c1829] px-4 py-2 flex justify-end gap-2">
                                 <button
-                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500"
+                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-200 border border-[#2a2540] hover:border-slate-500"
                                     onClick={() => navigator.clipboard.writeText(prdContent)}
                                 >
                                     Copy All
@@ -6800,7 +6919,7 @@
                                     <a
                                         href={`/api/ideas/${currentIdeaId}/download`}
                                         download
-                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500"
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-200 border border-[#2a2540] hover:border-slate-500"
                                     >
                                         Download PRD
                                     </a>
@@ -6813,7 +6932,7 @@
                                     {!roadmapContent ? (
                                         <div style={{display:'flex', flexDirection:'column', justifyContent:'center', alignItems:'center', height:'100%', gap:'12px'}}>
                                             <button
-                                                className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-[#0d0f11] border border-[#00b4d8]/60 font-semibold disabled:opacity-40"
+                                                className="header-text text-xs px-3 py-1.5 rounded bg-[#e2b14c] text-[#100d1a] border border-[#e2b14c]/60 font-semibold disabled:opacity-40"
                                                 onClick={doConvert}
                                                 disabled={convertLoading || roadmapActionsLockedByReply}
                                                 title={roadmapActionsLockedByReply && !convertLoading ? ROADMAP_GENERATE_LOCKED_HINT : undefined}
@@ -6829,9 +6948,9 @@
                                     )}
                                 </div>
                                 {roadmapContent && (
-                                    <div className="flex-shrink-0 border-t border-[#1a1d21] px-4 py-2 flex justify-end items-center gap-2">
+                                    <div className="flex-shrink-0 border-t border-[#1c1829] px-4 py-2 flex justify-end items-center gap-2">
                                         <button
-                                            className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500"
+                                            className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-200 border border-[#2a2540] hover:border-slate-500"
                                             onClick={() => navigator.clipboard.writeText(roadmapContent)}
                                         >
                                             Copy
@@ -6840,7 +6959,7 @@
                                             <a
                                                 href={`/api/ideas/${currentIdeaId}/download-roadmap`}
                                                 download
-                                                className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500"
+                                                className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-200 border border-[#2a2540] hover:border-slate-500"
                                             >
                                                 Download Roadmap
                                             </a>
@@ -6863,9 +6982,9 @@
                                     )}
                                 </div>
                                 {verificationContent && (
-                                    <div className="flex-shrink-0 border-t border-[#1a1d21] px-4 py-2 flex justify-end items-center gap-2">
+                                    <div className="flex-shrink-0 border-t border-[#1c1829] px-4 py-2 flex justify-end items-center gap-2">
                                         <button
-                                            className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500"
+                                            className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-200 border border-[#2a2540] hover:border-slate-500"
                                             onClick={() => navigator.clipboard.writeText(verificationContent)}
                                         >
                                             Copy
@@ -6874,7 +6993,7 @@
                                             <a
                                                 href={`/api/ideas/${currentIdeaId}/download-verification`}
                                                 download
-                                                className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:border-slate-500"
+                                                className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-200 border border-[#2a2540] hover:border-slate-500"
                                             >
                                                 Download Verification
                                             </a>
@@ -6885,7 +7004,7 @@
                         )}
                         {/* ── Sticky action bar ─────────────────────────────────────────── */}
                         {prdContent.trim().length > 0 && (
-                            <div className="flex-shrink-0 border-t border-[#1a1d21] px-4 py-3 bg-[#0d0f11] space-y-2.5">
+                            <div className="flex-shrink-0 border-t border-[#1c1829] px-4 py-3 bg-[#100d1a] space-y-2.5">
                                 {activeDocTab === "prd" && (
                                     <React.Fragment>
                                 {readinessStatus === "updating" && (
@@ -6898,7 +7017,7 @@
                                     <p className="text-xs text-slate-500">Readiness data unavailable</p>
                                 )}
                                 {readinessStatus === "ready" && readinessData && (
-                                    <div className="space-y-1.5 text-xs border border-[#1a1d21] rounded p-2 bg-[#141618]">
+                                    <div className="space-y-1.5 text-xs border border-[#1c1829] rounded p-2 bg-[#15121f]">
                                         <div className="flex flex-wrap items-center gap-2">
                                             <span
                                                 className={`header-text font-semibold ${
@@ -6964,7 +7083,7 @@
                                                     : undefined
                                         }
                                         onClick={doConvert}
-                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-[#0d0f11] border border-[#00b4d8]/60 font-semibold disabled:opacity-40"
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#e2b14c] text-[#100d1a] border border-[#e2b14c]/60 font-semibold disabled:opacity-40"
                                     >
                                         {convertLoading ? `Generating... (${_opEstimate("roadmap_generation")})` : roadmapContent ? "Regenerate Roadmap" : "Generate Roadmap"}
                                     </button>
@@ -6973,7 +7092,7 @@
                                             type="button"
                                             disabled={continueNavPending}
                                             onClick={continueSetup}
-                                            className="header-text text-xs px-2 py-1 rounded bg-[#00b4d8]/20 text-[#00b4d8] border border-[#00b4d8]/40 disabled:opacity-40"
+                                            className="header-text text-xs px-2 py-1 rounded bg-[#e2b14c]/20 text-[#e2b14c] border border-[#e2b14c]/40 disabled:opacity-40"
                                         >
                                             {continueNavPending ? "Checking..." : "Continue to Setup →"}
                                         </button>
@@ -6987,7 +7106,7 @@
                     {/* Regenerate roadmap confirmation */}
                     {showRegenerateConfirm && (
                         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setShowRegenerateConfirm(false)}>
-                            <div className="bg-[#141618] border border-[#2a2d31] rounded p-6 max-w-sm w-full space-y-4" onClick={(e) => e.stopPropagation()}>
+                            <div className="bg-[#15121f] border border-[#2a2540] rounded p-6 max-w-sm w-full space-y-4" onClick={(e) => e.stopPropagation()}>
                                 <div className="header-text text-sm text-slate-300">Regenerate Roadmap?</div>
                                 <div className="text-xs text-slate-400">
                                     This will overwrite the existing roadmap. The roadmap content will be permanently replaced.
@@ -6995,7 +7114,7 @@
                                 <div className="flex gap-2 justify-end">
                                     <button
                                         onClick={() => setShowRegenerateConfirm(false)}
-                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-400 border border-[#2a2d31] hover:text-slate-200"
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-400 border border-[#2a2540] hover:text-slate-200"
                                     >
                                         Cancel
                                     </button>
@@ -7020,7 +7139,7 @@
                             }}
                         >
                             <div
-                                className="bg-[#141618] border border-[#2a2d31] rounded p-6 max-w-md w-full space-y-4"
+                                className="bg-[#15121f] border border-[#2a2540] rounded p-6 max-w-md w-full space-y-4"
                                 data-testid="ideas-roadmap-behind-prd-modal"
                                 onClick={(e) => e.stopPropagation()}
                             >
@@ -7037,7 +7156,7 @@
                                             setShowRoadmapBehindPrdModal(false);
                                             setRoadmapBehindPrdMeta(null);
                                         }}
-                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-400 border border-[#2a2d31] hover:text-slate-200"
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-400 border border-[#2a2540] hover:text-slate-200"
                                     >
                                         Cancel
                                     </button>
@@ -7053,7 +7172,7 @@
                                             setRoadmapBehindPrdMeta(null);
                                             beginConvertAfterGuards();
                                         }}
-                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-[#0d0f11] border border-[#00b4d8]/60 font-semibold"
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#e2b14c] text-[#100d1a] border border-[#e2b14c]/60 font-semibold"
                                     >
                                         Regenerate roadmap
                                     </button>
@@ -7080,7 +7199,7 @@
                                             setRoadmapBehindPrdMeta(null);
                                             _continueSetupAfterStalenessOk();
                                         }}
-                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8]/20 text-[#00b4d8] border border-[#00b4d8]/40"
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#e2b14c]/20 text-[#e2b14c] border border-[#e2b14c]/40"
                                     >
                                         Continue anyway
                                     </button>
@@ -7092,20 +7211,20 @@
                     {/* Roadmap Format Invalid modal */}
                     {showFormatInvalidModal && (
                         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setShowFormatInvalidModal(false)}>
-                            <div className="bg-[#141618] border border-[#2a2d31] rounded p-6 max-w-sm w-full space-y-4" onClick={(e) => e.stopPropagation()}>
+                            <div className="bg-[#15121f] border border-[#2a2540] rounded p-6 max-w-sm w-full space-y-4" onClick={(e) => e.stopPropagation()}>
                                 <div className="header-text text-sm text-slate-300">Roadmap Format Invalid</div>
                                 <div className="text-xs text-slate-400">{formatInvalidDetail}</div>
                                 <div className="flex gap-2 justify-end">
                                     <button
                                         onClick={() => setShowFormatInvalidModal(false)}
-                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-400 border border-[#2a2d31] hover:text-slate-200"
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-400 border border-[#2a2540] hover:text-slate-200"
                                     >
                                         Cancel
                                     </button>
                                     <button
                                         onClick={doFixRoadmapFormat}
                                         disabled={fixFormatLoading}
-                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8]/20 text-[#00b4d8] border border-[#00b4d8]/40 disabled:opacity-40"
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#e2b14c]/20 text-[#e2b14c] border border-[#e2b14c]/40 disabled:opacity-40"
                                     >
                                         {fixFormatLoading ? `Fixing... (${_opEstimate("format_correction")})` : "Fix Format"}
                                     </button>
@@ -7118,7 +7237,7 @@
                     {showLowReadinessGenerateConfirm && (
                         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setShowLowReadinessGenerateConfirm(false)}>
                             <div
-                                className="bg-[#141618] border border-[#2a2d31] rounded p-6 max-w-sm w-full space-y-4"
+                                className="bg-[#15121f] border border-[#2a2540] rounded p-6 max-w-sm w-full space-y-4"
                                 data-testid="ideas-low-readiness-generate-confirm"
                                 onClick={(e) => e.stopPropagation()}
                             >
@@ -7137,7 +7256,7 @@
                                     <button
                                         type="button"
                                         onClick={() => setShowLowReadinessGenerateConfirm(false)}
-                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-400 border border-[#2a2d31] hover:text-slate-200"
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-400 border border-[#2a2540] hover:text-slate-200"
                                     >
                                         Cancel
                                     </button>
@@ -7147,7 +7266,7 @@
                                             setShowLowReadinessGenerateConfirm(false);
                                             _runConvert();
                                         }}
-                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-[#0d0f11] font-semibold"
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#e2b14c] text-[#100d1a] font-semibold"
                                     >
                                         Generate anyway
                                     </button>
@@ -7242,23 +7361,23 @@
                 : null;
 
             return (
-                <div className="flex-1 overflow-y-auto bg-[#0d0f12] p-6">
+                <div className="flex-1 overflow-y-auto bg-[#0b0a12] p-6">
                     <div className="max-w-2xl mx-auto space-y-4">
                         <h2 className="header-text text-lg text-slate-300">Setup &amp; Preflight</h2>
                         <div
                             data-testid="preflight-step-1"
-                            className={`rounded border p-3 space-y-2 ${repoPathLocked ? "border-emerald-600/60" : "border-[#2a2d31]"}`}
+                            className={`rounded border p-3 space-y-2 ${repoPathLocked ? "border-emerald-600/60" : "border-[#2a2540]"}`}
                         >
                             <div className="flex flex-wrap justify-between items-start gap-2">
                                 <div className="min-w-0 flex-1 space-y-1">
                                     <p className="header-text text-xs font-semibold text-slate-400">Step 1 — Repository path</p>
                                     <p className="text-[11px] text-slate-500 leading-relaxed max-w-prose">
-                                        Confirm the repository path AutoDev will build in.
+                                        Confirm the repository path Lullabeast will build in.
                                     </p>
                                 </div>
                                 <div className="flex gap-2 items-center shrink-0 self-start">
                                     {!repoPathLocked ? (
-                                        <button type="button" onClick={onRepoPathConfirm} className="header-text text-sm px-3 py-1 rounded bg-[#00b4d8] text-[#0d0f12] font-medium">
+                                        <button type="button" onClick={onRepoPathConfirm} className="header-text text-sm px-3 py-1 rounded bg-[#e2b14c] text-[#0b0a12] font-medium">
                                             Confirm repository
                                         </button>
                                     ) : (
@@ -7294,20 +7413,20 @@
                             {repoPathError && <p className="text-red-400 text-xs">{repoPathError}</p>}
                             {createFolderError && <p className="text-red-400 text-xs">{createFolderError}</p>}
                             {showCreateFolderPrompt && !repoPathLocked && (
-                                <div className="rounded border border-[#2a2d31] bg-[#141618] px-3 py-2 text-xs text-slate-300 space-y-2">
+                                <div className="rounded border border-[#2a2540] bg-[#15121f] px-3 py-2 text-xs text-slate-300 space-y-2">
                                     <p>This folder doesn&apos;t exist. Create it?</p>
                                     <div className="flex gap-2 flex-wrap">
                                         <button
                                             type="button"
                                             onClick={onCreateRepoDir}
-                                            className="header-text text-xs px-2 py-1 rounded bg-[#00b4d8] text-[#0d0f12] font-medium"
+                                            className="header-text text-xs px-2 py-1 rounded bg-[#e2b14c] text-[#0b0a12] font-medium"
                                         >
                                             Create Folder
                                         </button>
                                         <button
                                             type="button"
                                             onClick={onCancelCreateFolder}
-                                            className="header-text text-xs px-2 py-1 rounded border border-[#1a1d21] text-slate-400"
+                                            className="header-text text-xs px-2 py-1 rounded border border-[#1c1829] text-slate-400"
                                         >
                                             Cancel
                                         </button>
@@ -7317,13 +7436,13 @@
                         </div>
                         <div
                             data-testid="preflight-step-2"
-                            className={`rounded border p-3 space-y-2 ${hasLinkedIdea ? "border-emerald-600/60" : "border-[#2a2d31]"}`}
+                            className={`rounded border p-3 space-y-2 ${hasLinkedIdea ? "border-emerald-600/60" : "border-[#2a2540]"}`}
                         >
                             <div className="flex flex-wrap justify-between items-start gap-2">
                                 <div className="min-w-0 flex-1 space-y-1">
                                     <p className="header-text text-xs font-semibold text-slate-400">Step 2 — Project Idea</p>
-                                    <p className="text-[11px] text-slate-500 leading-relaxed max-w-prose">
-                                        The roadmap and verification doc come from Project Ideas. Authoring lives there; the Setup screen stages.
+                                    <p className="text-[11px] text-slate-500 leading-relaxed">
+                                        The roadmap and verification doc come from Project Ideas — authoring lives there.
                                     </p>
                                 </div>
                                 {hasLinkedIdea ? (
@@ -7333,31 +7452,31 @@
                                 ) : null}
                             </div>
                             {hasLinkedIdea ? (
-                                <div className="rounded border border-[#1a1d21] bg-[#0d0f11] p-4 space-y-3">
+                                <div className="rounded border border-[#1c1829] bg-[#100d1a] p-4 space-y-3">
                                     <div className="flex items-center justify-between gap-3 flex-wrap">
                                         <div className="flex items-center gap-2 min-w-0">
-                                            <p className="text-xs text-[#00b4d8] header-text">From Project Ideas</p>
+                                            <p className="text-xs text-[#e2b14c] header-text">From Project Ideas</p>
                                             <span className="text-sm font-semibold text-slate-200 truncate">{linkedIdeaName || "(linked idea)"}</span>
-                                            <span className="text-xs px-2 py-0.5 rounded bg-[#1a1d21] text-slate-400">
+                                            <span className="text-xs px-2 py-0.5 rounded bg-[#221b36] text-slate-400">
                                                 {linkedRoadmapPhaseCount} phase{linkedRoadmapPhaseCount === 1 ? "" : "s"}
                                             </span>
                                         </div>
                                         <button
                                             type="button"
                                             onClick={() => onOpenInIdeas && onOpenInIdeas(linkedIdeaId)}
-                                            className="text-xs text-[#00b4d8] hover:underline shrink-0"
+                                            className="text-xs text-[#e2b14c] hover:underline shrink-0"
                                         >
                                             Open in Project Ideas →
                                         </button>
                                     </div>
                                     <div className="flex gap-2 flex-wrap">
-                                        <span className={`text-[11px] px-2 py-0.5 rounded border ${prdReady ? "border-emerald-600/60 text-emerald-400" : "border-[#2a2d31] text-slate-500"}`}>
+                                        <span className={`text-[11px] px-2 py-0.5 rounded border ${prdReady ? "border-emerald-600/60 text-emerald-400" : "border-[#2a2540] text-slate-500"}`}>
                                             {prdReady ? "PRD ready" : "PRD missing"}
                                         </span>
-                                        <span className={`text-[11px] px-2 py-0.5 rounded border ${roadmapReady ? "border-emerald-600/60 text-emerald-400" : "border-[#2a2d31] text-slate-500"}`}>
+                                        <span className={`text-[11px] px-2 py-0.5 rounded border ${roadmapReady ? "border-emerald-600/60 text-emerald-400" : "border-[#2a2540] text-slate-500"}`}>
                                             {roadmapReady ? "Roadmap ready" : "Roadmap missing"}
                                         </span>
-                                        <span className={`text-[11px] px-2 py-0.5 rounded border ${verificationReady ? "border-emerald-600/60 text-emerald-400" : "border-[#2a2d31] text-slate-500"}`}>
+                                        <span className={`text-[11px] px-2 py-0.5 rounded border ${verificationReady ? "border-emerald-600/60 text-emerald-400" : "border-[#2a2540] text-slate-500"}`}>
                                             {verificationReady ? "Verification ready" : "Verification missing"}
                                         </span>
                                     </div>
@@ -7367,19 +7486,19 @@
                                             {roadmapReady ? (
                                                 <div>
                                                     <p className="text-[11px] uppercase tracking-wide text-slate-500 mb-1">Roadmap</p>
-                                                    <pre className="max-h-[24vh] overflow-y-auto rounded bg-[#0d0f12] border border-[#1a1d21] px-2 py-1 whitespace-pre-wrap">{roadmapSeed}</pre>
+                                                    <pre className="max-h-[24vh] overflow-y-auto rounded bg-[#0b0a12] border border-[#1c1829] px-2 py-1 whitespace-pre-wrap">{roadmapSeed}</pre>
                                                 </div>
                                             ) : null}
                                             {verificationReady ? (
                                                 <div>
                                                     <p className="text-[11px] uppercase tracking-wide text-slate-500 mb-1">Verification</p>
-                                                    <pre className="max-h-[24vh] overflow-y-auto rounded bg-[#0d0f12] border border-[#1a1d21] px-2 py-1 whitespace-pre-wrap">{launchVerificationContent}</pre>
+                                                    <pre className="max-h-[24vh] overflow-y-auto rounded bg-[#0b0a12] border border-[#1c1829] px-2 py-1 whitespace-pre-wrap">{launchVerificationContent}</pre>
                                                 </div>
                                             ) : null}
                                             <button
                                                 type="button"
                                                 onClick={() => onOpenInIdeas && onOpenInIdeas(linkedIdeaId)}
-                                                className="text-xs text-[#00b4d8] hover:underline"
+                                                className="text-xs text-[#e2b14c] hover:underline"
                                             >
                                                 Edit in Project Ideas →
                                             </button>
@@ -7387,12 +7506,12 @@
                                     </details>
                                 </div>
                             ) : (
-                                <div className="rounded border border-[#1a1d21] bg-[#0d0f11] p-4 text-center space-y-2">
+                                <div className="rounded border border-[#1c1829] bg-[#100d1a] p-4 text-center space-y-2">
                                     <p className="text-sm text-slate-300">No project idea linked to this repo path.</p>
                                     <button
                                         type="button"
                                         onClick={() => onOpenInIdeas && onOpenInIdeas(null)}
-                                        className="text-xs text-[#00b4d8] hover:underline"
+                                        className="text-xs text-[#e2b14c] hover:underline"
                                     >
                                         Create one in Project Ideas →
                                     </button>
@@ -7402,7 +7521,7 @@
                         {/* W5-G: Step 3 — Completion Report (required Yes/No selection) */}
                         <div
                             data-testid="preflight-step-3"
-                            className={`rounded border p-3 space-y-2 ${step3Done ? "border-emerald-600/60" : "border-[#2a2d31]"}`}
+                            className={`rounded border p-3 space-y-2 ${step3Done ? "border-emerald-600/60" : "border-[#2a2540]"}`}
                         >
                             <div className="flex flex-wrap justify-between items-start gap-2">
                                 <div className="min-w-0 flex-1 space-y-1">
@@ -7418,7 +7537,7 @@
                                         className={`header-text text-xs px-3 py-1.5 rounded border transition-colors ${
                                             completionReviewOptIn === true
                                                 ? 'border-emerald-500 text-emerald-400 bg-emerald-950/30'
-                                                : 'border-[#2a2d31] text-slate-400 hover:border-slate-500'
+                                                : 'border-[#2a2540] text-slate-400 hover:border-slate-500'
                                         }`}
                                     >Yes</button>
                                     <button
@@ -7427,7 +7546,7 @@
                                         className={`header-text text-xs px-3 py-1.5 rounded border transition-colors ${
                                             completionReviewOptIn === false
                                                 ? 'border-emerald-500 text-emerald-400 bg-emerald-950/30'
-                                                : 'border-[#2a2d31] text-slate-400 hover:border-slate-500'
+                                                : 'border-[#2a2540] text-slate-400 hover:border-slate-500'
                                         }`}
                                     >No</button>
                                 </div>
@@ -7440,7 +7559,7 @@
                                 step4HasError ? "border-red-600/60"
                                     : step4HasWarning ? "border-amber-500/60"
                                     : step4Done ? "border-emerald-600/60"
-                                    : "border-[#2a2d31]"
+                                    : "border-[#2a2540]"
                             }`}
                         >
                             <div className="flex flex-wrap justify-between items-start gap-2">
@@ -7460,7 +7579,7 @@
                                                 ? P3_PREFLIGHT_TITLE_RERUN_PREFLIGHT
                                                 : P3_PREFLIGHT_TITLE_RUN_PREFLIGHT
                                         }
-                                        className={`header-text text-sm px-4 py-2 rounded bg-[#1a1d21] text-slate-200 border border-[#1a1d21] disabled:opacity-40 whitespace-nowrap ${hasFail ? "status-pulse" : ""}`}
+                                        className={`header-text text-sm px-4 py-2 rounded bg-[#221b36] text-slate-200 border border-[#1c1829] disabled:opacity-40 whitespace-nowrap ${hasFail ? "status-pulse" : ""}`}
                                     >
                                         {preflightBtnLabel}
                                     </button>
@@ -7494,7 +7613,7 @@
                             {preflightChecks && preflightChecks.length > 0 && (
                                 <ul className="space-y-2 text-sm max-h-[32vh] overflow-y-auto pr-1">
                                     {preflightChecks.map((c, i) => (
-                                        <li key={i} className={`flex gap-2 ${c.status === "fail" ? "text-red-400" : c.status === "warn" ? "text-amber-400" : c.status === "fixed" ? "text-[#00b4d8]" : "text-emerald-400"}`}>
+                                        <li key={i} className={`flex gap-2 ${c.status === "fail" ? "text-red-400" : c.status === "warn" ? "text-amber-400" : c.status === "fixed" ? "text-[#e2b14c]" : "text-emerald-400"}`}>
                                             <span className="font-mono text-xs">[{c.status}]</span>
                                             <span>{c.check}: {c.message}</span>
                                         </li>
@@ -7528,7 +7647,7 @@
                             )}
                             <div className="flex gap-2 flex-wrap items-center shrink-0 sm:ml-auto">
                             <button type="button" onClick={() => onAddToQueue(completionReviewOptIn === true)} disabled={launchDisabled || completionReviewOptIn === null || addToQueueBusy}
-                                className="header-text text-sm px-4 py-2 rounded bg-[#1a1d21] text-[#00b4d8] border border-[#00b4d8]/40 font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:border-[#00b4d8]/70">
+                                className="header-text text-sm px-4 py-2 rounded bg-[#221b36] text-[#e2b14c] border border-[#e2b14c]/40 font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:border-[#e2b14c]/70">
                                 {addToQueueBusy ? 'Adding…' : 'Add to Queue'}
                             </button>
                             <button
@@ -7536,11 +7655,11 @@
                                 onClick={() => onLaunch(completionReviewOptIn === true)}
                                 disabled={launchDisabled || completionReviewOptIn === null || launchLoading}
                                 title={P3_PREFLIGHT_TITLE_LAUNCH_NOW}
-                                className="header-text text-sm px-4 py-2 rounded bg-[#00b4d8] text-[#0d0f12] font-medium disabled:bg-[#2a2d31] disabled:text-slate-600 disabled:cursor-not-allowed"
+                                className="header-text text-sm px-4 py-2 rounded bg-[#e2b14c] text-[#0b0a12] font-medium disabled:bg-[#2a2540] disabled:text-slate-600 disabled:cursor-not-allowed"
                             >
                                 {launchLoading ? 'Launching…' : 'Launch Now'}
                             </button>
-                            <button type="button" onClick={onBack} className="header-text text-sm px-4 py-2 rounded border border-[#1a1d21] text-slate-400">
+                            <button type="button" onClick={onBack} className="header-text text-sm px-4 py-2 rounded border border-[#1c1829] text-slate-400">
                                 Back
                             </button>
                             </div>
@@ -7570,8 +7689,8 @@
                             readOnly={disabled}
                             placeholder={placeholder}
                             className={
-                                "flex-1 min-w-0 rounded border border-[#1a1d21] px-3 py-2 text-sm font-mono " +
-                                (disabled ? "bg-[#0d0f12] text-slate-300" : "bg-[#1a1d21] text-slate-200")
+                                "flex-1 min-w-0 rounded border border-[#1c1829] px-3 py-2 text-sm font-mono " +
+                                (disabled ? "bg-[#0b0a12] text-slate-300" : "bg-[#221b36] text-slate-200")
                             }
                         />
                         {recents && recents.length > 0 && id ? (
@@ -7690,7 +7809,7 @@
 
             return (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
-                    <div className="relative w-full max-w-md mx-4 rounded-xl border border-[#2a2d31] bg-[#141618] p-6">
+                    <div className="relative w-full max-w-md mx-4 rounded-xl border border-[#2a2540] bg-[#15121f] p-6">
                         <button onClick={onClose} disabled={validating}
                             className="absolute top-4 right-4 text-slate-500 hover:text-slate-300 text-lg">✕</button>
                         <h2 className="header-text text-base text-slate-200 mb-4">Add Project to Queue</h2>
@@ -7721,11 +7840,11 @@
 
                             <div className="flex gap-3 justify-end pt-2">
                                 <button onClick={onClose} disabled={validating}
-                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-300 hover:bg-[#22252a]">
+                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-300 hover:bg-[#221b36]">
                                     Cancel
                                 </button>
                                 <button onClick={handleAdd} disabled={validating}
-                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-slate-900 font-semibold hover:bg-[#00c8f0] disabled:opacity-50">
+                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#e2b14c] text-slate-900 font-semibold hover:bg-[#f0c56b] disabled:opacity-50">
                                     {validating ? 'Validating…' : 'Validate & Add'}
                                 </button>
                             </div>
@@ -8126,7 +8245,12 @@
 
             function QueueProjectSnapshot() {
                 if (!selected) return (
-                    <p className="header-text text-xs text-slate-500 text-center mt-8">Select a project to view details</p>
+                    <div className="flex flex-col items-center justify-center mt-16 gap-3 text-slate-600">
+                        <div className="w-[52px] h-[52px] rounded-full border border-dashed border-[#3a3352] flex items-center justify-center">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3" strokeLinecap="round"/></svg>
+                        </div>
+                        <p className="header-text text-xs text-slate-500 text-center">Select a project to view details</p>
+                    </div>
                 );
                 if (snapshotLoading) return (
                     <p className="header-text text-xs text-slate-500 text-center mt-8">Loading…</p>
@@ -8179,7 +8303,7 @@
 
                         {/* Section B: Current Activity (active projects only) */}
                         {hasRunData && snap.current_phase_raw_id ? (
-                            <div className="border border-[#1a1d21] rounded-md p-3 bg-[#141618]/50">
+                            <div className="border border-[#1c1829] rounded-md p-3 bg-[#15121f]/50">
                                 <div className="flex items-center justify-between mb-0.5">
                                     <span className="header-text text-xs text-slate-500 uppercase tracking-wide">Current Activity</span>
                                 </div>
@@ -8228,14 +8352,14 @@
                             <div>
                                 <div className="flex items-center justify-between mb-1">
                                     <span className="header-text text-xs text-slate-500 uppercase tracking-wide">Progress</span>
-                                    <span className="header-text text-xs text-slate-300">{snap.phases_complete} / {snap.phases_total}</span>
+                                    <span className="font-mono text-xs text-slate-300">{snap.phases_complete} / {snap.phases_total}</span>
                                 </div>
-                                <div className="h-1.5 rounded-full bg-[#1a1d21] overflow-hidden">
+                                <div className="h-1.5 rounded-full bg-[#221b36] overflow-hidden">
                                     <div className="h-full rounded-full bg-emerald-600 transition-all"
                                         style={{width: `${Math.round((snap.phases_complete / snap.phases_total) * 100)}%`}}/>
                                 </div>
                                 {hasRunData && snap.current_phase != null && (
-                                    <p className="header-text text-xs text-slate-500 mt-1">Phase {snap.current_phase + 1} of {snap.phases_total}</p>
+                                    <p className="font-mono text-xs text-slate-500 mt-1">Phase {snap.current_phase + 1} of {snap.phases_total}</p>
                                 )}
                             </div>
                         ) : null}
@@ -8243,7 +8367,7 @@
                         {/* Section E: Background Details */}
                         <div className="space-y-1">
                             {snap && snap.cost_total > 0 && (
-                                <p className="header-text text-xs text-slate-500">Cost: ${snap.cost_total.toFixed(2)}</p>
+                                <p className="font-mono text-xs text-slate-500">Cost: ${snap.cost_total.toFixed(2)}</p>
                             )}
                             {hasRunData && snap.skill_injected && snap.skill_agent && (
                                 <p className="header-text text-xs text-slate-500">Skill: {snap.skill_injected} / {snap.skill_agent}</p>
@@ -8259,7 +8383,12 @@
             // ── Column 3: Action Hub ────────────────────────────────────────────────
             function QueueActionHub() {
                 if (!selected) return (
-                    <p className="header-text text-xs text-slate-500 text-center mt-8">Select a project to see actions</p>
+                    <div className="flex flex-col items-center justify-center mt-16 gap-3 text-slate-600">
+                        <div className="w-[52px] h-[52px] rounded-full border border-dashed border-[#3a3352] flex items-center justify-center">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+                        </div>
+                        <p className="header-text text-xs text-slate-500 text-center">Select a project to see actions</p>
+                    </div>
                 );
 
                 const state = selected.state;
@@ -8282,7 +8411,7 @@
                             onChange={e => handleSetParent(selected.id, e.target.value || null)}
                             disabled={hubBusy || reorderDirty}
                             title={reorderDirty ? "Save or cancel reorder first" : P3_QUEUE_DEPENDS_ON_TITLE}
-                            className="header-text text-xs bg-[#1a1d21] text-slate-200 border border-[#2a2d32] rounded px-2 py-1 w-full disabled:opacity-40">
+                            className="header-text text-xs bg-[#221b36] text-slate-200 border border-[#2a2540] rounded px-2 py-1 w-full disabled:opacity-40">
                             <option value="">None</option>
                             {queue.filter(e => e.id !== selected.id && !descendantsHub.includes(e.id)).map(e => (
                                 <option key={e.id} value={e.id}>{e.name} [{e.state}]</option>
@@ -8302,7 +8431,7 @@
 
                 const monitorBtn = (
                     <button type="button" onClick={() => safeNavigate('pipeline')}
-                        className="header-text text-xs px-3 py-1.5 rounded bg-teal-900/40 text-teal-300 hover:bg-teal-900/70 w-full">
+                        className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-300 border border-[#2a2540] hover:bg-[#221d31] w-full">
                         View in Pipeline Monitor
                     </button>
                 );
@@ -8352,7 +8481,7 @@
                                 )}
                                 {hubError && <p className="header-text text-xs text-red-400 mt-2">{hubError}</p>}
                             </div>
-                            <div className="border-t border-[#2a2d31] pt-3 space-y-3">
+                            <div className="border-t border-[#2a2540] pt-3 space-y-3">
                                 {dependsSelect}
                                 {removeBtn}
                                 {monitorBtn}
@@ -8384,7 +8513,7 @@
                                 targetProjectPath={selected && selected.state === 'ESCALATION' && selected.project_path ? selected.project_path : null}
                                 onDispatched={fetchQueue}
                             />
-                            <div className="border-t border-[#2a2d31] pt-3 space-y-3">
+                            <div className="border-t border-[#2a2540] pt-3 space-y-3">
                                 {dependsSelect}
                                 {removeBtn}
                                 {monitorBtn}
@@ -8411,7 +8540,7 @@
                                     setSnapshotVersion(v => v + 1);
                                 }}
                             />
-                            <div className="border-t border-[#2a2d31] pt-3 space-y-3">
+                            <div className="border-t border-[#2a2540] pt-3 space-y-3">
                                 {dependsSelect}
                                 {removeBtn}
                                 {monitorBtn}
@@ -8436,7 +8565,7 @@
                                         onClick={() => handleRelaunch(selected.id)}
                                         disabled={hubBusy || reorderDirty}
                                         title={reorderDirty ? "Save or cancel reorder first" : undefined}
-                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-slate-900 font-semibold hover:bg-[#00c8f0] disabled:opacity-50 w-full"
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#e2b14c] text-slate-900 font-semibold hover:bg-[#f0c56b] disabled:opacity-50 w-full"
                                     >
                                         {hubBusy ? "Restarting…" : "Restart Orchestrator"}
                                     </button>
@@ -8473,7 +8602,7 @@
                             <p className="header-text text-xs text-slate-400">Orchestrator process has stopped.</p>
                             <button onClick={() => handleRelaunch(selected.id)} disabled={hubBusy || reorderDirty}
                                 title={reorderDirty ? "Save or cancel reorder first" : undefined}
-                                className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-slate-900 font-semibold hover:bg-[#00c8f0] disabled:opacity-50 w-full">
+                                className="header-text text-xs px-3 py-1.5 rounded bg-[#e2b14c] text-slate-900 font-semibold hover:bg-[#f0c56b] disabled:opacity-50 w-full">
                                 {hubBusy ? 'Restarting…' : 'Restart Orchestrator'}
                             </button>
                             {hubError && <p className="header-text text-xs text-red-400">{hubError}</p>}
@@ -8484,7 +8613,7 @@
                         <div className="space-y-3">
                             <p className="header-text text-xs text-slate-400">This project was blocked. Check Pipeline Monitor for details.</p>
                             <button onClick={() => safeNavigate('pipeline')}
-                                className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-[#00b4d8] hover:bg-[#22252a] w-full">
+                                className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-[#e2b14c] hover:bg-[#221b36] w-full">
                                 View in Pipeline Monitor
                             </button>
                         </div>
@@ -8503,7 +8632,7 @@
                                     <p className="header-text text-xs text-slate-400 mb-1">Waiting for:</p>
                                     <div className="flex items-center gap-2">
                                         <button onClick={() => setSelectedId(parent.id)}
-                                            className="header-text text-xs text-[#00b4d8] hover:underline">{parent.name}</button>
+                                            className="header-text text-xs text-[#e2b14c] hover:underline">{parent.name}</button>
                                         {(() => {
                                             const pp = queueParentStatePill(parent.state);
                                             return (
@@ -8523,7 +8652,7 @@
                                     onChange={e => handleSetParent(selected.id, e.target.value || null)}
                                     disabled={hubBusy || reorderDirty}
                                     title={reorderDirty ? "Save or cancel reorder first" : undefined}
-                                    className="header-text text-xs bg-[#1a1d21] text-slate-200 border border-[#2a2d32] rounded px-2 py-1 w-full">
+                                    className="header-text text-xs bg-[#221b36] text-slate-200 border border-[#2a2540] rounded px-2 py-1 w-full">
                                     <option value="">None (remove dependency)</option>
                                     {queue.filter(e => e.id !== selected.id && !descendantsHold.includes(e.id)).map(e => (
                                         <option key={e.id} value={e.id}>{e.name} [{e.state}]</option>
@@ -8577,7 +8706,7 @@
                                 onChange={e => handleSetParent(selected.id, e.target.value || null)}
                                 disabled={reorderDirty}
                                 title={reorderDirty ? "Save or cancel reorder first" : undefined}
-                                className="header-text text-xs bg-[#1a1d21] text-slate-200 border border-[#2a2d32] rounded px-2 py-1 w-full disabled:opacity-40">
+                                className="header-text text-xs bg-[#221b36] text-slate-200 border border-[#2a2540] rounded px-2 py-1 w-full disabled:opacity-40">
                                 <option value="">None</option>
                                 {queue.filter(e => e.id !== selected.id && !descendants.includes(e.id)).map(e => (
                                     <option key={e.id} value={e.id}>{e.name} [{e.state}]</option>
@@ -8590,13 +8719,13 @@
                             <button onClick={() => { setRevalidateChecks(null); handleRevalidate(selected.id); }}
                                 disabled={hubBusy || reorderDirty}
                                 title={reorderDirty ? "Save or cancel reorder first" : undefined}
-                                className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-300 hover:bg-[#22252a] disabled:opacity-50 w-full">
+                                className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-300 hover:bg-[#221b36] disabled:opacity-50 w-full">
                                 {hubBusy ? 'Validating…' : 'Re-validate'}
                             </button>
                             {revalidateChecks && (
                                 <ul className="mt-2 space-y-1">
                                     {revalidateChecks.map((c, i) => (
-                                        <li key={i} className={`header-text text-xs flex gap-1.5 ${c.status === 'fail' ? 'text-red-400' : c.status === 'warn' ? 'text-amber-400' : c.status === 'fixed' ? 'text-[#00b4d8]' : 'text-emerald-400'}`}>
+                                        <li key={i} className={`header-text text-xs flex gap-1.5 ${c.status === 'fail' ? 'text-red-400' : c.status === 'warn' ? 'text-amber-400' : c.status === 'fixed' ? 'text-[#e2b14c]' : 'text-emerald-400'}`}>
                                             <span className="font-mono">[{c.status}]</span>
                                             <span>{c.check}: {c.message}</span>
                                         </li>
@@ -8621,31 +8750,31 @@
             return (
                 <div className="flex flex-col h-full overflow-hidden">
                     {/* Top bar: primary (left) + progression / run-next (right, ml-auto) */}
-                    <div className="bg-[#141618] border-b border-[#1a1d21] px-6 py-3 flex items-center gap-4 flex-shrink-0">
+                    <div className="bg-[#15121f] border-b border-[#1c1829] px-6 py-3 flex items-center gap-4 flex-shrink-0">
                         <div className="flex items-center gap-4 min-w-0 flex-1">
                             <h1 className="header-text text-base font-semibold text-slate-200">Project Queue</h1>
                             <button onClick={() => setShowAddModal(true)}
                                 disabled={reorderDirty}
                                 title={reorderDirty ? "Save or cancel reorder first" : undefined}
-                                className="header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-slate-900 font-semibold hover:bg-[#00c8f0] disabled:opacity-40">
+                                className="header-text text-xs px-3 py-1.5 rounded bg-[#e2b14c] text-slate-900 font-semibold hover:bg-[#f0c56b] disabled:opacity-40">
                                 + Add Project
                             </button>
                             {!reorderMode ? (
                                 <button type="button" onClick={beginReorder} disabled={loading || queue.length < 2}
                                     title="Drag root rows to change order, then Save order"
-                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 border border-[#2a2d31] hover:bg-[#22252a] disabled:opacity-40">
+                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-200 border border-[#2a2540] hover:bg-[#221b36] disabled:opacity-40">
                                     Reorder
                                 </button>
                             ) : (
                                 <>
                                     <button type="button" onClick={saveReorder} disabled={reorderSaveBusy || !reorderDirty}
                                         title={reorderDirty ? "Write this order to the server" : "Change the order first"}
-                                        className="header-text text-xs px-3 py-1.5 rounded bg-emerald-800 text-white hover:bg-emerald-700 disabled:opacity-40">
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-200 border border-[#2a2540] hover:bg-[#221d31] disabled:opacity-40">
                                         {reorderSaveBusy ? "Saving…" : "Save order"}
                                     </button>
                                     <button type="button" onClick={cancelReorder} disabled={reorderSaveBusy}
                                         title="Discard changes and reload queue from server"
-                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] text-slate-300 border border-[#2a2d31] hover:bg-[#22252a] disabled:opacity-40">
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-300 border border-[#2a2540] hover:bg-[#221b36] disabled:opacity-40">
                                         Cancel
                                     </button>
                                     {reorderDirty && (
@@ -8664,13 +8793,13 @@
                                     title="Auto advances the queue when eligible; Manual requires Run next project.">
                                     Progression
                                 </span>
-                                <div className="flex items-center gap-1 rounded-full bg-[#1a1d21] p-0.5 border border-[#2a2d31]">
+                                <div className="flex items-center gap-1 rounded-full bg-[#221b36] p-0.5 border border-[#2a2540]">
                                     {['auto', 'manual'].map(m => (
                                         <button key={m} onClick={() => handleModeSelect(m)}
                                             disabled={reorderDirty}
                                             title={reorderDirty ? "Save or cancel reorder first" : undefined}
                                             className={`header-text text-xs px-3 py-1 rounded-full transition-colors disabled:opacity-40 ${
-                                                queueMode === m ? 'bg-[#00b4d8] text-slate-900 font-semibold' : 'text-slate-400 hover:text-slate-200'
+                                                queueMode === m ? 'bg-[#e2b14c] text-slate-900 font-semibold' : 'text-slate-400 hover:text-slate-200'
                                             }`}>{m === 'auto' ? 'Auto' : 'Manual'}</button>
                                     ))}
                                 </div>
@@ -8682,7 +8811,7 @@
                                     onClick={handleTriggerNext}
                                     disabled={runNextProjectDisabled}
                                     title={getRunNextProjectDisabledReason() ?? undefined}
-                                    className={`header-text text-xs px-3 py-1.5 rounded bg-emerald-700 text-white hover:bg-emerald-600 disabled:opacity-50${!runNextProjectDisabled ? ' run-pulse' : ''}`}>
+                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#241d10] text-[#e2b14c] border border-[#e2b14c]/25 hover:bg-[#2e2412] disabled:opacity-50">
                                     {triggerBusy ? 'Starting…' : 'Run next project'}
                                 </button>
                             )}
@@ -8704,7 +8833,7 @@
                     {/* Three-column body */}
                     <div className="flex-1 grid grid-cols-[30%_35%_35%] gap-0 overflow-hidden">
                         {/* Column 1: Queue list */}
-                        <div className="bg-[#0d0f12] border-r border-[#1a1d21] overflow-y-auto p-3">
+                        <div className="bg-transparent border-r border-[rgba(96,86,140,0.14)] overflow-y-auto p-3">
                             {loading ? (
                                 <p className="header-text text-xs text-slate-500 text-center mt-8">Loading queue…</p>
                             ) : queue.length === 0 ? (
@@ -8741,13 +8870,13 @@
                                             title={entry.parent_id ? 'Move the parent project to reorder this group' : undefined}
                                             style={{paddingLeft: depth * 16 + 'px', borderLeft: depth > 0 ? '2px solid #312e81' : 'none'}}
                                             className={`flex items-center gap-2 p-2.5 rounded mb-1 cursor-pointer border transition-colors ${
-                                                isActive ? 'border-[#00b4d8]/60 bg-[#0d1f26]' : 'border-transparent hover:bg-[#141618]'
+                                                isActive ? 'border-[#e2b14c]/60 bg-[#241d10]' : 'border-[#322b4c] bg-[#15121f] hover:bg-[#221b36]'
                                             }`}
                                         >
                                             {canDrag && <span className="text-slate-600 cursor-grab text-xs select-none">⠿</span>}
                                             {!canDrag && <span className="w-3"/>}
                                             {effectiveRanks[entry.id] != null
-                                                ? <span className="header-text text-xs text-slate-500 w-5 text-right flex-shrink-0">{effectiveRanks[entry.id]}</span>
+                                                ? <span className="font-mono text-xs text-slate-500 w-5 text-right flex-shrink-0">{effectiveRanks[entry.id]}</span>
                                                 : <span className="header-text text-xs text-indigo-400 w-5 text-right flex-shrink-0">↳</span>}
                                             <div className="flex-1 min-w-0">
                                                 <span className="header-text text-xs text-slate-200 block truncate">{entry.name}</span>
@@ -8758,7 +8887,7 @@
                                                     <span className="header-text text-xs text-slate-500">Running {relTime(entry.started_at)}</span>
                                                 )}
                                                 {entry.state === 'ACTIVE' && entry.phases_total !== undefined && entry.phases_total > 0 && (
-                                                    <span className="header-text text-xs text-slate-500">{entry.phases_complete}/{entry.phases_total} phases</span>
+                                                    <span className="font-mono text-xs text-slate-500">{entry.phases_complete}/{entry.phases_total} phases</span>
                                                 )}
                                             </div>
                                             {entry.skip_count > 0 && <span className="header-text text-xs text-orange-400">↩{entry.skip_count}</span>}
@@ -8781,12 +8910,12 @@
                         </div>
 
                         {/* Column 2: Project snapshot */}
-                        <div className="bg-[#0d0f12] border-r border-[#1a1d21] p-4 overflow-y-auto">
+                        <div className="bg-transparent border-r border-[rgba(96,86,140,0.14)] p-4 overflow-y-auto">
                             <QueueProjectSnapshot/>
                         </div>
 
                         {/* Column 3: Action hub */}
-                        <div className="bg-[#0d0f12] p-4 overflow-y-auto">
+                        <div className="bg-transparent p-4 overflow-y-auto">
                             {selected && (
                                 <p className="header-text text-xs text-slate-500 font-semibold mb-3 uppercase tracking-wide">Actions</p>
                             )}
@@ -9287,7 +9416,7 @@
             // Derive header status label, optional native tooltip (title), and class
             let statusLabel = '--';
             let statusTitle = '';
-            let statusClass = 'bg-[#1a1d21] text-slate-300';
+            let statusClass = 'bg-[#221b36] text-slate-300';
             if (!alive && (status === 'RUNNING' || status === 'WAITING_FOR_SENTINEL')) {
                 statusLabel = 'ORCHESTRATOR DOWN';
                 statusClass = 'bg-red-600 text-white';
@@ -9300,7 +9429,7 @@
                 if (status === 'WAITING_FOR_SENTINEL') {
                     statusLabel = formatWaitForSentinelLabel(pState.current_agent);
                 }
-                statusClass = STATE_CLASSES[status] || 'bg-[#1a1d21] text-slate-300';
+                statusClass = STATE_CLASSES[status] || 'bg-[#221b36] text-slate-300';
             }
 
             const segments = (pState.project_path || '').split('/').filter(s => s);
@@ -9336,7 +9465,7 @@
                     style={feedCollapsed ? {} : { gridTemplateRows: `auto 1fr ${feedHeight}px` }}
                 >
                     {/* Header bar */}
-                    <header className="bg-[#141618] border-b border-[#1a1d21] px-6 py-4 flex-shrink-0">
+                    <header className="bg-[#15121f] border-b border-[#1c1829] px-6 py-4 flex-shrink-0">
                         <div className="flex items-center justify-between">
                             <div className="flex items-center gap-2">
                                 {status !== "Loading..." && (
@@ -9351,7 +9480,7 @@
                                                 setShowPathStopModal(true);
                                             }
                                         }}
-                                        className="header-text text-xs text-slate-500 hover:text-[#00b4d8] transition-colors px-1.5 py-0.5 rounded border border-[#2a2d31] hover:border-[#00b4d8]/40"
+                                        className="header-text text-xs text-slate-500 hover:text-[#e2b14c] transition-colors px-1.5 py-0.5 rounded border border-[#2a2540] hover:border-[#e2b14c]/40"
                                         title="Change project directory"
                                     >
                                         Change
@@ -9366,7 +9495,7 @@
                                             type="button"
                                             onClick={handleHeaderResume}
                                             disabled={resumeBusy}
-                                            className="header-text px-3 py-1 text-xs bg-emerald-950 hover:bg-emerald-900 text-emerald-300 rounded border border-emerald-800 transition-colors disabled:opacity-50"
+                                            className="header-text px-3 py-1 text-xs bg-[#241d10] hover:bg-[#2e2412] text-[#e2b14c] rounded border border-[#e2b14c]/30 transition-colors disabled:opacity-50"
                                         >
                                             {resumeBusy ? "Resuming…" : "Resume"}
                                         </button>
@@ -9379,7 +9508,7 @@
                                                 setStopHint("");
                                                 setShowStopModal(true);
                                             }}
-                                            className="header-text px-3 py-1 text-xs bg-[#1a1d21] hover:bg-[#1f2226] text-red-400 rounded border border-red-800 hover:border-red-700 transition-colors"
+                                            className="header-text px-3 py-1 text-xs bg-[#221b36] hover:bg-[#221b36] text-red-400 rounded border border-red-800 hover:border-red-700 transition-colors"
                                         >
                                             Stop Pipeline
                                         </button>
@@ -9388,7 +9517,7 @@
                                         <button
                                             type="button"
                                             disabled
-                                            className="header-text px-3 py-1 text-xs bg-[#1a1d21] text-red-400 rounded border border-red-800 opacity-70 status-pulse cursor-not-allowed"
+                                            className="header-text px-3 py-1 text-xs bg-[#221b36] text-red-400 rounded border border-red-800 opacity-70 status-pulse cursor-not-allowed"
                                         >
                                             Stopping...
                                         </button>
@@ -9404,7 +9533,7 @@
                                             className={`header-text px-2 py-1 rounded text-xs ml-1 ${
                                                 pState.queue_halted
                                                     ? 'bg-amber-600/20 text-amber-400 border border-amber-600/40'
-                                                    : 'bg-[#1a1d21] text-slate-400 border border-[#2a2d31]'
+                                                    : 'bg-[#221b36] text-slate-400 border border-[#2a2540]'
                                             }`}
                                             onClick={() => setCurrentScreen('queue')}
                                         >
@@ -9509,7 +9638,7 @@
                     {/* Middle section: two-panel grid (Phase 2a: 32/68 split) */}
                     <main className="grid grid-cols-1 md:grid-cols-[32%_68%] gap-4 p-4 overflow-hidden min-h-0">
                         {/* Left: Current Phase */}
-                        <div className="bg-[#141618] rounded-lg border border-[#1a1d21] p-4 overflow-auto">
+                        <div className="bg-[#15121f] rounded-lg border border-[#1c1829] p-4 overflow-auto">
                             <h2 className="header-text text-lg font-semibold text-slate-300 mb-4">Current Phase</h2>
                             <CurrentPhasePanel
                                 current_phase_raw_id={pState.current_phase_raw_id}
@@ -9536,7 +9665,7 @@
                             />
                             {showRestartOrchestratorButton && (
                                 <div
-                                    className="border-2 border-orange-500 rounded-lg p-4 mt-4 bg-[#141618]/50"
+                                    className="border-2 border-orange-500 rounded-lg p-4 mt-4 bg-[#15121f]/50"
                                     data-testid="pipeline-orchestrator-down-panel"
                                 >
                                     <h3 className="header-text text-sm font-semibold text-orange-400 mb-1">
@@ -9599,7 +9728,7 @@
                         </div>
 
                         {/* Right: Roadmap */}
-                        <div className="right-panel bg-[#141618] rounded-lg border border-[#1a1d21] p-4 overflow-auto">
+                        <div className="right-panel bg-[#15121f] rounded-lg border border-[#1c1829] p-4 overflow-auto">
                             <h2 className="header-text text-lg font-semibold text-slate-300 mb-4">Roadmap</h2>
                             <RoadmapPanel
                                 roadmap={roadmap}
@@ -9612,7 +9741,7 @@
                     </main>
 
                     {/* Activity Feed */}
-                    <div className={`bg-[#141618] border-t border-[#1a1d21] px-4 pt-3 pb-2 flex flex-col ${feedCollapsed ? '' : 'min-h-0 overflow-hidden'}`}>
+                    <div className={`bg-[#15121f] border-t border-[#1c1829] px-4 pt-3 pb-2 flex flex-col ${feedCollapsed ? '' : 'min-h-0 overflow-hidden'}`}>
                         {/* Resize handle — drag up to expand feed, down to shrink */}
                         <div
                             data-testid="feed-resize-handle"
@@ -9644,7 +9773,7 @@
 
                     {showPathStopModal && (
                         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" role="dialog" aria-modal="true">
-                            <div className="bg-[#141618] border border-[#1a1d21] rounded-lg max-w-sm w-full p-5 space-y-3">
+                            <div className="bg-[#15121f] border border-[#1c1829] rounded-lg max-w-sm w-full p-5 space-y-3">
                                 <h2 className="header-text text-base text-slate-200">Change project directory</h2>
                                 {pathStopDone ? (
                                     <p className="text-sm text-slate-300">
@@ -9664,7 +9793,7 @@
                                     <button
                                         type="button"
                                         onClick={() => { setShowPathStopModal(false); setPathStopDone(false); setPathStopErr(""); }}
-                                        className="header-text text-xs px-3 py-1.5 rounded border border-[#2a2d31] text-slate-400 hover:text-slate-200 transition-colors"
+                                        className="header-text text-xs px-3 py-1.5 rounded border border-[#2a2540] text-slate-400 hover:text-slate-200 transition-colors"
                                     >
                                         {pathStopDone ? "Close" : "Cancel"}
                                     </button>
@@ -9684,7 +9813,7 @@
                                                     })
                                                     .catch((e) => setPathStopErr(String(e?.message || e)));
                                             }}
-                                            className="header-text text-xs px-3 py-1.5 rounded bg-[#1a1d21] hover:bg-[#1f2226] text-red-400 border border-red-800 hover:border-red-700 transition-colors"
+                                            className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] hover:bg-[#221b36] text-red-400 border border-red-800 hover:border-red-700 transition-colors"
                                         >
                                             Stop Pipeline
                                         </button>
@@ -9696,7 +9825,7 @@
 
                     {showGitRecoverModal && (
                         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" role="dialog" aria-modal="true">
-                            <div className="bg-[#141618] border border-[#1a1d21] rounded-lg max-w-sm w-full p-5 space-y-3">
+                            <div className="bg-[#15121f] border border-[#1c1829] rounded-lg max-w-sm w-full p-5 space-y-3">
                                 <h2 className="header-text text-base text-slate-200">Return repository to branch</h2>
                                 <p className="text-sm text-slate-400">
                                     We prefilled the branch from your active project path and UI settings (same rule as
@@ -9708,7 +9837,7 @@
                                     type="text"
                                     value={gitRecoverBranch}
                                     onChange={(e) => setGitRecoverBranch(e.target.value)}
-                                    className="w-full bg-[#0f1215] border border-[#2a2d31] rounded px-2 py-1.5 text-sm text-slate-200 outline-none focus:border-cyan-600"
+                                    className="w-full bg-[#100d1a] border border-[#2a2540] rounded px-2 py-1.5 text-sm text-slate-200 outline-none focus:border-accent"
                                     placeholder="main"
                                 />
                                 {gitRecoverError ? <p className="text-xs text-red-400">{gitRecoverError}</p> : null}
@@ -9716,7 +9845,7 @@
                                     <button
                                         type="button"
                                         onClick={() => setShowGitRecoverModal(false)}
-                                        className="header-text text-xs px-3 py-1.5 rounded border border-[#2a2d31] text-slate-400 hover:text-slate-200 transition-colors"
+                                        className="header-text text-xs px-3 py-1.5 rounded border border-[#2a2540] text-slate-400 hover:text-slate-200 transition-colors"
                                         disabled={gitRecoverBusy}
                                     >
                                         Cancel
@@ -9741,7 +9870,7 @@
                             aria-modal="true"
                             aria-labelledby="switch-project-title"
                         >
-                            <div className="bg-[#141618] border border-[#1a1d21] rounded-lg max-w-lg w-full max-h-[90vh] overflow-y-auto p-5">
+                            <div className="bg-[#15121f] border border-[#1c1829] rounded-lg max-w-lg w-full max-h-[90vh] overflow-y-auto p-5">
                                 <h2
                                     id="switch-project-title"
                                     className="header-text text-lg text-slate-200 mb-3"
@@ -9795,7 +9924,7 @@
                                     </div>
                                 ) : null}
                                 {swCoherence && swCoherence.ok === false && swDestructiveOptions.length > 0 ? (
-                                    <div className="rounded border border-[#2a2d31] p-3 mb-3 text-sm text-slate-300">
+                                    <div className="rounded border border-[#2a2540] p-3 mb-3 text-sm text-slate-300">
                                         <p className="mb-2 text-slate-400">Coherence issues — allow deleting whitelisted files to continue:</p>
                                         <ul className="mb-2 space-y-1">
                                             {(swCoherence.issues || []).map((iss, idx) => (
@@ -9837,14 +9966,14 @@
                                                     ...merged,
                                                 });
                                             }}
-                                            className="mt-2 header-text text-xs px-3 py-1.5 rounded bg-[#00b4d8] text-[#0d0f12] disabled:opacity-40"
+                                            className="mt-2 header-text text-xs px-3 py-1.5 rounded bg-[#e2b14c] text-[#0b0a12] disabled:opacity-40"
                                         >
                                             Apply selected fixes &amp; re-validate
                                         </button>
                                     </div>
                                 ) : null}
                                 {swChecks && swChecks.length > 0 && !swRoadmapAmbiguous ? (
-                                    <ul className="space-y-1 text-xs mb-3 max-h-40 overflow-y-auto border border-[#1a1d21] rounded p-2">
+                                    <ul className="space-y-1 text-xs mb-3 max-h-40 overflow-y-auto border border-[#1c1829] rounded p-2">
                                         {swChecks.map((c, i) => (
                                             <li
                                                 key={i}
@@ -9854,7 +9983,7 @@
                                                         : c.status === "warn"
                                                           ? "text-amber-400"
                                                           : c.status === "fixed"
-                                                            ? "text-[#00b4d8]"
+                                                            ? "text-[#e2b14c]"
                                                             : "text-emerald-400"
                                                 }
                                             >
@@ -9867,7 +9996,7 @@
                                     <button
                                         type="button"
                                         onClick={closeProjectSwitch}
-                                        className="header-text text-sm px-3 py-1.5 rounded border border-[#1a1d21] text-slate-400"
+                                        className="header-text text-sm px-3 py-1.5 rounded border border-[#1c1829] text-slate-400"
                                     >
                                         Close
                                     </button>
@@ -9882,7 +10011,7 @@
                                                     ...swPendingRef.current,
                                                 })
                                             }
-                                            className="header-text text-sm px-3 py-1.5 rounded bg-[#1a1d21] text-slate-200 disabled:opacity-40"
+                                            className="header-text text-sm px-3 py-1.5 rounded bg-[#221b36] text-slate-200 disabled:opacity-40"
                                         >
                                             {swBusy ? "Working…" : "Switch & run checks"}
                                         </button>
@@ -9897,7 +10026,7 @@
                                                     ...swPendingRef.current,
                                                 })
                                             }
-                                            className="header-text text-sm px-3 py-1.5 rounded bg-[#00b4d8] text-[#0d0f12] disabled:opacity-40"
+                                            className="header-text text-sm px-3 py-1.5 rounded bg-[#e2b14c] text-[#0b0a12] disabled:opacity-40"
                                         >
                                             {swBusy ? "Starting…" : "Start pipeline"}
                                         </button>
@@ -9932,21 +10061,21 @@
                 return itemLabels[item] || item;
             };
             return (
-                <div className="flex h-screen items-center justify-center bg-[#0d0f12]">
+                <div className="flex h-screen items-center justify-center app-sky">
                     <div className="max-w-xl w-full mx-4 space-y-6">
                         <div>
                             <h1 className="text-2xl font-semibold text-white header-text mb-1">
-                                Welcome to AutoDev
+                                Welcome to Lullabeast
                             </h1>
                             <p className="text-slate-400 text-sm">
                                 Run the installer to configure your environment before using the pipeline.
                             </p>
                         </div>
-                        <div className="bg-[#141618] border border-slate-700 rounded-lg p-4">
+                        <div className="bg-[#15121f] border border-slate-700 rounded-lg p-4">
                             <p className="text-xs text-slate-500 uppercase tracking-wider mb-2">Run in your terminal</p>
                             <pre className="text-accent font-mono text-sm select-all">./install.sh</pre>
                         </div>
-                        <div className="bg-[#141618] border border-slate-700 rounded-lg p-4 space-y-2">
+                        <div className="bg-[#15121f] border border-slate-700 rounded-lg p-4 space-y-2">
                             <p className="text-xs text-slate-500 uppercase tracking-wider mb-3">Setup checklist</p>
                             {allClear ? (
                                 <div className="flex items-center gap-2 text-green-400 text-sm">
@@ -9975,9 +10104,9 @@
                             <button
                                 onClick={onContinue}
                                 disabled={!allClear}
-                                className="px-4 py-2 text-sm rounded bg-accent text-white hover:bg-blue-400 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                                className="px-4 py-2 text-sm rounded bg-accent text-[#0b0a12] font-semibold hover:bg-[#f0c56b] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                             >
-                                Continue to AutoDev →
+                                Continue to Lullabeast →
                             </button>
                         </div>
                     </div>
@@ -10474,7 +10603,7 @@
 
             if (setupComplete === null) {
                 return (
-                    <div className="flex h-screen items-center justify-center bg-[#0d0f12]">
+                    <div className="flex h-screen items-center justify-center app-sky">
                         <span className="text-slate-500 text-sm font-mono">Loading…</span>
                     </div>
                 );
@@ -10492,7 +10621,8 @@
 
             return (
                 <AppCtx.Provider value={appCtxValue}>
-                    <div className="flex h-screen overflow-hidden bg-[#0d0f12]">
+                    <div className="flex h-screen overflow-hidden app-sky">
+                        <div className="ll-grain" aria-hidden="true"></div>
                         {currentScreen !== "ideas" && (
                         <Sidebar
                             currentScreen={currentScreen}

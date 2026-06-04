@@ -36,7 +36,7 @@ def test_index_html_disclosure_and_neutral_expand():
     assert "1 AI assumption made" in html
     assert "AI assumptions made" in html
     chunk = _disclosure_source_chunk(html)
-    assert "bg-[#0d0f11]/90" in chunk
+    assert "bg-[#100d1a]/90" in chunk
     assert "text-amber-300/90" in chunk
     assert "bg-amber-950" not in chunk
     assert "border-amber-700" not in chunk

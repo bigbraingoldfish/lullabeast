@@ -52,15 +52,16 @@ def test_get_goal_for_phase_helper(html_content):
 
 
 def test_phase_id_renders_in_monospace(html_content):
-    """current_phase_raw_id renders in monospace font (JetBrains Mono)."""
-    # Multi-line span: header-text wrapper then phase id child (H-25 adds title= between)
+    """current_phase_raw_id renders in monospace font (font-mono / JetBrains Mono)."""
+    # Multi-line span: font-mono wrapper then phase id child (H-25 adds title= between).
+    # Lullabeast: data IDs use font-mono (header-text is now the Hanken chrome font).
     has_phase_render = bool(
         re.search(
-            r"header-text\s+text-sm\s+font-semibold\s+text-slate-300[\s\S]{0,220}?\{current_phase_raw_id\}",
+            r"font-mono\s+text-sm\s+font-semibold\s+text-slate-300[\s\S]{0,220}?\{current_phase_raw_id\}",
             html_content,
         )
     )
-    assert has_phase_render, "Phase ID not rendered with header-text (monospace) class"
+    assert has_phase_render, "Phase ID not rendered with font-mono (monospace) class"
 
 
 def test_goal_text_displayed(html_content):
@@ -143,8 +144,8 @@ def test_agent_attempt_row_component_exists(html_content):
     assert "function computeAgentAttemptFractionN" in html_content
     assert "PIPELINE_STATUS_PILL_HEX" in html_content
     assert "AGENT_ATTEMPT_DOT_HEX" in html_content
-    assert "#475569" in html_content and "#0d9488" in html_content
-    assert "#3b82f6" in html_content, "In-flight attempt cells use blue distinct from pipeline teal"
+    assert "#494360" in html_content and "#2ea043" in html_content
+    assert "#e2b14c" in html_content, "In-flight attempt cells use blue distinct from pipeline teal"
     assert "#2DEB1E" in html_content and "#dc2626" in html_content
     assert "data-agent-attempt-row" in html_content
     assert "data-agent-attempt-slot" in html_content

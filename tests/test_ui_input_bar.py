@@ -30,9 +30,9 @@ def attach_disabled(current_idea_id: str | None, is_loading: bool) -> bool:
 def send_button_class_for_state(disabled: bool) -> str:
     """Tailwind class string for Send (matches index.html pattern)."""
     base = (
-        "header-text px-3 rounded border border-[#00b4d8]/50 bg-[#00b4d8] "
-        "text-[#0d0f11] text-xs font-semibold hover:brightness-110 "
-        "disabled:bg-[#2a2d31] disabled:text-slate-600 disabled:border-[#2a2d31] disabled:cursor-not-allowed"
+        "header-text px-3 rounded border border-[#e2b14c]/50 bg-[#e2b14c] "
+        "text-[#100d1a] text-xs font-semibold hover:brightness-110 "
+        "disabled:bg-[#2a2540] disabled:text-slate-600 disabled:border-[#2a2540] disabled:cursor-not-allowed"
     )
     return base
 
@@ -74,8 +74,8 @@ def test_attach_disabled_no_idea_or_loading():
 
 def test_send_button_has_accent_when_enabled():
     s = send_button_class_for_state(False)
-    assert "bg-[#00b4d8]" in s
-    assert "disabled:bg-[#2a2d31]" in s
+    assert "bg-[#e2b14c]" in s
+    assert "disabled:bg-[#2a2540]" in s
 
 
 def test_index_html_input_bar_wiring():

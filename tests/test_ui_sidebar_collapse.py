@@ -12,19 +12,19 @@ def _repo_root() -> Path:
 def nav_rail_outer_class(sidebar_collapsed: bool) -> str:
     """Outer class string for the nav rail (Sidebar root div)."""
     return (
-        "w-14 relative flex-shrink-0 bg-[#141618] border-r border-[#1a1d21] "
+        "w-14 relative flex-shrink-0 bg-[#15121f] border-r border-[#1c1829] "
         "flex flex-col transition-[width] duration-200 ease-out"
         if sidebar_collapsed
-        else "w-[240px] relative flex-shrink-0 bg-[#141618] border-r border-[#1a1d21] "
+        else "w-[240px] relative flex-shrink-0 bg-[#15121f] border-r border-[#1c1829] "
         "flex flex-col transition-[width] duration-200 ease-out"
     )
 
 
 def chats_rail_outer_class(sidebar_collapsed: bool) -> str:
-    """Chats block under nav: same #141618 as sidebar; border-t only before Chats (mirror index)."""
+    """Chats block under nav: same #15121f as sidebar; border-t only before Chats (mirror index)."""
     if sidebar_collapsed:
         return "__chats_rail_absent_when_collapsed__"
-    return "bg-[#141618] border-t border-[#1a1d21] merged-under-nav"
+    return "bg-[#15121f] border-t border-[#1c1829] merged-under-nav"
 
 
 def chats_rail_shows_project_chrome(sidebar_collapsed: bool) -> bool:
@@ -46,7 +46,7 @@ def test_chats_rail_collapsed_unmounted_no_reserved_strip():
 
 def test_chats_rail_expanded_merged_styling():
     s = chats_rail_outer_class(False)
-    assert "bg-[#141618]" in s
+    assert "bg-[#15121f]" in s
     assert "border-t" in s
     assert "0d0f11" not in s
 

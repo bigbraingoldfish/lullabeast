@@ -153,12 +153,14 @@ def test_escalation_command_invalid_badge_color_is_warning_family(html):
     command -> defaulted to STOP).  It must get a warning-family badge, not
     the dark default.  Catches it falling through to the default dark badge."""
     body = _slice(html, "function getEventBadgeColor", "const EVENT_TYPE_DISPLAY")
+    # Lullabeast: events render as neutral chips + a keyed dot. escalation_command_invalid
+    # is a recoverable heal → the warning/amber dot (#e8893e), not the info/lavender default.
     assert re.search(
-        r"case\s+'escalation_command_invalid':\s*return\s+'bg-(amber|orange)-\d+",
+        r"'escalation_command_invalid'[\s\S]{0,200}?#e8893e",
         body,
     ), (
-        "getEventBadgeColor must map escalation_command_invalid to an "
-        "amber/orange warning class (recoverable heal), not the dark default"
+        "getEventBadgeColor must map escalation_command_invalid to the amber "
+        "warning dot #e8893e (recoverable heal), not the lavender default"
     )
 
 
