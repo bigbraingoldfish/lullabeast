@@ -134,7 +134,7 @@ The orchestrator polls for output files via a simple `time.sleep()` polling loop
   "reviewer_retries": "<int>",
   "last_action": "<string — description of last webhook/gate action>",
   "last_action_timestamp": "<ISO 8601>",
-  "pipeline_status": "<RUNNING|WAITING_FOR_SENTINEL|WAITING_FOR_HUMAN|HALTED_SILENT|BLOCKED|PIPELINE_COMPLETE|STOPPED>",
+  "pipeline_status": "<RUNNING|WAITING_FOR_SENTINEL|WAITING_FOR_HUMAN|HALTED_SILENT|BLOCKED|PIPELINE_COMPLETE|STOPPED|QUEUE_HALTED — the VALID_STATES enum; transition_state() raises on any other value. 'IDLE' is NOT a member: it is an external-only reset status written directly to this file by the UI/tooling, never a transition_state() target>",
   "project_path": "<string — absolute path to project directory; stored so heartbeat cron can re-pass it on restart (B4)>",
   "phase_base_commit": "<string — git SHA of HEAD before current phase branch was created; used by reset_phase() to rewind (B6)>"
 }
