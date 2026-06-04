@@ -27,12 +27,15 @@ def test_helper_and_title_binding():
     assert "title={getRunNextProjectDisabledReason()" in html
 
 
-def test_button_block_includes_run_pulse():
+def test_button_block_uses_gold_tint_action():
+    """Lullabeast action-colour discipline: 'Run next project' is a gold-tint action,
+    not a green run-pulse fill (green is reserved for live/running status)."""
     html = _index_text()
     marker = 'data-testid="queue-trigger-next"'
     pos = html.index(marker)
     window = html[pos : pos + 900]
-    assert "run-pulse" in window
+    assert "run-pulse" not in window, "Run-next must not use the green run-pulse fill"
+    assert "#e2b14c" in window, "Run-next should use the lamplight-gold action tint"
 
 
 def test_tooltip_branch_strings():

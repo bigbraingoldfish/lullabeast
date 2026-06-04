@@ -54,26 +54,35 @@ def test_event_row_displays_humanized_summary(html_content):
     assert "humanizeSummary" in event_row_block.group(0), \
         "EventRow should use humanizeSummary for the summary column"
 
+# Lullabeast: event rows are neutral chips with one small KEYED DOT (color = category),
+# not filled badges. getEventBadgeColor returns the dot hex:
+#   #4fd98c green=success · #f0697c rose=escalation · #e8893e amber=warning · #7c86c8 lavender=info
+def _event_badge_fn(html_content):
+    i = html_content.find("function getEventBadgeColor")
+    assert i >= 0, "getEventBadgeColor function not found"
+    return html_content[i:i + 2200]
+
+
 def test_badge_color_gate_pass_green(html_content):
-    has_gate_pass = bool(re.search(r"gate_pass.*green|gate_pass.*emerald|gate_pass.*bg-green", html_content))
-    assert has_gate_pass, "gate_pass badge does not use green color"
+    fn = _event_badge_fn(html_content)
+    assert re.search(r"'gate_pass'[\s\S]{0,400}?#4fd98c", fn), "gate_pass dot should be brand green #4fd98c"
 
 def test_badge_color_gate_fail_amber(html_content):
-    has_gate_fail = bool(re.search(r"gate_fail.*amber|gate_fail.*yellow|gate_fail.*bg-amber", html_content))
-    assert has_gate_fail, "gate_fail badge does not use amber color"
+    fn = _event_badge_fn(html_content)
+    assert re.search(r"'gate_fail'[\s\S]{0,400}?#e8893e", fn), "gate_fail dot should be the warning amber #e8893e"
 
 
 def test_badge_color_escalation_trigger_orange(html_content):
-    has_esc_trigger = bool(re.search(r"escalation_trigger.*orange|escalation_trigger.*bg-orange", html_content))
-    assert has_esc_trigger, "escalation_trigger badge does not use orange color"
+    fn = _event_badge_fn(html_content)
+    assert re.search(r"'escalation_trigger'[\s\S]{0,200}?#f0697c", fn), "escalation_trigger dot should be the rose #f0697c"
 
 def test_badge_color_escalation_resolve_blue(html_content):
-    has_esc_resolve = bool(re.search(r"escalation_resolve.*blue|escalation_resolve.*bg-blue", html_content))
-    assert has_esc_resolve, "escalation_resolve badge does not use blue color"
+    fn = _event_badge_fn(html_content)
+    assert re.search(r"'escalation_resolve'[\s\S]{0,900}?#7c86c8", fn), "escalation_resolve dot should be the info lavender #7c86c8"
 
 def test_badge_color_phase_complete_bright_green(html_content):
-    has_phase_complete = bool(re.search(r"phase_complete.*green|phase_complete.*lime|phase_complete.*bright", html_content, re.IGNORECASE))
-    assert has_phase_complete, "phase_complete badge does not use bright green"
+    fn = _event_badge_fn(html_content)
+    assert re.search(r"'phase_complete'[\s\S]{0,400}?#4fd98c", fn), "phase_complete dot should be brand green #4fd98c"
 
 def test_badge_color_others_gray(html_content):
     has_gray_fallback = bool(re.search(r"bg-slate-600|bg-gray-600|default.*gray", html_content))

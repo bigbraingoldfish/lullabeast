@@ -14,9 +14,10 @@ def html_content():
 
 
 def test_running_state_has_run_pulse_class(html_content):
-    """RUNNING uses run-pulse (teal compute pulse), not status-pulse on sentinel."""
-    has_run_pulse = bool(re.search(r"RUNNING:\s*\{[^}]*run-pulse", html_content))
-    assert has_run_pulse, "RUNNING state should include run-pulse class"
+    """RUNNING is the calm green .pill-glow pill (glowing dot), not the legacy
+    full-fill run-pulse animation."""
+    has_pill_running = bool(re.search(r"RUNNING:\s*\{[^}]*pill-glow", html_content))
+    assert has_pill_running, "RUNNING state should use the .pill-glow glowing-dot pill"
 
 
 def test_waiting_for_sentinel_state_has_no_pulse_class(html_content):
@@ -28,11 +29,12 @@ def test_waiting_for_sentinel_state_has_no_pulse_class(html_content):
 
 
 def test_waiting_for_human_state_has_no_pulse_animation(html_content):
-    """WAITING_FOR_HUMAN has NO pulse (static orange)."""
-    has_no_pulse = not bool(re.search(r"WAITING_FOR_HUMAN:\s*\{[^}]*run-pulse", html_content))
-    assert has_no_pulse, "WAITING_FOR_HUMAN state should NOT have run-pulse"
-    has_static_orange = bool(re.search(r"WAITING_FOR_HUMAN:\s*\{[^}]*bg-orange-500", html_content))
-    assert has_static_orange, "WAITING_FOR_HUMAN should use static orange (bg-orange-500)"
+    """WAITING_FOR_HUMAN is a calm orange-tinted pill with an attention glow-dot
+    (.pill-glow), not the legacy run-pulse full-fill / solid bg-orange-500."""
+    assert not re.search(r"WAITING_FOR_HUMAN:\s*\{[^}]*run-pulse", html_content), \
+        "WAITING_FOR_HUMAN must not use the legacy run-pulse full-fill"
+    assert re.search(r"WAITING_FOR_HUMAN:\s*\{[^}]*text-orange-300", html_content), \
+        "WAITING_FOR_HUMAN should use the calm orange-tint pill (text-orange-300)"
 
 
 def test_halted_silent_state_has_no_pulse_animation(html_content):

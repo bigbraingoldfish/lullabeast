@@ -100,7 +100,7 @@ def test_step3_border_states():
     assert "border-red" in step3_block
     assert "border-amber" in step3_block
     assert "border-emerald" in step3_block
-    assert "border-[#2a2d31]" in step3_block
+    assert "border-[#2a2540]" in step3_block
 
 
 def test_launch_blocking_hint_testid():
@@ -121,6 +121,6 @@ def test_per_step_descriptions():
     replaced by the Project-Ideas summary card. The new copy makes it
     explicit that authoring is somewhere else."""
     body = _preflight_body()
-    assert "Confirm the repository path AutoDev will build in." in body
-    assert "The roadmap and verification doc come from Project Ideas. Authoring lives there; the Setup screen stages." in body
+    assert "Confirm the repository path Lullabeast will build in." in body
+    assert "The roadmap and verification doc come from Project Ideas — authoring lives there." in body
     assert "Checks symlink, .gitignore, workspace files, and roadmap." in body

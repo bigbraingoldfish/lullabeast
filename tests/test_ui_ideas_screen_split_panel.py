@@ -55,8 +55,8 @@ class TestIdeasScreenSplitPanel:
         assert "PrimaryNavColumn" in func_body, "Nav + chats use PrimaryNavColumn"
         assert "sidebarCollapsed" in func_body, "Chats section follows sidebarCollapsed"
         assert "selectIdeaFromRail" in func_body, "Ideas should switch via rail, not only dropdown"
-        assert "border-r border-[#1a1d21]" in content, \
-            "Column separators should use border-r border-[#1a1d21]"
+        assert "border-r border-[#1c1829]" in content, \
+            "Column separators should use border-r border-[#1c1829]"
         assert re.search(r"flex-1.*?(?:overflow-hidden|overflow-y-auto)", func_body, re.DOTALL), \
             "Document/conversation columns should use flex-1"
 
@@ -66,17 +66,17 @@ class TestIdeasScreenSplitPanel:
         func_body = extract_function_body(content, "IdeasScreen")
         assert func_body is not None
 
-        assert re.search(r'flex\s+flex-col\s+min-w-0\s+bg-\[#141618\]', func_body), \
-            "Conversation column should be flex flex-col min-w-0 bg-[#141618]"
+        assert re.search(r'flex\s+flex-col\s+min-w-0\s+bg-\[#15121f\]', func_body), \
+            "Conversation column should be flex flex-col min-w-0 bg-[#15121f]"
 
         assert re.search(r'flex-1\s+overflow-y-auto\s+p-4', func_body), \
             "Messages area should have 'flex-1 overflow-y-auto p-4'"
 
-        # M2 UI-5 composer: border-t + p-3; default border color is border-[#1a1d21] (cyan when drag-over)
+        # M2 UI-5 composer: border-t + p-3; default border color is border-[#1c1829] (cyan when drag-over)
         assert re.search(
-            r"flex-shrink-0\s+border-t\s+p-3[\s\S]{0,400}border-\[#1a1d21\]",
+            r"flex-shrink-0\s+border-t\s+p-3[\s\S]{0,400}border-\[#1c1829\]",
             func_body,
-        ), "Composer area should use border-t, p-3, and border-[#1a1d21] default frame"
+        ), "Composer area should use border-t, p-3, and border-[#1c1829] default frame"
 
     def test_right_pane_has_all_prd_headers(self):
         """Right pane has all 12 PRD section headers as h2 elements."""
@@ -120,7 +120,7 @@ class TestIdeasScreenSplitPanel:
         func_body = extract_function_body(content, "IdeasScreen")
         assert func_body is not None
 
-        assert func_body.count("flex flex-col min-w-0 bg-[#141618]") >= 2, \
+        assert func_body.count("flex flex-col min-w-0 bg-[#15121f]") >= 2, \
             "Conversation and PRD columns should use matching flex-col panels"
 
     def test_no_javascript_syntax_errors(self):

@@ -66,10 +66,10 @@ def test_blocked_status_icon(html_content):
 
 
 def test_in_progress_phase_has_left_border_accent(html_content):
-    """In-progress phase row has left border accent in primary accent color (#3b82f6)."""
+    """In-progress phase row has left border accent in primary accent color (#e2b14c)."""
     # Check for border-left or border-l with accent color
-    has_accent_border = bool(re.search(r'border-l-4|border-left.*accent|border-l.*#3b82f6|border-l.*blue-500', html_content))
-    assert has_accent_border, "In-progress phase does not have left border accent (#3b82f6)"
+    has_accent_border = bool(re.search(r'border-l-4|border-left.*accent|border-l.*#e2b14c|border-l.*blue-500', html_content))
+    assert has_accent_border, "In-progress phase does not have left border accent (#e2b14c)"
 
 
 def test_complete_phases_have_reduced_opacity(html_content):

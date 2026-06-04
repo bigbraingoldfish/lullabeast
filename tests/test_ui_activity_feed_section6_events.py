@@ -69,10 +69,10 @@ def test_event_type_display_includes_section6_event(html, event):
 # ---------------------------------------------------------------------------
 
 
-def test_event_badge_color_uses_section6_purple(html):
-    """``getEventBadgeColor`` must return the curated purple ``#764cc5``
-    for the Section 6 event family so they read as one cohesive
-    diagnostic family in the Activity Feed."""
+def test_event_badge_color_uses_section6_lavender(html):
+    """Lullabeast: Section 6 diagnostic events are the info/lifecycle category, so
+    ``getEventBadgeColor`` returns the lavender dot ``#8e88ae`` for them (events are
+    now neutral chips + a keyed dot, not saturated purple fills)."""
     func_match = re.search(
         r"function\s+getEventBadgeColor\([^)]*\)\s*\{.*?\n\s*\}",
         html,
@@ -80,9 +80,9 @@ def test_event_badge_color_uses_section6_purple(html):
     )
     assert func_match, "getEventBadgeColor function not found"
     body = func_match.group(0)
-    assert "#764cc5" in body, (
-        "getEventBadgeColor must reference #764cc5 — the operator-"
-        "specified colour for the Section 6 diagnostic event family"
+    assert "#8e88ae" in body, (
+        "getEventBadgeColor must reference #8e88ae — the info/lavender dot "
+        "for the Section 6 diagnostic event family"
     )
 
 
