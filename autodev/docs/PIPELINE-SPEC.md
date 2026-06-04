@@ -593,9 +593,9 @@ Pipeline completion is also notified via Signal (not just escalation).
 | `RETRY` | Re-POST the exact webhook that failed, no state change | Any transient failure (network, timeout, fluke) |
 | `RESET_PHASE` | Full phase reset with cap enforcement. Resets git to `phase_base_commit`, deletes phase branch, clears all 6 output pairs, re-initializes `phase_state.json` (agent counters → 0, `escalation_resets` preserved), re-invokes planner. Increments `escalation_resets`. Cap: 3. | Plan is fundamentally flawed; start phase from scratch |
 | `RESET_EXECUTION` | Partial reset. Preserves planner output (`planner_output.json/done`). Clears executor and reviewer outputs and **preserves the working tree** so the executor iterates on its prior work — the hard reset to HEAD runs only on an `ERR_UNACCOUNTED_DELETION` failure (Phase 2). Re-invokes executor. Increments `escalation_resets`. Cap: 3. (For a clean-slate restart, use `RESET_PHASE`.) | Plan is sound but executor implementation failed; preserve the plan, retry execution |
-| `SKIP` | Marks phase N as `[-]` skipped in roadmap and advances to N+1. The phase branch and artifacts are NOT cleaned up — git state is left as-is; manual repo cleanup required. | Only when manually verified the phase outcome is acceptable and cleanup will be handled manually |
+| `SKIP` | Marks phase N as `[-]` skipped in roadmap, then **re-resolves the next pending phase via the shared `_advance_to_next_pending_phase()` helper** (F3) — the same path the reviewer-PASS completion uses — clearing the per-phase pipeline artifacts and starting the genuine next pending phase (not blindly "N+1"). The git phase *branch* is not deleted (no `git reset`); manual git cleanup is still the operator's responsibility. | Only when the phase outcome is acceptable and git cleanup will be handled manually |
 | `STOP` | Pipeline stays halted, full manual intervention required | Always valid |
-| `PROCEED` | Skips the merge step; marks phase `[x]` in roadmap, force-tags `phase-N-complete`, and advances to next phase. Does not append to `suggestions.md` or clear working files. | Phase branch already merged into base externally; use to advance after manual merge |
+| `PROCEED` | Skips the merge step; marks phase `[x]` in roadmap, force-tags `phase-N-complete`, then **re-resolves and advances via the shared `_advance_to_next_pending_phase()` helper** (F3) so it genuinely moves *past* this phase (previously it re-ran the just-closed phase and could loop straight back to escalation). Does not append to `suggestions.md`. | Phase branch already merged into base externally; use to advance after manual merge |
 | `NUCLEAR_RESET` | **Operator escape hatch (P1 Stage G2).** Thin wrapper over `reset_phase()` — same destructive mechanics (git reset to `phase_base_commit`, delete phase branch, wipe all outputs, zero retry counters, clear `prior_blame_attributions`, re-invoke planner). Differs only in governance: increments its own `nuclear_resets` counter (cap **2**) instead of `escalation_resets`, and appends a `reset_log` entry. | Every automatic retry and operator reset is spent (`escalation_resets >= 3`) but the operator fixed an *external* cause (infra/config, outside the repo) and wants a true fresh start |
 
 > **`RESTART PHASE` is a legacy alias for `RESET_PHASE`** — accepted by the orchestrator for backward compatibility with in-flight Signal conversations. Use `RESET_PHASE` in new invocations.
@@ -617,7 +617,7 @@ Both lifetime counters reset only inside `reset_phase()` (true new phase). The c
 
 Resume commands trigger `orchestrator.py` operations.
 **Sentinel Pattern Bridge:** The human's response from Signal is passed back to the orchestrator via the `escalation_output.json` file. The Escalation Agent has a strict tool policy carve-out in `openclaw.json` allowing it to write exactly this file and its sentinel (`escalation_output.done`). While awaiting a reply (`WAITING_FOR_HUMAN`), the orchestrator actively polls for this sentinel, parses the command, and triggers the corresponding state transition.
-**`PROCEED` implementation detail:** On receiving `PROCEED`, the orchestrator skips the merge step (assumes git state is already correct), then: `git tag --force phase-N-complete`, updates roadmap to `[x]`, and loops back to the roadmap gate. It does NOT append to `suggestions.md`, does NOT clear working files, and does NOT run any other post-merge sequence. If the tag or roadmap update fails, escalate again — do not silently advance.
+**`PROCEED` implementation detail (F3):** On receiving `PROCEED`, the orchestrator skips the merge step (assumes git state is already correct), then `git tag --force phase-N-complete`, updates roadmap to `[x]`, and calls the shared `_advance_to_next_pending_phase(trigger="proceed")` helper. That helper clears the per-phase pipeline artifacts, re-runs `phase_resolver`, and then either starts the next pending phase, completes the pipeline, parks on a blocked next phase, or (on resolver error) breaks — exactly as the reviewer-PASS completion path does, so the three sites cannot drift. `SKIP` uses the same helper (`trigger="skip"`) after marking `[-]`. It does NOT append to `suggestions.md`. If the tag or roadmap update fails, escalate again — do not silently advance.
 
 ### Ambiguous Reply Protocol
 
@@ -650,6 +650,8 @@ Sequential, not parallel:
 
 - `HALTED_SILENT` is written **only** when escalation delivery fails — all three fallbacks (escalation agent webhook, raw Signal webhook, direct write) have been exhausted. It is **not** the terminal state for clean pipeline completion; `PIPELINE_COMPLETE` is used for that.
 - An invalid / empty / unrecognised resume *command* (a consumed `escalation_output.json` whose `command` is unknown) is **not** a `HALTED_SILENT` trigger: the consumer emits `escalation_command_invalid` and defaults to `STOP` (recoverable). Only escalation *delivery* failure halts silently.
+- **F10 — two former silent sinks now escalate, not halt.** An unknown/unrecognised *reviewer-gate verdict* (F10(b)) and an *activity-stamp-init failure* (F10(a), `_init_activity_stamp_or_escalate`) previously dead-ended at `HALTED_SILENT` with no notification. Both now set `current_agent="escalation"` + `transition_state("RUNNING", …)` so the next loop iteration fires the escalation dispatch (notify ⟺ escalate; only the escalation agent sends Signal). This is what makes the "delivery-failure only" invariant above hold in code.
+- **F11 — `HALTED_SILENT` is operator-recoverable from the UI** via `POST /api/resume-ready` (→ `WAITING_FOR_HUMAN` + escalation), without the phase-destroying `git-recover`. See the endpoint section.
 - `HALTED_SILENT` prevents heartbeat from restarting orchestrator (same as `WAITING_FOR_HUMAN`)
 - Detection is by absence — no Signal activity, pipeline idle — manual check required
 - No infinite notification retry loop — systematic failure will not be self-resolving
@@ -1848,21 +1850,21 @@ Issues a resume command to the escalation handler. Writes `escalation_output.jso
 
 #### `POST /api/resume-ready`
 
-Transitions `pipeline_status` from `STOPPED` to `WAITING_FOR_HUMAN` atomically. Also sets `current_agent: "escalation"` so the restarted orchestrator enters the escalation command handler regardless of what agent was active when the pipeline was stopped.
+Transitions `pipeline_status` from `STOPPED` **or `HALTED_SILENT`** to `WAITING_FOR_HUMAN` atomically (F11). Also sets `current_agent: "escalation"` so the restarted orchestrator enters the escalation command handler regardless of what agent was active when the pipeline stopped or halted. This is the clean operator recovery from a silent halt — `POST /api/pipeline/git-recover` remains the heavy, phase-destroying fallback.
 
-**Preconditions:** `pipeline_status` must be `STOPPED`.
+**Preconditions:** `pipeline_status` must be `STOPPED` or `HALTED_SILENT`.
 
 **Success response (HTTP 200):**
 ```json
 {"ok": true}
 ```
 
-**Error response (HTTP 409) — pipeline not in STOPPED state:**
+**Error response (HTTP 409) — pipeline not in a resumable state:**
 ```json
-{"error": "Pipeline is not in STOPPED state (current: <status>)"}
+{"detail": "Pipeline is not in a resumable state (current: <status>). Resume is available from STOPPED or HALTED_SILENT."}
 ```
 
-**UI usage:** Called by the StoppedRecoveryPanel immediately before `POST /api/command` when the operator clicks Resume, Reset Execution, or Reset Phase.
+**UI usage:** Called by the recovery panel (`StoppedRecoveryPanel`, reused for both `STOPPED` and `HALTED_SILENT` — with distinct "Intervention Required" copy for the latter) immediately before `POST /api/command` when the operator clicks Resume, Reset Execution, or Reset Phase. The header Resume button uses the same flow.
 
 #### `POST /api/resume-orchestrator`
 

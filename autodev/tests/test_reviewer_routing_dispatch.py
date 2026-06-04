@@ -14,7 +14,7 @@ executor between them).
 These tests pin:
 
 * Every verdict the gate can emit is handled explicitly (no fall-through).
-* An unknown verdict transitions to ``HALTED_SILENT`` rather than loop.
+* An unknown verdict routes to escalation rather than loop or silent halt.
 * ``ROUTE_EXECUTOR`` writes the reviewer's blocking-issue payload to
   ``failure_context.json`` so the next executor pass receives the
   context it needs to fix the issue.
@@ -140,38 +140,68 @@ def test_behavioral_unverified_emitted_by_gate_script():
 
 
 # ---------------------------------------------------------------------------
-# R9: unknown verdict → HALTED_SILENT (the safety property)
+# R9: unknown verdict → escalation (the recovery property, F10(b))
 # ---------------------------------------------------------------------------
 
 
-def test_unknown_verdict_transitions_to_halted_silent():
-    """Source-level guard: the orchestrator must reference HALTED_SILENT
-    in the reviewer-gate consumption block so an unrecognised verdict
-    transitions to a loud halt instead of falling through.
+def test_unknown_verdict_routes_to_escalation():
+    """Source-level guard: an unrecognised reviewer-gate verdict must route to
+    the escalation agent — the same idiom as the CONTRACT_FAILURE / *_UNVERIFIED
+    retry caps (``current_agent = "escalation"`` + ``transition_state("RUNNING",
+    …)`` + ``continue``) — rather than dead-ending at a silent ``HALTED_SILENT``.
 
-    We look for the literal token pair near the reviewer-gate verdict
-    chain.
+    Why this shape: a ``HALTED_SILENT`` dead-end is invisible to the operator
+    until they tail ``/tmp/orchestrator.log``; routing to escalation fires the
+    existing dispatch (advisory + Signal notification via the escalation agent +
+    a dashboard answer path). This catches a regression to the old silent halt
+    *and* a regression to the original silent fall-through (which left
+    ``current_agent == "reviewer"`` and looped).
+
+    We slice the reviewer-gate consumption window (from ``run_reviewer_output_gate()``
+    to the ``elif current_agent == "escalation"`` branch) and assert the
+    unknown-verdict path escalates and does NOT halt.
     """
-    # The verdict-handling block lives near `run_reviewer_output_gate()`
-    # call.  Slice ~3000 chars around it.
     idx = _ORCH_SRC.find("run_reviewer_output_gate()")
     assert idx != -1, "Could not locate reviewer-gate consumption block"
-    # Slice up to the next major branch (escalation agent block) — the
-    # reviewer-gate dispatch chain is large (~700 lines) due to CONTRACT_FAILURE
-    # and unverified branching, so a fixed character window is too narrow.
+    # The reviewer-gate dispatch chain is large (~700 lines) due to
+    # CONTRACT_FAILURE and unverified branching, so slice up to the next major
+    # branch (the escalation agent block) rather than a fixed character window.
     end = _ORCH_SRC.find('elif current_agent == "escalation"', idx)
     if end == -1:
         end = idx + 20000
     window = _ORCH_SRC[idx:end]
-    halt_pat = re.compile(
-        r"HALTED_SILENT[\s\S]{0,300}?(unknown|unrecognized|unrecognised)"
-        r"|((unknown|unrecognized|unrecognised)[\s\S]{0,300}?HALTED_SILENT)",
+    escalate_pat = re.compile(
+        r"(unknown|unrecognized|unrecognised)[\s\S]{0,400}?"
+        r'current_agent"\]\s*=\s*"escalation"'
+        r'|current_agent"\]\s*=\s*"escalation"[\s\S]{0,400}?'
+        r"(unknown|unrecognized|unrecognised)",
         re.IGNORECASE,
     )
-    assert halt_pat.search(window), (
-        "reviewer-gate consumption block must transition to HALTED_SILENT "
-        "for unknown/unrecognised verdicts so silent fall-through is "
-        "impossible"
+    assert escalate_pat.search(window), (
+        "the unknown/unrecognised reviewer-gate verdict must route to "
+        "escalation (set current_agent = 'escalation'), not dead-end"
+    )
+    # And no reviewer-gate verdict (the unknown one included) may transition to
+    # HALTED_SILENT — the silent dead-end is exactly what F10(b) removed. Match
+    # the actual transition_state("HALTED_SILENT", …) *call* (not a comment
+    # mention of the token), so an explanatory comment can still reference it.
+    halt_call_pat = re.compile(r'transition_state\(\s*"HALTED_SILENT"')
+    assert not halt_call_pat.search(window), (
+        "the reviewer-gate consumption block must no longer call "
+        'transition_state("HALTED_SILENT", …) — the unknown-verdict path now '
+        "routes to escalation (F10(b))"
+    )
+
+
+def test_verdict_diagnostic_default_matches_escalation_routing():
+    """The ``_rev_next`` verdict→next-agent DIAGNOSTIC table (feeds the
+    ``[REVIEWER_GATE]`` log + the ``reviewer_verdict`` event's ``next_agent``)
+    must default an unknown verdict to ``"escalation"``, matching the actual
+    F10(b) routing. A stale ``"halted"`` default would make the activity feed
+    report a halt that no longer happens."""
+    assert re.search(r"\}\.get\(gate_result,\s*\"escalation\"\)", _ORCH_SRC), (
+        'the verdict→next-agent diagnostic table must default to "escalation" '
+        '(not "halted") so the diagnostic matches the real routing (F10(b))'
     )
 
 
