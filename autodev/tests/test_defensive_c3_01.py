@@ -73,3 +73,35 @@ class TestC301WriteStateReRaise:
         assert state_file.exists()
         data = json.loads(state_file.read_text())
         assert data["pipeline_status"] == "RUNNING"
+
+
+class TestWriteStateMissingLastActionDefensive:
+    """write_state's success-path [INFO] log line must never raise on a missing key.
+
+    A pipeline_state.json hand-reset that follows the documented reset checklist
+    (pipeline_status / current_agent / current_phase / current_phase_raw_id) omits
+    `last_action`. The atomic write itself succeeds, so write_state must NOT raise:
+    the log line must tolerate the absent key rather than KeyError after os.replace
+    has already committed the file. Reproduces the live trigger-next spawn crash.
+    """
+
+    def test_write_state_missing_last_action_does_not_raise(self, orch):
+        inst, mod, tmp_path = orch
+        # Documented reset checklist, verbatim — no `last_action`.
+        inst.state = {
+            "pipeline_status": "IDLE",
+            "current_agent": "planner",
+            "current_phase": 0,
+            "current_phase_raw_id": "",
+        }
+        state_file = tmp_path / "pipeline_state.json"
+
+        inst.write_state()  # must NOT raise KeyError
+
+        assert state_file.exists()
+        data = json.loads(state_file.read_text())
+        assert data["pipeline_status"] == "IDLE"
+        assert data["current_agent"] == "planner"
+        # write_state stamps the timestamp it owns, but must NOT fabricate last_action.
+        assert "last_action_timestamp" in data
+        assert "last_action" not in data

@@ -8,6 +8,10 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Fixed
+
+- **`write_state()` no longer crashes on a documented minimal reset (missing `last_action`).** `Orchestrator.write_state()`'s success-path `[INFO]` log line indexed `self.state['last_action']` directly, *after* the atomic `os.replace` had already committed the write. A `pipeline_state.json` hand-reset following the documented checklist (`pipeline_status` / `current_agent` / `current_phase` / `current_phase_raw_id`) omits `last_action`, so the first `write_state()` on orchestrator spawn raised `KeyError: 'last_action'`; the `except` handler then logged a misleading `[ERROR] Failed to write state` and re-raised, crashing `trigger-next` on first spawn (hit live during an E2E smoke-test state reset). The log line now reads both keys via `.get()` so a log statement can never raise after the write has succeeded; the genuine write-failure path (`mkstemp` / `json.dump` / `os.replace`) is unchanged and still re-raises (the existing C3-01 re-raise tests stay green). *Changed:* `autodev/pipeline/orchestrator.py` (`write_state` log line + docstring). *Tests (TDD, red→green):* `autodev/tests/test_defensive_c3_01.py` — new `TestWriteStateMissingLastActionDefensive::test_write_state_missing_last_action_does_not_raise`. *Docs:* `CLAUDE.md` reset-protocol + reset-checklist notes.
+
 ### Changed
 
 - **Phase 5 state-enum & transition hardening (F5 / F12).** The state-machine audit's final, lowest-risk tranche — the `VALID_STATES` enum and its single writer are now internally consistent and fail loudly. Two fixes, TDD red→green:

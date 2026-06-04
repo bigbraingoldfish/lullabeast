@@ -1090,7 +1090,15 @@ class Orchestrator:
             self.write_state()
 
     def write_state(self):
-        """Atomically writes pipeline_state.json."""
+        """Atomically writes pipeline_state.json (mkstemp + os.replace).
+
+        Stamps `last_action_timestamp` itself; `last_action` is set by the caller
+        (`transition_state()` / init paths) and may be absent on a minimal manual
+        reset, so the post-write `[INFO]` log line reads both fields via `.get()` —
+        a log statement must never raise after the atomic rename has committed the
+        write. Genuine write failures (mkstemp / json.dump / os.replace) still
+        propagate via `except … raise`.
+        """
         self.state["last_action_timestamp"] = datetime.now(timezone.utc).isoformat()
         
         # Write to temp file then atomic rename
@@ -1100,7 +1108,7 @@ class Orchestrator:
             with os.fdopen(fd, 'w') as f:
                 json.dump(self.state, f, indent=2)
             os.replace(temp_path, STATE_FILE)
-            print(f"[INFO] Atomically updated state: {self.state['pipeline_status']} - {self.state['last_action']}")
+            print(f"[INFO] Atomically updated state: {self.state.get('pipeline_status', '?')} - {self.state.get('last_action', '')}")
         except Exception as e:
             print(f"[ERROR] Failed to write state: {e}")
             if os.path.exists(temp_path):
