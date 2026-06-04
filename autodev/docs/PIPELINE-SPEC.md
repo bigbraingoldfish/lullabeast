@@ -896,12 +896,12 @@ ELSE                                             → proceed to validation check
 reviewer_artifacts_retries += 1
 IF reviewer_artifacts_retries >= 2  → escalation agent
 ELSE:
-    set artifact_instruction in phase_state.json
+    set executor_retry_directive in phase_state.json
     reset executor_retries to 0
-    re-invoke executor with artifact-creation instruction
+    re-invoke executor (directive delivered as webhook message= by _invoke_executor)
 ```
 
-`reviewer_artifacts_retries` is a separate counter that does NOT consume `reviewer_retries`. It is preserved across `reset_execution()` and only zeroed by `reset_phase()`. The `artifact_instruction` in `phase_state.json` tells the executor it must write the phase archive and metrics row before its sentinel.
+`reviewer_artifacts_retries` is a separate counter that does NOT consume `reviewer_retries`. It is preserved across `reset_execution()` and only zeroed by `reset_phase()`. The one-shot `executor_retry_directive` in `phase_state.json` is **delivered to the re-invoked executor as the webhook `message=`** by `_invoke_executor` (which clears it after delivery, so it is one-shot) — the executor-side counterpart of the reviewer's `reviewer_retry_directive`. It is self-contained: because delivering `message=` replaces the executor's default prompt, the directive re-asserts that the prior implementation is preserved on the branch (do not re-implement) and instructs the executor to write the phase archive and metrics row before its sentinel.
 
 **Validation checks (in order):**
 ```

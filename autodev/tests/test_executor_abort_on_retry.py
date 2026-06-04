@@ -25,13 +25,18 @@ class TestExecutorAbortOnRetry:
         ), "orchestrator.py must import abort_agent_session from webhook_client"
 
     def test_abort_called_before_invoke_when_retries_gt_zero(self):
-        """abort_agent_session must appear before executor invoke_agent_webhook and be guarded."""
+        """abort_agent_session must appear before the executor invoke and be guarded.
+
+        The executor is invoked via ``self._invoke_executor(...)`` (which delivers
+        any one-shot ``executor_retry_directive`` as the webhook message); the
+        retry-start abort must still run before it when ``retries > 0``.
+        """
         src = open(
             os.path.join(PIPELINE_DIR, "orchestrator.py"), encoding="utf-8"
         ).read()
         pattern = (
             r"if retries > 0:.*?abort_agent_session\(.*?"
-            r"webhook_status = invoke_agent_webhook\(\s*\"executor\""
+            r"webhook_status = self\._invoke_executor\("
         )
         assert re.search(
             pattern, src, re.DOTALL
