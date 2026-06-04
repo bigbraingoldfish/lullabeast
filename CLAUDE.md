@@ -235,7 +235,7 @@ def transition_state(self, new_status, action_description):
 
 ### State reset protocol
 
-When resetting `pipeline_state.json` to `IDLE` for a fresh run, set `pipeline_status` to `"IDLE"`. Also set `current_agent` to `"planner"` and `current_phase` to `0`. If `current_agent` is `null`, the orchestrator exits immediately with `"Agent None logic not reached"`.
+When resetting `pipeline_state.json` to `IDLE` for a fresh run, set `pipeline_status` to `"IDLE"`. Also set `current_agent` to `"planner"` and `current_phase` to `0`. If `current_agent` is `null`, the orchestrator exits immediately with `"Agent None logic not reached"`. `last_action` / `last_action_timestamp` need not be set: `write_state()` stamps the timestamp itself and its `[INFO]` log line tolerates a missing `last_action` (the first `transition_state()` after reset sets it), so the four fields above suffice.
 
 **F5 — `IDLE` is external-only and deliberately absent from `VALID_STATES`.** It is a reset/entry status written **only** by external resetters (the UI / tooling) via a direct atomic write to `pipeline_state.json` — it is **never** a `transition_state()` target (which now raises on any status outside `VALID_STATES`, see above). There is no explicit `IDLE → RUNNING` resolution at startup: the orchestrator treats `IDLE` as non-terminal, and the first real `transition_state` (typically `"Invoking Planner"` → `WAITING_FOR_SENTINEL`) overwrites it. The `VALID_STATES` list in `orchestrator.py` carries a matching code comment so the exclusion reads as deliberate.
 
@@ -570,6 +570,8 @@ When resetting for a fresh run, all of these must be set:
 ```
 
 Also delete all pipeline metadata files in the project directory: `*.done`, `current_phase.json`, `planner_output.json`, `executor_output.json`, `reviewer_output.json`, `failure_context.json`, any `phase_state_????????` temp files. Delete old phase branches (`phase/N`) for a clean re-run.
+
+**Note:** `last_action` / `last_action_timestamp` are intentionally **not** in this checklist. `write_state()` stamps `last_action_timestamp` and reads `last_action` defensively (`.get()`), so a minimal reset with only the four fields above will not crash the first `write_state()` on spawn; the first `transition_state()` populates `last_action`.
 
 ### Atomic write rule for all output files
 
