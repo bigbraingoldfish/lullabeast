@@ -30,15 +30,18 @@ def test_write_run_manifest_helper_defined():
     )
 
 
-def test_run_manifest_written_after_queue_write():
-    """_write_run_manifest must be called after _write_queue inside _select_next_queue_project."""
+def test_run_manifest_written_after_queue_active_commit():
+    """_write_run_manifest must be called after the ACTIVE commit inside
+    _select_next_queue_project. F9 routed that commit through the version-CAS helper
+    (``_mutate_queue(_activate)``) instead of a bare ``_write_queue``; the ordering invariant
+    (manifest reflects a committed queue entry) is unchanged."""
     lines = _SRC.splitlines()
-    write_queue_lines = [i for i, l in enumerate(lines, 1) if "_write_queue(queue_data)" in l]
-    assert write_queue_lines, "_write_queue(queue_data) call not found in orchestrator"
+    commit_lines = [i for i, l in enumerate(lines, 1) if "_mutate_queue(_activate)" in l]
+    assert commit_lines, "ACTIVE-commit '_mutate_queue(_activate)' call not found in orchestrator"
     write_manifest_lines = [i for i, l in enumerate(lines, 1) if "_write_run_manifest(" in l]
     assert write_manifest_lines, "_write_run_manifest call not found in orchestrator"
-    assert any(m > q for m in write_manifest_lines for q in write_queue_lines), (
-        "_write_run_manifest must be called after _write_queue(queue_data) — "
+    assert any(m > c for m in write_manifest_lines for c in commit_lines), (
+        "_write_run_manifest must be called after the ACTIVE commit — "
         "it should write the manifest after the queue entry is committed."
     )
 
