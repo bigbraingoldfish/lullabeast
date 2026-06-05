@@ -4,7 +4,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _THIS_DIR not in sys.path:
@@ -128,6 +128,7 @@ def poll_for_sentinel(
     stall_threshold_seconds: int | None = None,
     startup_grace_seconds: int | None = None,
     heartbeat_interval_seconds: float | None = None,
+    sentinel_acceptor: Optional[Callable[[], bool]] = None,
 ) -> PollResult:
     """Poll for a sentinel file using a time.sleep loop, strictly avoiding inotify.
 
@@ -211,6 +212,18 @@ def poll_for_sentinel(
         hung orchestrator from a healthy long wait at a glance.  When
         ``None`` (default), no heartbeats fire — preserves existing
         silence for callers that have not opted in.
+    sentinel_acceptor:
+        Optional zero-arg predicate consulted **only** when a fresh ``.done``
+        is observed (after the ``min_sentinel_mtime`` staleness guard).  When
+        it returns ``True`` (or is ``None``) the sentinel is accepted and the
+        poll returns ``PollResult(True, "succeeded")`` — the default, unchanged
+        behaviour.  When it returns ``False`` the sentinel is **held**: the
+        ``.done`` exists but the caller has judged it not yet authoritative
+        (e.g. written by a context-overflow turn the gateway will
+        compact-and-resume), so polling continues until the predicate accepts,
+        the activity stamp goes silent (``stalled`` / ``no_first_activity``), or
+        ``timeout_seconds`` fires.  A predicate that raises is treated as
+        ``True`` (fail-open) so a buggy acceptor can never hang the poll.
 
     Returns
     -------
@@ -319,6 +332,29 @@ def poll_for_sentinel(
                         continue
                 except OSError:
                     pass
+            if sentinel_acceptor is not None:
+                try:
+                    _accepted = sentinel_acceptor()
+                except Exception as _acc_err:
+                    # The acceptor must never break the poll.  On any error,
+                    # fail open: accept the sentinel rather than risk a hang.
+                    print(
+                        f"[POLL][SENTINEL_ACCEPTOR_ERROR] {_acc_err!r} — "
+                        "accepting sentinel."
+                    )
+                    _accepted = True
+                if not _accepted:
+                    # Predicate-backed hold: the ``.done`` exists but the caller
+                    # has judged it not yet authoritative (e.g. written by a
+                    # context-overflow turn the gateway will compact-and-resume).
+                    # Keep waiting — the stall / startup-grace / backstop bounds
+                    # above still apply, so a held sentinel can never hang forever.
+                    print(
+                        "[POLL][SENTINEL_HELD] .done present but acceptor deferred "
+                        "it (agent mid context-overflow recovery); continuing to wait."
+                    )
+                    time.sleep(2)
+                    continue
             return PollResult(True, "succeeded", _last_stamp_mtime)
         time.sleep(2)
 

@@ -486,6 +486,86 @@ def _is_provider_rejected_error(msg: str) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Layer 2 — context-overflow discarded-verdict race.
+#
+# An agent turn can die mid-tool-loop with stopReason="error" and a
+# "Context overflow: estimated context size exceeds safe threshold during tool
+# loop." errorMessage.  The autodev-pipeline-signals plugin's agent_end backstop
+# writes the {agent}_output.done sentinel UNCONDITIONALLY, so poll_for_sentinel
+# would return "succeeded" and the gate would read a missing verdict
+# (CONTRACT_FAILURE / ERR_FILE_MISSING) and escalate.  But OpenClaw then
+# auto-compacts and RESUMES the same session, which writes a valid verdict
+# seconds-to-minutes later (observed live: escalated 14:40:00, valid PASS landed
+# 14:43:13).  The acceptor below HOLDS such a sentinel until the real verdict
+# lands (or the session genuinely stalls / a hold budget is exhausted), so a
+# recovered verdict is no longer discarded.  Every NON-overflow termination is
+# accepted immediately, so the common path is byte-identical to before.
+# ---------------------------------------------------------------------------
+
+# Lowercase substrings of the OpenClaw context-overflow errorMessage.  Coupled to
+# the gateway's wording — guarded by test_is_recoverable_context_overflow_matches.
+_OVERFLOW_HOLD_SIGNATURES = ("context overflow", "context size exceeds")
+
+
+def _resolve_overflow_hold_budget() -> int:
+    """Wall-clock ceiling (seconds) on a single overflow hold, independent of the
+    75-min infra backstop.  Override via env ``AUTODEV_OVERFLOW_HOLD_BUDGET``."""
+    v = (os.environ.get("AUTODEV_OVERFLOW_HOLD_BUDGET") or "").strip()
+    try:
+        return int(v) if v else 900
+    except ValueError:
+        return 900
+
+
+_OVERFLOW_HOLD_BUDGET_SECONDS = _resolve_overflow_hold_budget()
+
+
+def _is_recoverable_context_overflow(msg) -> bool:
+    """True if ``msg`` is the OpenClaw context-overflow error the gateway recovers
+    from via compaction + resume (so the verdict is still coming).
+
+    Distinct from :func:`_is_provider_rejected_error`: a provider/quota rejection
+    is terminal (escalate), whereas a context overflow is recoverable (hold)."""
+    if not msg:
+        return False
+    lower = str(msg).lower()
+    return any(sig in lower for sig in _OVERFLOW_HOLD_SIGNATURES)
+
+
+def _resolve_session_jsonl_path(agent_role: str, session_key: str):
+    """Resolve the OpenClaw session JSONL for ``agent_role`` + ``session_key``
+    (sessions.json → sessionId → ``{sid}.jsonl``), or ``None`` if unresolvable.
+
+    The overflow-aware acceptor needs this fresh on each poll tick while the
+    session is still being written (the three post-poll sites inline an
+    equivalent resolution — see the dedup callout in the Layer-2 plan)."""
+    sdir = os.path.join(OPENCLAW_ROOT, "agents", agent_role, "sessions")
+    full_key = f"agent:{agent_role}:{session_key}".lower()
+    try:
+        with open(os.path.join(sdir, "sessions.json")) as f:
+            sid = json.load(f).get(full_key, {}).get("sessionId")
+    except (OSError, ValueError):
+        return None
+    if not sid:
+        return None
+    return os.path.join(sdir, f"{sid}.jsonl")
+
+
+def _verdict_is_fresh_and_parseable(verdict_path: str, min_mtime: float) -> bool:
+    """True if ``verdict_path`` exists, was written at or after ``min_mtime``
+    (i.e. by the current attempt — not a stale prior-phase artifact), and parses
+    as JSON.  Lets the acceptor accept a real verdict the instant it lands."""
+    try:
+        if os.path.getmtime(verdict_path) < min_mtime:
+            return False
+        with open(verdict_path) as f:
+            json.load(f)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def _sum_session_tokens(jsonl_path) -> dict:
     """W1-G: Sum token usage from an OpenClaw session JSONL file.
 
@@ -702,6 +782,12 @@ def _run_completion_review(orchestrator, project_basename: str) -> None:
         )
 
         _stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
+        # No sentinel_acceptor here (Layer 2): this is the optional, non-fatal
+        # completion-review poll. It produces completion_report.md (not a phase
+        # verdict), the except below already shrugs off a missing report, and it
+        # carries no stall stamp — so a context-overflow hold would have nothing
+        # to recover and no stall bound. The overflow-aware hold is wired only at
+        # the three phase-agent poll sites (planner/executor/reviewer).
         sentinel_found = poll_for_sentinel(
             sentinel_path=sentinel_path,
             timeout_seconds=300,  # infrastructure-failure backstop only; agent_end fires immediately on session close
@@ -2574,6 +2660,66 @@ class Orchestrator:
 
         self._record_phase_outcome(last_abort_result="ok")
         return True
+
+    def _make_overflow_aware_acceptor(
+        self, agent_role: str, session_key: str, attempt_start_time: float
+    ):
+        """Return a ``poll_for_sentinel`` ``sentinel_acceptor`` predicate that HOLDS
+        a ``.done`` written by a recoverable context-overflow turn until the
+        resumed session's real verdict lands (Layer 2 — see the module-level
+        ``_is_recoverable_context_overflow`` cluster for the full rationale).
+
+        The returned zero-arg predicate is consulted only while ``.done`` exists.
+        It returns:
+
+        * ``True`` immediately if a fresh, parseable ``{role}_output.json`` is
+          already present — never discard a verdict the resumed turn produced;
+        * ``True`` if the hold budget (``_OVERFLOW_HOLD_BUDGET_SECONDS``) is spent —
+          stop holding and let the gate adjudicate the still-missing verdict;
+        * ``False`` (HOLD) when there is no fresh verdict AND the session's last
+          assistant row is a recoverable context-overflow error — emitting one
+          ``sentinel_overflow_hold`` event per hold episode;
+        * ``True`` otherwise (a genuine non-overflow end → gate → the existing
+          CONTRACT_FAILURE / FAIL path is preserved).
+
+        Every non-overflow situation returns ``True``, so the common poll path is
+        unchanged.  Bounded by the poll's own stall / startup-grace / backstop
+        timers plus the hold budget, so a held sentinel can never hang the poll.
+        """
+        verdict_path = os.path.join(PROJECT_ARTIFACTS_DIR, f"{agent_role}_output.json")
+        phase_raw_id = (getattr(self, "state", {}) or {}).get("current_phase_raw_id", "")
+        emitted = {"hold": False}
+
+        def _acceptor() -> bool:
+            # 1. A real verdict already landed (the resumed turn won the race).
+            if _verdict_is_fresh_and_parseable(verdict_path, attempt_start_time):
+                return True
+            # 2. Hold budget exhausted — stop waiting; the gate decides.
+            if time.time() - attempt_start_time > _OVERFLOW_HOLD_BUDGET_SECONDS:
+                return True
+            # 3. Recoverable overflow with no verdict yet → HOLD and keep waiting.
+            err = _session_jsonl_last_assistant_error_message(
+                _resolve_session_jsonl_path(agent_role, session_key)
+            )
+            if _is_recoverable_context_overflow(err):
+                if not emitted["hold"]:
+                    emitted["hold"] = True
+                    _write_pipeline_event(
+                        "sentinel_overflow_hold",
+                        phase_raw_id,
+                        agent_role,
+                        {
+                            "agent_role": agent_role,
+                            "session_key": session_key,
+                            "error_excerpt": str(err)[:200],
+                            "elapsed_s": int(time.time() - attempt_start_time),
+                        },
+                    )
+                return False
+            # 4. Genuine non-overflow end → accept (gate handles it as today).
+            return True
+
+        return _acceptor
 
     def _escalate_if_provider_rejected(self, jsonl_path: str | None, role_label: str) -> bool:
         """If the session JSONL ends with a provider-rejection error (billing, rate-limit, or auth),
@@ -5003,6 +5149,9 @@ class Orchestrator:
                         stall_threshold_seconds=_planner_stall,
                         startup_grace_seconds=_planner_grace,
                         heartbeat_interval_seconds=60,
+                        sentinel_acceptor=self._make_overflow_aware_acceptor(
+                            "planner", session_key, _attempt_start_time
+                        ),
                     )
                     _planner_attempt_reason = getattr(sentinel_found, "reason", "unknown")
                     _planner_attempt_duration = int(time.time() - _attempt_start_time)
@@ -5379,6 +5528,9 @@ class Orchestrator:
                         stall_threshold_seconds=_executor_stall,
                         startup_grace_seconds=_executor_grace,
                         heartbeat_interval_seconds=60,
+                        sentinel_acceptor=self._make_overflow_aware_acceptor(
+                            "executor", session_key, _attempt_start_time
+                        ),
                     )
                     _executor_attempt_reason = getattr(sentinel_found, "reason", "unknown")
                     _executor_attempt_duration = int(time.time() - _attempt_start_time)
@@ -5650,6 +5802,9 @@ class Orchestrator:
                             stall_threshold_seconds=_reviewer_stall,
                             startup_grace_seconds=_reviewer_grace,
                             heartbeat_interval_seconds=60,
+                            sentinel_acceptor=self._make_overflow_aware_acceptor(
+                                "reviewer", session_key, _attempt_start_time
+                            ),
                         )
                         _reviewer_attempt_reason = getattr(sentinel_found, "reason", "unknown")
                         _reviewer_attempt_duration = int(time.time() - _attempt_start_time)
