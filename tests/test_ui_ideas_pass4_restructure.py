@@ -93,7 +93,8 @@ def test_sidebar_uses_header_chevron_toggle():
     assert "setSidebarCollapsed" in nav_body
     assert "Expand sidebar" in nav_body
     assert "‹" in nav_body
-    assert '>l</span><span className="text-accent">b</span>' in nav_body
+    # Collapsed sidebar shows the Lullabeast mascot mark (replaced the old "lb" text).
+    assert "/static/img/lullabeast_tilted.svg" in nav_body
     assert "side-divider-btn" not in content
 
 

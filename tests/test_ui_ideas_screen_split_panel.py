@@ -120,8 +120,15 @@ class TestIdeasScreenSplitPanel:
         func_body = extract_function_body(content, "IdeasScreen")
         assert func_body is not None
 
-        assert func_body.count("flex flex-col min-w-0 bg-[#15121f]") >= 2, \
+        # Both panes share the flex-col structure. Lullabeast: the conversation pane
+        # is transparent so the app gradient shows behind the message bubbles; the
+        # PRD/doc pane keeps its opaque panel surface.
+        assert func_body.count("flex flex-col min-w-0") >= 2, \
             "Conversation and PRD columns should use matching flex-col panels"
+        assert "flex flex-col min-w-0 bg-transparent" in func_body, \
+            "Conversation pane should be transparent (gradient shows through the bubbles)"
+        assert "flex flex-col min-w-0 bg-[#15121f]" in func_body, \
+            "PRD/doc pane should keep its opaque panel surface"
 
     def test_no_javascript_syntax_errors(self):
         """IdeasScreen function has balanced braces and parentheses."""
