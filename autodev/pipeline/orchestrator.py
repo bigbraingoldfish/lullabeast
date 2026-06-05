@@ -731,6 +731,22 @@ def _write_run_manifest(entry: dict) -> None:
         print(f"[W2A] run_manifest write failed (non-fatal): {_e}")
 
 
+def webhook_failure_reason(webhook_status: str) -> str:
+    """Map a non-SUCCESS ``invoke_agent_webhook`` return token to an operator-facing
+    failure reason for the activity feed / ``last_action``.
+
+    The three classes are distinguished so the operator sees an honest diagnosis:
+    ``AUTH_ERROR`` (bad bearer token), ``REQUEST_ERROR`` (a deterministic 4xx —
+    renamed agentId / bad payload shape, which retrying cannot fix), and everything
+    else (``INFRA_ERROR`` or an unknown token) as a transient infra failure.
+    """
+    if webhook_status == "AUTH_ERROR":
+        return "Auth Config Error"
+    if webhook_status == "REQUEST_ERROR":
+        return "Webhook request/config error"
+    return "Webhook infra failure"
+
+
 def _run_completion_review(orchestrator, project_basename: str) -> None:
     """W5-B: Run the completion reviewer as a best-effort post-pipeline documentation pass.
 
@@ -779,6 +795,7 @@ def _run_completion_review(orchestrator, project_basename: str) -> None:
             session_key,
             token,
             message=_completion_message,
+            url=orchestrator.openclaw_config.get("hooks_url"),
         )
 
         _stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
@@ -2793,7 +2810,8 @@ class Orchestrator:
         except Exception:
             directive = None
         return invoke_agent_webhook(
-            "reviewer", session_key, token, message=directive or None
+            "reviewer", session_key, token, message=directive or None,
+            url=self.openclaw_config.get("hooks_url"),
         )
 
     def _invoke_executor(self, session_key, token):
@@ -2824,7 +2842,8 @@ class Orchestrator:
         except Exception:
             directive = None
         return invoke_agent_webhook(
-            "executor", session_key, token, message=directive or None
+            "executor", session_key, token, message=directive or None,
+            url=self.openclaw_config.get("hooks_url"),
         )
 
     # -----------------------------------------------------------------------
@@ -3212,10 +3231,13 @@ class Orchestrator:
     def send_signal_notification(self, message):
         """Send a raw Signal notification via the OpenClaw gateway."""
         token = self.openclaw_config.get("hooks", {}).get("token", "")
+        url = self.openclaw_config.get("hooks_url") or "http://localhost:18789/hooks/agent"
         payload = {"channel": "signal", "message": message}
         try:
             headers = {"Authorization": f"Bearer {token}"}
-            r = requests.post("http://localhost:18789/hooks/agent", json=payload, headers=headers)
+            # timeout bounds the call so it can never hang the orchestrator while it
+            # holds pipeline.lock (heartbeat-cron could not then restart it).
+            r = requests.post(url, json=payload, headers=headers, timeout=15)
             r.raise_for_status()
             print(f"[INFO] Signal notification sent: {message[:80]}")
         except Exception as e:
@@ -4979,7 +5001,8 @@ class Orchestrator:
                     f"the dashboard."
                 ) if _advisory else None
                 webhook_status = invoke_agent_webhook(
-                    "escalation", session_key, token, message=_ri_webhook_msg
+                    "escalation", session_key, token, message=_ri_webhook_msg,
+                    url=self.openclaw_config.get("hooks_url"),
                 )
                 if webhook_status != "SUCCESS":
                     print("[ERROR] Escalation webhook failed after repo init failure.")
@@ -5104,11 +5127,14 @@ class Orchestrator:
 
                     self.state["sentinel_wait_started_at"] = datetime.now(timezone.utc).isoformat()
                     self.transition_state("WAITING_FOR_SENTINEL", "Invoking Planner via webhook")
-                    webhook_status = invoke_agent_webhook("planner", session_key, token)
+                    webhook_status = invoke_agent_webhook(
+                        "planner", session_key, token,
+                        url=self.openclaw_config.get("hooks_url"),
+                    )
 
                     if webhook_status != "SUCCESS":
                         self.state["current_agent"] = "escalation"
-                        error_reason = "Auth Config Error" if webhook_status == "AUTH_ERROR" else "Webhook infra failure"
+                        error_reason = webhook_failure_reason(webhook_status)
                         self.transition_state("RUNNING", error_reason)
                         time.sleep(5)
                         continue
@@ -6586,7 +6612,8 @@ class Orchestrator:
                         else:
                             _webhook_msg = None  # falls through to default in webhook_client.py
                         webhook_status = invoke_agent_webhook(
-                            "escalation", session_key, token, message=_webhook_msg
+                            "escalation", session_key, token, message=_webhook_msg,
+                            url=self.openclaw_config.get("hooks_url"),
                         )
 
                         if webhook_status != "SUCCESS":
@@ -6597,7 +6624,13 @@ class Orchestrator:
                             }
                             try:
                                 headers = {"Authorization": f"Bearer {token}"}
-                                r = requests.post("http://localhost:18789/hooks/agent", json=raw_payload, headers=headers)
+                                _raw_url = self.openclaw_config.get("hooks_url") or "http://localhost:18789/hooks/agent"
+                                # timeout: the structured webhook just failed, so the
+                                # gateway is reachable-but-degraded — exactly the case
+                                # where it accepts the socket and never replies. An
+                                # unbounded block would freeze the orchestrator with
+                                # pipeline.lock held.
+                                r = requests.post(_raw_url, json=raw_payload, headers=headers, timeout=15)
                                 r.raise_for_status()
                             except Exception as e:
                                 print(f"[ERROR] Raw signal failed: {e}")
@@ -6786,7 +6819,10 @@ class Orchestrator:
                 raw_id = self.state.get("current_phase_raw_id", "unknown")
                 session_key = f"pipeline:phase-{phase}:{raw_id}:exception-escalation"
                 token = self.openclaw_config.get("hooks", {}).get("token", "")
-                webhook_status = invoke_agent_webhook("escalation", session_key, token)
+                webhook_status = invoke_agent_webhook(
+                    "escalation", session_key, token,
+                    url=self.openclaw_config.get("hooks_url"),
+                )
                 if webhook_status == "SUCCESS":
                     _ps = self.read_phase_state()
                     _ps["escalation_trigger_reason"] = f"Escalated after unhandled exception: {exc_description}"

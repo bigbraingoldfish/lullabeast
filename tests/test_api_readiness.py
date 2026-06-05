@@ -107,7 +107,8 @@ class TestReadinessPoll:
 
         r = client.get(f"/api/ideas/{iid}/readiness/poll")
         assert r.status_code == 200
-        assert r.json() == {"done": False}
+        # T2.6 added an additive `error` terminal flag alongside `done`.
+        assert r.json() == {"done": False, "error": False}
 
     def test_poll_true_with_sentinel(self, tmp_path, monkeypatch):
         client, ideas_dir = _client(tmp_path, monkeypatch)
@@ -118,7 +119,7 @@ class TestReadinessPoll:
 
         r = client.get(f"/api/ideas/{iid}/readiness/poll")
         assert r.status_code == 200
-        assert r.json() == {"done": True}
+        assert r.json() == {"done": True, "error": False}
 
 
 class TestTriggerReadinessAssessment:

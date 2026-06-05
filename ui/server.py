@@ -3533,6 +3533,12 @@ IDEAS_LATE_DONE_MTIME_SLACK_SEC: float = 2.0
 
 IDEAS_WEBHOOK_POST_TIMEOUT = aiohttp.ClientTimeout(total=120)
 
+# Bound the fire-and-return gateway POST for the convert / clarity-check /
+# fix-roadmap-format flows. These only need to *enqueue* the agent task; the long
+# wait belongs to the subsequent idle-detection poll, not the POST. Without a
+# timeout a reachable-but-degraded gateway could hang the request indefinitely.
+IDEAS_GATEWAY_POST_TIMEOUT = aiohttp.ClientTimeout(total=30)
+
 IDEAS_ATTACHMENT_MAX_BYTES = 10_000_000
 
 
@@ -3676,13 +3682,20 @@ def _rollback_last_turn_pair(session_path: os.PathLike | str) -> None:
 
 
 async def _post_agent_webhook(hooks_url: str, hooks_token: str, webhook_payload: dict) -> None:
-    """POST to OpenClaw agent hook. Raises HTTPException 503 on connect/timeout, 502 on non-2xx."""
+    """POST to OpenClaw agent hook. Raises HTTPException 503 on any aiohttp client
+    error (connect failure, server timeout, or a body truncated mid-stream —
+    ``ClientPayloadError``) or an asyncio timeout, and 502 on a non-2xx response.
+
+    ``aiohttp.ClientError`` is the superclass of ``ClientConnectionError``,
+    ``ServerTimeoutError`` and ``ClientPayloadError``, so catching it keeps a
+    truncated-response error (gateway dies after headers) from escaping as an
+    uncaught 500 that strands the "Working on your request…" placeholder."""
     headers = {"Authorization": f"Bearer {hooks_token}"}
     try:
         async with aiohttp.ClientSession(timeout=IDEAS_WEBHOOK_POST_TIMEOUT) as session:
             resp = await session.post(hooks_url, json=webhook_payload, headers=headers)
             await resp.read()
-    except (aiohttp.ClientConnectionError, aiohttp.ServerTimeoutError, asyncio.TimeoutError) as exc:
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
         raise HTTPException(
             status_code=503,
             detail=f"Webhook connection failed: {exc}",
@@ -4582,6 +4595,9 @@ async def _trigger_readiness_assessment(idea_id: str, config: dict) -> None:
         ideas_dir = Path(config.get("ideas_dir") or "")
         sentinel = ideas_dir / idea_id / "readiness.done"
         sentinel.unlink(missing_ok=True)
+        # Clear a stale error artifact from a prior failed run so it cannot shadow
+        # this fresh attempt's in-progress / success state.
+        (ideas_dir / idea_id / "readiness_error.json").unlink(missing_ok=True)
         hooks_url = config.get("hooks_url", "http://localhost:18789/hooks/agent")
         hooks_token = config.get("hooks_token", "")
         ip = _idea_paths_for_messages(config, idea_id)
@@ -4620,6 +4636,18 @@ async def _trigger_readiness_assessment(idea_id: str, config: dict) -> None:
             logger.warning(f"[READINESS] Assessment timed out for {idea_id}")
         else:
             logger.error(f"[READINESS] Webhook failed for {idea_id}: {exc}")
+        # Mirror the HTTP>=400 branch on a connection-level failure so the readiness
+        # panel can distinguish "assessment infra unavailable" from "no assessment
+        # yet" / "PRD not ready". Without this, a gateway-down readiness run (auto-
+        # fired every chat turn) only logs and GET /readiness reads as "unavailable".
+        try:
+            error_path = ideas_dir / idea_id / "readiness_error.json"
+            _atomic_write_json_file(
+                str(error_path),
+                {"error": f"webhook connection failed: {exc}", "idea_id": idea_id},
+            )
+        except Exception as werr:
+            logger.error(f"[READINESS] Failed to write readiness_error.json for {idea_id}: {werr}")
     finally:
         _active_readiness_jobs.discard(idea_id)
 
@@ -5396,7 +5424,10 @@ async def post_ideas_clarity_check(idea_id: str):
     _attempt_start_wall = time.time()
     headers = {"Authorization": f"Bearer {hooks_token}"}
     async with aiohttp.ClientSession() as session:
-        resp = await session.post(hooks_url, json=webhook_payload, headers=headers)
+        resp = await session.post(
+            hooks_url, json=webhook_payload, headers=headers,
+            timeout=IDEAS_GATEWAY_POST_TIMEOUT,
+        )
         if resp.status >= 400:
             raise HTTPException(status_code=502, detail=f"Webhook returned {resp.status}")
 
@@ -5479,6 +5510,19 @@ def get_idea_readiness(idea_id: str):
         logger.debug(f"[READINESS] Status for {idea_id}: {status}")
         return {"status": status, "data": data}
 
+    # No success sentinel — if the last run failed at the infra level it left a
+    # readiness_error.json (T2.6). A fresh run clears that file first, so its
+    # presence here means the most recent attempt failed and is done; surface a
+    # distinct "error" state so the UI can say "assessment infra unavailable"
+    # rather than the ambiguous "unavailable".
+    error_path = idea_dir / "readiness_error.json"
+    if error_path.exists():
+        _active_readiness_jobs.discard(idea_id)
+        _readiness_job_started_at.pop(idea_id, None)
+        err = _read_json_file(str(error_path)) or {}
+        logger.debug(f"[READINESS] Status for {idea_id}: error")
+        return {"status": "error", "data": None, "error": err.get("error")}
+
     if idea_id in _active_readiness_jobs:
         status = "updating"
         logger.debug(f"[READINESS] Status for {idea_id}: {status}")
@@ -5501,13 +5545,21 @@ def get_idea_readiness(idea_id: str):
 
 @app.get("/api/ideas/{idea_id}/readiness/poll")
 def poll_readiness_done(idea_id: str):
-    """Lightweight poll for readiness.done sentinel."""
+    """Lightweight poll for readiness.done sentinel.
+
+    Also reports ``error: True`` when the run failed at the infra level
+    (``readiness_error.json`` present, T2.6) so the frontend treats it as a
+    terminal outcome — stop polling and fetch ``GET /readiness`` for the error
+    status — exactly as it does on ``done``."""
     config = load_config()
     ideas_dir = Path(config.get("ideas_dir") or "")
     idea_dir = ideas_dir / idea_id
     if not idea_dir.exists():
         raise HTTPException(status_code=404, detail="Idea not found")
-    return {"done": (idea_dir / "readiness.done").exists()}
+    return {
+        "done": (idea_dir / "readiness.done").exists(),
+        "error": (idea_dir / "readiness_error.json").exists(),
+    }
 
 
 @app.post("/api/ideas/{idea_id}/convert")
@@ -5577,7 +5629,10 @@ async def post_ideas_convert(idea_id: str):
     _attempt_start_wall = time.time()
     headers = {"Authorization": f"Bearer {hooks_token}"}
     async with aiohttp.ClientSession() as session:
-        resp = await session.post(hooks_url, json=webhook_payload, headers=headers)
+        resp = await session.post(
+            hooks_url, json=webhook_payload, headers=headers,
+            timeout=IDEAS_GATEWAY_POST_TIMEOUT,
+        )
         if resp.status >= 400:
             raise HTTPException(status_code=502, detail=f"Webhook returned {resp.status}")
 
@@ -5733,7 +5788,10 @@ async def post_ideas_fix_roadmap_format(idea_id: str, body: FixRoadmapFormatRequ
     _attempt_start_wall = time.time()
     headers = {"Authorization": f"Bearer {hooks_token}"}
     async with aiohttp.ClientSession() as session:
-        resp = await session.post(hooks_url, json=webhook_payload, headers=headers)
+        resp = await session.post(
+            hooks_url, json=webhook_payload, headers=headers,
+            timeout=IDEAS_GATEWAY_POST_TIMEOUT,
+        )
         if resp.status >= 400:
             raise HTTPException(status_code=502, detail=f"Webhook returned {resp.status}")
 
