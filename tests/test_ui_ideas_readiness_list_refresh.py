@@ -13,11 +13,14 @@ def test_readiness_poll_completion_refreshes_ideas_list():
     html = load_index_html()
     assert re.search(r"function IdeasScreen\s*\(\)\s*\{", html), "IdeasScreen not found"
 
-    # Block: poll done → fetch readiness JSON → state updates → refreshIdeas for list badge
+    # Block: poll done (or error — T2.6 terminal flag) → fetch readiness JSON →
+    # state updates → refreshIdeas for list badge. The guard may carry an extra
+    # `|| p.error` terminal condition; assert on `p.done` without anchoring the
+    # closing paren so the wiring check survives that additive change.
     # (raw string uses single quotes so template-literal backticks in the HTML do not break the pattern.)
     assert re.search(
         r"readiness/poll[\s\S]{0,2000}?"
-        r"if\s*\(\s*p\.done\s*\)[\s\S]{0,1200}?"
+        r"if\s*\(\s*p\.done[\s\S]{0,1200}?"
         r"fetch\s*\(\s*`/api/ideas/\$\{ideaId\}/readiness`[\s\S]{0,900}?"
         r"refreshIdeas\s*\(\s*\)",
         html,

@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import time
+import uuid
 
 import requests
 import websocket
@@ -72,13 +73,19 @@ def invoke_agent_webhook(
     model: str = None,
     message: str = None,
     thinking: str | None = None,
+    url: str | None = None,
 ):
     # Enqueue-only semantics: OpenClaw returns HTTP 200 when the agent task has been
     # queued, NOT when it has been executed.  Any 2xx after raise_for_status() means
     # "successfully enqueued" — not "successfully completed".  Do not inspect the
     # response body for execution results here; completion is detected via sentinel
     # files written by the agent to its workspace directory.
-    url = "http://localhost:18789/hooks/agent"
+    #
+    # ``url`` defaults to the loopback gateway but callers pass the orchestrator's
+    # resolved ``config["hooks_url"]`` (derived from ``gateway.port``) so a non-default
+    # port — and the IPv4 ``127.0.0.1`` over a dual-stack ``localhost`` (which can
+    # resolve to ``::1`` where the gateway binds IPv4) — actually take effect.
+    url = url or "http://localhost:18789/hooks/agent"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     # Default messages per agent role — agents read workspace files for full context.
     # Stage D (P0 §2.3): planner / executor / reviewer also read pipeline-project/prd.md
@@ -118,10 +125,19 @@ def invoke_agent_webhook(
             f"the dashboard."
         ),
     }
+    # Idempotency key: one per logical invocation, STABLE across this call's inner
+    # retry loop but UNIQUE per call. OpenClaw's /hooks/agent replay cache dedups by
+    # this key (it caches the runId at enqueue time, before sending the response), so
+    # a read-timeout retry of a slow-but-alive enqueue returns the original runId
+    # instead of enqueuing the same task twice. Without it OpenClaw does NOT dedup
+    # (it does not key on sessionKey alone), so every read-timeout retry would launch
+    # a duplicate run racing on the same output files.
+    idempotency_key = str(uuid.uuid4())
     payload = {
         "agentId": agent_id,
         "sessionKey": session_key,
         "wakeMode": wake_mode,
+        "idempotencyKey": idempotency_key,
         "message": message or default_messages.get(agent_id, "Begin your assigned pipeline task. Read your workspace files for context."),
     }
     # File-only run for the working agents: completion is detected via sentinel
@@ -147,12 +163,19 @@ def invoke_agent_webhook(
     # Inner retry loop: 3 attempts, 30s backoff for INFRA failures only
     for attempt in range(1, 4):
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=15)
-            
+            # (connect, read) split: fail fast on a dead gateway (5 s connect) while
+            # still allowing a slow-but-alive enqueue up to 30 s to respond. A read
+            # timeout is retried safely because the idempotencyKey above makes the
+            # re-POST idempotent at the gateway.
+            response = requests.post(url, headers=headers, json=payload, timeout=(5, 30))
+
             if response.status_code in (401, 403):
                 logging.error(f"Auth error (401/403) from webhook: {response.text}")
                 return "AUTH_ERROR"
-                
+
+            # Transient infra — RETRYABLE: 429 (rate-limited) and 5xx (server busy /
+            # restarting) can self-heal, so keep the 3×30 s retry. This branch MUST
+            # precede the deterministic-4xx branch below, because 429 is itself a 4xx.
             if response.status_code == 429 or response.status_code >= 500:
                 logging.warning(f"Infra error {response.status_code} (Attempt {attempt}/3): {response.text}")
                 if attempt < 3:
@@ -161,7 +184,15 @@ def invoke_agent_webhook(
                 else:
                     logging.error("Exhausted webhook infra retries.")
                     return "INFRA_ERROR"
-                    
+
+            # Deterministic client error (400/404/422/…) — NON-retryable: re-sending
+            # the identical request returns the identical rejection (renamed agentId,
+            # bad payload shape, malformed body), so fail fast with an honest
+            # classification instead of burning 3×30 s and mislabeling it as infra.
+            if 400 <= response.status_code < 500:
+                logging.error(f"Request error {response.status_code} from webhook: {response.text}")
+                return "REQUEST_ERROR"
+
             response.raise_for_status()
             logging.info(f"Webhook invoked successfully for {agent_id}.")
             return "SUCCESS"

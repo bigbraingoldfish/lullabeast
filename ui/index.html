@@ -5105,7 +5105,10 @@
                         .then((r) => r.json())
                         .then((p) => {
                             if (ideaId !== currentIdeaIdRef.current) return;
-                            if (p.done) {
+                            // `error` is terminal too (T2.6): an infra-level failure
+                            // left readiness_error.json, so stop polling and fetch the
+                            // status — which now resolves to "error" — same as `done`.
+                            if (p.done || p.error) {
                                 stopReadinessPoll();
                                 fetch(`/api/ideas/${ideaId}/readiness`)
                                     .then((rr) => rr.json())
@@ -7049,6 +7052,9 @@
                                 )}
                                 {readinessTimedOut && (
                                     <p className="text-xs text-slate-500">Readiness assessment timed out. It will update after your next message.</p>
+                                )}
+                                {readinessStatus === "error" && (
+                                    <p className="text-xs text-amber-500">Readiness assessment infrastructure unavailable — it will retry after your next message.</p>
                                 )}
                                 {!readinessTimedOut && readinessStatus === "unavailable" && hadReadyReadiness && (
                                     <p className="text-xs text-slate-500">Readiness data unavailable</p>
