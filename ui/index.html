@@ -4,6 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Lullabeast Pipeline</title>
+
+    <!-- Favicon / app icon — Lullabeast mascot (tilted) -->
+    <link rel="icon" type="image/svg+xml" href="/static/img/lullabeast_tilted.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/img/lullabeast_tilted_32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/static/img/lullabeast_tilted_16.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/img/lullabeast_tilted_180.png" />
     
     <!-- Google Fonts: Hanken Grotesk for chrome (wordmark + prose), JetBrains Mono for data -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -82,18 +88,25 @@
             --ll-brand-tint: #241D10;
             --ll-running: #4FD98C;
         }
-        /* Two-source eased night-sky gradient on the shell — multi-stop falloff
-           avoids a hard "ring" edge. Applied to body + every full-screen shell. */
+        /* Two-source eased night-sky gradient on the shell. Sized in VIEWPORT-% (not
+           fixed px) so the glow scales with the screen and actually reaches it at any
+           width — fixed-px centres sat off-screen on wide displays and read flat. Two
+           indigo sources (top-right + bottom-left) over the deep base, peak a notch
+           under the reference for a slightly darker feel; the grain overlay dithers
+           any 8-bit banding so the falloff stays very smooth. */
         .app-sky,
         body {
             background-color: #0B0A12;
             background:
-                radial-gradient(1500px 950px at 90% -25%,
-                    rgba(38,28,76,.55) 0%, rgba(30,23,60,.22) 33%,
-                    rgba(21,16,42,.10) 50%, rgba(11,10,18,0) 76%),
-                radial-gradient(1280px 840px at -12% 122%,
-                    rgba(26,20,56,.48) 0%, rgba(17,14,36,.11) 46%,
-                    rgba(11,10,18,0) 74%),
+                radial-gradient(175% 150% at 60% -20%,
+                    rgba(54,40,108,0.42) 0%,
+                    rgba(35,27,72,0.23) 38%,
+                    rgba(18,14,42,0.09) 64%,
+                    rgba(11,10,18,0) 86%),
+                radial-gradient(155% 135% at -10% 116%,
+                    rgba(40,30,82,0.32) 0%,
+                    rgba(19,15,42,0.09) 52%,
+                    rgba(11,10,18,0) 80%),
                 #0B0A12;
             background-attachment: fixed;
         }
@@ -123,6 +136,26 @@
         [class~="bg-[#15121f]"],
         [class~="bg-[#221b36]"] {
             box-shadow: inset 0 1px 0 rgba(255,255,255,.05);
+        }
+        /* Chat-preview hover popover — a distinct floating layer with a quiet
+           periwinkle accent so its edge separates from the AI message bubble it
+           overlaps (same surface colour otherwise). Background is an OPAQUE tint
+           OVER the bubble colour (not an alpha overlay), so text behind never
+           bleeds through. Alpha variants use color-mix(... , transparent) — never
+           a hex-alpha suffix on oklch() (that silently drops the declaration). */
+        .ll-hover-popover {
+            --popover-accent: oklch(0.72 0.12 272);   /* periwinkle */
+            --bubble-bg: var(--ll-bg-panel-2);        /* #221B36 — the AI message bubble colour */
+            border-radius: 12px;
+            border: 1px solid var(--popover-accent);
+            background: linear-gradient(
+                color-mix(in oklch, var(--popover-accent) 10%, var(--bubble-bg)),
+                color-mix(in oklch, var(--popover-accent)  4%, var(--bubble-bg))
+            );
+            box-shadow:
+                0 18px 46px rgba(0,0,0,0.55),
+                0 0 0 1px color-mix(in oklch, var(--popover-accent) 35%, transparent),
+                0 0 22px -6px color-mix(in oklch, var(--popover-accent) 30%, transparent);
         }
         /* One fixed grain overlay dithers 8-bit banding so the dark gradients read
            smooth, not rigid. Above the canvas, below modals; never eats clicks. */
@@ -3436,13 +3469,16 @@
                                 title="Expand sidebar"
                                 aria-label="Expand sidebar"
                             >
-                                <span className="font-body text-[12px] font-bold tracking-tight leading-none"><span className="text-white">l</span><span className="text-accent">b</span></span>
+                                <img src="/static/img/lullabeast_tilted.svg" alt="lullabeast" className="h-8 w-auto" />
                             </button>
                         ) : (
                             <>
-                                <h1 className="font-body text-lg font-bold tracking-tight flex-1 text-center truncate px-1 min-w-0">
-                                    <span className="font-light text-white">lulla</span><span className="font-bold text-accent">beast</span>
-                                </h1>
+                                <div className="flex items-center justify-center gap-2 flex-1 min-w-0 px-1">
+                                    <img src="/static/img/lullabeast_tilted.svg" alt="" className="h-8 w-auto shrink-0" />
+                                    <h1 className="font-body text-2xl font-bold tracking-tight truncate min-w-0">
+                                        <span className="font-light text-white">lulla</span><span className="font-bold text-accent">beast</span>
+                                    </h1>
+                                </div>
                                 <button
                                     type="button"
                                     onClick={() => setSidebarCollapsed(true)}
@@ -3478,7 +3514,7 @@
                                 >
                                     {item.icon}
                                     {!sidebarCollapsed ? (
-                                        <span className="header-text text-xs font-medium leading-tight">{item.label}</span>
+                                        <span className="header-text text-sm font-medium leading-tight">{item.label}</span>
                                     ) : null}
                                 </button>
                             );
@@ -5989,7 +6025,7 @@
                 ReactDOM.createPortal(
                     <div
                         role="tooltip"
-                        className="fixed z-[60] w-[280px] rounded-lg border border-[#2a2540] bg-[#221b36] p-3 pointer-events-auto"
+                        className="fixed z-[60] w-[280px] p-3 pointer-events-auto ll-hover-popover"
                         style={{ top: hoverCardTop, left: sidebarLeftPx + 8 }}
                         onMouseEnter={onHoverCardMouseEnter}
                         onMouseLeave={onHoverCardMouseLeave}
@@ -6207,15 +6243,16 @@
                                                 onClick={() => selectIdeaFromRail(it.id)}
                                                 className="flex-1 min-w-0 text-left px-2 py-2"
                                             >
-                                                <div className="flex items-center justify-between gap-1 min-w-0">
-                                                    <div className={`truncate flex-1 min-w-0 text-xs font-medium header-text ${currentIdeaId === it.id ? "text-slate-100" : "text-slate-400"}`}>{it.name || it.id}</div>
+                                                <div className={`truncate min-w-0 text-xs font-medium header-text ${currentIdeaId === it.id ? "text-slate-100" : "text-slate-400"}`}>{it.name || it.id}</div>
+                                                <div className="flex items-center justify-between gap-1.5 min-w-0">
+                                                    <div className="text-slate-500 truncate text-[11px]">{it.updated ? relativeTime(it.updated) : "—"}</div>
                                                     {typeof it.readiness_score === "number" && Number.isFinite(it.readiness_score) ? (
-                                                        <span className={`header-text text-[10px] font-semibold shrink-0 ml-1 ${ideaScoreTextClass(it.readiness_score)}`}>
-                                                            {it.readiness_score}/10
-                                                        </span>
+                                                        <span
+                                                            className={`shrink-0 w-1.5 h-1.5 rounded-full ${ideaScoreBarClass(it.readiness_score)}`}
+                                                            title={`Readiness ${it.readiness_score}/10`}
+                                                        ></span>
                                                     ) : null}
                                                 </div>
-                                                <div className="text-slate-500 truncate text-[11px]">{it.updated ? relativeTime(it.updated) : "—"}</div>
                                             </button>
                                             {renamingIdeaId === it.id ? (
                                                 <div className="flex flex-col gap-1 px-1.5 py-1 border-l border-[#1c1829] bg-[#15121f]/80 shrink-0 min-w-[180px]">
@@ -6346,7 +6383,7 @@
                     />
 
                     <div ref={containerRef} className="flex flex-1 min-w-0">
-                    <div style={{ width: splitPct + "%" }} className="relative flex-shrink-0 flex flex-col min-w-0 bg-[#15121f] overflow-hidden">
+                    <div style={{ width: splitPct + "%" }} className="relative flex-shrink-0 flex flex-col min-w-0 bg-transparent overflow-hidden">
                         <div className="flex-shrink-0 border-b border-[#1c1829] px-3 py-2 flex items-center justify-between gap-2">
                             <span className="header-text text-xs text-slate-500 truncate">{currentIdeaName}</span>
                         </div>
@@ -7361,17 +7398,17 @@
                 : null;
 
             return (
-                <div className="flex-1 overflow-y-auto bg-[#0b0a12] p-6">
+                <div className="flex-1 overflow-y-auto bg-transparent p-6">
                     <div className="max-w-2xl mx-auto space-y-4">
                         <h2 className="header-text text-lg text-slate-300">Setup &amp; Preflight</h2>
                         <div
                             data-testid="preflight-step-1"
-                            className={`rounded border p-3 space-y-2 ${repoPathLocked ? "border-emerald-600/60" : "border-[#2a2540]"}`}
+                            className={`rounded border p-3 space-y-2 bg-[#15121f] ${repoPathLocked ? "border-emerald-600/60" : "border-[#2a2540]"}`}
                         >
                             <div className="flex flex-wrap justify-between items-start gap-2">
                                 <div className="min-w-0 flex-1 space-y-1">
-                                    <p className="header-text text-xs font-semibold text-slate-400">Step 1 — Repository path</p>
-                                    <p className="text-[11px] text-slate-500 leading-relaxed max-w-prose">
+                                    <p className="header-text text-sm font-semibold text-slate-400">Step 1 — Repository path</p>
+                                    <p className="text-xs text-slate-500 leading-relaxed max-w-prose">
                                         Confirm the repository path Lullabeast will build in.
                                     </p>
                                 </div>
@@ -7436,12 +7473,12 @@
                         </div>
                         <div
                             data-testid="preflight-step-2"
-                            className={`rounded border p-3 space-y-2 ${hasLinkedIdea ? "border-emerald-600/60" : "border-[#2a2540]"}`}
+                            className={`rounded border p-3 space-y-2 bg-[#15121f] ${hasLinkedIdea ? "border-emerald-600/60" : "border-[#2a2540]"}`}
                         >
                             <div className="flex flex-wrap justify-between items-start gap-2">
                                 <div className="min-w-0 flex-1 space-y-1">
-                                    <p className="header-text text-xs font-semibold text-slate-400">Step 2 — Project Idea</p>
-                                    <p className="text-[11px] text-slate-500 leading-relaxed">
+                                    <p className="header-text text-sm font-semibold text-slate-400">Step 2 — Project Idea</p>
+                                    <p className="text-xs text-slate-500 leading-relaxed">
                                         The roadmap and verification doc come from Project Ideas — authoring lives there.
                                     </p>
                                 </div>
@@ -7470,13 +7507,13 @@
                                         </button>
                                     </div>
                                     <div className="flex gap-2 flex-wrap">
-                                        <span className={`text-[11px] px-2 py-0.5 rounded border ${prdReady ? "border-emerald-600/60 text-emerald-400" : "border-[#2a2540] text-slate-500"}`}>
+                                        <span className={`text-xs px-2 py-0.5 rounded border ${prdReady ? "border-emerald-600/60 text-emerald-400" : "border-[#2a2540] text-slate-500"}`}>
                                             {prdReady ? "PRD ready" : "PRD missing"}
                                         </span>
-                                        <span className={`text-[11px] px-2 py-0.5 rounded border ${roadmapReady ? "border-emerald-600/60 text-emerald-400" : "border-[#2a2540] text-slate-500"}`}>
+                                        <span className={`text-xs px-2 py-0.5 rounded border ${roadmapReady ? "border-emerald-600/60 text-emerald-400" : "border-[#2a2540] text-slate-500"}`}>
                                             {roadmapReady ? "Roadmap ready" : "Roadmap missing"}
                                         </span>
-                                        <span className={`text-[11px] px-2 py-0.5 rounded border ${verificationReady ? "border-emerald-600/60 text-emerald-400" : "border-[#2a2540] text-slate-500"}`}>
+                                        <span className={`text-xs px-2 py-0.5 rounded border ${verificationReady ? "border-emerald-600/60 text-emerald-400" : "border-[#2a2540] text-slate-500"}`}>
                                             {verificationReady ? "Verification ready" : "Verification missing"}
                                         </span>
                                     </div>
@@ -7485,13 +7522,13 @@
                                         <div className="mt-2 space-y-3">
                                             {roadmapReady ? (
                                                 <div>
-                                                    <p className="text-[11px] uppercase tracking-wide text-slate-500 mb-1">Roadmap</p>
+                                                    <p className="text-xs uppercase tracking-wide text-slate-500 mb-1">Roadmap</p>
                                                     <pre className="max-h-[24vh] overflow-y-auto rounded bg-[#0b0a12] border border-[#1c1829] px-2 py-1 whitespace-pre-wrap">{roadmapSeed}</pre>
                                                 </div>
                                             ) : null}
                                             {verificationReady ? (
                                                 <div>
-                                                    <p className="text-[11px] uppercase tracking-wide text-slate-500 mb-1">Verification</p>
+                                                    <p className="text-xs uppercase tracking-wide text-slate-500 mb-1">Verification</p>
                                                     <pre className="max-h-[24vh] overflow-y-auto rounded bg-[#0b0a12] border border-[#1c1829] px-2 py-1 whitespace-pre-wrap">{launchVerificationContent}</pre>
                                                 </div>
                                             ) : null}
@@ -7521,12 +7558,12 @@
                         {/* W5-G: Step 3 — Completion Report (required Yes/No selection) */}
                         <div
                             data-testid="preflight-step-3"
-                            className={`rounded border p-3 space-y-2 ${step3Done ? "border-emerald-600/60" : "border-[#2a2540]"}`}
+                            className={`rounded border p-3 space-y-2 bg-[#15121f] ${step3Done ? "border-emerald-600/60" : "border-[#2a2540]"}`}
                         >
                             <div className="flex flex-wrap justify-between items-start gap-2">
                                 <div className="min-w-0 flex-1 space-y-1">
-                                    <p className="header-text text-xs font-semibold text-slate-400">Step 3 — Completion Report</p>
-                                    <p className="text-[11px] text-slate-500 leading-relaxed max-w-prose">
+                                    <p className="header-text text-sm font-semibold text-slate-400">Step 3 — Completion Report</p>
+                                    <p className="text-xs text-slate-500 leading-relaxed max-w-prose">
                                         Automatically generate documentation and next steps when the pipeline completes.
                                     </p>
                                 </div>
@@ -7555,7 +7592,7 @@
 
                         <div
                             data-testid="preflight-step-4"
-                            className={`rounded border p-3 space-y-2 ${
+                            className={`rounded border p-3 space-y-2 bg-[#15121f] ${
                                 step4HasError ? "border-red-600/60"
                                     : step4HasWarning ? "border-amber-500/60"
                                     : step4Done ? "border-emerald-600/60"
@@ -7564,8 +7601,8 @@
                         >
                             <div className="flex flex-wrap justify-between items-start gap-2">
                                 <div className="min-w-0 flex-1 space-y-1">
-                                    <p className="header-text text-xs font-semibold text-slate-400">Step 4 — Preflight</p>
-                                    <p className="text-[11px] text-slate-500 leading-relaxed max-w-prose">
+                                    <p className="header-text text-sm font-semibold text-slate-400">Step 4 — Preflight</p>
+                                    <p className="text-xs text-slate-500 leading-relaxed max-w-prose">
                                         Checks symlink, .gitignore, workspace files, and roadmap. Launch adds scaffolding and sets the active project.
                                     </p>
                                 </div>
@@ -7584,7 +7621,7 @@
                                         {preflightBtnLabel}
                                     </button>
                                     {preflightLastRun ? (
-                                        <span className="text-[11px] text-slate-600 text-right max-w-[12rem]">
+                                        <span className="text-xs text-slate-600 text-right max-w-[12rem]">
                                             Last run: {relativeTimeShort(preflightLastRun)}
                                         </span>
                                     ) : null}
@@ -9523,7 +9560,7 @@
                                         </button>
                                     )}
                                     <span
-                                        className={`header-text px-3 py-1 rounded-full text-sm font-medium ${statusClass}`}
+                                        className={`header-text px-2.5 py-1 rounded-full text-xs font-medium ${statusClass}`}
                                         title={statusTitle || undefined}
                                     >
                                         {statusLabel}
