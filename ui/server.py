@@ -82,7 +82,6 @@ _polling_lock = asyncio.Lock()
 _sse_clients = set()  # Set of asyncio.Queue objects for each connected client
 _sse_clients_lock = asyncio.Lock()
 _file_positions = {}  # Track file positions per client for file-based tailing
-_sse_notify_event = asyncio.Event()  # Event to notify when new events are available
 
 logger = logging.getLogger("autodev.readiness")
 logger.setLevel(logging.DEBUG)
@@ -420,84 +419,6 @@ async def _tail_events_file(events_path, client_id):
             pass
 
 
-async def _stream_events(events_path, client_id):
-    """Async generator that yields SSE-formatted events.
-    
-    Yields heartbeat every 15 seconds and new ring buffer events when
-    polling detects changes. Tracks file position for file-based tailing.
-    
-    Args:
-        events_path: Path to events file (if file-based source).
-        client_id: Unique identifier for this client.
-    
-    Yields:
-        SSE-formatted event strings.
-    """
-    heartbeat_interval = 15
-    use_file = events_path and Path(events_path).exists()
-    
-    # Track last event to avoid duplicates
-    last_event = None
-    
-    while True:
-        try:
-            if use_file:
-                # Stream from file
-                async for event_msg in _tail_events_file(events_path, client_id):
-                    yield event_msg
-            else:
-                # Stream from ring buffer
-                # Wait for new events or heartbeat
-                try:
-                    # Wait for event with timeout for heartbeat
-                    async with _sse_clients_lock:
-                        client_queue = None
-                        for q in _sse_clients:
-                            # Find the queue for this client
-                            pass
-                    
-                    # Use the notify event to wait for new data
-                    _sse_notify_event.clear()
-                    
-                    # Wait for either a new event or heartbeat timeout
-                    wait_task = asyncio.create_task(_sse_notify_event.wait())
-                    heartbeat_task = asyncio.create_task(asyncio.sleep(heartbeat_interval))
-                    
-                    done, pending = await asyncio.wait(
-                        [wait_task, heartbeat_task],
-                        return_when=asyncio.FIRST_COMPLETED
-                    )
-                    
-                    # Cancel whichever didn't complete
-                    for task in pending:
-                        task.cancel()
-                    
-                    if wait_task in done:
-                        # New event arrived - get it from ring buffer
-                        async with _sse_clients_lock:
-                            for q in _sse_clients:
-                                try:
-                                    event = q.get_nowait()
-                                    if event != last_event:
-                                        last_event = event
-                                        yield f"data: {json.dumps(event)}\n\n"
-                                except asyncio.QueueEmpty:
-                                    pass
-                    else:
-                        # Heartbeat timeout
-                        yield f"event: heartbeat\ndata: {{}}\n\n"
-                        
-                except asyncio.CancelledError:
-                    break
-                    
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            # Log error but continue
-            print(f"Stream error: {e}")
-            await asyncio.sleep(1)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager to start/stop background polling."""
@@ -682,6 +603,24 @@ def load_config(config_path=None):
             config["ideas_idle_threshold"] = float(_idle_env)
         except ValueError:
             pass
+
+    # Coerce numeric keys after the dual-source merge. A string in ui/config.json
+    # (e.g. "300", or a typo like "5 min") would otherwise flow straight through
+    # to a consumer's float(config[...]) and raise a ValueError 500 — and for the
+    # Ideas flows that 500 fires *after* the webhook already enqueued, leaving a
+    # stuck pending placeholder. Each malformed value degrades to its DEFAULTS
+    # value; a valid numeric string is normalized to a real number (``port`` is
+    # consumed without a call-site float(), so it needs this here).
+    _float_keys = ("poll_timeout", "poll_interval", "ideas_idle_threshold")
+    for _k in _float_keys:
+        try:
+            config[_k] = float(config.get(_k, DEFAULTS[_k]))
+        except (TypeError, ValueError):
+            config[_k] = DEFAULTS[_k]
+    try:
+        config["port"] = int(config.get("port", DEFAULTS["port"]))
+    except (TypeError, ValueError):
+        config["port"] = DEFAULTS["port"]
 
     # Expand ~ on all string values (skip port which is int)
     for key, value in list(config.items()):
@@ -919,16 +858,24 @@ def root():
 def _read_json_file(path):
     """Read a JSON file and return its contents.
 
+    Read-tolerant: every caller treats a ``None`` return as "absent / degrade
+    gracefully" (none rely on a raised exception to distinguish "unreadable"
+    from "absent"). So any read or decode failure — missing file, corrupt JSON,
+    a directory in place of a file, bad permissions, or undecodable bytes —
+    returns ``None`` rather than propagating as a 500 from a read-tolerant
+    endpoint. ``FileNotFoundError`` is an ``OSError`` subclass, so it stays
+    covered by the broadened catch.
+
     Args:
         path: Path to the JSON file.
 
     Returns:
-        Parsed JSON dict, or None on error.
+        Parsed JSON dict, or None on any read/decode error.
     """
     try:
         with open(path, 'r') as f:
             return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
 
 
@@ -957,12 +904,54 @@ def _should_resolve_idea_name(name: str) -> bool:
     return bool(_UUID_ID_RE.match(n))
 
 
-def _atomic_write_json_file(path: Path, data: dict) -> None:
-    """Write JSON atomically (tmp + replace)."""
-    tmp_path = str(path) + ".tmp"
-    with open(tmp_path, "w") as f:
-        json.dump(data, f)
-    os.replace(tmp_path, str(path))
+def _atomic_write_json_file(path, data: dict) -> None:
+    """Write JSON atomically via a unique temp file + ``os.replace``.
+
+    Uses ``mkstemp`` (unique name in the same directory) rather than a fixed
+    ``<path>.tmp`` suffix: two concurrent writers to the same ``session.json``
+    (e.g. a chat turn racing the auto-fired readiness job or a GET /session
+    salvage write) would otherwise collide on the one temp name — the second
+    truncates the first's temp before ``os.replace``, leaving corrupt JSON that
+    ``_read_json_file`` then reads as ``None``. A unique temp per write makes
+    concurrent writers independent. The temp is removed if the write fails, so
+    a failure never leaves the destination truncated. Accepts ``str`` or
+    ``Path`` (call sites pass both).
+    """
+    path = Path(path)
+    fd, tmp = mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, str(path))
+    except Exception:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+
+
+def _atomic_symlink_swap(target: str, link_path: str) -> None:
+    """Atomically point ``link_path`` at ``target``, never leaving it absent.
+
+    A plain ``os.remove`` + ``os.symlink`` leaves a window where the link does
+    not exist, and if ``os.symlink`` then raises, the link is gone entirely —
+    which strands the orchestrator/agents that resolve project files through it.
+    Instead, create the new link under a unique temp name in the same directory
+    and ``os.replace`` it over the target (an atomic rename that works on
+    symlinks). On any failure the temp is cleaned up and the existing link is
+    left untouched. Pure-Python — no subprocess.
+    """
+    link_dir = os.path.dirname(link_path) or "."
+    tmp = os.path.join(link_dir, f".symlink_swap_{uuid.uuid4().hex}")
+    try:
+        os.symlink(target, tmp)
+        os.replace(tmp, link_path)
+    except Exception:
+        if os.path.islink(tmp) or os.path.lexists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        raise
 
 
 _METRICS_MAX_ENTRIES = 10
@@ -2062,7 +2051,6 @@ async def events_stream():
         import time
         heartbeat_interval = 15
         use_file = events_path and Path(events_path).exists()
-        last_event = None
         last_heartbeat = time.time()
         
         # Send heartbeat immediately on connect
@@ -2116,14 +2104,16 @@ async def events_stream():
                     yield f"event: heartbeat\ndata: {{}}\n\n"
                     last_heartbeat = current_time
                 
-                # Check for new events in queue (non-blocking)
+                # Drain this client's own queue and deliver every event. No
+                # ``!= last_event`` dedup: a legitimately-repeated event (e.g.
+                # two identical gate outcomes) must reach the client, not be
+                # silently dropped. Each client reads only its own queue, so
+                # there is no cross-client drain.
                 try:
                     while True:
                         try:
                             event = client_queue.get_nowait()
-                            if event != last_event:
-                                last_event = event
-                                yield f"data: {json.dumps(event)}\n\n"
+                            yield f"data: {json.dumps(event)}\n\n"
                         except asyncio.QueueEmpty:
                             break
                 except Exception:
@@ -2588,30 +2578,48 @@ def _validate_command_request(project_dir_path, pipeline_status, escalation_rese
 
 
 def _write_escalation_files(project_dir_path, command):
-    """Write escalation output files atomically under ``.autodev/pipeline/``.
+    """Write the live operator-command channel under ``.autodev/pipeline/``.
 
-    Uses realpath so writes land in the symlink target when project_dir_path is a symlink.
+    Crash-atomic, mirroring the already-hardened ``_write_pending_escalation_files``:
+    the payload is written to a unique temp file and ``os.replace``d into place,
+    so a crash mid-write can never hand the orchestrator a half-written command.
+    Any stale ``.done`` is removed before the payload is committed, and the fresh
+    ``.done`` sentinel is written last — so the sentinel always trails a complete
+    payload and is never observed ahead of it. Uses realpath so writes land in
+    the symlink target when ``project_dir_path`` is a symlink.
     """
     root = os.path.realpath(os.path.expanduser(str(project_dir_path)))
     project_path = Path(_pipeline_artifacts_dir(root))
     project_path.mkdir(parents=True, exist_ok=True)
     json_path = project_path / "escalation_output.json"
     done_path = project_path / "escalation_output.done"
-    
-    # Write JSON file first
+
     data = {
         "command": command,
         "source": "ui",
         "timestamp": datetime.utcnow().isoformat() + "Z"
     }
-    
-    with open(json_path, 'w') as f:
-        json.dump(data, f)
-    
-    # Then write done file
-    with open(done_path, 'w') as f:
+
+    # Drop a stale sentinel before committing the new payload so a reader can
+    # never pair this fresh payload's window with a previous run's .done.
+    if done_path.exists():
+        done_path.unlink()
+
+    # Atomic payload write (unique temp + os.replace; temp cleaned on failure).
+    fd, tmp = mkstemp(dir=str(project_path), prefix="eo_")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, str(json_path))
+    except Exception:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+
+    # Sentinel last — always trails the committed payload.
+    with open(done_path, "w") as f:
         f.write("")
-    
+
     return True
 
 
@@ -2960,9 +2968,7 @@ def _repoint_pipeline_project_symlink(config: dict, target_real: str) -> dict:
                     "previous_symlink_real": previous_symlink_real,
                 }
 
-        if os.path.lexists(link_path) and os.path.islink(link_path):
-            os.remove(link_path)
-        os.symlink(target_real, link_path)
+        _atomic_symlink_swap(target_real, link_path)
     except OSError as exc:
         return {
             "ok": False,
@@ -4805,6 +4811,14 @@ async def post_ideas_message(idea_id: str, request: Request):
     md_path = turns_dir / f"{turn_n}.md"
     prd_draft_path = idea_dir / "prd_draft.md"
 
+    # Turn numbers are reused across retries: if a prior attempt wrote
+    # turns/{n}.done late (after a 408), this attempt (same n) would otherwise
+    # latch onto that stale sentinel via the poll's bare existence check and
+    # instantly "succeed" with the prior reply. Scrub the stale sentinel (mtime
+    # predating this attempt) before polling — mirrors the unlink that /convert
+    # and /fix-roadmap-format already do.
+    _ideas_scrub_stale_turn_artifacts(idea_dir, int(turn_n), _attempt_start_wall)
+
     sentinel_found = await _poll_sentinel_with_idle_detect(
         done_path=done_path,
         stamp_path=idea_dir / "prd_creator_activity.stamp",
@@ -4972,13 +4986,19 @@ def _load_session_for_idea(idea_dir: Path) -> dict:
 
 
 def _save_session_for_idea(idea_dir: Path, session_data: dict) -> None:
-    """Atomic write of session.json."""
+    """Atomic write of session.json via the shared unique-temp writer.
+
+    Routes through :func:`_atomic_write_json_file` (mkstemp, unique temp) rather
+    than a fixed ``session.json.tmp`` suffix. This writer (the annotations path)
+    and ``_atomic_write_json_file`` (chat / readiness / convert / salvage) target
+    the SAME ``session.json``, so a fixed temp here would re-introduce the exact
+    concurrent-writer collision T3.7 closed elsewhere — an annotation write
+    racing a chat-turn / readiness write could clobber the other's temp and leave
+    corrupt JSON. See :func:`_atomic_write_json_file`.
+    """
     session_path = idea_dir / "session.json"
     session_data.setdefault("annotations", [])
-    tmp_path = str(session_path) + ".tmp"
-    with open(tmp_path, "w") as f:
-        json.dump(session_data, f)
-    os.replace(tmp_path, session_path)
+    _atomic_write_json_file(session_path, session_data)
 
 
 @app.post("/api/ideas/{idea_id}/annotations")
@@ -5272,10 +5292,7 @@ def post_ideas():
     }
 
     session_path = idea_dir / "session.json"
-    tmp_path = str(session_path) + ".tmp"
-    with open(tmp_path, "w") as f:
-        json.dump(session_data, f)
-    os.replace(tmp_path, session_path)
+    _atomic_write_json_file(session_path, session_data)
 
     return {"id": idea_id}
 
@@ -5680,14 +5697,23 @@ async def post_ideas_convert(idea_id: str):
         verification_draft_path.read_text() if verification_draft_path.exists() else ""
     )
 
-    # Atomically store both fields in session.json
+    # Validate artifact *content*, not just the .done sentinels: a model refusal
+    # or truncation can land both sentinels with an empty/garbage draft. Reject
+    # with a 502 retry BEFORE persisting so a prior good roadmap in session.json
+    # is preserved (untouched) instead of being silently overwritten. The
+    # converter produces two artifacts, so both must be non-empty.
+    if not roadmap_content.strip() or not verification_content.strip():
+        raise HTTPException(
+            status_code=502,
+            detail="converter produced an empty roadmap or verification draft",
+        )
+
+    # Atomically store both fields in session.json (unique-temp atomic writer,
+    # so a concurrent readiness/salvage write can't corrupt the file).
     session_data["roadmap_content"] = roadmap_content
     session_data["verification_content"] = verification_content
     session_data["updated"] = datetime.utcnow().isoformat() + "Z"
-    tmp_path = str(session_path) + ".tmp"
-    with open(tmp_path, "w") as f:
-        json.dump(session_data, f)
-    os.replace(tmp_path, session_path)
+    _atomic_write_json_file(session_path, session_data)
 
     return {
         "roadmap_content": roadmap_content,
@@ -5825,6 +5851,15 @@ async def post_ideas_fix_roadmap_format(idea_id: str, body: FixRoadmapFormatRequ
 
     # Read corrected roadmap
     corrected_content = roadmap_draft_path.read_text() if roadmap_draft_path.exists() else roadmap_content
+
+    # Validate content, not just the .done sentinel: a refusal/truncation yields
+    # an empty draft. Reject with a 502 retry BEFORE persisting so the prior good
+    # roadmap in session.json is preserved instead of being overwritten with "".
+    if not corrected_content.strip():
+        raise HTTPException(
+            status_code=502,
+            detail="format correction produced an empty roadmap",
+        )
 
     # Store in session.json
     updated_session = dict(session_data)
@@ -6740,9 +6775,7 @@ def _run_preflight_checks(repo_path: str, config: dict | None = None) -> list:
                     ),
                 })
             else:
-                if os.path.lexists(symlink_path):
-                    os.remove(symlink_path)
-                os.symlink(repo_path, symlink_path)
+                _atomic_symlink_swap(repo_path, symlink_path)
                 checks.append({
                     "check": "symlink",
                     "status": "fixed",
@@ -6840,8 +6873,17 @@ def _run_preflight_checks(repo_path: str, config: dict | None = None) -> list:
             })
 
     # 3b. Git executable on PATH (required for init/commits)
-    gv = subprocess.run(["git", "--version"], capture_output=True, text=True)
-    if gv.returncode == 0:
+    # A missing git binary raises FileNotFoundError (not a non-zero return), so
+    # the probe must be guarded — otherwise preflight crashes on exactly the
+    # misconfiguration it exists to diagnose. ``git_ok`` then short-circuits the
+    # later git-dependent steps so they don't re-raise FileNotFoundError either.
+    git_ok = False
+    try:
+        gv = subprocess.run(["git", "--version"], capture_output=True, text=True)
+        git_ok = gv.returncode == 0
+    except (FileNotFoundError, OSError):
+        gv = None
+    if git_ok:
         checks.append({
             "check": "git",
             "status": "pass",
@@ -6855,9 +6897,11 @@ def _run_preflight_checks(repo_path: str, config: dict | None = None) -> list:
         })
 
     # 4. Git repo + main/master branch (auto-init when .git is missing)
+    # All git-dependent steps below are gated on ``git_ok``: with no git binary
+    # the single "git not available" failure above is the actionable signal.
     did_fresh_init = False
     git_dir = os.path.join(repo_path, ".git")
-    if not os.path.exists(git_dir):
+    if git_ok and not os.path.exists(git_dir):
         try:
             subprocess.run(["git", "init", repo_path], check=True, capture_output=True)
             subprocess.run(
@@ -6941,7 +6985,7 @@ def _run_preflight_checks(repo_path: str, config: dict | None = None) -> list:
             })
 
     git_dir = os.path.join(repo_path, ".git")
-    if os.path.exists(git_dir) and not did_fresh_init:
+    if git_ok and os.path.exists(git_dir) and not did_fresh_init:
         result = subprocess.run(
             ["git", "-C", repo_path, "branch", "--list", "main", "master"],
             capture_output=True, text=True,
@@ -8753,9 +8797,7 @@ def _run_init_project(
         sym_parent = os.path.dirname(symlink_path)
         if sym_parent:
             os.makedirs(sym_parent, exist_ok=True)
-        if os.path.lexists(symlink_path):
-            os.remove(symlink_path)
-        os.symlink(repo_path, symlink_path)
+        _atomic_symlink_swap(repo_path, symlink_path)
 
         return {"ok": True, "error": None}
 

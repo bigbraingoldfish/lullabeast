@@ -45,7 +45,10 @@ def pw_page():
 
 
 def _dismiss_first_run_if_present(page):
-    cont = page.get_by_role("button", name="Continue to AutoDev →")
+    # Brand-agnostic: the first-run continue button is "Continue to <Product> →"
+    # (the product name is themed — was "AutoDev", now "Lullabeast"). Match on the
+    # stable prefix so a future rebrand of index.html can't silently re-break this.
+    cont = page.get_by_role("button", name=re.compile(r"Continue to .+ →"))
     if cont.count() > 0:
         try:
             cont.first.click(timeout=5000)
@@ -60,7 +63,8 @@ def _wait_app_shell(page):
         """() => {
             const navBtn = document.querySelector('nav button');
             const txt = document.body ? document.body.innerText : '';
-            return navBtn !== null || txt.includes('Continue to AutoDev');
+            // Brand-agnostic first-run check (see _dismiss_first_run_if_present).
+            return navBtn !== null || txt.includes('Continue to ');
         }""",
         timeout=90000,
     )
