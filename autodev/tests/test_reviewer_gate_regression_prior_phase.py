@@ -26,6 +26,7 @@ Mirror fixtures and structure of
 import json
 import os
 import sys
+import tempfile
 from contextlib import ExitStack
 from unittest.mock import patch
 
@@ -34,6 +35,23 @@ import pytest
 # Path wiring handled by autodev/tests/conftest.py
 import utils as utils_module
 import reviewer_gate as reviewer_gate_module
+
+
+def _make_escape_symlink(workspace, link_name="sneaky", target_file="anchor.txt"):
+    """Create an in-workspace symlink that resolves OUTSIDE the workspace, plus a
+    real file at its target. Returns the workspace-relative path
+    ``"<link_name>/<target_file>"`` — lexically inside the workspace (old guard
+    accepts) but ``realpath``-outside (hardened guard rejects). The precondition
+    assert keeps the test valid on symlinked-TMPDIR hosts (e.g. macOS)."""
+    parent = os.path.dirname(workspace.rstrip(os.sep))
+    outside = tempfile.mkdtemp(dir=parent, prefix="ws_escape_")
+    assert os.path.commonpath(
+        [os.path.realpath(outside), os.path.realpath(workspace)]
+    ) != os.path.realpath(workspace), "escape target must be outside the workspace"
+    with open(os.path.join(outside, target_file), "w") as f:
+        f.write("secret\n")
+    os.symlink(outside, os.path.join(workspace, link_name))
+    return f"{link_name}/{target_file}"
 
 
 # ---------------------------------------------------------------------------
@@ -533,6 +551,90 @@ class TestRegressionShapeValidation:
                 _reviewer_output(
                     behavioral_verification=bv_block,
                     regression_verification=regression_block,
+                ),
+                f,
+            )
+
+        with _patch_workspace(tmp_workspace):
+            result = reviewer_gate_module.evaluate_reviewer(output_path)
+        assert result == "REGRESSION_UNVERIFIED"
+
+    def test_non_string_regression_evidence_path_returns_problem(self, tmp_workspace):
+        """T1.2 — a truthy non-string ``file_or_screenshot_or_log`` in the
+        regression evidence must be a clean shape failure (→ REGRESSION_UNVERIFIED),
+        not a crash. Regression twin of the behavioural str-guard.
+
+        RED on current code: ``os.path.isabs(["x"])`` raises ``TypeError`` inside
+        ``_check_regression_verification`` → the gate crashes → ROUTE_ESCALATE."""
+        _write_current_phase_with_prior(tmp_workspace)
+        _write_phase_state(tmp_workspace)
+        _write_done_artifacts(tmp_workspace, "CORE-E2")
+        bv_block = _valid_behavioral_block(tmp_workspace)
+        regression_block = _valid_regression_block(tmp_workspace)
+        regression_block["evidence"][0]["file_or_screenshot_or_log"] = ["x"]
+        output_path = os.path.join(tmp_workspace, "reviewer_output.json")
+        with open(output_path, "w") as f:
+            json.dump(
+                _reviewer_output(
+                    behavioral_verification=bv_block,
+                    regression_verification=regression_block,
+                ),
+                f,
+            )
+
+        with _patch_workspace(tmp_workspace):
+            result = reviewer_gate_module.evaluate_reviewer(output_path)
+        assert result == "REGRESSION_UNVERIFIED"
+
+    def test_regression_evidence_symlink_escape_returns_problem(self, tmp_workspace):
+        """T1.4 — an in-workspace symlink whose realpath escapes the workspace in
+        the regression evidence must be a shape failure (→ REGRESSION_UNVERIFIED).
+        Regression twin of the behavioural symlink-escape test.
+
+        RED on current code: lexical ``abspath`` does not follow the symlink →
+        boundary passes → file exists via the symlink → gate reaches PASS."""
+        _write_current_phase_with_prior(tmp_workspace)
+        _write_phase_state(tmp_workspace)
+        _write_done_artifacts(tmp_workspace, "CORE-E2")
+        bv_block = _valid_behavioral_block(tmp_workspace)
+        regression_block = _valid_regression_block(tmp_workspace)
+        rel = _make_escape_symlink(tmp_workspace)
+        regression_block["evidence"][0]["file_or_screenshot_or_log"] = rel
+        output_path = os.path.join(tmp_workspace, "reviewer_output.json")
+        with open(output_path, "w") as f:
+            json.dump(
+                _reviewer_output(
+                    behavioral_verification=bv_block,
+                    regression_verification=regression_block,
+                ),
+                f,
+            )
+
+        with _patch_workspace(tmp_workspace):
+            result = reviewer_gate_module.evaluate_reviewer(output_path)
+        assert result == "REGRESSION_UNVERIFIED"
+
+    def test_non_dict_regression_block_normalized_returns_unverified(self, tmp_workspace):
+        """T1.2(b) CHARACTERIZATION (passes before AND after the normalization).
+
+        A truthy non-dict ``regression_verification`` on a regression-requiring
+        phase is intercepted by the upstream contract check
+        (``_check_regression_verification`` → REGRESSION_UNVERIFIED) long before the
+        ``_regression_block.get(...)`` access, whose ``.get`` is itself short-
+        circuited behind ``requires_regression_verification``. So that line is NOT
+        independently crash-reachable today; the line-514 ``isinstance`` change is
+        defense-in-depth. This test locks the short-circuit invariant so a future
+        change to the contract-check gate can't silently make ``.get`` crash."""
+        _write_current_phase_with_prior(tmp_workspace)
+        _write_phase_state(tmp_workspace)
+        _write_done_artifacts(tmp_workspace, "CORE-E2")
+        bv_block = _valid_behavioral_block(tmp_workspace)
+        output_path = os.path.join(tmp_workspace, "reviewer_output.json")
+        with open(output_path, "w") as f:
+            json.dump(
+                _reviewer_output(
+                    behavioral_verification=bv_block,
+                    regression_verification=["not", "a", "dict"],
                 ),
                 f,
             )

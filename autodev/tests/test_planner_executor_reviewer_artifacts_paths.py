@@ -22,7 +22,10 @@ def test_executor_gate_uses_artifacts_dir_for_io_and_workspace_for_boundary():
     text = (Path(_GATE) / "executor_gate.py").read_text()
     assert 'os.path.join(ARTIFACTS_DIR, "executor_output.json")' in text
     assert 'os.path.join(ARTIFACTS_DIR, "planner_output.json")' in text
-    assert 'os.path.abspath(os.path.join(WORKSPACE_DIR, relative_path))' in text
+    # T1.4 — the manifest boundary check resolves symlinks (realpath), not the
+    # former lexical abspath, but is still derived from WORKSPACE_DIR (not
+    # ARTIFACTS_DIR). This pins the I/O-vs-boundary path separation.
+    assert 'os.path.realpath(os.path.join(WORKSPACE_DIR, relative_path))' in text
 
 
 def test_reviewer_gate_paths_use_artifacts_dir():

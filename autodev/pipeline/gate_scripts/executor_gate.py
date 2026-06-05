@@ -305,18 +305,30 @@ def evaluate_executor(output_path=None):
         return "FAIL"
 
     # Verify file manifest existences and bounds
-    expected_files = data.get("file_manifest", []) + data.get("tests_written", [])
-    workspace_abs = os.path.abspath(WORKSPACE_DIR)
+    # T1.1 — coerce-validate the manifest fields before concatenation. ``.get(k, [])``
+    # only rescues an *absent* key; a present-but-non-list value (MiniMax emits
+    # ``"foo.py"`` instead of ``["foo.py"]``) would raise TypeError here, crashing
+    # the gate BEFORE the MiniMax file-deletion guard runs and writing no error
+    # code. Fail closed with ERR_VALIDATION_FAILED so the self-heal feedback
+    # survives and the orchestrator retries with a fresh session.
+    _file_manifest = data.get("file_manifest", [])
+    _tests_written = data.get("tests_written", [])
+    if not isinstance(_file_manifest, list) or not isinstance(_tests_written, list):
+        record_error_code_only("executor", "ERR_VALIDATION_FAILED")
+        return "FAIL"
+    expected_files = _file_manifest + _tests_written
+    workspace_real = os.path.realpath(WORKSPACE_DIR)
 
     _missing_manifest_files = []
     for relative_path in expected_files:
-        target_abs = os.path.abspath(os.path.join(WORKSPACE_DIR, relative_path))
+        target_real = os.path.realpath(os.path.join(WORKSPACE_DIR, relative_path))
 
-        # Absolute bounds checking — SECURITY guard, NOT demoted by Phase 3.
-        # A path escaping the workspace stays a hard FAIL (CLAUDE.md Security
+        # Canonical (realpath) bounds checking — SECURITY guard, NOT demoted by
+        # Phase 3. Both sides are symlink-resolved so an in-workspace symlink that
+        # points outside the workspace cannot pass the boundary (CLAUDE.md Security
         # Constraints; do not weaken).
         try:
-            if os.path.commonpath([workspace_abs, target_abs]) != workspace_abs:
+            if os.path.commonpath([workspace_real, target_real]) != workspace_real:
                 record_error_code_only("executor", "ERR_PATH_TRAVERSAL")
                 return "FAIL"
         except ValueError:
@@ -327,7 +339,7 @@ def evaluate_executor(output_path=None):
         # reviewer adjudicates, not a hard FAIL. The reviewer independently
         # re-verifies file_manifest existence (reviewer/AGENTS.md "What to
         # Actually Review"), so this is a focusing hint, not the sole safety net.
-        if not os.path.exists(target_abs):
+        if not os.path.exists(target_real):
             _missing_manifest_files.append(relative_path)
 
     if _missing_manifest_files:
@@ -346,6 +358,14 @@ def evaluate_executor(output_path=None):
     planner_data = load_json_safe(planner_output_path, "executor")
     if planner_data is not None:
         planned_tests = planner_data.get("tdd_test_structure", [])
+        # T1.3 — coerce a non-list tdd_test_structure to [] so the membership
+        # comprehension below does not iterate a string per-character (which
+        # produces a garbage ``missing`` list and a spurious
+        # ERR_TDD_COVERAGE_MISMATCH warning) or crash on a non-iterable. The
+        # executor's own ``tests_written`` is already list-guaranteed by the T1.1
+        # manifest-type guard above, so it needs no re-coercion here.
+        if not isinstance(planned_tests, list):
+            planned_tests = []
         tests_written = data.get("tests_written", [])
         missing = [t for t in planned_tests if t not in tests_written]
         if missing:
@@ -417,10 +437,11 @@ def evaluate_executor(output_path=None):
                         "detail": f"behavioral_smoke_artifacts[{i}] is missing its path.",
                     })
                     continue
-                target_abs = os.path.abspath(os.path.join(WORKSPACE_DIR, path))
-                # Workspace-boundary check — SECURITY guard, NOT demoted.
+                target_real = os.path.realpath(os.path.join(WORKSPACE_DIR, path))
+                # Workspace-boundary check — SECURITY guard, NOT demoted. Canonical
+                # (realpath) resolution on both sides so a symlink escape is caught.
                 try:
-                    if os.path.commonpath([workspace_abs, target_abs]) != workspace_abs:
+                    if os.path.commonpath([workspace_real, target_real]) != workspace_real:
                         record_error_code_only("executor", "ERR_PATH_TRAVERSAL")
                         print(
                             f"[GATE FAIL] behavioral_smoke_artifacts[{i}] path escapes workspace: {path}",
@@ -434,7 +455,7 @@ def evaluate_executor(output_path=None):
                         file=sys.stderr,
                     )
                     return "FAIL"
-                if not os.path.exists(target_abs):
+                if not os.path.exists(target_real):
                     print(
                         f"[GATE WARN] behavioral_smoke_artifacts[{i}] path does not exist on disk: {path}",
                         file=sys.stderr,
@@ -456,7 +477,7 @@ def evaluate_executor(output_path=None):
     #   - data["files_deleted"]  (intentionally removed by this phase)
     # Anything else is ERR_UNACCOUNTED_DELETION.
     # ------------------------------------------------------------------
-    pipeline_state_path = os.path.join(os.path.dirname(WORKSPACE_DIR.rstrip("/")), "pipeline_state.json")
+    pipeline_state_path = os.path.join(os.path.dirname(WORKSPACE_DIR.rstrip(os.sep)), "pipeline_state.json")
     # Also check the canonical openclaw workspace path.
     _oc_state = os.path.expanduser("~/.openclaw/pipeline_state.json")
     if not os.path.exists(pipeline_state_path) and os.path.exists(_oc_state):
