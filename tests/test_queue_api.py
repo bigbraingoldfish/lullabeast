@@ -1487,9 +1487,7 @@ class TestSetupLaunchQueueSync:
         _write_queue(str(queue_file), [entry])
 
         with patch("subprocess.run", side_effect=_make_subprocess_pass_launch()), \
-             patch("ui.server.os.symlink"), \
-             patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"), \
+             patch("ui.server._atomic_symlink_swap"), \
              patch("ui.server._check_orchestrator_liveness", return_value=False), \
              patch("ui.server._spawn_orchestrator", return_value={"ok": True, "error": None}):
             resp = c.post(

@@ -59,9 +59,7 @@ class TestC305LaunchStateNotWrittenOnSpawnFail:
 
         client = TestClient(app)
         with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
-             patch("ui.server.os.symlink"), \
-             patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"), \
+             patch("ui.server._atomic_symlink_swap"), \
              patch("ui.server.load_config", return_value=cfg), \
              patch("ui.server._check_orchestrator_liveness", return_value=False), \
              patch("ui.server._spawn_orchestrator",
@@ -95,9 +93,7 @@ class TestC305LaunchStateNotWrittenOnSpawnFail:
 
         client = TestClient(app)
         with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
-             patch("ui.server.os.symlink"), \
-             patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"), \
+             patch("ui.server._atomic_symlink_swap"), \
              patch("ui.server.load_config", return_value=cfg), \
              patch("ui.server._check_orchestrator_liveness", return_value=False), \
              patch("ui.server._spawn_orchestrator",

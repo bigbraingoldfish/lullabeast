@@ -75,14 +75,6 @@ def _make_subprocess_status_dirty():
     return _inner
 
 
-def _symlink_patches():
-    """Return context manager patches for symlink ops in ui.server module."""
-    return (
-        patch("ui.server.os.symlink"),
-        patch("ui.server.os.path.lexists", return_value=False),
-        patch("ui.server.os.remove"),
-    )
-
 
 # ---------------------------------------------------------------------------
 # Endpoint integration tests
@@ -113,9 +105,7 @@ class TestEndpointBasics:
         p1, p2, p3 = self._launch_orchestrator_patches(tmp_path)
 
         with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
-             patch("ui.server.os.symlink"), \
-             patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"), \
+             patch("ui.server._atomic_symlink_swap"), \
              p1, p2, p3:
             response = client.post(
                 "/api/setup/launch",
@@ -151,9 +141,7 @@ class TestEndpointBasics:
         p1, p2, p3 = self._launch_orchestrator_patches(tmp_path)
 
         with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
-             patch("ui.server.os.symlink"), \
-             patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"), \
+             patch("ui.server._atomic_symlink_swap"), \
              p1, p2, p3:
             response = client.post(
                 "/api/setup/launch",
@@ -177,9 +165,7 @@ class TestModeADirectoryStructure:
         repo_path = tmp_path / "myproject"
 
         with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
-             patch("ui.server.os.symlink"), \
-             patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"):
+             patch("ui.server._atomic_symlink_swap"):
             result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is True
@@ -194,9 +180,7 @@ class TestModeADirectoryStructure:
         repo_path = tmp_path / "myproject"
 
         with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
-             patch("ui.server.os.symlink"), \
-             patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"):
+             patch("ui.server._atomic_symlink_swap"):
             result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is True
@@ -210,9 +194,7 @@ class TestModeADirectoryStructure:
         repo_path = tmp_path / "myproject"
 
         with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
-             patch("ui.server.os.symlink"), \
-             patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"):
+             patch("ui.server._atomic_symlink_swap"):
             result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is True
@@ -226,9 +208,7 @@ class TestModeADirectoryStructure:
         repo_path = tmp_path / "myproject"
 
         with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
-             patch("ui.server.os.symlink"), \
-             patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"):
+             patch("ui.server._atomic_symlink_swap"):
             result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is True
@@ -241,9 +221,7 @@ class TestModeADirectoryStructure:
         repo_path = tmp_path / "myproject"
 
         with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
-             patch("ui.server.os.symlink"), \
-             patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"):
+             patch("ui.server._atomic_symlink_swap"):
             result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is True
@@ -256,9 +234,7 @@ class TestModeADirectoryStructure:
         bad_seed = "- [ ] `TEST-E1` | LOW | Do the thing\nNo test line follows.\n"
 
         with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
-             patch("ui.server.os.symlink"), \
-             patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"):
+             patch("ui.server._atomic_symlink_swap"):
             result = _run_init_project(str(repo_path), bad_seed, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is False
@@ -272,9 +248,7 @@ class TestModeADirectoryStructure:
         bad_seed = "- [ ] `TEST-E1` | LOW | Do the thing\nNo test line follows.\n"
 
         with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
-             patch("ui.server.os.symlink"), \
-             patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"):
+             patch("ui.server._atomic_symlink_swap"):
             result = _run_init_project(str(repo_path), bad_seed, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is False
@@ -298,9 +272,7 @@ class TestModeAGitFailure:
             raise exc
 
         with patch("subprocess.run", side_effect=raise_git_error), \
-             patch("ui.server.os.symlink"), \
-             patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"):
+             patch("ui.server._atomic_symlink_swap"):
             result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is False
@@ -317,9 +289,7 @@ class TestModeAGitFailure:
             raise exc
 
         with patch("subprocess.run", side_effect=fail_on_git), \
-             patch("ui.server.os.symlink"), \
-             patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"):
+             patch("ui.server._atomic_symlink_swap"):
             result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is False
@@ -356,9 +326,7 @@ class TestModeBExistingRepo:
         original_content = "# My existing roadmap\n\n- [ ] `ORIG-E1` | HIGH | Original phase\n  > Test: Done.\n"
         (repo_path / "roadmap.md").write_text(original_content)
 
-        with patch("ui.server.os.symlink"), \
-             patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"):
+        with patch("ui.server._atomic_symlink_swap"):
             result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is True
@@ -372,9 +340,7 @@ class TestModeBExistingRepo:
         # Write a .gitignore with only some entries present
         (repo_path / ".gitignore").write_text("*.pyc\n__pycache__/\n")
 
-        with patch("ui.server.os.symlink"), \
-             patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"):
+        with patch("ui.server._atomic_symlink_swap"):
             result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is True
@@ -390,9 +356,7 @@ class TestModeBExistingRepo:
         existing = "\n".join(PIPELINE_GITIGNORE_ENTRIES) + "\n"
         (repo_path / ".gitignore").write_text(existing)
 
-        with patch("ui.server.os.symlink"), \
-             patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"):
+        with patch("ui.server._atomic_symlink_swap"):
             result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is True
@@ -404,9 +368,7 @@ class TestModeBExistingRepo:
         repo_path = tmp_path / "myproject"
         self._make_git_repo(repo_path)
 
-        with patch("ui.server.os.symlink"), \
-             patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"):
+        with patch("ui.server._atomic_symlink_swap"):
             result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is True
@@ -420,9 +382,7 @@ class TestModeBExistingRepo:
         self._make_git_repo(repo_path)
         prd = "# Product requirements\n\n## Problem\nFrom Ideas.\n"
 
-        with patch("ui.server.os.symlink"), \
-             patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"):
+        with patch("ui.server._atomic_symlink_swap"):
             result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, prd, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is True
@@ -436,68 +396,60 @@ class TestModeBExistingRepo:
 class TestSymlinkSetting:
 
     def test_sets_symlink_to_repo_path(self, tmp_path):
-        """After success, os.symlink is called with repo_path as src."""
+        """After success, the atomic swap points the link (project_dir_path) at repo_path."""
         repo_path = tmp_path / "myproject"
-        symlink_calls = []
+        swap_calls = []
 
-        def capture_symlink(src, dst):
-            symlink_calls.append((src, dst))
+        def capture_swap(target, link_path):
+            swap_calls.append((target, link_path))
 
         with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
-             patch("ui.server.os.symlink", side_effect=capture_symlink), \
-             patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"):
+             patch("ui.server._atomic_symlink_swap", side_effect=capture_swap):
             result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is True
-        assert len(symlink_calls) == 1
-        src, dst = symlink_calls[0]
-        # src should be the expanded repo_path
-        assert src == str(repo_path)
-        # dst should be the configured project_dir_path (repo-local .autodev/ by default,
-        # or ~/.openclaw/pipeline-project in legacy mode). Derive from load_config() so
-        # the assertion survives future runtime layout changes.
+        assert len(swap_calls) == 1
+        target, link_path = swap_calls[0]
+        # target should be the expanded repo_path
+        assert target == str(repo_path)
+        # link_path should be the configured project_dir_path (repo-local .autodev/ by
+        # default, or ~/.openclaw/pipeline-project in legacy mode). Derive from
+        # load_config() so the assertion survives future runtime layout changes.
         from ui.server import load_config
         cfg = load_config()
-        expected_dst = os.path.expanduser(cfg["project_dir_path"])
-        assert dst == expected_dst
+        expected_link = os.path.expanduser(cfg["project_dir_path"])
+        assert link_path == expected_link
 
-    def test_removes_existing_symlink_before_creating(self, tmp_path):
-        """When lexists returns True, os.remove is called before os.symlink."""
+    def test_symlink_swap_is_atomic_single_call(self, tmp_path):
+        """The link is repointed via one atomic _atomic_symlink_swap call.
+
+        Replaces the obsolete remove-before-symlink ordering test: the swap no
+        longer does a separate os.remove (which left a window with no link) — it
+        creates a temp link and os.replace's it over the target in one step.
+        """
         repo_path = tmp_path / "myproject"
-        call_order = []
-
-        def track_remove(path):
-            call_order.append(("remove", path))
-
-        def track_symlink(src, dst):
-            call_order.append(("symlink", src, dst))
-
         with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
-             patch("ui.server.os.symlink", side_effect=track_symlink), \
-             patch("ui.server.os.path.lexists", return_value=True), \
-             patch("ui.server.os.remove", side_effect=track_remove):
+             patch("ui.server._atomic_symlink_swap") as swap, \
+             patch("ui.server.os.remove") as os_remove:
             result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is True
-        assert call_order[0][0] == "remove"
-        assert call_order[1][0] == "symlink"
+        assert swap.call_count == 1
+        # No separate symlink-removal step in the swap path.
+        assert os_remove.call_count == 0
 
     def test_symlink_not_set_on_failure(self, tmp_path):
-        """On roadmap validation failure (Mode A), os.symlink is never called."""
+        """On roadmap validation failure (Mode A), the symlink swap is never called."""
         repo_path = tmp_path / "myproject"
         # Phase line without '> Test:' triggers validation failure
         bad_seed = "- [ ] `TEST-E1` | LOW | Do the thing\nNo test line follows.\n"
-        symlink_calls = []
 
         with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
-             patch("ui.server.os.symlink", side_effect=lambda s, d: symlink_calls.append((s, d))), \
-             patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"):
+             patch("ui.server._atomic_symlink_swap") as swap:
             result = _run_init_project(str(repo_path), bad_seed, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is False
-        assert len(symlink_calls) == 0
+        assert swap.call_count == 0
 
 
 # ---------------------------------------------------------------------------
@@ -511,9 +463,7 @@ class TestReturnValues:
         repo_path = tmp_path / "myproject"
 
         with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
-             patch("ui.server.os.symlink"), \
-             patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"):
+             patch("ui.server._atomic_symlink_swap"):
             result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result == {"ok": True, "error": None}
@@ -525,9 +475,7 @@ class TestReturnValues:
         bad_seed = "- [ ] `TEST-E1` | LOW | Do the thing\nNo test line follows.\n"
 
         with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
-             patch("ui.server.os.symlink"), \
-             patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"):
+             patch("ui.server._atomic_symlink_swap"):
             result = _run_init_project(str(repo_path), bad_seed, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is False
@@ -555,9 +503,7 @@ class TestLaunchSpawnsOrchestrator:
         client = load_server()
 
         with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
-             patch("ui.server.os.symlink"), \
-             patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"), \
+             patch("ui.server._atomic_symlink_swap"), \
              patch("ui.server.load_config", return_value=cfg), \
              patch("ui.server._check_orchestrator_liveness", return_value=False), \
              patch("ui.server._spawn_orchestrator") as spawn_m:
@@ -590,9 +536,7 @@ class TestLaunchSpawnsOrchestrator:
         client = load_server()
 
         with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
-             patch("ui.server.os.symlink"), \
-             patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"), \
+             patch("ui.server._atomic_symlink_swap"), \
              patch("ui.server.load_config", return_value=cfg), \
              patch("ui.server._check_orchestrator_liveness", return_value=True), \
              patch("ui.server._spawn_orchestrator") as spawn_m:
@@ -656,9 +600,7 @@ class TestVerificationContentPlumbing:
         }
         client = load_server()
         with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
-             patch("ui.server.os.symlink"), \
-             patch("ui.server.os.path.lexists", return_value=False), \
-             patch("ui.server.os.remove"), \
+             patch("ui.server._atomic_symlink_swap"), \
              patch("ui.server.load_config", return_value=cfg), \
              patch("ui.server._check_orchestrator_liveness", return_value=False), \
              patch("ui.server._spawn_orchestrator", return_value={"ok": True, "error": None}):
