@@ -145,7 +145,9 @@ def test_poll_site_records_last_poll_reason(agent):
     marker = f"stall_detection_path=_{agent}_stamp"
     idx = _ORCH_SRC.find(marker)
     assert idx != -1
-    window = _ORCH_SRC[max(0, idx - 1500) : idx + 2500]
+    # Forward window spans the poll_for_sentinel call (incl. the Layer-2
+    # sentinel_acceptor kwarg) through the post-poll _record_phase_outcome block.
+    window = _ORCH_SRC[max(0, idx - 1500) : idx + 3000]
     assert "_record_phase_outcome" in window, (
         f"{agent} poll site must invoke _record_phase_outcome after the poll"
     )
@@ -161,7 +163,9 @@ def test_poll_site_records_last_attempt_summary(agent):
     marker = f"stall_detection_path=_{agent}_stamp"
     idx = _ORCH_SRC.find(marker)
     assert idx != -1
-    window = _ORCH_SRC[max(0, idx - 1500) : idx + 2500]
+    # Forward window spans the poll_for_sentinel call (incl. the Layer-2
+    # sentinel_acceptor kwarg) through the post-poll _record_phase_outcome block.
+    window = _ORCH_SRC[max(0, idx - 1500) : idx + 3000]
     assert "last_attempt_summary" in window, (
         f"{agent} poll site must record last_attempt_summary"
     )
