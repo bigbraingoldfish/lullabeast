@@ -72,9 +72,11 @@ def _check_behavioral_verification(data):
       - ``evidence``: list. On ``verdict == "pass"`` it MUST contain at least
         :data:`_MIN_BEHAVIORAL_EVIDENCE_ANCHORS` entries; each entry is a dict
         with ``claim``, ``file_or_screenshot_or_log``, and ``method`` keys.
-        The ``file_or_screenshot_or_log`` path is workspace-bounded (via
-        ``os.path.commonpath`` — same guard pattern as the file_manifest
-        validator in :mod:`executor_gate`) and must resolve on disk.
+        The ``file_or_screenshot_or_log`` path must be a string and is
+        workspace-bounded via a canonical (``os.path.realpath``) ``commonpath``
+        check that resolves symlinks on BOTH sides — same guard pattern as the
+        file_manifest validator in :mod:`executor_gate`; an in-workspace symlink
+        resolving outside the workspace is rejected — and must resolve on disk.
 
     A ``"fail"`` or ``"cannot_verify"`` verdict is not treated as a
     gate-script-level problem here — it flows through the validation block in
@@ -100,7 +102,7 @@ def _check_behavioral_verification(data):
             f"behavioral_verification.evidence must have at least "
             f"{_MIN_BEHAVIORAL_EVIDENCE_ANCHORS} entries when verdict='pass'"
         ]
-    workspace_abs = os.path.abspath(WORKSPACE_DIR)
+    workspace_real = os.path.realpath(WORKSPACE_DIR)
     for i, entry in enumerate(evidence):
         if not isinstance(entry, dict):
             return [f"behavioral_verification.evidence[{i}] must be an object"]
@@ -110,9 +112,19 @@ def _check_behavioral_verification(data):
                     f"behavioral_verification.evidence[{i}] missing required key {key!r}"
                 ]
         path = entry["file_or_screenshot_or_log"]
+        # T1.2 — the key-presence loop above only checks truthiness; reject a
+        # truthy non-string path before it reaches os.path.isabs (which raises
+        # TypeError on a non-str), mirroring _check_visual_verification's guard.
+        if not isinstance(path, str):
+            return [
+                f"behavioral_verification.evidence[{i}] file_or_screenshot_or_log must be a string"
+            ]
         abs_path = path if os.path.isabs(path) else os.path.join(WORKSPACE_DIR, path)
+        # T1.4 — canonical (realpath) bounds check: resolve symlinks on both sides
+        # so an in-workspace symlink that points outside the workspace is caught.
+        real_path = os.path.realpath(abs_path)
         try:
-            if os.path.commonpath([workspace_abs, os.path.abspath(abs_path)]) != workspace_abs:
+            if os.path.commonpath([workspace_real, real_path]) != workspace_real:
                 return [
                     f"behavioral_verification.evidence[{i}] path escapes workspace: {path}"
                 ]
@@ -120,7 +132,7 @@ def _check_behavioral_verification(data):
             return [
                 f"behavioral_verification.evidence[{i}] path escapes workspace: {path}"
             ]
-        if not os.path.exists(abs_path):
+        if not os.path.exists(real_path):
             return [
                 f"behavioral_verification.evidence[{i}] path does not exist on disk: {path}"
             ]
@@ -142,8 +154,9 @@ def _check_regression_verification(data, current_phase):
       - ``evidence``: list. On ``verdict == "pass"`` AND
         ``prior_phase_how_to_check_followed is True`` it MUST contain at least
         :data:`_MIN_BEHAVIORAL_EVIDENCE_ANCHORS` entries (each a dict with
-        ``claim``, ``file_or_screenshot_or_log``, ``method`` keys, paths
-        workspace-bounded and resolvable on disk).
+        ``claim``, ``file_or_screenshot_or_log``, ``method`` keys; paths must be
+        strings, are canonically (``os.path.realpath``) workspace-bounded on both
+        sides, and must resolve on disk).
 
     A ``"fail"`` / ``"cannot_verify"`` verdict OR a ``followed: False`` signal
     is not a shape failure — those flow through the validation block as
@@ -184,7 +197,7 @@ def _check_regression_verification(data, current_phase):
             f"{_MIN_BEHAVIORAL_EVIDENCE_ANCHORS} entries when "
             f"verdict='pass' and prior_phase_how_to_check_followed=True"
         ]
-    workspace_abs = os.path.abspath(WORKSPACE_DIR)
+    workspace_real = os.path.realpath(WORKSPACE_DIR)
     for i, entry in enumerate(evidence):
         if not isinstance(entry, dict):
             return [f"regression_verification.evidence[{i}] must be an object"]
@@ -194,9 +207,18 @@ def _check_regression_verification(data, current_phase):
                     f"regression_verification.evidence[{i}] missing required key {key!r}"
                 ]
         path = entry["file_or_screenshot_or_log"]
+        # T1.2 — reject a truthy non-string path before os.path.isabs (which raises
+        # TypeError on a non-str); the key-presence loop only checks truthiness.
+        if not isinstance(path, str):
+            return [
+                f"regression_verification.evidence[{i}] file_or_screenshot_or_log must be a string"
+            ]
         abs_path = path if os.path.isabs(path) else os.path.join(WORKSPACE_DIR, path)
+        # T1.4 — canonical (realpath) bounds check: resolve symlinks on both sides
+        # so an in-workspace symlink that points outside the workspace is caught.
+        real_path = os.path.realpath(abs_path)
         try:
-            if os.path.commonpath([workspace_abs, os.path.abspath(abs_path)]) != workspace_abs:
+            if os.path.commonpath([workspace_real, real_path]) != workspace_real:
                 return [
                     f"regression_verification.evidence[{i}] path escapes workspace: {path}"
                 ]
@@ -204,7 +226,7 @@ def _check_regression_verification(data, current_phase):
             return [
                 f"regression_verification.evidence[{i}] path escapes workspace: {path}"
             ]
-        if not os.path.exists(abs_path):
+        if not os.path.exists(real_path):
             return [
                 f"regression_verification.evidence[{i}] path does not exist on disk: {path}"
             ]
@@ -499,7 +521,13 @@ def evaluate_reviewer(output_path=None):
     # ``not data.get("phase_intent_validated")`` trigger that lived here
     # before — the boolean was self-attested and unverifiable; the
     # structured verdict is anchored to evidence.
-    behavioral_verdict = (data.get("behavioral_verification") or {}).get("verdict")
+    # T1.2 — ``or {}`` only rescues a falsy value; a truthy non-dict
+    # behavioral_verification crashes ``.get``. On a behavioural phase a non-dict
+    # block was already intercepted upstream (BEHAVIORAL_UNVERIFIED); this line is
+    # reachable with a non-dict only on a NON-behavioural phase, where the verdict
+    # is irrelevant — so treat a non-dict as absent (None) and ignore it.
+    _bv = data.get("behavioral_verification")
+    behavioral_verdict = _bv.get("verdict") if isinstance(_bv, dict) else None
     behavioral_rejection = (
         phase_has_behavioral_block(_current_phase)
         and behavioral_verdict in ("fail", "cannot_verify")
@@ -511,7 +539,13 @@ def evaluate_reviewer(output_path=None):
     # reviewer-driven executor rejection (per the locked rejection-budget
     # decision — no per-flavour rejection counter). Routes through
     # ROUTE_EXECUTOR via the existing apply_reviewer_routing pass logic.
-    _regression_block = data.get("regression_verification") or {}
+    # T1.2 — normalize a non-dict regression_verification to {} explicitly.
+    # Defense-in-depth: the ``.get`` calls below are short-circuited behind
+    # requires_regression_verification and a non-dict block is already intercepted
+    # upstream as REGRESSION_UNVERIFIED, so this is not independently crash-
+    # reachable today — but it removes the reliance on that subtle invariant.
+    _rb = data.get("regression_verification")
+    _regression_block = _rb if isinstance(_rb, dict) else {}
     regression_rejection = requires_regression_verification(_current_phase) and (
         _regression_block.get("verdict") in ("fail", "cannot_verify")
         or _regression_block.get("prior_phase_how_to_check_followed") is False

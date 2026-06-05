@@ -21,6 +21,7 @@ check is a no-op, and call ``evaluate_executor`` directly.
 import json
 import os
 import sys
+import tempfile
 from contextlib import ExitStack
 from unittest.mock import patch
 
@@ -28,6 +29,25 @@ import pytest
 
 import utils as utils_module
 import executor_gate as executor_gate_module
+
+
+def _make_escape_symlink(workspace, link_name="sneaky", target_file="file.txt"):
+    """Create an in-workspace symlink that resolves OUTSIDE the workspace, plus a
+    real file at its target. Returns the workspace-relative path
+    ``"<link_name>/<target_file>"`` whose lexical ``abspath`` stays inside the
+    workspace (so the old guard accepts it) but whose ``realpath`` escapes (so the
+    hardened guard must reject it). The precondition assert keeps the test honest
+    on symlinked-TMPDIR hosts (e.g. macOS, where ``$TMPDIR`` is itself a symlink):
+    the escape target must genuinely fall outside ``realpath(workspace)``."""
+    parent = os.path.dirname(workspace.rstrip(os.sep))
+    outside = tempfile.mkdtemp(dir=parent, prefix="ws_escape_")
+    assert os.path.commonpath(
+        [os.path.realpath(outside), os.path.realpath(workspace)]
+    ) != os.path.realpath(workspace), "escape target must be outside the workspace"
+    with open(os.path.join(outside, target_file), "w") as f:
+        f.write("secret\n")
+    os.symlink(outside, os.path.join(workspace, link_name))
+    return f"{link_name}/{target_file}"
 
 
 def _patch_workspace(tmp_dir):
@@ -230,3 +250,196 @@ def test_valid_behavioral_smoke_artifacts_pass(tmp_workspace, monkeypatch):
     )
     # A fully-valid behavioural phase emits no warning.
     assert not os.path.exists(os.path.join(tmp_workspace, "gate_warnings.json"))
+
+
+# ===========================================================================
+# Phase 1 defensive hardening — gate output & boundary hardening
+# (defensive-hardening-roadmap.md PHASE 1: T1.1 manifest type-coercion,
+#  T1.3 tdd-list coercion, T1.4 realpath boundary guard). Co-located here for
+# the executor-gate scaffolding above (_patch_workspace / _executor_output /
+# _write_pipeline_state / _write_planner_output / _make_escape_symlink).
+# ===========================================================================
+
+
+def test_non_list_file_manifest_fails_validation(tmp_workspace):
+    """T1.1 — a non-list ``file_manifest`` (MiniMax emits ``"foo.py"`` instead of
+    ``["foo.py"]``) must yield a clean ``FAIL`` + ``ERR_VALIDATION_FAILED``, NOT a
+    ``TypeError`` crash. The crash path returns no ``last_error_code`` and skips
+    the MiniMax file-deletion guard; the error-code assertion proves the guard
+    ran rather than the gate merely crashing.
+
+    RED on current code: ``"foo.py" + []`` raises ``TypeError`` at line 308."""
+    out = _executor_output(tmp_workspace, include_planner_files=False)
+    out["file_manifest"] = "src/module.py"  # string, not a list
+    output_path = os.path.join(tmp_workspace, "executor_output.json")
+    with open(output_path, "w") as f:
+        json.dump(out, f)
+
+    with _patch_workspace(tmp_workspace):
+        result = executor_gate_module.evaluate_executor(output_path)
+    assert result == "FAIL"
+
+    with open(os.path.join(tmp_workspace, "phase_state.json")) as f:
+        state = json.load(f)
+    assert state.get("last_error_code") == "ERR_VALIDATION_FAILED", (
+        f"A non-list file_manifest must record ERR_VALIDATION_FAILED so the "
+        f"self-heal feedback survives; got {state.get('last_error_code')!r}"
+    )
+
+
+def test_non_list_tests_written_fails_validation(tmp_workspace):
+    """T1.1 — symmetric to the file_manifest case: a non-list ``tests_written``
+    must also short-circuit to ``FAIL`` + ``ERR_VALIDATION_FAILED`` (the guard
+    validates both operands of the concatenation).
+
+    RED on current code: ``[...] + 123`` raises ``TypeError`` at line 308."""
+    out = _executor_output(tmp_workspace)
+    out["tests_written"] = 123  # int, not a list
+    output_path = os.path.join(tmp_workspace, "executor_output.json")
+    with open(output_path, "w") as f:
+        json.dump(out, f)
+
+    with _patch_workspace(tmp_workspace):
+        result = executor_gate_module.evaluate_executor(output_path)
+    assert result == "FAIL"
+
+    with open(os.path.join(tmp_workspace, "phase_state.json")) as f:
+        state = json.load(f)
+    assert state.get("last_error_code") == "ERR_VALIDATION_FAILED"
+
+
+def test_string_tdd_structure_no_spurious_coverage_warning(tmp_workspace, monkeypatch):
+    """T1.3 — a string ``tdd_test_structure`` must be coerced to an empty list so
+    the coverage comprehension does NOT iterate it per-character (which produces a
+    garbage ``missing`` list and a spurious ``ERR_TDD_COVERAGE_MISMATCH`` warning
+    that pollutes the gate-feedback channel the reviewer adjudicates).
+
+    RED on current code: ``[t for t in "render_button" ...]`` flags every char as
+    missing, so ``gate_warnings.json`` carries ERR_TDD_COVERAGE_MISMATCH."""
+    _write_current_phase_no_behavioral(tmp_workspace)
+    _write_pipeline_state(tmp_workspace)
+    _write_planner_output(tmp_workspace, tdd_paths="render_button")  # string, not list
+
+    out = _executor_output(tmp_workspace)
+    out["tests_written"] = []
+    output_path = os.path.join(tmp_workspace, "executor_output.json")
+    with open(output_path, "w") as f:
+        json.dump(out, f)
+
+    import subprocess
+    class _Sub:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Sub())
+
+    with _patch_workspace(tmp_workspace):
+        result = executor_gate_module.evaluate_executor(output_path)
+    assert result == "PASS", f"expected PASS, got {result!r}"
+
+    gw_path = os.path.join(tmp_workspace, "gate_warnings.json")
+    codes = []
+    if os.path.exists(gw_path):
+        with open(gw_path) as f:
+            codes = [w.get("code") for w in json.load(f).get("warnings", [])]
+    assert "ERR_TDD_COVERAGE_MISMATCH" not in codes, (
+        f"A string tdd_test_structure must not emit a per-character coverage "
+        f"warning; got warning codes {codes!r}"
+    )
+
+
+def test_int_tdd_structure_does_not_crash(tmp_workspace, monkeypatch):
+    """T1.3 — a non-iterable ``tdd_test_structure`` (int) must be coerced, not
+    iterated, so the gate returns a normal verdict instead of crashing.
+
+    RED on current code: ``[t for t in 5 ...]`` raises ``TypeError`` at line 350."""
+    _write_current_phase_no_behavioral(tmp_workspace)
+    _write_pipeline_state(tmp_workspace)
+    _write_planner_output(tmp_workspace, tdd_paths=5)  # int, not a list
+
+    out = _executor_output(tmp_workspace)
+    out["tests_written"] = []
+    output_path = os.path.join(tmp_workspace, "executor_output.json")
+    with open(output_path, "w") as f:
+        json.dump(out, f)
+
+    import subprocess
+    class _Sub:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Sub())
+
+    with _patch_workspace(tmp_workspace):
+        result = executor_gate_module.evaluate_executor(output_path)
+    assert result == "PASS", f"expected a clean verdict, got {result!r}"
+
+
+def test_manifest_symlink_escape_rejected(tmp_workspace, monkeypatch):
+    """T1.4 — an in-workspace symlink in ``file_manifest`` that resolves OUTSIDE
+    the workspace must be rejected (``FAIL`` + ``ERR_PATH_TRAVERSAL``). The lexical
+    ``abspath`` guard accepted it (the documented-but-unimplemented ``realpath``
+    contract); the hardened guard resolves symlinks on both sides.
+
+    RED on current code: ``abspath`` does not follow ``sneaky`` → boundary passes
+    → file exists via the symlink → gate reaches PASS."""
+    rel = _make_escape_symlink(tmp_workspace)
+    _write_current_phase_no_behavioral(tmp_workspace)
+    _write_pipeline_state(tmp_workspace)
+    _write_planner_output(tmp_workspace)
+
+    out = _executor_output(tmp_workspace, include_planner_files=False)
+    out["file_manifest"] = [rel]
+    output_path = os.path.join(tmp_workspace, "executor_output.json")
+    with open(output_path, "w") as f:
+        json.dump(out, f)
+
+    import subprocess
+    class _Sub:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Sub())
+
+    with _patch_workspace(tmp_workspace):
+        result = executor_gate_module.evaluate_executor(output_path)
+    assert result == "FAIL"
+
+    with open(os.path.join(tmp_workspace, "phase_state.json")) as f:
+        state = json.load(f)
+    assert state.get("last_error_code") == "ERR_PATH_TRAVERSAL", (
+        f"A manifest path whose realpath escapes the workspace must FAIL with "
+        f"ERR_PATH_TRAVERSAL; got {state.get('last_error_code')!r}"
+    )
+
+
+def test_behavioral_artifact_symlink_escape_rejected(tmp_workspace, monkeypatch):
+    """T1.4 — the same symlink-escape guard on the second boundary loop
+    (``behavioral_smoke_artifacts``). RED on current code for the same reason as
+    the manifest case."""
+    rel = _make_escape_symlink(tmp_workspace)
+    _write_current_phase_with_behavioral(tmp_workspace)
+    _write_pipeline_state(tmp_workspace)
+    _write_planner_output(tmp_workspace)
+
+    out = _executor_output(tmp_workspace, behavioral_artifacts=[
+        {"path": rel, "description": "resolves outside the workspace"},
+    ])
+    output_path = os.path.join(tmp_workspace, "executor_output.json")
+    with open(output_path, "w") as f:
+        json.dump(out, f)
+
+    import subprocess
+    class _Sub:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Sub())
+
+    with _patch_workspace(tmp_workspace):
+        result = executor_gate_module.evaluate_executor(output_path)
+    assert result == "FAIL"
+
+    with open(os.path.join(tmp_workspace, "phase_state.json")) as f:
+        state = json.load(f)
+    assert state.get("last_error_code") == "ERR_PATH_TRAVERSAL"
