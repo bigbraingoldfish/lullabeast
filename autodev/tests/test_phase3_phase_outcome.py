@@ -130,7 +130,11 @@ def test_nuclear_reset_records_outcome():
     ``reset_phase()`` call it makes."""
     nuke_idx = _ORCH_SRC.find("def nuclear_reset_phase")
     assert nuke_idx != -1
-    nuke_window = _ORCH_SRC[nuke_idx: nuke_idx + 2000]
+    # Scan the whole method body (up to the next method def), not a fixed-size
+    # window — the T4.1 reorder (gate nuclear_resets++/last_phase_outcome on a
+    # confirmed reset_phase()) sets last_phase_outcome later in the body.
+    _next_def = _ORCH_SRC.find("\n    def ", nuke_idx + 1)
+    nuke_window = _ORCH_SRC[nuke_idx: _next_def if _next_def != -1 else nuke_idx + 4000]
     assert "last_phase_outcome" in nuke_window and '"nuclear_reset"' in nuke_window, (
         'nuclear_reset_phase must set last_phase_outcome="nuclear_reset"'
     )
