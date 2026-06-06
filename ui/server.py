@@ -1,7 +1,14 @@
 """UI server module."""
 import base64
 import aiohttp
-import fcntl
+try:
+    import fcntl
+except ModuleNotFoundError:  # pragma: no cover - native Windows lacks POSIX fcntl
+    raise SystemExit(
+        "AutoDev requires Linux, macOS, or WSL2. Native Windows is not "
+        "supported (the pipeline uses POSIX fcntl advisory locking) — "
+        "run AutoDev under WSL2."
+    )
 import hashlib
 import json
 import logging
@@ -1327,6 +1334,7 @@ def _queue_demote_stale_active_entries(config: dict, canonical_real: str) -> boo
     try:
         # Best-effort alignment: a CAS exhaustion (astronomically unlikely with two writers)
         # must not 503 the caller — treat it as "did not demote this cycle".
+        # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
         return _mutate_queue_file(config, _apply) is True
     except QueueVersionConflict:
         return False
@@ -1429,6 +1437,7 @@ def _queue_mark_matching_entry_active(config: dict, project_real: str) -> None:
 
     try:
         # Best-effort alignment — a CAS exhaustion must not 503 the spawn caller.
+        # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
         _mutate_queue_file(config, _apply)
     except QueueVersionConflict:
         pass
@@ -1482,7 +1491,7 @@ def _merge_ingested_active_project(ordered, ps):
         "id": ingest_id,
         "project_path": ps_project,
         "idea_id": None,
-        "name": os.path.basename(ps_project.rstrip("/")) or ps_project,
+        "name": os.path.basename(ps_project.rstrip(os.sep)) or ps_project,
         "state": "ACTIVE",
         "position": max_pos + 1,
         "parent_id": None,
@@ -7482,6 +7491,7 @@ def _queue_run_trigger_next_logic(config: dict) -> dict:
                 new_pos = min(t["position"] + group_size, len(es))
                 _move_group_atomically(es, _eid, new_pos)
                 return True
+            # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
             _mutate_queue_file(config, _skip)
             entry["state"] = "SKIPPED_PENDING"  # keep the walk snapshot roughly aligned
             continue
@@ -7494,6 +7504,7 @@ def _queue_run_trigger_next_logic(config: dict) -> dict:
             t["state"] = "ACTIVE"
             t["started_at"] = now
             return True
+        # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
         if _mutate_queue_file(config, _activate) is None:
             continue  # re-pick on the next call
         result = _spawn_orchestrator(entry["project_path"], config)
@@ -7504,6 +7515,7 @@ def _queue_run_trigger_next_logic(config: dict) -> dict:
                     raise QueueAbort()
                 t["state"] = "FAILED"
                 return True
+            # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
             _mutate_queue_file(config, _fail)
             raise HTTPException(status_code=500, detail=result.get("error", "Failed to spawn orchestrator"))
         return {"ok": True, "started": entry["name"]}
@@ -7589,6 +7601,7 @@ async def patch_queue_mode(request: Request):
         prev = q.get("queue_mode", "auto")
         q["queue_mode"] = mode
         return prev
+    # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
     prev_mode = _mutate_queue_file(config, _apply)
     response: dict = {"ok": True, "queue_mode": mode}
     # Transition guard stays: only a manual→auto switch kicks (auto→auto must not re-kick).
@@ -7710,6 +7723,7 @@ async def put_queue_order(request: Request):
             e["position"] = i
         q["queue"] = new_queue
         return True
+    # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
     _mutate_queue_file(config, _apply)
     return {"ok": True}
 
@@ -7803,7 +7817,7 @@ async def post_queue_add(request: Request):
             "id": str(_uuid.uuid4()),
             "project_path": repo_abs,
             "idea_id": idea_id,
-            "name": os.path.basename(project_path.rstrip("/")) or project_path,
+            "name": os.path.basename(project_path.rstrip(os.sep)) or project_path,
             "state": initial_state,
             "position": len(entries) + 1,
             "parent_id": parent_id,
@@ -7820,6 +7834,7 @@ async def post_queue_add(request: Request):
         q["queue"] = entries
         return new_entry
 
+    # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
     entry = _mutate_queue_file(config, _apply)
     # Auto-start the next eligible project when the queue is in auto mode and the pipeline
     # is idle (server-owned; replaces the former client-side post-add trigger shim).
@@ -7891,6 +7906,7 @@ def delete_queue_entry(entry_id: str):
         _resequence_positions(new_entries)
         q["queue"] = new_entries
         return True
+    # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
     _mutate_queue_file(config, _apply)
     return {"ok": True}
 
@@ -7930,6 +7946,7 @@ async def post_queue_clear(request: Request):
         n = len(entries)
         q["queue"] = []
         return n
+    # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
     cleared = _mutate_queue_file(config, _apply)
     return {"ok": True, "cleared": cleared}
 
@@ -7981,6 +7998,7 @@ async def patch_queue_position(entry_id: str, request: Request):
 
         q["queue"] = entries
         return True
+    # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
     _mutate_queue_file(config, _apply)
     return {"ok": True}
 
@@ -8032,6 +8050,7 @@ async def patch_queue_parent(entry_id: str, request: Request):
         q["queue"] = entries
         return {"target": dict(target), "cleared_to_ready": cleared_to_ready}
 
+    # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
     result = _mutate_queue_file(config, _apply)
     target = result["target"]
     # Auto-start only when a parent-clear just made this row READY (scope: clear→READY);
@@ -8262,6 +8281,7 @@ async def post_queue_entry_revalidate(entry_id: str):
             target["state"] = "READY"
         return dict(target)
 
+    # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
     target = _mutate_queue_file(config, _apply)
     # Auto-start if this revalidation left an eligible READY row in an idle auto queue
     # (no-op when the row stayed SKIPPED_PENDING / not in auto mode). Non-raising; additive.
@@ -8711,7 +8731,7 @@ def _run_init_project(
     import shutil
 
     repo_path = os.path.expanduser(repo_path)
-    name = os.path.basename(repo_path.rstrip("/"))
+    name = os.path.basename(repo_path.rstrip(os.sep))
     now = datetime.utcnow().isoformat() + "Z"
     mode = "B" if os.path.exists(os.path.join(repo_path, ".git")) else "A"
 
@@ -9012,6 +9032,7 @@ async def post_setup_launch(request: Request):
                 return True
 
             # Best-effort (a CAS exhaustion is swallowed like any other error below).
+            # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
             _mutate_queue_file(config, _apply)
         except Exception:
             pass

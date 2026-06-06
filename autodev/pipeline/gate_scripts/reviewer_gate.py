@@ -377,8 +377,10 @@ def _check_visual_verification(data):
     Required shape on visual phases:
       - visual_verification: one of "pass", "fail", "cannot_verify"
       - visual_smoke_artifacts: list with ≥1 entry when verification == "pass".
-        Each entry must be a dict with a `path` key resolvable on disk under
-        the workspace.
+        Each entry must be a dict with a `path` key that resolves on disk and,
+        after symlink resolution (``realpath``), stays inside the workspace —
+        the same ``commonpath`` boundary check behavioral/regression evidence
+        enforce (T7.4; a path escaping the workspace is rejected, not followed).
 
     A "fail" or "cannot_verify" verdict is not treated as a gate-script-level
     problem here — it flows through the existing blocking_issues path in
@@ -396,6 +398,7 @@ def _check_visual_verification(data):
     if verdict == "pass":
         if not isinstance(artifacts, list) or len(artifacts) == 0:
             return ["visual_smoke_artifacts must be a non-empty list when visual_verification='pass'"]
+        workspace_real = os.path.realpath(WORKSPACE_DIR)
         for i, entry in enumerate(artifacts):
             if not isinstance(entry, dict):
                 return [f"visual_smoke_artifacts[{i}] must be an object"]
@@ -403,7 +406,17 @@ def _check_visual_verification(data):
             if not path or not isinstance(path, str):
                 return [f"visual_smoke_artifacts[{i}] missing path"]
             abs_path = path if os.path.isabs(path) else os.path.join(WORKSPACE_DIR, path)
-            if not os.path.exists(abs_path):
+            # T7.4 — canonical (realpath) bounds check, parity with behavioral/
+            # regression evidence: resolve symlinks on both sides so an
+            # in-workspace symlink pointing outside the workspace is caught
+            # (CLAUDE.md Security Constraints; do not weaken).
+            real_path = os.path.realpath(abs_path)
+            try:
+                if os.path.commonpath([workspace_real, real_path]) != workspace_real:
+                    return [f"visual_smoke_artifacts[{i}] path escapes workspace: {path}"]
+            except ValueError:
+                return [f"visual_smoke_artifacts[{i}] path escapes workspace: {path}"]
+            if not os.path.exists(real_path):
                 return [f"visual_smoke_artifacts[{i}] path does not exist on disk: {path}"]
     return []
 
