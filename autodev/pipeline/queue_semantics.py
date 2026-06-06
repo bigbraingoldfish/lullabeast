@@ -69,9 +69,16 @@ class QueueAbort(Exception):
 
 
 def read_queue_version(data: dict) -> int:
-    """Return the queue's version, treating a missing/legacy/invalid value as 0."""
+    """Return the queue's version, treating a missing/legacy/invalid value as 0.
+
+    ``bool`` is explicitly excluded even though ``isinstance(True, int)`` is
+    ``True``: a hand-edited / legacy ``"queue_version": true`` would otherwise
+    read as ``1`` and ``bump_queue_version`` would write ``True + 1`` (the type
+    silently flips mid-stream). A bool — like any non-int / negative value — is
+    normalised to ``0`` so the first real CAS write lands a clean ``1``.
+    """
     v = data.get(QUEUE_VERSION_KEY)
-    return v if isinstance(v, int) and v >= 0 else 0
+    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else 0
 
 
 def bump_queue_version(data: dict) -> None:
@@ -107,6 +114,14 @@ def mutate_queue(read_fn, write_fn, current_version_fn, mutate_fn,
     and retried here rather than silently dropped.
 
     Raises QueueVersionConflict if *max_retries* conflicts occur without a clean commit.
+
+    The version key is owned exclusively by ``bump_queue_version`` (called inside
+    ``write_fn``). A ``mutate_fn`` that touches it would be re-applied — and the
+    version re-bumped from a corrupted base — on every CAS retry, so this loop
+    enforces that invariant: if ``mutate_fn`` changed the version key, it raises
+    ``RuntimeError`` rather than committing. (Full closure purity — no spawn,
+    symlink, or other I/O in the retried region — cannot be enforced in Python;
+    this checks the one violation that is provable and most damaging.)
     """
     for _ in range(max_retries):
         data = read_fn()
@@ -115,6 +130,12 @@ def mutate_queue(read_fn, write_fn, current_version_fn, mutate_fn,
             result = mutate_fn(data)
         except QueueAbort:
             return None
+        if read_queue_version(data) != base:
+            raise RuntimeError(
+                "mutate_fn must not modify the queue_version key — it is owned by "
+                f"bump_queue_version (base={base}, after mutate_fn="
+                f"{data.get(QUEUE_VERSION_KEY)!r})"
+            )
         if current_version_fn() == base:   # nobody else wrote since our read -> safe to commit
             write_fn(data)                 # write_fn bumps base -> base+1
             return result

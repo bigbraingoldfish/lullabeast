@@ -9,7 +9,16 @@ _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
-from env_resolvers import resolve_openclaw_root, resolve_pipeline_root  # noqa: E402
+from env_resolvers import (  # noqa: E402
+    load_repo_env_file,
+    resolve_openclaw_root,
+    resolve_pipeline_root,
+)
+
+# Cron self-load: under system cron `.env` is not sourced, so populate any unset
+# canonical vars from <repo>/.env before resolving the roots (setdefault — a
+# properly sourced or explicitly-exported env still wins).
+load_repo_env_file()
 
 OPENCLAW_ROOT = resolve_openclaw_root()
 AUTODEV_REPO_PATH = os.environ.get(
@@ -134,8 +143,17 @@ def run_heartbeat() -> None:
         except BlockingIOError:
             # ── LOCK HELD ─ orchestrator is alive, nothing to do ─────────────
             if os.path.exists(STATE_FILE):
-                with open(STATE_FILE, "r") as f:
-                    state = json.load(f)
+                try:
+                    with open(STATE_FILE, "r") as f:
+                        state = json.load(f)
+                except json.JSONDecodeError:
+                    # Benign: the live orchestrator owns the file and rewrites it
+                    # atomically; we just can't report its status this cycle.
+                    print(
+                        "[WARN] Orchestrator alive but pipeline_state.json is "
+                        "unreadable/corrupt; status unknown."
+                    )
+                    return
                 print(
                     f"[INFO] Orchestrator alive. "
                     f"status={state.get('pipeline_status')!r}"
@@ -149,8 +167,22 @@ def run_heartbeat() -> None:
             print("[INFO] No state file — pipeline never started or was cleaned up. No action.")
             return
 
-        with open(STATE_FILE, "r") as f:
-            state = json.load(f)
+        try:
+            with open(STATE_FILE, "r") as f:
+                state = json.load(f)
+        except json.JSONDecodeError as e:
+            # Orchestrator is DEAD and the state file is corrupt — the watchdog
+            # cannot decide whether/how to recover. Fail loud (non-zero exit) so
+            # the corruption is visible instead of being silently skipped every
+            # cycle behind a vague "[ERROR]" line. SystemExit is not caught by the
+            # broad `except Exception` below, and the `finally` still releases the
+            # lock.
+            print(
+                "[CRITICAL] pipeline_state.json is CORRUPT while the orchestrator is "
+                "DEAD — automatic crash-recovery is BLOCKED. Manual intervention "
+                f"required: inspect {STATE_FILE}. ({e})"
+            )
+            sys.exit(1)
 
         pipeline_status = state.get("pipeline_status", "")
 
@@ -214,11 +246,33 @@ def run_heartbeat() -> None:
                 pass
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Cron entry point.
+
+    Logs the resolved roots, then **refuses to run (exit 1) on a broken
+    ``OPENCLAW_ROOT``** — heartbeat hands that root to any orchestrator it
+    restarts (``start_orchestrator`` -> ``env["OPENCLAW_ROOT"]``), so a bad root
+    would spawn a broken orchestrator, which is worse than a no-op. A bare
+    cron environment is the usual cause; ``load_repo_env_file`` at import already
+    tried ``<repo>/.env``, so reaching the guard means the root is genuinely
+    absent.
+    """
     print(
         f"[STARTUP] OPENCLAW_ROOT={OPENCLAW_ROOT} "
         f"AUTODEV_PIPELINE_ROOT={AUTODEV_PIPELINE_ROOT} "
         f"STATE_FILE={STATE_FILE}",
         flush=True,
     )
+    if not os.path.isdir(OPENCLAW_ROOT):
+        print(
+            f"[CRITICAL] OPENCLAW_ROOT is not a directory (resolved={OPENCLAW_ROOT!r}) "
+            "— refusing to run; a restarted orchestrator would inherit a broken root. "
+            "Check the cron environment / .env (is HOME set, is .env present?).",
+            flush=True,
+        )
+        sys.exit(1)
     run_heartbeat()
+
+
+if __name__ == "__main__":
+    main()
