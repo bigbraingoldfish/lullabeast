@@ -1279,11 +1279,11 @@ Each agent workspace contains a symlink providing write access to the shared pro
 ~/.openclaw/workspace-escalation/pipeline-project → ~/.openclaw/pipeline-project
 ```
 
-The outer symlink `~/.openclaw/pipeline-project` resolves to the actual project directory. When the orchestrator swaps projects (via `ln -sfn`), all four workspace symlinks follow automatically.
+The outer symlink `~/.openclaw/pipeline-project` resolves to the actual project directory. When the orchestrator swaps projects (via `update_symlink`), all four workspace symlinks follow automatically.
 
 Agent `AGENTS.md` files instruct agents to use the workspace-relative symlink `pipeline-project/` to reach the target repo. **Pipeline state and sentinels** (`planner_output.*`, `phase_state.json`, `*_output.done`, `phases/`, `metrics.jsonl`, etc.) are under `pipeline-project/.autodev/pipeline/`, not the project root. Do not use the absolute path `~/.openclaw/pipeline-project/` in agent write instructions.
 
-**Orchestrator symlink reconcile (executor and reviewer):** Immediately before each executor and reviewer webhook, the orchestrator calls `_verify_symlinks_consistent(pipeline_state["project_path"], self.update_symlink)`. If both outer `pipeline-project` symlinks (under `AUTODEV_PIPELINE_ROOT` and `OPENCLAW_ROOT`) already resolve to `project_path`, the call is a no-op. If they diverge, it invokes `update_symlink` to repoint both to `project_path` (same **Policy A — state wins** model as `POST /api/resume-orchestrator`), logs `[RECONCILE]` on the attempt and on successful confirmation, and re-verifies. Empty `project_path`, failed `update_symlink`, or persistent mismatch yields `[WARN]` or `[ERROR]` and `False`; the main loop still proceeds to the webhook (the reconcile is best-effort; operators should treat persistent `[WARN]` after `[RECONCILE]` as a signal to inspect symlinks and disk permissions).
+**Orchestrator symlink reconcile (executor and reviewer):** Immediately before each executor and reviewer webhook, the orchestrator calls `_verify_symlinks_consistent(pipeline_state["project_path"], self.update_symlink)`. If both outer `pipeline-project` symlinks (under `AUTODEV_PIPELINE_ROOT` and `OPENCLAW_ROOT`) already resolve to `project_path`, the call is a no-op. If they diverge, it invokes `update_symlink` to repoint both to `project_path` (same **Policy A — state wins** model as `POST /api/resume-orchestrator`), logs `[RECONCILE]` on the attempt and on successful confirmation, and re-verifies. Empty `project_path`, failed `update_symlink`, or persistent mismatch yields `[WARN]` or `[ERROR]` and `False`; the main loop still proceeds to the webhook (the reconcile is best-effort; operators should treat persistent `[WARN]` after `[RECONCILE]` as a signal to inspect symlinks and disk permissions). **`update_symlink` is transactional (T6.5):** it stages both links at unique temp names and commits them with atomic `os.replace`, rolling the first back to its prior target if the second fails — so the AUTODEV-side and OpenClaw-side links are never left permanently divergent (replacing the prior two non-atomic `ln -sfn` calls).
 
 ### Git Operations
 
@@ -1572,7 +1572,7 @@ Components that require no LLM at all:
 
 - Repo initialization check (folder structure, support docs, roadmap file)
 - Roadmap validation + phase identification
-- Symlink update (`ln -sfn`) per new project
+- Symlink update (`update_symlink`, transactional `os.symlink` + atomic `os.replace`) per new project
 - Git add / commit / merge / tag (reviewer gate pass only)
 - Cycle counter + sentinel + working file cleanup
 - Audit archive write (before clear, non-blocking on failure)

@@ -32,6 +32,15 @@ import sys as _sys
 _AUTODEV_UI_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _AUTODEV_UI_ROOT not in _sys.path:
     _sys.path.insert(0, _AUTODEV_UI_ROOT)
+
+# T6.1 — post-spawn lock-confirmation budget. _spawn_orchestrator(confirm_lock=True) polls
+# _check_orchestrator_liveness for up to _SPAWN_LOCK_CONFIRM_TIMEOUT seconds (every
+# _SPAWN_LOCK_CONFIRM_POLL) to confirm the child took the pipeline lock before reporting
+# success. With the lock lifted ahead of apply_cli_* in the orchestrator's main(), the child
+# acquires the lock in well under a second, so a timeout is a genuine failure signal. Patchable
+# in tests. Only interactive endpoints opt in; the fire-and-forget autostart path never does.
+_SPAWN_LOCK_CONFIRM_TIMEOUT = 10.0
+_SPAWN_LOCK_CONFIRM_POLL = 0.1
 _AUTODEV_PIPELINE_DIR = os.path.join(_AUTODEV_UI_ROOT, "autodev", "pipeline")
 if _AUTODEV_PIPELINE_DIR not in _sys.path:
     _sys.path.insert(0, _AUTODEV_PIPELINE_DIR)
@@ -1617,7 +1626,8 @@ def _validate_queue_entry_ids_order(entries, entry_ids):
     return None
 
 
-def _spawn_orchestrator(project_path: str, config: dict | None = None, revive_entry_id: str | None = None) -> dict:
+def _spawn_orchestrator(project_path: str, config: dict | None = None, revive_entry_id: str | None = None,
+                        *, confirm_lock: bool = False) -> dict:
     """Start orchestrator.py with --project-path. Returns {"ok": bool, "error": str|None}.
 
     When *revive_entry_id* is supplied (F2 — the dashboard 'Resume' control for a parked
@@ -1625,6 +1635,17 @@ def _spawn_orchestrator(project_path: str, config: dict | None = None, revive_en
     revival path (restore the escalated phase + apply any banked command) instead of the
     phase-0 reset ``--project-path`` would trigger on a project switch; it falls back to
     ``--project-path`` if the entry turns out not to be revivable.
+
+    T6.1 — hardening:
+      * the ``subprocess.Popen`` is wrapped in try/except ``OSError`` so a fork/exec failure
+        returns ``{"ok": False}`` instead of escaping as a 500 into the request handler;
+      * the parent's copy of the log fd is closed after Popen (the child inherits its own
+        dup at fork/exec) so the long-lived server does not leak one fd per spawn;
+      * when *confirm_lock* is True, the server polls ``_check_orchestrator_liveness`` for up
+        to ``_SPAWN_LOCK_CONFIRM_TIMEOUT`` to confirm the child took the pipeline lock before
+        reporting success. ``confirm_lock`` defaults **False** so the fire-and-forget autostart
+        path (``_queue_run_trigger_next_logic``) is never blocked or failed by a slow-but-healthy
+        child — only the interactive endpoints (launch / switch / resume / recover) opt in.
 
     Env construction rules (canonical names only — no legacy aliases):
       * ``OPENCLAW_ROOT`` is always set from ``config["openclaw_root"]``.
@@ -1673,13 +1694,40 @@ def _spawn_orchestrator(project_path: str, config: dict | None = None, revive_en
     cmd = [sys.executable, orchestrator_script, "--project-path", project_path]
     if revive_entry_id:
         cmd += ["--revive", str(revive_entry_id)]
-    subprocess.Popen(
-        cmd,
-        cwd=autodev_repo_path,
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-        env=env,
-    )
+    try:
+        subprocess.Popen(
+            cmd,
+            cwd=autodev_repo_path,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            env=env,
+        )
+    except OSError as e:
+        log_file.close()
+        return {"ok": False, "error": f"failed to start orchestrator: {e}"}
+    # The child inherited its own dup of the log fd at fork/exec; close the parent copy so a
+    # long-lived server process does not leak one fd per spawn.
+    log_file.close()
+
+    # T6.1 — post-spawn lock confirmation (interactive callers only; see confirm_lock note).
+    if confirm_lock:
+        lock_path = _expand_lock_path(config)
+        if lock_path:
+            deadline = time.monotonic() + _SPAWN_LOCK_CONFIRM_TIMEOUT
+            while time.monotonic() < deadline:
+                try:
+                    if _check_orchestrator_liveness(lock_path):
+                        return {"ok": True, "error": None}
+                except OSError:
+                    pass  # lock file not creatable yet — keep polling
+                time.sleep(_SPAWN_LOCK_CONFIRM_POLL)
+            return {
+                "ok": False,
+                "error": (
+                    f"orchestrator did not acquire the pipeline lock within "
+                    f"{_SPAWN_LOCK_CONFIRM_TIMEOUT:.0f}s (it may have failed to start)"
+                ),
+            }
     return {"ok": True, "error": None}
 
 
@@ -2817,6 +2865,14 @@ def post_command(request: dict):
 def post_pipeline_git_recover(request: dict):
     """Attempt safe git recovery after branch-checkout failures."""
     config = load_config()
+    # T6.2 — git stash / checkout + state rewrite must not race a live orchestrator mid-phase.
+    # Inert when no lock_path is configured / the lock is not held.
+    lock_path = _expand_lock_path(config)
+    if lock_path and _check_orchestrator_liveness(lock_path):
+        raise HTTPException(
+            status_code=409,
+            detail="An orchestrator is running. Stop the pipeline before running git recovery.",
+        )
     project_dir_path = config.get("project_dir_path")
     pipeline_state_path = config.get("pipeline_state_path")
 
@@ -3052,7 +3108,7 @@ def post_resume_orchestrator():
         except Exception:
             pass
 
-    spawned = _spawn_orchestrator(project_path, config)
+    spawned = _spawn_orchestrator(project_path, config, confirm_lock=True)
     if not spawned.get("ok"):
         err_msg = spawned.get("error") or "Failed to spawn orchestrator"
         if reconciled:
@@ -7370,10 +7426,21 @@ def _queue_run_trigger_next_logic(config: dict) -> dict:
     Same behavior as POST /api/queue/trigger-next body.
 
     Raises:
-        HTTPException: 409 if any file-backed row is ACTIVE; 500 if spawn fails.
+        HTTPException: 409 if an orchestrator is live or any file-backed row is ACTIVE;
+            500 if spawn fails.
     Returns:
         {"ok": True, "started": name} or {"queue_halted": True, "error": str}.
     """
+    # T6.2 — refuse to start a second orchestrator while one holds the pipeline lock. Inert
+    # when no lock_path is configured. The autostart caller (_maybe_autostart_queue) already
+    # pre-checks liveness and returns early when held, so this only bites the direct
+    # POST /api/queue/trigger-next path during the live-orchestrator window.
+    lock_path = _expand_lock_path(config)
+    if lock_path and _check_orchestrator_liveness(lock_path):
+        raise HTTPException(
+            status_code=409,
+            detail="An orchestrator is already running. Stop the pipeline before starting another project.",
+        )
     q = _read_queue_file(config)
     entries = q.get("queue", [])
 
@@ -7797,6 +7864,15 @@ def delete_queue_entry(entry_id: str):
         if target is None:
             raise HTTPException(status_code=404, detail="Queue entry not found")
         if target["state"] == "ACTIVE":
+            # T6.2 — a live orchestrator holding the lock owns the ACTIVE row; removing it would
+            # orphan the running pipeline. Inert when no lock_path / lock not held; the
+            # pipeline_state check below still covers the dead-orchestrator stale-ACTIVE-row case.
+            _lock_path = _expand_lock_path(config)
+            if _lock_path and _check_orchestrator_liveness(_lock_path):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Cannot remove an ACTIVE row while an orchestrator is running. Stop the pipeline first.",
+                )
             ps = _read_json_file(ps_path) if os.path.exists(ps_path) else None
             if ps:
                 try:
@@ -7838,6 +7914,14 @@ async def post_queue_clear(request: Request):
 
     def _apply(q):
         entries = q.get("queue", [])
+        if not force:
+            # T6.2 — clearing the queue under a live orchestrator orphans the running project.
+            _lock_path = _expand_lock_path(config)
+            if _lock_path and _check_orchestrator_liveness(_lock_path):
+                raise HTTPException(
+                    status_code=409,
+                    detail='An orchestrator is running; pass {"force": true} to clear anyway.',
+                )
         if any(e.get("state") == "ACTIVE" for e in entries) and not force:
             raise HTTPException(
                 status_code=409,
@@ -8140,7 +8224,7 @@ def post_queue_entry_relaunch(entry_id: str):
         except Exception:
             pass
 
-    result = _spawn_orchestrator(entry["project_path"], config, revive_entry_id=entry_id)
+    result = _spawn_orchestrator(entry["project_path"], config, revive_entry_id=entry_id, confirm_lock=True)
     if not result.get("ok"):
         raise HTTPException(status_code=500, detail=result.get("error", "Failed to spawn orchestrator"))
     return {"ok": True}
@@ -8566,15 +8650,9 @@ async def post_setup_switch_project(request: Request):
     if parent:
         os.makedirs(parent, exist_ok=True)
 
-    spawned = _spawn_orchestrator(repo_abs, config)
-    if not spawned.get("ok"):
-        return {
-            "ok": False,
-            "checks": all_pre,
-            "coherence": {"ok": True, "issues": []},
-            "error": spawned.get("error") or "Failed to spawn orchestrator",
-        }
-
+    # T6.3 — write pipeline_state.json BEFORE spawning (write-then-act): the child reads the
+    # project state at startup, so it must be committed first; a pre-spawn write failure aborts
+    # the spawn rather than leaving a running orchestrator with stale/foreign state.
     try:
         _write_json_atomic(pipeline_state_path, _clean_pipeline_state_for_project(repo_abs))
     except OSError as exc:
@@ -8583,6 +8661,16 @@ async def post_setup_switch_project(request: Request):
             "checks": all_pre,
             "coherence": {"ok": True, "issues": []},
             "error": f"Could not write pipeline_state.json: {exc}",
+        }
+
+    # T6.1 — confirm_lock: poll liveness post-spawn to confirm the child took the pipeline lock.
+    spawned = _spawn_orchestrator(repo_abs, config, confirm_lock=True)
+    if not spawned.get("ok"):
+        return {
+            "ok": False,
+            "checks": all_pre,
+            "coherence": {"ok": True, "issues": []},
+            "error": spawned.get("error") or "Failed to spawn orchestrator",
         }
 
     try:
@@ -8859,14 +8947,18 @@ async def post_setup_launch(request: Request):
     if parent:
         os.makedirs(parent, exist_ok=True)
 
-    spawned = _spawn_orchestrator(project_real, config)
-    if not spawned.get("ok"):
-        return {"ok": False, "error": spawned.get("error") or "Failed to spawn orchestrator"}
-
+    # T6.3 — write pipeline_state.json BEFORE spawning (write-then-act): the child reads the
+    # project state at startup, so it must be committed first; a pre-spawn write failure aborts
+    # the spawn rather than leaving a running orchestrator with stale/foreign state.
     try:
         _write_json_atomic(pipeline_state_path, _clean_pipeline_state_for_project(project_real))
     except OSError as exc:
         return {"ok": False, "error": f"Could not write pipeline_state.json: {exc}"}
+
+    # T6.1 — confirm_lock: poll liveness post-spawn to confirm the child took the pipeline lock.
+    spawned = _spawn_orchestrator(project_real, config, confirm_lock=True)
+    if not spawned.get("ok"):
+        return {"ok": False, "error": spawned.get("error") or "Failed to spawn orchestrator"}
 
     try:
         _queue_mark_matching_entry_active(config, project_real)
