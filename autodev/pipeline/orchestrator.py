@@ -1,6 +1,13 @@
 import os
 import sys
-import fcntl
+try:
+    import fcntl
+except ModuleNotFoundError:  # pragma: no cover - native Windows lacks POSIX fcntl
+    raise SystemExit(
+        "AutoDev requires Linux, macOS, or WSL2. Native Windows is not "
+        "supported (the pipeline uses POSIX fcntl advisory locking) — "
+        "run AutoDev under WSL2."
+    )
 import json
 import re
 import shutil
@@ -1605,6 +1612,7 @@ class Orchestrator:
             return data
 
         try:
+            # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
             committed = self._mutate_queue(_apply)
         except QueueVersionConflict as e:
             # T6.6 — perpetual queue contention must not propagate to run()'s top-level
@@ -1754,6 +1762,7 @@ class Orchestrator:
                         # CAS actually committed (a concurrently-deleted entry yields None). Fires
                         # once per genuine READY->DEPENDENCY_HOLD: an already-held entry is skipped
                         # by the state gate at the top of this loop before reaching here.
+                        # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
                         if self._mutate_queue(_hold_cas):
                             _write_pipeline_event(
                                 "dependency_hold", "", "queue",
@@ -1785,6 +1794,7 @@ class Orchestrator:
                     if not self._skip_and_requeue_group(data["queue"], _eid, _reason):
                         raise QueueAbort()  # entry deleted concurrently
                     return True
+                # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
                 self._mutate_queue(_skip_cas)
                 # Do NOT increment i — entry at this position shifted; visited_ids prevents re-trying
                 continue
@@ -1819,6 +1829,7 @@ class Orchestrator:
                         fresh.pop(_stale, None)
                 return True
 
+            # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
             if self._mutate_queue(_activate) is None:
                 print(f"[QUEUE] Picked entry '{entry['name']}' changed before activation — re-selecting next cycle.")
                 return False
@@ -1938,6 +1949,7 @@ class Orchestrator:
                     fresh.pop(_stale, None)
                 return True
 
+            # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
             if self._mutate_queue(_activate_esc) is None:
                 print(f"[QUEUE] Escalation '{_esc['name']}' changed before revive — skipping.")
                 continue
@@ -2016,6 +2028,7 @@ class Orchestrator:
                 raise QueueAbort()  # nothing to promote -> commit nothing
             return True
         try:
+            # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
             self._mutate_queue(_apply)
         except Exception as e:
             print(f"[QUEUE] Failed to promote children after parent completed: {e}")
@@ -2035,6 +2048,7 @@ class Orchestrator:
             # AFTER this write commits (it must not re-fire on a retry of THIS mutation).
             return entry.get("id") if new_state == "COMPLETED" else None
         try:
+            # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
             parent_id_completed = self._mutate_queue(_apply)
             if parent_id_completed:
                 self._queue_promote_children_after_parent_completed(parent_id_completed)
@@ -2082,6 +2096,7 @@ class Orchestrator:
             return {"id": row.get("id"), "name": row.get("name")}
 
         try:
+            # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
             parked = self._mutate_queue(_apply)
             # Phase 2 (observability) — record that the active project was set aside and
             # the queue advanced. Emitted once AFTER the commit (outside the retried closure
@@ -2138,6 +2153,7 @@ class Orchestrator:
             raise QueueAbort()  # no matching parked row -> commit nothing
 
         try:
+            # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
             self._mutate_queue(_apply)
         except Exception as e:
             print(f"[QUEUE] Failed to restore parked entry to ACTIVE: {e}")

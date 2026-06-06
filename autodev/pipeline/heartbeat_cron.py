@@ -1,6 +1,13 @@
 import os
 import sys
-import fcntl
+try:
+    import fcntl
+except ModuleNotFoundError:  # pragma: no cover - native Windows lacks POSIX fcntl
+    raise SystemExit(
+        "AutoDev requires Linux, macOS, or WSL2. Native Windows is not "
+        "supported (the pipeline uses POSIX fcntl advisory locking) — "
+        "run AutoDev under WSL2."
+    )
 import json
 import subprocess
 from datetime import datetime, timezone, timedelta

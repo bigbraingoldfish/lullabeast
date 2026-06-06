@@ -151,7 +151,7 @@ The UI server's configuration is a two-layer merge:
 
 `load_config()` applies this merge and expands `~` in all path values. After the merge it also **coerces the numeric keys** — `poll_timeout` / `poll_interval` / `ideas_idle_threshold` (to `float`) and `port` (to `int`) — falling back to the DEFAULTS value when a `ui/config.json` entry is a non-numeric string (a typo like `"5 min"`, or a quoted `"300"`). This stops a malformed numeric config from reaching a consumer's `float(config[...])` and 500-ing every Ideas flow *after* the webhook already fired. Every endpoint that reads a file path calls `load_config()` (or receives the result) rather than referencing DEFAULTS directly.
 
-The `autodev_repo_path` key in DEFAULTS reads from the `AUTODEV_REPO_PATH` environment variable first, then falls back to `~/.openclaw` (which is wrong after migration but preserved for backward compatibility). The correct value is the repo root. `install.sh` writes `.env` with the correct value; source `.env` before starting the server or set it in `ui/config.json`.
+The `autodev_repo_path` key in DEFAULTS reads from the `AUTODEV_REPO_PATH` environment variable first, then falls back to `_AUTODEV_UI_ROOT` — the repo root, two levels up from `ui/server.py` (`server.py:471`). `install.sh` writes `.env` with the explicit value; source `.env` before starting the server or set it in `ui/config.json`.
 
 ```json
 {
@@ -159,12 +159,11 @@ The `autodev_repo_path` key in DEFAULTS reads from the `AUTODEV_REPO_PATH` envir
 }
 ```
 
-When `_spawn_orchestrator` (called by `/api/setup/launch`) looks for `orchestrator.py`, it constructs:
+When `_spawn_orchestrator` (called by `/api/setup/launch`) looks for `orchestrator.py`, it constructs (`server.py:1666–1667`):
 ```python
-orchestrator_script = os.path.join(autodev_repo_path, ORCHESTRATOR_FILENAME)
-# = os.path.join(autodev_repo_path, "orchestrator.py")
+orchestrator_script = os.path.join(autodev_repo_path, "autodev", "pipeline", ORCHESTRATOR_FILENAME)
 ```
-This is **wrong unless `autodev_repo_path` is set to the repo root** — the correct path is `autodev/pipeline/orchestrator.py`. This is a known unfixed issue; see Unresolved Items below.
+With `autodev_repo_path` defaulting to the repo root (above), this resolves to `autodev/pipeline/orchestrator.py`. A wrong `autodev_repo_path` yields a clean `{ok: False, "orchestrator.py not found at …"}`, not a crash. (Resolved — see Unresolved Items #1/#3.)
 
 ---
 
@@ -638,6 +637,8 @@ These values appear throughout the codebase. Do not change them without understa
 
 The lock uses `fcntl.flock(fd, LOCK_EX | LOCK_NB)`. This is an **advisory lock**, not a PID file. Liveness is determined by attempting to acquire the lock — if successful, the holder is dead. This is immune to PID reuse (a new process with the same PID will not have the file descriptor open). Do not replace this with PID-file locking.
 
+**Platform support is POSIX-only — Linux, macOS, and WSL2 (T7.2/Decision #3).** `fcntl.flock` is a POSIX advisory-lock API available on Darwin (it is not a Linux-specific mechanism). Native Windows is unsupported: the three entry points that import `fcntl` (`orchestrator.py`, `heartbeat_cron.py`, `ui/server.py`) wrap the import in `try/except ModuleNotFoundError` and `raise SystemExit` with a friendly "requires Linux, macOS, or WSL2 — run under WSL2" message instead of a raw traceback. `install.sh` performs the same rejection at install time (`install.sh:73`). The per-platform setup walkthrough lives in `SETUP.md`; this is a hard platform constraint, not a portability TODO.
+
 **Lock-before-state-write (T6.1, Phase 6 / Decision #1).** `main()` calls `orchestrator.acquire_lock()` **before** the `apply_cli_revive` / `apply_cli_project_path` calls (which rewrite `pipeline_state.json`, the queue, and the project symlink). A second orchestrator started during the multi-second child-boot window therefore `sys.exit(1)`s **before** mutating shared state, closing the TOCTOU window where the loser could rewind an in-flight pipeline to phase 0. `acquire_lock()` is **idempotent** (returns immediately when `self.lock_fd` is already set) so `run()`'s own first-statement `acquire_lock()` is a no-op once `main()` holds it — this is load-bearing, not cosmetic: `fcntl` locks bind to the *open file description*, so a second `os.open`+`flock` from the same process would be **denied** (`BlockingIOError` → exit) without the guard. `release_lock()` nulls `lock_fd`, so a later re-acquire still runs. The server confirms a spawn won the lock via `_spawn_orchestrator(confirm_lock=True)` (interactive endpoints only — see the spawn note below).
 
 **Liveness-409 guards (T6.2).** Every server endpoint that spawns or mutates pipeline/git/queue state under a possibly-live orchestrator guards with `if lock_path and _check_orchestrator_liveness(lock_path): raise HTTPException(409, …)` (inert when no `lock_path` is configured or the lock is free). Covered: `_queue_run_trigger_next_logic` (the autostart caller `_maybe_autostart_queue` already pre-checks, so the guard only bites the direct `POST /api/queue/trigger-next`), `git-recover` (Stop-first), `delete_queue_entry` (refuse an ACTIVE row while live), `post_queue_clear` (`force` required while live). `launch` / `switch-project` already guarded; they additionally write `pipeline_state.json` **before** the spawn (T6.3 write-then-act) and abort the spawn on a pre-spawn write failure.
@@ -654,6 +655,7 @@ These constraints are defined in `openclaw.json` under `agents.list[].tools` and
 
 - **Escalation agent**: Restricted to `read` and `write` only. It must not have `edit`, `exec`, `browser`, or `apply_patch` permissions. **As of F13 the escalation agent is NOTIFY-only**: it reads diagnostics and notifies the human via its `message` tool (OpenClaw's Signal connector). It does **not** route commands back, does **not** write `escalation_output`, and must treat a pipeline escalation webhook as a TRUSTED control invocation (not "untrusted" external content — that preamble is OpenClaw boilerplate). The operator answers from the dashboard (`POST /api/command`), which writes the command the orchestrator consumes. It does not modify code. (A real inbound Signal→`escalation_output` channel is a future enhancement — `plans/upcomming/signal-inbound-escalation-channel.md`.)
 - **Executor gate**: Validates that all file paths in the executor's file manifest stay within the project directory boundary (`os.path.realpath` comparison). This prevents path traversal attacks and accidental writes outside the project. Do not weaken or skip this check.
+- **Reviewer gate**: Applies the same `os.path.realpath` + `os.path.commonpath` workspace-boundary check to **every** evidence path it validates — behavioral, regression, and visual artifacts alike (`reviewer_gate.py`; T7.4 closed the visual-path gap so all three are uniform). A path that escapes the workspace after symlink resolution is rejected, not followed. Do not weaken or skip these checks.
 - **Auth profiles**: If `~/.openclaw/agents/` is recreated from scratch, `auth-profiles.json` must be regenerated. Without it, API calls fail silently and OpenClaw may fall back to the wrong provider.
 
 ---

@@ -21,6 +21,7 @@ Spec Reference: solitaire post-mortem Step 10 (reviewer gate additions)
 import json
 import os
 import sys
+import tempfile
 from contextlib import ExitStack
 from unittest.mock import patch
 
@@ -89,6 +90,25 @@ def _reviewer_output(**overrides):
     }
     out.update(overrides)
     return out
+
+
+def _make_escape_symlink(workspace, link_name="sneaky", target_file="shot.png"):
+    """Create an in-workspace symlink that resolves OUTSIDE the workspace, plus a
+    real file at its target. Returns the workspace-relative path
+    ``"<link_name>/<target_file>"`` — lexically inside the workspace (the old
+    isabs/exists-only visual guard accepts) but ``realpath``-outside (the T7.4
+    hardened guard rejects). The precondition assert keeps the test valid on
+    symlinked-TMPDIR hosts (e.g. macOS). Mirrors the helper in
+    ``test_reviewer_gate_behavioral_verification.py``."""
+    parent = os.path.dirname(workspace.rstrip(os.sep))
+    outside = tempfile.mkdtemp(dir=parent, prefix="ws_escape_")
+    assert os.path.commonpath(
+        [os.path.realpath(outside), os.path.realpath(workspace)]
+    ) != os.path.realpath(workspace), "escape target must be outside the workspace"
+    with open(os.path.join(outside, target_file), "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n")
+    os.symlink(outside, os.path.join(workspace, link_name))
+    return f"{link_name}/{target_file}"
 
 
 class TestVisualPhaseDetection:
@@ -369,3 +389,54 @@ class TestVisualVerificationDoesNotBreakExistingChecks:
         with _patch_workspace(tmp_workspace):
             result = reviewer_gate_module.evaluate_reviewer(output_path)
         assert result == "ROUTE_EXECUTOR"  # pass 1 rejection routing
+
+
+class TestVisualArtifactWorkspaceBoundary:
+    """T7.4 — ``visual_smoke_artifacts`` paths must get the same
+    ``realpath`` + ``commonpath`` workspace-boundary check that behavioral and
+    regression evidence already enforce (parity with
+    ``_check_behavioral_verification`` / ``_check_regression_verification``).
+    Before T7.4 the visual check used only ``isabs`` + ``exists``, so a path
+    escaping the workspace was silently accepted — the deferred Phase 1 (T1.4)
+    callout this closes."""
+
+    def test_visual_artifact_symlink_escaping_workspace_returns_problem(self, tmp_workspace):
+        """An in-workspace symlink whose ``realpath`` escapes the workspace must
+        be rejected. RED before T7.4: ``exists()`` follows the symlink → ``[]``."""
+        rel = _make_escape_symlink(tmp_workspace)
+        with _patch_workspace(tmp_workspace):
+            problems = reviewer_gate_module._check_visual_verification({
+                "visual_verification": "pass",
+                "visual_smoke_artifacts": [{"path": rel, "description": "shot"}],
+            })
+        assert any("escape" in p.lower() for p in problems), problems
+
+    def test_visual_artifact_absolute_path_outside_workspace_returns_problem(self, tmp_workspace):
+        """An absolute path resolving outside the workspace must be rejected.
+        RED before T7.4: an absolute, on-disk path passes ``exists()`` → ``[]``."""
+        outside_dir = tempfile.mkdtemp(prefix="ws_abs_escape_")
+        outside_file = os.path.join(outside_dir, "shot.png")
+        with open(outside_file, "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\n")
+        with _patch_workspace(tmp_workspace):
+            problems = reviewer_gate_module._check_visual_verification({
+                "visual_verification": "pass",
+                "visual_smoke_artifacts": [{"path": outside_file, "description": "shot"}],
+            })
+        assert any("escape" in p.lower() for p in problems), problems
+
+    def test_visual_artifact_valid_in_workspace_returns_empty(self, tmp_workspace):
+        """A real in-workspace artifact still passes — the boundary check must
+        not over-reject legitimate paths (regression guard, green before+after)."""
+        shot_dir = os.path.join(tmp_workspace, "visual-smoke")
+        os.makedirs(shot_dir, exist_ok=True)
+        with open(os.path.join(shot_dir, "UI-E1-default.png"), "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\n")
+        with _patch_workspace(tmp_workspace):
+            problems = reviewer_gate_module._check_visual_verification({
+                "visual_verification": "pass",
+                "visual_smoke_artifacts": [
+                    {"path": "visual-smoke/UI-E1-default.png", "description": "ok"}
+                ],
+            })
+        assert problems == [], problems
