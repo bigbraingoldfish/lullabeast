@@ -1131,7 +1131,19 @@ class Orchestrator:
         return config
 
     def acquire_lock(self):
-        """Acquires an exclusive, non-blocking lock using fcntl.flock."""
+        """Acquires an exclusive, non-blocking lock using fcntl.flock.
+
+        IDEMPOTENT (T6.1): returns immediately if this instance already holds the lock
+        (``self.lock_fd`` set). This lets ``main()`` acquire the lock BEFORE the
+        ``apply_cli_*`` state writes (so a losing instance exits before mutating shared
+        state) while ``run()`` still calls ``acquire_lock()`` as its first statement —
+        the second call is then a no-op. Without this guard the second call would
+        ``os.open`` a fresh fd and ``flock`` it; fcntl locks bind to the open file
+        description, so a second fd from the SAME process is denied (BlockingIOError →
+        sys.exit). ``release_lock`` nulls ``lock_fd``, so a later re-acquire still runs.
+        """
+        if getattr(self, "lock_fd", None) is not None:
+            return
         try:
             os.makedirs(AUTODEV_PIPELINE_ROOT, exist_ok=True)
             self.lock_fd = os.open(LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o666)
@@ -1161,7 +1173,7 @@ class Orchestrator:
             print("[INFO] Released pipeline lock.")
 
     def update_symlink(self, target_project_dir: str):
-        """Atomically updates the shared workspace symlink.
+        """Transactionally point BOTH project symlinks at *target_project_dir*.
 
         Two symlinks are kept in sync:
         1. SYMLINK_TARGET (.autodev/pipeline-project) — used by the orchestrator and
@@ -1170,6 +1182,15 @@ class Orchestrator:
            agent workspace symlinks (workspace-{agent}/pipeline-project →
            ~/.openclaw/pipeline-project). Without this second update the agent reads
            the previous project's files even though the orchestrator targets the new one.
+
+        T6.5 — the pair is updated TRANSACTIONALLY (replacing the prior two non-atomic
+        ``ln -sfn`` calls that had no rollback). Each new link is first staged at a unique
+        temp name, then committed with an atomic ``os.replace``; if the SECOND commit fails,
+        the FIRST is rolled back to its previous target. A divergent pair (orchestrator and
+        agent following different project trees) makes the executor write sentinels to one
+        tree while the orchestrator polls the other → infinite retries, so "both or neither"
+        is the safety property. Returns True only when both links point at the new target;
+        False (prior state restored) otherwise.
         """
         target_project_dir = os.path.abspath(os.path.expanduser(target_project_dir))
         if not os.path.exists(target_project_dir):
@@ -1177,18 +1198,70 @@ class Orchestrator:
             return False
 
         openclaw_symlink = os.path.join(OPENCLAW_ROOT, "pipeline-project")
+        links = [SYMLINK_TARGET]
+        if SYMLINK_TARGET != openclaw_symlink:
+            links.append(openclaw_symlink)
 
+        def _prev_target(path):
+            try:
+                return os.readlink(path)
+            except OSError:
+                return None  # absent or not a symlink — nothing to restore to
+
+        def _rollback(path, prev):
+            try:
+                if prev is None:
+                    if os.path.lexists(path):
+                        os.remove(path)  # was absent before — restore "no link"
+                    print(f"[INFO] Rolled back symlink {path} (removed; was absent).")
+                else:
+                    rb = f"{path}.rollback.{os.getpid()}"
+                    if os.path.lexists(rb):
+                        os.remove(rb)
+                    os.symlink(prev, rb)
+                    os.replace(rb, path)
+                    print(f"[INFO] Rolled back symlink {path} -> {prev}.")
+            except OSError as e:
+                print(f"[ERROR] Rollback of symlink {path} failed: {e}")
+
+        # Phase 1 — stage both new links at temp names (no visible change yet).
+        staged = []  # (link, tmp, prev_target)
         try:
-            subprocess.run(["ln", "-sfn", target_project_dir, SYMLINK_TARGET], check=True)
-            print(f"[INFO] Updated symlink {SYMLINK_TARGET} -> {target_project_dir}")
-            # Keep the OpenClaw-side symlink in sync so agent workspaces resolve correctly.
-            if SYMLINK_TARGET != openclaw_symlink:
-                subprocess.run(["ln", "-sfn", target_project_dir, openclaw_symlink], check=True)
-                print(f"[INFO] Updated symlink {openclaw_symlink} -> {target_project_dir}")
-            return True
-        except subprocess.CalledProcessError as e:
-            print(f"[ERROR] Failed to update symlink: {e}")
+            for link in links:
+                tmp = f"{link}.tmp.{os.getpid()}"
+                if os.path.lexists(tmp):
+                    os.remove(tmp)
+                os.symlink(target_project_dir, tmp)
+                staged.append((link, tmp, _prev_target(link)))
+        except OSError as e:
+            print(f"[ERROR] Failed to stage symlink update: {e}")
+            for _link, _tmp, _prev in staged:
+                if os.path.lexists(_tmp):
+                    try:
+                        os.remove(_tmp)
+                    except OSError:
+                        pass
             return False
+
+        # Phase 2 — commit each via atomic os.replace; on a mid-commit failure, roll back the
+        # links already committed so the pair is never left permanently divergent.
+        committed = []  # (link, prev_target)
+        for link, tmp, prev in staged:
+            try:
+                os.replace(tmp, link)
+            except OSError as e:
+                print(f"[ERROR] Failed to commit symlink {link} -> {target_project_dir}: {e}")
+                if os.path.lexists(tmp):
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
+                for done_link, done_prev in reversed(committed):
+                    _rollback(done_link, done_prev)
+                return False
+            committed.append((link, prev))
+            print(f"[INFO] Updated symlink {link} -> {target_project_dir}")
+        return True
 
     def read_state(self):
         """Reads pipeline_state.json if it exists.
@@ -1303,8 +1376,9 @@ class Orchestrator:
         low-frequency writers on one host, and the deferred ``queue_write_token`` nonce is the
         documented way to close it.
 
-        If the file exists but is corrupt (invalid JSON or unreadable), it is
-        quarantined by renaming to pipeline_queue.json.corrupt.<timestamp> and a
+        If the file exists but is corrupt (invalid JSON or unreadable) — or is valid
+        JSON of the wrong shape (T6.7: ``{}`` / ``[]`` / a dict with no ``queue`` list) —
+        it is quarantined by renaming to pipeline_queue.json.corrupt.<timestamp> and a
         RuntimeError is raised.  Callers must NOT silently fall through to
         _write_queue — doing so would overwrite the queue file with an empty
         structure, destroying all queue data.
@@ -1313,18 +1387,39 @@ class Orchestrator:
             return {"queue": [], "queue_mode": "auto", "last_updated": ""}
         try:
             with open(QUEUE_FILE, "r") as f:
-                return json.load(f)
+                data = json.load(f)
         except (json.JSONDecodeError, OSError) as e:
-            corrupt_path = f"{QUEUE_FILE}.corrupt.{int(time.time())}"
-            try:
-                os.rename(QUEUE_FILE, corrupt_path)
-                print(f"[QUEUE] Quarantined corrupt queue file to {corrupt_path}: {e}")
-            except OSError as rename_err:
-                print(f"[QUEUE] Could not quarantine corrupt queue file: {rename_err}")
-            raise RuntimeError(
-                f"[QUEUE] pipeline_queue.json is corrupt and has been quarantined to "
-                f"{corrupt_path}. Manual recovery required."
-            ) from e
+            self._quarantine_queue_file(f"unreadable / invalid JSON ({e})")
+        # T6.7 — a valid-JSON wrong-shape file ({}, [], or a dict with no "queue" list) is
+        # NOT caught above, so without this guard it flows out as-is and KeyErrors downstream
+        # on EVERY restart; and unlike corrupt JSON it was never quarantined, so the bad file
+        # is re-read and re-crashes each cycle (a heartbeat-cron restart loop). Quarantine it
+        # the same way so the next read self-heals to the empty structure.
+        if not (isinstance(data, dict) and isinstance(data.get("queue"), list)):
+            self._quarantine_queue_file(
+                f"invalid shape (expected a dict with a 'queue' list, got {type(data).__name__})"
+            )
+        return data
+
+    def _quarantine_queue_file(self, why: str):
+        """Rename a corrupt / wrong-shape pipeline_queue.json out of the way and raise.
+
+        Renaming (rather than leaving the file in place) is what makes the failure
+        self-heal: the next ``_read_queue`` finds the file absent and returns the empty
+        structure, so a bad file cannot wedge selection in a restart loop. Shared by the
+        corrupt-JSON and wrong-shape (T6.7) paths so quarantine lives in exactly one place.
+        The raise is implicitly chained to any in-flight ``except`` via ``__context__``.
+        """
+        corrupt_path = f"{QUEUE_FILE}.corrupt.{int(time.time())}"
+        try:
+            os.rename(QUEUE_FILE, corrupt_path)
+            print(f"[QUEUE] Quarantined queue file to {corrupt_path} ({why}).")
+        except OSError as rename_err:
+            print(f"[QUEUE] Could not quarantine queue file: {rename_err}")
+        raise RuntimeError(
+            f"[QUEUE] pipeline_queue.json {why}; quarantined to {corrupt_path}. "
+            f"Manual recovery required."
+        )
 
     def _write_queue(self, data):
         """Atomically persist pipeline_queue.json (stamp next version, mkstemp + os.replace).
@@ -1438,7 +1533,9 @@ class Orchestrator:
 
     def _get_all_descendants(self, entries, entry_id):
         """Return set of all descendant IDs (recursive). Does not include entry_id itself."""
-        children = {e["id"] for e in entries if e.get("parent_id") == entry_id}
+        # T6.7 — require a truthy id: a malformed row with id missing/None must not be
+        # treated as a child of a None parent_id (which would wrongly match every root row).
+        children = {e["id"] for e in entries if e.get("id") and e.get("parent_id") == entry_id}
         result = set(children)
         for cid in list(children):
             result |= self._get_all_descendants(entries, cid)
@@ -1448,9 +1545,9 @@ class Orchestrator:
         """Move parent + all descendants as a unit to new_pos (1-based position for parent)."""
         desc = self._get_all_descendants(entries, parent_id)
         group_ids = {parent_id} | desc
-        sorted_all = sorted(entries, key=lambda e: e["position"])
-        group_block = [e for e in sorted_all if e["id"] in group_ids]
-        non_group = [e for e in sorted_all if e["id"] not in group_ids]
+        sorted_all = sorted(entries, key=lambda e: e.get("position", 0))
+        group_block = [e for e in sorted_all if e.get("id") in group_ids]
+        non_group = [e for e in sorted_all if e.get("id") not in group_ids]
         insert_idx = max(0, min(new_pos - 1, len(non_group)))
         final = non_group[:insert_idx] + group_block + non_group[insert_idx:]
         for i, e in enumerate(final, 1):
@@ -1507,7 +1604,15 @@ class Orchestrator:
                 raise QueueAbort()
             return data
 
-        committed = self._mutate_queue(_apply)
+        try:
+            committed = self._mutate_queue(_apply)
+        except QueueVersionConflict as e:
+            # T6.6 — perpetual queue contention must not propagate to run()'s top-level
+            # handler (which would escalate). This pre-pass has callers beyond selection
+            # (the _maybe_revive_on_queue_halted recovery hook), so catch here too: the
+            # promotion simply retries on the next cycle.
+            print(f"[QUEUE] promote-answered CAS exhausted this cycle ({e}); retry next cycle.")
+            return False
         if committed is None:
             return False
         # Rebase the caller's snapshot to the authoritative post-CAS queue (in place, preserving
@@ -1527,12 +1632,12 @@ class Orchestrator:
         Shared by the in-memory walk update and the CAS re-apply closure so the skip logic lives
         in exactly one place (F9).
         """
-        entry = next((e for e in entries if e["id"] == entry_id), None)
+        entry = next((e for e in entries if e.get("id") == entry_id), None)
         if entry is None:
             return False
         desc_ids = self._get_all_descendants(entries, entry_id)
         for e in entries:
-            if e["id"] in desc_ids and e["state"] not in ("ACTIVE", "COMPLETED"):
+            if e.get("id") in desc_ids and e.get("state") not in ("ACTIVE", "COMPLETED"):
                 e["state"] = "SKIPPED_PENDING"
                 e["skip_count"] = e.get("skip_count", 0) + 1
                 if visited_ids is not None:
@@ -1541,11 +1646,27 @@ class Orchestrator:
         entry["skip_count"] = entry.get("skip_count", 0) + 1
         entry["skip_reason"] = reason
         group_size = 1 + len(desc_ids)
-        new_pos = min(entry["position"] + group_size, len(entries))
+        new_pos = min(entry.get("position", 0) + group_size, len(entries))
         self._move_group_atomically(entries, entry_id, new_pos)
         return True
 
     def _select_next_queue_project(self, halt_if_no_eligible: bool = True, target_entry_id: str | None = None):
+        """Walk the queue and start the next eligible project; thin CAS-exhaustion guard (T6.6).
+
+        Delegates to ``_select_next_queue_project_inner``. A ``QueueVersionConflict`` raised by
+        any selection-path CAS (perpetual queue contention vs the UI writer, after the 8 retries
+        in ``mutate_queue``) degrades to "couldn't commit this cycle" — return False, retry next
+        cycle — instead of propagating to ``run()``'s top-level handler, which would escalate.
+        """
+        try:
+            return self._select_next_queue_project_inner(
+                halt_if_no_eligible=halt_if_no_eligible, target_entry_id=target_entry_id
+            )
+        except QueueVersionConflict as e:
+            print(f"[QUEUE] selection CAS exhausted this cycle ({e}); retry next cycle.")
+            return False
+
+    def _select_next_queue_project_inner(self, halt_if_no_eligible: bool = True, target_entry_id: str | None = None):
         """Walk queue, find next eligible project, run preflight, start it.
 
         Returns True if a project was started, False if no eligible entry was found.
@@ -1569,11 +1690,30 @@ class Orchestrator:
         # eligibility walk below admits them for revival. Orchestrator-owned flip
         # (the server only writes the per-project pending file) — single-writer safe.
         self._promote_answered_escalations(queue_data)
-        entries = queue_data["queue"]
-        entries.sort(key=lambda e: e["position"])
+        # T6.7 — sanitize the walk list. A single hand-edited / partial-write row missing a
+        # required key must not KeyError the sort / state_by_id comprehension below and poison
+        # selection for EVERY project. Skip + log malformed rows (not a dict, or no usable
+        # id / state); the per-row access in the walk then relies on these keys being present.
+        # The position sort additionally tolerates a missing position (defaults to 0).
+        entries = []
+        for _e in queue_data["queue"]:
+            if not isinstance(_e, dict):
+                print(f"[QUEUE] Skipping malformed queue row (not an object): {_e!r}")
+                continue
+            if not (isinstance(_e.get("id"), str) and _e.get("id")):
+                print(f"[QUEUE] Skipping queue row with missing/invalid id: {_e!r}")
+                continue
+            if not isinstance(_e.get("state"), str):
+                print(f"[QUEUE] Skipping queue row {_e.get('id')!r} with missing/invalid state.")
+                continue
+            if not (isinstance(_e.get("project_path"), str) and _e.get("project_path")):
+                print(f"[QUEUE] Skipping queue row {_e.get('id')!r} with missing/invalid project_path.")
+                continue
+            entries.append(_e)
+        entries.sort(key=lambda e: e.get("position", 0))
         now = datetime.now(timezone.utc).isoformat()
 
-        # Build parent state lookup
+        # Build parent state lookup (entries are sanitized: id + state guaranteed present)
         state_by_id = {e["id"]: e["state"] for e in entries}
 
         visited_ids = set()  # prevent infinite loop if all entries keep failing
@@ -1605,7 +1745,7 @@ class Orchestrator:
                         entry["state"] = "DEPENDENCY_HOLD"  # in-memory, for the walk
 
                         def _hold_cas(data, _eid=entry["id"]):
-                            fresh = next((e for e in data["queue"] if e["id"] == _eid), None)
+                            fresh = next((e for e in data["queue"] if e.get("id") == _eid), None)
                             if fresh is None:
                                 raise QueueAbort()  # entry deleted concurrently
                             fresh["state"] = "DEPENDENCY_HOLD"
@@ -1667,7 +1807,7 @@ class Orchestrator:
             _commit = {"snapshot": None}
 
             def _activate(data, _eid=entry["id"], _expected=_expected):
-                fresh = next((e for e in data["queue"] if e["id"] == _eid), None)
+                fresh = next((e for e in data["queue"] if e.get("id") == _eid), None)
                 if fresh is None or fresh.get("state") not in _expected:
                     raise QueueAbort()  # the picked entry vanished/changed under us
                 fresh["state"] = "ACTIVE"
@@ -1760,8 +1900,8 @@ class Orchestrator:
         # escalated-phase pointer from parked_state_snapshot and wait for the human. This
         # supersedes the prior rule that counted a parked ESCALATION as all_blocked.
         for _esc in sorted(
-            (e for e in entries if e["state"] == "ESCALATION"),
-            key=lambda e: e["position"],
+            (e for e in entries if e.get("state") == "ESCALATION"),
+            key=lambda e: e.get("position", 0),
         ):
             # F2 (--revive): a targeted relaunch only revives the requested entry.
             if target_entry_id is not None and _esc["id"] != target_entry_id:
@@ -1785,7 +1925,7 @@ class Orchestrator:
             _esc_commit = {"snapshot": {}}
 
             def _activate_esc(data, _eid=_esc["id"]):
-                fresh = next((e for e in data["queue"] if e["id"] == _eid), None)
+                fresh = next((e for e in data["queue"] if e.get("id") == _eid), None)
                 if fresh is None or fresh.get("state") != "ESCALATION":
                     raise QueueAbort()
                 _esc_commit["snapshot"] = dict(fresh.get("parked_state_snapshot") or {})
@@ -3868,6 +4008,7 @@ class Orchestrator:
             with open(roadmap_path, 'r') as f:
                 rmap_lines = f.readlines()
             _chk_raw_id = self.state.get("current_phase_raw_id", "")
+            _flipped = False
             for i, rline in enumerate(rmap_lines):
                 rmatch = re.match(r'- \[( |x|-|!)\] `([^`]+)` \|', rline.strip())
                 if rmatch:
@@ -3876,14 +4017,27 @@ class Orchestrator:
                     # share the same trailing integer (e.g. INFRA-1, CORE-1, UI-1 all → 1).
                     if _chk_raw_id:
                         if phase_id == _chk_raw_id:
-                            rmap_lines[i] = rline.replace('- [ ]', '- [x]').replace('- [!]', '- [x]')
+                            _new = rline.replace('- [ ]', '- [x]').replace('- [!]', '- [x]')
+                            if _new != rline:
+                                rmap_lines[i] = _new
+                                _flipped = True
                             break
                     else:
                         parts = phase_id.split('-')
                         phase_num = int(parts[-1]) if len(parts) > 1 and parts[-1].isdigit() else 0
                         if phase_num == phase:
-                            rmap_lines[i] = rline.replace('- [ ]', '- [x]').replace('- [!]', '- [x]')
+                            _new = rline.replace('- [ ]', '- [x]').replace('- [!]', '- [x]')
+                            if _new != rline:
+                                rmap_lines[i] = _new
+                                _flipped = True
                             break
+            # T6.4/B3 — idempotent re-entry: if the checkbox is already [x] (no change), do NOT
+            # rewrite the file or `git commit --amend`. An amend with no content delta still
+            # rewrites the merge-commit SHA (and moves the --force phase-complete tag) on every
+            # restart, churning history and risking an amend of the wrong commit on a double restart.
+            if not _flipped:
+                print(f"[INFO] Roadmap checkbox for {_chk_raw_id or phase} already set; no amend needed.")
+                return True
             with open(roadmap_path, 'w') as f:
                 f.writelines(rmap_lines)
             # Fold checkbox update into the merge commit atomically.
@@ -6276,54 +6430,95 @@ class Orchestrator:
                         # Use full raw_id for branch name to avoid int-suffix collision (e.g. INFRA-1 vs UI-1 both = 1)
                         _raw_id = self.state.get("current_phase_raw_id", "")
                         branch = f"phase/{_raw_id}" if _raw_id else f"phase/{phase}"
+                        _marker_id = _raw_id or phase
+                        # T6.4 — crash-window idempotency. A kill after the merge commit lands but
+                        # before the phase advances re-enters here (status RUNNING + reviewer →
+                        # reviewer re-PASSes). The durable phase_merged marker (written below only
+                        # after a confirmed rc-0 merge, self-cleared when phase_state is deleted on
+                        # advance/reset) lets us skip the already-done merge + roadmap flip. The read
+                        # is wrapped because read_phase_state raises on a corrupt file — degrade to
+                        # "marker absent" and fall through to the merge-base --is-ancestor backstop.
+                        try:
+                            _ps_guard = self.read_phase_state()
+                        except Exception:
+                            _ps_guard = {}
+                        already_merged_marker = (_ps_guard.get("phase_merged") == _marker_id)
+                        _persisted_base = _ps_guard.get("merge_base_branch")
                         try:
                             configured_base_branch = self.openclaw_config.get("pipeline", {}).get("base_branch", "").strip()
-                            base_branch = configured_base_branch if configured_base_branch else _detect_base_branch(SYMLINK_TARGET)
+                            if already_merged_marker and _persisted_base:
+                                # Re-entry: use the base the merge actually landed on (guards against
+                                # base-branch auto-detect drift between the original run and restart).
+                                base_branch = _persisted_base
+                            else:
+                                base_branch = configured_base_branch if configured_base_branch else _detect_base_branch(SYMLINK_TARGET)
 
-                            # Hard guard: ensure HEAD is on the phase branch before staging.
-                            # This is the authoritative check — commits MUST land on branch,
-                            # not on base. If correction fails, escalate rather than corrupt
-                            # the repository topology.
-                            if not self._ensure_phase_branch(branch):
-                                print(f"[ERROR] Phase {phase}: cannot ensure branch '{branch}' before commit — escalating.")
-                                self.state["current_agent"] = "escalation"
-                                self.transition_state(
-                                    "RUNNING",
-                                    f"Phase {phase} branch integrity failure: cannot checkout '{branch}'",
-                                )
-                                time.sleep(5)
-                                continue
+                            if already_merged_marker:
+                                # The merge for this phase already committed in a prior run. Re-assert
+                                # HEAD on base for the tag + advance below; do NOT re-stage / re-merge
+                                # or re-run the roadmap flip (already folded into the merge commit).
+                                subprocess.run(["git", "checkout", base_branch], cwd=SYMLINK_TARGET, check=False)
+                                merge_result = subprocess.CompletedProcess(
+                                    args=["git", "merge", branch], returncode=0, stdout=b"", stderr=b"")
+                            else:
+                                # Hard guard: ensure HEAD is on the phase branch before staging.
+                                # This is the authoritative check — commits MUST land on branch,
+                                # not on base. If correction fails, escalate rather than corrupt
+                                # the repository topology.
+                                if not self._ensure_phase_branch(branch):
+                                    print(f"[ERROR] Phase {phase}: cannot ensure branch '{branch}' before commit — escalating.")
+                                    self.state["current_agent"] = "escalation"
+                                    self.transition_state(
+                                        "RUNNING",
+                                        f"Phase {phase} branch integrity failure: cannot checkout '{branch}'",
+                                    )
+                                    time.sleep(5)
+                                    continue
 
-                            subprocess.run(["git", "add", "."], cwd=SYMLINK_TARGET, check=True)
+                                subprocess.run(["git", "add", "."], cwd=SYMLINK_TARGET, check=True)
 
-                            # Check if there are changes to commit
-                            status_output = subprocess.run(["git", "status", "--porcelain"], cwd=SYMLINK_TARGET, capture_output=True, text=True)
-                            if status_output.stdout.strip():
-                                _raw_id = self.state.get("current_phase_raw_id", "") or f"phase-{phase}"
+                                # Check if there are changes to commit
+                                status_output = subprocess.run(["git", "status", "--porcelain"], cwd=SYMLINK_TARGET, capture_output=True, text=True)
+                                if status_output.stdout.strip():
+                                    _raw_id = self.state.get("current_phase_raw_id", "") or f"phase-{phase}"
+                                    try:
+                                        _cp_data = json.load(open(os.path.join(PROJECT_ARTIFACTS_DIR, "current_phase.json")))
+                                        _detail = _cp_data.get("detail", "")
+                                        # detail format: "Phase CORE-2: Implement core game logic..."
+                                        _goal = _detail.split(": ", 1)[1] if ": " in _detail else _raw_id
+                                    except Exception:
+                                        _goal = _raw_id
+                                    subprocess.run(["git", "commit", "-m", f"phase({_raw_id}): {_goal}"], cwd=SYMLINK_TARGET, check=True)
+
                                 try:
-                                    _cp_data = json.load(open(os.path.join(PROJECT_ARTIFACTS_DIR, "current_phase.json")))
-                                    _detail = _cp_data.get("detail", "")
-                                    # detail format: "Phase CORE-2: Implement core game logic..."
-                                    _goal = _detail.split(": ", 1)[1] if ": " in _detail else _raw_id
-                                except Exception:
-                                    _goal = _raw_id
-                                subprocess.run(["git", "commit", "-m", f"phase({_raw_id}): {_goal}"], cwd=SYMLINK_TARGET, check=True)
+                                    subprocess.run(["git", "checkout", base_branch], cwd=SYMLINK_TARGET, check=True)
+                                except subprocess.CalledProcessError:
+                                    subprocess.run(
+                                        ["git", "stash", "push", "--include-untracked"],
+                                        cwd=SYMLINK_TARGET,
+                                        check=False,
+                                    )
+                                    subprocess.run(["git", "checkout", base_branch], cwd=SYMLINK_TARGET, check=True)
+                                    subprocess.run(["git", "stash", "pop"], cwd=SYMLINK_TARGET, check=False)
 
-                            try:
-                                subprocess.run(["git", "checkout", base_branch], cwd=SYMLINK_TARGET, check=True)
-                            except subprocess.CalledProcessError:
-                                subprocess.run(
-                                    ["git", "stash", "push", "--include-untracked"],
-                                    cwd=SYMLINK_TARGET,
-                                    check=False,
-                                )
-                                subprocess.run(["git", "checkout", base_branch], cwd=SYMLINK_TARGET, check=True)
-                                subprocess.run(["git", "stash", "pop"], cwd=SYMLINK_TARGET, check=False)
-
-                            merge_result = subprocess.run(
-                                ["git", "merge", branch, "--no-ff", "-m", f"Merge {branch}"],
-                                cwd=SYMLINK_TARGET, capture_output=True
-                            )
+                                # T6.4 — idempotent-merge backstop. If branch is already an ancestor of
+                                # base (the merge landed but the marker didn't persist — crash between
+                                # the merge and the marker write), treat it as success instead of
+                                # re-running git merge. A re-merge would FAIL when _ensure_phase_branch
+                                # recreated an empty phase branch (the branch-recreated-empty sub-case)
+                                # → a false ERR_MERGE_FAILED on already-complete work.
+                                _already_ancestor = subprocess.run(
+                                    ["git", "merge-base", "--is-ancestor", branch, base_branch],
+                                    cwd=SYMLINK_TARGET, capture_output=True
+                                ).returncode == 0
+                                if _already_ancestor:
+                                    merge_result = subprocess.CompletedProcess(
+                                        args=["git", "merge", branch], returncode=0, stdout=b"", stderr=b"")
+                                else:
+                                    merge_result = subprocess.run(
+                                        ["git", "merge", branch, "--no-ff", "-m", f"Merge {branch}"],
+                                        cwd=SYMLINK_TARGET, capture_output=True
+                                    )
 
                             if merge_result.returncode != 0:
                                 _merge_stderr = (merge_result.stderr or b"").decode(errors="replace").strip()
@@ -6359,27 +6554,40 @@ class Orchestrator:
                                 time.sleep(5)
                                 continue
 
+                            # T6.4 — durable marker: the merge for this phase has landed (rc 0).
+                            # Record it (and the base it landed on) BEFORE the roadmap flip /
+                            # advance, so a crash in this window re-enters via already_merged_marker
+                            # instead of re-merging an empty branch → false ERR_MERGE_FAILED.
+                            # phase_state.json is deleted on advance/reset, so the marker self-clears.
+                            _ps_merged = self.read_phase_state()
+                            _ps_merged["phase_merged"] = _marker_id
+                            _ps_merged["merge_base_branch"] = base_branch
+                            self.write_phase_state_atomic(_ps_merged)
+
                             # 2. Roadmap Update — fold into merge commit atomically (B5).
                             # Write [x] checkbox to roadmap.md in-place, then amend the merge
                             # commit so the checkbox is part of the merge, not a separate commit.
                             # This prevents git checkout -b phase/NEXT from reverting the checkbox.
-                            import glob, re
-                            roadmap_path = None
-                            for ext in ['*.md', '*.yaml', '*.json']:
-                                matches = glob.glob(os.path.join(SYMLINK_TARGET, f"*oadmap{ext}")) + glob.glob(os.path.join(SYMLINK_TARGET, f"*Roadmap{ext}"))
-                                if matches:
-                                    roadmap_path = matches[0]
-                                    break
+                            # Skipped on confirmed re-entry (already folded into the merge commit);
+                            # the flip helper also self-skips its amend when the box is already [x].
+                            if not already_merged_marker:
+                                import glob, re
+                                roadmap_path = None
+                                for ext in ['*.md', '*.yaml', '*.json']:
+                                    matches = glob.glob(os.path.join(SYMLINK_TARGET, f"*oadmap{ext}")) + glob.glob(os.path.join(SYMLINK_TARGET, f"*Roadmap{ext}"))
+                                    if matches:
+                                        roadmap_path = matches[0]
+                                        break
 
-                            if roadmap_path:
-                                # T4.4 — fail closed. On a non-git flip failure the
-                                # helper routes to escalation and returns False; we
-                                # must NOT fall through to tag + advance (that would
-                                # silently re-run the merged phase). A git failure
-                                # re-raises to the outer handler below.
-                                if not self._flip_roadmap_checkbox_or_escalate(roadmap_path, phase):
-                                    time.sleep(5)
-                                    continue
+                                if roadmap_path:
+                                    # T4.4 — fail closed. On a non-git flip failure the
+                                    # helper routes to escalation and returns False; we
+                                    # must NOT fall through to tag + advance (that would
+                                    # silently re-run the merged phase). A git failure
+                                    # re-raises to the outer handler below.
+                                    if not self._flip_roadmap_checkbox_or_escalate(roadmap_path, phase):
+                                        time.sleep(5)
+                                        continue
 
                             _tag_id = self.state.get("current_phase_raw_id", "") or phase
                             # Use --force so the tag moves to the new commit on phase re-runs
@@ -6392,21 +6600,24 @@ class Orchestrator:
                             time.sleep(5)
                             continue
                                 
-                        # 3. Suggestions Append
-                        reviewer_output_path = os.path.join(PROJECT_ARTIFACTS_DIR, "reviewer_output.json")
-                        if os.path.exists(reviewer_output_path):
-                            try:
-                                with open(reviewer_output_path, 'r') as f:
-                                    rev_out = json.load(f)
-                                suggestions = rev_out.get("suggestions", [])
-                                if suggestions:
-                                    sugg_path = os.path.join(PROJECT_ARTIFACTS_DIR, "suggestions.md")
-                                    with open(sugg_path, 'a') as f:
-                                        f.write(f"\n## Phase {phase} Suggestions\n")
-                                        for s in suggestions:
-                                            f.write(f"- {s}\n")
-                            except Exception as e:
-                                print(f"[ERROR] Failed to append suggestions: {e}")
+                        # 3. Suggestions Append — skipped on confirmed re-entry: the append is NOT
+                        # idempotent (it would duplicate the "## Phase N Suggestions" block on every
+                        # restart), and the suggestions were already recorded on the first pass (B6).
+                        if not already_merged_marker:
+                            reviewer_output_path = os.path.join(PROJECT_ARTIFACTS_DIR, "reviewer_output.json")
+                            if os.path.exists(reviewer_output_path):
+                                try:
+                                    with open(reviewer_output_path, 'r') as f:
+                                        rev_out = json.load(f)
+                                    suggestions = rev_out.get("suggestions", [])
+                                    if suggestions:
+                                        sugg_path = os.path.join(PROJECT_ARTIFACTS_DIR, "suggestions.md")
+                                        with open(sugg_path, 'a') as f:
+                                            f.write(f"\n## Phase {phase} Suggestions\n")
+                                            for s in suggestions:
+                                                f.write(f"- {s}\n")
+                                except Exception as e:
+                                    print(f"[ERROR] Failed to append suggestions: {e}")
                                 
                         # 3.1 Canonical metrics row — see _write_canonical_metrics_row
                         # for full rationale.  Extracted to a method so the history-
@@ -7239,6 +7450,14 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     orchestrator = Orchestrator()
+
+    # T6.1 — acquire the pipeline lock BEFORE any apply_cli_* call. apply_cli_revive /
+    # apply_cli_project_path rewrite pipeline_state.json, the queue, and the project symlink;
+    # acquiring the exclusive lock first means a second (losing) orchestrator started during
+    # the boot window exits(1) here WITHOUT mutating that shared state, closing the TOCTOU
+    # window where it could rewind an in-flight pipeline to phase 0. acquire_lock() is
+    # idempotent, so run()'s own first-statement acquire_lock() is a no-op once this holds.
+    orchestrator.acquire_lock()
 
     # --revive takes precedence: a relaunch of a parked entry must resume its escalated phase,
     # not reset to phase 0 (which would orphan the banked command). If the entry turns out not
