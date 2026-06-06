@@ -2,6 +2,7 @@ import os
 import sys
 import fcntl
 import json
+import re
 import shutil
 import time
 import tempfile
@@ -367,35 +368,58 @@ def cleanup_stranded_temp_files(base_dir: str) -> None:
     )
 
 
+# T4.6 — seconds to allow each base-branch git probe before falling back to "main".
+# Bounded because _detect_base_branch runs on the reset path while pipeline.lock is held.
+_BASE_BRANCH_PROBE_TIMEOUT = 10
+
+
 def _detect_base_branch(directory: str) -> str:
-    """Return the best candidate base branch for the target repository."""
+    """Return the best candidate base branch for the target repository.
+
+    T4.6 — every git probe is bounded by ``_BASE_BRANCH_PROBE_TIMEOUT`` so a
+    wedged git cannot hang the pipeline (this runs on the reset path while the
+    exclusive ``pipeline.lock`` is held, so heartbeat-cron cannot restart a hung
+    orchestrator). A missing git binary, a dangling/unreadable ``directory``, or
+    a probe timeout all fall back to "main" — the caller (`reset_phase`) already
+    treats "main" as the safe default base branch.
+    """
     for branch in ("main", "master", "develop", "trunk"):
-        result = subprocess.run(
-            ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
-            cwd=directory,
-        )
+        try:
+            result = subprocess.run(
+                ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+                cwd=directory,
+                timeout=_BASE_BRANCH_PROBE_TIMEOUT,
+            )
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as e:
+            print(f"[WARN] _detect_base_branch: git probe failed ({e}); falling back to 'main'.")
+            return "main"
         if result.returncode == 0:
             return branch
 
-    remote_head = subprocess.run(
-        ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
-        cwd=directory,
-        capture_output=True,
-        text=True,
-    )
-    remote_ref = (remote_head.stdout or "").strip()
-    if remote_head.returncode == 0 and remote_ref.startswith("refs/remotes/origin/"):
-        return remote_ref[len("refs/remotes/origin/"):]
+    try:
+        remote_head = subprocess.run(
+            ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+            cwd=directory,
+            capture_output=True,
+            text=True,
+            timeout=_BASE_BRANCH_PROBE_TIMEOUT,
+        )
+        remote_ref = (remote_head.stdout or "").strip()
+        if remote_head.returncode == 0 and remote_ref.startswith("refs/remotes/origin/"):
+            return remote_ref[len("refs/remotes/origin/"):]
 
-    init_branch = subprocess.run(
-        ["git", "config", "--get", "init.defaultBranch"],
-        cwd=directory,
-        capture_output=True,
-        text=True,
-    )
-    configured_branch = (init_branch.stdout or "").strip()
-    if init_branch.returncode == 0 and configured_branch:
-        return configured_branch
+        init_branch = subprocess.run(
+            ["git", "config", "--get", "init.defaultBranch"],
+            cwd=directory,
+            capture_output=True,
+            text=True,
+            timeout=_BASE_BRANCH_PROBE_TIMEOUT,
+        )
+        configured_branch = (init_branch.stdout or "").strip()
+        if init_branch.returncode == 0 and configured_branch:
+            return configured_branch
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as e:
+        print(f"[WARN] _detect_base_branch: git probe failed ({e}); falling back to 'main'.")
 
     return "main"
 
@@ -2037,20 +2061,59 @@ class Orchestrator:
         emit in _select_next_queue_project; all other callers ignore it.
         """
         root = os.path.realpath(os.path.expanduser(project_path))
+        # T4.10 — if the queued project's directory was deleted out from under us,
+        # surface it loudly + on the activity feed instead of returning None, which
+        # would read identically to "no banked command" and silently drop the
+        # operator's answer (write_phase_state would also fall back to the wrong dir).
+        if not os.path.isdir(root):
+            print(f"[ERROR] _apply_pending_escalation_command: project dir missing: {root}",
+                  file=sys.stderr)
+            _write_pipeline_event(
+                "queue_revive_project_missing",
+                self.state.get("current_phase_raw_id", ""),
+                "queue",
+                {"project_path": project_path, "resolved": root},
+            )
+            return None
         art = os.path.join(root, ".autodev", "pipeline")
         try:
             os.makedirs(art, exist_ok=True)
-        except OSError:
-            pass
+        except OSError as _mk_err:
+            print(f"[ERROR] _apply_pending_escalation_command: cannot create {art}: {_mk_err}",
+                  file=sys.stderr)
+            _write_pipeline_event(
+                "queue_revive_project_missing",
+                self.state.get("current_phase_raw_id", ""),
+                "queue",
+                {"project_path": project_path, "resolved": root, "error": str(_mk_err)},
+            )
+            return None
         pending_json = os.path.join(art, "pending_escalation_command.json")
         if not os.path.exists(pending_json):
             return None
         try:
             with open(pending_json, "r") as f:
                 data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError(f"banked answer is not a JSON object: {type(data).__name__}")
             command = str(data.get("command", "STOP")).upper()
-        except Exception:
-            command = "STOP"
+        except (json.JSONDecodeError, OSError, ValueError) as _bank_err:
+            # T4.5 — a corrupt banked answer must NOT silently become STOP (which
+            # would quietly discard the operator's RESET_PHASE/PROCEED/SKIP intent).
+            # Surface it on the activity feed and LEAVE the file in place so the
+            # operator can re-bank a valid answer (the server's atomic write
+            # overwrites it cleanly). Returning None here — BEFORE the os.remove
+            # below — preserves the file and applies no command.
+            print(f"[ERROR] corrupt banked escalation command at {pending_json}: {_bank_err}",
+                  file=sys.stderr)
+            _write_pipeline_event(
+                "escalation_command_invalid",
+                self.state.get("current_phase_raw_id", ""),
+                "escalation",
+                {"received_command": "<unreadable>", "defaulted_to": "none",
+                 "reason": "corrupt_banked_answer", "error": str(_bank_err)},
+            )
+            return None
         try:
             os.remove(pending_json)
         except OSError:
@@ -2189,6 +2252,24 @@ class Orchestrator:
             print(f"[ADVISORY] Could not read escalation_summary.json: {e}")
             return None
 
+    def _llama_chat_completions_url(self) -> str:
+        """Resolve the local llama-server chat-completions URL from openclaw.json.
+
+        T4.9 — an empty-string ``baseUrl`` (the key is present but blank) is
+        treated as *absent* and falls back to the default origin, rather than
+        producing a relative URL that ``requests.post`` rejects. The blame
+        analyst and the escalation-advisory path share this single resolver so
+        the two URL derivations cannot drift.
+        """
+        _base = (
+            self.openclaw_config.get("models", {})
+            .get("providers", {})
+            .get("llama-local", {})
+            .get("baseUrl")
+            or f"{_LLAMA_ORIGIN}/v1"
+        ).rstrip("/")
+        return f"{_base}/chat/completions"
+
     def _generate_escalation_advisory(self):
         """Call qwen3.5-27b to produce a plain-English advisory before the escalation webhook.
 
@@ -2303,14 +2384,7 @@ class Orchestrator:
             "response_format": {"type": "json_object"},
         }
 
-        _llama_chat_base = (
-            self.openclaw_config.get("models", {})
-            .get("providers", {})
-            .get("llama-local", {})
-            .get("baseUrl", f"{_LLAMA_ORIGIN}/v1")
-            .rstrip("/")
-        )
-        _chat_url = f"{_llama_chat_base}/chat/completions"
+        _chat_url = self._llama_chat_completions_url()
 
         try:
             _resp = requests.post(_chat_url, json=_payload, timeout=30)
@@ -2975,6 +3049,29 @@ class Orchestrator:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
+    def _accumulate_role_tokens(self, role: str, jsonl_path: str) -> None:
+        """Accumulate this attempt's token usage into ``{role}_tokens_acc``.
+
+        T4.8 — sums per key so a role RE-invoked within a phase (the reviewer's
+        CONTRACT_FAILURE / ``*_UNVERIFIED`` / multi-pass loop, or a planner /
+        executor retry) ADDS to the running total rather than overwriting it.
+        The planner, executor, and reviewer token-capture sites all call this so
+        the three cannot drift — the reviewer path had silently diverged to a
+        bare assignment, under-reporting reviewer cost across retries (the T4.8
+        bug). ``{role}_tokens_acc`` is dropped by ``reset_phase``'s fresh
+        phase_state dict, so the totals are per-phase and reset on genuine phase
+        advance (identical lifecycle to the planner/executor accumulators).
+        """
+        _new = _sum_session_tokens(jsonl_path)
+        _ps = self.read_phase_state()
+        _acc = _ps.get(f"{role}_tokens_acc", {})
+        if not isinstance(_acc, dict):
+            _acc = {}
+        for _k, _v in _new.items():
+            _acc[_k] = _acc.get(_k, 0) + _v
+        _ps[f"{role}_tokens_acc"] = _acc
+        self.write_phase_state_atomic(_ps)
+
     def _clean_escalation_headline(self, raw_id=None):
         """P1 Stage G1 — a clean, deterministic headline for the escalation panel.
 
@@ -3246,6 +3343,16 @@ class Orchestrator:
     def reset_phase(self):
         """Full phase-level reset. Triggered by RESET_PHASE resume command (escalation-only).
 
+        Returns ``True`` on a successful reset, ``False`` when the git operations failed.
+
+        T4.1 (Decision #4) — fail closed: if step 1/2 below raises
+        ``CalledProcessError`` (dirty tree, missing base, repo lock), the method does
+        **not** proceed to wipe outputs / re-init phase_state / transition to
+        planner-RUNNING (which would "succeed" while leaving a corrupt tree). It instead
+        records ``ERR_RESET_PHASE_GIT_FAILED``, routes to escalation, and returns
+        ``False`` — so callers (the RESET_PHASE dispatch handler, ``nuclear_reset_phase``)
+        gate their ``escalation_resets++`` / ``nuclear_resets++`` on confirmed success.
+
         Sequence:
           1. git reset --hard <phase_base_commit> (pre-phase commit stored at branch creation)
           2. git checkout main (base branch)
@@ -3291,7 +3398,19 @@ class Orchestrator:
             subprocess.run(["git", "branch", "-D", branch], cwd=SYMLINK_TARGET, check=False)
             print(f"[INFO] reset_phase: reset to {phase_base or 'HEAD'}, on {base_branch}, deleted {branch}.")
         except subprocess.CalledProcessError as e:
+            # T4.1 (Decision #4) — fail closed: do NOT proceed to wipe outputs /
+            # re-init phase_state / transition to planner-RUNNING (which would
+            # "succeed" while leaving a corrupt tree). Route to escalation and
+            # return False so the caller gates its escalation_resets++ /
+            # nuclear_resets++ on confirmed success.
             print(f"[ERROR] reset_phase git operations failed: {e}")
+            _ps_fail = self.read_phase_state()
+            _ps_fail["last_error_code"] = "ERR_RESET_PHASE_GIT_FAILED"
+            _ps_fail["escalation_trigger_reason"] = f"reset_phase git operations failed: {e}"
+            self.write_phase_state_atomic(_ps_fail)
+            self.state["current_agent"] = "escalation"
+            self.transition_state("RUNNING", f"RESET_PHASE git failure on phase {raw_id or phase}: {e}")
+            return False
 
         # Clear all six output pairs and phase_state.json
         for fname in [
@@ -3375,6 +3494,7 @@ class Orchestrator:
             print("[WARN] reset_phase: no roadmap file found, current_phase.json not refreshed.")
 
         self.transition_state("RUNNING", f"RESET_PHASE: restarting phase {raw_id or phase} from planner")
+        return True
 
     def nuclear_reset_phase(self):
         """P1 Stage G2 — operator escape hatch (cap 2). Destructive true-fresh-start.
@@ -3389,41 +3509,63 @@ class Orchestrator:
         It differs from reset_phase ONLY in governance: it increments its own
         nuclear_resets counter (cap 2, enforced by the dispatch branch and the server's
         /api/command validation) instead of being blocked by the escalation_resets cap (3),
-        and appends a NUCLEAR_RESET reset_log entry. The increment + log are written
-        BEFORE delegating to reset_phase(), which then PRESERVES both nuclear_resets and
-        reset_log across its re-init (see reset_phase docstring) — so the final phase_state
-        carries the bumped counter and the new audit entry.
+        and appends a NUCLEAR_RESET reset_log entry. T4.1 (Decision #4): the increment +
+        log are written AFTER a CONFIRMED reset_phase() — a git-failed reset returns False,
+        routes to escalation, and charges NO nuclear budget. reset_phase() PRESERVES both
+        nuclear_resets and reset_log across its re-init (see reset_phase docstring), so
+        incrementing after success carries the bumped counter and the new audit entry into
+        the final phase_state.
 
         Note: the escalation_resolve pipeline event is already emitted for every command at
         the top of the dispatch loop, so this method must not re-emit it.
         """
         _ps = self.read_phase_state()
-        _ps["nuclear_resets"] = _ps.get("nuclear_resets", 0) + 1
         _reason = _ps.get("last_error_code", "unknown")
-        _ps.setdefault("reset_log", []).append({
-            "reset_number": _ps["nuclear_resets"],
+        # Capture the escalated phase pointer before reset_phase() runs so the
+        # observability event carries it rather than any post-reset value.
+        _phase_at_reset = self.state.get("current_phase_raw_id", "")
+        print(f"[INFO] nuclear_reset_phase: attempting nuclear reset, reason={_reason!r}.")
+        # T4.1 (Decision #4) — charge the nuclear budget + record the destructive
+        # action ONLY on a CONFIRMED reset. reset_phase() returns False and routes to
+        # escalation (tree intact) on a git failure; in that case leave nuclear_resets
+        # untouched and emit nothing. reset_phase preserves nuclear_resets / reset_log
+        # across its re-init, so increment AFTER success.
+        if not self.reset_phase():
+            return
+        _ps2 = self.read_phase_state()
+        _ps2["nuclear_resets"] = _ps2.get("nuclear_resets", 0) + 1
+        _ps2.setdefault("reset_log", []).append({
+            "reset_number": _ps2["nuclear_resets"],
             "command": "NUCLEAR_RESET",
             "reason": _reason,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
-        _ps["last_phase_outcome"] = "nuclear_reset"  # Phase 3 — preserved across reset_phase
-        self.write_phase_state_atomic(_ps)
-        print(f"[INFO] nuclear_reset_phase: nuclear_resets now {_ps['nuclear_resets']}, reason={_reason!r}.")
-        # Phase 2 (observability) — record the destructive ACTION on the timeline. The dispatch
-        # loop already emits escalation_resolve for the *command*; this captures that the phase
-        # work was actually discarded. Emit BEFORE reset_phase() wipes the phase pointer so the
-        # detail carries the escalated phase, not the post-reset blank.
+        _ps2["last_phase_outcome"] = "nuclear_reset"  # Phase 3 — survives reset_phase's re-init
+        self.write_phase_state_atomic(_ps2)
+        print(f"[INFO] nuclear_reset_phase: nuclear_resets now {_ps2['nuclear_resets']}, reason={_reason!r}.")
+        # Phase 2 (observability) — record the destructive ACTION on the timeline. The
+        # dispatch loop already emits escalation_resolve for the *command*; this captures
+        # that the phase work was actually discarded.
         _write_pipeline_event(
             "nuclear_reset",
-            self.state.get("current_phase_raw_id", ""),
+            _phase_at_reset,
             "escalation",
-            {"nuclear_resets": _ps["nuclear_resets"], "reason": _reason,
-             "phase": self.state.get("current_phase_raw_id", "")},
+            {"nuclear_resets": _ps2["nuclear_resets"], "reason": _reason,
+             "phase": _phase_at_reset},
         )
-        self.reset_phase()
 
     def reset_execution(self, caller: str):
         """Partial execution-level reset. Preserves planner output. Clears executor + reviewer outputs.
+
+        Returns ``True`` on a successful reset, ``False`` when the git operations failed.
+
+        T4.1 (Decision #4) — fail closed: if the ``git checkout`` / ``git reset --hard``
+        below raises ``CalledProcessError``, the method does **not** proceed to clear
+        outputs, change counters (including the ``escalation_resets++`` for
+        ``caller="escalation"``), or transition to executor-RUNNING. It records
+        ``ERR_RESET_EXECUTION_GIT_FAILED``, routes to escalation, and returns ``False`` —
+        so no reset budget is charged on a failed reset (the internal increments are
+        skipped by the early return).
 
         Phase 2 — self-failure feedback parity: on an ordinary gate failure the
         executor's WORKING TREE is PRESERVED (the hard ``git reset --hard HEAD``
@@ -3467,7 +3609,19 @@ class Orchestrator:
                 subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=SYMLINK_TARGET, check=True)
                 print(f"[INFO] reset_execution({caller}): hard reset on {branch} (unaccounted deletion — restoring deleted files).")
         except subprocess.CalledProcessError as e:
+            # T4.1 (Decision #4) — fail closed: do NOT proceed to clear outputs /
+            # change counters (including the escalation_resets++ below) / transition
+            # to executor-RUNNING on a failed reset. Route to escalation and return
+            # False; the internal increments are skipped by this early return, so no
+            # reset budget is charged.
             print(f"[ERROR] reset_execution git operations failed: {e}")
+            _ps_fail = self.read_phase_state()
+            _ps_fail["last_error_code"] = "ERR_RESET_EXECUTION_GIT_FAILED"
+            _ps_fail["escalation_trigger_reason"] = f"reset_execution({caller}) git operations failed: {e}"
+            self.write_phase_state_atomic(_ps_fail)
+            self.state["current_agent"] = "escalation"
+            self.transition_state("RUNNING", f"RESET_EXECUTION git failure on phase {raw_id or phase}: {e}")
+            return False
 
         # §5.3 fix (reset_execution path): git reset --hard HEAD restores the committed
         # version of current_phase.json, which may be stale from a prior completed phase.
@@ -3579,6 +3733,7 @@ class Orchestrator:
         # Set state so main loop routes to executor on next iteration
         self.state["current_agent"] = "executor"
         self.transition_state("RUNNING", f"reset_execution({caller}): executor reset, awaiting retry")
+        return True
 
     def reset_reviewer(self):
         """Reviewer-only reset. Preserves planner and executor output. Clears reviewer outputs.
@@ -3695,6 +3850,64 @@ class Orchestrator:
         except Exception as _e:
             print(f"[WARN] _mark_roadmap_phase: could not update roadmap for {raw_id!r}: {_e}")
 
+    def _flip_roadmap_checkbox_or_escalate(self, roadmap_path, phase) -> bool:
+        """Flip the just-completed phase's roadmap checkbox ``[ ]``→``[x]`` and fold
+        it into the merge commit. Returns ``True`` on success.
+
+        T4.4 — on a NON-git failure (read-only roadmap, encoding error) this routes
+        to escalation (``ERR_ROADMAP_CHECKBOX_FAILED``, Decision #5 operator
+        message) and returns ``False`` rather than swallowing the error and letting
+        the caller tag + advance: the merge commit has already landed, but the
+        roadmap still shows the phase incomplete, so the resolver would re-return it
+        → silent re-run → ``ERR_MERGE_FAILED`` on the now-empty branch. A git
+        ``CalledProcessError`` is re-raised for the caller's outer git handler
+        (which already escalates). Extracted from the reviewer-PASS merge block so
+        this fail-closed decision is unit-testable in isolation.
+        """
+        try:
+            with open(roadmap_path, 'r') as f:
+                rmap_lines = f.readlines()
+            _chk_raw_id = self.state.get("current_phase_raw_id", "")
+            for i, rline in enumerate(rmap_lines):
+                rmatch = re.match(r'- \[( |x|-|!)\] `([^`]+)` \|', rline.strip())
+                if rmatch:
+                    _, phase_id = rmatch.groups()
+                    # Prefer exact raw_id match — avoids collision when multiple phases
+                    # share the same trailing integer (e.g. INFRA-1, CORE-1, UI-1 all → 1).
+                    if _chk_raw_id:
+                        if phase_id == _chk_raw_id:
+                            rmap_lines[i] = rline.replace('- [ ]', '- [x]').replace('- [!]', '- [x]')
+                            break
+                    else:
+                        parts = phase_id.split('-')
+                        phase_num = int(parts[-1]) if len(parts) > 1 and parts[-1].isdigit() else 0
+                        if phase_num == phase:
+                            rmap_lines[i] = rline.replace('- [ ]', '- [x]').replace('- [!]', '- [x]')
+                            break
+            with open(roadmap_path, 'w') as f:
+                f.writelines(rmap_lines)
+            # Fold checkbox update into the merge commit atomically.
+            subprocess.run(["git", "add", roadmap_path], cwd=SYMLINK_TARGET, check=True)
+            subprocess.run(["git", "commit", "--amend", "--no-edit"], cwd=SYMLINK_TARGET, check=True)
+            print(f"[INFO] Roadmap checkbox for {_chk_raw_id or phase} folded into merge commit.")
+            return True
+        except subprocess.CalledProcessError:
+            raise  # let the caller's outer except handle git failures
+        except Exception as e:
+            # T4.4 — fail closed: the merge landed but the checkbox didn't flip.
+            reason = (
+                f"merge succeeded, roadmap checkbox couldn't be flipped — fix and "
+                f"resume (Phase {self.state.get('current_phase_raw_id', '') or phase}): {e}"
+            )
+            print(f"[ERROR] {reason} — routing to escalation.", file=sys.stderr)
+            _ps = self.read_phase_state()
+            _ps["last_error_code"] = "ERR_ROADMAP_CHECKBOX_FAILED"
+            _ps["escalation_trigger_reason"] = reason
+            self.write_phase_state_atomic(_ps)
+            self.state["current_agent"] = "escalation"
+            self.transition_state("RUNNING", reason)
+            return False
+
     def _advance_to_next_pending_phase(self, *, trigger: str) -> str:
         """Resolve the roadmap and advance to the next pending phase.
 
@@ -3773,9 +3986,32 @@ class Orchestrator:
             if result.returncode == 0 and "PENDING: Phase" in output:
                 # Start next phase correctly.
                 # The current_phase.json is written by phase_resolver.py
-                if os.path.exists(os.path.join(PROJECT_ARTIFACTS_DIR, "current_phase.json")):
-                    with open(os.path.join(PROJECT_ARTIFACTS_DIR, "current_phase.json"), 'r') as f:
-                        new_phase = json.load(f)
+                _cp_path = os.path.join(PROJECT_ARTIFACTS_DIR, "current_phase.json")
+                if os.path.exists(_cp_path):
+                    # T4.3 — guard the resolver-written phase file. A truncated /
+                    # corrupt file (crash mid-write, disk-full) raises
+                    # JSONDecodeError — uncaught, since the outer except only
+                    # catches CalledProcessError; a valid-but-shapeless file
+                    # (no raw_id) would silently advance to current_phase=0,
+                    # raw_id="" (branch "phase/", colliding session keys). Route
+                    # either to the same F4 ERR_PHASE_RESOLVER_FAILED escalation
+                    # as a missing verdict rather than crashing or advancing blind.
+                    try:
+                        with open(_cp_path, 'r') as f:
+                            new_phase = json.load(f)
+                        if not isinstance(new_phase, dict) or not new_phase.get("raw_id"):
+                            raise ValueError(f"current_phase.json missing raw_id: {new_phase!r}")
+                    except (json.JSONDecodeError, OSError, ValueError) as _cp_err:
+                        reason = (f"current_phase.json unreadable on advance "
+                                  f"(trigger={trigger}): {_cp_err}")
+                        print(f"[ERROR] {reason} — routing to escalation.", file=sys.stderr)
+                        _ps = self.read_phase_state()
+                        _ps["last_error_code"] = "ERR_PHASE_RESOLVER_FAILED"
+                        _ps["escalation_trigger_reason"] = reason
+                        self.write_phase_state_atomic(_ps)
+                        self.state["current_agent"] = "escalation"
+                        self.transition_state("RUNNING", reason)
+                        return "continue"
                     self.state["current_phase"] = new_phase.get("phase_number", 0)
                     self.state["current_phase_raw_id"] = new_phase.get("raw_id", "")
                     self.state["planner_retries"] = 0
@@ -3998,23 +4234,36 @@ class Orchestrator:
                 ],
                 "response_format": {"type": "json_object"},
             }
-            _llama_chat_base = (
-                self.openclaw_config.get("models", {})
-                .get("providers", {})
-                .get("llama-local", {})
-                .get("baseUrl", f"{_LLAMA_ORIGIN}/v1")
-                .rstrip("/")
-            )
-            _chat_url = f"{_llama_chat_base}/chat/completions"
+            _chat_url = self._llama_chat_completions_url()
             try:
                 _resp = requests.post(
                     _chat_url,
                     json=_payload, timeout=60
                 )
                 _resp.raise_for_status()
-                _raw = _resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+                # T4.2 — validate the response SHAPE before destructuring. A
+                # well-formed-but-wrong-shape 200 (e.g. {"error": ...} from a
+                # loaded llama-server) otherwise yields empty content that the
+                # broad `except` below routes to Layer 2's 'impl' default —
+                # burning a real executor retry on an infra blip. A missing/empty
+                # `choices` or empty content routes to 'unknown' (the same
+                # escalate path as malformed JSON), not the heuristic fallback.
+                _l1_json = _resp.json()
+                _l1_choices = _l1_json.get("choices") if isinstance(_l1_json, dict) else None
+                if not isinstance(_l1_choices, list) or not _l1_choices:
+                    _append_blame_log(1, "wrong_shape", "null", "unknown",
+                                      f"analyst response missing choices: {str(_l1_json)[:200]}")
+                    _record_blame_attribution("unknown")
+                    return {"blame": "unknown",
+                            "reason": "[L1] analyst response wrong shape — escalating"}
+                _l1_msg = _l1_choices[0].get("message", {}) if isinstance(_l1_choices[0], dict) else {}
+                _raw = (_l1_msg.get("content", "") if isinstance(_l1_msg, dict) else "") or ""
                 if not _raw.strip():
-                    raise ValueError("empty response from analyst")
+                    _append_blame_log(1, "empty_content", "null", "unknown",
+                                      "analyst returned empty content")
+                    _record_blame_attribution("unknown")
+                    return {"blame": "unknown",
+                            "reason": "[L1] analyst returned empty content — escalating"}
                 _parsed = json.loads(_raw)
                 _fault = _parsed.get("fault", "unknown")
                 _conf = _parsed.get("confidence", "low")
@@ -4824,10 +5073,22 @@ class Orchestrator:
                     if os.path.exists(cp_path):
                         with open(cp_path) as f:
                             first_phase = json.load(f)
-                        self.state["current_phase"] = first_phase.get("phase_number", 0)
-                        self.state["current_phase_raw_id"] = first_phase.get("raw_id", "")
-                        self.state["phase_start_time"] = datetime.now(timezone.utc).isoformat()
-                        self.write_state()
+                        # T4.3 (mirror of the advance-path guard) — a valid-but-
+                        # shapeless current_phase.json (no raw_id) would advance blind
+                        # to phase 0 / a "phase/" branch with colliding session keys.
+                        # Treat it as an unactionable verdict and route to the shared
+                        # F4 escalation below. (A *corrupt* file is already caught by
+                        # this method's broad `except` and routed to the same place.)
+                        if not isinstance(first_phase, dict) or not first_phase.get("raw_id"):
+                            startup_resolver_reason = (
+                                f"Startup current_phase.json is shapeless "
+                                f"(no raw_id): {first_phase!r}"
+                            )
+                        else:
+                            self.state["current_phase"] = first_phase.get("phase_number", 0)
+                            self.state["current_phase_raw_id"] = first_phase.get("raw_id", "")
+                            self.state["phase_start_time"] = datetime.now(timezone.utc).isoformat()
+                            self.write_state()
                 elif result.returncode == 0 and "PIPELINE_COMPLETE" in output:
                     print("[INFO] All roadmap phases already complete. Nothing to do.")
                     self.state["current_phase_raw_id"] = ""
@@ -5245,13 +5506,7 @@ class Orchestrator:
                             _planner_jsonl_path = os.path.join(_planner_sessions_dir, f"{_sid}.jsonl")
                     except Exception:
                         pass
-                    _planner_tokens = _sum_session_tokens(_planner_jsonl_path)
-                    _ps_plan_tok = self.read_phase_state()
-                    _planner_tokens_acc = _ps_plan_tok.get("planner_tokens_acc", {})
-                    for _k, _v in _planner_tokens.items():
-                        _planner_tokens_acc[_k] = _planner_tokens_acc.get(_k, 0) + _v
-                    _ps_plan_tok["planner_tokens_acc"] = _planner_tokens_acc
-                    self.write_phase_state_atomic(_ps_plan_tok)
+                    self._accumulate_role_tokens("planner", _planner_jsonl_path)
 
                     if self._escalate_if_provider_rejected(_planner_jsonl_path, "Planner"):
                         time.sleep(5)
@@ -5648,13 +5903,7 @@ class Orchestrator:
                         continue
 
                     # Accumulate executor token usage into phase_state across retry attempts.
-                    _attempt_tokens = _sum_session_tokens(_jsonl_path)
-                    _ps_tok = self.read_phase_state()
-                    _executor_tokens_acc = _ps_tok.get("executor_tokens_acc", {})
-                    for _k, _v in _attempt_tokens.items():
-                        _executor_tokens_acc[_k] = _executor_tokens_acc.get(_k, 0) + _v
-                    _ps_tok["executor_tokens_acc"] = _executor_tokens_acc
-                    self.write_phase_state_atomic(_ps_tok)
+                    self._accumulate_role_tokens("executor", _jsonl_path)
 
                     # RR-3 (Phase 3): Classify executor terminal state before deciding action.
                     # executor_output_path is .json counterpart to sentinel_path (.done).
@@ -5921,11 +6170,9 @@ class Orchestrator:
                         )
                         continue
 
-                    # Capture reviewer token usage from the resolved session JSONL.
-                    _reviewer_tokens = _sum_session_tokens(_jsonl_path)
-                    _ps_rev_tok = self.read_phase_state()
-                    _ps_rev_tok["reviewer_tokens_acc"] = _reviewer_tokens
-                    self.write_phase_state_atomic(_ps_rev_tok)
+                    # Accumulate reviewer token usage across reviewer re-invocations
+                    # (T4.8 — was a bare assignment that overwrote prior totals).
+                    self._accumulate_role_tokens("reviewer", _jsonl_path)
 
                     if self._escalate_if_provider_rejected(_jsonl_path, "Reviewer"):
                         time.sleep(5)
@@ -6125,37 +6372,14 @@ class Orchestrator:
                                     break
 
                             if roadmap_path:
-                                try:
-                                    with open(roadmap_path, 'r') as f:
-                                        rmap_lines = f.readlines()
-                                    _chk_raw_id = self.state.get("current_phase_raw_id", "")
-                                    for i, rline in enumerate(rmap_lines):
-                                        rmatch = re.match(r'- \[( |x|-|!)\] `([^`]+)` \|', rline.strip())
-                                        if rmatch:
-                                            _, phase_id = rmatch.groups()
-                                            # Prefer exact raw_id match — avoids collision when multiple phases
-                                            # share the same trailing integer (e.g. INFRA-1, CORE-1, UI-1 all → 1).
-                                            if _chk_raw_id:
-                                                if phase_id == _chk_raw_id:
-                                                    rmap_lines[i] = rline.replace('- [ ]', '- [x]').replace('- [!]', '- [x]')
-                                                    break
-                                            else:
-                                                parts = phase_id.split('-')
-                                                phase_num = int(parts[-1]) if len(parts) > 1 and parts[-1].isdigit() else 0
-                                                if phase_num == phase:
-                                                    rmap_lines[i] = rline.replace('- [ ]', '- [x]').replace('- [!]', '- [x]')
-                                                    break
-                                    with open(roadmap_path, 'w') as f:
-                                        f.writelines(rmap_lines)
-                                    # Fold checkbox update into the merge commit atomically.
-                                    subprocess.run(["git", "add", roadmap_path], cwd=SYMLINK_TARGET, check=True)
-                                    subprocess.run(["git", "commit", "--amend", "--no-edit"], cwd=SYMLINK_TARGET, check=True)
-                                    print(f"[INFO] Roadmap checkbox for {_chk_raw_id or phase} folded into merge commit.")
-                                except subprocess.CalledProcessError:
-                                    raise  # let outer except handle git failures
-                                except Exception as e:
-                                    print(f"[ERROR] Failed to update roadmap: {e}")
-                                    # Non-blocking — tag proceeds even if roadmap file write fails
+                                # T4.4 — fail closed. On a non-git flip failure the
+                                # helper routes to escalation and returns False; we
+                                # must NOT fall through to tag + advance (that would
+                                # silently re-run the merged phase). A git failure
+                                # re-raises to the outer handler below.
+                                if not self._flip_roadmap_checkbox_or_escalate(roadmap_path, phase):
+                                    time.sleep(5)
+                                    continue
 
                             _tag_id = self.state.get("current_phase_raw_id", "") or phase
                             # Use --force so the tag moves to the new commit on phase re-runs
@@ -6698,18 +6922,25 @@ class Orchestrator:
                                         "Escalation reset cap reached (3). Human PROCEED required to advance past this phase."
                                     )
                                 else:
-                                    _ps["escalation_resets"] = _ps.get("escalation_resets", 0) + 1
-                                    # FIND-ESCALATION-CAP: log reason for this reset.
+                                    # T4.1 (Decision #4) — charge escalation_resets only on a
+                                    # CONFIRMED reset. reset_phase() returns False + routes to
+                                    # escalation on a git failure (tree intact), in which case
+                                    # the budget is NOT charged. Capture the reason before the
+                                    # reset (reset_phase clears last_error_code on success) and
+                                    # increment after — reset_phase preserves escalation_resets
+                                    # across its re-init.
                                     _reason = _ps.get("last_error_code", "unknown")
-                                    _entry = {
-                                        "reset_number": _ps["escalation_resets"],
-                                        "command": "RESET_PHASE",
-                                        "reason": _reason,
-                                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                                    }
-                                    _ps.setdefault("reset_log", []).append(_entry)
-                                    self.write_phase_state_atomic(_ps)
-                                    self.reset_phase()
+                                    if self.reset_phase():
+                                        _ps = self.read_phase_state()
+                                        _ps["escalation_resets"] = _ps.get("escalation_resets", 0) + 1
+                                        _entry = {
+                                            "reset_number": _ps["escalation_resets"],
+                                            "command": "RESET_PHASE",
+                                            "reason": _reason,
+                                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                                        }
+                                        _ps.setdefault("reset_log", []).append(_entry)
+                                        self.write_phase_state_atomic(_ps)
                             elif command == "NUCLEAR_RESET":
                                 # P1 Stage G2 — operator escape hatch, governed by its OWN
                                 # nuclear_resets cap (2), independent of escalation_resets.
