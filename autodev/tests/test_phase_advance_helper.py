@@ -219,20 +219,47 @@ def test_advance_pipeline_complete_no_queue_returns_break(tmp_path, monkeypatch)
     )
 
 
-def test_advance_pipeline_complete_auto_advances_returns_continue(tmp_path, monkeypatch):
+def test_advance_pipeline_complete_auto_advances_reinits_and_returns_continue(tmp_path, monkeypatch):
     """PIPELINE_COMPLETE with a queued next project in auto mode: the helper
-    auto-advances the queue and returns 'continue' so the loop restarts for the
-    new project (this is why PROCEEDing the last phase of project A can roll
-    straight into project B)."""
+    auto-advances the queue, then RE-RUNS startup init (``_run_startup_loop``) for
+    the freshly-activated project BEFORE returning 'continue' — so the new project
+    resolves its real phase + ``phase_base_commit`` instead of the planner running
+    at a blank phase 0. Catches the Phase-8 ``ERR_MISSING_BASE_COMMIT`` bug, where
+    the in-process advance re-entered the main loop with no startup init (this is
+    also why PROCEEDing the last phase of project A can roll straight into B)."""
     run = _ResolverRun(rc=0, stdout="PIPELINE_COMPLETE", artifacts_dir=str(tmp_path))
     orch = _make_advance_orch(tmp_path, monkeypatch, run=run)
     orch._read_queue = lambda: {"queue": [{"id": "q1", "completion_review": False}], "queue_mode": "auto"}
     orch._find_active_queue_entry = lambda q: (0, q["queue"][0])
     orch._select_next_queue_project = lambda **k: True
+    _loop_calls = []
+    orch._run_startup_loop = lambda: (_loop_calls.append(1), "enter_main_loop")[1]
 
     sig = orch._advance_to_next_pending_phase(trigger="phase_complete")
 
     assert sig == "continue"
+    assert _loop_calls == [1], (
+        "after auto-advancing to a new project the helper must re-run startup "
+        "init (_run_startup_loop) so the new project resolves its phase + base "
+        "commit — not dispatch the planner at a blank phase 0"
+    )
+
+
+def test_advance_complete_auto_advance_exit_run_returns_break(tmp_path, monkeypatch):
+    """If the freshly-advanced project's startup returns 'exit_run' (nothing left
+    to do / the 20-pass cap), the helper must translate that to 'break' (leave the
+    main loop) rather than 'continue' into an agent dispatch with no resolved
+    phase. Pins the exit_run→break translation at the COMPLETE advance site."""
+    run = _ResolverRun(rc=0, stdout="PIPELINE_COMPLETE", artifacts_dir=str(tmp_path))
+    orch = _make_advance_orch(tmp_path, monkeypatch, run=run)
+    orch._read_queue = lambda: {"queue": [{"id": "q1", "completion_review": False}], "queue_mode": "auto"}
+    orch._find_active_queue_entry = lambda q: (0, q["queue"][0])
+    orch._select_next_queue_project = lambda **k: True
+    orch._run_startup_loop = lambda: "exit_run"
+
+    sig = orch._advance_to_next_pending_phase(trigger="phase_complete")
+
+    assert sig == "break"
 
 
 def test_advance_blocked_parks_and_returns_signal(tmp_path, monkeypatch):
@@ -248,6 +275,30 @@ def test_advance_blocked_parks_and_returns_signal(tmp_path, monkeypatch):
     assert orch.state["pipeline_status"] == "BLOCKED"
     assert any(a and a[0] == "BLOCKED" for a in orch.calls["park"]), (
         "a blocked next phase must park the active queue entry BLOCKED"
+    )
+
+
+def test_advance_blocked_auto_advance_runs_startup_loop(tmp_path, monkeypatch):
+    """BLOCKED (resolver rc 2) WITH a queued next project: the helper parks the
+    active entry BLOCKED, auto-advances, and must re-run startup init for the new
+    project BEFORE returning 'continue' — the same Phase-8 parity as the COMPLETE
+    arm (the BLOCKED in-process advance was a second instance of the skip-init
+    bug). The no-advance case stays in test_advance_blocked_parks_and_returns_signal."""
+    run = _ResolverRun(rc=2, stdout="BLOCKED: Phase CORE-E2 is blocked.", artifacts_dir=str(tmp_path))
+    orch = _make_advance_orch(tmp_path, monkeypatch, run=run)
+    _loop_calls = []
+    orch._queue_after_park_maybe_advance = lambda: True
+    orch._run_startup_loop = lambda: (_loop_calls.append(1), "enter_main_loop")[1]
+
+    sig = orch._advance_to_next_pending_phase(trigger="skip")
+
+    assert sig == "continue"
+    assert _loop_calls == [1], (
+        "a BLOCKED-then-auto-advance must re-run startup init for the newly "
+        "activated project (Phase-8 parity with the COMPLETE arm)"
+    )
+    assert any(a and a[0] == "BLOCKED" for a in orch.calls["park"]), (
+        "the blocked phase must still park the active queue entry BLOCKED"
     )
 
 

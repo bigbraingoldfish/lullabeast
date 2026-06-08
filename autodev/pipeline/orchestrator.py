@@ -248,6 +248,19 @@ def _validate_openclaw_root(root: str) -> None:
         sys.exit(1)
 WEBHOOK_AGENT_ID_PRD = "prd-creator"
 
+# Phase 9 — injected into a still-streaming agent session when the orchestrator gives
+# up (escalation) and its WS abort is NOT confirmed to have stopped the session. Tells
+# the model to wind down instead of continuing to mutate the repo (git commit/tag/edit)
+# after the orchestrator has handed off to the human. NOT sent to a confirmed-stopped
+# session (that would needlessly wake it). OpenClaw's sessions.abort is cooperative
+# (AbortController) with no force-kill, so this message is the strongest backstop.
+_HALT_SESSION_MESSAGE = (
+    "PIPELINE HALT — this phase has been stopped by the AutoDev orchestrator and your "
+    "output is no longer being read. Do NOT make any further changes, file edits, git "
+    "commits, tags, or tool calls. No further action or output is required. End your "
+    "turn now."
+)
+
 # Hard cap for gate script subprocess.run — prevents hung gates from stalling the orchestrator.
 GATE_SUBPROCESS_TIMEOUT = 60
 
@@ -1061,6 +1074,14 @@ class Orchestrator:
         # "executor_self_failure"; the ROUTE_EXECUTOR handler sets it to
         # "reviewer_rejection".
         self._current_attempt_retry_class = "initial_attempt"
+        # Phase 9 — track the last-invoked pipeline-agent session so the escalation
+        # chokepoint can abort it (the terminal attempt is otherwise never aborted —
+        # the retry-start abort only stops the PRIOR attempt when launching the next).
+        # Set by _record_active_agent at each agent invocation; consumed + cleared by
+        # _abort_active_agent_session. Process-local (reset on restart; see callout).
+        self._active_agent_session_key = None
+        self._active_agent_role = None
+        self._active_agent_stamp = None
         _validate_openclaw_root(OPENCLAW_ROOT)
         self.openclaw_config = self.load_config()
         self.skill_manager = SkillManager(OPENCLAW_ROOT)
@@ -2799,6 +2820,98 @@ class Orchestrator:
         )
         return False
 
+    def _record_active_agent(self, role: str, session_key: str) -> None:
+        """Remember the just-invoked pipeline agent's session so a later give-up
+        (escalation) can abort it.
+
+        Stores the **bare** session key (``pipeline:phase-…:{role}-attempt-N``), the
+        role, and the role's ``{role}_activity.stamp`` path (for verify_session_stopped).
+        Called at every planner/executor/reviewer invocation; overwritten each time, so
+        it always reflects the last-invoked (i.e. in-flight) agent. Cleared by
+        :meth:`_abort_active_agent_session`. See Phase 9 (zombie-session fix)."""
+        self._active_agent_role = role
+        self._active_agent_session_key = session_key
+        self._active_agent_stamp = os.path.join(PROJECT_ARTIFACTS_DIR, f"{role}_activity.stamp")
+
+    def _abort_active_agent_session(self, source: str) -> None:
+        """Abort the last-invoked agent's still-running session when the orchestrator
+        gives up on a phase (escalation), so it can't keep mutating the repo
+        (``git commit``/``tag``/edits) after the hand-off to the human.
+
+        The terminal attempt that triggers escalation is otherwise never aborted — the
+        retry-start abort only stops the *prior* attempt when *launching the next* one.
+
+        OpenClaw's ``sessions.abort`` is cooperative (``AbortController``; no force-kill),
+        so:
+          1. send the WS abort (best-effort, via :func:`abort_agent_session`);
+          2. if acked, ``verify_session_stopped`` (stamp settle); a still-advancing stamp
+             emits ``abort_verify_failed``;
+          3. inject :data:`_HALT_SESSION_MESSAGE` **only when NOT confirmed-stopped**
+             (abort failed, or acked-but-still-streaming) — a confirmed-stopped session
+             must not be woken just to read "do nothing". Best-effort; a webhook failure
+             is logged, never raised.
+        Emits ``abort_attempted`` (``source`` / ``result`` / ``halt_message_sent``) and
+        clears the recorded session. No-op when nothing is in-flight. Never blocks
+        escalation (soft-continue, same contract as :meth:`_handle_stall_outcome`)."""
+        key = self._active_agent_session_key
+        role = self._active_agent_role
+        if not key or not role:
+            return
+        raw_id = self.state.get("current_phase_raw_id", "")
+        gw_token = self.openclaw_config.get("gateway_token", "")
+        gw_ws_url = self.openclaw_config.get(
+            "gateway_ws_url", "ws://127.0.0.1:18789/__openclaw__/ws"
+        )
+        abort_key = f"agent:{role}:{key}".lower()
+        aborted = abort_agent_session(abort_key, gw_ws_url, gw_token)
+
+        stopped = False
+        if aborted:
+            stopped = verify_session_stopped(self._active_agent_stamp, settle_seconds=5.0)
+            if not stopped:
+                print(
+                    f"[ABORT][VERIFY_FAILED] session_key={abort_key} source={source} — "
+                    f"gateway acknowledged abort but stamp is still being refreshed."
+                )
+                _write_pipeline_event(
+                    "abort_verify_failed", raw_id, role,
+                    {
+                        "session_key": abort_key, "stamp_path": self._active_agent_stamp,
+                        "agent_role": role, "source": source,
+                    },
+                )
+
+        # Halt message is a FALLBACK: only when the session is NOT confirmed-stopped.
+        # Posting to a stopped session would wake it just to read "do nothing".
+        halt_sent = False
+        if not stopped:
+            try:
+                token = self.openclaw_config.get("hooks", {}).get("token", "")
+                invoke_agent_webhook(
+                    role, key, token, message=_HALT_SESSION_MESSAGE,
+                    url=self.openclaw_config.get("hooks_url"),
+                )
+                halt_sent = True
+            except Exception as _halt_err:  # best-effort — never block escalation
+                print(
+                    f"[ABORT][HALT_MSG_FAILED] session_key={key} source={source}: {_halt_err}"
+                )
+
+        print(
+            f"[ABORT] result={'ok' if aborted else 'FAILED'} session_key={abort_key} "
+            f"source={source} halt_message_sent={halt_sent}"
+        )
+        _write_pipeline_event(
+            "abort_attempted", raw_id, role,
+            {
+                "session_key": abort_key, "result": "ok" if aborted else "FAILED",
+                "agent_role": role, "source": source, "halt_message_sent": halt_sent,
+            },
+        )
+        self._active_agent_session_key = None
+        self._active_agent_role = None
+        self._active_agent_stamp = None
+
     def _handle_stall_outcome(
         self,
         agent_role: str,
@@ -4099,9 +4212,14 @@ class Orchestrator:
                                  RUNNING.
           * PIPELINE_COMPLETE  — clear ``current_agent``, run the opt-in completion
                                  review, mark the active queue entry COMPLETED, and
-                                 auto-advance the queue if eligible.
+                                 auto-advance the queue if eligible.  On an in-process
+                                 advance, re-run startup init (``_run_startup_loop``)
+                                 so the new project resolves its phase + captures
+                                 ``phase_base_commit`` before any agent runs (Phase 8;
+                                 otherwise the executor hits ``ERR_MISSING_BASE_COMMIT``).
           * BLOCKED (rc 2)     — park the active queue entry BLOCKED and try to
-                                 advance the queue.
+                                 advance the queue; an in-process advance likewise
+                                 re-runs ``_run_startup_loop`` for the new project.
           * resolver error / unexpected rc / unrecognised output — route to the
                                  escalation agent (``current_agent="escalation"``,
                                  an honest ``escalation_trigger_reason`` recording
@@ -4229,7 +4347,18 @@ class Orchestrator:
                 if queue_data["queue"] and queue_data.get("queue_mode", "auto") == "auto":
                     advanced = self._select_next_queue_project(halt_if_no_eligible=False)
                     if advanced:
-                        return "continue"  # restart loop for the new project
+                        # The advanced-to project was activated at a blank
+                        # phase-0/planner state by _select_next_queue_project. Re-run
+                        # the startup phase-resolution + branch checkout +
+                        # phase_base_commit capture (the same routine a fresh launch
+                        # runs) BEFORE re-entering the main loop — otherwise the new
+                        # project's executor runs against an empty raw_id with no
+                        # phase_base_commit → permanent ERR_MISSING_BASE_COMMIT
+                        # (Phase 8). A revival activation (current_agent="escalation")
+                        # makes _run_startup_loop a no-op, so this is safe for both.
+                        if self._run_startup_loop() == "exit_run":
+                            return "break"
+                        return "continue"
                 return "break"
             elif result.returncode == 2 and "BLOCKED" in output:
                 print(f"[INFO] Roadmap blocked. Halting.")
@@ -4242,6 +4371,11 @@ class Orchestrator:
                     {"blocked_at": _blk},
                 )
                 if self._queue_after_park_maybe_advance():
+                    # Same Phase-8 re-init as the PIPELINE_COMPLETE arm: the queue
+                    # advanced in-process to a fresh-start project — resolve its
+                    # phase + capture phase_base_commit before re-entering the loop.
+                    if self._run_startup_loop() == "exit_run":
+                        return "break"
                     return "continue"
                 return "break"
         except subprocess.CalledProcessError as e:
@@ -5218,6 +5352,13 @@ class Orchestrator:
         returns ``"enter_main_loop"`` so the main-loop escalation dispatch fires,
         rather than proceeding to a blind planner run with an empty raw_id (F4).
 
+        Driven by :meth:`_run_startup_loop` (which honors the ``"retry_startup"``
+        re-entry below) — called by :meth:`run` at launch AND after an in-process
+        queue auto-advance, so a queued project is resolved + branched the same way
+        a fresh launch is (Phase 8). Self-guards: returns ``"enter_main_loop"``
+        immediately when ``current_agent != "planner"`` (e.g. a revival), so
+        re-running it on a non-fresh-start activation is a safe no-op.
+
         Returns:
             "exit_run" — leave run() entirely (orchestrator stops).
             "retry_startup" — symlink/project may have changed; re-run this method.
@@ -5368,6 +5509,42 @@ class Orchestrator:
 
         return "enter_main_loop"
 
+    def _run_startup_loop(self) -> str:
+        """Run :meth:`_run_startup_planner_phase_zero_and_branch` to a settled
+        verdict, honoring its ``"retry_startup"`` re-entry (the startup fn emits it
+        when it detects PIPELINE_COMPLETE and auto-advances the queue to a fresh
+        project — that new project must then itself be resolved + branched).
+
+        This is the single canonical "bring the current project up from a blank
+        phase-0/planner state to a resolved phase + ``phase/<raw_id>`` branch +
+        captured ``phase_base_commit``" routine. It is called by :meth:`run` once
+        at launch **and** by :meth:`_advance_to_next_pending_phase` (PIPELINE_COMPLETE
+        / BLOCKED arms) and the main-loop escalation-park advance after an
+        **in-process** queue auto-advance. That re-use closes the Phase-8 gap where
+        an in-process advance re-entered the main loop with NO startup init, so the
+        newly-activated project's planner ran at ``Phase=NONE``/empty ``raw_id`` and
+        the executor hit a permanent ``ERR_MISSING_BASE_COMMIT`` (no
+        ``phase_base_commit`` was ever captured). It is a safe no-op for a revival
+        activation (``current_agent="escalation"``), on which the startup fn
+        early-returns ``"enter_main_loop"`` without touching state.
+
+        Returns:
+            "exit_run" — the orchestrator should stop (startup said so, or the
+                20-pass queue-advance cap was hit).
+            "enter_main_loop" — startup settled; proceed to / re-enter the main loop.
+        """
+        _startup_pass = 0
+        while _startup_pass < 20:
+            _startup_pass += 1
+            _startup_rv = self._run_startup_planner_phase_zero_and_branch()
+            if _startup_rv == "exit_run":
+                return "exit_run"
+            if _startup_rv == "retry_startup":
+                continue
+            return "enter_main_loop"
+        print("[ERROR] Startup exceeded max iterations (queue advance loop); exiting.")
+        return "exit_run"
+
     def run(self):
         """Main event loop."""
         self.acquire_lock()
@@ -5467,18 +5644,12 @@ class Orchestrator:
             if not self._maybe_revive_on_queue_halted():
                 return
 
-            # --- Startup Phase Identification + branch checkout (may repeat after queue auto-advance) ---
-            _startup_pass = 0
-            while _startup_pass < 20:
-                _startup_pass += 1
-                _startup_rv = self._run_startup_planner_phase_zero_and_branch()
-                if _startup_rv == "exit_run":
-                    return
-                if _startup_rv == "retry_startup":
-                    continue
-                break
-            else:
-                print("[ERROR] Startup exceeded max iterations (queue advance loop); exiting.")
+            # --- Startup Phase Identification + branch checkout. The same routine
+            #     is re-run after an in-process queue auto-advance (via
+            #     _run_startup_loop, called from _advance_to_next_pending_phase and
+            #     the main-loop escalation-park advance) so a queued project resolves
+            #     its real phase + phase_base_commit before any agent is dispatched. ---
+            if self._run_startup_loop() == "exit_run":
                 return
 
             print("[INFO] Starting orchestrator loop (Phase 5 Integration)")
@@ -5541,6 +5712,7 @@ class Orchestrator:
                         continue
 
                     session_key = f"pipeline:phase-{phase}:{raw_id}:planner-attempt-{retries + 1}"
+                    self._record_active_agent("planner", session_key)  # Phase 9 — abort-on-escalation target
                     sentinel_path = os.path.join(PROJECT_ARTIFACTS_DIR, "planner_output.done")
                     token = self.openclaw_config.get("hooks", {}).get("token", "")
 
@@ -5835,6 +6007,7 @@ class Orchestrator:
                         continue
 
                     session_key = f"pipeline:phase-{phase}:{raw_id}:executor-attempt-{retries + 1}"
+                    self._record_active_agent("executor", session_key)  # Phase 9 — abort-on-escalation target
                     attempt_label = "Cloud"
 
                     sentinel_path = os.path.join(PROJECT_ARTIFACTS_DIR, "executor_output.done")
@@ -6163,7 +6336,8 @@ class Orchestrator:
                     # session per contract retry (see _reviewer_session_key).
                     _contract_retries = self.read_phase_state().get("reviewer_contract_retries", 0)
                     session_key = self._reviewer_session_key(phase, raw_id, retries, _contract_retries)
-                    
+                    self._record_active_agent("reviewer", session_key)  # Phase 9 — abort-on-escalation target
+
                     sentinel_path = os.path.join(PROJECT_ARTIFACTS_DIR, "reviewer_output.done")
                     token = self.openclaw_config.get("hooks", {}).get("token", "")
 
@@ -7013,7 +7187,15 @@ class Orchestrator:
                         raw_id = self.state.get("current_phase_raw_id", "unknown")
                         session_key = f"pipeline:phase-{phase}:{raw_id}:escalation"
                         token = self.openclaw_config.get("hooks", {}).get("token", "")
-                        
+
+                        # Phase 9 — the orchestrator is giving up on this phase; abort the
+                        # last-invoked pipeline-agent session (the terminal attempt is never
+                        # aborted by the retry-start path) so a zombie can't keep committing
+                        # to the repo after hand-off. Runs once per escalation (this block is
+                        # guarded by _should_invoke_escalation_agent(), which flips
+                        # RUNNING->WAITING_FOR_HUMAN below). Best-effort, never blocks.
+                        self._abort_active_agent_session("escalation")
+
                         cleanup_output_files(PROJECT_ARTIFACTS_DIR, "escalation")
                         _ps = self.read_phase_state()
                         _ps["escalation_trigger_reason"] = self.state.get("last_action", "escalation triggered")
@@ -7101,6 +7283,12 @@ class Orchestrator:
                                 )
                                 break
                         if self._queue_after_park_maybe_advance():
+                            # Phase-8 re-init: the auto-advance just activated a
+                            # fresh-start project — resolve its phase + capture
+                            # phase_base_commit before re-entering the main loop.
+                            # exit_run (nothing left / 20-pass cap) → leave cleanly.
+                            if self._run_startup_loop() == "exit_run":
+                                break
                             continue
                     else:
                         out_path = self._poll_escalation_output_json_path(timeout_seconds=10)
