@@ -408,24 +408,21 @@ class TestSymlinkSetting:
             result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is True
-        assert len(swap_calls) == 1
-        target, link_path = swap_calls[0]
-        # target should be the expanded repo_path
-        assert target == str(repo_path)
-        # link_path should be the configured project_dir_path (repo-local .autodev/ by
-        # default, or ~/.openclaw/pipeline-project in legacy mode). Derive from
-        # load_config() so the assertion survives future runtime layout changes.
-        from ui.server import load_config
-        cfg = load_config()
-        expected_link = os.path.expanduser(cfg["project_dir_path"])
-        assert link_path == expected_link
+        # Symmetric write: one atomic swap per server-owned link (AUTODEV side + OpenClaw side),
+        # every link pointed at repo_path. Derive the expected link set from load_config() so the
+        # assertion survives future runtime-layout changes.
+        from ui.server import load_config, _pipeline_symlink_paths
+        expected_links = _pipeline_symlink_paths(load_config())
+        assert len(swap_calls) == len(expected_links)
+        for target, _link in swap_calls:
+            assert target == str(repo_path)
+        assert {link for _t, link in swap_calls} == set(expected_links)
 
-    def test_symlink_swap_is_atomic_single_call(self, tmp_path):
-        """The link is repointed via one atomic _atomic_symlink_swap call.
-
-        Replaces the obsolete remove-before-symlink ordering test: the swap no
-        longer does a separate os.remove (which left a window with no link) — it
-        creates a temp link and os.replace's it over the target in one step.
+    def test_symlink_swap_is_atomic_per_link(self, tmp_path):
+        """Each owned link is repointed via one atomic _atomic_symlink_swap call (no separate
+        os.remove). With the symmetric two-link write the swap fires once per server-owned link
+        (AUTODEV side + OpenClaw side); the count derives from _pipeline_symlink_paths so it
+        survives runtime-layout changes.
         """
         repo_path = tmp_path / "myproject"
         with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
@@ -434,7 +431,8 @@ class TestSymlinkSetting:
             result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
 
         assert result["ok"] is True
-        assert swap.call_count == 1
+        from ui.server import load_config, _pipeline_symlink_paths
+        assert swap.call_count == len(_pipeline_symlink_paths(load_config()))
         # No separate symlink-removal step in the swap path.
         assert os_remove.call_count == 0
 

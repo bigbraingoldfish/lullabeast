@@ -45,3 +45,46 @@ def _disable_queue_autostart(request, monkeypatch):
         lambda config: {"attempted": False, "reason": "test_disabled"},
         raising=False,
     )
+
+
+@pytest.fixture(autouse=True)
+def _protect_pipeline_symlinks():
+    """Snapshot the live ``pipeline-project`` links and restore them after each test.
+
+    A test that drives a symlink-writing endpoint (``_run_init_project`` / preflight / resume /
+    switch) without fully isolating BOTH ``project_dir_path`` and ``openclaw_root`` can repoint
+    the operator's real links — the documented "tests rewrite the shared symlink" hazard (see
+    ``_disable_queue_autostart`` above), widened by the symmetric two-link write. ``_run_init_project``
+    in particular reads the *real* ``load_config()`` internally, so even a test that patches
+    ``ui.server.load_config`` does not isolate it. This belt-and-braces guard captures each link's
+    target before the test and restores it afterward if it changed, so the suite can never strand
+    a live run. No test asserts the real link persists across teardown (all use ``tmp_path`` links),
+    so restoring only ever undoes accidental clobbering.
+    """
+    import os
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    links = [
+        os.path.join(repo_root, ".autodev", "pipeline-project"),
+        os.path.expanduser("~/.openclaw/pipeline-project"),
+    ]
+    snapshot = {}
+    for link in links:
+        try:
+            if os.path.islink(link):
+                snapshot[link] = os.readlink(link)
+        except OSError:
+            pass
+    try:
+        yield
+    finally:
+        for link, target in snapshot.items():
+            try:
+                if not os.path.islink(link) or os.readlink(link) != target:
+                    tmp = f"{link}.restore_{os.getpid()}"
+                    if os.path.lexists(tmp):
+                        os.remove(tmp)
+                    os.symlink(target, tmp)
+                    os.replace(tmp, link)
+            except OSError:
+                pass
