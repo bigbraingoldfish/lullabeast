@@ -60,6 +60,7 @@ from autodev.pipeline.queue_semantics import (
     bump_queue_version,
     mutate_queue,
     read_queue_version,
+    scrub_parked_fields,
 )
 from autodev.pipeline.sentinel_poller import PollResult  # noqa: E402
 from env_resolvers import resolve_openclaw_root, resolve_pipeline_root  # noqa: E402
@@ -970,6 +971,74 @@ def _atomic_symlink_swap(target: str, link_path: str) -> None:
         raise
 
 
+def _pipeline_symlink_paths(config: dict) -> list:
+    """The project links the SERVER owns, de-duplicated, in priority order:
+
+      1. AUTODEV side — ``config['project_dir_path']`` (or ``symlink_target`` / ``project_dir``);
+         in this deployment ``<AUTODEV_PIPELINE_ROOT>/pipeline-project`` — the link the
+         orchestrator and gate scripts resolve project files through.
+      2. OpenClaw side — ``<openclaw_root>/pipeline-project`` — the link the per-agent workspace
+         symlinks follow.
+
+    The orchestrator's ``update_symlink`` keeps this SAME pair in sync; the server must too, or a
+    server-side repoint of one leaves the other stale (the Defect-A divergence). Single source of
+    truth for "which links a server repoint must move."
+    """
+    paths = []
+    autodev = config.get("project_dir_path") or config.get("symlink_target") or config.get("project_dir")
+    if autodev and str(autodev).strip():
+        paths.append(os.path.expanduser(str(autodev)))
+    # The OpenClaw-side link is included only when openclaw_root is CONFIGURED — no hardcoded
+    # "~/.openclaw" fallback. In production load_config always sets openclaw_root (DEFAULTS,
+    # server.py:478), so both links are always kept in sync; an under-specified caller (e.g. a
+    # hermetic test that sets only project_dir_path) gets the single AUTODEV link, so a server
+    # repoint can never clobber the operator's real ~/.openclaw/pipeline-project link.
+    oc_root = config.get("openclaw_root")
+    if oc_root and str(oc_root).strip():
+        paths.append(os.path.join(os.path.expanduser(str(oc_root)), "pipeline-project"))
+    seen = set()
+    deduped = []
+    for p in paths:
+        if p and p not in seen:
+            seen.add(p)
+            deduped.append(p)
+    return deduped
+
+
+def _atomic_symlink_swap_multi(target: str, link_paths: list) -> None:
+    """Point every path in *link_paths* at *target* transactionally ("both or neither").
+
+    Each link is committed via :func:`_atomic_symlink_swap`; if a later commit fails, the
+    already-committed links are rolled back to their prior targets (or removed if they did not
+    previously exist), then the error is re-raised. Mirrors the orchestrator's ``update_symlink``
+    two-phase commit so the AUTODEV-side and OpenClaw-side links never permanently diverge.
+    """
+    committed = []  # (link_path, prior_target_or_None)
+    try:
+        for link in link_paths:
+            prior = None
+            if os.path.islink(link):
+                try:
+                    prior = os.readlink(link)
+                except OSError:
+                    prior = None
+            parent = os.path.dirname(link)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            _atomic_symlink_swap(target, link)
+            committed.append((link, prior))
+    except Exception:
+        for link, prior in reversed(committed):
+            try:
+                if prior is not None:
+                    _atomic_symlink_swap(prior, link)
+                elif os.path.islink(link):
+                    os.remove(link)
+            except OSError:
+                pass
+        raise
+
+
 _METRICS_MAX_ENTRIES = 10
 
 
@@ -1314,6 +1383,7 @@ def _queue_demote_stale_active_entries(config: dict, canonical_real: str) -> boo
             if not ep:
                 e["state"] = "READY"
                 e["started_at"] = None
+                scrub_parked_fields(e)
                 changed = True
                 continue
             try:
@@ -1321,11 +1391,13 @@ def _queue_demote_stale_active_entries(config: dict, canonical_real: str) -> boo
             except OSError:
                 e["state"] = "READY"
                 e["started_at"] = None
+                scrub_parked_fields(e)
                 changed = True
                 continue
             if er != target:
                 e["state"] = "READY"
                 e["started_at"] = None
+                scrub_parked_fields(e)
                 changed = True
         if not changed:
             raise QueueAbort()
@@ -1363,6 +1435,30 @@ def _queue_entry_realpath(e: dict) -> str | None:
         return None
 
 
+def _queue_entry_for_project(config: dict, project_real: str) -> dict | None:
+    """Lowest-position queue entry whose project_path realpath == *project_real* (read-only)."""
+    if not project_real:
+        return None
+    try:
+        entries = (_read_queue_file(config) or {}).get("queue") or []
+    except Exception:
+        return None
+    matches = [e for e in entries if isinstance(e, dict) and _queue_entry_realpath(e) == project_real]
+    if not matches:
+        return None
+    return min(matches, key=lambda e: e.get("position") or 0)
+
+
+def _entry_is_parked_escalation(entry: dict | None) -> bool:
+    """True for a parked escalation entry (ESCALATION / ESCALATION_ANSWERED).
+
+    Resume/switch route such a target through the orchestrator's ``--revive`` path
+    (restore the escalated phase + apply any banked command) instead of a bare ACTIVE
+    promote, which would restart the phase and strand a banked answer.
+    """
+    return bool(entry) and entry.get("state") in ("ESCALATION", ESCALATION_ANSWERED)
+
+
 def _queue_mark_matching_entry_active(config: dict, project_real: str) -> None:
     """Align queue with the orchestrator spawn path: demote stale ACTIVE, promote match, pin to front.
 
@@ -1396,11 +1492,13 @@ def _queue_mark_matching_entry_active(config: dict, project_real: str) -> None:
             if er is None:
                 e["state"] = "READY"
                 e["started_at"] = None
+                scrub_parked_fields(e)
                 changed = True
                 continue
             if er != target:
                 e["state"] = "READY"
                 e["started_at"] = None
+                scrub_parked_fields(e)
                 changed = True
 
         by_position = sorted(entries, key=lambda x: x.get("position") or 0)
@@ -1419,6 +1517,9 @@ def _queue_mark_matching_entry_active(config: dict, project_real: str) -> None:
                 changed = True
             if not e.get("started_at"):
                 e["started_at"] = now
+                changed = True
+            # An entry being (re)activated must not carry stale park metadata.
+            if scrub_parked_fields(e):
                 changed = True
 
         if matching:
@@ -3033,7 +3134,7 @@ def _repoint_pipeline_project_symlink(config: dict, target_real: str) -> dict:
                     "previous_symlink_real": previous_symlink_real,
                 }
 
-        _atomic_symlink_swap(target_real, link_path)
+        _atomic_symlink_swap_multi(target_real, _pipeline_symlink_paths(config))
     except OSError as exc:
         return {
             "ok": False,
@@ -3117,7 +3218,13 @@ def post_resume_orchestrator():
         except Exception:
             pass
 
-    spawned = _spawn_orchestrator(project_path, config, confirm_lock=True)
+    # Defect C — if the project being resumed has a PARKED escalation queue entry, resume it
+    # through the orchestrator's --revive path (restore escalated phase + apply any banked
+    # command) rather than a bare ACTIVE promote that would restart the phase.
+    _revive_entry = _queue_entry_for_project(config, canonical_project_real)
+    _revive_id = _revive_entry["id"] if _entry_is_parked_escalation(_revive_entry) else None
+
+    spawned = _spawn_orchestrator(project_path, config, revive_entry_id=_revive_id, confirm_lock=True)
     if not spawned.get("ok"):
         err_msg = spawned.get("error") or "Failed to spawn orchestrator"
         if reconciled:
@@ -3134,10 +3241,13 @@ def post_resume_orchestrator():
             )
         raise HTTPException(status_code=503, detail=err_msg)
 
-    try:
-        _queue_mark_matching_entry_active(config, project_path)
-    except Exception:
-        pass
+    # Bare-promote only on the non-revival path; the --revive selection marks the entry ACTIVE
+    # (and restores its phase) itself, so mark-matching here would race/duplicate it.
+    if _revive_id is None:
+        try:
+            _queue_mark_matching_entry_active(config, project_path)
+        except Exception:
+            pass
 
     return {
         "ok": True,
@@ -6807,7 +6917,8 @@ def _run_preflight_checks(repo_path: str, config: dict | None = None) -> list:
         sym_parent = os.path.dirname(symlink_path)
         if sym_parent:
             os.makedirs(sym_parent, exist_ok=True)
-        ok = os.path.lexists(symlink_path) and os.path.realpath(symlink_path) == repo_path
+        _links = _pipeline_symlink_paths(config)
+        ok = all(os.path.lexists(l) and os.path.realpath(l) == repo_path for l in _links)
         if ok:
             checks.append({
                 "check": "symlink",
@@ -6815,32 +6926,42 @@ def _run_preflight_checks(repo_path: str, config: dict | None = None) -> list:
                 "message": f"Symlink points to {repo_path}",
             })
         else:
-            # Guard: don't repoint if the orchestrator is mid-run on a DIFFERENT project.
-            # Repointing during an active poll redirects the sentinel path and breaks
-            # completion detection (the .done file ends up in the wrong directory).
+            # Guard: never repoint the live link AWAY from the project pipeline_state.json
+            # declares current. Two cases: (1) a live orchestrator mid-poll on a DIFFERENT
+            # project — repointing redirects its sentinel path and breaks completion detection;
+            # (2) even when idle, a preview / validate of project X must not hijack the link
+            # while state targets Y (the r&mpop<->Minecraft divergence). Resume / switch-project
+            # change the active project deliberately; preflight must not. The state read is
+            # unconditional now (not gated on liveness), so the idle case is covered too.
             _lock_path = _expand_lock_path(config)
             _orch_running = bool(_lock_path and _check_orchestrator_liveness(_lock_path))
-            _running_project = None
-            if _orch_running:
-                _ps_path = config.get("pipeline_state_path")
-                if _ps_path:
-                    try:
-                        _ps = _read_json_file(os.path.expanduser(_ps_path))
-                        _pp = (_ps or {}).get("project_path", "")
-                        _running_project = os.path.realpath(_pp) if _pp else None
-                    except Exception:
-                        pass
-            if _orch_running and _running_project and _running_project != repo_path:
+            _state_real = None
+            _ps_path = config.get("pipeline_state_path")
+            if _ps_path:
+                try:
+                    _ps = _read_json_file(os.path.expanduser(_ps_path))
+                    _pp = (_ps or {}).get("project_path", "")
+                    _state_real = os.path.realpath(_pp) if _pp else None
+                except Exception:
+                    _state_real = None
+            if _state_real and _state_real != repo_path:
+                if _orch_running:
+                    _msg = (
+                        f"Symlink points to {_state_real!r} (active run). "
+                        f"Not repointing to {repo_path!r} while orchestrator holds the lock."
+                    )
+                else:
+                    _msg = (
+                        f"pipeline_state.json targets {_state_real!r}; not repointing to "
+                        f"{repo_path!r}. Resume or switch-project to change the active project."
+                    )
                 checks.append({
                     "check": "symlink",
                     "status": "warn",
-                    "message": (
-                        f"Symlink points to {_running_project!r} (active run). "
-                        f"Not repointing to {repo_path!r} while orchestrator holds the lock."
-                    ),
+                    "message": _msg,
                 })
             else:
-                _atomic_symlink_swap(repo_path, symlink_path)
+                _atomic_symlink_swap_multi(repo_path, _links)
                 checks.append({
                     "check": "symlink",
                     "status": "fixed",
@@ -8670,21 +8791,29 @@ async def post_setup_switch_project(request: Request):
     if parent:
         os.makedirs(parent, exist_ok=True)
 
-    # T6.3 — write pipeline_state.json BEFORE spawning (write-then-act): the child reads the
-    # project state at startup, so it must be committed first; a pre-spawn write failure aborts
-    # the spawn rather than leaving a running orchestrator with stale/foreign state.
-    try:
-        _write_json_atomic(pipeline_state_path, _clean_pipeline_state_for_project(repo_abs))
-    except OSError as exc:
-        return {
-            "ok": False,
-            "checks": all_pre,
-            "coherence": {"ok": True, "issues": []},
-            "error": f"Could not write pipeline_state.json: {exc}",
-        }
+    # Defect C — a PARKED escalation target is resumed through the orchestrator's --revive path
+    # (restore escalated phase + apply any banked command), mirroring /api/queue/{id}/relaunch:
+    # skip the phase-0 state reset (it would discard the escalated-phase pointer) and the bare
+    # mark-matching promote (the --revive selection marks the entry ACTIVE itself).
+    _revive_entry = _queue_entry_for_project(config, repo_abs)
+    _revive_id = _revive_entry["id"] if _entry_is_parked_escalation(_revive_entry) else None
+
+    if _revive_id is None:
+        # T6.3 — write pipeline_state.json BEFORE spawning (write-then-act): the child reads the
+        # project state at startup, so it must be committed first; a pre-spawn write failure aborts
+        # the spawn rather than leaving a running orchestrator with stale/foreign state.
+        try:
+            _write_json_atomic(pipeline_state_path, _clean_pipeline_state_for_project(repo_abs))
+        except OSError as exc:
+            return {
+                "ok": False,
+                "checks": all_pre,
+                "coherence": {"ok": True, "issues": []},
+                "error": f"Could not write pipeline_state.json: {exc}",
+            }
 
     # T6.1 — confirm_lock: poll liveness post-spawn to confirm the child took the pipeline lock.
-    spawned = _spawn_orchestrator(repo_abs, config, confirm_lock=True)
+    spawned = _spawn_orchestrator(repo_abs, config, revive_entry_id=_revive_id, confirm_lock=True)
     if not spawned.get("ok"):
         return {
             "ok": False,
@@ -8693,10 +8822,11 @@ async def post_setup_switch_project(request: Request):
             "error": spawned.get("error") or "Failed to spawn orchestrator",
         }
 
-    try:
-        _queue_mark_matching_entry_active(config, repo_abs)
-    except Exception:
-        pass
+    if _revive_id is None:
+        try:
+            _queue_mark_matching_entry_active(config, repo_abs)
+        except Exception:
+            pass
 
     return {
         "ok": True,
@@ -8905,7 +9035,7 @@ def _run_init_project(
         sym_parent = os.path.dirname(symlink_path)
         if sym_parent:
             os.makedirs(sym_parent, exist_ok=True)
-        _atomic_symlink_swap(repo_path, symlink_path)
+        _atomic_symlink_swap_multi(repo_path, _pipeline_symlink_paths(_cfg))
 
         return {"ok": True, "error": None}
 

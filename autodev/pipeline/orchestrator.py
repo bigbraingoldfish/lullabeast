@@ -30,7 +30,7 @@ from skill_manager import SkillManager
 from queue_semantics import (
     parent_blocks_child, ESCALATION_ANSWERED, REVIVABLE_ANSWERED_STATES,
     QUEUE_MAX_CAS_RETRIES, QUEUE_VERSION_KEY, QueueAbort, QueueVersionConflict,
-    bump_queue_version, mutate_queue, read_queue_version,
+    bump_queue_version, mutate_queue, read_queue_version, scrub_parked_fields,
 )
 from env_resolvers import resolve_openclaw_root, resolve_pipeline_root
 
@@ -1845,9 +1845,7 @@ class Orchestrator:
                 fresh["started_at"] = now
                 if is_revival:
                     _commit["snapshot"] = dict(fresh.get("parked_state_snapshot") or {})
-                    for _stale in ("parked_state_snapshot", "parked_at", "parked_reason",
-                                   "parked_pipeline_status", "answered_at"):
-                        fresh.pop(_stale, None)
+                    scrub_parked_fields(fresh)
                 return True
 
             # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
@@ -1963,11 +1961,7 @@ class Orchestrator:
                 _esc_commit["snapshot"] = dict(fresh.get("parked_state_snapshot") or {})
                 fresh["state"] = "ACTIVE"
                 fresh["started_at"] = now
-                for _stale in (
-                    "parked_state_snapshot", "parked_at", "parked_reason",
-                    "parked_pipeline_status", "answered_at",
-                ):
-                    fresh.pop(_stale, None)
+                scrub_parked_fields(fresh)
                 return True
 
             # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
@@ -2167,9 +2161,7 @@ class Orchestrator:
                 except OSError:
                     continue
                 entry["state"] = "ACTIVE"
-                entry.pop("parked_at", None)
-                entry.pop("parked_reason", None)
-                entry.pop("parked_pipeline_status", None)
+                scrub_parked_fields(entry)
                 return True
             raise QueueAbort()  # no matching parked row -> commit nothing
 

@@ -40,6 +40,42 @@ def parent_blocks_child(parent_state: str | None) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Parked-entry metadata hygiene (Defect C — shared by orchestrator + server)
+# ---------------------------------------------------------------------------
+
+# The full set of per-entry keys that _queue_park_active_entry writes when it parks
+# the ACTIVE row (ESCALATION / BLOCKED). Any transition that takes a row OUT of a
+# parked state without going through proper revival must remove ALL of these, or the
+# entry drifts (e.g. state=READY still carrying a stale parked_state_snapshot — the
+# Minecraft inconsistency). Defined once here so the orchestrator's selection/restore
+# paths and the server's demote/promote reconcile share one canonical set and cannot
+# silently diverge (the prior bug: _queue_restore_parked_entry_to_active scrubbed only
+# 3 of these, and the server's reconcile scrubbed none).
+PARKED_ENTRY_FIELDS = frozenset({
+    "parked_state_snapshot",
+    "parked_at",
+    "parked_reason",
+    "parked_pipeline_status",
+    "answered_at",
+})
+
+
+def scrub_parked_fields(entry: dict) -> bool:
+    """Remove every PARKED_ENTRY_FIELDS key from *entry* in place.
+
+    Returns True if any field was present (so callers can fold it into their
+    ``changed`` tracking). Pure and id-free — safe to call inside an F9 CAS
+    closure, which may re-apply it onto a freshly-read dict on retry.
+    """
+    changed = False
+    for key in PARKED_ENTRY_FIELDS:
+        if key in entry:
+            del entry[key]
+            changed = True
+    return changed
+
+
+# ---------------------------------------------------------------------------
 # F9 — queue write concurrency (optimistic version-CAS)
 # ---------------------------------------------------------------------------
 

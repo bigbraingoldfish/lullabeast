@@ -460,3 +460,97 @@ def test_trigger_next_unblocked_after_stale_active_demote(paths, monkeypatch):
     assert by_name["calculator"]["state"] == "READY"
     assert by_name["prefproj"]["state"] == "ACTIVE"
     assert by_name["prefproj"]["position"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Defect C (C3) — the server demote/promote reconcile must SCRUB stale parked_*
+# fields, matching the orchestrator's selection hygiene. A drifted row carrying
+# leftover park metadata (state=READY/ACTIVE + parked_state_snapshot) must be
+# cleaned on any non-revival state transition, or it stays inconsistent forever
+# (the Minecraft drift). RED against the pre-fix server (which scrubbed none).
+# ---------------------------------------------------------------------------
+
+_PARKED_FIELDS = (
+    "parked_state_snapshot", "parked_at", "parked_reason",
+    "parked_pipeline_status", "answered_at",
+)
+
+
+def _with_parked(entry):
+    """Attach a full set of stale park metadata to an entry (simulating drift)."""
+    entry["parked_state_snapshot"] = {"current_phase_raw_id": "CORE-E1", "phase_base_commit": "abc123"}
+    entry["parked_at"] = "2026-06-08T05:08:42+00:00"
+    entry["parked_reason"] = "escalation"
+    entry["parked_pipeline_status"] = "WAITING_FOR_HUMAN"
+    entry["answered_at"] = "2026-06-08T06:00:00+00:00"
+    return entry
+
+
+def test_mark_matching_scrubs_parked_on_promote(paths, monkeypatch):
+    from ui import server as srv
+
+    proj_b = paths["proj_b"]
+    qf = paths["queue_file"]
+    sf = paths["state_file"]
+    # The matching row is READY but carries leftover park metadata (drifted).
+    entries = [_with_parked(_entry("prefproj", proj_b, "READY", 1, str(uuid.uuid4())))]
+    _write_queue(qf, entries)
+    _write_state(sf, proj_b)
+    cfg = {"pipeline_queue_path": str(qf), "pipeline_state_path": str(sf)}
+    monkeypatch.setattr(srv, "load_config", lambda _p=None: cfg)
+
+    srv._queue_mark_matching_entry_active(cfg, proj_b)
+
+    with open(qf) as f:
+        row = json.load(f)["queue"][0]
+    assert row["state"] == "ACTIVE"
+    for k in _PARKED_FIELDS:
+        assert k not in row, f"{k} should be scrubbed on promote to ACTIVE"
+
+
+def test_mark_matching_scrubs_parked_on_demote(paths, monkeypatch):
+    from ui import server as srv
+
+    proj_a = paths["proj_a"]
+    proj_b = paths["proj_b"]
+    qf = paths["queue_file"]
+    sf = paths["state_file"]
+    # proj_a is a stale ACTIVE row (state wants proj_b) carrying leftover park metadata.
+    entries = [
+        _with_parked(_entry("calculator", proj_a, "ACTIVE", 1, str(uuid.uuid4()))),
+        _entry("prefproj", proj_b, "READY", 2, str(uuid.uuid4())),
+    ]
+    _write_queue(qf, entries)
+    _write_state(sf, proj_b)
+    cfg = {"pipeline_queue_path": str(qf), "pipeline_state_path": str(sf)}
+    monkeypatch.setattr(srv, "load_config", lambda _p=None: cfg)
+
+    srv._queue_mark_matching_entry_active(cfg, proj_b)
+
+    with open(qf) as f:
+        by_name = {e["name"]: e for e in json.load(f)["queue"]}
+    assert by_name["calculator"]["state"] == "READY"
+    for k in _PARKED_FIELDS:
+        assert k not in by_name["calculator"], f"{k} should be scrubbed on demote to READY"
+
+
+def test_demote_stale_active_entries_scrubs_parked(paths, monkeypatch):
+    from ui import server as srv
+
+    proj_a = paths["proj_a"]
+    proj_b = paths["proj_b"]
+    qf = paths["queue_file"]
+    sf = paths["state_file"]
+    entries = [_with_parked(_entry("calculator", proj_a, "ACTIVE", 1, str(uuid.uuid4())))]
+    _write_queue(qf, entries)
+    cfg = {"pipeline_queue_path": str(qf), "pipeline_state_path": str(sf)}
+    monkeypatch.setattr(srv, "load_config", lambda _p=None: cfg)
+
+    changed = srv._queue_demote_stale_active_entries(cfg, proj_b)
+
+    assert changed is True
+    with open(qf) as f:
+        row = json.load(f)["queue"][0]
+    assert row["state"] == "READY"
+    for k in _PARKED_FIELDS:
+        assert k not in row, f"{k} should be scrubbed when demoting a stale ACTIVE row"

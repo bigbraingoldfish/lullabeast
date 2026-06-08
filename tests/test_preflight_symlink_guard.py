@@ -172,3 +172,69 @@ class TestPreflightSymlinkGuard:
         sym_check = next((c for c in checks if c["check"] == "symlink"), None)
         assert sym_check is not None
         assert sym_check["status"] in ("pass", "fixed")
+
+    def test_symlink_not_repointed_when_state_differs_and_orchestrator_idle(self, tmp_path):
+        """Defect A (A2): even with NO orchestrator running, preflight must not repoint the
+        live link AWAY from the project pipeline_state.json declares current. This is the
+        r&mpop<->Minecraft divergence: previewing/validating project X hijacked the link while
+        state targeted Y. RED against the pre-A2 guard (idle -> repoints freely)."""
+        import json
+        from ui.server import _run_preflight_checks
+
+        lock_file = tmp_path / "pipeline.lock"
+        lock_file.touch()  # present but NOT held -> idle
+
+        running_project = tmp_path / "minecraft"
+        running_project.mkdir()
+        (running_project / ".git").mkdir()
+        symlink = tmp_path / "pipeline-project"
+        symlink.symlink_to(running_project)
+
+        state_file = tmp_path / "pipeline_state.json"
+        state_file.write_text(json.dumps({"project_path": str(running_project)}))
+
+        preview = tmp_path / "rmpop"
+        preview.mkdir()
+        (preview / ".git").mkdir()
+        (preview / "roadmap.md").write_text("- [ ] `T-E1` | LOW | Task\n  > Test.\n")
+
+        config = _make_config(tmp_path, symlink, lock_file)
+        checks = _run_preflight_checks(str(preview), config=config)
+
+        assert os.path.realpath(str(symlink)) == str(running_project), (
+            "Idle preflight must NOT repoint the link away from the state's project"
+        )
+        sym_check = next((c for c in checks if c["check"] == "symlink"), None)
+        assert sym_check is not None
+        assert sym_check["status"] == "warn", sym_check
+
+    def test_symlink_repointed_when_state_matches_preview(self, tmp_path):
+        """A2 must not over-block: when state already targets the previewed project, an idle
+        preflight still repairs a stale link."""
+        import json
+        from ui.server import _run_preflight_checks
+
+        lock_file = tmp_path / "pipeline.lock"
+        lock_file.touch()  # idle
+
+        repo = tmp_path / "proj"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        (repo / "roadmap.md").write_text("- [ ] `T-E1` | LOW | Task\n  > Test.\n")
+
+        stale = tmp_path / "stale"
+        stale.mkdir()
+        symlink = tmp_path / "pipeline-project"
+        symlink.symlink_to(stale)
+
+        state_file = tmp_path / "pipeline_state.json"
+        state_file.write_text(json.dumps({"project_path": str(repo)}))
+
+        config = _make_config(tmp_path, symlink, lock_file)
+        checks = _run_preflight_checks(str(repo), config=config)
+
+        assert os.path.realpath(str(symlink)) == str(repo), (
+            "Idle preflight should repair the link when state already targets this project"
+        )
+        sym_check = next((c for c in checks if c["check"] == "symlink"), None)
+        assert sym_check is not None and sym_check["status"] in ("pass", "fixed"), sym_check
