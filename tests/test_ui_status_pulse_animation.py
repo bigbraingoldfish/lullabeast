@@ -13,11 +13,18 @@ def html_content():
     return INDEX_HTML_PATH.read_text()
 
 
-def test_running_state_has_run_pulse_class(html_content):
-    """RUNNING is the calm green .pill-glow pill (glowing dot), not the legacy
-    full-fill run-pulse animation."""
-    has_pill_running = bool(re.search(r"RUNNING:\s*\{[^}]*pill-glow", html_content))
-    assert has_pill_running, "RUNNING state should use the .pill-glow glowing-dot pill"
+def test_running_state_is_calm_green_tinted_pill_no_dot(html_content):
+    """RUNNING is the calm green tinted pill (#4fd98c text + tinted bg + soft outline) with
+    NO leading status dot — the .pill-glow / .pill-dot ::before dot was removed, and the
+    legacy full-fill run-pulse animation is not used either."""
+    m = re.search(r"RUNNING:\s*\{[^}]*\}", html_content)
+    assert m, "RUNNING entry in PIPELINE_LIVE_PILL expected"
+    frag = m.group(0)
+    assert "#4fd98c" in frag, "RUNNING should use the calm brand green #4fd98c"
+    assert "border" in frag, "RUNNING should keep the soft outline"
+    assert "pill-glow" not in frag and "pill-dot" not in frag, \
+        "RUNNING pill must not carry a status dot (pill-glow/pill-dot removed)"
+    assert "run-pulse" not in frag, "RUNNING must not use the legacy run-pulse full-fill"
 
 
 def test_waiting_for_sentinel_state_has_no_pulse_class(html_content):
@@ -45,7 +52,7 @@ def test_halted_silent_state_has_no_pulse_animation(html_content):
 
 def test_blocked_state_has_no_pulse_animation(html_content):
     """Pipeline BLOCKED has NO pulse (static red) in PIPELINE_LIVE_PILL map."""
-    idx = html_content.find("PIPELINE_LIVE_PILL")
+    idx = html_content.find("PIPELINE_LIVE_PILL = {")
     assert idx != -1, "PIPELINE_LIVE_PILL map expected"
     end = html_content.find("};", idx)
     chunk = html_content[idx:end] if end != -1 else html_content[idx : idx + 4000]
