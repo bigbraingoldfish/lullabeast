@@ -41,10 +41,20 @@ class TestServerPathInput:
             "ServerPathInput function not found"
         )
 
-    def test_has_datalist_element(self):
+    def test_renders_clickable_recents_not_datalist(self):
+        """Recents are a visible click-to-fill list (4-A), not a hidden <datalist> (which also
+        re-introduced the N2 sticky-path autofill). Replaces the former test_has_datalist_element."""
         body = extract_function(load_html(), "ServerPathInput")
         assert body is not None
-        assert "<datalist" in body
+        assert "<datalist" not in body, "datalist removed in favour of the visible click-to-fill list"
+        assert "recentsToDisplayPaths" in body, "recents rendered via the filtered display helper"
+        assert "<button" in body, "recents are clickable buttons (click-to-fill)"
+
+    def test_disables_browser_autofill(self):
+        """N2 — the field must not browser-autofill a previously typed path on reopen."""
+        body = extract_function(load_html(), "ServerPathInput")
+        assert body is not None
+        assert 'autoComplete="off"' in body
 
     def test_placeholder_is_example_path(self):
         html = load_html()

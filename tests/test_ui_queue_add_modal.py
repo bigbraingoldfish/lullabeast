@@ -66,3 +66,11 @@ class TestAddProjectModalPath:
         body = extract_function(load_html(), "AddProjectModal")
         assert body is not None
         assert 'id="queue-add-path"' in body
+
+    def test_queue_modal_accepts_initial_path_prefill(self):
+        """N4: the modal accepts an ``initialPath`` so the Setup-screen redirect can open it
+        prefilled with the staged repo path."""
+        body = extract_function(load_html(), "AddProjectModal")
+        assert body is not None
+        assert "initialPath" in body
+        assert "useState(initialPath" in body

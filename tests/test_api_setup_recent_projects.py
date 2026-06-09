@@ -200,3 +200,50 @@ class TestPruneRecentProjects:
         body = r.json()
         assert body["removed_count"] == 3
         assert body["projects"] == []
+
+
+# ---------------------------------------------------------------------------
+# GET /api/setup/recent-projects  (4-B — real projects only)
+# ---------------------------------------------------------------------------
+
+class TestGetRecentProjects:
+    """The GET endpoint returns only entries whose ``path`` is a real directory on disk, so a
+    stale/dead recents file never surfaces dead paths in the UI. (The ``/tmp`` exclusion is a
+    separate frontend display backstop, so a real ``tmp_path`` dir here is intentionally kept.)"""
+
+    def test_get_filters_out_nonexistent_dirs(self, client, recents_file, tmp_path):
+        real = tmp_path / "real_proj"
+        real.mkdir()
+        dead = tmp_path / "gone"  # never created
+        _seed(recents_file, [
+            {"path": str(real), "last_used": "2026-01-01T00:00:00Z"},
+            {"path": str(dead), "last_used": "2026-01-01T00:00:00Z"},
+        ])
+        r = client.get("/api/setup/recent-projects")
+        assert r.status_code == 200, r.text
+        paths = [e["path"] for e in r.json()["projects"]]
+        assert str(real) in paths
+        assert str(dead) not in paths
+
+    def test_get_keeps_existing_dir(self, client, recents_file, tmp_path):
+        real = tmp_path / "p"
+        real.mkdir()
+        _seed(recents_file, [{"path": str(real), "last_used": "2026-01-01T00:00:00Z"}])
+        r = client.get("/api/setup/recent-projects")
+        assert r.status_code == 200, r.text
+        assert [e["path"] for e in r.json()["projects"]] == [str(real)]
+
+    def test_get_drops_malformed_entries(self, client, recents_file):
+        _seed(recents_file, ["just-a-string", {"no_path_key": 1}, {"path": ""}])
+        r = client.get("/api/setup/recent-projects")
+        assert r.status_code == 200, r.text
+        assert r.json()["projects"] == []
+
+
+def test_conftest_wires_session_prune_teardown():
+    """4-B: the suite self-cleans real dead recents via a session-scoped teardown that calls the
+    prune endpoint logic, so test runs against real preflight/switch don't accumulate dead /tmp
+    entries in the operator's recents file."""
+    conftest_src = (Path(__file__).resolve().parent / "conftest.py").read_text(encoding="utf-8")
+    assert 'scope="session"' in conftest_src, "a session-scoped fixture must exist"
+    assert "post_setup_recent_projects_prune" in conftest_src, "teardown must call the prune logic"

@@ -141,29 +141,42 @@ class TestPreflightServerPathInput:
         assert 'currentScreen !== "preflight"' in html
 
     def test_preflight_confirm_path_fetches_repo_roadmap_hint(self):
+        """N4: confirming an existing repo with no linked idea performs a REAL repo-roadmap-hint
+        fetch (to decide whether to pop the redirect modal) — not a stale removal comment."""
         html = load_html()
         app_html = extract_function(html, "App")
         assert app_html is not None, "App function not found"
-        assert "/api/setup/repo-roadmap-hint" in app_html
+        assert ('fetch("/api/setup/repo-roadmap-hint"' in app_html) or (
+            "fetch('/api/setup/repo-roadmap-hint'" in app_html
+        ), "App must perform a real repo-roadmap-hint fetch"
+        assert "the on-disk auto-load (formerly" not in html, "the stale removal comment must be deleted"
 
 
 class TestAppPreflightQueueActiveGating:
-    """B-02: preflight 'currently running' banner follows live_pipeline_status, not queue ACTIVE alone."""
+    """4-C (supersedes B-02): the preflight 'currently running' banner follows the LAUNCH
+    predicate — a queue entry in state 'ACTIVE' — so the warning matches what Launch actually
+    does (insert-at-top-of-queue). The busy-live helper is retained for cold-boot Ideas routing
+    but no longer feeds this banner."""
 
-    def test_queue_busy_helper_exists(self):
+    def test_active_entry_helper_exists(self):
         html = load_html()
-        assert "function queueEntriesHaveBusyLivePipeline" in html
-        assert "WAITING_FOR_SENTINEL" in html
-        assert "WAITING_FOR_HUMAN" in html
+        assert "function queueHasActiveEntry" in html
+        assert "state === 'ACTIVE'" in html
 
-    def test_preflight_queue_probe_uses_live_status_not_active_only(self):
+    def test_busy_live_helper_retained_for_cold_bootstrap(self):
+        html = load_html()
+        # Not dead — still gates shouldOpenIdeasOnColdBootstrap (P0-01).
+        assert "function queueEntriesHaveBusyLivePipeline" in html
+        assert "queueEntriesHaveBusyLivePipeline(queueEntries)" in html
+
+    def test_preflight_banner_probe_uses_active_state_not_busy_live(self):
         html = load_html()
         app_html = extract_function(html, "App")
         assert app_html is not None, "App function not found"
-        assert "queueEntriesHaveBusyLivePipeline(d.queue)" in app_html
-        assert "setPreflightQueueActive((d.queue || []).some(e => e.state === 'ACTIVE'))" not in app_html
-        assert "setPreflightQueueActive(!!qActive)" not in app_html
-        assert "queueEntriesHaveBusyLivePipeline(qr.queue)" in app_html
+        assert "queueHasActiveEntry(d.queue)" in app_html
+        assert "queueHasActiveEntry(qr.queue)" in app_html
+        assert "queueEntriesHaveBusyLivePipeline(d.queue)" not in app_html
+        assert "queueEntriesHaveBusyLivePipeline(qr.queue)" not in app_html
 
 
 class TestAppPreflightVerificationContent:

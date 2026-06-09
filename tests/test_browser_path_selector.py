@@ -99,10 +99,13 @@ def test_preflight_bad_path_shows_x(pw_page):
     )
 
 
-def test_preflight_path_has_datalist_link(pw_page):
+def test_preflight_path_no_datalist_autofill_off(pw_page):
+    """4-A/N2 — the recents <datalist> is gone (replaced by a visible click-to-fill list) and
+    browser autofill is disabled so a previously-typed path can't re-populate the field."""
     _goto_preflight(pw_page)
-    lst = pw_page.locator("#preflight-repo-path").get_attribute("list")
-    assert lst == "preflight-repo-path-recents"
+    inp = pw_page.locator("#preflight-repo-path")
+    assert inp.get_attribute("list") is None, "datalist link must be removed (4-A)"
+    assert inp.get_attribute("autocomplete") == "off", "browser autofill must be off (N2)"
 
 
 def test_queue_modal_debounce_shows_check(pw_page):
@@ -122,7 +125,8 @@ def test_queue_modal_debounce_shows_check(pw_page):
     )
 
 
-def test_queue_modal_datalist_link(pw_page):
+def test_queue_modal_no_datalist_autofill_off(pw_page):
+    """4-A/N2 — the Add-Project path input has no recents datalist and disables browser autofill."""
     page = pw_page
     page.goto(URL + "/", wait_until="domcontentloaded")
     _wait_app_shell(page)
@@ -131,7 +135,9 @@ def test_queue_modal_datalist_link(pw_page):
     page.locator("nav button").filter(has_text=re.compile(r"Project Queue", re.I)).first.click()
     page.get_by_role("button", name="+ Add Project").click()
     page.wait_for_selector("#queue-add-path", timeout=15000)
-    assert page.locator("#queue-add-path").get_attribute("list") == "queue-add-path-recents"
+    inp = page.locator("#queue-add-path")
+    assert inp.get_attribute("list") is None, "datalist link must be removed (4-A)"
+    assert inp.get_attribute("autocomplete") == "off", "browser autofill must be off (N2)"
 
 
 def test_switch_modal_debounce_shows_check(pw_page):
@@ -244,13 +250,14 @@ def test_queue_add_autorepairs_git(pw_page):
 
 
 def test_recents_appear_after_preflight(pw_page):
-    """POST preflight via API so recents list is non-empty; datalist gets options in DOM.
+    """POST preflight via API so recents list is non-empty; the click-to-fill list shows it.
 
     Fixture writes the canonical P0-compliant project shape (roadmap with a
     Behavioral Verification block, ``verification.md`` with all five required
     sections). Both files are required by Stage C's strict preflight; the
     test's actual concern is that a successful preflight call populates the
-    recents list and the UI exposes it as a ``<datalist>`` option.
+    recents list and the UI exposes it as a click-to-fill button. The project lives under
+    $HOME (not /tmp) so it survives the ``recentsToDisplayPaths`` /tmp display backstop.
 
     Skip-handling discipline (P1 Stage B): the only sanctioned skip path is
     a missing OpenClaw workspace install — every other failure mode raises
@@ -261,7 +268,7 @@ def test_recents_appear_after_preflight(pw_page):
     rather than accumulating one stale ``/tmp/autodev-e2e-rc-*`` entry per
     run. Prune sweeps the entry because its directory no longer exists.
     """
-    base = tempfile.mkdtemp(prefix="autodev-e2e-rc-")
+    base = tempfile.mkdtemp(prefix=".autodev-e2e-rc-", dir=os.path.expanduser("~"))
     try:
         proj = os.path.join(base, "prefproj")
         os.makedirs(proj, exist_ok=True)
@@ -325,8 +332,11 @@ def test_recents_appear_after_preflight(pw_page):
             )
 
         _goto_preflight(pw_page)
-        opts = pw_page.locator("#preflight-repo-path-recents option")
-        assert opts.count() >= 1
+        recents = pw_page.locator('[data-testid="server-path-recents"]')
+        recents.first.wait_for(state="visible", timeout=10000)
+        assert recents.locator("button", has_text=proj).count() >= 1, (
+            "the preflighted project must appear as a click-to-fill recent"
+        )
     finally:
         # Remove tmpdir so prune sweeps the recents entry. Best-effort: a
         # cleanup failure must not mask a real test failure.
