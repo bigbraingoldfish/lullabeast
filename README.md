@@ -1,4 +1,4 @@
-# AutoDev
+# Lullabeast
 
 **Bring an idea. Leave with a working MVP.**
 
@@ -7,21 +7,21 @@
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20WSL2-lightgrey.svg)
 ![Status](https://img.shields.io/badge/status-MVP-orange.svg)
 
-AutoDev is an autonomous, multi-agent software-development pipeline. You describe what you
-want to build; AutoDev helps you shape that idea into structured product documentation, then
+Lullabeast is an autonomous, multi-agent software-development pipeline. You describe what you
+want to build; Lullabeast helps you shape that idea into structured product documentation, then
 drives a team of LLM agents — **planner → executor → reviewer** — to implement it phase by
 phase against a real git repository. When the agents get stuck (and on a hard enough project,
-they will), AutoDev **escalates to you** with the context to unblock the run and resume it.
+they will), Lullabeast **escalates to you** with the context to unblock the run and resume it.
 
 The goal is simple: **come to us with an idea, and by the end we aim to hand you a functional
 MVP** — with a clear, honest trail of what was built, what passed review, and where a human
 had to step in.
 
-It ships as a single-process **FastAPI dashboard** plus the orchestration pipeline. AutoDev is
+It ships as a single-process **FastAPI dashboard** plus the orchestration pipeline. Lullabeast is
 **model-agnostic**: it runs on top of [OpenClaw](https://docs.openclaw.ai), which provides the
 agent gateway and owns all model/provider configuration.
 
-> **Status — MVP / operator tooling.** AutoDev aims for a working MVP — a prototype you'd refine
+> **Status — MVP / operator tooling.** Lullabeast aims for a working MVP — a prototype you'd refine
 > and harden before shipping. It runs as a **single-user tool on a trusted machine**: the API has
 > **no authentication**, so bind it to loopback. Autonomous runs can and do fail, which is exactly
 > why the escalation/recovery loop is a first-class part of the design.
@@ -52,7 +52,7 @@ agent gateway and owns all model/provider configuration.
 
 1. **Ideate.** In **Project Ideas**, you chat with a PRD-creator agent that refines a raw idea
    into a structured **`prd.md`** (what to build, and why).
-2. **Convert.** AutoDev turns the PRD into a phased **`roadmap.md`** (how the work is broken into
+2. **Convert.** Lullabeast turns the PRD into a phased **`roadmap.md`** (how the work is broken into
    phases, each with a behavioral-verification block) and a **`verification.md`** contract (the
    project's entry point, public surface, and acceptance stack).
 3. **Build.** The orchestrator runs a deterministic, gate-checked loop for each phase:
@@ -62,13 +62,13 @@ agent gateway and owns all model/provider configuration.
      for UI phases).
    - Deterministic **gate scripts** validate every agent's output before the pipeline advances —
      no LLM is trusted to grade its own homework.
-4. **Recover.** If a phase can't pass after its retry budget, AutoDev **escalates**: the run pauses,
+4. **Recover.** If a phase can't pass after its retry budget, Lullabeast **escalates**: the run pauses,
    you get the failure context, you answer (proceed / reset the phase / skip / stop), and the run
    resumes from where it stopped.
 5. **Done.** On completion the dashboard shows a **Pipeline Complete** summary — per-phase attempts,
    review verdicts, and cost (when your OpenClaw models report it).
 
-Queue several projects and AutoDev works them in order, honoring dependencies between them.
+Queue several projects and Lullabeast works them in order, honoring dependencies between them.
 
 ---
 
@@ -86,11 +86,11 @@ invoked only once the gates and retries are exhausted, and two ideation agents (
 **roadmap-converter**) drive the idea → PRD → roadmap front-end. A single orchestrator state machine
 sequences all of them and owns the git operations, blame attribution, and recovery logic.
 
-**OpenClaw is the runtime.** AutoDev runs on top of [OpenClaw](https://docs.openclaw.ai), which hosts
-the agent sessions and brokers every model call. AutoDev invokes agents through OpenClaw's
+**OpenClaw is the runtime.** Lullabeast runs on top of [OpenClaw](https://docs.openclaw.ai), which hosts
+the agent sessions and brokers every model call. Lullabeast invokes agents through OpenClaw's
 `/hooks/agent` webhook and reads the session files OpenClaw writes back. **All model and provider
-configuration — including any API keys — lives in `openclaw.json`**, so AutoDev itself stays
-model-agnostic and never handles a provider credential. You install OpenClaw and point AutoDev at it
+configuration — including any API keys — lives in `openclaw.json`**, so Lullabeast itself stays
+model-agnostic and never handles a provider credential. You install OpenClaw and point Lullabeast at it
 (see [SETUP.md](SETUP.md)).
 
 **Two state trees.** Pipeline state — the lock, queue, event log, ideas, and the active-project
@@ -146,7 +146,7 @@ curl -sS -o /dev/null -w "HTTP %{http_code}\n" -X POST http://127.0.0.1:18789/ho
 - **Setup & Preflight** — point at a project repo, run preflight checks, and launch the pipeline.
 - **Pipeline Monitor** — watch the live planner → executor → reviewer loop, per-phase metrics, and a
   real-time activity feed; recover from git errors or answer escalations.
-- **Queue** — line up multiple projects with dependency ordering; AutoDev runs them sequentially.
+- **Queue** — line up multiple projects with dependency ordering; Lullabeast runs them sequentially.
 
 ---
 
@@ -156,7 +156,7 @@ curl -sS -o /dev/null -w "HTTP %{http_code}\n" -X POST http://127.0.0.1:18789/ho
   project files. Bind to **`127.0.0.1`** (the default). Only use `--host 0.0.0.0` on a trusted LAN
   behind a firewall, and never expose the raw port to the internet without a reverse proxy + TLS +
   auth. See [SECURITY.md](SECURITY.md) and [SETUP.md — Security and network exposure](SETUP.md#security-and-network-exposure).
-- The pipeline **executes agent-written code on the host** under your user account. Treat AutoDev as
+- The pipeline **executes agent-written code on the host** under your user account. Treat Lullabeast as
   operator tooling for a trusted machine, not a multi-tenant service.
 - Secrets (the webhook Bearer token) live in `.env` (gitignored) or `AUTODEV_HOOKS_TOKEN`. Never
   commit them in `ui/config.json` or any tracked file.
@@ -236,4 +236,4 @@ install.sh          # 14-step interactive installer
 
 ## License
 
-[MIT](LICENSE) © 2026 AutoDev contributors.
+[MIT](LICENSE) © 2026 Lullabeast contributors.

@@ -45,7 +45,7 @@ def test_setup_links_to_glossary(setup_text: str) -> None:
 
 
 def test_glossary_d05_openclaw_vs_autodev(glossary_text: str) -> None:
-    assert "## OpenClaw vs AutoDev" in glossary_text
+    assert "## OpenClaw vs Lullabeast" in glossary_text
     assert "OPENCLAW_ROOT" in glossary_text
     assert "AUTODEV_PIPELINE_ROOT" in glossary_text
 

@@ -1,4 +1,4 @@
-# AutoDev UI (`ui/`)
+# Lullabeast UI (`ui/`)
 
 FastAPI server (`server.py`) and a single-file React app (`index.html`) for the pipeline monitor, Project Ideas, and Setup & Preflight screens.
 

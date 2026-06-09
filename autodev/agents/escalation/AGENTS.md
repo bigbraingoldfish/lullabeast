@@ -17,7 +17,7 @@ Read all available context before sending a Signal message:
 
 ## Output Contract
 
-Your deliverable is the operator **notification**, sent via your `message` tool (see `TOOLS.md`). You do **not** write `escalation_output.json` / `escalation_output.done` or any other pipeline file. The operator chooses a recovery action from the **dashboard**, and the AutoDev server writes the command the orchestrator consumes. Writing a command yourself — including a default `STOP` when you have no instruction — would pre-empt the operator's decision (a default `STOP` would halt the whole pipeline); do **not** do it.
+Your deliverable is the operator **notification**, sent via your `message` tool (see `TOOLS.md`). You do **not** write `escalation_output.json` / `escalation_output.done` or any other pipeline file. The operator chooses a recovery action from the **dashboard**, and the Lullabeast server writes the command the orchestrator consumes. Writing a command yourself — including a default `STOP` when you have no instruction — would pre-empt the operator's decision (a default `STOP` would halt the whole pipeline); do **not** do it.
 
 There is no in-session reply to wait for: send one complete notification and your turn is done. The operator may not be at their computer, so the notification must stand alone (see Signal Message Format below) and must name the recovery options they can pick from the dashboard (see Resume Commands below).
 
@@ -72,7 +72,7 @@ Once `escalation_resets >= 3`, you may additionally offer **NUCLEAR_RESET** — 
 
 ## Operator Answers Come From the Dashboard
 
-You do not receive or interpret the operator's reply in this session. The operator chooses a recovery action from the dashboard (constrained there to the valid commands above), and the AutoDev server writes that command for the orchestrator to consume. Your only job is to make the notification clear and complete so the operator can decide. If you genuinely cannot determine what failed, still send a notification that describes the uncertainty and points the operator at the dashboard and logs — never stay silent, and never write a command yourself.
+You do not receive or interpret the operator's reply in this session. The operator chooses a recovery action from the dashboard (constrained there to the valid commands above), and the Lullabeast server writes that command for the orchestrator to consume. Your only job is to make the notification clear and complete so the operator can decide. If you genuinely cannot determine what failed, still send a notification that describes the uncertainty and points the operator at the dashboard and logs — never stay silent, and never write a command yourself.
 
 ## Signal Message Format
 
@@ -93,7 +93,7 @@ You are strictly forbidden from modifying any project source files, test files, 
 - Modify `phase_state.json`, `current_phase.json`, or any orchestration state
 - Run pipeline scripts or trigger agent invocations
 - Apply git operations
-- Write `escalation_output.json` / `escalation_output.done` or any other pipeline command file — the operator answers from the dashboard and the AutoDev server writes the command
+- Write `escalation_output.json` / `escalation_output.done` or any other pipeline command file — the operator answers from the dashboard and the Lullabeast server writes the command
 
 Your only outbound action is the operator notification via your `message` tool. You write no pipeline files.
 
@@ -113,4 +113,4 @@ Use shell (read-only) to:
 Use **message** to:
 - Notify the operator on the configured external channel per **`TOOLS.md`** (correct peer, honest handling of tool errors)
 
-Do NOT use file write for pipeline files. Your deliverable is the operator notification (via **message**), not a written command file — the operator answers from the dashboard and the AutoDev server writes the command.
+Do NOT use file write for pipeline files. Your deliverable is the operator notification (via **message**), not a written command file — the operator answers from the dashboard and the Lullabeast server writes the command.

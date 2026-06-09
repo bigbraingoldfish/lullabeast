@@ -3,8 +3,8 @@
 
 Callable from install.sh and from tests (TDD).
 
-NOTE: openclaw.json is intentionally NOT created by AutoDev.  Its absence
-means OpenClaw is not installed or is broken beyond what AutoDev can fix
+NOTE: openclaw.json is intentionally NOT created by Lullabeast.  Its absence
+means OpenClaw is not installed or is broken beyond what Lullabeast can fix
 (gateway process, auth-profiles, agent session management all depend on it).
 install.sh fails fast when openclaw.json is missing rather than generating a
 stub that would give a false sense of success.
@@ -22,8 +22,8 @@ from typing import Any
 # Webhook session keys used by the pipeline and idea-to-PRD flows.
 _REQUIRED_SESSION_KEY_PREFIXES: tuple[str, ...] = ("pipeline:", "ideas:")
 
-# --- AutoDev context-limit / truncation seeds -------------------------------
-# Canonical source of truth for the openclaw.json truncation keys AutoDev tunes
+# --- Lullabeast context-limit / truncation seeds -------------------------------
+# Canonical source of truth for the openclaw.json truncation keys Lullabeast tunes
 # (audit: plans/Active/metaprompt-2-truncation-settings-audit.md).
 #
 # Why these values:
@@ -70,7 +70,7 @@ AUTODEV_POSTCOMPACTION_SECTIONS: tuple[str, ...] = (
 
 
 def openclaw_hooks_issues(openclaw_json_path: str) -> list[str]:
-    """Return human-readable issue codes for AutoDev hook expectations (read-only).
+    """Return human-readable issue codes for Lullabeast hook expectations (read-only).
 
     Empty list means the hooks block matches the baseline this installer enforces.
     """
@@ -136,7 +136,7 @@ def patch_openclaw_hooks_baseline(
     *,
     token_if_missing: str | None = None,
 ) -> str:
-    """Ensure AutoDev-compatible ``hooks`` keys in openclaw.json (atomic write).
+    """Ensure Lullabeast-compatible ``hooks`` keys in openclaw.json (atomic write).
 
     Sets ``enabled`` and ``allowRequestSessionKey`` to True, merges required
     session-key prefixes, and sets ``token`` only when it is missing/empty and
@@ -486,7 +486,7 @@ def parse_dotenv_value(env_path: str, key: str) -> str | None:
 
 @dataclass(frozen=True)
 class WebhookSecretSync:
-    """Compare ``hooks.token`` to AutoDev UI config and optional ``.env`` (no secrets logged)."""
+    """Compare ``hooks.token`` to Lullabeast UI config and optional ``.env`` (no secrets logged)."""
 
     expected_token: str | None
     ui_config_path: str
@@ -734,7 +734,7 @@ def _merge_sections(existing: Any, required: tuple[str, ...]) -> list[str]:
 
 
 def ensure_openclaw_context_limits(openclaw_json_path: str) -> str:
-    """Seed AutoDev bootstrap/compaction truncation keys in openclaw.json (atomic).
+    """Seed Lullabeast bootstrap/compaction truncation keys in openclaw.json (atomic).
 
     Idempotently ensures, without disturbing any other key:
       * ``agents.list[id in AUTODEV_BOOTSTRAP_AGENT_IDS].bootstrapMaxChars`` =
@@ -749,7 +749,7 @@ def ensure_openclaw_context_limits(openclaw_json_path: str) -> str:
         header names (OpenClaw's default targets sections we do not have, so the
         rules are otherwise dropped on every compaction).
 
-    Only entries whose ``id`` is an AutoDev agent are touched; other agents and
+    Only entries whose ``id`` is an Lullabeast agent are touched; other agents and
     all unrelated keys are preserved. This is the upgrade path for installs whose
     agents already exist (register_agent leaves existing entries untouched) and is
     safe to re-run.

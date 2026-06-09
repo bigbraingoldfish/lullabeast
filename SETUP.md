@@ -1,6 +1,6 @@
-# AutoDev Setup Guide
+# Lullabeast Setup Guide
 
-AutoDev is an autonomous development pipeline that runs on top of OpenClaw. It manages a planner → executor → reviewer loop against your project repository, with a web dashboard for monitoring and a PRD ideation system. For dashboard terminology (pipeline and queue states, skills, metrics), see [GLOSSARY.md](GLOSSARY.md).
+Lullabeast is an autonomous development pipeline that runs on top of OpenClaw. It manages a planner → executor → reviewer loop against your project repository, with a web dashboard for monitoring and a PRD ideation system. For dashboard terminology (pipeline and queue states, skills, metrics), see [GLOSSARY.md](GLOSSARY.md).
 
 ---
 
@@ -8,13 +8,13 @@ AutoDev is an autonomous development pipeline that runs on top of OpenClaw. It m
 
 **Python 3.9 or later.** The pipeline code uses `fcntl` for advisory file locking. `fcntl` is part of the POSIX standard and is available on Linux and macOS. Native Windows lacks `fcntl` and is not supported; WSL2 runs a real Linux kernel and works without any code changes.
 
-**Linux, macOS, or WSL2.** AutoDev runs on Linux (including WSL2) and macOS. Native Windows is not supported. `fcntl.flock` is how the orchestrator and heartbeat watchdog coordinate without racing — it is a POSIX advisory lock, not a Linux-only mechanism.
+**Linux, macOS, or WSL2.** Lullabeast runs on Linux (including WSL2) and macOS. Native Windows is not supported. `fcntl.flock` is how the orchestrator and heartbeat watchdog coordinate without racing — it is a POSIX advisory lock, not a Linux-only mechanism.
 
 **git.** The executor agent commits completed phases to the project repository. git must be on the PATH.
 
 **Node.js (with npm), 22+ recommended.** `install.sh` builds the `autodev-pipeline-signals` OpenClaw plugin (an esbuild bundle) and provisions the Playwright MCP used for visual review of UI phases. If `npm` is missing the installer continues but warns — and without the signals plugin, agent activity stamps never refresh and stall detection is disabled, so install Node before a real run.
 
-**OpenClaw installed and running.** AutoDev does not bundle OpenClaw — it calls OpenClaw's webhook API to invoke agents and reads the session files OpenClaw writes. OpenClaw is also the **runtime that owns all model and provider configuration**: you pick each agent's model and supply any provider API keys in `openclaw.json`. AutoDev is model-agnostic and never reads a provider key directly. Install OpenClaw separately and confirm its gateway is running on `localhost:18789` before running install.sh.
+**OpenClaw installed and running.** Lullabeast does not bundle OpenClaw — it calls OpenClaw's webhook API to invoke agents and reads the session files OpenClaw writes. OpenClaw is also the **runtime that owns all model and provider configuration**: you pick each agent's model and supply any provider API keys in `openclaw.json`. Lullabeast is model-agnostic and never reads a provider key directly. Install OpenClaw separately and confirm its gateway is running on `localhost:18789` before running install.sh.
 
 ---
 
@@ -23,10 +23,10 @@ AutoDev is an autonomous development pipeline that runs on top of OpenClaw. It m
 Run these checks once after install to avoid common first-run webhook failures.
 
 1. In `~/.openclaw/openclaw.json`, confirm `hooks.token` is set (this is the webhook Bearer secret; it is **not** `gateway.auth.token`).
-2. Ensure AutoDev uses the same secret:
+2. Ensure Lullabeast uses the same secret:
    - `<repo>/.env` → `AUTODEV_HOOKS_TOKEN=...`, and/or
    - `ui/config.json` → `hooks_token`.
-3. Start AutoDev UI with `.env` loaded:
+3. Start Lullabeast UI with `.env` loaded:
 
 ```bash
 cd /path/to/autodev-ui
@@ -50,7 +50,7 @@ Expect `HTTP 200`. `HTTP 401` means the Bearer token does not match `hooks.token
 
 ## What Testers Bring
 
-You bring two things: a project directory (a git repository containing a `roadmap.md` AND a `verification.md` in the formats AutoDev expects) and a running OpenClaw instance configured with the four pipeline agents (planner, executor, reviewer, escalation) and the prd-creator agent.
+You bring two things: a project directory (a git repository containing a `roadmap.md` AND a `verification.md` in the formats Lullabeast expects) and a running OpenClaw instance configured with the four pipeline agents (planner, executor, reviewer, escalation) and the prd-creator agent.
 
 **Three project-level documents form the contract**:
 
@@ -58,7 +58,7 @@ You bring two things: a project directory (a git repository containing a `roadma
 - **`roadmap.md`** — *how* the work is broken into phases. Every phase must include a `**Behavioral Verification:**` block with three sub-bullets (`User-observable`, `How we'll check`, `If this fails, the user sees`). Preflight refuses to stage a project whose roadmap is missing the block.
 - **`verification.md`** — *proof*. Project-level document derived from the PRD that names the project type, entry point, public surface, and acceptance stack. Preflight refuses to stage a project without a valid `verification.md`. The user never edits it directly — if it's wrong, the fix is to edit the PRD and re-run conversion from the Ideas screen.
 
-AutoDev does not create the project repository or the OpenClaw agents — it orchestrates them. The `install.sh` script deploys the behavioral identity files (IDENTITY.md, SOUL.md, TOOLS.md, AGENTS.md, USER.md) into each agent's workspace directory so OpenClaw loads them at session start. You are responsible for having OpenClaw configured with the correct models for each agent.
+Lullabeast does not create the project repository or the OpenClaw agents — it orchestrates them. The `install.sh` script deploys the behavioral identity files (IDENTITY.md, SOUL.md, TOOLS.md, AGENTS.md, USER.md) into each agent's workspace directory so OpenClaw loads them at session start. You are responsible for having OpenClaw configured with the correct models for each agent.
 
 ---
 
@@ -70,7 +70,7 @@ cd autodev-ui
 ./install.sh
 ```
 
-**Upgrading:** after `git pull`, restart the AutoDev UI service. The server automatically syncs updated agent workspace guidance into `OPENCLAW_ROOT/workspace-*` on startup (same mtime rules as step 5 of `install.sh`). To manage those files only yourself—for example you maintain custom agent instructions—set `"auto_sync_agent_workspaces": false` in `ui/config.json` and re-run `./install.sh` after each update when you want upstream guidance copied.
+**Upgrading:** after `git pull`, restart the Lullabeast UI service. The server automatically syncs updated agent workspace guidance into `OPENCLAW_ROOT/workspace-*` on startup (same mtime rules as step 5 of `install.sh`). To manage those files only yourself—for example you maintain custom agent instructions—set `"auto_sync_agent_workspaces": false` in `ui/config.json` and re-run `./install.sh` after each update when you want upstream guidance copied.
 
 `install.sh` works through **14** steps in order. You will see colored output for each step. Early steps exit on failure when prerequisites are missing; later steps often warn and continue, collecting issues for the final summary.
 
@@ -95,7 +95,7 @@ If install.sh exits cleanly with no warnings, the system is ready. If it exits w
 
 ### Installing on macOS
 
-AutoDev runs on macOS without any code changes. The pipeline uses `fcntl.flock` for advisory locking, which is a POSIX mechanism available on Darwin.
+Lullabeast runs on macOS without any code changes. The pipeline uses `fcntl.flock` for advisory locking, which is a POSIX mechanism available on Darwin.
 
 **Prerequisites on macOS:**
 
@@ -186,17 +186,17 @@ sudo systemctl enable --now autodev-ui
 
 If you prefer not to enable systemd, run `uvicorn` directly in a `tmux`/`screen` session instead.
 
-**Reaching the UI from Windows:** once AutoDev is running inside WSL2, open `http://localhost:18790` in a Windows browser. WSL2 automatically forwards loopback ports to the Windows host.
+**Reaching the UI from Windows:** once Lullabeast is running inside WSL2, open `http://localhost:18790` in a Windows browser. WSL2 automatically forwards loopback ports to the Windows host.
 
 ### Environment variables (canonical names)
 
-AutoDev exposes two root paths, each with a single canonical name. Legacy
+Lullabeast exposes two root paths, each with a single canonical name. Legacy
 aliases have been removed; set the canonical names below.
 
 | Concept                          | Env                     | UI JSON                 |
 | -------------------------------- | ----------------------- | ----------------------- |
 | OpenClaw install root            | `OPENCLAW_ROOT`         | `openclaw_root`         |
-| AutoDev pipeline state directory | `AUTODEV_PIPELINE_ROOT` | `autodev_pipeline_root` |
+| Lullabeast pipeline state directory | `AUTODEV_PIPELINE_ROOT` | `autodev_pipeline_root` |
 
 Resolution order at every read site: env var → UI JSON key → built-in default.
 Empty strings are treated as "unset".
@@ -312,7 +312,7 @@ The FastAPI app exposes **`/api/*` without authentication**. Anyone who can reac
 
 ---
 
-## Starting AutoDev
+## Starting Lullabeast
 
 ```bash
 source .env
@@ -345,13 +345,13 @@ To run as a background service, see `ui/autodev-ui.service` (Linux/WSL2 systemd 
 
 Tested against OpenClaw 2026.5.18 — earlier versions may have schema differences in `pipeline_state.json`. See openclaw.json requirements below.
 
-The fields AutoDev reads from `pipeline_state.json` are: `pipeline_status`, `current_agent`, `current_phase`, `current_phase_raw_id`, `planner_retries`, `executor_retries`, `reviewer_retries`, `last_action_timestamp`, and `project_path`. Values of **`current_phase_raw_id`** (for example `INT-E1`) are the same phase identifiers used in the project’s **`roadmap.md`**. If your OpenClaw version writes different field names, the UI status endpoint will return partial data.
+The fields Lullabeast reads from `pipeline_state.json` are: `pipeline_status`, `current_agent`, `current_phase`, `current_phase_raw_id`, `planner_retries`, `executor_retries`, `reviewer_retries`, `last_action_timestamp`, and `project_path`. Values of **`current_phase_raw_id`** (for example `INT-E1`) are the same phase identifiers used in the project’s **`roadmap.md`**. If your OpenClaw version writes different field names, the UI status endpoint will return partial data.
 
 ---
 
 ## `openclaw.json` Requirements
 
-AutoDev reads the following keys from `~/.openclaw/openclaw.json`. The **orchestrator and UI** treat this file as read-only. **`install.sh` step 8** may update it atomically when you confirm the prompts: normalize the **`hooks`** block for webhook calls (`enabled`, `token`, `allowRequestSessionKey`, `allowedSessionKeyPrefixes`), optionally set `tools.profile` to `coding`, and add any missing pipeline agent entries plus `hooks.allowedAgentIds` for those IDs. Other keys are preserved.
+Lullabeast reads the following keys from `~/.openclaw/openclaw.json`. The **orchestrator and UI** treat this file as read-only. **`install.sh` step 8** may update it atomically when you confirm the prompts: normalize the **`hooks`** block for webhook calls (`enabled`, `token`, `allowRequestSessionKey`, `allowedSessionKeyPrefixes`), optionally set `tools.profile` to `coding`, and add any missing pipeline agent entries plus `hooks.allowedAgentIds` for those IDs. Other keys are preserved.
 
 ### `agents.list` and pipeline agents
 
@@ -359,11 +359,11 @@ Webhook routing uses `agents.list[]`. Some OpenClaw exports include `agents.defa
 
 ### `tools.profile` vs per-agent tools
 
-OpenClaw applies a **global tool profile** (`tools.profile`: `minimal` | `coding` | `messaging` | `full`) as the baseline allowlist, then per-agent `tools` can further restrict or extend depending on version and UI presets. That is why the gateway can show **Coding** for planner/executor/reviewer even when those entries do not list every tool explicitly. For AutoDev’s pipeline, **`coding` or `full`** is appropriate; see [OpenClaw — Tools and Plugins](https://docs.openclaw.ai/tools).
+OpenClaw applies a **global tool profile** (`tools.profile`: `minimal` | `coding` | `messaging` | `full`) as the baseline allowlist, then per-agent `tools` can further restrict or extend depending on version and UI presets. That is why the gateway can show **Coding** for planner/executor/reviewer even when those entries do not list every tool explicitly. For Lullabeast’s pipeline, **`coding` or `full`** is appropriate; see [OpenClaw — Tools and Plugins](https://docs.openclaw.ai/tools).
 
-**`hooks.token` vs `gateway.auth.token`** — These are different secrets. **`hooks.token`** is the **Bearer** secret for **`POST /hooks/agent`**: the orchestrator and AutoDev UI send it in the `Authorization` header when invoking agents. If it is wrong or missing, invocations return **401** and the pipeline stalls. **`gateway.auth.token`** (or similar gateway Control UI / API auth in your OpenClaw version) protects **browser or REST access to the gateway itself** — it does **not** substitute for `hooks.token`. The installer can generate `hooks.token` and suggest storing the same value as **`AUTODEV_HOOKS_TOKEN`** (or `hooks_token` in `ui/config.json`) so the UI matches the gateway. The orchestrator also uses **`gateway.auth.token`** (with **`gateway.port`**) for a best-effort WebSocket **`sessions.abort`** on the **previous** executor session before starting executor attempt N+1, so a stale run does not keep streaming after a retry.
+**`hooks.token` vs `gateway.auth.token`** — These are different secrets. **`hooks.token`** is the **Bearer** secret for **`POST /hooks/agent`**: the orchestrator and Lullabeast UI send it in the `Authorization` header when invoking agents. If it is wrong or missing, invocations return **401** and the pipeline stalls. **`gateway.auth.token`** (or similar gateway Control UI / API auth in your OpenClaw version) protects **browser or REST access to the gateway itself** — it does **not** substitute for `hooks.token`. The installer can generate `hooks.token` and suggest storing the same value as **`AUTODEV_HOOKS_TOKEN`** (or `hooks_token` in `ui/config.json`) so the UI matches the gateway. The orchestrator also uses **`gateway.auth.token`** (with **`gateway.port`**) for a best-effort WebSocket **`sessions.abort`** on the **previous** executor session before starting executor attempt N+1, so a stale run does not keep streaming after a retry.
 
-Recommended **`hooks`** shape for AutoDev (installer converges toward this without clobbering unrelated keys):
+Recommended **`hooks`** shape for Lullabeast (installer converges toward this without clobbering unrelated keys):
 
 ```json
 {
@@ -395,7 +395,7 @@ Session keys such as `pipeline:phase-1:...` and idea flows under `ideas:` must b
 
 Setting `enabled` to `false` disables skill injection for all agents. Setting an individual agent flag to `false` disables injection for that agent only. Missing flags default to `true`.
 
-**`agents.defaults.heartbeat.every`** — Set this to `"0m"` to disable the native OpenClaw heartbeat. If left at a non-zero interval (e.g. `"30m"`), OpenClaw's heartbeat will pull agents to the foreground on a schedule, interrupting active pipeline runs and causing model-swap interruptions. AutoDev's own heartbeat watchdog (`heartbeat_cron.py`) provides crash recovery independently.
+**`agents.defaults.heartbeat.every`** — Set this to `"0m"` to disable the native OpenClaw heartbeat. If left at a non-zero interval (e.g. `"30m"`), OpenClaw's heartbeat will pull agents to the foreground on a schedule, interrupting active pipeline runs and causing model-swap interruptions. Lullabeast's own heartbeat watchdog (`heartbeat_cron.py`) provides crash recovery independently.
 
 ```json
 {
@@ -411,9 +411,9 @@ Setting `enabled` to `false` disables skill injection for all agents. Setting an
 
 ---
 
-## Cost metrics: configuring OpenClaw so AutoDev can report run cost
+## Cost metrics: configuring OpenClaw so Lullabeast can report run cost
 
-AutoDev does **not** compute model cost. It reads `usage.cost.total` directly from each OpenClaw session JSONL row (`~/.openclaw/agents/<role>/sessions/<id>.jsonl`) and sums those values into `metrics.jsonl` and the **Pipeline Complete** panel. When OpenClaw writes zero for `cost.total`, AutoDev's UI correctly hides the cost card and the **Cost** column — there is nothing to display. If you want cost reporting, **OpenClaw must populate that field**.
+Lullabeast does **not** compute model cost. It reads `usage.cost.total` directly from each OpenClaw session JSONL row (`~/.openclaw/agents/<role>/sessions/<id>.jsonl`) and sums those values into `metrics.jsonl` and the **Pipeline Complete** panel. When OpenClaw writes zero for `cost.total`, Lullabeast's UI correctly hides the cost card and the **Cost** column — there is nothing to display. If you want cost reporting, **OpenClaw must populate that field**.
 
 There is no single switch that works for every provider/model. The steps below are the rough order of operations that produces non-zero `cost.total` in most setups. Treat it as a checklist, not a script.
 
@@ -441,7 +441,7 @@ OpenClaw needs a price (per-million input/output/cache tokens) for **every model
 2. **Built-in OpenClaw price tables.** OpenClaw ships rates for first-party Anthropic models (`claude-opus-*`, `claude-sonnet-*`, `claude-haiku-*`) and a handful of common third-party models. These work out of the box once `pricing.enabled` is `true`.
 3. **Explicit `pricing` block on the model entry.** If your model is not in OpenClaw's table and your provider does not report cost, add a `pricing` object to the model definition under `models.{model-id}.pricing`. Consult your OpenClaw version's docs for the exact field names (typical shape is `inputPerMillion`, `outputPerMillion`, `cacheReadPerMillion`, `cacheWritePerMillion`). Without this, OpenClaw has no way to convert tokens into dollars.
 
-**Local providers** (llama-server, Ollama, vLLM) generally have no real cost. You can leave them without pricing — `cost.total` will be `0`, AutoDev will hide the cost UI for runs that used only local models, and no report is wrong.
+**Local providers** (llama-server, Ollama, vLLM) generally have no real cost. You can leave them without pricing — `cost.total` will be `0`, Lullabeast will hide the cost UI for runs that used only local models, and no report is wrong.
 
 ### Step 3 — Restart the OpenClaw gateway after config changes
 
@@ -473,9 +473,9 @@ If every `total` is still `0`:
 - Confirm the model your agent actually used (look at the `model` field in the session JSONL — note that fallback can swap the model silently) has pricing defined either by OpenClaw or by an explicit `pricing` block.
 - Check `~/.openclaw/logs/` for OpenClaw warnings about missing rate tables.
 
-Once `cost.total` is non-zero on disk, AutoDev surfaces it automatically — no AutoDev restart needed; the Pipeline Complete panel reads `metrics.jsonl` on each poll.
+Once `cost.total` is non-zero on disk, Lullabeast surfaces it automatically — no Lullabeast restart needed; the Pipeline Complete panel reads `metrics.jsonl` on each poll.
 
-### What AutoDev does with the data
+### What Lullabeast does with the data
 
 - **Pipeline Complete panel** (left side, post-completion): shows total cost plus a planner/executor/reviewer breakdown when `total_cost > 0`. The COST column in the per-phase table appears when any phase has cost data.
 - **Roadmap panel** phase breakdown: shows **Cost: $X.XX** in the expanded run-metrics block for any phase with `cost_total > 0`. Phases that ran on local models (zero cost) simply omit the row.

@@ -1,4 +1,4 @@
-"""Centralised resolvers for the two AutoDev path roots.
+"""Centralised resolvers for the two Lullabeast path roots.
 
 These helpers are the single source of truth for every pipeline, gate script,
 heartbeat cron, and UI code path that needs to locate the OpenClaw installation
@@ -46,7 +46,7 @@ def resolve_openclaw_root() -> str:
 
 
 def resolve_pipeline_root(repo_path: str) -> str:
-    """Return the absolute path to the AutoDev pipeline state directory.
+    """Return the absolute path to the Lullabeast pipeline state directory.
 
     Reads ``AUTODEV_PIPELINE_ROOT`` and otherwise derives
     ``<repo_path>/.autodev``. ``~`` is always expanded. Empty string is treated

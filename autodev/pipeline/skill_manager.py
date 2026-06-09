@@ -1,5 +1,5 @@
 """
-skill_manager.py — Per-agent, per-phase discipline skill injector for the AutoDev pipeline.
+skill_manager.py — Per-agent, per-phase discipline skill injector for the Lullabeast pipeline.
 
 Integrates with OpenClaw's native workspace-level skills tier:
     <workspace>/skills/{name}/SKILL.md   ← auto-loaded by OpenClaw at session start

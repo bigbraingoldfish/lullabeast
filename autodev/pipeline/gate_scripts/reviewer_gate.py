@@ -19,7 +19,7 @@ from utils import (
 
 # Phases that produce user-visible output and therefore require a screenshot
 # artifact + a reviewer visual_verification verdict. Identified by roadmap
-# subsystem prefix. Convention used across AutoDev roadmaps:
+# subsystem prefix. Convention used across Lullabeast roadmaps:
 #   UI-*   — surfaces visible to the end user (rendered UI, styling, themes)
 #   INT-*  — final integration: full system end-to-end (always rendered if UI exists)
 #

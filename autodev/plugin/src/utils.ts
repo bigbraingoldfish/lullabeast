@@ -206,7 +206,7 @@ export function touchIdeasPrdCreatorActivityStamp(
 }
 
 /**
- * Return true when sessionKey belongs to an AutoDev pipeline session.
+ * Return true when sessionKey belongs to an Lullabeast pipeline session.
  * All pipeline sessions use the prefix "pipeline:" (enforced by
  * allowedSessionKeyPrefixes in openclaw.json).  The OpenClaw gateway
  * additionally normalises session keys to ``agent:{role}:{key}`` at
@@ -263,7 +263,7 @@ export function resolveOpenClawStateDirFromEnv(
   return path.join(os.homedir(), ".openclaw");
 }
 
-/** Resolve the AutoDev pipeline artifacts dir from gateway-visible env/path state. */
+/** Resolve the Lullabeast pipeline artifacts dir from gateway-visible env/path state. */
 export function resolvePipelineArtifactsDirFromEnv(
   env: NodeJS.ProcessEnv = process.env,
 ): string {

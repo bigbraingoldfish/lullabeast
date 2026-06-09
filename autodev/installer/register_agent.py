@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Register AutoDev pipeline agents in openclaw.json.
+"""Register Lullabeast pipeline agents in openclaw.json.
 
 Ensures planner, executor, reviewer, escalation, prd-creator, and roadmap-converter
 each have an ``agents.list`` entry and appear in ``hooks.allowedAgentIds``. Called by
@@ -200,7 +200,7 @@ def _build_new_entry(
 ) -> dict:
     """Build one agents.list entry for ``agent_id`` (not yet persisted).
 
-    New entries are born with the AutoDev truncation caps: ``bootstrapMaxChars``
+    New entries are born with the Lullabeast truncation caps: ``bootstrapMaxChars``
     for every agent and ``contextLimits.postCompactionMaxChars`` for the pipeline
     roles (see module constants). Existing entries are handled separately by
     ``setup_helpers.ensure_openclaw_context_limits``.
@@ -210,7 +210,7 @@ def _build_new_entry(
         "workspace": os.path.join(autodev_root, f"workspace-{agent_id}"),
         "model": copy.deepcopy(shared_model),
     }
-    # Born-correct truncation caps: every AutoDev agent gets the raised bootstrap
+    # Born-correct truncation caps: every Lullabeast agent gets the raised bootstrap
     # cap; only the pipeline coding roles (which carry the Always-Apply sections)
     # get the post-compaction cap.
     entry["bootstrapMaxChars"] = BOOTSTRAP_MAX_CHARS
@@ -244,7 +244,7 @@ def register_autodev_agents(
     dry_run: bool = False,
     stderr=None,
 ) -> str:
-    """Ensure all AutoDev webhook agents exist in openclaw.json."""
+    """Ensure all Lullabeast webhook agents exist in openclaw.json."""
     if stderr is None:
         stderr = sys.stderr
 
@@ -338,7 +338,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Register AutoDev agents (planner … roadmap-converter) in openclaw.json"
+        description="Register Lullabeast agents (planner … roadmap-converter) in openclaw.json"
     )
     parser.add_argument("openclaw_json", help="Path to openclaw.json")
     parser.add_argument("autodev_root", help="OpenClaw root directory")
