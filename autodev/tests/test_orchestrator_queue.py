@@ -1028,6 +1028,7 @@ _SNAPSHOT_KEYS = (
     "reviewer_retries",
     "phase_base_commit",
     "phase_start_time",
+    "run_started_at",
 )
 
 
@@ -1044,6 +1045,7 @@ def _escalated_state(project_path):
         "reviewer_retries": 2,
         "phase_base_commit": "abc123def",
         "phase_start_time": "2026-05-30T00:00:00Z",
+        "run_started_at": "2026-05-30T11:11:11Z",
         "last_action": "executor attempt failed",
         "pipeline_status": "WAITING_FOR_HUMAN",
         "project_path": project_path,
@@ -1062,6 +1064,7 @@ def _snapshot(phase=4, raw_id="CORE-2"):
         "reviewer_retries": 2,
         "phase_base_commit": "abc123def",
         "phase_start_time": "2026-05-30T00:00:00Z",
+        "run_started_at": "2026-05-29T09:00:00Z",
     }
 
 
@@ -1115,6 +1118,7 @@ class TestParkedEscalationRevival:
         assert snap["reviewer_retries"] == 2
         assert snap["phase_base_commit"] == "abc123def"
         assert snap["phase_start_time"] == "2026-05-30T00:00:00Z"
+        assert snap["run_started_at"] == "2026-05-30T11:11:11Z"  # run-start captured for revival
 
     def test_promote_answered_only_flips_escalation_with_pending_file(self, orch, tmp_path, monkeypatch):
         """The orchestrator-owned promotion pre-pass flips ONLY ESCALATION rows whose
@@ -1178,6 +1182,7 @@ class TestParkedEscalationRevival:
         assert s["current_phase_raw_id"] == "CORE-2"
         assert s["phase_base_commit"] == "abc123def"
         assert s["reviewer_retries"] == 2
+        assert s["run_started_at"] == "2026-05-29T09:00:00Z"  # original run start preserved on revival
         assert s["executor_self_failure_retries"] == 1
         assert s["current_agent"] == "escalation"
         assert s["pipeline_status"] == "RUNNING"

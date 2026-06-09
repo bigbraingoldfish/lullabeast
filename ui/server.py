@@ -1279,7 +1279,14 @@ def _expand_lock_path(config: dict) -> str | None:
 
 
 def _clean_pipeline_state_for_project(project_real: str) -> dict:
-    """Match orchestrator.py reset template when switching projects."""
+    """Match orchestrator.py reset template when switching projects.
+
+    Stamps a fresh ``run_started_at`` (ISO8601): this is the run-start marker the
+    RoadmapPanel "(from previous run)" staleness badge compares against the
+    completion report's mtime. Both server fresh-run writers — ``/api/setup/launch``
+    and ``/api/setup/switch-project`` — go through here; resume paths (git-recover,
+    resume-ready) read-modify-write existing state and so preserve it (3-A).
+    """
     return {
         "current_phase": 0,
         "current_phase_raw_id": "",
@@ -1289,6 +1296,7 @@ def _clean_pipeline_state_for_project(project_real: str) -> dict:
         "reviewer_retries": 0,
         "last_action": "initialized for new project",
         "last_action_timestamp": datetime.now(timezone.utc).isoformat(),
+        "run_started_at": datetime.now(timezone.utc).isoformat(),
         "pipeline_status": "RUNNING",
         "project_path": project_real,
     }
@@ -2532,6 +2540,11 @@ def get_state():
 
     Merges pipeline_state.json and phase_state.json, adds server-derived
     fields (orchestrator_alive, event_source), and handles missing files gracefully.
+
+    Surfaces ``run_started_at`` (UI REVIEW 3-A): the run-start marker the
+    RoadmapPanel "(from previous run)" staleness badge compares against the
+    completion report's mtime. ``None`` when absent (no run started / pre-feature
+    state); the whitelist below adds it explicitly (state is not passed through).
     """
     config = load_config()
     
@@ -2561,6 +2574,10 @@ def get_state():
             "current_agent": pipeline_state.get("current_agent", ""),
             "project_path": pipeline_state.get("project_path", ""),
             "last_action_timestamp": pipeline_state.get("last_action_timestamp"),
+            # 3-A — run-start marker (stamped by the orchestrator / launch reset
+            # template). The RoadmapPanel staleness badge compares it against the
+            # completion report's mtime; absent → null → badge never shows.
+            "run_started_at": pipeline_state.get("run_started_at"),
             "sentinel_wait_started_at": pipeline_state.get("sentinel_wait_started_at"),
             "queue_halted_reason": pipeline_state.get("queue_halted_reason"),
             "counters": counters,
@@ -2578,6 +2595,7 @@ def get_state():
             "planner_retries": 0,
             "executor_retries": 0,
             "reviewer_retries": 0,
+            "run_started_at": None,
             "sentinel_wait_started_at": None,
         }
     
@@ -3450,6 +3468,13 @@ def get_metrics_summary():
     ``total_duration_seconds`` is the SUM of per-phase ``duration_seconds`` (real
     phase work, in-phase holds included) — never run_summary.json's calendar
     wall-clock, which spans idle gaps across days and inflates the figure.
+
+    Token totals (UI REVIEW 3-B) parallel the cost totals: run-level
+    ``total_tokens`` + per-role ``{planner,executor,reviewer}_tokens_total``, and
+    per-phase ``tokens_total`` — each summed from the row's per-role
+    ``total_tokens`` via ``_role_token_total`` (missing/non-numeric → 0). Cost and
+    tokens are surfaced together so the Pipeline Monitor renders both live and at
+    completion.
     """
     config = load_config()
     project_dir_path = config.get("project_dir_path")
@@ -3517,10 +3542,36 @@ def get_metrics_summary():
         except (TypeError, ValueError):
             return 0.0
 
+    def _role_token_total(p: dict, role_key: str) -> int:
+        """Sum of a role's token count for one phase row. Parallels ``_role_cost``;
+        defaults a missing/non-numeric ``total_tokens`` to 0 so pre-token history
+        rows (and local-model runs that report no usage) read as 0, not NaN."""
+        role_obj = p.get(role_key) or {}
+        if not isinstance(role_obj, dict):
+            return 0
+        try:
+            return int(role_obj.get("total_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _phase_token_total(p: dict) -> int:
+        return (
+            _role_token_total(p, "planner_tokens")
+            + _role_token_total(p, "executor_tokens")
+            + _role_token_total(p, "reviewer_tokens")
+        )
+
     total_cost = round(sum(_phase_cost(p) for p in phases), 6)
     planner_cost_total = round(sum(_role_cost(p, "planner_tokens") for p in phases), 6)
     executor_cost_total = round(sum(_role_cost(p, "executor_tokens") for p in phases), 6)
     reviewer_cost_total = round(sum(_role_cost(p, "reviewer_tokens") for p in phases), 6)
+    # 3-B — token totals parallel the cost totals above (run total + per-role). The
+    # underlying per-role total_tokens already lives on each metrics row; the endpoint
+    # simply surfaces it so the Pipeline Monitor can render spend-in-tokens.
+    total_tokens = sum(_phase_token_total(p) for p in phases)
+    planner_tokens_total = sum(_role_token_total(p, "planner_tokens") for p in phases)
+    executor_tokens_total = sum(_role_token_total(p, "executor_tokens") for p in phases)
+    reviewer_tokens_total = sum(_role_token_total(p, "reviewer_tokens") for p in phases)
 
     # Hold time: pair escalation_trigger/escalation_resolve events from the
     # pipeline-root events log, filtered by project name.
@@ -3544,6 +3595,10 @@ def get_metrics_summary():
         "planner_cost_total": planner_cost_total,
         "executor_cost_total": executor_cost_total,
         "reviewer_cost_total": reviewer_cost_total,
+        "total_tokens": total_tokens,
+        "planner_tokens_total": planner_tokens_total,
+        "executor_tokens_total": executor_tokens_total,
+        "reviewer_tokens_total": reviewer_tokens_total,
         "total_hold_seconds": total_hold_seconds,
         "total_active_seconds": total_active_seconds,
         "phases": [
@@ -3568,6 +3623,7 @@ def get_metrics_summary():
                 "planner_cost": _role_cost(p, "planner_tokens"),
                 "executor_cost": _role_cost(p, "executor_tokens"),
                 "reviewer_cost": _role_cost(p, "reviewer_tokens"),
+                "tokens_total": _phase_token_total(p),
                 "hold_seconds": hold_per_phase.get(p.get("phase"), 0),
             }
             for p in phases
