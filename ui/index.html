@@ -1242,6 +1242,15 @@
             return `${m}m`;
         }
 
+        /** Format a token count with thousands separators (e.g. 1234567 → "1,234,567").
+         *  Returns '—' for null/0 so token surfaces stay clean on local-model runs that
+         *  report no usage — mirrors the cost surfaces' "> 0" suppression. */
+        function fmtTokens(v) {
+            const n = Number(v) || 0;
+            if (n <= 0) return '—';
+            return n.toLocaleString();
+        }
+
         /** P0 Stage H — format "Exec attempts" with retry-source breakdown.
          *
          * Clean common case: when both lifetime counters are 0 (single
@@ -2168,11 +2177,13 @@
             const totalCount = roadmap ? roadmap.length : 0;
 
             const totalCost = metricsSummary && Number(metricsSummary.total_cost) || 0;
+            const totalTokens = metricsSummary && Number(metricsSummary.total_tokens) || 0;
             const totalHold = metricsSummary && Number(metricsSummary.total_hold_seconds) || 0;
             const totalActive = metricsSummary && Number(metricsSummary.total_active_seconds) || 0;
             const totalEscalations = metricsSummary && Number(metricsSummary.total_escalations) || 0;
             const phases = (metricsSummary && Array.isArray(metricsSummary.phases)) ? metricsSummary.phases : [];
             const hasCostColumn = phases.some(p => Number(p.cost_total) > 0);
+            const hasTokenColumn = phases.some(p => Number(p.tokens_total) > 0);
 
             const outcomeBadge = (phase) => {
                 const ex = Number(phase.executor_attempts) || 0;
@@ -2197,8 +2208,8 @@
 
                     {metricsSummary && (
                         <>
-                            <div className={totalCost > 0 ? "grid grid-cols-2 gap-2 pt-1" : "pt-1"}>
-                                <div className="bg-[#221b36] rounded p-2">
+                            <div className="flex flex-wrap gap-2 pt-1">
+                                <div className="bg-[#221b36] rounded p-2 flex-1 min-w-[8rem]">
                                     <div className="text-slate-500 text-xs mb-0.5 header-text uppercase tracking-wide">Total Time</div>
                                     <div className="header-text text-lg font-semibold text-slate-200 font-mono">{formatDuration(metricsSummary.total_duration_seconds)}</div>
                                     {totalHold > 0 && (
@@ -2209,13 +2220,26 @@
                                     )}
                                 </div>
                                 {totalCost > 0 && (
-                                    <div className="bg-[#221b36] rounded p-2">
+                                    <div className="bg-[#221b36] rounded p-2 flex-1 min-w-[8rem]">
                                         <div className="text-slate-500 text-xs mb-0.5 header-text uppercase tracking-wide">Total Cost</div>
                                         <div className="header-text text-lg font-semibold text-slate-200 font-mono">{fmtUSD(totalCost)}</div>
                                         <div className="mt-1 space-y-0.5 text-xs">
                                             <div className="flex justify-between text-slate-400"><span>Planner</span><span className="font-mono">{fmtUSD(metricsSummary.planner_cost_total)}</span></div>
                                             <div className="flex justify-between text-slate-400"><span>Executor</span><span className="font-mono">{fmtUSD(metricsSummary.executor_cost_total)}</span></div>
                                             <div className="flex justify-between text-slate-400"><span>Reviewer</span><span className="font-mono">{fmtUSD(metricsSummary.reviewer_cost_total)}</span></div>
+                                        </div>
+                                    </div>
+                                )}
+                                {/* 3-B — Total Tokens card, mirroring Total Cost. Gated on > 0 so
+                                    local-model runs that report no usage hide it (same as cost). */}
+                                {totalTokens > 0 && (
+                                    <div className="bg-[#221b36] rounded p-2 flex-1 min-w-[8rem]">
+                                        <div className="text-slate-500 text-xs mb-0.5 header-text uppercase tracking-wide">Total Tokens</div>
+                                        <div className="header-text text-lg font-semibold text-slate-200 font-mono">{fmtTokens(totalTokens)}</div>
+                                        <div className="mt-1 space-y-0.5 text-xs">
+                                            <div className="flex justify-between text-slate-400"><span>Planner</span><span className="font-mono">{fmtTokens(metricsSummary.planner_tokens_total)}</span></div>
+                                            <div className="flex justify-between text-slate-400"><span>Executor</span><span className="font-mono">{fmtTokens(metricsSummary.executor_tokens_total)}</span></div>
+                                            <div className="flex justify-between text-slate-400"><span>Reviewer</span><span className="font-mono">{fmtTokens(metricsSummary.reviewer_tokens_total)}</span></div>
                                         </div>
                                     </div>
                                 )}
@@ -2230,6 +2254,7 @@
                                             <span className="w-14 flex-shrink-0 text-right">Duration</span>
                                             <span className="w-10 flex-shrink-0 text-right">Execs</span>
                                             {hasCostColumn && <span className="w-14 flex-shrink-0 text-right">Cost</span>}
+                                            {hasTokenColumn && <span className="w-16 flex-shrink-0 text-right">Tokens</span>}
                                             <span className="ml-auto">Result</span>
                                         </div>
                                         {phases.map((phase, idx) => {
@@ -2244,6 +2269,9 @@
                                                     <span className="text-slate-400 w-10 flex-shrink-0 text-right font-mono">{phase.executor_attempts}</span>
                                                     {hasCostColumn && (
                                                         <span className="text-slate-400 w-14 flex-shrink-0 text-right font-mono">{Number(phase.cost_total) > 0 ? fmtUSD(phase.cost_total) : '—'}</span>
+                                                    )}
+                                                    {hasTokenColumn && (
+                                                        <span className="text-slate-400 w-16 flex-shrink-0 text-right font-mono">{Number(phase.tokens_total) > 0 ? fmtTokens(phase.tokens_total) : '—'}</span>
                                                     )}
                                                     <span className={`ml-auto header-text ${badgeClass}`}>{badge.label}</span>
                                                 </div>
@@ -2735,7 +2763,7 @@
 
                     {metricsSummary && metricsSummary.total_phases > 0 && (
                         <p className="font-mono text-xs text-slate-500">
-                            Run so far: {metricsSummary.total_phases} phases · {metricsSummary.total_executor_attempts} exec attempts · {formatDuration(metricsSummary.total_duration_seconds)}{metricsSummary.total_cost > 0 ? ` · $${metricsSummary.total_cost.toFixed(2)}` : ''}
+                            Run so far: {metricsSummary.total_phases} phases · {metricsSummary.total_executor_attempts} exec attempts · {formatDuration(metricsSummary.total_duration_seconds)}{metricsSummary.total_cost > 0 ? ` · $${metricsSummary.total_cost.toFixed(2)}` : ''}{metricsSummary.total_tokens > 0 ? ` · ${fmtTokens(metricsSummary.total_tokens)} tokens` : ''}
                         </p>
                     )}
 
@@ -2828,6 +2856,19 @@
                                                                         <div>
                                                                             <span className="text-slate-500">Cost: </span>
                                                                             <span className="text-slate-300 font-mono">${phaseMeta.cost_total.toFixed(2)}</span>
+                                                                            {/* 3-C — per-phase role-cost split (planner/executor/reviewer),
+                                                                                already returned by /api/metrics-summary; previously orphaned. */}
+                                                                            <div className="pl-3 text-[10px] text-slate-500 font-mono leading-tight">
+                                                                                <div>planner ${(Number(phaseMeta.planner_cost) || 0).toFixed(2)}</div>
+                                                                                <div>executor ${(Number(phaseMeta.executor_cost) || 0).toFixed(2)}</div>
+                                                                                <div>reviewer ${(Number(phaseMeta.reviewer_cost) || 0).toFixed(2)}</div>
+                                                                            </div>
+                                                                        </div>
+                                                                    )}
+                                                                    {phaseMeta.tokens_total > 0 && (
+                                                                        <div>
+                                                                            <span className="text-slate-500">Tokens: </span>
+                                                                            <span className="text-slate-300 font-mono">{fmtTokens(phaseMeta.tokens_total)}</span>
                                                                         </div>
                                                                     )}
                                                                 </div>
@@ -3044,6 +3085,10 @@
             RESET_PHASE: 'Restart entire phase',
             RESET_REVIEWER: 'Restart review step',
             RESET_EXECUTION: 'Restart execution step',
+            // 3-E — labels reused verbatim from ESCALATION_CMD_DEFS so a resolve via
+            // these verbs renders a friendly string, not the raw token.
+            PROCEED: 'Mark Complete',
+            NUCLEAR_RESET: 'Reset Everything & Restart Phase',
             STOP: 'Stop pipeline',
         };
 
@@ -7095,12 +7140,12 @@
                                     <div className="space-y-1.5 text-xs border border-[#1c1829] rounded p-2 bg-[#15121f]">
                                         <div className="flex flex-wrap items-center gap-2">
                                             <span
-                                                className={`header-text font-semibold ${
+                                                className={`header-text font-medium ${
                                                     readinessData.overall_status === "ready"
-                                                        ? "text-emerald-400"
+                                                        ? "text-emerald-300/80"
                                                         : readinessData.overall_status === "approaching_ready"
-                                                          ? "text-amber-400"
-                                                          : "text-red-400"
+                                                          ? "text-amber-300/80"
+                                                          : "text-red-300/80"
                                                 }`}
                                                 title={P3_PRD_TITLE_READINESS_SCORE}
                                             >
@@ -7127,8 +7172,8 @@
                                         {readinessExpanded && (
                                             <React.Fragment>
                                                 {Array.isArray(readinessData.blocking_gaps) && readinessData.blocking_gaps.length > 0 && (
-                                                    <div className="rounded border border-amber-700/50 bg-amber-950/30 px-2 py-1.5 text-amber-200">
-                                                        <span className="font-semibold header-text">Before converting: </span>
+                                                    <div className="rounded border border-[#2a2540] bg-[#100d1a]/90 px-2 py-1.5 text-slate-400">
+                                                        <span className="font-medium header-text text-amber-300/90">Before converting: </span>
                                                         {readinessData.blocking_gaps.join(" · ")}
                                                     </div>
                                                 )}

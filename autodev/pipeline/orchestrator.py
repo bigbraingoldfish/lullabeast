@@ -281,6 +281,15 @@ VALID_STATES = [
     "QUEUE_HALTED",
 ]
 
+# 3-A — statuses that mean "a run is still in flight". A same-project --project-path
+# (re)start while the on-disk status is one of these is a crash/restart RESUME of that
+# run, so run_started_at is preserved; any other (terminal/idle) status — or no stamp at
+# all — means a NEW run is beginning (e.g. queue trigger-next re-running a finished
+# project) and run_started_at is freshly stamped. See apply_cli_project_path.
+_RESUMABLE_ACTIVE_RUN_STATUSES = frozenset(
+    {"RUNNING", "WAITING_FOR_SENTINEL", "WAITING_FOR_HUMAN", "QUEUE_HALTED"}
+)
+
 QUEUE_FILE = os.path.join(AUTODEV_PIPELINE_ROOT, "pipeline_queue.json")
 
 
@@ -1064,6 +1073,10 @@ class Orchestrator:
             "reviewer_retries": 0,
             "last_action": "initialized",
             "last_action_timestamp": datetime.now(timezone.utc).isoformat(),
+            # run_started_at: run-scoped marker for the staleness badge. Set once per
+            # fresh run, survives every phase advance (the advance mutates in place),
+            # refreshed on a new run / queue advance (3-A).
+            "run_started_at": datetime.now(timezone.utc).isoformat(),
             "pipeline_status": "RUNNING"
         }
         # P0 Stage H — orchestrator-private tracker for the current attempt's
@@ -1882,6 +1895,10 @@ class Orchestrator:
                     self.state["phase_base_commit"] = snap["phase_base_commit"]
                 if snap.get("phase_start_time"):
                     self.state["phase_start_time"] = snap["phase_start_time"]
+                # A revived project is the SAME run — keep the original run start so
+                # the staleness badge stays correct (3-A).
+                if snap.get("run_started_at"):
+                    self.state["run_started_at"] = snap["run_started_at"]
             else:
                 self.state = {
                     "current_phase": 0,
@@ -1894,6 +1911,9 @@ class Orchestrator:
                     "reviewer_retries": 0,
                     "last_action": f"queue auto-advance to {entry['name']}",
                     "last_action_timestamp": now,
+                    # A fresh queue advance is a new run — stamp run_started_at (3-A).
+                    # Same value as the queue entry's started_at / run_manifest.
+                    "run_started_at": now,
                     "pipeline_status": "RUNNING",
                     "project_path": project_path,
                 }
@@ -1991,6 +2011,9 @@ class Orchestrator:
                 self.state["phase_base_commit"] = snap["phase_base_commit"]
             if snap.get("phase_start_time"):
                 self.state["phase_start_time"] = snap["phase_start_time"]
+            # A revived escalation is the SAME run — preserve the original run start (3-A).
+            if snap.get("run_started_at"):
+                self.state["run_started_at"] = snap["run_started_at"]
             self.state.pop("queue_halted_reason", None)
             self._current_attempt_retry_class = "initial_attempt"
             self.write_state()
@@ -2092,6 +2115,9 @@ class Orchestrator:
             "reviewer_retries": self.state.get("reviewer_retries", 0),
             "phase_base_commit": self.state.get("phase_base_commit", ""),
             "phase_start_time": self.state.get("phase_start_time", ""),
+            # run_started_at: a parked project is the SAME run — snapshot it so the
+            # revival restores the original run start, not a fresh one (3-A).
+            "run_started_at": self.state.get("run_started_at", ""),
         }
 
         def _apply(data):
@@ -7521,6 +7547,14 @@ def apply_cli_project_path(orchestrator, new_target: str) -> None:
     holds the previous ``project_path`` and terminal ``pipeline_status`` (e.g.
     PIPELINE_COMPLETE). Always compare requested path to on-disk
     ``project_path`` after loading state.
+
+    ``run_started_at`` (3-A): a project switch stamps a fresh run-start; a
+    same-project (re)start stamps fresh too UNLESS the on-disk status shows the
+    run is still in flight (``_RESUMABLE_ACTIVE_RUN_STATUSES`` — a crash/restart
+    resume), in which case the existing stamp is preserved. This is what gives the
+    queue ``trigger-next`` path (which spawns ``--project-path`` on a finished
+    project, hitting the same-project branch) a run-start marker for the staleness
+    badge — without it, queue-launched runs left ``run_started_at`` null.
     """
     new_target = os.path.abspath(os.path.expanduser(new_target))
     new_target_real = _realpath_safe(new_target)
@@ -7552,6 +7586,8 @@ def apply_cli_project_path(orchestrator, new_target: str) -> None:
             "reviewer_retries": 0,
             "last_action": "initialized for new project",
             "last_action_timestamp": datetime.now(timezone.utc).isoformat(),
+            # A CLI project switch is a new run — stamp run_started_at (3-A).
+            "run_started_at": datetime.now(timezone.utc).isoformat(),
             "pipeline_status": "RUNNING",
             "project_path": new_target,
         }
@@ -7559,6 +7595,16 @@ def apply_cli_project_path(orchestrator, new_target: str) -> None:
         if disk_state:
             orchestrator.state = disk_state
         orchestrator.state["project_path"] = new_target
+        # 3-A — run_started_at on a same-project (re)start. The else branch is reached
+        # both by a crash/restart RESUME of an in-flight run (preserve the original
+        # stamp) and by a fresh re-run of a finished/idle project — the queue
+        # trigger-next path, which spawns `--project-path` and so never reset state.
+        # Stamp a new run-start unless the on-disk status shows the run is still active
+        # AND a stamp already exists; otherwise the queue-launched/re-run case would
+        # leave run_started_at null and the staleness badge dead (live-validation gap).
+        if (orchestrator.state.get("pipeline_status") not in _RESUMABLE_ACTIVE_RUN_STATUSES
+                or not orchestrator.state.get("run_started_at")):
+            orchestrator.state["run_started_at"] = datetime.now(timezone.utc).isoformat()
 
     # Update symlink before writing state: if the symlink fails the on-disk state
     # must not be updated, otherwise the orchestrator starts with the new project
