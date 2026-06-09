@@ -215,31 +215,11 @@
             animation: teal-pulse 2s ease-in-out infinite;
         }
 
-        /* Lullabeast live-status pills: calm tinted pills whose leading dot carries the
-           state colour via currentColor (so the dot always matches the pill's own text).
-           .pill-dot = static dot; .pill-glow adds a soft pulse for the "alive / needs you"
-           states (running, needs-input, intervention) — the dot signals, not the whole pill. */
-        .pill-dot::before,
-        .pill-glow::before {
-            content: '';
-            display: inline-block;
-            width: 7px;
-            height: 7px;
-            margin-right: 6px;
-            border-radius: 9999px;
-            background-color: currentColor;
-            vertical-align: middle;
-        }
-        .pill-glow::before {
-            animation: pill-dot-glow 2.4s ease-in-out infinite;
-        }
-        @keyframes pill-dot-glow {
-            0%, 100% { box-shadow: 0 0 3px 0 currentColor; opacity: 0.7; }
-            50% { box-shadow: 0 0 8px 0 currentColor; opacity: 1; }
-        }
-        @media (prefers-reduced-motion: reduce) {
-            .pill-glow::before { animation: none; }
-        }
+        /* Lullabeast status pills carry no leading dot — the pill colour and label carry the
+           state. Both the Pipeline Monitor header and the Project Queue use the same calm
+           tinted-outline treatment (muted bg + accent text + accent outline, no fill): the
+           Monitor via PIPELINE_LIVE_PILL, the Queue via QUEUE_LIVE_PILL_CLASS / queueOnlyRowPill.
+           The former .pill-dot / .pill-glow ::before dot was removed. */
 
 
         /* L-28: in-flight attempt cell only — subtle opacity pulse */
@@ -542,25 +522,25 @@
 
         /** Live pipeline_status from GET /api/queue → single pill (shared with Pipeline Monitor header). */
         const PIPELINE_LIVE_PILL = {
-            RUNNING: { label: 'RUNNING', className: 'bg-[rgba(79,217,140,0.13)] text-[#4fd98c] border border-[rgba(79,217,140,0.38)] pill-glow', title: '' },
-            WAITING_FOR_SENTINEL: { label: 'Running', className: 'bg-[rgba(79,217,140,0.13)] text-[#4fd98c] border border-[rgba(79,217,140,0.38)] pill-glow', title: '' },
-            WAITING_FOR_HUMAN: { label: 'NEEDS YOUR INPUT', className: 'bg-[#2a1808] text-orange-300 border border-orange-500/40 pill-glow', title: '' },
+            RUNNING: { label: 'RUNNING', className: 'bg-[rgba(79,217,140,0.13)] text-[#4fd98c] border border-[rgba(79,217,140,0.38)]', title: '' },
+            WAITING_FOR_SENTINEL: { label: 'Running', className: 'bg-[rgba(79,217,140,0.13)] text-[#4fd98c] border border-[rgba(79,217,140,0.38)]', title: '' },
+            WAITING_FOR_HUMAN: { label: 'NEEDS YOUR INPUT', className: 'bg-[#2a1808] text-orange-300 border border-orange-500/40', title: '' },
             HALTED_SILENT: {
                 label: 'INTERVENTION REQUIRED',
-                className: 'bg-[#2a1015] text-[#f0697c] border border-[#f0697c]/40 pill-glow',
+                className: 'bg-[#2a1015] text-[#f0697c] border border-[#f0697c]/40',
                 title:
                     'Pipeline halted — escalation path failed; check orchestrator logs and project escalation_failed.json.',
             },
-            BLOCKED: { label: 'BLOCKED', className: 'bg-[#2a1015] text-[#f0697c] border border-[#f0697c]/30 pill-dot', title: PIPELINE_BLOCKED_TOOLTIP },
+            BLOCKED: { label: 'BLOCKED', className: 'bg-[#2a1015] text-[#f0697c] border border-[#f0697c]/30', title: PIPELINE_BLOCKED_TOOLTIP },
             PIPELINE_COMPLETE: {
                 label: 'COMPLETE',
-                className: 'bg-emerald-950 text-emerald-400 border border-emerald-700/60 pill-dot',
+                className: 'bg-emerald-950 text-emerald-400 border border-emerald-700/60',
                 title: '',
             },
-            STOPPED: { label: 'STOPPED', className: 'bg-[#221b36] text-slate-300 border border-[#2a2540] pill-dot', title: '' },
-            QUEUE_HALTED: { label: 'Queue stalled', className: 'bg-[#2a1808] text-orange-300 border border-orange-500/30 pill-dot', title: '' },
-            IDLE: { label: 'IDLE', className: 'bg-[#221b36] text-slate-300 border border-[#2a2540] pill-dot', title: '' },
-            UNKNOWN: { label: 'UNKNOWN', className: 'bg-[#221b36] text-slate-300 border border-[#2a2540] pill-dot', title: '' },
+            STOPPED: { label: 'STOPPED', className: 'bg-[#221b36] text-slate-300 border border-[#2a2540]', title: '' },
+            QUEUE_HALTED: { label: 'Queue stalled', className: 'bg-[#2a1808] text-orange-300 border border-orange-500/30', title: '' },
+            IDLE: { label: 'IDLE', className: 'bg-[#221b36] text-slate-300 border border-[#2a2540]', title: '' },
+            UNKNOWN: { label: 'UNKNOWN', className: 'bg-[#221b36] text-slate-300 border border-[#2a2540]', title: '' },
         };
 
         /** POST /api/queue/trigger-next `queue_halted_reason` → one-line user message (L-07). */
@@ -584,39 +564,39 @@
         /** Queue-only row states when live_pipeline_status is null (no global state for this path). */
         function queueOnlyRowPill(state) {
             const q = {
-                READY: { label: 'READY', className: 'bg-slate-600 text-slate-200', title: '' },
-                ACTIVE: { label: 'ACTIVE', className: 'bg-slate-600 text-slate-200', title: QUEUE_CURRENT_TOOLTIP },
-                BLOCKED: { label: 'QUEUE BLOCKED', className: 'bg-amber-600 text-slate-900', title: QUEUE_BLOCKED_TOOLTIP },
+                READY: { label: 'READY', className: 'bg-slate-600/25 text-slate-300 border border-slate-500/40', title: '' },
+                ACTIVE: { label: 'ACTIVE', className: 'bg-slate-600/25 text-slate-300 border border-slate-500/40', title: QUEUE_CURRENT_TOOLTIP },
+                BLOCKED: { label: 'QUEUE BLOCKED', className: 'bg-amber-600/15 text-amber-300 border border-amber-400/50', title: QUEUE_BLOCKED_TOOLTIP },
                 SKIPPED_PENDING: {
                     label: 'Preflight failed',
-                    className: 'bg-indigo-900 text-indigo-200',
+                    className: 'bg-indigo-600/15 text-indigo-300 border border-indigo-400/50',
                     title: P3_QUEUE_ONLY_PILL_TITLES.SKIPPED_PENDING,
                 },
                 DEPENDENCY_HOLD: {
                     label: 'Waiting on parent',
-                    className: 'bg-orange-600 text-white',
+                    className: 'bg-orange-600/15 text-orange-300 border border-orange-400/50',
                     title: P3_QUEUE_ONLY_PILL_TITLES.DEPENDENCY_HOLD,
                 },
                 ESCALATION: {
                     label: 'ESCALATION',
-                    className: 'bg-amber-500 text-slate-900',
+                    className: 'bg-amber-600/15 text-amber-300 border border-amber-400/50',
                     title: P3_QUEUE_ONLY_PILL_TITLES.ESCALATION,
                 },
                 ESCALATION_ANSWERED: {
                     label: 'Answer banked',
-                    className: 'bg-sky-700 text-sky-100',
+                    className: 'bg-sky-700/15 text-sky-300 border border-sky-400/50',
                     title: P3_QUEUE_ONLY_PILL_TITLES.ESCALATION_ANSWERED,
                 },
-                COMPLETED: { label: 'COMPLETED', className: 'bg-emerald-800 text-emerald-200', title: '' },
+                COMPLETED: { label: 'COMPLETED', className: 'bg-emerald-600/15 text-emerald-300 border border-emerald-400/50', title: '' },
                 FAILED: {
                     label: 'FAILED',
-                    className: 'bg-red-700 text-white',
+                    className: 'bg-red-600/15 text-red-300 border border-red-400/50',
                     title: P3_QUEUE_ONLY_PILL_TITLES.FAILED,
                 },
             };
             const row = q[state];
             if (row) return { ...row };
-            return { label: state || '', className: 'bg-slate-700 text-white', title: '' };
+            return { label: state || '', className: 'bg-slate-600/25 text-slate-300 border border-slate-500/40', title: '' };
         }
 
         /** Parent state mini-pill in dependency panel — same colors as queue-only mapping. */
@@ -634,6 +614,26 @@
             return !!parentEntry && parentEntry.state !== 'COMPLETED';
         }
 
+        /** Tinted-outline pill classes for the Project Queue. Every queue pill — live-status and
+         *  queue-only alike (see queueOnlyRowPill) — uses the same muted-bg + accent-text +
+         *  accent-outline treatment as the Pipeline Monitor header, just with no leading dot.
+         *  RUNNING keeps the vivid brand green so it stays distinct from the muted emerald
+         *  COMPLETE, and PIPELINE_COMPLETE matches queueOnlyRowPill.COMPLETED so the two read
+         *  identically. Labels/titles still come from PIPELINE_LIVE_PILL; only the className
+         *  differs here. Recipe: bg-{c}-600/15 + text-{c}-300 + border-{c}-400/50. */
+        const QUEUE_LIVE_PILL_CLASS = {
+            RUNNING: 'bg-[rgba(79,217,140,0.13)] text-[#4fd98c] border border-[rgba(79,217,140,0.38)]',
+            WAITING_FOR_SENTINEL: 'bg-[rgba(79,217,140,0.13)] text-[#4fd98c] border border-[rgba(79,217,140,0.38)]',
+            WAITING_FOR_HUMAN: 'bg-orange-600/15 text-orange-300 border border-orange-400/50',
+            HALTED_SILENT: 'bg-red-600/15 text-red-300 border border-red-400/50',
+            BLOCKED: 'bg-red-600/15 text-red-300 border border-red-400/50',
+            PIPELINE_COMPLETE: 'bg-emerald-600/15 text-emerald-300 border border-emerald-400/50',
+            STOPPED: 'bg-slate-600/25 text-slate-300 border border-slate-500/40',
+            QUEUE_HALTED: 'bg-amber-600/15 text-amber-300 border border-amber-400/50',
+            IDLE: 'bg-slate-600/25 text-slate-300 border border-slate-500/40',
+            UNKNOWN: 'bg-slate-600/25 text-slate-300 border border-slate-500/40',
+        };
+
         /** Primary queue list/detail pill: live pipeline_status overrides queue row state. */
         function queueRowDisplay(entry) {
             if (!entry) return { label: '', className: 'bg-slate-700 text-white', title: '' };
@@ -646,26 +646,26 @@
             }
             const live = entry.live_pipeline_status;
             if (live != null && live !== '') {
+                // Queue rows render every status as a tinted-outline pill (QUEUE_LIVE_PILL_CLASS);
+                // only the label/title come from PIPELINE_LIVE_PILL.
+                const pillClass = QUEUE_LIVE_PILL_CLASS[live] || 'bg-slate-600/25 text-slate-300 border border-slate-500/40';
                 if (live === 'WAITING_FOR_SENTINEL') {
                     const meta = PIPELINE_LIVE_PILL[live];
-                    if (!meta) {
-                        return { label: 'Running', className: 'bg-slate-600 text-slate-200', title: '' };
-                    }
                     return {
                         label: formatWaitForSentinelLabel(entry.live_current_agent),
-                        className: meta.className,
-                        title: meta.title || '',
+                        className: pillClass,
+                        title: (meta && meta.title) || '',
                     };
                 }
                 const meta = PIPELINE_LIVE_PILL[live];
-                if (meta) return { label: meta.label, className: meta.className, title: meta.title || '' };
-                return { label: String(live), className: 'bg-slate-600 text-slate-200', title: '' };
+                if (meta) return { label: meta.label, className: pillClass, title: meta.title || '' };
+                return { label: String(live), className: pillClass, title: '' };
             }
             // Row ACTIVE in queue file but path does not match global pipeline_state (defensive).
             if (entry.state === 'ACTIVE') {
                 return {
                     label: 'ACTIVE (stale)',
-                    className: 'bg-slate-700 text-slate-400',
+                    className: 'bg-slate-600/25 text-slate-400 border border-slate-500/40',
                     title: 'Queue row is ACTIVE but does not match the current pipeline project_path.',
                 };
             }
@@ -3764,8 +3764,8 @@
             );
         }
 
-        function QuestionFlow({ questions, onSubmit }) {
-            const [index, setIndex] = React.useState(0);
+        function QuestionFlow({ questions, onSubmit, submitted }) {
+            const [index, setIndex] = React.useState(submitted ? Math.max(0, questions.length - 1) : 0);
             const [selections, setSelections] = React.useState({});
             const [freeTexts, setFreeTexts] = React.useState({});
 
@@ -3792,7 +3792,7 @@
             };
 
             const advance = () => {
-                if (!hasAnswer) return;
+                if (submitted || !hasAnswer) return;
                 if (isLast) {
                     const parts = questions.map((qItem, i) => {
                         const chosen = selections[i] || [];
@@ -3808,13 +3808,13 @@
             };
 
             return (
-                <div className="rounded-xl border border-[#2a2540] bg-[#221b36] p-4 space-y-3 w-full min-w-0">
+                <div className="rounded-xl border border-[#2a2540] bg-[#221b36] p-4 space-y-3 w-full min-w-0" style={submitted ? { pointerEvents: "none" } : undefined}>
                     <div className="flex items-start justify-between gap-2">
                         <p className="text-sm text-slate-200 font-medium leading-snug">{q.text}</p>
                         <div className="flex items-center gap-1 shrink-0 mt-0.5">
-                            <button type="button" onClick={() => setIndex((i) => i - 1)} disabled={index === 0} className="text-[10px] text-slate-500 hover:text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed px-0.5">&lt;</button>
+                            <button type="button" onClick={() => setIndex((i) => i - 1)} disabled={submitted || index === 0} className="text-[10px] text-slate-500 hover:text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed px-0.5">&lt;</button>
                             <span className="text-[10px] text-slate-600">{index + 1}/{questions.length}</span>
-                            <button type="button" onClick={() => setIndex((i) => i + 1)} disabled={index >= questions.length - 1} className="text-[10px] text-slate-500 hover:text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed px-0.5">&gt;</button>
+                            <button type="button" onClick={() => setIndex((i) => i + 1)} disabled={submitted || index >= questions.length - 1} className="text-[10px] text-slate-500 hover:text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed px-0.5">&gt;</button>
                         </div>
                     </div>
                     <div className="space-y-1.5">
@@ -3824,6 +3824,7 @@
                                 <button
                                     key={opt}
                                     type="button"
+                                    disabled={submitted}
                                     onClick={() => toggleOption(opt)}
                                     onKeyDown={(e) => { if (e.key === " ") { e.preventDefault(); toggleOption(opt); } }}
                                     className={`w-full text-left text-xs px-3 py-2 rounded-lg border transition-colors ${
@@ -3841,22 +3842,112 @@
                         <input
                             type="text"
                             value={ft}
+                            disabled={submitted}
                             onChange={(e) => setFreeTexts((prev) => ({ ...prev, [index]: e.target.value }))}
                             onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); advance(); } }}
                             placeholder="Or add your own answer…"
+                            style={{ opacity: submitted ? 0.55 : 1 }}
                             className="w-full bg-[#15121f] border border-[#2a2540] rounded px-3 py-1.5 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-500"
                         />
                     </div>
                     <div className="flex justify-end">
-                        <button
-                            type="button"
-                            onClick={advance}
-                            disabled={!hasAnswer}
-                            className="header-text text-xs px-4 py-1.5 rounded border border-[#e2b14c]/50 bg-[#e2b14c] text-[#100d1a] font-semibold hover:brightness-110 disabled:bg-[#2a2540] disabled:text-slate-600 disabled:border-[#2a2540] disabled:cursor-not-allowed"
-                        >
-                            {isLast ? "Submit Answers" : "Next →"}
-                        </button>
+                        {submitted ? (
+                            <button
+                                type="button"
+                                disabled
+                                aria-disabled="true"
+                                style={{ pointerEvents: "auto" }}
+                                className="header-text text-xs px-4 py-1.5 rounded border border-[#2a2540] bg-[#2a2540] text-[#6E6788] font-semibold cursor-not-allowed inline-flex items-center gap-1.5"
+                            >
+                                <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>
+                                Answers submitted
+                            </button>
+                        ) : (
+                            <button
+                                type="button"
+                                onClick={advance}
+                                disabled={!hasAnswer}
+                                className="header-text text-xs px-4 py-1.5 rounded border border-[#e2b14c]/50 bg-[#e2b14c] text-[#100d1a] font-semibold hover:brightness-110 disabled:bg-[#2a2540] disabled:text-slate-600 disabled:border-[#2a2540] disabled:cursor-not-allowed"
+                            >
+                                {isLast ? "Submit Answers" : "Next →"}
+                            </button>
+                        )}
                     </div>
+                </div>
+            );
+        }
+
+        // Detects the QuestionFlow's bundled-answers payload. The raw
+        // [ANSWERS] / Q:/A: wrapper is the model-only wire format — never rendered.
+        function isAnswersBundle(text) {
+            return typeof text === "string" && /^\s*\[ANSWERS\]/.test(text);
+        }
+
+        // Parse the bundled-answers payload into {q, a} pairs for clean rendering.
+        function parseAnswersBundle(text) {
+            if (typeof text !== "string") return [];
+            const inner = text
+                .replace(/^\s*\[ANSWERS\]\s*\n?/, "")
+                .replace(/\n?\s*\[\/ANSWERS\]\s*$/, "");
+            const pairs = [];
+            let cur = null;
+            for (const line of inner.split("\n")) {
+                if (line.startsWith("Q: ")) {
+                    if (cur) pairs.push(cur);
+                    cur = { q: line.slice(3), a: "" };
+                } else if (line.startsWith("A: ")) {
+                    if (cur) cur.a = line.slice(3);
+                    else cur = { q: "", a: line.slice(3) };
+                } else if (cur) {
+                    // continuation of a multi-line question/answer
+                    if (cur.a) cur.a += "\n" + line;
+                    else cur.q += "\n" + line;
+                }
+            }
+            if (cur) pairs.push(cur);
+            return pairs;
+        }
+
+        // A question flow is "answered" if a later user turn carries the bundled
+        // answers for its questions. Survives session reloads (where in-memory
+        // answeredFlowIds keys are regenerated) so a submitted card cannot re-fire.
+        function flowAnsweredInHistory(messages, fromIdx, questions) {
+            const qTexts = (questions || []).map((q) => (q && q.text) || "").filter(Boolean);
+            for (let j = fromIdx + 1; j < messages.length; j++) {
+                const m = messages[j];
+                if (m && m.role === "user" && isAnswersBundle(m.content)) {
+                    if (qTexts.length === 0) return true;
+                    if (qTexts.every((t) => m.content.includes(t))) return true;
+                }
+            }
+            return false;
+        }
+
+        // Cleaned render of the submitted-answers user bubble: stacked Q/A pairs in
+        // the same warm bubble, with the [ANSWERS] tags and Q:/A: prefixes stripped.
+        function AnswersBubble({ content }) {
+            const pairs = parseAnswersBundle(content);
+            if (pairs.length === 0) {
+                return (
+                    <div className="rounded-xl px-3 py-2 text-sm bg-[#e2b14c]/20 text-slate-100 whitespace-pre-wrap leading-[1.6]">
+                        {content}
+                    </div>
+                );
+            }
+            return (
+                <div
+                    className="font-mono max-w-full"
+                    style={{ background: "#382D29", borderRadius: "14px", padding: "15px 17px", display: "flex", flexDirection: "column" }}
+                >
+                    <div style={{ textTransform: "uppercase", fontSize: "10px", letterSpacing: "0.16em", color: "#9C8B73", marginBottom: "13px" }}>
+                        Your Answers · {pairs.length}
+                    </div>
+                    {pairs.map((p, idx) => (
+                        <div key={idx} style={{ marginTop: idx === 0 ? 0 : "13px" }}>
+                            <div style={{ fontSize: "11px", color: "#AC9C84", lineHeight: 1.45, whiteSpace: "pre-wrap" }}>{p.q}</div>
+                            <div style={{ fontSize: "12.5px", fontWeight: 400, color: "#DDD0BF", lineHeight: 1.45, marginTop: "3px", whiteSpace: "pre-wrap" }}>{p.a}</div>
+                        </div>
+                    ))}
                 </div>
             );
         }
@@ -6535,9 +6626,13 @@
                                 <div key={msg.id || i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
                                     {msg.role === "user" ? (
                                         <div className="max-w-[95%] flex flex-col items-end gap-1">
-                                            <div className="rounded-xl px-3 py-2 text-sm bg-[#e2b14c]/20 text-slate-100 whitespace-pre-wrap leading-[1.6]">
-                                                {msg.content}
-                                            </div>
+                                            {isAnswersBundle(msg.content) ? (
+                                                <AnswersBubble content={msg.content} />
+                                            ) : (
+                                                <div className="rounded-xl px-3 py-2 text-sm bg-[#e2b14c]/20 text-slate-100 whitespace-pre-wrap leading-[1.6]">
+                                                    {msg.content}
+                                                </div>
+                                            )}
                                             {msg.sent_context && (msg.sent_context.notes || msg.sent_context.attachment) ? (
                                                 <div className="flex flex-col items-end gap-1 max-w-full">
                                                     {msg.sent_context.notes && msg.sent_context.notes.length > 0 && (
@@ -6641,10 +6736,10 @@
                                                         ) : null}
                                                         {msg.parsed &&
                                                         msg.parsed.questions &&
-                                                        msg.parsed.questions.length > 0 &&
-                                                        !answeredFlowIds.has(msg.id) ? (
+                                                        msg.parsed.questions.length > 0 ? (
                                                             <QuestionFlow
                                                                 questions={msg.parsed.questions}
+                                                                submitted={answeredFlowIds.has(msg.id) || flowAnsweredInHistory(messages, i, msg.parsed.questions)}
                                                                 onSubmit={(bundled) => {
                                                                     setAnsweredFlowIds((prev) => new Set([...prev, msg.id]));
                                                                     submitMessage(bundled);

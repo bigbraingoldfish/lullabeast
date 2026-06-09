@@ -20,11 +20,15 @@ def test_lullabeast_wordmark_exists():
 
 
 def test_status_pill_with_running_state():
-    """RUNNING is a calm brand-green tinted pill (#4fd98c) with a glowing dot (.pill-glow)."""
+    """RUNNING is a calm brand-green tinted pill (#4fd98c text + tinted bg + outline) with NO
+    leading status dot — the .pill-glow / .pill-dot dot was removed."""
     with open('ui/index.html', 'r') as f:
         content = f.read()
-    assert re.search(r"RUNNING:\s*\{[^}]*pill-glow", content), "RUNNING should use the .pill-glow glowing-dot pill"
     assert re.search(r"RUNNING:\s*\{[^}]*#4fd98c", content), "RUNNING should use the calm brand green #4fd98c"
+    run_entry = re.search(r"RUNNING:\s*\{[^}]*\}", content)
+    assert run_entry, "RUNNING entry expected"
+    assert "pill-glow" not in run_entry.group(0) and "pill-dot" not in run_entry.group(0), \
+        "RUNNING pill must not carry a status dot (pill-glow/pill-dot removed)"
 
 
 def test_status_pill_waiting_for_sentinel():
