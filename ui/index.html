@@ -625,6 +625,15 @@
             return { label: disp.label, className: disp.className, title: disp.title };
         }
 
+        /** Phase 5 (R1): true when a child is effectively waiting on its parent — the parent
+         *  exists and has not COMPLETED. Mirrors the orchestrator selection-skip
+         *  (parent_state != "COMPLETED"). The queue *state* is DEPENDENCY_HOLD only when the
+         *  parent is in a blocking state (parent_blocks_child); a READY/ACTIVE parent leaves the
+         *  child READY but still un-selectable, so the wait must surface regardless of state. */
+        function isWaitingForParent(parentEntry) {
+            return !!parentEntry && parentEntry.state !== 'COMPLETED';
+        }
+
         /** Primary queue list/detail pill: live pipeline_status overrides queue row state. */
         function queueRowDisplay(entry) {
             if (!entry) return { label: '', className: 'bg-slate-700 text-white', title: '' };
@@ -8511,12 +8520,10 @@
                             {selected.started_at && <span className="header-text text-xs text-slate-500">Started {relTime(selected.started_at)}</span>}
                             {selected.completed_at && <span className="header-text text-xs text-slate-500">Completed {relTime(selected.completed_at)}</span>}
                         </div>
-                        {selected.state === 'DEPENDENCY_HOLD' && (
+                        {isWaitingForParent(parentEntry) && (
                             <p className="header-text text-xs text-slate-400">
-                                Waiting for: {parentEntry ? parentEntry.name : '(parent not found)'}
-                                {parentEntry && (
-                                    <span className="text-slate-500"> — {parentEntry.live_pipeline_status || parentEntry.state}</span>
-                                )}
+                                Waiting for: {parentEntry.name}
+                                <span className="text-slate-500"> — {parentEntry.live_pipeline_status || parentEntry.state}</span>
                             </p>
                         )}
                         {selected.skip_count > 0 && (
@@ -8657,6 +8664,28 @@
                         View in Pipeline Monitor
                     </button>
                 );
+
+                // Phase 5 (R1): one shared "Waiting for:" panel, rendered by any branch whose
+                // selected entry has an incomplete parent (DEPENDENCY_HOLD and READY alike).
+                const hubParent = selected && selected.parent_id ? queue.find(e => e.id === selected.parent_id) : null;
+                const waitingForParentPanel = isWaitingForParent(hubParent) ? (
+                    <div>
+                        <p className="header-text text-xs text-slate-400 mb-1">Waiting for:</p>
+                        <div className="flex items-center gap-2">
+                            <button onClick={() => setSelectedId(hubParent.id)}
+                                className="header-text text-xs text-[#e2b14c] hover:underline">{hubParent.name}</button>
+                            {(() => {
+                                const pp = queueParentStatePill(hubParent.state);
+                                return (
+                                    <span
+                                        className={`header-text px-1.5 py-0.5 rounded text-xs font-medium ${pp.className}`}
+                                        title={pp.title || undefined}
+                                    >{pp.label}</span>
+                                );
+                            })()}
+                        </div>
+                    </div>
+                ) : null;
 
                 // Eligibility + advisory fields from the per-entry `snapshot` — fed to the
                 // shared EscalationCommandPanel as props (the Queue renders the same
@@ -8844,29 +8873,11 @@
 
                 // DEPENDENCY_HOLD
                 if (state === 'DEPENDENCY_HOLD') {
-                    const parent = queue.find(e => e.id === selected.parent_id);
                     const getDescendantsHold = (id) => queue.filter(x => x.parent_id === id).flatMap(x => [x.id, ...getDescendantsHold(x.id)]);
                     const descendantsHold = getDescendantsHold(selected.id);
                     return (
                         <div className="space-y-3">
-                            {parent && (
-                                <div>
-                                    <p className="header-text text-xs text-slate-400 mb-1">Waiting for:</p>
-                                    <div className="flex items-center gap-2">
-                                        <button onClick={() => setSelectedId(parent.id)}
-                                            className="header-text text-xs text-[#e2b14c] hover:underline">{parent.name}</button>
-                                        {(() => {
-                                            const pp = queueParentStatePill(parent.state);
-                                            return (
-                                                <span
-                                                    className={`header-text px-1.5 py-0.5 rounded text-xs font-medium ${pp.className}`}
-                                                    title={pp.title || undefined}
-                                                >{pp.label}</span>
-                                            );
-                                        })()}
-                                    </div>
-                                </div>
-                            )}
+                            {waitingForParentPanel}
                             <div>
                                 <label className="header-text text-xs text-slate-400 mb-1 block">Depends on</label>
                                 <select
@@ -8920,6 +8931,7 @@
 
                 return (
                     <div className="space-y-4">
+                        {waitingForParentPanel}
                         {/* Dependency selector */}
                         <div>
                             <label className="header-text text-xs text-slate-400 mb-1 block">Depends on</label>
@@ -9110,6 +9122,9 @@
                                                 )}
                                                 {entry.state === 'ACTIVE' && entry.phases_total !== undefined && entry.phases_total > 0 && (
                                                     <span className="font-mono text-xs text-slate-500">{entry.phases_complete}/{entry.phases_total} phases</span>
+                                                )}
+                                                {isWaitingForParent(parentEntry) && entry.state !== 'DEPENDENCY_HOLD' && (
+                                                    <span className="header-text text-xs text-orange-300/70 block truncate">Waiting for {parentEntry.name}</span>
                                                 )}
                                             </div>
                                             {entry.skip_count > 0 && <span className="header-text text-xs text-orange-400">↩{entry.skip_count}</span>}

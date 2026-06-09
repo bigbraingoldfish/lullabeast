@@ -46,7 +46,7 @@ Each row in `pipeline_queue.json` has a `state`. Labels below are the queue-only
 | `ACTIVE` | **ACTIVE** (or live pipeline pill when `live_pipeline_status` set) | This row is the current queue slot for a project path. | Completes to `COMPLETED` / `FAILED`, or demoted when stale. |
 | `BLOCKED` | **QUEUE BLOCKED** | Row blocked (dependency / gate / policy). | Operator fixes underlying issue; may return to `READY` after revalidation. |
 | `SKIPPED_PENDING` | **Preflight failed** | Preflight failed for this path or a cascaded descendant; not removed from queue. | Preflight passes again (often after fixing repo); can return to `READY`. |
-| `DEPENDENCY_HOLD` | **Waiting on parent** | Parent project not `COMPLETED`. | Completing parent or clearing parent id. |
+| `DEPENDENCY_HOLD` | **Waiting on parent** | Parent is in a *blocking* state (`BLOCKED`/`ESCALATION`/`ESCALATION_ANSWERED`). A non-blocking but still-incomplete parent (`READY`/`ACTIVE`) keeps the child `READY` — the dashboard still shows it *Waiting for parent*. | Completing the parent or clearing the parent id. |
 | `ESCALATION` | **ESCALATION** | Parked for human escalation flow on this entry. | Commands / pipeline progression per server rules. |
 | `COMPLETED` | **COMPLETED** | Project finished successfully in queue terms. | Terminal for that row. |
 | `FAILED` | **FAILED** | Failed after retries / terminal failure. | Terminal; fix project and re-add or reset per operator workflow. |
