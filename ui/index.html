@@ -8077,6 +8077,20 @@
 
             useEffect(() => { fetchQueue({ force: true }); }, []);
 
+            // Live refresh: the orchestrator advances the queue server-side with no user
+            // action, so poll to reflect ACTIVE->COMPLETED, dependency clears, escalation
+            // transitions, and per-entry snapshot progress. Skip entirely while reordering
+            // so a poll cannot clobber an in-flight drag or spam the reorder-dirty error.
+            // 5s cadence (slower than the Pipeline screen's 3s; the queue changes less
+            // often and this avoids list re-render churn). Reads /api/queue only — never
+            // /api/state (the per-entry advisory stays snapshot-sourced).
+            useEffect(() => {
+                const id = setInterval(() => {
+                    if (!reorderModeRef.current) fetchQueue();
+                }, 5000);
+                return () => clearInterval(id);
+            }, []);
+
             // Fetch snapshot when selected entry or version changes
             useEffect(() => {
                 if (!selectedId) { setSnapshot(null); return; }
@@ -8977,7 +8991,7 @@
         }
 
         function PipelineScreen() {
-            const { setCurrentScreen, setPipelineStatus } = useContext(AppCtx);
+            const { setCurrentScreen } = useContext(AppCtx);
             const [pState, setPState] = useState({
                 pipeline_status: 'Loading...',
                 orchestrator_alive: true,
@@ -9120,10 +9134,14 @@
                 const stateInterval = setInterval(fetchState, 3000);
                 const roadmapInterval = setInterval(fetchRoadmap, 3000);
                 const reportInterval = setInterval(fetchCompletionReport, 5000);
+                // 0.3 — metrics on the interval so cost/per-phase data refresh mid-run
+                // (was one-shot on mount, leaving the "Run so far" cost frozen).
+                const metricsInterval = setInterval(fetchMetricsSummary, 5000);
                 return () => {
                     clearInterval(stateInterval);
                     clearInterval(roadmapInterval);
                     clearInterval(reportInterval);
+                    clearInterval(metricsInterval);
                 };
             }, []);
 
@@ -9252,8 +9270,9 @@
                 fetch('/api/state')
                     .then(res => res.json())
                     .then(data => {
+                        // ctx.pipelineStatus is owned by App's live /api/state poll;
+                        // PipelineScreen keeps only its local pState for detail rendering.
                         setPState(prev => ({ ...prev, ...data }));
-                        setPipelineStatus(data.pipeline_status || '');
                     })
                     .catch(() => {});
             }
@@ -10230,6 +10249,25 @@
                 return () => {
                     cancelled = true;
                 };
+            }, [setupComplete]);
+
+            // Live global pipeline status, owned by App so it stays fresh on EVERY
+            // screen (not only while PipelineScreen is mounted). ctx.pipelineStatus
+            // consumers — e.g. QueueScreen's Queue-stalled banner + Run-next gating —
+            // read this. QueueScreen deliberately does NOT fetch /api/state itself
+            // (its per-entry advisory is snapshot-sourced); App is the sanctioned owner.
+            useEffect(() => {
+                if (setupComplete !== true) return;
+                let cancelled = false;
+                const tick = () => {
+                    fetch("/api/state")
+                        .then((r) => r.json())
+                        .then((d) => { if (!cancelled) setPipelineStatus(d.pipeline_status || ""); })
+                        .catch(() => {});
+                };
+                tick();
+                const id = setInterval(tick, 5000);
+                return () => { cancelled = true; clearInterval(id); };
             }, [setupComplete]);
 
             const [, setUnsavedQueueOrderState] = useState(false);
