@@ -663,10 +663,18 @@
             return queueOnlyRowPill(entry.state);
         }
 
-        /** True when any queue row's live_pipeline_status is an in-flight pipeline (B-02). Not queue row ACTIVE alone. */
+        /** True when any queue row's live_pipeline_status is an in-flight pipeline. Used by
+         * shouldOpenIdeasOnColdBootstrap (P0-01) for first-run routing — NOT the preflight banner. */
         function queueEntriesHaveBusyLivePipeline(entries) {
             const busy = new Set(["RUNNING", "WAITING_FOR_SENTINEL", "WAITING_FOR_HUMAN"]);
             return (entries || []).some((e) => busy.has(e && e.live_pipeline_status));
+        }
+
+        /** True when any queue row is in entry-state ACTIVE — the LAUNCH predicate the preflight
+         * "currently running" banner warns about (4-C). Launch inserts-at-top-of-queue precisely
+         * when an entry is ACTIVE (see onLaunch), so the banner must follow the same signal. */
+        function queueHasActiveEntry(entries) {
+            return (entries || []).some((e) => e && e.state === 'ACTIVE');
         }
 
         /** P0-01: first-run default screen — Ideas when pipeline is not running and queue has no in-flight live status. */
@@ -4887,6 +4895,7 @@
             const [showRegenerateConfirm, setShowRegenerateConfirm] = useState(false);
             const [showLowReadinessGenerateConfirm, setShowLowReadinessGenerateConfirm] = useState(false);
             const [showFormatInvalidModal, setShowFormatInvalidModal] = useState(false);
+            const [showRoadmapNeedsDetailModal, setShowRoadmapNeedsDetailModal] = useState(false);
             const [activeDocTab, setActiveDocTab] = useState("prd");
             const [formatInvalidDetail, setFormatInvalidDetail] = useState("");
             const [fixFormatLoading, setFixFormatLoading] = useState(false);
@@ -5750,10 +5759,9 @@
                 // event object as a roadmap override and throw in rm.includes(...).
                 const rm = (typeof contentOverride === "string" ? contentOverride : roadmapContent) || "";
                 if (rm.includes("Transformation Aborted")) {
-                    setFormatInvalidDetail(
-                        "The roadmap contains a 'Transformation Aborted' phase and cannot be used for setup. Generate a valid roadmap first.",
-                    );
-                    setShowFormatInvalidModal(true);
+                    // Abort-stub roadmap → honest "needs more detail" recovery (with a bypass),
+                    // not the misleading "Roadmap Format Invalid" / Fix-Format dead-end. N1.
+                    setShowRoadmapNeedsDetailModal(true);
                     return;
                 }
                 setContinueNavPending(true);
@@ -5766,7 +5774,15 @@
                         const d = await r.json().catch(() => ({}));
                         setContinueNavPending(false);
                         if (!r.ok || !d.valid) {
-                            const errMsgs = (d.errors || []).map((e) => e.message || String(e)).join("; ");
+                            const errs = d.errors || [];
+                            if (errs.some((e) => e && e.code === "no_phase_lines")) {
+                                // Zero parseable phases → the PRD is too thin, not a fixable
+                                // format error. Route to the honest recovery modal (N1), whose
+                                // "Continue anyway" still lets the operator proceed.
+                                setShowRoadmapNeedsDetailModal(true);
+                                return;
+                            }
+                            const errMsgs = errs.map((e) => e.message || String(e)).join("; ");
                             setFormatInvalidDetail(errMsgs || "Roadmap did not pass validation.");
                             setShowFormatInvalidModal(true);
                             return;
@@ -5788,6 +5804,23 @@
                     });
             };
 
+            const _proceedToPreflight = (contentOverride) => {
+                // N1 "Continue anyway" bypass — skip validation entirely and seed Setup with the
+                // current roadmap. A deliberately small / unconventional roadmap is the operator's
+                // call; the validator stays advisory, not authoritative.
+                setShowRoadmapNeedsDetailModal(false);
+                const rm = (typeof contentOverride === "string" ? contentOverride : roadmapContent) || "";
+                if (ctx && ctx.navigateToPreflightWithSeed) {
+                    ctx.navigateToPreflightWithSeed(
+                        rm,
+                        prdContent || "",
+                        verificationContent || "",
+                        currentIdeaName || "",
+                        currentIdeaId || null,
+                    );
+                }
+            };
+
             const continueSetup = (contentOverride) => {
                 // Honor contentOverride only when it's a string. The "Continue to
                 // Setup" button is wired onClick={continueSetup}, so React passes a
@@ -5795,10 +5828,9 @@
                 // event object as a roadmap override and throw in rm.includes(...).
                 const rm = (typeof contentOverride === "string" ? contentOverride : roadmapContent) || "";
                 if (rm.includes("Transformation Aborted")) {
-                    setFormatInvalidDetail(
-                        "The roadmap contains a 'Transformation Aborted' phase and cannot be used for setup. Generate a valid roadmap first.",
-                    );
-                    setShowFormatInvalidModal(true);
+                    // Abort-stub roadmap → honest "needs more detail" recovery (with a bypass),
+                    // not the misleading "Roadmap Format Invalid" / Fix-Format dead-end. N1.
+                    setShowRoadmapNeedsDetailModal(true);
                     return;
                 }
                 if (!currentIdeaId) {
@@ -7276,6 +7308,49 @@
                         </div>
                     )}
 
+                    {/* N1 — PRD too thin for a runnable roadmap: honest recovery, soft (not a block) */}
+                    {showRoadmapNeedsDetailModal && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setShowRoadmapNeedsDetailModal(false)}>
+                            <div
+                                className="bg-[#15121f] border border-[#2a2540] rounded p-6 max-w-sm w-full space-y-4"
+                                data-testid="ideas-roadmap-needs-detail"
+                                onClick={(e) => e.stopPropagation()}
+                            >
+                                <div className="header-text text-sm text-slate-300">Your PRD needs more detail</div>
+                                <div className="text-xs text-slate-400 space-y-2">
+                                    <p>
+                                        This roadmap has no runnable phases yet — usually the PRD needs more detail
+                                        before it can become a roadmap. Keep refining and regenerate, or continue
+                                        anyway if this is intentional (e.g. a deliberately small enhancement roadmap).
+                                    </p>
+                                </div>
+                                <div className="flex gap-2 justify-end flex-wrap">
+                                    <button
+                                        type="button"
+                                        onClick={() => { setShowRoadmapNeedsDetailModal(false); setActiveDocTab("prd"); }}
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-400 border border-[#2a2540] hover:text-slate-200"
+                                    >
+                                        Keep editing PRD
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => { setShowRoadmapNeedsDetailModal(false); beginConvertAfterGuards(); }}
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-[#e2b14c] border border-[#e2b14c]/40 hover:border-[#e2b14c]/70"
+                                    >
+                                        Regenerate
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => _proceedToPreflight(roadmapContent)}
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#e2b14c] text-[#100d1a] font-semibold"
+                                    >
+                                        Continue anyway →
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
                     {/* Low readiness: confirm before POST /convert */}
                     {showLowReadinessGenerateConfirm && (
                         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setShowLowReadinessGenerateConfirm(false)}>
@@ -7717,32 +7792,50 @@
             );
         }
 
+        /**
+         * Map recents entries → de-duped path strings for the click-to-fill list, excluding
+         * throwaway /tmp working dirs (a defensive display backstop on top of the server-side
+         * real-dir filter). 4-A.
+         */
+        function recentsToDisplayPaths(recents) {
+            const seen = new Set();
+            const out = [];
+            (recents || []).forEach((r) => {
+                const p = typeof r === "object" && r && r.path ? r.path : r;
+                if (typeof p !== "string" || !p) return;
+                if (p === "/tmp" || p.startsWith("/tmp/")) return;
+                if (seen.has(p)) return;
+                seen.add(p);
+                out.push(p);
+            });
+            return out;
+        }
+
         function ServerPathInput({ value, onChange, disabled, fsStatus, recents, id, placeholder = "/path/to/your-project/my-app" }) {
-            const listId = id ? id + "-recents" : undefined;
+            // Recents are a visible click-to-fill list (4-A), not a hidden native autocomplete. Both
+            // the recents dropdown and browser autofill are deliberately off (autoComplete="off") so a
+            // previously-typed path never re-populates the field on reopen (N2 sticky-path bug).
+            const displayRecents = disabled ? [] : recentsToDisplayPaths(recents);
             return (
                 <div className="relative">
                     <div className="flex gap-2 items-stretch">
                         <input
                             id={id}
                             type="text"
-                            list={listId}
                             value={value}
                             onChange={(e) => onChange(e.target.value)}
                             disabled={disabled}
                             readOnly={disabled}
                             placeholder={placeholder}
+                            autoComplete="off"
+                            autoCorrect="off"
+                            autoCapitalize="off"
+                            spellCheck={false}
                             className={
                                 "flex-1 min-w-0 rounded border border-[#1c1829] px-3 py-2 text-sm font-mono " +
                                 (disabled ? "bg-[#0b0a12] text-slate-300" : "bg-[#221b36] text-slate-200")
                             }
                         />
-                        {recents && recents.length > 0 && id ? (
-                            <datalist id={listId}>
-                                {recents.map((r, i) => (
-                                    <option key={i} value={typeof r === "object" && r.path ? r.path : r} />
-                                ))}
-                            </datalist>
-                        ) : null}
                         {!disabled && fsStatus === "exists" && (
                             <span
                                 className="flex items-center text-emerald-500 shrink-0"
@@ -7760,14 +7853,32 @@
                             </span>
                         )}
                     </div>
+                    {displayRecents.length > 0 && (
+                        <div className="mt-1.5 flex flex-wrap gap-1.5 items-center" data-testid="server-path-recents">
+                            <span className="text-[11px] text-slate-500">Recent:</span>
+                            {displayRecents.slice(0, 6).map((p, i) => (
+                                <button
+                                    key={i}
+                                    type="button"
+                                    onClick={() => onChange(p)}
+                                    title={p}
+                                    className="text-[11px] font-mono px-2 py-0.5 rounded border border-[#1c1829] bg-[#221b36] text-slate-400 hover:text-slate-200 hover:border-[#2a2540] max-w-[16rem] truncate"
+                                >
+                                    {p}
+                                </button>
+                            ))}
+                        </div>
+                    )}
                 </div>
             );
         }
 
         // ─── Add Project Modal ────────────────────────────────────────────────────
 
-        function AddProjectModal({ onClose, onAdded }) {
-            const [projectPath, setProjectPath] = useState('');
+        function AddProjectModal({ onClose, onAdded, initialPath }) {
+            // initialPath seeds the field when the Setup-screen N4 redirect opens this modal
+            // prefilled. Seeded at mount only; the modal remounts per open, so a normal open is empty.
+            const [projectPath, setProjectPath] = useState(initialPath || '');
             const [validating, setValidating] = useState(false);
             const [errors, setErrors] = useState([]);
             const [queueAddPathFsStatus, setQueueAddPathFsStatus] = useState(null);
@@ -7908,12 +8019,21 @@
          */
 
         function QueueScreen() {
-            const { pipelineStatus, setUnsavedQueueOrder, safeNavigate } = useContext(AppCtx);
+            const { pipelineStatus, setUnsavedQueueOrder, safeNavigate, pendingQueueAddPath, clearPendingQueueAddPath } = useContext(AppCtx);
             const [queue, setQueue] = useState([]);
             const [queueMode, setQueueMode] = useState('auto');
             const [selectedId, setSelectedId] = useState(null);
             const [nextEligible, setNextEligible] = useState(null);
             const [showAddModal, setShowAddModal] = useState(false);
+            const [addModalInitialPath, setAddModalInitialPath] = useState('');
+            // N4 — App stashes a path here when redirecting from Setup; open Add-Project prefilled, once.
+            useEffect(() => {
+                if (pendingQueueAddPath) {
+                    setAddModalInitialPath(pendingQueueAddPath);
+                    setShowAddModal(true);
+                    if (clearPendingQueueAddPath) clearPendingQueueAddPath();
+                }
+            }, [pendingQueueAddPath]);
             const [error, setError] = useState('');
             const [triggerBusy, setTriggerBusy] = useState(false);
             const [triggerMsg, setTriggerMsg] = useState('');
@@ -8810,7 +8930,7 @@
                     <div className="bg-[#15121f] border-b border-[#1c1829] px-6 py-3 flex items-center gap-4 flex-shrink-0">
                         <div className="flex items-center gap-4 min-w-0 flex-1">
                             <h1 className="header-text text-base font-semibold text-slate-200">Project Queue</h1>
-                            <button onClick={() => setShowAddModal(true)}
+                            <button onClick={() => { setAddModalInitialPath(''); setShowAddModal(true); }}
                                 disabled={reorderDirty}
                                 title={reorderDirty ? "Save or cancel reorder first" : undefined}
                                 className="header-text text-xs px-3 py-1.5 rounded bg-[#e2b14c] text-slate-900 font-semibold hover:bg-[#f0c56b] disabled:opacity-40">
@@ -8982,6 +9102,7 @@
 
                     {showAddModal && (
                         <AddProjectModal
+                            initialPath={addModalInitialPath}
                             onClose={() => setShowAddModal(false)}
                             onAdded={() => { fetchQueue(); setShowAddModal(false); }}
                         />
@@ -10282,6 +10403,11 @@
             const [seedRoadmap, setSeedRoadmap] = useState("");
             const [repoPath, setRepoPath] = useState("");
             const [repoPathLocked, setRepoPathLocked] = useState(false);
+            // N4 — redirect modal + cross-screen prefill for "repo has a roadmap on disk but no
+            // linked idea". Setup stays Ideas-only; this points the operator at the Queue's
+            // + Add Project flow (which accepts on-disk-roadmap projects), prefilled with the path.
+            const [showRepoNeedsIdeaModal, setShowRepoNeedsIdeaModal] = useState(false);
+            const [pendingQueueAddPath, setPendingQueueAddPath] = useState(null);
             const [roadmapSeed, setRoadmapSeed] = useState("");
             /** PRD text from Project Ideas, passed to preflight + launch when non-empty. */
             const [launchPrdContent, setLaunchPrdContent] = useState("");
@@ -10464,13 +10590,27 @@
                         if (check.exists) {
                             setRepoPathLocked(true);
                             setRepoPath(path);
-                            /* P0 Stage J.4 — the on-disk auto-load (formerly
-                             * fetching /api/setup/repo-roadmap-hint to
-                             * prepopulate the Step 2 textarea) was removed.
-                             * The Setup screen no longer ingests free-text
-                             * roadmap content; the only path for Step 2
-                             * to populate is navigateToPreflightWithSeed
-                             * from Project Ideas. */
+                            // N4 — Setup is Ideas-only. If the operator staged an EXISTING repo that
+                            // already has a roadmap on disk but no linked Project Idea, it can't be
+                            // launched from here — point them at Queue → + Add Project (which does
+                            // accept on-disk-roadmap projects), prefilled. Detect via repo-roadmap-hint.
+                            const hasLinkedIdea = Boolean(
+                                (roadmapSeed || "").trim() ||
+                                (launchPrdContent || "").trim() ||
+                                (launchVerificationContent || "").trim()
+                            );
+                            if (!hasLinkedIdea) {
+                                fetch("/api/setup/repo-roadmap-hint", {
+                                    method: "POST",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({ path }),
+                                })
+                                    .then((r) => (r.ok ? r.json() : null))
+                                    .then((hint) => {
+                                        if (hint && hint.found) setShowRepoNeedsIdeaModal(true);
+                                    })
+                                    .catch(() => {});
+                            }
                         } else if (check.parent_exists) {
                             setShowCreateFolderPrompt(true);
                         } else {
@@ -10579,7 +10719,7 @@
                 if (currentScreen !== 'preflight') return;
                 fetch('/api/queue')
                     .then(r => r.json())
-                    .then(d => setPreflightQueueActive(queueEntriesHaveBusyLivePipeline(d.queue)))
+                    .then(d => setPreflightQueueActive(queueHasActiveEntry(d.queue)))
                     .catch(() => {});
             }, [currentScreen]);
 
@@ -10590,7 +10730,7 @@
                     // Check if there is an active queue entry
                     const qr = await fetch('/api/queue').then(r => r.json()).catch(() => ({queue: []}));
                     const qActive = (qr.queue || []).find(e => e.state === 'ACTIVE');
-                    setPreflightQueueActive(queueEntriesHaveBusyLivePipeline(qr.queue));
+                    setPreflightQueueActive(queueHasActiveEntry(qr.queue));
 
                     if (qActive) {
                         // Insert at top of queue — add then move to position 1
@@ -10671,6 +10811,8 @@
 
             const appCtxValue = {
                 navigateToPreflightWithSeed,
+                pendingQueueAddPath,
+                clearPendingQueueAddPath: () => setPendingQueueAddPath(null),
                 setSeedRoadmap,
                 setCurrentScreen,
                 currentScreen,
@@ -10759,6 +10901,46 @@
                             {currentScreen === "ideas" && <IdeasScreen />}
                         </div>
                     </div>
+                    {/* N4 — staged repo has an on-disk roadmap but no linked idea → redirect to the Queue */}
+                    {showRepoNeedsIdeaModal && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setShowRepoNeedsIdeaModal(false)}>
+                            <div
+                                className="bg-[#15121f] border border-[#2a2540] rounded p-6 max-w-md w-full space-y-4"
+                                data-testid="setup-repo-needs-idea"
+                                onClick={(e) => e.stopPropagation()}
+                            >
+                                <div className="header-text text-sm text-slate-300">This repo already has a roadmap</div>
+                                <div className="text-xs text-slate-400 space-y-2">
+                                    <p>
+                                        The Setup screen launches projects linked to a Project Idea. This repository
+                                        already has a <span className="font-mono">roadmap.md</span> on disk, so launch it
+                                        from the Queue instead — <span className="text-slate-300">+ Add Project</span> accepts
+                                        an existing on-disk roadmap.
+                                    </p>
+                                </div>
+                                <div className="flex gap-2 justify-end flex-wrap">
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowRepoNeedsIdeaModal(false)}
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-400 border border-[#2a2540] hover:text-slate-200"
+                                    >
+                                        Stay on Setup
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setShowRepoNeedsIdeaModal(false);
+                                            setPendingQueueAddPath(repoPath);
+                                            setCurrentScreen('queue');
+                                        }}
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#e2b14c] text-[#100d1a] font-semibold"
+                                    >
+                                        Go to Queue → Add Project
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
                 </AppCtx.Provider>
             );
         }

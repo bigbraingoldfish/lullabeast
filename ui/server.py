@@ -1860,6 +1860,26 @@ def _read_recent_projects() -> list:
     return []
 
 
+def _live_recent_projects() -> list:
+    """Recent-projects entries whose ``path`` is still a real directory on disk.
+
+    The persisted list can accumulate dead paths (a project dir was deleted, or a test's
+    ``tmp_path`` was cleaned up). The GET endpoint serves this filtered view so the UI's
+    recents only ever offer projects that actually exist — "real projects only" (4-A/4-B).
+    Malformed entries (non-dict / missing / empty ``path``) are dropped too. The ``/tmp``
+    exclusion is a separate frontend display backstop, so a genuine ``/tmp`` working dir is
+    intentionally NOT filtered here.
+    """
+    return [
+        e
+        for e in _read_recent_projects()
+        if isinstance(e, dict)
+        and isinstance(e.get("path"), str)
+        and e["path"]
+        and os.path.isdir(e["path"])
+    ]
+
+
 def _write_recent_projects_atomic(entries: list) -> None:
     path = _ui_recent_projects_path()
     parent = os.path.dirname(path)
@@ -6305,10 +6325,14 @@ def _validate_roadmap_content(content: str) -> dict:
             phase_matches.append((i, m.group(1), line))
 
     if not phase_matches:
+        # Machine-readable code so the UI can distinguish a genuinely-empty / abort-stub
+        # roadmap (→ honest "your PRD needs more detail" recovery) from a malformed-but-
+        # substantive one that has phases (→ "Fix Format"). N1.
         errors.append({
             "line": 0,
             "content": "",
             "message": "At least one valid phase line is required",
+            "code": "no_phase_lines",
         })
         return {"valid": False, "errors": errors}
 
@@ -7414,8 +7438,13 @@ async def post_setup_preflight(request: Request):
 
 @app.get("/api/setup/recent-projects")
 def get_setup_recent_projects():
-    """Recent project directories (real paths) that passed preflight or switch validation."""
-    return {"projects": _read_recent_projects()}
+    """Recent project directories that passed preflight or switch validation.
+
+    Returns only entries whose path is a real directory on disk (``_live_recent_projects``),
+    so the recents UI never surfaces dead paths (4-A/4-B). The DELETE / prune endpoints below
+    operate on the raw persisted list; only this display read is filtered.
+    """
+    return {"projects": _live_recent_projects()}
 
 
 @app.delete("/api/setup/recent-projects")

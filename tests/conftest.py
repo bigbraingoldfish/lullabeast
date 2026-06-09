@@ -88,3 +88,24 @@ def _protect_pipeline_symlinks():
                     os.replace(tmp, link)
             except OSError:
                 pass
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _prune_recent_projects_after_session():
+    """Self-clean dead recents after the whole suite (4-B).
+
+    Tests that drive real preflight / switch validation append the project's realpath to the
+    operator's recents file (``~/.openclaw/ui_recent_projects.json``). When those paths are
+    ``tmp_path`` dirs that are gone by session end, the entries become dead and would otherwise
+    accumulate in the operator's UI. This session teardown runs AFTER every function-scoped
+    ``_ui_recent_projects_path`` patch (e.g. ``recents_file``) is torn down, so it acts on the
+    REAL file — and prune only removes entries whose directory no longer exists, never a live
+    project. Best-effort: a failure here must never fail the suite.
+    """
+    yield
+    try:
+        from ui.server import post_setup_recent_projects_prune
+
+        post_setup_recent_projects_prune()
+    except Exception:
+        pass

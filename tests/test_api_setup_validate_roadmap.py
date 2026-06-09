@@ -197,3 +197,41 @@ class TestValidateRoadmapEndpoint:
         data = response.json()
         assert data["valid"] is False
         assert len(data["errors"]) >= 1
+
+
+# ---------------------------------------------------------------------------
+# N1 — machine-readable code on the zero-phase short-circuit error
+# ---------------------------------------------------------------------------
+
+class TestNoPhaseLinesCode:
+    """The 'no valid phase line' error carries ``code: 'no_phase_lines'`` so the UI can tell a
+    genuinely-empty / abort-stub roadmap ('your PRD needs more detail' recovery) apart from a
+    malformed-but-substantive one ('Fix Format'). Brittle string-matching on the message is
+    avoided — the code is the contract."""
+
+    def test_no_phase_error_carries_code(self):
+        result = _validate_roadmap_content("")
+        assert result["valid"] is False
+        assert any(e.get("code") == "no_phase_lines" for e in result["errors"]), (
+            "the zero-phase error must carry code='no_phase_lines'"
+        )
+
+    def test_malformed_with_phases_is_not_tagged_no_phase_lines(self):
+        """A roadmap WITH a phase line but missing > Test:/Behavioral Verification is a Fix-Format
+        case — it must NOT be tagged no_phase_lines (that routes to the wrong recovery)."""
+        result = _validate_roadmap_content(VALID_PHASE_LINE + "\n")
+        assert result["valid"] is False
+        assert not any(e.get("code") == "no_phase_lines" for e in result["errors"]), (
+            "a roadmap that has phases must not be tagged no_phase_lines"
+        )
+
+    def test_endpoint_surfaces_no_phase_code(self):
+        client = load_server()
+        resp = client.post(
+            "/api/setup/validate-roadmap",
+            json={"content": "Just some prose with no phase lines at all.\n"},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["valid"] is False
+        assert any(e.get("code") == "no_phase_lines" for e in data["errors"])
