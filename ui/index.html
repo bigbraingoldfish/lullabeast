@@ -7896,30 +7896,83 @@
         }
 
         function ServerPathInput({ value, onChange, disabled, fsStatus, recents, id, placeholder = "/path/to/your-project/my-app" }) {
-            // Recents are a visible click-to-fill list (4-A), not a hidden native autocomplete. Both
-            // the recents dropdown and browser autofill are deliberately off (autoComplete="off") so a
-            // previously-typed path never re-populates the field on reopen (N2 sticky-path bug).
-            const displayRecents = disabled ? [] : recentsToDisplayPaths(recents);
+            // Recents surface as a styled, app-themed dropdown (rounded, dark-purple, soft shadow) —
+            // NOT the bare native OS autocomplete dropdown, and NOT a sticky browser autofill. It opens
+            // on focus, filters as you type, and fills on click. Browser autofill stays off
+            // (autoComplete="off") so a previously-typed path never re-populates on reopen (N2);
+            // recentsToDisplayPaths keeps it to real, non-/tmp projects (4-A/4-B). Shared by every
+            // repository selector (Setup / Add-Project / Switch-Project) for a consistent look.
+            const [open, setOpen] = useState(false);
+            const allRecents = disabled ? [] : recentsToDisplayPaths(recents);
+            const q = (value || "").trim().toLowerCase();
+            const filtered = q ? allRecents.filter((p) => p.toLowerCase().includes(q)) : allRecents;
+            const hasRecents = allRecents.length > 0;
+            const showMenu = open && filtered.length > 0;
+            const listId = id ? id + "-recents" : undefined;
             return (
                 <div className="relative">
                     <div className="flex gap-2 items-stretch">
-                        <input
-                            id={id}
-                            type="text"
-                            value={value}
-                            onChange={(e) => onChange(e.target.value)}
-                            disabled={disabled}
-                            readOnly={disabled}
-                            placeholder={placeholder}
-                            autoComplete="off"
-                            autoCorrect="off"
-                            autoCapitalize="off"
-                            spellCheck={false}
-                            className={
-                                "flex-1 min-w-0 rounded border border-[#1c1829] px-3 py-2 text-sm font-mono " +
-                                (disabled ? "bg-[#0b0a12] text-slate-300" : "bg-[#221b36] text-slate-200")
-                            }
-                        />
+                        <div className="relative flex-1 min-w-0">
+                            <input
+                                id={id}
+                                type="text"
+                                value={value}
+                                onChange={(e) => { onChange(e.target.value); setOpen(true); }}
+                                onFocus={() => setOpen(true)}
+                                onBlur={() => window.setTimeout(() => setOpen(false), 120)}
+                                disabled={disabled}
+                                readOnly={disabled}
+                                placeholder={placeholder}
+                                autoComplete="off"
+                                autoCorrect="off"
+                                autoCapitalize="off"
+                                spellCheck={false}
+                                role="combobox"
+                                aria-expanded={showMenu}
+                                aria-controls={listId}
+                                className={
+                                    "w-full rounded-lg border border-[#1c1829] px-3 py-2 text-sm font-mono " +
+                                    (hasRecents ? "pr-9 " : "") +
+                                    (disabled ? "bg-[#0b0a12] text-slate-300" : "bg-[#221b36] text-slate-200")
+                                }
+                            />
+                            {!disabled && hasRecents && (
+                                <button
+                                    type="button"
+                                    tabIndex={-1}
+                                    onMouseDown={(e) => { e.preventDefault(); setOpen((o) => !o); }}
+                                    aria-label="Show recent projects"
+                                    className="absolute inset-y-0 right-0 flex items-center px-2.5 text-slate-500 hover:text-slate-300"
+                                >
+                                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true"
+                                        className={"transition-transform " + (showMenu ? "rotate-180" : "")}>
+                                        <path d="M2.5 4.5 L6 8 L9.5 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                                    </svg>
+                                </button>
+                            )}
+                            {showMenu && (
+                                <div
+                                    id={listId}
+                                    data-testid="server-path-recents"
+                                    role="listbox"
+                                    className="absolute z-30 left-0 right-0 mt-1 max-h-56 overflow-y-auto rounded-lg border border-[#2a2540] bg-[#15121f] py-1 shadow-xl shadow-black/50"
+                                >
+                                    <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-slate-600">Recent projects</div>
+                                    {filtered.slice(0, 8).map((p, i) => (
+                                        <button
+                                            key={i}
+                                            type="button"
+                                            role="option"
+                                            onMouseDown={(e) => { e.preventDefault(); onChange(p); setOpen(false); }}
+                                            title={p}
+                                            className="block w-full truncate px-3 py-1.5 text-left text-xs font-mono text-slate-300 hover:bg-[#221b36] hover:text-slate-100"
+                                        >
+                                            {p}
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
                         {!disabled && fsStatus === "exists" && (
                             <span
                                 className="flex items-center text-emerald-500 shrink-0"
@@ -7937,22 +7990,6 @@
                             </span>
                         )}
                     </div>
-                    {displayRecents.length > 0 && (
-                        <div className="mt-1.5 flex flex-wrap gap-1.5 items-center" data-testid="server-path-recents">
-                            <span className="text-[11px] text-slate-500">Recent:</span>
-                            {displayRecents.slice(0, 6).map((p, i) => (
-                                <button
-                                    key={i}
-                                    type="button"
-                                    onClick={() => onChange(p)}
-                                    title={p}
-                                    className="text-[11px] font-mono px-2 py-0.5 rounded border border-[#1c1829] bg-[#221b36] text-slate-400 hover:text-slate-200 hover:border-[#2a2540] max-w-[16rem] truncate"
-                                >
-                                    {p}
-                                </button>
-                            ))}
-                        </div>
-                    )}
                 </div>
             );
         }
