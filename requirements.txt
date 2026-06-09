@@ -1,4 +1,4 @@
-# AutoDev — full runtime dependencies (UI dashboard + orchestration pipeline).
+# Lullabeast — full runtime dependencies (UI dashboard + orchestration pipeline).
 # Pinned for reproducible installs; run `pip-audit -r requirements.txt` periodically
 # and upgrade the pins after review. Install everything with:
 #     pip install -r requirements.txt

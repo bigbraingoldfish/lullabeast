@@ -1,6 +1,6 @@
-# AutoDev Pipeline Signals Plugin
+# Lullabeast Pipeline Signals Plugin
 
-OpenClaw plugin for AutoDev pipeline liveness and output signaling.
+OpenClaw plugin for Lullabeast pipeline liveness and output signaling.
 
 ## Purpose
 

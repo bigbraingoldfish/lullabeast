@@ -2,11 +2,11 @@
 
 ## Security model
 
-The AutoDev API has **no authentication**. Every route under `/api/*` is reachable by anyone who can connect to the server's TCP port.
+The Lullabeast API has **no authentication**. Every route under `/api/*` is reachable by anyone who can connect to the server's TCP port.
 
 The UI and API are designed to run on loopback (`127.0.0.1`, port **18790**) and must not be exposed to untrusted networks without a reverse proxy, TLS, and access control in front. See [SETUP.md — Security and network exposure](SETUP.md#security-and-network-exposure) for binding options.
 
-The agent pipeline (planner → executor → reviewer) executes code on the host machine. The trust boundary is the **local user account**: anyone who can invoke the pipeline API can cause code to run under the account that owns the AutoDev process. Treat this as operator tooling for a trusted machine, not a multi-tenant service.
+The agent pipeline (planner → executor → reviewer) executes code on the host machine. The trust boundary is the **local user account**: anyone who can invoke the pipeline API can cause code to run under the account that owns the Lullabeast process. Treat this as operator tooling for a trusted machine, not a multi-tenant service.
 
 ## Reporting vulnerabilities
 
@@ -29,7 +29,7 @@ Do not send vulnerability reports by email. We do not publish a security contact
 
 - The underlying LLM models or their hosted APIs (OpenRouter, Anthropic, etc.)
 - OpenClaw itself — it is a separate project and has its own security surface
-- Issues in third-party Python dependencies that are not exploitable via AutoDev's code paths (report those upstream)
+- Issues in third-party Python dependencies that are not exploitable via Lullabeast's code paths (report those upstream)
 
 ## Known limitations
 

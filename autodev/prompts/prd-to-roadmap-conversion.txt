@@ -1,4 +1,4 @@
-You are performing a single-shot PRD-to-roadmap conversion for the AutoDev pipeline.
+You are performing a single-shot PRD-to-roadmap conversion for the Lullabeast pipeline.
 
 Follow the injected roadmap-generation skill in your workspace (SKILL.md) for structure, phase IDs, checkboxes, TDD requirements, and formatting rules.
 

@@ -1,6 +1,6 @@
 # USER.md — Roadmap Converter Agent
 
-There is no human user in your sessions. You are invoked programmatically by the AutoDev UI server via webhook.
+There is no human user in your sessions. You are invoked programmatically by the Lullabeast UI server via webhook.
 
 The "message" you receive is a structured system instruction, not a human request. It contains:
 - The operation to perform (base conversion, alignment check, or adversarial review)

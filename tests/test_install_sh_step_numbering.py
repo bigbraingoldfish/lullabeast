@@ -15,7 +15,7 @@ def _read_install_sh() -> str:
 
 def test_header_declares_14_steps():
     text = _read_install_sh()
-    assert "# install.sh — AutoDev interactive setup (14 steps)" in text
+    assert "# install.sh — Lullabeast interactive setup (14 steps)" in text
     assert "(15 steps)" not in text
 
 

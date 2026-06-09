@@ -1,7 +1,7 @@
 # ASSUMPTIONS.md — Skills Integration Operator Review Document
 
 > Generated: 2026-03-13
-> Scope: Integration of optional discipline skills into the AutoDev pipeline.
+> Scope: Integration of optional discipline skills into the Lullabeast pipeline.
 > This document is the operator's primary tool for reviewing the implementation and catching misalignment between intent and execution.
 
 ---
@@ -76,7 +76,7 @@
 |------|-------------------|
 | `~/.openclaw/orchestrator.py` | Added `from skill_manager import SkillManager` import; added `self.skill_manager = SkillManager(WORKSPACE_DIR)` in `__init__`; added `self.skill_manager.inject_skill(...)` before planner, executor, and reviewer webhook calls (3 insertions) |
 | `~/.openclaw/openclaw.json` | Added `"pipeline": { "skills": { "enabled": true, ... } }` top-level block |
-| `~/.openclaw/README.md` | Added "AutoDev Pipeline — Skills System" section (operator documentation) |
+| `~/.openclaw/README.md` | Added "Lullabeast Pipeline — Skills System" section (operator documentation) |
 | `~/.openclaw/deployment-package/Updates/PIPELINE-SPEC (1).md` | Added `§Skills — Optional Discipline Skill Injection` section at end |
 | `~/.openclaw/workspace-planner/AGENTS.md` | Appended "## Discipline Skill" section (one-line note about optional SKILL.md) |
 | `~/.openclaw/workspace-executor/AGENTS.md` | Same as planner |

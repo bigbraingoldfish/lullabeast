@@ -37,7 +37,7 @@ export function register(api: OpenClawPluginApi): void {
 
 export default {
   id: "autodev-pipeline-signals",
-  name: "AutoDev Pipeline Signals",
+  name: "Lullabeast Pipeline Signals",
   description:
     "Pipeline + Ideas signals: agent_end sentinels, before_agent_finalize structural revise, " +
     "and Tier A stall activity stamps (model_call_*, after_tool_call, agent event streams)",

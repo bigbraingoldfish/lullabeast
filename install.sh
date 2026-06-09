@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — AutoDev interactive setup (14 steps)
+# install.sh — Lullabeast interactive setup (14 steps)
 # Usage: ./install.sh [--force] [--non-interactive] [--skip-playwright]
 set -euo pipefail
 
@@ -72,7 +72,7 @@ else
         warn "Unknown OS: $OS_TYPE — proceeding due to --force"
         OS_STATUS="unknown (forced)"
     else
-        fail "Unsupported OS: $OS_TYPE. AutoDev requires Linux, macOS, or WSL2."
+        fail "Unsupported OS: $OS_TYPE. Lullabeast requires Linux, macOS, or WSL2."
     fi
 fi
 
@@ -209,7 +209,7 @@ fi
 unset _OC_ENV_INPUT
 
 # openclaw.json must already exist — we never create it.
-# Its absence means OpenClaw is not installed or is broken beyond what AutoDev
+# Its absence means OpenClaw is not installed or is broken beyond what Lullabeast
 # can repair (gateway process, auth-profiles, and agent session management all
 # depend on it).  Fail fast here rather than generating a stub.
 if [ ! -f "$OPENCLAW_ROOT/openclaw.json" ]; then
@@ -741,7 +741,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 # 8/14  REGISTER AUTODEV AGENTS (OPENCLAW)
 # ─────────────────────────────────────────────────────────────────────────────
-hdr "8/14  Register AutoDev agents in openclaw.json"
+hdr "8/14  Register Lullabeast agents in openclaw.json"
 
 REGISTER_STATUS_STEP="not attempted"
 TOOLS_PROFILE_STEP="skipped"
@@ -771,10 +771,10 @@ print(','.join(openclaw_hooks_issues(sys.argv[1])))
         warn "Could not audit hooks block in openclaw.json — fix JSON syntax and re-run install.sh"
         HOOKS_STEP="audit_error"
     elif [ -z "$HOOK_ISSUES" ]; then
-        ok "openclaw.json hooks baseline OK (webhook Bearer + session-key prefixes for AutoDev)"
+        ok "openclaw.json hooks baseline OK (webhook Bearer + session-key prefixes for Lullabeast)"
         HOOKS_STEP="ok"
     else
-        warn "openclaw.json hooks need changes for AutoDev webhook calls:"
+        warn "openclaw.json hooks need changes for Lullabeast webhook calls:"
         case ",$HOOK_ISSUES," in
             *,no_hooks_object,*|*,hooks_not_object,*) warn "  · hooks must be a JSON object" ;;
         esac
@@ -1034,7 +1034,7 @@ print(set_openclaw_global_tools_profile(sys.argv[1], 'coding'))
 
     case "$REGISTER_DRY_STATUS" in
         already_registered)
-            ok "All AutoDev agents already registered in openclaw.json"
+            ok "All Lullabeast agents already registered in openclaw.json"
             REGISTER_STATUS_STEP="already registered"
             ;;
         dry_run)
@@ -1042,16 +1042,16 @@ print(set_openclaw_global_tools_profile(sys.argv[1], 'coding'))
             # `head -n -1` is GNU-only; `sed '$d'` (delete last line) is BSD/GNU portable.
             echo "$REGISTER_DRY_OUTPUT" | sed '$d'
             info "The above changes would be applied to $OPENCLAW_ROOT/openclaw.json"
-            if prompt_yn "Register missing AutoDev agents (planner, executor, reviewer, escalation, prd-creator, roadmap-converter)? [Y/n]" "Y"; then
+            if prompt_yn "Register missing Lullabeast agents (planner, executor, reviewer, escalation, prd-creator, roadmap-converter)? [Y/n]" "Y"; then
                 APPLY_RESULT=$("$PYTHON" "$REGISTER_AGENT" \
                     "$OPENCLAW_ROOT/openclaw.json" "$OPENCLAW_ROOT" --apply)
                 case "$APPLY_RESULT" in
                     registered)
-                        ok "AutoDev agents registered in openclaw.json"
+                        ok "Lullabeast agents registered in openclaw.json"
                         REGISTER_STATUS_STEP="registered"
                         ;;
                     already_registered)
-                        ok "AutoDev agents already registered (concurrent write?)"
+                        ok "Lullabeast agents already registered (concurrent write?)"
                         REGISTER_STATUS_STEP="already registered"
                         ;;
                     error:*)
@@ -1082,7 +1082,7 @@ print(set_openclaw_global_tools_profile(sys.argv[1], 'coding'))
 
     # Seed/upgrade truncation caps so AGENTS.md (incl. the Stage A Always-Apply
     # rules) is not truncated at bootstrap or dropped on compaction. Idempotent;
-    # touches only AutoDev agents and leaves all other keys intact. New agents are
+    # touches only Lullabeast agents and leaves all other keys intact. New agents are
     # already born correct via register_agent; this covers existing entries too.
     CTX_LIMITS_RESULT=$(
         cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
@@ -1417,7 +1417,7 @@ PYEOF
         # already has agents present with empty tools, ensure the executor and
         # reviewer can use browser.
         info "Pipeline executors + reviewers must have 'browser' in their tools.allow list."
-        info "  Re-running step 8 (Register AutoDev agents) ensures this."
+        info "  Re-running step 8 (Register Lullabeast agents) ensures this."
     fi
 fi
 
@@ -1428,7 +1428,7 @@ hdr "13/14  Marking setup complete"
 
 date -u +%Y-%m-%dT%H:%M:%SZ > "$SETUP_MARKER"
 ok "Setup marker written to $SETUP_MARKER"
-info "  The AutoDev UI uses this file for first-run detection"
+info "  The Lullabeast UI uses this file for first-run detection"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 14/14  SUMMARY

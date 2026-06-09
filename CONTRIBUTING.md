@@ -1,4 +1,4 @@
-# Contributing to AutoDev
+# Contributing to Lullabeast
 
 ## Development setup
 

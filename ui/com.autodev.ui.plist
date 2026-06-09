@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- AutoDev UI — macOS LaunchAgent (per-user, not LaunchDaemon).
+<!-- Lullabeast UI — macOS LaunchAgent (per-user, not LaunchDaemon).
 
-     AutoDev runs as the invoking user, talks to per-user ~/.openclaw/ files,
+     Lullabeast runs as the invoking user, talks to per-user ~/.openclaw/ files,
      and never needs root, so this is a LaunchAgent loaded under the user GUI
      session — not a system LaunchDaemon.
 
@@ -26,14 +26,14 @@
     <!-- EDIT THE PATHS BELOW BEFORE INSTALLING.
          First entry: path to your python3 (e.g. /usr/bin/python3 or
          /opt/homebrew/bin/python3).  Last entry must reference ui/server.py
-         inside your AutoDev checkout. -->
+         inside your Lullabeast checkout. -->
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/python3</string>
         <string>ui/server.py</string>
     </array>
 
-    <!-- EDIT THIS PATH BEFORE INSTALLING — set to your AutoDev checkout root. -->
+    <!-- EDIT THIS PATH BEFORE INSTALLING — set to your Lullabeast checkout root. -->
     <key>WorkingDirectory</key>
     <string>/path/to/autodev</string>
 

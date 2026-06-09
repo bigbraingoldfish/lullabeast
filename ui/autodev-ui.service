@@ -1,5 +1,5 @@
 [Unit]
-Description=AutoDev UI Service
+Description=Lullabeast UI Service
 After=network.target
 
 [Service]

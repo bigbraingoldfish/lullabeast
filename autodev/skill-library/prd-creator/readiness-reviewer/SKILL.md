@@ -210,7 +210,7 @@ Schema:
 }
 ```
 
-**Dashboard mapping (AutoDev UI):** The operator dashboard shows **`PRD readiness:`** with `score` out of 10, and **`Roadmap confidence:`** with the value from the `conversion_confidence` field above. Do **not** rename `conversion_confidence` in JSON — the UI label is display-only.
+**Dashboard mapping (Lullabeast UI):** The operator dashboard shows **`PRD readiness:`** with `score` out of 10, and **`Roadmap confidence:`** with the value from the `conversion_confidence` field above. Do **not** rename `conversion_confidence` in JSON — the UI label is display-only.
 
 **Field constraints:**
 

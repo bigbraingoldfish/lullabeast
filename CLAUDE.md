@@ -1,4 +1,4 @@
-# CLAUDE.md — AutoDev Repository Guide
+# CLAUDE.md — Lullabeast Repository Guide
 
 This file is the complete orientation for a contributor or Claude Code session working in this repo. Read it before touching anything else. All facts are drawn directly from source files; check the cited paths if anything is surprising.
 
@@ -6,7 +6,7 @@ This file is the complete orientation for a contributor or Claude Code session w
 
 ## What This Repo Is
 
-AutoDev is an autonomous multi-agent software development pipeline that orchestrates four LLM agents (planner, executor, reviewer, escalation) through a deterministic gate-based loop to iteratively build software from a roadmap. It depends on OpenClaw as external infrastructure (webhook server, agent session management, workspace directories). AutoDev does not embed OpenClaw — it calls it.
+Lullabeast is an autonomous multi-agent software development pipeline that orchestrates four LLM agents (planner, executor, reviewer, escalation) through a deterministic gate-based loop to iteratively build software from a roadmap. It depends on OpenClaw as external infrastructure (webhook server, agent session management, workspace directories). Lullabeast does not embed OpenClaw — it calls it.
 
 This repo contains:
 - The pipeline orchestration code (previously lived in `~/.openclaw/`, now migrated here)
@@ -108,7 +108,7 @@ def resolve_pipeline_root(repo_path: str) -> str:
     return os.path.expanduser(v) if v else os.path.join(repo_path, ".autodev")
 ```
 
-Points to the AutoDev pipeline state directory. Default is `<AUTODEV_REPO_PATH>/.autodev/`. Holds `pipeline.lock`, `pipeline_state.json`, `pipeline_queue.json`, `pipeline_events.jsonl`, `orchestrator.log`, `ideas/`, and the `pipeline-project` symlink.
+Points to the Lullabeast pipeline state directory. Default is `<AUTODEV_REPO_PATH>/.autodev/`. Holds `pipeline.lock`, `pipeline_state.json`, `pipeline_queue.json`, `pipeline_events.jsonl`, `orchestrator.log`, `ideas/`, and the `pipeline-project` symlink.
 
 The legacy `AUTODEV_RUNTIME_ROOT` alias and the `AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME` flag have been removed. To reproduce the old layout where pipeline state lived alongside OpenClaw data, set `AUTODEV_PIPELINE_ROOT=$OPENCLAW_ROOT` explicitly.
 
@@ -451,7 +451,7 @@ Skill files live in `autodev/skill-library/{discipline}/{agent_role}/SKILL.md`. 
 
 **The phase-injectable disciplines:** `api-service`, `auth-security`, `cli-tooling`, `core-logic`, `data-persistence`, `infra-config`, `ui-frontend` (each with planner / executor / reviewer SKILL.md), plus the special `completion` discipline (COMPLETE phases) and the agent-owned `prd-creator` / `roadmap-converter` skill sets used outside the pipeline loop.
 
-**Universal rules live in AGENTS.md, not here.** The always-apply wiring discipline ("read the entrypoint before wiring") and testing-quality discipline (TDD) are not skills — they are standing identity. They live in each role's `autodev/agents/{role}/AGENTS.md` under the `## Always-Apply: Integration Wiring` and `## Always-Apply: Testing Quality` sections, which OpenClaw injects as primary context every turn — **but only if the truncation caps reach them.** OpenClaw's default per-file bootstrap cap (`bootstrapMaxChars`) is 12000 and these sections begin past byte ~10k, so AutoDev raises the cap to 32000 and points the post-compaction refresh (`postCompactionSections` / `postCompactionMaxChars`) at the section names; otherwise the rules are truncated at injection and dropped on every compaction. See the truncation rows in **Operational Constants** and `setup_helpers.ensure_openclaw_context_limits`. The `integration-wiring` and `testing-quality` skill-library directories were removed in the P1 Stage A refactor; the `INTEGRATION` / `TEST` / `E2E` prefixes are intentionally unmapped (see `skill_mapping.yaml`).
+**Universal rules live in AGENTS.md, not here.** The always-apply wiring discipline ("read the entrypoint before wiring") and testing-quality discipline (TDD) are not skills — they are standing identity. They live in each role's `autodev/agents/{role}/AGENTS.md` under the `## Always-Apply: Integration Wiring` and `## Always-Apply: Testing Quality` sections, which OpenClaw injects as primary context every turn — **but only if the truncation caps reach them.** OpenClaw's default per-file bootstrap cap (`bootstrapMaxChars`) is 12000 and these sections begin past byte ~10k, so Lullabeast raises the cap to 32000 and points the post-compaction refresh (`postCompactionSections` / `postCompactionMaxChars`) at the section names; otherwise the rules are truncated at injection and dropped on every compaction. See the truncation rows in **Operational Constants** and `setup_helpers.ensure_openclaw_context_limits`. The `integration-wiring` and `testing-quality` skill-library directories were removed in the P1 Stage A refactor; the `INTEGRATION` / `TEST` / `E2E` prefixes are intentionally unmapped (see `skill_mapping.yaml`).
 
 ### Mapping mechanism
 
@@ -627,7 +627,7 @@ These values appear throughout the codebase. Do not change them without understa
 | `AUTODEV_LLAMA_BASE` | default `http://127.0.0.1:11434` | Orchestrator blame-L1 analyst and failure analyst — HTTP origin (fallback) when `openclaw.json` has no `llama-local` `baseUrl`. (Formerly also read by the reviewer INFRA_FAILURE `check_traffic_cop_health` / `wait_for_model_stable` machinery, retired 2026-06-01.) |
 | `AUTODEV_AUDIT_ARCHIVE_DIR` | unset → `$OPENCLAW_ROOT/pipeline-audit`; empty string → disabled | Phase-complete snapshot copies in `orchestrator.py` |
 | `AUTODEV_HOOKS_TOKEN` | optional | Overrides `hooks_token` from `ui/config.json` / `DEFAULTS` for UI → OpenClaw webhook calls |
-| `agents.list[].bootstrapMaxChars` | `32000` (all six AutoDev agents) | Per-file bootstrap injection cap in `openclaw.json`. OpenClaw's default is `12000`, which truncated every pipeline role's `AGENTS.md` (planner 15.5k, executor 20.5k, reviewer 23k) and silently dropped the Stage A `## Always-Apply:` rules (they begin past byte ~10k). Seeded for new agents by `register_agent._build_new_entry`; ensured on existing agents (and the live config) by `setup_helpers.ensure_openclaw_context_limits` (install.sh step 8). Do not lower below the largest `AGENTS.md`. |
+| `agents.list[].bootstrapMaxChars` | `32000` (all six Lullabeast agents) | Per-file bootstrap injection cap in `openclaw.json`. OpenClaw's default is `12000`, which truncated every pipeline role's `AGENTS.md` (planner 15.5k, executor 20.5k, reviewer 23k) and silently dropped the Stage A `## Always-Apply:` rules (they begin past byte ~10k). Seeded for new agents by `register_agent._build_new_entry`; ensured on existing agents (and the live config) by `setup_helpers.ensure_openclaw_context_limits` (install.sh step 8). Do not lower below the largest `AGENTS.md`. |
 | `agents.list[].contextLimits.postCompactionMaxChars` | `8000` (planner/executor/reviewer only) | After a context compaction, OpenClaw re-injects only the `postCompactionSections` of `AGENTS.md`, capped per-agent here (OpenClaw default `1800`). The two Always-Apply sections measure ≤4.6k combined; 8k holds them with headroom. Pipeline roles only — they are the agents that carry the Always-Apply sections. Guarded by `test_postcompaction_cap_covers_largest_always_apply_block`. |
 | `agents.defaults.compaction.postCompactionSections` | `["Always-Apply: Integration Wiring", "Always-Apply: Testing Quality", "Session Startup", "Red Lines"]` | Global-only (the schema has no per-agent `compaction` block). Names the `AGENTS.md` H2 sections the post-compaction refresh re-injects. OpenClaw's default `["Session Startup","Red Lines"]` matches **no** header in our `AGENTS.md`, so without this the Always-Apply rules are dropped on every compaction. Our two headers are seeded first; OpenClaw's defaults are preserved. Drift-guarded against the real headers by `test_postcompaction_sections_match_real_agents_md_headers`. |
 | `AUTODEV_STALL_TIMEOUT_PLANNER` | default `300` (seconds) | **Post-first-hook** silence: max silence on `planner_activity.stamp` mtime *after* the plugin has touched it at least once, before `poll_for_sentinel` returns `PollResult(False, "stalled")`. Catches mid-turn model deaths. Independent of startup grace below. |

@@ -1,7 +1,7 @@
 {
   "id": "autodev-pipeline-signals",
-  "name": "AutoDev Pipeline Signals",
-  "description": "AutoDev pipeline signals: completion sentinels, structural revise hooks, and Tier A activity stamps for stall detection",
+  "name": "Lullabeast Pipeline Signals",
+  "description": "Lullabeast pipeline signals: completion sentinels, structural revise hooks, and Tier A activity stamps for stall detection",
   "activation": {
     "onStartup": true
   },

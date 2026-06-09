@@ -1,7 +1,7 @@
-# AutoDev Pipeline Dashboard — Product Requirements Document
+# Lullabeast Pipeline Dashboard — Product Requirements Document
 
 > **Status:** PRD — for conversion to implementation roadmap by Claude Code with full project visibility  
-> **Audience:** Claude Code agent with access to the AutoDev project filesystem  
+> **Audience:** Claude Code agent with access to the Lullabeast project filesystem  
 > **Purpose:** Build a real-time pipeline monitoring dashboard that replaces four terminal windows with a single ops-quality UI
 
 ---
@@ -24,7 +24,7 @@ These findings should appear at the top of the roadmap as a "Pre-Flight Findings
 
 ## Product Overview
 
-A single-page dashboard that gives the operator full situational awareness of the AutoDev pipeline from any browser on the Tailscale network. It reads state files written by the orchestrator and streams events from the activity feed. During normal operation the UI is read-only. When the pipeline is waiting for human input (`WAITING_FOR_HUMAN`), the escalation command panel allows the operator to issue resume commands directly.
+A single-page dashboard that gives the operator full situational awareness of the Lullabeast pipeline from any browser on the Tailscale network. It reads state files written by the orchestrator and streams events from the activity feed. During normal operation the UI is read-only. When the pipeline is waiting for human input (`WAITING_FOR_HUMAN`), the escalation command panel allows the operator to issue resume commands directly.
 
 **Access model:** UI server runs on the Raspberry Pi. Accessible at `http://<tailscale-ip>:<port>` from any device on the Tailscale network — specifically the Windows machine where the operator currently monitors OpenClaw. No authentication required (Tailscale is the access control layer).
 
