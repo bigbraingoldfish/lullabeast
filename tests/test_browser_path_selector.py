@@ -332,10 +332,11 @@ def test_recents_appear_after_preflight(pw_page):
             )
 
         _goto_preflight(pw_page)
+        pw_page.locator("#preflight-repo-path").click()  # focus to open the recents dropdown
         recents = pw_page.locator('[data-testid="server-path-recents"]')
         recents.first.wait_for(state="visible", timeout=10000)
         assert recents.locator("button", has_text=proj).count() >= 1, (
-            "the preflighted project must appear as a click-to-fill recent"
+            "the preflighted project must appear in the recents dropdown"
         )
     finally:
         # Remove tmpdir so prune sweeps the recents entry. Best-effort: a
