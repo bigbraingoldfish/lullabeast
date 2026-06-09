@@ -4875,6 +4875,26 @@
             );
         }
 
+        // Copy text to the clipboard with a legacy fallback. Returns Promise<boolean>:
+        // true on success, false if BOTH the async Clipboard API and the execCommand
+        // textarea fallback fail (e.g. the browser blocks clipboard access). Single
+        // source of truth for every copy button (UI REVIEW 1-H).
+        async function copyToClipboard(text) {
+            const value = text == null ? "" : String(text);
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                try { await navigator.clipboard.writeText(value); return true; }
+                catch (e) { /* fall through to the legacy path */ }
+            }
+            try {
+                const ta = document.createElement("textarea");
+                ta.value = value; ta.style.position = "fixed"; ta.style.opacity = "0";
+                document.body.appendChild(ta); ta.select();
+                const ok = document.execCommand("copy");
+                document.body.removeChild(ta);
+                return ok;
+            } catch (e) { return false; }
+        }
+
         function IdeasScreen() {
             const ctx = useContext(AppCtx);
             const sidebarCollapsed = ctx && ctx.sidebarCollapsed === true;
@@ -4924,6 +4944,18 @@
             const [annotationDraft, setAnnotationDraft] = useState("");
             const [openAnnotationBubble, setOpenAnnotationBubble] = useState(null);
             const [copiedSection, setCopiedSection] = useState(null);
+            // Transient copy feedback for the PRD/Roadmap/Verification footer buttons.
+            // {tab: 'prd'|'roadmap'|'verification', ok: boolean} | null  (UI REVIEW 1-H)
+            const [docCopyState, setDocCopyState] = useState(null);
+            const handleDocCopy = (tab, text) => {
+                copyToClipboard(text).then((ok) => {
+                    setDocCopyState({ tab, ok });
+                    setTimeout(() => setDocCopyState(null), 2000);
+                });
+            };
+            const docCopyLabel = (tab, dflt) =>
+                docCopyState && docCopyState.tab === tab
+                    ? (docCopyState.ok ? "Copied!" : "Copy failed") : dflt;
             const [prdSectionDiff, setPrdSectionDiff] = useState({});
             const [expandedDiffSlugs, setExpandedDiffSlugs] = useState([]);
             const [undoOfferSlugs, setUndoOfferSlugs] = useState([]);
@@ -5370,6 +5402,12 @@
                 el.style.height = Math.min(el.scrollHeight, maxH) + "px";
             };
 
+            // Post-hoc "just drafted" flash — NOT a live during-turn signal. Fires only
+            // AFTER a reply returns carrying `parsed.drafting` (see the reply handler
+            // below); shows "✏ Drafting <section>…" then auto-clears after 3s. A true
+            // during-turn signal needs streaming infra OpenClaw lacks (opaque model
+            // calls); the "Working…" pending bubble is the live signal.
+            // (UI REVIEW 1-C — kept by decision, documented.)
             const triggerDraftingIndicator = (sectionName) => {
                 if (draftingTimerRef.current) clearTimeout(draftingTimerRef.current);
                 setDraftingIndicator(sectionName);
@@ -6898,16 +6936,9 @@
                                                                 type="button"
                                                                 title="Copy section markdown"
                                                                 onClick={() => {
-                                                                    const done = () => { setCopiedSection(title); setTimeout(() => setCopiedSection(null), 2000); };
-                                                                    if (navigator.clipboard) {
-                                                                        navigator.clipboard.writeText(copySource).then(done).catch(() => {});
-                                                                    } else {
-                                                                        const ta = document.createElement("textarea");
-                                                                        ta.value = copySource; ta.style.position = "fixed"; ta.style.opacity = "0";
-                                                                        document.body.appendChild(ta); ta.select();
-                                                                        try { document.execCommand("copy"); done(); } catch(e) {}
-                                                                        document.body.removeChild(ta);
-                                                                    }
+                                                                    copyToClipboard(copySource).then((ok) => {
+                                                                        if (ok) { setCopiedSection(title); setTimeout(() => setCopiedSection(null), 2000); }
+                                                                    });
                                                                 }}
                                                                 className="text-[11px] text-[#6e6788] hover:text-slate-300 px-1.5 py-0.5 rounded border border-[#2a2540] hover:border-slate-600 shrink-0 header-text"
                                                             >{copiedSection === title ? "Copied" : "⎘"}</button>
@@ -7037,9 +7068,9 @@
                             <div className="flex-shrink-0 border-t border-[#1c1829] px-4 py-2 flex justify-end gap-2">
                                 <button
                                     className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-200 border border-[#2a2540] hover:border-slate-500"
-                                    onClick={() => navigator.clipboard.writeText(prdContent)}
+                                    onClick={() => handleDocCopy('prd', prdContent)}
                                 >
-                                    Copy All
+                                    {docCopyLabel('prd', 'Copy All')}
                                 </button>
                                 {currentIdeaId && (
                                     <a
@@ -7077,9 +7108,9 @@
                                     <div className="flex-shrink-0 border-t border-[#1c1829] px-4 py-2 flex justify-end items-center gap-2">
                                         <button
                                             className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-200 border border-[#2a2540] hover:border-slate-500"
-                                            onClick={() => navigator.clipboard.writeText(roadmapContent)}
+                                            onClick={() => handleDocCopy('roadmap', roadmapContent)}
                                         >
-                                            Copy
+                                            {docCopyLabel('roadmap', 'Copy')}
                                         </button>
                                         {currentIdeaId && (
                                             <a
@@ -7111,9 +7142,9 @@
                                     <div className="flex-shrink-0 border-t border-[#1c1829] px-4 py-2 flex justify-end items-center gap-2">
                                         <button
                                             className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-200 border border-[#2a2540] hover:border-slate-500"
-                                            onClick={() => navigator.clipboard.writeText(verificationContent)}
+                                            onClick={() => handleDocCopy('verification', verificationContent)}
                                         >
-                                            Copy
+                                            {docCopyLabel('verification', 'Copy')}
                                         </button>
                                         {currentIdeaId && (
                                             <a
@@ -7454,7 +7485,6 @@
 
         function PreflightScreen(props) {
             const {
-                seedRoadmap,
                 repoPath,
                 repoPathLocked,
                 roadmapSeed,
@@ -10460,7 +10490,6 @@
                 setUnsavedQueueOrderState(next);
             }, []);
             const [pipelineStatus, setPipelineStatus] = useState('');
-            const [seedRoadmap, setSeedRoadmap] = useState("");
             const [repoPath, setRepoPath] = useState("");
             const [repoPathLocked, setRepoPathLocked] = useState(false);
             // N4 — redirect modal + cross-screen prefill for "repo has a roadmap on disk but no
@@ -10520,7 +10549,6 @@
              * generic label. */
             const navigateToPreflightWithSeed = (content, prdText, verificationText, ideaName, ideaId) => {
                 const text = content || "";
-                setSeedRoadmap(text);
                 setRoadmapSeed(text);
                 setLaunchPrdContent(typeof prdText === "string" ? prdText : "");
                 setLaunchVerificationContent(typeof verificationText === "string" ? verificationText : "");
@@ -10531,7 +10559,6 @@
 
             const handleNavigate = (screen) => {
                 if (screen === "preflight") {
-                    setSeedRoadmap("");
                     setRoadmapSeed("");
                     setLaunchPrdContent("");
                     setLaunchVerificationContent("");
@@ -10873,7 +10900,6 @@
                 navigateToPreflightWithSeed,
                 pendingQueueAddPath,
                 clearPendingQueueAddPath: () => setPendingQueueAddPath(null),
-                setSeedRoadmap,
                 setCurrentScreen,
                 currentScreen,
                 safeNavigate,
@@ -10919,7 +10945,6 @@
                             {currentScreen === "queue" && <QueueScreen />}
                             {currentScreen === "preflight" && (
                                 <PreflightScreen
-                                    seedRoadmap={seedRoadmap}
                                     repoPath={repoPath}
                                     repoPathLocked={repoPathLocked}
                                     roadmapSeed={roadmapSeed}

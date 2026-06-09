@@ -59,10 +59,11 @@ class TestPreflightScreenRendering:
         assert 'id="preflight-repo-path"' in preflight
 
     def test_pre_populated_roadmap_shows_indicator(self):
-        """pass_criteria: When seedRoadmap prop is non-empty, PreflightScreen shows
-        'From Project Ideas' indicator. Post-Stage-J.4 the indicator is the
-        summary-card heading rather than a textarea badge — both render the
-        same literal so this assertion is intact."""
+        """pass_criteria: When a linked-idea roadmap seed is present, PreflightScreen
+        shows the 'From Project Ideas' indicator. Post-Stage-J.4 the indicator is the
+        linked-idea summary-card heading rather than a textarea badge; the seed is
+        carried by ``roadmapSeed`` (the dead ``seedRoadmap`` shadow was removed in UI
+        REVIEW Phase 6 / 4-D). This assertion only pins the rendered literal."""
         html = load_html()
         preflight = extract_function(html, "PreflightScreen")
         assert preflight is not None, "PreflightScreen function not found"
@@ -94,14 +95,15 @@ class TestPreflightScreenNoConsoleErrors:
 
         Stage J.4 removed ``roadmapSeedLocked``, ``onRoadmapSeedChange``,
         and ``onRoadmapSeedLockToggle`` from the prop set — the textarea
-        they controlled is gone. The remaining props still flow through
-        the component."""
+        they controlled is gone. UI REVIEW Phase 6 (4-D) further removed the
+        dead ``seedRoadmap`` shadow prop (it was destructured but never read;
+        ``roadmapSeed`` is the real one). The remaining props still flow
+        through the component."""
         html = load_html()
         preflight = extract_function(html, "PreflightScreen")
         assert preflight is not None, "PreflightScreen function not found"
 
         required_props = [
-            'seedRoadmap',
             'repoPath',
             'repoPathLocked',
             'roadmapSeed',

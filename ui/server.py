@@ -5648,6 +5648,13 @@ async def post_ideas_clarity_check(idea_id: str):
     Returns the contents of clarity_result.json on success, 504 on a stall or
     backstop. The result is ephemeral (not persisted), so a late result is
     simply re-run by the caller.
+
+    NOTE (UI REVIEW 1-D): intentionally PARKED — backend-only, not wired in the UI
+    (``index.html`` has zero "clarity" references). This is the deprecated PRD
+    clarity/completeness secondary review; its siblings ``alignment_report`` /
+    ``adversarial_report`` are likewise stripped/parked. Kept for future product vision —
+    do NOT wire into the UI and do NOT retire. Documented so audits don't re-flag it as a
+    dead endpoint.
     """
     config = load_config()
     ideas_dir = Path(config.get("ideas_dir") or "")
