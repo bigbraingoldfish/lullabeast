@@ -713,9 +713,11 @@ The orchestrator's `_queue_preflight()` checks: directory exists, `.git` present
 
 ### DEPENDENCY_HOLD state
 
-`DEPENDENCY_HOLD` is a valid entry state. It is applied:
-- **Server-side**: when a parent is assigned via `PATCH /api/queue/{entry_id}/parent` (if parent is not COMPLETED), and when a project is added via `POST /api/queue/add` with a non-COMPLETED parent.
-- **Orchestrator-side**: enforced in `_select_next_queue_project` before activating a queued project.
+`DEPENDENCY_HOLD` is a valid entry state, written **only when the parent is in a *blocking* state** — `parent_blocks_child(parent_state)` → `{BLOCKED, ESCALATION, ESCALATION_ANSWERED}` (`queue_semantics.py`). A non-blocking but still-incomplete parent (e.g. `READY` / `ACTIVE`) leaves the child **`READY`** — un-selectable, but *not* `DEPENDENCY_HOLD`. It is applied:
+- **Server-side**: `PATCH /api/queue/{entry_id}/parent` and `POST /api/queue/add` set `DEPENDENCY_HOLD` **only** when `parent_blocks_child()` holds for the assigned parent; otherwise the child stays `READY` (with `parent_id` set). A `COMPLETED` parent imposes no hold at all. (Verified by `tests/test_queue_dependency_edit.py` — `test_set_parent_ready_parent_keeps_child_ready` vs `test_set_parent_blocked_transitions_to_dependency_hold`.)
+- **Orchestrator-side**: `_select_next_queue_project` **skips any child whose parent ≠ COMPLETED** at selection time — so the dependency is enforced *regardless* of the child's state — but it only **writes** `DEPENDENCY_HOLD` when `parent_blocks_child(parent_state)`. A `READY` child with a non-blocking incomplete parent therefore stays `READY` and is simply passed over until the parent completes.
+
+**UI surfacing (Phase 5 / R1, UI-only).** Because a non-blocking incomplete parent leaves the child `READY`, the wait is *not* encoded in the entry state — so the dashboard derives it live from the queue. The shared `isWaitingForParent(parentEntry)` helper (`ui/index.html`, `parent.state !== 'COMPLETED'`, mirroring the orchestrator skip) drives a **"Waiting for: <parent>"** indicator for **any** incomplete parent — a muted queue-row sub-line, the project-snapshot line, and the action-hub panel — not only literal `DEPENDENCY_HOLD`. No state-machine or server change; the backend already exposes every entry's `parent_id`/`state` via `GET /api/queue`.
 
 Clearing a parent (`parent_id: null`) via the API restores a `DEPENDENCY_HOLD` child to `READY`.
 
