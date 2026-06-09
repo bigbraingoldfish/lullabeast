@@ -3839,9 +3839,9 @@
                 if (!container || !canvas) return undefined;
 
                 const CELL = 4;
-                const LIVE_COLOR = "#1c1829";
-                const DEAD_COLOR = "#1c1829";
-                const FADE_RGBA = "rgba(28, 24, 41, 0.18)";
+                const LIVE_COLOR = "#4a4068";
+                const DEAD_COLOR = "#221b36";
+                const FADE_RGBA = "rgba(34, 27, 54, 0.25)";
 
                 let cols = 0, rows = 0, w = 0, h = 0;
                 let dpr = window.devicePixelRatio || 1;
@@ -6488,14 +6488,14 @@
                                                                 {msg.pending && <PendingBubbleLifeBackdrop />}
                                                                 {hasProse ? (
                                                                     <div
-                                                                        className={`relative z-10 ${msg.pending ? "opacity-50" : ""} flex flex-row items-stretch gap-1 px-3 py-2 w-full min-w-0 ${proseAssumptionsDivider}`}
+                                                                        className={`relative z-10 flex flex-row items-stretch gap-1 px-3 py-2 w-full min-w-0 ${proseAssumptionsDivider}`}
                                                                     >
                                                                         <div
                                                                             className={`msg-md text-sm min-w-0 flex-1 leading-[1.6] ${
                                                                                 msg.error
                                                                                     ? "text-red-100"
                                                                                     : msg.pending
-                                                                                      ? "text-slate-400"
+                                                                                      ? "text-slate-300"
                                                                                       : "text-slate-200"
                                                                             }`}
                                                                             dangerouslySetInnerHTML={{
