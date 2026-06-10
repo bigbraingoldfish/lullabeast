@@ -12,7 +12,7 @@ Short reference for operators and contributors. Install and networking details s
 | ----- | ---- |
 | **OpenClaw** | External runtime: gateway (e.g. `localhost:18789`), `openclaw.json`, agent workspaces under **`OPENCLAW_ROOT`** (`workspace-planner`, `workspace-executor`, …), sessions, webhooks. Lullabeast does not embed it; the orchestrator POSTs to OpenClaw to wake agents. |
 | **Orchestrator** | Python process in **this repo**: `autodev/pipeline/orchestrator.py`. Reads/writes pipeline lock and state under **`AUTODEV_PIPELINE_ROOT`** (default `<repo>/.autodev/`). Uses the **`pipeline-project`** symlink to reach the target git repository. |
-| **Lullabeast UI** | FastAPI app in `ui/server.py` (default port **18790**). Serves the React dashboard and **`/api/*`** routes. **No authentication** on `/api` — bind to loopback on trusted machines (see SETUP **Security and network exposure**). |
+| **Lullabeast UI** | FastAPI app in `ui/server.py` (default port **18790**). Serves the React dashboard and **`/api/*`** routes. Access requires the **`AUTODEV_UI_TOKEN`** dashboard token (browser cookie via the startup URL, or `Authorization: Bearer` for scripts) — still bind to loopback on trusted machines (see SETUP **Security and network exposure**). |
 | **This repository** | Contains pipeline code, UI, skills, agent identity sources, and tests. **`AUTODEV_REPO_PATH`** should point at this clone for a correct install. |
 
 ---

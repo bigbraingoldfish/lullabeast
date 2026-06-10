@@ -1154,6 +1154,27 @@ case "$ENV_MERGE" in
     *) warn ".env merge: $ENV_MERGE" ;;
 esac
 
+# Dashboard access token: generate once and merge into .env. Idempotent — an
+# existing AUTODEV_UI_TOKEN is preserved (merge_dotenv_missing_keys never
+# overwrites), so the freshly generated value is discarded on re-runs. The UI
+# server requires this token for the dashboard and /api/*; without it the
+# server runs unauthenticated on loopback only.
+UI_TOKEN_MERGE=$(
+    cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import merge_dotenv_missing_keys
+import os, secrets
+print(merge_dotenv_missing_keys(
+    os.path.join(os.environ['AUTODEV_REPO_PATH'], '.env'),
+    {'AUTODEV_UI_TOKEN': secrets.token_urlsafe(32)},
+))
+" 2>/dev/null || echo "error:helper"
+)
+case "$UI_TOKEN_MERGE" in
+    created|updated) ok "AUTODEV_UI_TOKEN generated and merged into .env (dashboard access token)" ;;
+    unchanged) info ".env already had AUTODEV_UI_TOKEN (preserved)" ;;
+    *) warn ".env AUTODEV_UI_TOKEN merge: $UI_TOKEN_MERGE" ;;
+esac
+
 ENV_STALL_HINTS=$(
     cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
 from autodev.installer.setup_helpers import ensure_dotenv_stall_timeout_hints
