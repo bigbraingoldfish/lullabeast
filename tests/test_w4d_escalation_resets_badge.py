@@ -37,7 +37,7 @@ def test_reset_chip_not_in_queue_action_hub():
     """Badge copy must not bleed into QueueActionHub (separate surface)."""
     html = _html()
     hub_start = html.index("function QueueActionHub(")
-    hub_end = html.index("// ── Column 3:", hub_start - 200)  # approx end
+    hub_end = html.index("// ── Row expansion: Action Hub", hub_start - 200)  # approx end
     # QueueActionHub ends before PipelineScreen; just check the hub region doesn't carry the badge
     hub_region = html[hub_start : hub_start + 4000]
     # The hub shows escalation count but not the 'Reset ×' chip

@@ -46,12 +46,13 @@ def test_queue_escalation_advisory_is_snapshot_sourced_not_api_state(html_conten
     The original guarded a ``/api/state`` useEffect (+ ``selectedLiveForEscalationMsg``)
     against re-triggering on queue-array identity. That whole effect is gone: the Queue
     advisory is now derived from the per-entry snapshot, which already refreshes on
-    ``[selectedId, snapshotVersion]``. Assert the new world: the snapshot effect carries
-    that dependency, and the removed ``/api/state`` machinery (the effect's
-    ``selectedLiveForEscalationMsg`` helper and the ``setEscalationMsg`` setter) is gone.
+    ``[expandedId, snapshotVersion]`` (the queue-redesign rename of ``selectedId``).
+    Assert the new world: the snapshot effect carries that dependency, and the removed
+    ``/api/state`` machinery (the effect's ``selectedLiveForEscalationMsg`` helper and
+    the ``setEscalationMsg`` setter) is gone.
     """
-    assert "}, [selectedId, snapshotVersion]);" in html_content, (
-        "the snapshot effect must depend on [selectedId, snapshotVersion]"
+    assert "}, [expandedId, snapshotVersion]);" in html_content, (
+        "the snapshot effect must depend on [expandedId, snapshotVersion]"
     )
     assert "selectedLiveForEscalationMsg" not in html_content, (
         "the /api/state effect's live-status helper must be removed"

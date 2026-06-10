@@ -1,10 +1,12 @@
-"""W3-B: phases_complete and phases_total enriched onto ACTIVE entries in GET /api/queue.
+"""W3-B (extended by the queue redesign): phases_complete and phases_total on
+EVERY entry in GET /api/queue.
 
-Tests verify:
-- ACTIVE entry gets phases_total and phases_complete when roadmap.md is present
-- Non-ACTIVE entries do not get these fields
-- Graceful degradation when roadmap is missing or unreadable
-- phases_total == 0 for empty roadmap
+Originally W3-B enriched ACTIVE entries only; the flat-table queue screen
+renders 0/N progress on queued rows too, so the uniform summary block computes
+the counts for all states. Tests verify:
+- Any entry gets phases_total and phases_complete when roadmap.md is present
+- Keys are present-but-None when the roadmap is missing or unreadable
+- phases_total == 0 for an empty roadmap (file exists, no phase lines)
 """
 import json
 import os
@@ -132,10 +134,10 @@ def test_active_entry_with_all_phases_done(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Non-ACTIVE entries: no enrichment
+# Non-ACTIVE entries: enriched too (queue redesign — uniform summary block)
 # ---------------------------------------------------------------------------
 
-def test_ready_entry_does_not_get_phases_fields(tmp_path):
+def test_ready_entry_gets_phases_fields(tmp_path):
     proj = tmp_path / "proj"
     proj.mkdir()
     (proj / "roadmap.md").write_text(ROADMAP_4_PHASES_2_DONE)
@@ -151,11 +153,11 @@ def test_ready_entry_does_not_get_phases_fields(tmp_path):
     assert resp.status_code == 200
     found = _entry_by_id(resp.json(), eid)
     assert found is not None
-    assert "phases_total" not in found
-    assert "phases_complete" not in found
+    assert found["phases_total"] == 4
+    assert found["phases_complete"] == 2
 
 
-def test_blocked_entry_does_not_get_phases_fields(tmp_path):
+def test_blocked_entry_gets_phases_fields(tmp_path):
     proj = tmp_path / "proj"
     proj.mkdir()
     (proj / "roadmap.md").write_text(ROADMAP_4_PHASES_2_DONE)
@@ -170,8 +172,8 @@ def test_blocked_entry_does_not_get_phases_fields(tmp_path):
 
     assert resp.status_code == 200
     found = _entry_by_id(resp.json(), eid)
-    assert "phases_total" not in found
-    assert "phases_complete" not in found
+    assert found["phases_total"] == 4
+    assert found["phases_complete"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -195,9 +197,9 @@ def test_active_entry_with_no_roadmap_file(tmp_path):
     assert resp.status_code == 200
     found = _entry_by_id(resp.json(), eid)
     assert found is not None
-    # No phases fields — graceful skip, no crash
-    assert "phases_total" not in found
-    assert "phases_complete" not in found
+    # Uniform summary block: keys present, values None — graceful skip, no crash
+    assert found["phases_total"] is None
+    assert found["phases_complete"] is None
 
 
 def test_active_entry_with_empty_roadmap(tmp_path):
@@ -235,10 +237,10 @@ def test_active_entry_with_empty_project_path_does_not_crash(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Multiple entries: only ACTIVE one is enriched
+# Multiple entries: every row is enriched (uniform summary block)
 # ---------------------------------------------------------------------------
 
-def test_only_active_entry_enriched_in_mixed_queue(tmp_path):
+def test_all_entries_enriched_in_mixed_queue(tmp_path):
     active_proj = tmp_path / "active_proj"
     active_proj.mkdir()
     (active_proj / "roadmap.md").write_text(ROADMAP_4_PHASES_2_DONE)
@@ -266,8 +268,8 @@ def test_only_active_entry_enriched_in_mixed_queue(tmp_path):
 
     assert active["phases_total"] == 4
     assert active["phases_complete"] == 2
-    assert "phases_total" not in ready
-    assert "phases_complete" not in ready
+    assert ready["phases_total"] == 4
+    assert ready["phases_complete"] == 2
 
 
 def test_active_queue_phases_match_roadmap_checkbox_stats(tmp_path):

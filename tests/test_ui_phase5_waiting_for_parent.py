@@ -26,9 +26,9 @@ def _queue_action_hub_block(html):
 
 
 def _queue_row_region(html):
-    """Column-1 queue-list render region (between the two column markers)."""
-    start = html.index("Column 1: Queue list")
-    end = html.index("Column 2: Project snapshot", start)
+    """Queue-table rows render region (rows marker → AddProjectModal gate)."""
+    start = html.index("{/* Queue table rows */}")
+    end = html.index("{showAddModal", start)
     return html[start:end]
 
 

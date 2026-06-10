@@ -3354,6 +3354,114 @@ def get_roadmap():
     return phases
 
 
+def _role_cost(p: dict, role_key: str) -> float:
+    """Cost of one role's token usage on a metrics row (missing/non-numeric → 0.0)."""
+    role_obj = p.get(role_key) or {}
+    if not isinstance(role_obj, dict):
+        return 0.0
+    try:
+        return float(role_obj.get("cost_total", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _phase_cost(p: dict) -> float:
+    """A metrics row's top-level cost_total (missing/non-numeric → 0.0)."""
+    v = p.get("cost_total", 0.0)
+    try:
+        return float(v or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _role_token_total(p: dict, role_key: str) -> int:
+    """Sum of a role's token count for one phase row. Parallels ``_role_cost``;
+    defaults a missing/non-numeric ``total_tokens`` to 0 so pre-token history
+    rows (and local-model runs that report no usage) read as 0, not NaN."""
+    role_obj = p.get(role_key) or {}
+    if not isinstance(role_obj, dict):
+        return 0
+    try:
+        return int(role_obj.get("total_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _phase_token_total(p: dict) -> int:
+    return (
+        _role_token_total(p, "planner_tokens")
+        + _role_token_total(p, "executor_tokens")
+        + _role_token_total(p, "reviewer_tokens")
+    )
+
+
+def _project_metrics_totals(project_path):
+    """Aggregate ``{project_path}/.autodev/pipeline/metrics.jsonl`` (pure, read-only).
+
+    Shared by ``GET /api/metrics-summary`` (the active project) and the
+    ``GET /api/queue`` per-entry summary block (any queued project's cost,
+    duration, and last phase).
+
+    Returns ``None`` when ``project_path`` is falsy, the file is absent or
+    unreadable (``OSError``), or it contains ZERO parseable JSON rows — exactly
+    the cases where ``/api/metrics-summary`` returns ``_empty_metrics_summary()``.
+    A file whose parsed rows all lack a truthy ``"phase"`` key returns a
+    zeroed dict with ``phases == []`` (NOT ``None``) so the endpoint keeps its
+    pre-extraction behavior for that edge. Otherwise::
+
+        {
+          "phases":           list[dict],  # deduped keep-LAST per phase, first-seen order
+          "cost_total":       float,       # round(sum of per-row cost_total, 6)
+          "duration_seconds": int,         # sum of per-phase duration_seconds (active work)
+          "last_phase":       str | None,  # phases[-1]["phase"], or None when phases empty
+        }
+
+    Dedup keeps the LAST row per phase (a reset re-run replaces the earlier
+    row) in first-seen phase order, so ``last_phase`` is the last *distinct*
+    phase — for this pipeline (one row appended per phase PASS) that is the
+    most recently completed phase. ``duration_seconds`` is per-phase active
+    work summed — deliberately NOT run_summary.json calendar wall-clock (see
+    the TOTAL TIME note in ``get_metrics_summary``).
+    """
+    if not project_path:
+        return None
+    metrics_path = Path(_pipeline_artifacts_dir(project_path)) / "metrics.jsonl"
+    if not metrics_path.exists():
+        return None
+
+    rows = []
+    try:
+        with open(metrics_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        return None
+
+    if not rows:
+        return None
+
+    # Deduplicate by phase — keep the last occurrence (highest attempt counts)
+    seen: dict = {}
+    for row in rows:
+        phase = row.get("phase")
+        if phase:
+            seen[phase] = row
+
+    phases = list(seen.values())
+    return {
+        "phases": phases,
+        "cost_total": round(sum(_phase_cost(p) for p in phases), 6),
+        "duration_seconds": sum((p.get("duration_seconds") or 0) for p in phases),
+        "last_phase": phases[-1].get("phase") if phases else None,
+    }
+
+
 def _empty_metrics_summary():
     """Return a zero-valued metrics summary dict."""
     return {
@@ -3478,40 +3586,17 @@ def get_metrics_summary():
     """
     config = load_config()
     project_dir_path = config.get("project_dir_path")
-    if not project_dir_path:
+
+    # Shared aggregation (read + parse + dedup keep-last + cost/duration sums)
+    # lives in _project_metrics_totals — also consumed by the GET /api/queue
+    # per-entry summary block. None covers exactly the old empty-summary cases.
+    totals = _project_metrics_totals(project_dir_path)
+    if totals is None:
         return _empty_metrics_summary()
 
-    metrics_path = Path(_pipeline_artifacts_dir(project_dir_path)) / "metrics.jsonl"
-    if not metrics_path.exists():
-        return _empty_metrics_summary()
+    phases = totals["phases"]
 
-    rows = []
-    try:
-        with open(metrics_path, "r") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rows.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-    except OSError:
-        return _empty_metrics_summary()
-
-    if not rows:
-        return _empty_metrics_summary()
-
-    # Deduplicate by phase — keep the last occurrence (highest attempt counts)
-    seen: dict = {}
-    for row in rows:
-        phase = row.get("phase")
-        if phase:
-            seen[phase] = row
-
-    phases = list(seen.values())
-
-    total_duration_summed = sum((p.get("duration_seconds") or 0) for p in phases)
+    total_duration_summed = totals["duration_seconds"]
     total_executor = sum((p.get("executor_attempts") or 0) for p in phases)
     total_reviewer = sum((p.get("reviewer_passes") or 0) for p in phases)
     total_blame = sum((p.get("blame_fires") or 0) for p in phases)
@@ -3526,42 +3611,9 @@ def get_metrics_summary():
     # vs 19h21m of phase work).
     total_duration = total_duration_summed
 
-    def _role_cost(p: dict, role_key: str) -> float:
-        role_obj = p.get(role_key) or {}
-        if not isinstance(role_obj, dict):
-            return 0.0
-        try:
-            return float(role_obj.get("cost_total", 0.0) or 0.0)
-        except (TypeError, ValueError):
-            return 0.0
-
-    def _phase_cost(p: dict) -> float:
-        v = p.get("cost_total", 0.0)
-        try:
-            return float(v or 0.0)
-        except (TypeError, ValueError):
-            return 0.0
-
-    def _role_token_total(p: dict, role_key: str) -> int:
-        """Sum of a role's token count for one phase row. Parallels ``_role_cost``;
-        defaults a missing/non-numeric ``total_tokens`` to 0 so pre-token history
-        rows (and local-model runs that report no usage) read as 0, not NaN."""
-        role_obj = p.get(role_key) or {}
-        if not isinstance(role_obj, dict):
-            return 0
-        try:
-            return int(role_obj.get("total_tokens", 0) or 0)
-        except (TypeError, ValueError):
-            return 0
-
-    def _phase_token_total(p: dict) -> int:
-        return (
-            _role_token_total(p, "planner_tokens")
-            + _role_token_total(p, "executor_tokens")
-            + _role_token_total(p, "reviewer_tokens")
-        )
-
-    total_cost = round(sum(_phase_cost(p) for p in phases), 6)
+    # Row-math helpers (_role_cost / _phase_cost / _role_token_total /
+    # _phase_token_total) are module-level — shared with _project_metrics_totals.
+    total_cost = totals["cost_total"]
     planner_cost_total = round(sum(_role_cost(p, "planner_tokens") for p in phases), 6)
     executor_cost_total = round(sum(_role_cost(p, "executor_tokens") for p in phases), 6)
     reviewer_cost_total = round(sum(_role_cost(p, "reviewer_tokens") for p in phases), 6)
@@ -6327,18 +6379,27 @@ async def post_setup_roadmap_seed(request: Request):
 
 # ─── Roadmap validation ───────────────────────────────────────────────────────
 
+# Phase-ID grammar: `[A-Z]+-[A-Z]?\d+` accepts both letter-suffixed (`CORE-E6`)
+# and plain-number (`INFRA-1`) phase numbers — the canonical parsers
+# (gate_scripts/phase_resolver.py, ui/roadmap_parser.py) accept any backticked
+# ID, and the smoke project ships plain-number IDs; the former `[A-Z]\d+` form
+# silently read such roadmaps as having zero phases (live E2E finding).
 _PHASE_LINE_RE = re.compile(
-    r"^- \[.\] `([A-Z]+-[A-Z]\d+)` \| (?:LOW|MEDIUM|HIGH|CRITICAL) \| .+",
+    r"^- \[(?P<box>.)\] `(?P<id>[A-Z]+-[A-Z]?\d+)` \| (?:LOW|MEDIUM|HIGH|CRITICAL) \| .+",
     re.MULTILINE,
 )
 
 
 def _roadmap_phase_checkbox_stats(content: str) -> tuple[int, int]:
-    """Return (total_phase_lines, completed_phase_lines) for roadmap markdown."""
-    all_phases = _PHASE_LINE_RE.findall(content or "")
-    completed_re = re.compile(r"^- \[[xX]\] ", re.MULTILINE)
-    completed = len(completed_re.findall(content or ""))
-    return len(all_phases), completed
+    """Return (total_phase_lines, completed_phase_lines) for roadmap markdown.
+
+    ``completed`` is the ``[x]``/``[X]`` subset of the MATCHED phase lines — a
+    stray checked task bullet elsewhere in the document (or the Conventions
+    legend) cannot inflate it past the total.
+    """
+    matches = list(_PHASE_LINE_RE.finditer(content or ""))
+    completed = sum(1 for m in matches if m.group("box") in ("x", "X"))
+    return len(matches), completed
 
 
 # Behavioral Verification block enforcement (Stage C, P0 §2.2).
@@ -6385,7 +6446,7 @@ def _validate_roadmap_content(content: str) -> dict:
     for i, line in enumerate(lines, start=1):
         m = _PHASE_LINE_RE.match(line)
         if m:
-            phase_matches.append((i, m.group(1), line))
+            phase_matches.append((i, m.group("id"), line))
 
     if not phase_matches:
         # Machine-readable code so the UI can distinguish a genuinely-empty / abort-stub
@@ -7834,6 +7895,22 @@ def get_queue():
     ``live_pipeline_status`` to null. When the paths match, ``live_current_agent``
     is also set from pipeline state (for ``WAITING_FOR_SENTINEL`` “Running {agent}”
     queue pills); otherwise null.
+
+    Every entry (including synthetic ``ingest-*`` rows) also carries a uniform
+    summary block for the flat-table queue screen — ``None`` marks "unknowable"
+    (rendered as an em-dash):
+
+    - ``phases_total`` / ``phases_complete`` — roadmap checkbox stats from the
+      project's ``*oadmap*.md`` (W3-B, extended from ACTIVE-only to all states)
+    - ``cost_total`` / ``duration_seconds`` — aggregated from the project's
+      ``metrics.jsonl`` via ``_project_metrics_totals`` (active work time, not
+      calendar wall-clock)
+    - ``current_phase_raw_id`` — live entry: from pipeline_state; parked
+      ESCALATION/ESCALATION_ANSWERED/BLOCKED entry: from its
+      ``parked_state_snapshot``; COMPLETED/FAILED entry: last deduped metrics
+      phase
+    - ``parked_agent`` — parked entry: ``parked_state_snapshot.current_agent``
+      (None for snapshots written before that key existed)
     """
     config = load_config()
     q = _read_queue_file(config)
@@ -7852,9 +7929,15 @@ def get_queue():
     # Sort after merge so synthetic ``ingest-*`` rows (active project not in queue file) are first too.
     merged = _queue_entries_active_first_by_pipeline_state(merged, ps_real)
 
+    import glob as _glob_mod  # used by the per-entry summary block below
+
     enriched = []
     for e in merged:
         entry = dict(e)
+        # True only for a genuine pipeline_state realpath match — parked rows
+        # fake live_pipeline_status from parked_pipeline_status, so the summary
+        # block below must key off this, never off live_pipeline_status.
+        _is_live_match = False
         if ps and ps_real:
             ep = e.get("project_path", "")
             try:
@@ -7862,6 +7945,7 @@ def get_queue():
             except OSError:
                 er = ""
             if er and er == ps_real:
+                _is_live_match = True
                 entry["live_pipeline_status"] = ps.get("pipeline_status")
                 # UI: WAITING_FOR_SENTINEL pill — "Running {agent}" (see formatWaitForSentinelLabel in index.html)
                 entry["live_current_agent"] = (ps.get("current_agent") or None)
@@ -7885,21 +7969,54 @@ def get_queue():
         # Shared with the trigger-next halt-reason via _entry_has_banked_answer (read-only).
         entry["has_banked_answer"] = _entry_has_banked_answer(entry)
 
-        # W3-B: enrich ACTIVE entries with live roadmap phase counts
-        if entry.get("state") == "ACTIVE":
-            _proj = entry.get("project_path", "")
-            if _proj:
-                try:
-                    import glob as _glob_mod
-                    _rm_candidates = _glob_mod.glob(os.path.join(_proj, "*oadmap*.md"))
-                    if _rm_candidates:
-                        with open(_rm_candidates[0], "r", errors="replace") as _rf:
-                            _rc = _rf.read()
-                        _pt, _pc = _roadmap_phase_checkbox_stats(_rc)
-                        entry["phases_total"] = _pt
-                        entry["phases_complete"] = _pc
-                except Exception:
-                    pass  # non-fatal — queue entry returned without phase counts
+        # Uniform per-entry summary block (queue redesign): the flat-table
+        # screen renders progress / cost / elapsed on EVERY row, so all six
+        # keys are present on every state — None marks "unknowable" (the UI
+        # renders an em-dash). Each field group degrades independently.
+        _proj = entry.get("project_path", "")
+
+        # phases_total / phases_complete — roadmap checkbox stats (W3-B,
+        # extended from ACTIVE-only to all entries so queued rows show 0/N).
+        entry["phases_total"] = None
+        entry["phases_complete"] = None
+        if _proj:
+            try:
+                _rm_candidates = _glob_mod.glob(os.path.join(_proj, "*oadmap*.md"))
+                if _rm_candidates:
+                    with open(_rm_candidates[0], "r", errors="replace") as _rf:
+                        _rc = _rf.read()
+                    _pt, _pc = _roadmap_phase_checkbox_stats(_rc)
+                    entry["phases_total"] = _pt
+                    entry["phases_complete"] = _pc
+            except Exception:
+                pass  # non-fatal — keys stay None
+
+        # cost_total / duration_seconds — aggregated from the project's
+        # metrics.jsonl via the shared helper (None when no metrics exist).
+        try:
+            _totals = _project_metrics_totals(_proj)
+        except Exception:
+            _totals = None  # non-fatal — cost/duration stay None
+        entry["cost_total"] = _totals["cost_total"] if _totals else None
+        entry["duration_seconds"] = _totals["duration_seconds"] if _totals else None
+
+        # current_phase_raw_id / parked_agent — state-dependent sources. The
+        # live branch keys off _is_live_match (a parked row can ALSO be the
+        # live project in manual-mode escalation; ps wins, snapshot backfills).
+        _state = entry.get("state")
+        _raw_id = None
+        _parked_agent = None
+        if _is_live_match:
+            _raw_id = ps.get("current_phase_raw_id") or None
+        if _state in ("ESCALATION", "ESCALATION_ANSWERED", "BLOCKED"):
+            _snap = entry.get("parked_state_snapshot")
+            _snap = _snap if isinstance(_snap, dict) else {}
+            _raw_id = _raw_id or (_snap.get("current_phase_raw_id") or None)
+            _parked_agent = _snap.get("current_agent") or None
+        elif _state in ("COMPLETED", "FAILED") and _raw_id is None:
+            _raw_id = _totals["last_phase"] if _totals else None
+        entry["current_phase_raw_id"] = _raw_id
+        entry["parked_agent"] = _parked_agent
 
         enriched.append(entry)
 
@@ -8283,6 +8400,11 @@ def get_queue_entry_snapshot(entry_id: str):
     Reads the global pipeline_state.json (matches by project_path) and the
     project's roadmap.md to build a combined progress snapshot. All fields
     are optional — returns partial data gracefully when files are missing.
+
+    ``cost_total`` / ``duration_seconds`` (queue redesign) aggregate the
+    entry's own ``metrics.jsonl`` via ``_project_metrics_totals`` — None when
+    the project has no metrics. The dashboard's row expansion renders them in
+    the snapshot's background-details section.
     """
     config = load_config()
     q = _read_queue_file(config)
@@ -8353,6 +8475,15 @@ def get_queue_entry_snapshot(entry_id: str):
         except Exception:
             pass
 
+    # Cost + active-work duration from the entry's own metrics.jsonl (shared
+    # helper; None when the project has no metrics — the UI suppresses both).
+    try:
+        _totals = _project_metrics_totals(project_path)
+    except Exception:
+        _totals = None
+    snapshot_cost_total = _totals["cost_total"] if _totals else None
+    snapshot_duration_seconds = _totals["duration_seconds"] if _totals else None
+
     # Per-entry escalation/advisory view + eligibility probes, computed by the SHARED
     # _compute_escalation_view helper against THIS entry's project (not the active one).
     # This is the fix: a parked ESCALATION entry now describes its OWN project — the same
@@ -8398,6 +8529,8 @@ def get_queue_entry_snapshot(entry_id: str):
         "preflight_validated_at": entry.get("preflight_validated_at"),
         "phases_total": phases_total,
         "phases_complete": phases_complete,
+        "cost_total": snapshot_cost_total,
+        "duration_seconds": snapshot_duration_seconds,
         "current_phase_raw_id": current_phase_raw_id,
         "current_phase_desc": current_phase_desc,
         "current_phase": current_phase,
