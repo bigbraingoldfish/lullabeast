@@ -1021,6 +1021,7 @@ class TestQueueRestoreParkedEntryToActive:
 _SNAPSHOT_KEYS = (
     "current_phase",
     "current_phase_raw_id",
+    "current_agent",
     "planner_retries",
     "executor_retries",
     "executor_self_failure_retries",
@@ -1057,6 +1058,7 @@ def _snapshot(phase=4, raw_id="CORE-2"):
     return {
         "current_phase": phase,
         "current_phase_raw_id": raw_id,
+        "current_agent": "escalation",
         "planner_retries": 0,
         "executor_retries": 2,
         "executor_self_failure_retries": 1,
@@ -1113,6 +1115,9 @@ class TestParkedEscalationRevival:
         assert set(snap.keys()) == set(_SNAPSHOT_KEYS), f"snapshot keys drifted: {sorted(snap.keys())}"
         assert snap["current_phase"] == 4
         assert snap["current_phase_raw_id"] == "CORE-2"
+        # Display-only key for the dashboard's parked-row PHASE cell; the
+        # revival restore deliberately ignores it (hard-codes "escalation").
+        assert snap["current_agent"] == "escalation"
         assert snap["executor_retries"] == 2
         assert snap["executor_self_failure_retries"] == 1
         assert snap["reviewer_retries"] == 2

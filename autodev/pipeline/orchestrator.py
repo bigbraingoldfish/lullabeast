@@ -2108,6 +2108,11 @@ class Orchestrator:
         snapshot = {
             "current_phase": self.state.get("current_phase", 0),
             "current_phase_raw_id": self.state.get("current_phase_raw_id", ""),
+            # current_agent: display-only — the dashboard's queue table renders the
+            # parked row's PHASE cell as "<raw_id> · <agent>" (GET /api/queue exposes
+            # it as parked_agent). The revival restore deliberately ignores this key
+            # and keeps hard-coding current_agent="escalation".
+            "current_agent": self.state.get("current_agent", ""),
             "planner_retries": self.state.get("planner_retries", 0),
             "executor_retries": self.state.get("executor_retries", 0),
             "executor_self_failure_retries": self.state.get("executor_self_failure_retries", 0),

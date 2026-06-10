@@ -672,6 +672,60 @@
             return queueOnlyRowPill(entry.state);
         }
 
+        /** Queue-table status buckets (filter chips + row grouping). localStorage key holds
+         * the HIDDEN bucket names — default [] keeps every bucket visible on first load. */
+        const QUEUE_HIDDEN_BUCKETS_KEY = 'autodev_queue_hidden_buckets';
+        /** Glance order = priority order: what runs, what needs you, what waits, what's done. */
+        const QUEUE_BUCKET_ORDER = ['running', 'attention', 'queued', 'complete'];
+        /** Live pipeline statuses that pull an ACTIVE row into the attention bucket. */
+        const QUEUE_ATTENTION_LIVE_STATUSES = ['WAITING_FOR_HUMAN', 'STOPPED', 'HALTED_SILENT', 'QUEUE_HALTED'];
+        const QUEUE_BUCKET_CHIP = {
+            running:   { label: 'running',   dot: 'bg-[#4fd98c]' },
+            attention: { label: 'attention', dot: 'bg-amber-400' },
+            queued:    { label: 'queued',    dot: 'bg-slate-400' },
+            complete:  { label: 'complete',  dot: 'bg-emerald-400' },
+        };
+
+        /** Shared queue-table column template — header and data rows must stay aligned,
+         * and columns scale proportionally on wide screens (PROJECT is capped so it
+         * cannot swallow the whole width). */
+        const QUEUE_TABLE_GRID = 'grid grid-cols-[minmax(230px,2.2fr)_minmax(140px,1.1fr)_minmax(120px,1fr)_minmax(150px,1.2fr)_minmax(95px,0.7fr)_minmax(80px,0.6fr)_minmax(95px,0.7fr)] items-center gap-3';
+
+        /** One stat tile in the expansion's "Run so far" / "At a glance" trio.
+         * Module-level (stable component identity) so the trio never remounts on
+         * the 5s poll re-render. */
+        function QueueStatCard({ label, value, sub }) {
+            return (
+                <div className="border border-[#1c1829] rounded-md bg-[#15121f] p-3 min-w-0">
+                    <p className="header-text text-[10px] uppercase tracking-wide text-slate-500">{label}</p>
+                    <p className="font-mono text-base text-slate-200 mt-1 truncate">{value}</p>
+                    {sub && <p className="header-text text-[11px] text-slate-500 mt-0.5 truncate">{sub}</p>}
+                </div>
+            );
+        }
+
+        /** Map a queue entry to its filter bucket — pure function of
+         * (state, live_pipeline_status). Parked/terminal states that need (or needed)
+         * a human are 'attention'; an ACTIVE row follows its live status. */
+        function queueEntryBucket(entry) {
+            const state = entry && entry.state;
+            if (state === 'COMPLETED') return 'complete';
+            if (state === 'ESCALATION' || state === 'ESCALATION_ANSWERED' || state === 'BLOCKED' || state === 'FAILED') return 'attention';
+            if (state === 'ACTIVE') {
+                return QUEUE_ATTENTION_LIVE_STATUSES.includes(entry.live_pipeline_status) ? 'attention' : 'running';
+            }
+            return 'queued';  // READY, DEPENDENCY_HOLD, SKIPPED_PENDING
+        }
+
+        /** Wall-clock elapsed since an ISO timestamp, formatted via formatDuration.
+         * Null-safe: returns null for a missing/garbled timestamp so callers can em-dash. */
+        function formatElapsedSince(iso) {
+            if (!iso) return null;
+            const seconds = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+            if (!isFinite(seconds)) return null;
+            return formatDuration(Math.max(0, seconds));
+        }
+
         /** True when any queue row's live_pipeline_status is an in-flight pipeline. Used by
          * shouldOpenIdeasOnColdBootstrap (P0-01) for first-run routing — NOT the preflight banner. */
         function queueEntriesHaveBusyLivePipeline(entries) {
@@ -1260,6 +1314,9 @@
             return n.toLocaleString();
         }
 
+        /** Currency formatting — callers zero-suppress (cost 0/null renders an em-dash). */
+        const fmtUSD = (v) => `$${(Number(v) || 0).toFixed(2)}`;
+
         /** P0 Stage H — format "Exec attempts" with retry-source breakdown.
          *
          * Clean common case: when both lifetime counters are 0 (single
@@ -1787,6 +1844,18 @@
             onDispatched = null,
             showOrchestratorLifecycle = false,
             showCommandSentScreen = false,
+            // When false, the panel renders the command groups only and suppresses its
+            // built-in collapsible advisory block — the Queue view shows the advisory on
+            // the left (from the snapshot's escalation_* fields), so duplicating it inside
+            // the right-rail panel would be redundant. Default true → the Pipeline Monitor
+            // (which passes nothing) is unchanged.
+            showAdvisory = true,
+            // Compact mode for the queue's narrow action rail: one-line command buttons
+            // (the inline description moves to the hover title; the confirmation modal
+            // still restates consequences before anything fires) and no outer border-2
+            // frame (the rail provides the framing — a frame-in-a-frame reads heavy).
+            // Default false → the Monitor render is unchanged.
+            compact = false,
         }) {
             const [commandSent, setCommandSent] = useState(false);
             const [lastSubmittedCommand, setLastSubmittedCommand] = useState(null);
@@ -1914,16 +1983,19 @@
             const renderActionButton = ({ command, label, desc, title: cmdTitle, group }) => {
                 const isStop = group === 'stop';
                 const isNuclear = group === 'nuclear';  // P1 Stage G2 — destructive emphasis
+                // Compact: hover carries the mid-form description ahead of the long-form
+                // consequences so a one-line button still explains itself before the modal.
+                const hoverTitle = compact && desc ? `${desc} ${cmdTitle || ''}`.trim() : cmdTitle;
                 return (
                     <button
                         key={command}
                         type="button"
-                        className={`flex flex-col items-start text-left px-3 py-2 rounded transition-colors w-full ${isNuclear ? 'bg-red-950/40 border border-red-800/60 hover:bg-red-900/40' : 'bg-[#221b36] hover:bg-[#221d31]'}`}
-                        title={cmdTitle}
+                        className={`flex flex-col items-start text-left px-3 rounded transition-colors w-full ${compact ? 'py-1.5' : 'py-2'} ${isNuclear ? 'bg-red-950/40 border border-red-800/60 hover:bg-red-900/40' : 'bg-[#221b36] hover:bg-[#221d31]'}`}
+                        title={hoverTitle}
                         onClick={() => handleCommand(command)}
                     >
-                        <span className={`header-text text-sm font-medium ${(isStop || isNuclear) ? 'text-red-400' : ''}`}>{label}</span>
-                        {desc && <span className="text-slate-400 text-xs mt-0.5 leading-snug">{desc}</span>}
+                        <span className={`header-text ${compact ? 'text-xs' : 'text-sm'} font-medium ${(isStop || isNuclear) ? 'text-red-400' : ''}`}>{label}</span>
+                        {!compact && desc && <span className="text-slate-400 text-xs mt-0.5 leading-snug">{desc}</span>}
                     </button>
                 );
             };
@@ -1985,7 +2057,7 @@
 
             return (
                 <div
-                    className={`border-2 rounded-lg p-4 mt-4 bg-[#15121f]/50 ${
+                    className={compact ? "space-y-3" : `border-2 rounded-lg p-4 mt-4 bg-[#15121f]/50 ${
                         capReached ? "border-red-500" : "border-orange-500"
                     }`}
                 >
@@ -2042,7 +2114,9 @@
                         /* ── Grouped command layout ──────────────────────────── */
                         <div className="space-y-3">
 
-                            {/* 1. Collapsible advisory block */}
+                            {/* 1. Collapsible advisory block (suppressed in the Queue, which
+                                renders the advisory on the left — see showAdvisory) */}
+                            {showAdvisory && (
                             <div className="rounded border border-[#2a2540] bg-[#100d1a]/60">
                                 <button
                                     type="button"
@@ -2111,6 +2185,7 @@
                                     </div>
                                 )}
                             </div>
+                            )}
 
                             {/* 2. Recover group OR cap-reached notice */}
                             {capReached ? (
@@ -2202,8 +2277,6 @@
                 if (ex >= 2) return { label: 'retried', accent: false, muted: true };
                 return { label: 'clean', accent: false };
             };
-
-            const fmtUSD = (v) => `$${(Number(v) || 0).toFixed(2)}`;
 
             return (
                 <div className="space-y-4">
@@ -8238,7 +8311,15 @@
             const { pipelineStatus, setUnsavedQueueOrder, safeNavigate, pendingQueueAddPath, clearPendingQueueAddPath } = useContext(AppCtx);
             const [queue, setQueue] = useState([]);
             const [queueMode, setQueueMode] = useState('auto');
-            const [selectedId, setSelectedId] = useState(null);
+            const [expandedId, setExpandedId] = useState(null);
+            // Hidden filter-chip buckets — persisted so the operator's "keep completed
+            // tucked away" choice survives reloads. Corrupt storage degrades to all-visible.
+            const [hiddenBuckets, setHiddenBuckets] = useState(() => {
+                try {
+                    const parsed = JSON.parse(localStorage.getItem(QUEUE_HIDDEN_BUCKETS_KEY) || '[]');
+                    return Array.isArray(parsed) ? parsed : [];
+                } catch (e) { return []; }
+            });
             const [nextEligible, setNextEligible] = useState(null);
             const [showAddModal, setShowAddModal] = useState(false);
             const [addModalInitialPath, setAddModalInitialPath] = useState('');
@@ -8328,6 +8409,37 @@
 
             const effectiveRanks = reorderMode ? computeLocalRanks(queue) : displayRanks;
 
+            const toggleBucket = (bucket) => {
+                const hiding = !hiddenBuckets.includes(bucket);
+                setHiddenBuckets(prev => {
+                    const next = prev.includes(bucket) ? prev.filter(b => b !== bucket) : [...prev, bucket];
+                    try { localStorage.setItem(QUEUE_HIDDEN_BUCKETS_KEY, JSON.stringify(next)); } catch (e) {}
+                    return next;
+                });
+                // Hiding the expanded row's bucket also collapses it (the row disappears).
+                const expanded = queue.find(e => e.id === expandedId);
+                if (hiding && expanded && queueEntryBucket(expanded) === bucket) setExpandedId(null);
+            };
+
+            const bucketCounts = { running: 0, attention: 0, queued: 0, complete: 0 };
+            queue.forEach(e => { bucketCounts[queueEntryBucket(e)] += 1; });
+            const bucketRank = (e) => QUEUE_BUCKET_ORDER.indexOf(queueEntryBucket(e));
+            // Reorder mode renders the raw queue (drag indices operate on the full array,
+            // and a hidden parent must not silently drag along unseen children); otherwise
+            // hide filtered buckets and group rows by bucket rank. The stable sort keeps
+            // the server order inside each bucket (active-first, then position); the
+            // complete bucket additionally sorts newest-first.
+            const visibleQueue = reorderMode ? queue : queue
+                .filter(e => !hiddenBuckets.includes(queueEntryBucket(e)))
+                .sort((a, b) => {
+                    const ra = bucketRank(a), rb = bucketRank(b);
+                    if (ra !== rb) return ra - rb;
+                    if (QUEUE_BUCKET_ORDER[ra] === 'complete') {
+                        return (b.completed_at || '').localeCompare(a.completed_at || '');
+                    }
+                    return 0;
+                });
+
             const fetchQueue = (options = {}) => {
                 const force = options.force === true;
                 if (!force && reorderModeRef.current && reorderDirtyRef.current) {
@@ -8348,10 +8460,15 @@
                     })
                     .then((d) => {
                         const q = d.queue || [];
-                        setQueue(q);
+                        // Identity-stable when unchanged: the 5s poll must not re-render
+                        // every row (and visibly repaint the table) for an identical payload.
+                        setQueue(prev => JSON.stringify(prev) === JSON.stringify(q) ? prev : q);
                         setQueueMode(d.queue_mode || 'auto');
                         setNextEligible(d.next_eligible || null);
-                        setDisplayRanks(d.display_ranks || {});
+                        setDisplayRanks(prev => {
+                            const next = d.display_ranks || {};
+                            return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+                        });
                         setLoading(false);
                         setError("");
                         setSnapshotVersion(v => v + 1);
@@ -8427,19 +8544,43 @@
                 return () => clearInterval(id);
             }, []);
 
-            // Fetch snapshot when selected entry or version changes
+            // Fetch snapshot when the expanded entry or version changes. Stale-while-
+            // revalidate: the 5s poll bumps snapshotVersion, and flipping to a Loading
+            // state on every bump made the whole expansion flash — so the spinner (and
+            // the data clear) is reserved for a genuine target change; a background
+            // refresh of the same row swaps the data in place.
+            const snapshotIdRef = useRef(null);
             useEffect(() => {
-                if (!selectedId) { setSnapshot(null); return; }
-                setSnapshotLoading(true);
-                fetch(`/api/queue/${selectedId}/snapshot`)
+                if (!expandedId) { setSnapshot(null); snapshotIdRef.current = null; return; }
+                const isNewTarget = snapshotIdRef.current !== expandedId;
+                if (isNewTarget) { setSnapshot(null); setSnapshotLoading(true); }
+                fetch(`/api/queue/${expandedId}/snapshot`)
                     .then(r => r.json())
-                    .then(d => setSnapshot(d))
-                    .catch(() => setSnapshot(null))
+                    .then(d => {
+                        snapshotIdRef.current = expandedId;
+                        // Identity-stable when unchanged: an idle background refresh
+                        // must not re-render the screen (same idiom as setQueue).
+                        setSnapshot(prev => JSON.stringify(prev) === JSON.stringify(d) ? prev : d);
+                    })
+                    .catch(() => { if (isNewTarget) setSnapshot(null); })
                     .finally(() => setSnapshotLoading(false));
-            }, [selectedId, snapshotVersion]);
+            }, [expandedId, snapshotVersion]);
 
-            const selected = queue.find(e => e.id === selectedId) || null;
+            const selected = queue.find(e => e.id === expandedId) || null;
             const activeEntry = queue.find(e => e.state === 'ACTIVE');
+
+            // Escalation-ness of the expanded row — shared by QueueProjectSnapshot (advisory
+            // on the left), QueueActionHub (command buttons), and QueueRowExpansion (wider
+            // action rail so the buttons aren't cramped). A banked answer is escalation-like
+            // for layout but renders the "answer banked" body instead of the advisory.
+            const selectedHasBankedAnswer = !!selected &&
+                (selected.state === 'ESCALATION_ANSWERED' || (selected.state === 'ESCALATION' && selected.has_banked_answer));
+            const selectedIsEscalation = !!selected && (
+                selected.state === 'ESCALATION' ||
+                selected.state === 'ESCALATION_ANSWERED' ||
+                selected.live_pipeline_status === 'WAITING_FOR_HUMAN' ||
+                (snapshot && snapshot.is_active_project && snapshot.pipeline_status === 'WAITING_FOR_HUMAN')
+            );
 
             const busyPipelineStatuses = ['RUNNING', 'WAITING_FOR_SENTINEL', 'WAITING_FOR_HUMAN'];
             const runNextProjectDisabled =
@@ -8499,7 +8640,7 @@
                 fetch(`/api/queue/${id}`, {method: 'DELETE'})
                     .then(async r => {
                         if (!r.ok) { const d = await r.json().catch(() => ({})); setError(d.detail || 'Cannot remove'); return; }
-                        setSelectedId(null);
+                        setExpandedId(null);
                         fetchQueue();
                     })
                     .catch(() => setError('Request failed'));
@@ -8627,7 +8768,7 @@
                 return `${Math.floor(diff/3600)}h ago`;
             }
 
-            // ── Column 2: Project Snapshot ──────────────────────────────────────────
+            // ── Row expansion: Project Snapshot ─────────────────────────────────────
 
             const AGENT_ACTIVITY_LABELS = {
                 planner: "Planning implementation",
@@ -8637,150 +8778,247 @@
             };
 
             function QueueProjectSnapshot() {
-                if (!selected) return (
-                    <div className="flex flex-col items-center justify-center mt-16 gap-3 text-slate-600">
-                        <div className="w-[52px] h-[52px] rounded-full border border-dashed border-[#3a3352] flex items-center justify-center">
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3" strokeLinecap="round"/></svg>
-                        </div>
-                        <p className="header-text text-xs text-slate-500 text-center">Select a project to view details</p>
-                    </div>
-                );
-                if (snapshotLoading) return (
-                    <p className="header-text text-xs text-slate-500 text-center mt-8">Loading…</p>
-                );
+                // Rendered only inside the expanded row, so `selected` is set by
+                // construction; bare guard covers a mid-poll removal race. The row above
+                // already carries name / path / status pill — nothing here repeats them.
+                if (!selected) return null;
                 const snap = snapshot;
+                // Loading only when there is nothing to show yet — a background refresh
+                // (the 5s poll) keeps the previous data on screen, no flash.
+                if (snapshotLoading && !snap) return (
+                    <p className="header-text text-xs text-slate-500 mt-2">Loading…</p>
+                );
+
                 const hasRunData = snap && snap.is_active_project;
                 const agentRetries = snap && snap.current_agent ? {
                     planner: snap.planner_retries || 0,
                     executor: snap.executor_retries || 0,
                     reviewer: snap.reviewer_retries || 0,
                 }[snap.current_agent] : null;
-
-                const selDisp = queueRowDisplay(selected);
                 const parentEntry = selected.parent_id ? queue.find((e) => e.id === selected.parent_id) : null;
+
+                const phasesTotal = (snap && snap.phases_total > 0 ? snap.phases_total : selected.phases_total) || 0;
+                const phasesComplete = (snap && snap.phases_total > 0 ? snap.phases_complete : selected.phases_complete) || 0;
+                const remaining = Math.max(0, phasesTotal - phasesComplete);
+                const phasesNode = phasesTotal > 0
+                    ? <>{phasesComplete} <span className="text-slate-500">/ {phasesTotal}</span></> : '—';
+                const rank = effectiveRanks[selected.id];
+                const isNext = !!nextEligible && selected.id === nextEligible;
+
+                // Coarse expansion kind drives the whole body (the user asked for a
+                // distinct, purpose-fit layout per state rather than one shape reused).
+                let kind = 'queued';
+                if (selectedIsEscalation) kind = selectedHasBankedAnswer ? 'answered' : 'escalation';
+                else if (selected.state === 'ACTIVE') kind = 'active';
+                else if (selected.state === 'COMPLETED') kind = 'completed';
+                else if (selected.state === 'FAILED') kind = 'failed';
+                else if (selected.state === 'BLOCKED') kind = 'blocked';
+
+                // Headline — plain words for what's happening now.
+                const STATE_HEADLINES = {
+                    COMPLETED: 'Pipeline complete',
+                    FAILED: 'Run failed',
+                    BLOCKED: 'Blocked — roadmap needs attention',
+                    SKIPPED_PENDING: 'Preflight failed — re-validate to requeue',
+                    DEPENDENCY_HOLD: 'Waiting on its parent project',
+                };
+                let headline = STATE_HEADLINES[selected.state] || 'Queued — waiting to start';
+                if (kind === 'answered') headline = 'Answer banked — resumes automatically';
+                else if (kind === 'escalation') headline = 'Escalated — waiting for your answer';
+                else if (kind === 'active') headline = (hasRunData && snap.current_agent && AGENT_ACTIVITY_LABELS[snap.current_agent]) || 'Running';
+                else if (kind === 'queued' && selected.state === 'READY') headline = isNext ? 'Next up — first in line' : 'Queued — waiting its turn';
+
+                // READY "what happens next" confidence line (uses the formerly-dead nextEligible).
+                let nextLine = null;
+                if (kind === 'queued' && selected.state === 'READY') {
+                    if (isNext) nextLine = queueMode === 'auto'
+                        ? 'Starts automatically when the pipeline is free.'
+                        : 'Press "Run next project" to start it.';
+                    else if (rank != null && rank > 1) nextLine = `${rank - 1} project${rank - 1 !== 1 ? 's' : ''} ahead of it in line.`;
+                }
+
+                const costValue = snap && snap.cost_total > 0 ? fmtUSD(snap.cost_total) : '—';
+                const costSub = snap && snap.cost_total > 0 && phasesComplete > 0
+                    ? `${fmtUSD(snap.cost_total / phasesComplete)} / phase` : null;
+
+                // Stat-card trio — content is per-kind (em-dash where unknowable). The
+                // queued family deliberately omits cost (unknown before a run runs).
+                let cards = null;
+                if (kind === 'active') {
+                    cards = [
+                        { label: 'Elapsed', value: selected.started_at ? (formatElapsedSince(selected.started_at) || '—') : '—',
+                          sub: snap && snap.duration_seconds != null ? `active ${formatDuration(snap.duration_seconds)}` : null },
+                        { label: 'Cost', value: costValue, sub: costSub },
+                        { label: 'Phases', value: phasesNode, sub: phasesTotal > 0 ? `${remaining} remaining` : null },
+                    ];
+                } else if (kind === 'completed') {
+                    cards = [
+                        { label: 'Duration', value: snap && snap.duration_seconds != null ? formatDuration(snap.duration_seconds) : '—', sub: 'active work' },
+                        { label: 'Cost', value: costValue, sub: costSub },
+                        { label: 'Phases', value: phasesNode, sub: phasesTotal > 0 ? 'all complete' : null },
+                    ];
+                } else if (kind === 'failed') {
+                    cards = [
+                        { label: 'Ran for', value: selected.started_at ? (formatElapsedSince(selected.started_at) || '—') : '—',
+                          sub: selected.failed_at ? `failed ${relTime(selected.failed_at)}` : null },
+                        { label: 'Cost', value: costValue, sub: costSub },
+                        { label: 'Reached', value: phasesNode, sub: null },
+                    ];
+                } else if (kind === 'blocked') {
+                    cards = [
+                        { label: 'Phases', value: phasesNode, sub: phasesTotal > 0 ? `${remaining} remaining` : null },
+                        { label: 'Cost', value: costValue, sub: costSub },
+                        { label: 'Blocked', value: selected.blocked_at ? relTime(selected.blocked_at) : '—', sub: null },
+                    ];
+                } else if (kind === 'queued') {
+                    cards = [
+                        { label: 'Phases', value: phasesTotal > 0 ? String(phasesTotal) : '—', sub: 'planned' },
+                        { label: 'Preflight', value: selected.preflight_validated_at ? relTime(selected.preflight_validated_at) : '—', sub: 'last checked' },
+                        { label: 'Position', value: isNext ? 'Next up' : (rank != null ? `#${rank}` : '—'), sub: isNext ? 'first in line' : 'in line' },
+                    ];
+                } else if (kind === 'escalation' || kind === 'answered') {
+                    // Balance the compact action rail: the left pane carries the run
+                    // numbers under the advisory instead of sitting as a void.
+                    const waitingSince = selected.parked_at || (snap && snap.waiting_for_human_at) || null;
+                    cards = [
+                        { label: 'Phases', value: phasesNode, sub: phasesTotal > 0 ? `${remaining} remaining` : null },
+                        { label: 'Cost', value: costValue, sub: costSub },
+                        { label: 'Waiting', value: waitingSince ? (formatElapsedSince(waitingSince) || '—') : '—', sub: kind === 'answered' ? 'for its turn' : 'on you' },
+                    ];
+                }
+
+                const STEPPER_ROLES = ['planner', 'executor', 'reviewer'];
+                const stepperIdx = hasRunData ? STEPPER_ROLES.indexOf(snap.current_agent) : -1;
+
+                // Escalation advisory (left). Read from the snapshot's escalation_* fields,
+                // which the snapshot endpoint already exposes for THIS entry's project; the
+                // right-rail command panel is rendered with showAdvisory={false} so it isn't
+                // shown twice.
+                const advGenerating = snap && snap.escalation_advisory_status === 'generating';
+                const advMsg = snap && snap.escalation_message;
+                const advAction = snap && snap.escalation_recommended_action;
+                const advLoops = (snap && snap.escalation_resets) || 0;
+
+                const phaseContextLine = (snap && snap.current_phase_raw_id) ? (
+                    <p className="header-text text-xs text-slate-500 mt-1">
+                        <span className="font-mono text-slate-300" title={P3_PIPELINE_PHASE_RAW_ID_TITLE}>{snap.current_phase_raw_id}</span>
+                        {snap.current_phase != null && phasesTotal > 0 && <span> · Phase {snap.current_phase + 1} of {phasesTotal}</span>}
+                    </p>
+                ) : null;
+
                 return (
                     <div className="space-y-4">
-                        {/* Section A: Project Identity */}
+                        {/* Headline + phase/goal context */}
                         <div>
-                            <p className="header-text text-base text-slate-200 font-semibold leading-tight">{selected.name}</p>
-                            <p className="header-text text-xs text-slate-500 font-mono mt-0.5 break-all">{selected.project_path}</p>
-                        </div>
-                        <div className="flex items-center gap-2 flex-wrap">
-                            {selected.parent_id && (
-                                <span
-                                    className="header-text px-1.5 py-0.5 rounded text-xs font-medium bg-indigo-900/50 text-indigo-300 border border-indigo-700/40"
-                                    title={depBadgeTitle(selected, parentEntry)}
-                                >
-                                    DEP
-                                </span>
+                            <p className="header-text text-sm text-slate-200 font-semibold">{headline}</p>
+                            {(kind === 'active' || kind === 'escalation' || kind === 'answered' || kind === 'blocked') && phaseContextLine}
+                            {nextLine && <p className="header-text text-xs text-slate-400 mt-1">{nextLine}</p>}
+                            {kind === 'active' && hasRunData && snap.current_phase_desc && (
+                                <p className="text-sm text-slate-400 leading-relaxed mt-1.5">{snap.current_phase_desc}</p>
                             )}
-                            <span
-                                className={`header-text px-2 py-0.5 rounded text-xs font-medium ${selDisp.className}`}
-                                title={selDisp.title || undefined}
-                            >{selDisp.label}</span>
-                            {selected.blocked_at && <span className="header-text text-xs text-slate-500">Blocked {relTime(selected.blocked_at)}</span>}
-                            {selected.started_at && <span className="header-text text-xs text-slate-500">Started {relTime(selected.started_at)}</span>}
-                            {selected.completed_at && <span className="header-text text-xs text-slate-500">Completed {relTime(selected.completed_at)}</span>}
                         </div>
+
+                        {/* Escalation advisory — the detail, on the left */}
+                        {(kind === 'escalation') && (
+                            <div className="rounded-md border border-orange-500/40 bg-[#1a1410]/60 p-3 space-y-2">
+                                <p className="header-text text-[11px] text-orange-300/80 font-mono">Escalation loops {advLoops}/3</p>
+                                {advGenerating ? (
+                                    <p className="header-text text-xs text-sky-300">Reviewing escalation…</p>
+                                ) : (
+                                    <>
+                                        <p className="text-sm text-slate-300 leading-relaxed">
+                                            {advMsg || 'This phase needs your input. See the pipeline log for full context.'}
+                                        </p>
+                                        {advAction && (
+                                            <p className="text-xs text-slate-400 leading-relaxed">
+                                                <span className="text-emerald-400 font-medium">Suggested · </span>{advAction}
+                                            </p>
+                                        )}
+                                    </>
+                                )}
+                            </div>
+                        )}
+                        {(kind === 'answered') && (
+                            <p className="header-text text-xs text-slate-400">Your answer is saved — this project resumes when the queue reaches it again.</p>
+                        )}
+
+                        {/* Live activity strip (active rows) */}
+                        {kind === 'active' && hasRunData && snap.current_agent ? (
+                            <div className="border border-[#1c1829] rounded-md bg-[#15121f] px-3 py-2 flex items-center justify-between gap-3">
+                                <span className="font-mono text-xs text-slate-300 truncate">
+                                    {snap.current_agent}
+                                    {agentRetries !== null && <span className="text-slate-500"> · attempt {agentRetries + 1}</span>}
+                                    {snap.last_action && (
+                                        <span className="text-slate-500" title={snap.last_action}>
+                                            {' '}— {snap.last_action.length > 60 ? snap.last_action.slice(0, 60) + '…' : snap.last_action}
+                                        </span>
+                                    )}
+                                </span>
+                                <ElapsedTimer
+                                    lastActionTimestamp={snap.last_action_timestamp}
+                                    sentinelWaitStartedAt={snap.sentinel_wait_started_at}
+                                    waitingForHumanAt={snap.waiting_for_human_at}
+                                    orchestratorAlive={snap.orchestrator_alive}
+                                    pipeline_status={snap.pipeline_status}
+                                />
+                            </div>
+                        ) : null}
+
+                        {/* Agent stepper (active only) */}
+                        {kind === 'active' && stepperIdx >= 0 && (
+                            <div className="flex items-center px-1 pt-1">
+                                {STEPPER_ROLES.map((role, i) => (
+                                    <React.Fragment key={role}>
+                                        {i > 0 && <span className={`flex-1 h-px mx-2 ${i <= stepperIdx ? 'bg-emerald-700/60' : 'bg-[#2a2540]'}`}></span>}
+                                        <span className="flex flex-col items-center gap-1">
+                                            <span className={`w-2 h-2 rounded-full ${i === stepperIdx ? 'bg-[#4fd98c]' : i < stepperIdx ? 'bg-emerald-800' : 'border border-[#3a3352]'}`}></span>
+                                            <span className={`header-text text-[10px] ${i === stepperIdx ? 'text-[#4fd98c]' : 'text-slate-600'}`}>{role}</span>
+                                        </span>
+                                    </React.Fragment>
+                                ))}
+                            </div>
+                        )}
+
+                        {/* Stat trio — per-kind (escalation/answered show advisory instead) */}
+                        {cards && (
+                            <div>
+                                <p className="header-text text-[10px] text-slate-500 font-semibold uppercase tracking-wide mb-2">
+                                    {kind === 'queued' ? 'At a glance' : 'Run so far'}
+                                </p>
+                                <div className="grid grid-cols-3 gap-2">
+                                    {cards.map((c, i) => <QueueStatCard key={i} label={c.label} value={c.value} sub={c.sub}/>)}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Dependency note (required surface — any incomplete parent) */}
                         {isWaitingForParent(parentEntry) && (
-                            <p className="header-text text-xs text-slate-400">
+                            <p className="header-text text-xs text-orange-300/80">
                                 Waiting for: {parentEntry.name}
                                 <span className="text-slate-500"> — {parentEntry.live_pipeline_status || parentEntry.state}</span>
                             </p>
                         )}
-                        {selected.skip_count > 0 && (
+                        {kind === 'queued' && selected.skip_count > 0 && (
                             <p className="header-text text-xs text-orange-400">↩ Skipped {selected.skip_count} time{selected.skip_count !== 1 ? 's' : ''}</p>
                         )}
 
-                        {/* Section B: Current Activity (active projects only) */}
-                        {hasRunData && snap.current_phase_raw_id ? (
-                            <div className="border border-[#1c1829] rounded-md p-3 bg-[#15121f]/50">
-                                <div className="flex items-center justify-between mb-0.5">
-                                    <span className="header-text text-xs text-slate-500 uppercase tracking-wide">Current Activity</span>
-                                </div>
-                                <div className="flex items-center justify-between mt-1.5">
-                                    <span
-                                        className="header-text text-sm text-slate-200 font-mono font-semibold"
-                                        title={P3_PIPELINE_PHASE_RAW_ID_TITLE}
-                                    >
-                                        {snap.current_phase_raw_id}
-                                    </span>
-                                    <ElapsedTimer
-                                        lastActionTimestamp={snap.last_action_timestamp}
-                                        sentinelWaitStartedAt={snap.sentinel_wait_started_at}
-                                        waitingForHumanAt={snap.waiting_for_human_at}
-                                        orchestratorAlive={snap.orchestrator_alive}
-                                        pipeline_status={snap.pipeline_status}
-                                    />
-                                </div>
-                                {snap.current_phase_desc && (
-                                    <p className="text-sm text-slate-400 leading-relaxed mt-1">{snap.current_phase_desc}</p>
-                                )}
-                                <div className="mt-2.5 space-y-1">
-                                    {snap.current_agent && (
-                                        <p className="header-text text-xs text-slate-300">
-                                            {AGENT_ACTIVITY_LABELS[snap.current_agent] || snap.current_agent}
-                                            {agentRetries !== null && agentRetries > 0 && (
-                                                <span className="text-slate-500"> — attempt {agentRetries + 1}</span>
-                                            )}
-                                        </p>
-                                    )}
-                                    {snap.last_action && (
-                                        <p className="header-text text-xs text-slate-500" title={snap.last_action}>
-                                            Last: {snap.last_action.length > 80 ? snap.last_action.slice(0, 80) + '…' : snap.last_action}
-                                            {snap.last_action_timestamp && ` — ${relTime(snap.last_action_timestamp)}`}
-                                        </p>
-                                    )}
-                                    {!snap.last_action && snap.last_action_timestamp && (
-                                        <p className="header-text text-xs text-slate-500">Last activity: {relTime(snap.last_action_timestamp)}</p>
-                                    )}
-                                </div>
-                            </div>
-                        ) : null}
-
-                        {/* Section C: Progress */}
-                        {snap && snap.phases_total > 0 ? (
-                            <div>
-                                <div className="flex items-center justify-between mb-1">
-                                    <span className="header-text text-xs text-slate-500 uppercase tracking-wide">Progress</span>
-                                    <span className="font-mono text-xs text-slate-300">{snap.phases_complete} / {snap.phases_total}</span>
-                                </div>
-                                <div className="h-1.5 rounded-full bg-[#221b36] overflow-hidden">
-                                    <div className="h-full rounded-full bg-emerald-600 transition-all"
-                                        style={{width: `${Math.round((snap.phases_complete / snap.phases_total) * 100)}%`}}/>
-                                </div>
-                                {hasRunData && snap.current_phase != null && (
-                                    <p className="font-mono text-xs text-slate-500 mt-1">Phase {snap.current_phase + 1} of {snap.phases_total}</p>
-                                )}
-                            </div>
-                        ) : null}
-
-                        {/* Section E: Background Details */}
-                        <div className="space-y-1">
-                            {snap && snap.cost_total > 0 && (
-                                <p className="font-mono text-xs text-slate-500">Cost: ${snap.cost_total.toFixed(2)}</p>
-                            )}
-                            {hasRunData && snap.skill_injected && snap.skill_agent && (
-                                <p className="header-text text-xs text-slate-500">Skill: {snap.skill_injected} / {snap.skill_agent}</p>
-                            )}
-                            {selected.preflight_validated_at && (
-                                <p className="header-text text-xs text-slate-500" title="When this project last passed preflight checks (symlink, gitignore, workspace files, roadmap format)">Preflight passed {relTime(selected.preflight_validated_at)}</p>
+                        {/* Compact meta footer — only the timestamps that matter for this kind.
+                            Active deliberately omits Started (≈ Elapsed) and Preflight (implied). */}
+                        <div className="space-y-0.5">
+                            {kind === 'completed' && selected.completed_at && <p className="header-text text-[11px] text-slate-500">Completed {relTime(selected.completed_at)}</p>}
+                            {kind === 'failed' && selected.failed_at && <p className="header-text text-[11px] text-slate-500">Failed {relTime(selected.failed_at)}</p>}
+                            {kind === 'active' && hasRunData && snap.skill_injected && snap.skill_agent && (
+                                <p className="header-text text-[11px] text-slate-500">Skill: {snap.skill_injected} / {snap.skill_agent}</p>
                             )}
                         </div>
                     </div>
                 );
             }
 
-            // ── Column 3: Action Hub ────────────────────────────────────────────────
+            // ── Row expansion: Action Hub ───────────────────────────────────────────
             function QueueActionHub() {
-                if (!selected) return (
-                    <div className="flex flex-col items-center justify-center mt-16 gap-3 text-slate-600">
-                        <div className="w-[52px] h-[52px] rounded-full border border-dashed border-[#3a3352] flex items-center justify-center">
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
-                        </div>
-                        <p className="header-text text-xs text-slate-500 text-center">Select a project to see actions</p>
-                    </div>
-                );
+                // Rendered only inside the expanded row — see QueueProjectSnapshot.
+                if (!selected) return null;
 
                 const state = selected.state;
                 const selLive = selected.live_pipeline_status;
@@ -8815,15 +9053,15 @@
                     <button type="button" onClick={() => handleRemove(selected.id)}
                         disabled={reorderDirty}
                         title={reorderDirty ? "Save or cancel reorder first" : undefined}
-                        className="header-text text-xs px-3 py-1.5 rounded bg-red-900/40 text-red-300 hover:bg-red-900/70 w-full disabled:opacity-40">
+                        className="header-text text-xs px-3 py-2 rounded-md bg-transparent text-red-400 border border-red-900/50 hover:bg-red-900/25 w-full disabled:opacity-40">
                         Remove from Queue
                     </button>
                 );
 
                 const monitorBtn = (
                     <button type="button" onClick={() => safeNavigate('pipeline')}
-                        className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-300 border border-[#2a2540] hover:bg-[#221d31] w-full">
-                        View in Pipeline Monitor
+                        className="header-text text-xs px-3 py-2 rounded-md bg-[#221b36] text-slate-300 border border-[#2a2540] hover:bg-[#2a2245] w-full">
+                        Open in Monitor
                     </button>
                 );
 
@@ -8834,7 +9072,7 @@
                     <div>
                         <p className="header-text text-xs text-slate-400 mb-1">Waiting for:</p>
                         <div className="flex items-center gap-2">
-                            <button onClick={() => setSelectedId(hubParent.id)}
+                            <button onClick={() => setExpandedId(hubParent.id)}
                                 className="header-text text-xs text-[#e2b14c] hover:underline">{hubParent.name}</button>
                             {(() => {
                                 const pp = queueParentStatePill(hubParent.state);
@@ -8925,6 +9163,8 @@
                                 merge_probe_passed={hubMergeProbePassed}
                                 targetProjectPath={selected && selected.state === 'ESCALATION' && selected.project_path ? selected.project_path : null}
                                 onDispatched={fetchQueue}
+                                showAdvisory={false}
+                                compact={true}
                             />
                             <div className="border-t border-[#2a2540] pt-3 space-y-3">
                                 {dependsSelect}
@@ -8992,7 +9232,10 @@
                         return (
                             <div className="space-y-3">
                                 <p className="header-text text-xs text-slate-400">Pipeline is running for this project.</p>
-                                {monitorBtn}
+                                <button type="button" onClick={() => safeNavigate('pipeline')}
+                                    className="header-text text-xs px-3 py-2 rounded-md bg-[#e2b14c] text-slate-900 font-semibold hover:bg-[#f0c56b] w-full">
+                                    Open in Monitor
+                                </button>
                             </div>
                         );
                     }
@@ -9026,8 +9269,8 @@
                         <div className="space-y-3">
                             <p className="header-text text-xs text-slate-400">This project was blocked. Check Pipeline Monitor for details.</p>
                             <button onClick={() => safeNavigate('pipeline')}
-                                className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-[#e2b14c] hover:bg-[#221b36] w-full">
-                                View in Pipeline Monitor
+                                className="header-text text-xs px-3 py-2 rounded-md bg-[#221b36] text-[#e2b14c] border border-[#2a2540] hover:bg-[#2a2245] w-full">
+                                Open in Monitor
                             </button>
                         </div>
                     );
@@ -9143,63 +9386,67 @@
                 );
             }
 
+            /** Inline expansion under the expanded table row — composes the project
+             * snapshot (read view, left) and the per-state action hub (narrow right
+             * rail). The row above keeps name / path / status; nothing repeats here.
+             *
+             * RENDERED AS A FUNCTION CALL, not a JSX element — these nested,
+             * hook-free helpers get a NEW function identity on every QueueScreen
+             * render, so a JSX-element render of them would make React unmount +
+             * remount the whole subtree on every 5s poll, wiping EscalationCommandPanel's
+             * open confirm modal, the advisory disclosure, ticking timers, and any
+             * open select. Calling them keeps one render scope: the module-level
+             * children (EscalationCommandPanel, ElapsedTimer, QueueStatCard, …)
+             * keep stable types and STAY MOUNTED across polls. */
+            function QueueRowExpansion() {
+                // Escalation needs more room for the command buttons (each carries a
+                // description) and lets the advisory breathe on the left, so the rail
+                // widens and the left content uncaps for that state only.
+                const wide = selectedIsEscalation;
+                return (
+                    <div className="border-b border-[#1c1829] border-l-2 border-l-[#e2b14c]/60 bg-[#120e1b]/80 px-5 py-5 flex flex-col md:flex-row gap-6">
+                        {/* The WRAPPER fills (flex-1, uncapped) so the rail anchors the
+                            right edge of the card on wide screens; the readable-width cap
+                            lives on the INNER content — capping the wrapper instead left a
+                            dead void to the right of the ACTIONS rail. */}
+                        <div className="flex-1 min-w-0">
+                            <div className={wide ? 'max-w-3xl' : 'max-w-2xl'}>
+                                {QueueProjectSnapshot()}
+                            </div>
+                        </div>
+                        <div className={`w-full flex-shrink-0 md:border-l md:border-[#221b36] md:pl-6 ${wide ? 'md:w-80' : 'md:w-64'}`}>
+                            <p className="header-text text-[10px] text-slate-500 font-semibold mb-3 uppercase tracking-wide">ACTIONS</p>
+                            {QueueActionHub()}
+                        </div>
+                    </div>
+                );
+            }
+
             return (
                 <div className="flex flex-col h-full overflow-hidden">
-                    {/* Top bar: primary (left) + progression / run-next (right, ml-auto) */}
-                    <div className="bg-[#15121f] border-b border-[#1c1829] px-6 py-3 flex items-center gap-4 flex-shrink-0">
-                        <div className="flex items-center gap-4 min-w-0 flex-1">
-                            <h1 className="header-text text-base font-semibold text-slate-200">Project Queue</h1>
-                            <button onClick={() => { setAddModalInitialPath(''); setShowAddModal(true); }}
-                                disabled={reorderDirty}
-                                title={reorderDirty ? "Save or cancel reorder first" : undefined}
-                                className="header-text text-xs px-3 py-1.5 rounded bg-[#e2b14c] text-slate-900 font-semibold hover:bg-[#f0c56b] disabled:opacity-40">
-                                + Add Project
-                            </button>
-                            {!reorderMode ? (
-                                <button type="button" onClick={beginReorder} disabled={loading || queue.length < 2}
-                                    title="Drag root rows to change order, then Save order"
-                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-200 border border-[#2a2540] hover:bg-[#221b36] disabled:opacity-40">
-                                    Reorder
-                                </button>
-                            ) : (
-                                <>
-                                    <button type="button" onClick={saveReorder} disabled={reorderSaveBusy || !reorderDirty}
-                                        title={reorderDirty ? "Write this order to the server" : "Change the order first"}
-                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-200 border border-[#2a2540] hover:bg-[#221d31] disabled:opacity-40">
-                                        {reorderSaveBusy ? "Saving…" : "Save order"}
-                                    </button>
-                                    <button type="button" onClick={cancelReorder} disabled={reorderSaveBusy}
-                                        title="Discard changes and reload queue from server"
-                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-300 border border-[#2a2540] hover:bg-[#221b36] disabled:opacity-40">
-                                        Cancel
-                                    </button>
-                                    {reorderDirty && (
-                                        <span className="header-text text-[10px] uppercase tracking-wide text-slate-500">Unsaved</span>
-                                    )}
-                                </>
-                            )}
-                            {reorderError && <span className="header-text text-xs text-red-400 max-w-xs">{reorderError}</span>}
-                            {error && <span className="header-text text-xs text-red-400">{error}</span>}
+                    {/* Top bar: slim — Progression toggle anchors the LEFT; the conditional
+                        run-next / resume cluster trails right. Title + queue-management
+                        actions live in the content header below. */}
+                    <div className="bg-[#15121f] border-b border-[#1c1829] px-6 py-2.5 flex items-center flex-shrink-0">
+                        <div data-testid="queue-header-leading" className="flex items-center gap-2 flex-shrink-0">
+                            <span
+                                data-testid="queue-progression-label"
+                                className="header-text text-xs uppercase tracking-wide text-white"
+                                title="Auto advances the queue when eligible; Manual requires Run next project.">
+                                Progression
+                            </span>
+                            <div className="flex items-center gap-1 rounded-full bg-[#221b36] p-0.5 border border-[#2a2540]">
+                                {['auto', 'manual'].map(m => (
+                                    <button key={m} onClick={() => handleModeSelect(m)}
+                                        disabled={reorderDirty}
+                                        title={reorderDirty ? "Save or cancel reorder first" : undefined}
+                                        className={`header-text text-xs px-3 py-1 rounded-full transition-colors disabled:opacity-40 ${
+                                            queueMode === m ? 'bg-[#e2b14c] text-slate-900 font-semibold' : 'text-slate-400 hover:text-slate-200'
+                                        }`}>{m === 'auto' ? 'Auto' : 'Manual'}</button>
+                                ))}
+                            </div>
                         </div>
                         <div data-testid="queue-header-trailing" className="flex items-center gap-2 ml-auto flex-shrink-0">
-                            <div className="flex items-center gap-2">
-                                <span
-                                    data-testid="queue-progression-label"
-                                    className="header-text text-xs uppercase tracking-wide text-white"
-                                    title="Auto advances the queue when eligible; Manual requires Run next project.">
-                                    Progression
-                                </span>
-                                <div className="flex items-center gap-1 rounded-full bg-[#221b36] p-0.5 border border-[#2a2540]">
-                                    {['auto', 'manual'].map(m => (
-                                        <button key={m} onClick={() => handleModeSelect(m)}
-                                            disabled={reorderDirty}
-                                            title={reorderDirty ? "Save or cancel reorder first" : undefined}
-                                            className={`header-text text-xs px-3 py-1 rounded-full transition-colors disabled:opacity-40 ${
-                                                queueMode === m ? 'bg-[#e2b14c] text-slate-900 font-semibold' : 'text-slate-400 hover:text-slate-200'
-                                            }`}>{m === 'auto' ? 'Auto' : 'Manual'}</button>
-                                    ))}
-                                </div>
-                            </div>
                             {queueMode === 'manual' && (
                                 <button
                                     type="button"
@@ -9226,100 +9473,209 @@
                         </div>
                     </div>
 
-                    {/* Three-column body */}
-                    <div className="flex-1 grid grid-cols-[30%_35%_35%] gap-0 overflow-hidden">
-                        {/* Column 1: Queue list */}
-                        <div className="bg-transparent border-r border-[rgba(96,86,140,0.14)] overflow-y-auto p-3">
-                            {loading ? (
-                                <p className="header-text text-xs text-slate-500 text-center mt-8">Loading queue…</p>
-                            ) : queue.length === 0 ? (
-                                <p className="header-text text-xs text-slate-500 text-center mt-8">No projects in queue.<br/>Click "+ Add Project" to get started.</p>
-                            ) : (() => {
-                                // Compute depth per entry (0=root, 1=child, 2=grandchild…)
-                                const byId = Object.fromEntries(queue.map(e => [e.id, e]));
-                                const depthOf = {};
-                                queue.forEach(e => {
-                                    let d = 0, cur = e;
-                                    while (cur.parent_id && byId[cur.parent_id]) { d++; cur = byId[cur.parent_id]; }
-                                    depthOf[e.id] = d;
-                                });
-                                return queue.map(entry => {
-                                    const rowDisp = queueRowDisplay(entry);
-                                    const parentEntry = entry.parent_id ? byId[entry.parent_id] : null;
-                                    const isActive = selectedId === entry.id;
-                                    const depth = depthOf[entry.id] || 0;
-                                    const canDrag = reorderMode && !['ACTIVE','COMPLETED'].includes(entry.state) && !entry.parent_id;
-                                    return (
-                                        <div
-                                            key={entry.id}
-                                            role="button"
-                                            tabIndex={0}
-                                            aria-label={`${entry.name} — ${rowDisp.label}`}
-                                            aria-pressed={isActive}
-                                            draggable={canDrag}
-                                            onDragStart={e => handleDragStart(e, entry)}
-                                            onDragOver={e => handleDragOver(e, entry)}
-                                            onDrop={e => handleDrop(e, entry)}
-                                            onDragEnd={handleDragEnd}
-                                            onClick={() => { setSelectedId(entry.id); setHubError(''); setRevalidateChecks(null); setHubModalCommand(null); }}
-                                            onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelectedId(entry.id); setHubError(''); setRevalidateChecks(null); setHubModalCommand(null); } }}
-                                            title={entry.parent_id ? 'Move the parent project to reorder this group' : undefined}
-                                            style={{paddingLeft: depth * 16 + 'px', borderLeft: depth > 0 ? '2px solid #312e81' : 'none'}}
-                                            className={`flex items-center gap-2 p-2.5 rounded mb-1 cursor-pointer border transition-colors ${
-                                                isActive ? 'border-[#e2b14c]/60 bg-[#241d10]' : 'border-[#322b4c] bg-[#15121f] hover:bg-[#221b36]'
-                                            }`}
-                                        >
-                                            {canDrag && <span className="text-slate-600 cursor-grab text-xs select-none">⠿</span>}
-                                            {!canDrag && <span className="w-3"/>}
-                                            {effectiveRanks[entry.id] != null
-                                                ? <span className="font-mono text-xs text-slate-500 w-5 text-right flex-shrink-0">{effectiveRanks[entry.id]}</span>
-                                                : <span className="header-text text-xs text-indigo-400 w-5 text-right flex-shrink-0">↳</span>}
-                                            <div className="flex-1 min-w-0">
-                                                <span className="header-text text-xs text-slate-200 block truncate">{entry.name}</span>
-                                                {entry.state === 'BLOCKED' && entry.blocked_at && (
-                                                    <span className="header-text text-xs text-slate-500">Blocked {relTime(entry.blocked_at)}</span>
-                                                )}
-                                                {entry.state === 'ACTIVE' && entry.started_at && (
-                                                    <span className="header-text text-xs text-slate-500">Running {relTime(entry.started_at)}</span>
-                                                )}
-                                                {entry.state === 'ACTIVE' && entry.phases_total !== undefined && entry.phases_total > 0 && (
-                                                    <span className="font-mono text-xs text-slate-500">{entry.phases_complete}/{entry.phases_total} phases</span>
-                                                )}
-                                                {isWaitingForParent(parentEntry) && entry.state !== 'DEPENDENCY_HOLD' && (
-                                                    <span className="header-text text-xs text-orange-300/70 block truncate">Waiting for {parentEntry.name}</span>
-                                                )}
-                                            </div>
-                                            {entry.skip_count > 0 && <span className="header-text text-xs text-orange-400">↩{entry.skip_count}</span>}
-                                            {entry.parent_id && (
-                                                <span
-                                                    className="header-text px-1.5 py-0.5 rounded text-xs font-medium flex-shrink-0 bg-indigo-900/50 text-indigo-300 border border-indigo-700/40"
-                                                    title={depBadgeTitle(entry, parentEntry)}
-                                                >
-                                                    DEP
-                                                </span>
-                                            )}
-                                            <span
-                                                className={`header-text px-1.5 py-0.5 rounded text-xs font-medium flex-shrink-0 ${rowDisp.className}`}
-                                                title={rowDisp.title || undefined}
-                                            >{rowDisp.label}</span>
-                                        </div>
-                                    );
-                                });
-                            })()}
-                        </div>
-
-                        {/* Column 2: Project snapshot */}
-                        <div className="bg-transparent border-r border-[rgba(96,86,140,0.14)] p-4 overflow-y-auto">
-                            <QueueProjectSnapshot/>
-                        </div>
-
-                        {/* Column 3: Action hub */}
-                        <div className="bg-transparent p-4 overflow-y-auto">
-                            {selected && (
-                                <p className="header-text text-xs text-slate-500 font-semibold mb-3 uppercase tracking-wide">Actions</p>
+                    {/* Content header: title + queue management actions */}
+                    <div className="px-6 pt-5 pb-3 flex items-center gap-3 flex-shrink-0">
+                        <h1 className="header-text text-xl font-semibold text-slate-100">Project Queue</h1>
+                        {reorderError && <span className="header-text text-xs text-red-400 max-w-xs truncate">{reorderError}</span>}
+                        {error && <span className="header-text text-xs text-red-400 truncate">{error}</span>}
+                        <div className="flex items-center gap-2 ml-auto">
+                            {!reorderMode ? (
+                                <button type="button" onClick={beginReorder} disabled={loading || queue.length < 2}
+                                    title="Drag root rows to change order, then Save order"
+                                    className="header-text text-xs px-3 py-1.5 rounded-md bg-[#221b36] text-slate-200 border border-[#2a2540] hover:bg-[#2a2245] disabled:opacity-40">
+                                    Reorder
+                                </button>
+                            ) : (
+                                <>
+                                    {reorderDirty && (
+                                        <span className="header-text text-[10px] uppercase tracking-wide text-slate-500">Unsaved</span>
+                                    )}
+                                    <button type="button" onClick={saveReorder} disabled={reorderSaveBusy || !reorderDirty}
+                                        title={reorderDirty ? "Write this order to the server" : "Change the order first"}
+                                        className="header-text text-xs px-3 py-1.5 rounded-md bg-[#221b36] text-slate-200 border border-[#2a2540] hover:bg-[#2a2245] disabled:opacity-40">
+                                        {reorderSaveBusy ? "Saving…" : "Save order"}
+                                    </button>
+                                    <button type="button" onClick={cancelReorder} disabled={reorderSaveBusy}
+                                        title="Discard changes and reload queue from server"
+                                        className="header-text text-xs px-3 py-1.5 rounded-md bg-[#221b36] text-slate-300 border border-[#2a2540] hover:bg-[#2a2245] disabled:opacity-40">
+                                        Cancel
+                                    </button>
+                                </>
                             )}
-                            <QueueActionHub/>
+                            <button onClick={() => { setAddModalInitialPath(''); setShowAddModal(true); }}
+                                disabled={reorderDirty}
+                                title={reorderDirty ? "Save or cancel reorder first" : undefined}
+                                className="header-text text-xs px-3 py-1.5 rounded-md bg-[#e2b14c] text-slate-900 font-semibold hover:bg-[#f0c56b] disabled:opacity-40">
+                                + Add Project
+                            </button>
                         </div>
+                    </div>
+
+                    {/* Filter chips */}
+                    <div className="px-6 pb-3 flex items-center gap-2 flex-shrink-0">
+                        {QUEUE_BUCKET_ORDER.map(bucket => {
+                            const meta = QUEUE_BUCKET_CHIP[bucket];
+                            const hidden = hiddenBuckets.includes(bucket);
+                            return (
+                                <button key={bucket} type="button" onClick={() => toggleBucket(bucket)}
+                                    aria-pressed={!hidden}
+                                    title={hidden ? `Show ${meta.label} projects` : `Hide ${meta.label} projects`}
+                                    className={`flex items-center gap-1.5 px-3 py-1 rounded-full border text-xs transition-colors ${
+                                        hidden ? 'border-[#221b36] text-slate-600' : 'border-[#2a2540] bg-[#221b36] text-slate-300'
+                                    }`}>
+                                    <span className={`w-1.5 h-1.5 rounded-full ${hidden ? 'bg-slate-700' : meta.dot}`}></span>
+                                    <span className="font-mono font-semibold">{bucketCounts[bucket]}</span>
+                                    <span className="header-text">{meta.label}</span>
+                                </button>
+                            );
+                        })}
+                        {reorderMode && (
+                            <span className="header-text text-[10px] uppercase tracking-wide text-slate-500 ml-2">Filters paused while reordering</span>
+                        )}
+                    </div>
+
+                    {/* Queue table */}
+                    <div className="flex-1 overflow-y-auto px-6 py-4">
+                        {loading ? (
+                            <p className="header-text text-xs text-slate-500 text-center mt-8">Loading queue…</p>
+                        ) : queue.length === 0 ? (
+                            <p className="header-text text-xs text-slate-500 text-center mt-8">No projects in queue.<br/>Click "+ Add Project" to get started.</p>
+                        ) : (
+                            <div className="border border-[#1c1829] rounded">
+                                {/* Queue table header */}
+                                <div className={`${QUEUE_TABLE_GRID} px-4 py-2 text-[10px] header-text uppercase tracking-wide text-slate-500 border-b border-[#1c1829]`}>
+                                    <span className="min-w-0">PROJECT</span>
+                                    <span className="min-w-0">STATUS</span>
+                                    <span className="min-w-0">PHASE</span>
+                                    <span className="min-w-0">PROGRESS</span>
+                                    <span className="min-w-0 text-right">ELAPSED</span>
+                                    <span className="min-w-0 text-right">COST</span>
+                                    <span className="min-w-0 text-right">QUEUED</span>
+                                </div>
+                                {/* Queue table rows */}
+                                {visibleQueue.length === 0 ? (
+                                    <p className="header-text text-xs text-slate-500 text-center py-6">All projects hidden by filters.</p>
+                                ) : visibleQueue.map(entry => {
+                                    const rowDisp = queueRowDisplay(entry);
+                                    const parentEntry = entry.parent_id ? queue.find(p => p.id === entry.parent_id) : null;
+                                    const parentVisible = !!(parentEntry && visibleQueue.some(p => p.id === parentEntry.id));
+                                    const bucket = queueEntryBucket(entry);
+                                    const isExpanded = expandedId === entry.id;
+                                    const canDrag = reorderMode && !['ACTIVE','COMPLETED'].includes(entry.state) && !entry.parent_id;
+                                    const isParked = entry.state === 'ESCALATION' || entry.state === 'ESCALATION_ANSWERED' || entry.state === 'BLOCKED';
+
+                                    // PHASE — the STATUS pill already names the live agent
+                                    // ("Running executor"), so the cell appends an agent only for
+                                    // parked rows (their pill carries no agent); "· done" when complete.
+                                    let phaseCell = '—';
+                                    if (entry.state === 'COMPLETED') {
+                                        phaseCell = entry.current_phase_raw_id ? `${entry.current_phase_raw_id} · done` : '—';
+                                    } else if (entry.current_phase_raw_id) {
+                                        phaseCell = entry.parked_agent ? `${entry.current_phase_raw_id} · ${entry.parked_agent}` : entry.current_phase_raw_id;
+                                    }
+
+                                    // ELAPSED — running: since start; parked: time WAITING on the
+                                    // operator; complete: summed active work; failed: when it failed.
+                                    let elapsedCell = '—';
+                                    if (entry.state === 'ACTIVE' && entry.started_at) {
+                                        elapsedCell = formatElapsedSince(entry.started_at) || '—';
+                                    } else if (isParked && entry.parked_at) {
+                                        elapsedCell = 'waiting ' + formatElapsedSince(entry.parked_at);
+                                    } else if (entry.state === 'COMPLETED' && entry.duration_seconds != null) {
+                                        elapsedCell = formatDuration(entry.duration_seconds);
+                                    } else if (entry.state === 'FAILED' && entry.failed_at) {
+                                        elapsedCell = relTime(entry.failed_at) || '—';
+                                    }
+
+                                    const costCell = Number(entry.cost_total) > 0 ? fmtUSD(entry.cost_total) : '—';
+
+                                    const pt = entry.phases_total, pc = entry.phases_complete;
+                                    const hasProgress = pt != null && pt > 0;
+                                    const pct = hasProgress ? Math.round(((pc || 0) / pt) * 100) : 0;
+                                    const barFill = bucket === 'attention' ? 'bg-amber-500' : 'bg-emerald-600';
+
+                                    const queuedCell = effectiveRanks[entry.id] != null &&
+                                        ['READY', 'DEPENDENCY_HOLD', 'SKIPPED_PENDING'].includes(entry.state)
+                                        ? `position ${effectiveRanks[entry.id]}` : '—';
+
+                                    return (
+                                        <React.Fragment key={entry.id}>
+                                            <div
+                                                role="button"
+                                                tabIndex={0}
+                                                aria-label={`${entry.name} — ${rowDisp.label}`}
+                                                aria-expanded={isExpanded}
+                                                draggable={canDrag}
+                                                onDragStart={e => handleDragStart(e, entry)}
+                                                onDragOver={e => handleDragOver(e, entry)}
+                                                onDrop={e => handleDrop(e, entry)}
+                                                onDragEnd={handleDragEnd}
+                                                onClick={() => { setExpandedId(prev => prev === entry.id ? null : entry.id); setHubError(''); setRevalidateChecks(null); }}
+                                                onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpandedId(prev => prev === entry.id ? null : entry.id); setHubError(''); setRevalidateChecks(null); } }}
+                                                title={entry.parent_id && reorderMode ? 'Move the parent project to reorder this group' : undefined}
+                                                className={`${QUEUE_TABLE_GRID} px-4 py-2.5 text-xs border-b border-[#1c1829] cursor-pointer transition-colors ${
+                                                    isExpanded ? 'bg-[#241d10]/70 border-l-2 border-l-[#e2b14c]' : 'hover:bg-[#221b36]/50'
+                                                }`}
+                                            >
+                                                {/* PROJECT */}
+                                                <div className="min-w-0 flex items-center gap-2">
+                                                    {canDrag && <span className="text-slate-600 cursor-grab text-xs select-none">⠿</span>}
+                                                    {entry.parent_id && <span className="header-text text-xs text-indigo-400 flex-shrink-0">↳</span>}
+                                                    <div className="min-w-0">
+                                                        <span className="header-text text-sm text-slate-200 block truncate font-medium">{entry.name}</span>
+                                                        <span className="font-mono text-[11px] text-slate-600 block truncate">{entry.project_path}</span>
+                                                        {isWaitingForParent(parentEntry) && entry.state !== 'DEPENDENCY_HOLD' && (
+                                                            <span className="header-text text-[11px] text-orange-300/70 block truncate">Waiting for {parentEntry.name}</span>
+                                                        )}
+                                                        {parentEntry && !parentVisible && !reorderMode && (
+                                                            <span className="header-text text-[11px] text-slate-500 block truncate">↳ after {parentEntry.name}</span>
+                                                        )}
+                                                    </div>
+                                                    {entry.skip_count > 0 && <span className="header-text text-xs text-orange-400 flex-shrink-0">↩{entry.skip_count}</span>}
+                                                    {entry.parent_id && (
+                                                        <span
+                                                            className="header-text px-1.5 py-0.5 rounded text-xs font-medium flex-shrink-0 bg-indigo-900/50 text-indigo-300 border border-indigo-700/40"
+                                                            title={depBadgeTitle(entry, parentEntry)}
+                                                        >
+                                                            DEP
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                {/* STATUS */}
+                                                <span className="min-w-0">
+                                                    <span
+                                                        className={`header-text px-1.5 py-0.5 rounded text-xs font-medium inline-block max-w-full truncate align-middle ${rowDisp.className}`}
+                                                        title={rowDisp.title || undefined}
+                                                    >{rowDisp.label}</span>
+                                                </span>
+                                                {/* PHASE */}
+                                                <span className="min-w-0 font-mono text-slate-300 truncate">{phaseCell}</span>
+                                                {/* PROGRESS */}
+                                                <span className="min-w-0">
+                                                    {hasProgress ? (
+                                                        <span className="flex items-center gap-1.5">
+                                                            <span className="flex-1 h-1.5 rounded-full bg-[#221b36] overflow-hidden">
+                                                                <span className={`block h-full rounded-full ${barFill} transition-all`} style={{width: `${pct}%`}}></span>
+                                                            </span>
+                                                            <span className="font-mono text-[10px] text-slate-400 flex-shrink-0">{pc || 0}/{pt}</span>
+                                                        </span>
+                                                    ) : (
+                                                        <span className="text-slate-600">—</span>
+                                                    )}
+                                                </span>
+                                                {/* ELAPSED */}
+                                                <span className="min-w-0 text-right font-mono text-slate-400 truncate">{elapsedCell}</span>
+                                                {/* COST */}
+                                                <span className="min-w-0 text-right font-mono text-slate-400">{costCell}</span>
+                                                {/* QUEUED */}
+                                                <span className="min-w-0 text-right font-mono text-slate-500 truncate">{queuedCell}</span>
+                                            </div>
+                                            {expandedId === entry.id && QueueRowExpansion()}
+                                        </React.Fragment>
+                                    );
+                                })}
+                            </div>
+                        )}
                     </div>
 
                     {showAddModal && (

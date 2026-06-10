@@ -13,7 +13,7 @@ def _html() -> str:
 
 def _snapshot_body(html: str) -> str:
     start = html.index("function QueueProjectSnapshot(")
-    end = html.index("// ── Column 3:", start)
+    end = html.index("// ── Row expansion: Action Hub", start)
     return html[start:end]
 
 

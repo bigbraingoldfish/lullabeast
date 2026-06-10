@@ -38,7 +38,7 @@ Orchestrator-valid values are `VALID_STATES` in `autodev/pipeline/orchestrator.p
 
 ## Queue entry states
 
-Each row in `pipeline_queue.json` has a `state`. Labels below are the queue-only or live pills from `ui/index.html` (live `pipeline_status` from the active project overrides several pills when present).
+Each row in `pipeline_queue.json` has a `state`. Labels below are the queue-only or live pills from `ui/index.html` (live `pipeline_status` from the active project overrides several pills when present). The Queue screen renders entries as a flat table with status filter chips (`running` / `attention` / `queued` / `complete`); pill labels are unchanged — the chips are display buckets, not states.
 
 | `state` (enum) | Typical pill label | Meaning (short) | What clears or advances it |
 | -------------- | -------------------- | --------------- | --------------------------- |
@@ -48,6 +48,7 @@ Each row in `pipeline_queue.json` has a `state`. Labels below are the queue-only
 | `SKIPPED_PENDING` | **Preflight failed** | Preflight failed for this path or a cascaded descendant; not removed from queue. | Preflight passes again (often after fixing repo); can return to `READY`. |
 | `DEPENDENCY_HOLD` | **Waiting on parent** | Parent is in a *blocking* state (`BLOCKED`/`ESCALATION`/`ESCALATION_ANSWERED`). A non-blocking but still-incomplete parent (`READY`/`ACTIVE`) keeps the child `READY` — the dashboard still shows it *Waiting for parent*. | Completing the parent or clearing the parent id. |
 | `ESCALATION` | **ESCALATION** | Parked for human escalation flow on this entry. | Commands / pipeline progression per server rules. |
+| `ESCALATION_ANSWERED` | **Answer banked** | Parked escalation whose operator answer is saved (`pending_escalation_command.json`); resumes automatically when the queue reaches it. An un-promoted `ESCALATION` row with a banked answer shows the same pill. | Queue revival applies the banked command; **Resume banked answer** / **Resume now** relaunches immediately. |
 | `COMPLETED` | **COMPLETED** | Project finished successfully in queue terms. | Terminal for that row. |
 | `FAILED` | **FAILED** | Failed after retries / terminal failure. | Terminal; fix project and re-add or reset per operator workflow. |
 

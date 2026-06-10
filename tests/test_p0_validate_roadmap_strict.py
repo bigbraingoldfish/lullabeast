@@ -176,6 +176,23 @@ class TestValidateRoadmapStrict:
     test fires.
     """
 
+    def test_plain_number_phase_ids_accepted(self):
+        """`INFRA-1` / `CORE-1` (no letter before the phase number) are canonical
+        IDs — phase_resolver.py and ui/roadmap_parser.py accept any backticked ID,
+        and the smoke project completed a real pipeline run with them — so the
+        validator must not reject such a roadmap as having no phase lines
+        (live E2E finding 2026-06-09: `_PHASE_LINE_RE` demanded `[A-Z]\\d+`)."""
+        content = _phase_block(
+            "- [ ] `INFRA-1` | LOW | Bootstrap the package",
+            "  > Test: pytest passes.",
+            _full_bv_block(),
+        )
+        result = _validate_roadmap_content(content)
+        assert not any(e.get("code") == "no_phase_lines" for e in result["errors"]), (
+            f"plain-number phase ID read as 'no phase lines': {result['errors']}"
+        )
+        assert result["valid"] is True, f"Expected valid; errors: {result['errors']}"
+
     def test_two_phases_both_with_block_pass(self):
         """Multi-phase happy path. Stage C only covered the single-phase shape;
         a regression that broke per-phase iteration could pass single-phase
