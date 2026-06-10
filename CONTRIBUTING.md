@@ -69,3 +69,13 @@ Per-file skill size is bounded by OpenClaw's context-injection limits, configure
 ## Code style
 
 No formal style guide. Match the surrounding code. `ui/server.py` and `autodev/pipeline/orchestrator.py` are intentionally single-file by design — do not split them into sub-modules without a deliberate architectural decision. See [CLAUDE.md](CLAUDE.md) for the reasoning.
+
+## Maintainer notes
+
+- **Pin runtime deps** in [requirements.txt](requirements.txt) / [ui/requirements.txt](ui/requirements.txt);
+  run `pip-audit -r requirements.txt` periodically and upgrade pins after review.
+- **`install.sh` is idempotent** (`set -euo pipefail`, atomic JSON patches) and safe to re-run after a
+  `git pull`; it audits the OpenClaw `hooks` block, registers pipeline agents, and rebuilds the plugin.
+- **Before a public release**, run a secret scanner over full git history (e.g.
+  [gitleaks](https://github.com/gitleaks/gitleaks) / [trufflehog](https://github.com/trufflesecurity/trufflehog));
+  rotate anything real that was ever committed and consider `git filter-repo`.

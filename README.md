@@ -1,30 +1,84 @@
+<p align="center">
+  <img src="ui/static/img/lullabeast_512.png" alt="Lullabeast — a rounded gold creature face" width="140">
+</p>
+
 # Lullabeast
 
-**Bring an idea. Leave with a working MVP.**
+**From plain English to shipped MVP.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![CI](https://github.com/[[FILL: org/repo]]/actions/workflows/ci.yml/badge.svg)](https://github.com/[[FILL: org/repo]]/actions/workflows/ci.yml)
+[![Runs on OpenClaw](https://img.shields.io/badge/runs%20on-OpenClaw-c9962e.svg)](https://docs.openclaw.ai)
+![Status](https://img.shields.io/badge/status-beta-orange.svg)
 ![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20WSL2-lightgrey.svg)
-![Status](https://img.shields.io/badge/status-MVP-orange.svg)
 
-Lullabeast is an autonomous, multi-agent software-development pipeline. You describe what you
-want to build; Lullabeast helps you shape that idea into structured product documentation, then
-drives a team of LLM agents — **planner → executor → reviewer** — to implement it phase by
-phase against a real git repository. When the agents get stuck (and on a hard enough project,
-they will), Lullabeast **escalates to you** with the context to unblock the run and resume it.
+Lullabeast is an open-source, local-first, autonomous multi-agent development pipeline: describe
+what you want to build in plain English, and a team of LLM agents — **planner → executor →
+reviewer** — implements it phase by phase against a real git repository, with deterministic gate
+scripts checking every step and an escalation path back to you when a run gets stuck. Lullabeast
+runs on [OpenClaw](https://docs.openclaw.ai) and **requires** it: Lullabeast is the pipeline and
+dashboard, while the agents themselves run inside OpenClaw, which you install and run separately.
+It is built on top of OpenClaw — not a fork of it, and not a competitor to it.
 
-The goal is simple: **come to us with an idea, and by the end we aim to hand you a functional
-MVP** — with a clear, honest trail of what was built, what passed review, and where a human
-had to step in.
+> **Status: beta.** Pre-release software, not production-ready. It runs as a **single-user tool
+> on a trusted machine**: the dashboard and API are protected by a locally generated access
+> token, but there are no user accounts or roles — keep it bound to loopback. Autonomous runs
+> can and do fail; the escalation/recovery loop is a first-class part of the design, not an
+> apology.
 
-It ships as a single-process **FastAPI dashboard** plus the orchestration pipeline. Lullabeast is
-**model-agnostic**: it runs on top of [OpenClaw](https://docs.openclaw.ai), which provides the
-agent gateway and owns all model/provider configuration.
+**Who it's for.** Today: developers willing to run a beta — you install two services, point
+Lullabeast at a git repo, and supervise runs from a dashboard. The longer arc: the idea-to-PRD and
+escalation flows are built so that someone who can *describe* software in plain English — not
+necessarily write it — can take a project from idea to working MVP.
 
-> **Status — MVP / operator tooling.** Lullabeast aims for a working MVP — a prototype you'd refine
-> and harden before shipping. It runs as a **single-user tool on a trusted machine**: the API has
-> **no authentication**, so bind it to loopback. Autonomous runs can and do fail, which is exactly
-> why the escalation/recovery loop is a first-class part of the design.
+---
+
+## Quick start
+
+### Requirements
+
+Read this before running anything — the first item is a separate install:
+
+- **A running [OpenClaw](https://docs.openclaw.ai) gateway** — required; Lullabeast cannot run
+  without it. Install it first ([install guide](https://openclaw.dev/install)) and have it
+  listening on `localhost:18789`. Tested against **OpenClaw 2026.5.18**; earlier versions may
+  have state-schema differences (see [SETUP.md](SETUP.md)).
+- **Linux, macOS, or WSL2** — native Windows is unsupported (the pipeline uses POSIX `fcntl` locking).
+- **Python 3.9+** and `git`.
+- **Node.js 22+** with `npm` — builds the OpenClaw signals plugin and the Playwright visual-review MCP.
+
+### Install & run
+
+```bash
+# 1. Install and start OpenClaw first — Lullabeast cannot run without it.
+#    https://openclaw.dev/install
+curl -s http://localhost:18789/v1/models   # should respond; "connection refused" = gateway not up
+
+# 2. Install Lullabeast.
+git clone [[FILL: public repo URL — current origin is https://github.com/bigbraingoldfish/autodev-oc.git]] autodev-ui
+cd autodev-ui
+./install.sh            # interactive; registers agents with OpenClaw, generates your dashboard access token; safe to re-run
+
+# 3. Run the dashboard.
+source .env
+uvicorn ui.server:app --host 127.0.0.1 --port 18790
+```
+
+The server prints your access URL at startup — open it
+(**`http://127.0.0.1:18790/?token=<AUTODEV_UI_TOKEN>`**). That authorizes your browser via a
+session cookie; scripts can send the same token as a `Bearer` header instead. Then verify the
+webhook wiring once — use POST, a GET check can miss token mismatches:
+
+```bash
+curl -sS -o /dev/null -w "HTTP %{http_code}\n" -X POST http://127.0.0.1:18789/hooks/agent \
+  -H "Authorization: Bearer <hooks.token>" -H "Content-Type: application/json" \
+  -d '{"agentId":"prd-creator","sessionKey":"ideas:install-check:0","wakeMode":"now","message":"ping"}'
+```
+
+`HTTP 200` means you're wired up; `401` means the Bearer token doesn't match `hooks.token` in
+`openclaw.json`. The full walkthrough — including macOS LaunchAgent and Linux/WSL2 systemd units —
+is in **[SETUP.md](SETUP.md)**.
 
 ---
 
@@ -50,23 +104,15 @@ agent gateway and owns all model/provider configuration.
   Working MVP  ✅
 ```
 
-1. **Ideate.** In **Project Ideas**, you chat with a PRD-creator agent that refines a raw idea
-   into a structured **`prd.md`** (what to build, and why).
-2. **Convert.** Lullabeast turns the PRD into a phased **`roadmap.md`** (how the work is broken into
-   phases, each with a behavioral-verification block) and a **`verification.md`** contract (the
-   project's entry point, public surface, and acceptance stack).
-3. **Build.** The orchestrator runs a deterministic, gate-checked loop for each phase:
-   - **Planner** turns the phase into a concrete implementation plan.
-   - **Executor** writes the code and tests, then commits.
-   - **Reviewer** verifies the behavior actually works (including screenshot-based visual review
-     for UI phases).
-   - Deterministic **gate scripts** validate every agent's output before the pipeline advances —
-     no LLM is trusted to grade its own homework.
-4. **Recover.** If a phase can't pass after its retry budget, Lullabeast **escalates**: the run pauses,
-   you get the failure context, you answer (proceed / reset the phase / skip / stop), and the run
-   resumes from where it stopped.
-5. **Done.** On completion the dashboard shows a **Pipeline Complete** summary — per-phase attempts,
-   review verdicts, and cost (when your OpenClaw models report it).
+1. **Ideate.** Chat with the PRD-creator agent until a raw idea is a structured `prd.md`.
+2. **Convert.** The PRD becomes a phased `roadmap.md` (each phase with a behavioral-verification
+   block) and a `verification.md` acceptance contract.
+3. **Build.** The orchestrator runs the gate-checked planner → executor → reviewer loop for each
+   phase; failing phases retry in fresh sessions until they pass or the retry budget runs out.
+4. **Recover.** When a phase exhausts its budget, the run pauses and escalates to you with the
+   failure context — answer (proceed / reset / skip / stop) and the run resumes.
+5. **Done.** The dashboard shows a completion summary: per-phase attempts, review verdicts, and
+   cost (when your OpenClaw models report it).
 
 Queue several projects and Lullabeast works them in order, honoring dependencies between them.
 
@@ -74,92 +120,67 @@ Queue several projects and Lullabeast works them in order, honoring dependencies
 
 ## Architecture
 
-**Multi-agent, gate-based.** Each phase moves through specialised agents: the **planner** turns the
-phase into a concrete plan, the **executor** writes code and tests and commits, and the **reviewer**
-checks that the result actually behaves as intended. Between every handoff sits a deterministic
-**gate script** — a plain, LLM-free Python checker that inspects what the agent produced (its file
-manifest, the git diff, test results, behavioral evidence, unaccounted deletions) and returns a
-verdict: pass, retry, or escalate. The gates are the pipeline's source of truth, so a
-confident-but-wrong agent can't advance on its own say-so; a failing phase loops back through a
-fresh attempt until it passes or the retry budget runs out. A fourth agent, **escalation**, is
-invoked only once the gates and retries are exhausted, and two ideation agents (**prd-creator**,
-**roadmap-converter**) drive the idea → PRD → roadmap front-end. A single orchestrator state machine
-sequences all of them and owns the git operations, blame attribution, and recovery logic.
+Four pipeline agents and two ideation agents, sequenced by a single orchestrator state machine
+that owns the git operations, blame attribution, and recovery logic:
 
-**OpenClaw is the runtime.** Lullabeast runs on top of [OpenClaw](https://docs.openclaw.ai), which hosts
-the agent sessions and brokers every model call. Lullabeast invokes agents through OpenClaw's
-`/hooks/agent` webhook and reads the session files OpenClaw writes back. **All model and provider
-configuration — including any API keys — lives in `openclaw.json`**, so Lullabeast itself stays
-model-agnostic and never handles a provider credential. You install OpenClaw and point Lullabeast at it
-(see [SETUP.md](SETUP.md)).
+- **Planner** — turns the current roadmap phase into a concrete implementation plan.
+- **Executor** — writes the code and tests, then commits to a phase branch.
+- **Reviewer** — verifies the result actually behaves as intended, including screenshot-based
+  visual review for UI phases.
+- **Gate scripts** — deterministic, LLM-free Python checkers between every handoff: file
+  manifest, git diff, test results, behavioral evidence, unaccounted deletions. The gates are the
+  pipeline's source of truth — no agent advances on its own say-so.
+- **Escalation** — invoked only when gates and retries are exhausted; notifies you and pauses.
+- **prd-creator / roadmap-converter** — drive the idea → PRD → roadmap front end.
 
-**Two state trees.** Pipeline state — the lock, queue, event log, ideas, and the active-project
-symlink — defaults to **`<repo>/.autodev/`**; OpenClaw's own config and agent workspaces live under
-**`~/.openclaw`**.
-
-**Single-file by design.** `ui/server.py` (all API routes) and `autodev/pipeline/orchestrator.py`
-(the whole state machine) are intentionally monolithic, keeping the control flow auditable in one
-place. See [CLAUDE.md](CLAUDE.md) before refactoring either.
+Pipeline state (lock, queue, event log, ideas) lives in `<repo>/.autodev/`; OpenClaw's own config
+and agent workspaces live under `~/.openclaw`. `ui/server.py` (all API routes) and
+`autodev/pipeline/orchestrator.py` (the whole state machine) are intentionally single-file to keep
+control flow auditable — read [CLAUDE.md](CLAUDE.md) before refactoring either. The full spec is
+[autodev/docs/PIPELINE-SPEC.md](autodev/docs/PIPELINE-SPEC.md).
 
 ---
 
-## Quick start
+## How Lullabeast relates to OpenClaw
 
-**Prerequisites**
-
-- Linux, macOS, or WSL2 (native Windows is unsupported — the pipeline uses POSIX `fcntl` locking)
-- Python 3.9+ and `git`
-- Node.js 22+ with `npm` (builds the signals plugin and the Playwright visual-review MCP)
-- A separate, running **OpenClaw** gateway on `localhost:18789` ([install OpenClaw](https://openclaw.dev/install))
-
-**Install & run**
-
-```bash
-git clone <this-repo> autodev-ui
-cd autodev-ui
-./install.sh            # interactive, 14 steps; safe to re-run
-source .env
-uvicorn ui.server:app --host 127.0.0.1 --port 18790
-```
-
-Then open **http://127.0.0.1:18790**.
-
-**Verify webhooks once** (a GET check can miss token mismatches — use POST):
-
-```bash
-curl -sS -o /dev/null -w "HTTP %{http_code}\n" -X POST http://127.0.0.1:18789/hooks/agent \
-  -H "Authorization: Bearer <hooks.token>" -H "Content-Type: application/json" \
-  -d '{"agentId":"prd-creator","sessionKey":"ideas:install-check:0","wakeMode":"now","message":"ping"}'
-```
-
-`HTTP 200` means you're wired up. `HTTP 401` means the Bearer token doesn't match `hooks.token` in
-`openclaw.json`. Full walkthrough — including macOS LaunchAgent and Linux/WSL2 systemd units — is in
-**[SETUP.md](SETUP.md)**.
+Lullabeast is built on top of [OpenClaw](https://docs.openclaw.ai) and requires it — a hard
+dependency, the way a client needs its server. OpenClaw hosts the agent sessions, brokers every
+model call, and owns all model/provider configuration: API keys and model choices live in
+`openclaw.json`, never in Lullabeast — which is what keeps Lullabeast itself model-agnostic.
+Lullabeast drives OpenClaw from the outside (webhook invocations in, session files out) and ships
+a small OpenClaw plugin for activity signals; it contains no OpenClaw code. Not a fork, not a
+competitor — a pipeline that needs a capable agent runtime, and uses OpenClaw as that runtime. New
+to OpenClaw? Start with its [install guide](https://openclaw.dev/install).
 
 ---
 
 ## The dashboard
 
-<!-- Add a screenshot or short GIF of the dashboard here before release. -->
+[[FILL: dashboard screenshot or short demo GIF — screenshots/ is currently empty; capture the Pipeline Monitor mid-run]]
 
 - **Project Ideas** — chat an idea into a PRD, then generate the roadmap + verification contract.
-- **Setup & Preflight** — point at a project repo, run preflight checks, and launch the pipeline.
-- **Pipeline Monitor** — watch the live planner → executor → reviewer loop, per-phase metrics, and a
-  real-time activity feed; recover from git errors or answer escalations.
+- **Setup & Preflight** — point at a project repo, run preflight checks, launch the pipeline.
+- **Pipeline Monitor** — watch the live planner → executor → reviewer loop, per-phase metrics, and
+  a real-time activity feed; recover from git errors or answer escalations.
 - **Queue** — line up multiple projects with dependency ordering; Lullabeast runs them sequentially.
 
 ---
 
 ## Security
 
-- **`/api/*` has no authentication.** Anyone who can reach the bound port can launch runs and read
-  project files. Bind to **`127.0.0.1`** (the default). Only use `--host 0.0.0.0` on a trusted LAN
-  behind a firewall, and never expose the raw port to the internet without a reverse proxy + TLS +
-  auth. See [SECURITY.md](SECURITY.md) and [SETUP.md — Security and network exposure](SETUP.md#security-and-network-exposure).
-- The pipeline **executes agent-written code on the host** under your user account. Treat Lullabeast as
-  operator tooling for a trusted machine, not a multi-tenant service.
-- Secrets (the webhook Bearer token) live in `.env` (gitignored) or `AUTODEV_HOOKS_TOKEN`. Never
-  commit them in `ui/config.json` or any tracked file.
+- **The dashboard and `/api/*` require an access token** (`AUTODEV_UI_TOKEN`, generated by
+  `install.sh`). Open the tokenized URL printed at startup to authorize your browser; scripts send
+  the token as a `Bearer` header. This is single-user, local-tool auth — one shared token, no
+  accounts, roles, or audit trail.
+- **Stay on loopback anyway.** Bind to **`127.0.0.1`** (the default); the server refuses a
+  non-loopback bind unless a token is configured. Never expose the raw port to the internet —
+  anything beyond a trusted LAN belongs behind a reverse proxy + TLS. See
+  [SECURITY.md](SECURITY.md) and [SETUP.md — Security and network exposure](SETUP.md#security-and-network-exposure).
+- The pipeline **executes agent-written code on the host** under your user account. Treat
+  Lullabeast as operator tooling for a trusted machine, not a multi-tenant service.
+- Secrets — the dashboard token (`AUTODEV_UI_TOKEN`) and the webhook Bearer token
+  (`AUTODEV_HOOKS_TOKEN`) — live in `.env` (gitignored). Never commit them in `ui/config.json` or
+  any tracked file.
 
 ---
 
@@ -169,10 +190,10 @@ curl -sS -o /dev/null -w "HTTP %{http_code}\n" -X POST http://127.0.0.1:18789/ho
 |---|---|---|
 | UI says `RUNNING` but no agents ever fire | OpenClaw gateway is down | `curl -s http://localhost:18789/v1/models` — connection refused means start the gateway |
 | Webhook returns **401** | `hooks.token` ≠ `AUTODEV_HOOKS_TOKEN` | Sync the Bearer secret (install.sh step 8 does this) |
-| `orchestrator.py not found` / `No module named …` on launch | `.env` not sourced / `AUTODEV_REPO_PATH` wrong | `source .env` before starting uvicorn |
+| Dashboard or `/api/*` returns **401** | browser not authorized / wrong `AUTODEV_UI_TOKEN` | Open the tokenized URL printed at server startup |
+| `orchestrator.py not found` on launch | `.env` not sourced | `source .env` before starting uvicorn |
 | Every **UI/INT** phase fails at the reviewer | Playwright MCP not installed | Re-run `./install.sh` without `--skip-playwright` |
-| PRD → roadmap **convert** errors | conversion prompt path overridden to a missing file | Leave `conversion_prompt_path` empty in `ui/config.json` to use the bundled prompt |
-| Header shows **Queue stalled** | all queued projects are blocked / in dependency hold | Clear a parent or resume a banked escalation answer |
+| Header shows **Queue stalled** | all queued projects blocked / in dependency hold | Clear a parent or resume a banked escalation answer |
 
 A deeper **"Silent failure modes"** walkthrough lives in [SETUP.md](SETUP.md#silent-failure-modes-four-cases).
 
@@ -180,15 +201,26 @@ A deeper **"Silent failure modes"** walkthrough lives in [SETUP.md](SETUP.md#sil
 
 ## Tests
 
-Two suites; both must pass before a change merges.
+Two suites; both must pass before a change merges — CI ([ci.yml](.github/workflows/ci.yml)) runs
+them on every push and pull request. Neither needs a live OpenClaw.
 
 ```bash
 source .env
-pytest autodev/tests/ -q     # pipeline: orchestration, sentinel polling, skill injection (no live OpenClaw)
+pytest autodev/tests/ -q     # pipeline: orchestration, sentinel polling, skill injection
 pytest tests/ -q             # UI server: FastAPI routes + frontend
 ```
 
-Dev dependencies (`pytest`, `httpx`) are in [`requirements-dev.txt`](requirements-dev.txt).
+Dev dependencies are in [`requirements-dev.txt`](requirements-dev.txt).
+
+---
+
+## Known limitations
+
+- **Beta.** State schemas, interfaces, and the install flow still change without deprecation.
+- **Single-user by design.** One shared access token — no user accounts, roles, or multi-tenancy;
+  agent-written code runs on your host.
+- **Hard projects will escalate.** That is the designed behavior, not an edge case.
+- **POSIX only.** Linux, macOS, or WSL2; native Windows is unsupported.
 
 ---
 
@@ -204,7 +236,7 @@ autodev/
   docs/             # PIPELINE-SPEC, PIPELINE-CONSTRAINTS, PRD, assumptions
 ui/                 # FastAPI server + single-file React dashboard (no build step)
 tests/              # UI server tests
-install.sh          # 14-step interactive installer
+install.sh          # interactive installer
 ```
 
 ---
@@ -219,18 +251,6 @@ install.sh          # 14-step interactive installer
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup, PR conventions, adding skills |
 | [SECURITY.md](SECURITY.md) | Security model and vulnerability reporting |
 | `autodev/docs/PIPELINE-SPEC.md` | The architecture spec / single source of truth |
-
----
-
-## Maintainer notes
-
-- **Pin runtime deps** in [requirements.txt](requirements.txt) / [ui/requirements.txt](ui/requirements.txt);
-  run `pip-audit -r requirements.txt` periodically and upgrade pins after review.
-- **`install.sh` is idempotent** (`set -euo pipefail`, atomic JSON patches) and safe to re-run after a
-  `git pull`; it audits the OpenClaw `hooks` block, registers pipeline agents, and rebuilds the plugin.
-- **Before a public release**, run a secret scanner over full git history (e.g.
-  [gitleaks](https://github.com/gitleaks/gitleaks) / [trufflehog](https://github.com/trufflesecurity/trufflehog));
-  rotate anything real that was ever committed and consider `git filter-repo`.
 
 ---
 
