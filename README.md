@@ -67,7 +67,7 @@ uvicorn ui.server:app --host 127.0.0.1 --port 18790
 
 The server prints your access URL at startup — open it
 (**`http://127.0.0.1:18790/?token=<AUTODEV_UI_TOKEN>`**). That authorizes your browser via a
-session cookie; scripts can send the same token as a `Bearer` header instead. Then verify the
+cookie (30 days); scripts can send the same token as a `Bearer` header instead. Then verify the
 webhook wiring once — use POST, a GET check can miss token mismatches:
 
 ```bash
@@ -172,8 +172,8 @@ to OpenClaw? Start with its [install guide](https://openclaw.dev/install).
   `install.sh`). Open the tokenized URL printed at startup to authorize your browser; scripts send
   the token as a `Bearer` header. This is single-user, local-tool auth — one shared token, no
   accounts, roles, or audit trail.
-- **Stay on loopback anyway.** Bind to **`127.0.0.1`** (the default); the server refuses a
-  non-loopback bind unless a token is configured. Never expose the raw port to the internet —
+- **Stay on loopback anyway.** Bind to **`127.0.0.1`** (the default); the server refuses
+  non-loopback requests unless a token is configured. Never expose the raw port to the internet —
   anything beyond a trusted LAN belongs behind a reverse proxy + TLS. See
   [SECURITY.md](SECURITY.md) and [SETUP.md — Security and network exposure](SETUP.md#security-and-network-exposure).
 - The pipeline **executes agent-written code on the host** under your user account. Treat

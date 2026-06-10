@@ -299,7 +299,9 @@ If `ui/config.json` exists and contains an `autodev_repo_path` key, that value t
 
 ## Security and network exposure
 
-The FastAPI app exposes **`/api/*` without authentication**. Anyone who can reach the bound TCP port can invoke setup, queue, launch/stop, and file-oriented endpoints — treat this as **operator tooling for a trusted machine**, not a multi-tenant service.
+The dashboard and **`/api/*`** require a **single shared access token**: `AUTODEV_UI_TOKEN`, generated into `.env` by `install.sh` (step 10). At startup the server prints the access URL — open `http://127.0.0.1:18790/?token=<AUTODEV_UI_TOKEN>` once and the browser is authorized via an HttpOnly cookie (30 days); scripts and `curl` send the same value as `Authorization: Bearer <token>` instead. The `?token=` query is honored only on `/`, never on `/api/*`, so the secret stays out of request logs. `GET /health` and `/static/*` are exempt. This is single-user, local-tool auth — one token, no accounts or roles — so the endpoints still execute code on the host for whoever holds it; treat Lullabeast as **operator tooling for a trusted machine**, not a multi-tenant service.
+
+**Token sources, in precedence order:** the `AUTODEV_UI_TOKEN` environment variable (sourced from `.env`), then `ui_token` in `ui/config.json`. Service deployments note: the bundled systemd unit does not load `.env`, so set `ui_token` in `ui/config.json` (or add an `EnvironmentFile=` line yourself). To rotate the token, change it and restart the server. **With no token configured at all**, the server runs in the legacy open mode: loopback requests are served unauthenticated and non-loopback requests are refused (403) — the startup log warns loudly.
 
 - **Default (recommended):** bind to loopback only so only local users and SSH tunnels can connect:
 
@@ -308,7 +310,7 @@ The FastAPI app exposes **`/api/*` without authentication**. Anyone who can reac
   uvicorn ui.server:app --host 127.0.0.1 --port 18790
   ```
 
-- **LAN access:** `--host 0.0.0.0` makes every route reachable from your network. Use only on a trusted LAN, behind a firewall, or put a reverse proxy with TLS and authentication in front. Do not expose the raw port to the public internet.
+- **LAN access:** `--host 0.0.0.0` makes every route reachable from your network (each request still requires the token). Use only on a trusted LAN, behind a firewall, or put a reverse proxy with TLS and its own authentication in front. Do not expose the raw port to the public internet — the shared token is not a substitute for TLS + real access control.
 
 ---
 
@@ -321,15 +323,20 @@ uvicorn ui.server:app --host 127.0.0.1 --port 18790
 
 For access from other machines on a **trusted** LAN only, you may use `--host 0.0.0.0` (see **Security and network exposure** above).
 
-The UI is then available at `http://<host>:18790`.
+The startup log prints your access URL — open it to authorize the browser:
 
-To verify it is running correctly, check the health endpoint:
-
-```bash
-curl http://localhost:18790/api/state
+```
+[AUTH] Dashboard access URL: http://127.0.0.1:18790/?token=<AUTODEV_UI_TOKEN>
 ```
 
-A healthy response contains a JSON object with `pipeline_status`, `current_agent`, and `current_phase_raw_id` fields. If the response is an error or the server refuses the connection, check the uvicorn output for import errors — a missing Python dependency or an incorrect `AUTODEV_REPO_PATH` will surface there.
+To verify the server is up, check the (unauthenticated) health endpoint, then a real API route with the token:
+
+```bash
+curl http://localhost:18790/health
+curl -H "Authorization: Bearer $AUTODEV_UI_TOKEN" http://localhost:18790/api/state
+```
+
+`/health` returns `{"ok": true}`. A healthy `/api/state` response contains a JSON object with `pipeline_status`, `current_agent`, and `current_phase_raw_id` fields; a **401** means the Bearer value does not match the configured `AUTODEV_UI_TOKEN`. If the response is an error or the server refuses the connection, check the uvicorn output for import errors — a missing Python dependency or an incorrect `AUTODEV_REPO_PATH` will surface there.
 
 **First load.** When `pipeline_status` is idle or unknown and no queue row shows a busy live pipeline, the dashboard opens **Project Ideas** by default. Use **Setup & Preflight** to select the repository path, run preflight, and launch. **Pipeline Monitor** is where you watch an active or resumed run.
 
