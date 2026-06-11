@@ -45,7 +45,10 @@ Read this before running anything — the first item is a separate install:
   listening on `localhost:18789`. Tested against **OpenClaw 2026.5.18**; earlier versions may
   have state-schema differences (see [SETUP.md](SETUP.md)).
 - **Linux, macOS, or WSL2** — native Windows is unsupported (the pipeline uses POSIX `fcntl` locking).
-- **Python 3.9+** and `git`.
+- **Python 3.9+** and `git` — with a configured git identity: the pipeline makes commits in your
+  project repos (the executor's commits, phase merges, init commits), so set it once —
+  `git config --global user.name "Your Name"` and `git config --global user.email "you@example.com"`.
+  `install.sh` checks this and fails fast with these commands if either is missing.
 - **Node.js 22+** with `npm` — builds the OpenClaw signals plugin and the Playwright visual-review MCP.
 
 ### Install & run
@@ -60,10 +63,16 @@ git clone [[FILL: public repo URL — current origin is https://github.com/bigbr
 cd autodev-ui
 ./install.sh            # interactive; registers agents with OpenClaw, generates your dashboard access token; safe to re-run
 
-# 3. Run the dashboard.
+# 3. Run the dashboard — from the repo root; the -m module form is required.
 source .env
-uvicorn ui.server:app --host 127.0.0.1 --port 18790
+python -m ui.server
 ```
+
+> **Launch command:** `python -m ui.server`, run **from the repo root**, is the canonical way to
+> start the dashboard (it binds `127.0.0.1` on the configured port, default `18790`). The script
+> form `python ui/server.py` fails with `ModuleNotFoundError: No module named 'ui'` because the
+> server uses package-absolute imports. `uvicorn ui.server:app --host 127.0.0.1 --port 18790` is
+> the equivalent uvicorn invocation if you need CLI control of host/port.
 
 The server prints your access URL at startup — open it
 (**`http://127.0.0.1:18790/?token=<AUTODEV_UI_TOKEN>`**). That authorizes your browser via a

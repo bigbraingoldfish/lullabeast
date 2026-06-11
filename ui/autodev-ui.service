@@ -3,9 +3,12 @@ Description=Lullabeast UI Service
 After=network.target
 
 [Service]
-# EDIT THE PATH BELOW BEFORE INSTALLING - set to your actual application directory
+# EDIT THE PATH BELOW BEFORE INSTALLING - set to your Lullabeast checkout root.
+# The module form (-m ui.server) is required and must run from the repo root:
+# `python3 ui/server.py` fails with ModuleNotFoundError because the server uses
+# package-absolute imports.
 WorkingDirectory=/path/to/autodev
-ExecStart=/usr/bin/python3 ui/server.py
+ExecStart=/usr/bin/python3 -m ui.server
 Restart=on-failure
 RestartSec=5
 
