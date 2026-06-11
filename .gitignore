@@ -13,6 +13,7 @@ metrics.jsonl
 tmp_ui_verify/
 
 .pytest_cache/
+.ruff_cache/
 .coverage
 htmlcov/
 *.log
@@ -38,6 +39,7 @@ ui/index.html.bak
 /.windsurfrules
 /.claude/skills/
 .claude/settings.json
+.claude/settings.local.json
 
 # Local / internal planning (not for the public tree)
 /plans/

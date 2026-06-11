@@ -151,8 +151,9 @@ def test_cli_project_switch_stamps_run_started_at():
 def test_park_snapshot_includes_run_started_at():
     """``_queue_park_active_entry`` snapshots ``run_started_at`` so a later revival
     restores the ORIGINAL run start (a parked project is the same run)."""
-    # Window spans the whole snapshot dict (~10 fields) through its closing brace.
-    assert "run_started_at" in _region("snapshot = {", 1000)
+    # Window spans the whole snapshot dict (~10 fields + inline comments) through
+    # its closing brace — run_started_at sits ~1.1k chars in, brace at ~1.35k.
+    assert "run_started_at" in _region("snapshot = {", 1600)
 
 
 def test_revival_restores_run_started_at():
