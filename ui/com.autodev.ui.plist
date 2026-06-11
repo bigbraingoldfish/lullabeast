@@ -23,14 +23,17 @@
     <key>Label</key>
     <string>com.autodev.ui</string>
 
-    <!-- EDIT THE PATHS BELOW BEFORE INSTALLING.
+    <!-- EDIT THE PYTHON PATH BELOW BEFORE INSTALLING.
          First entry: path to your python3 (e.g. /usr/bin/python3 or
-         /opt/homebrew/bin/python3).  Last entry must reference ui/server.py
-         inside your Lullabeast checkout. -->
+         /opt/homebrew/bin/python3).  The module form (-m ui.server) is
+         required and resolves against WorkingDirectory (the checkout root):
+         `python3 ui/server.py` fails with ModuleNotFoundError because the
+         server uses package-absolute imports. -->
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/python3</string>
-        <string>ui/server.py</string>
+        <string>-m</string>
+        <string>ui.server</string>
     </array>
 
     <!-- EDIT THIS PATH BEFORE INSTALLING — set to your Lullabeast checkout root. -->

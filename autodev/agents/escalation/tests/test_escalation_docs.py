@@ -10,7 +10,13 @@ ESCALATION_DIR = Path(__file__).resolve().parent.parent
 AGENTS = (ESCALATION_DIR / "AGENTS.md").read_text(encoding="utf-8")
 TOOLS = (ESCALATION_DIR / "TOOLS.md").read_text(encoding="utf-8")
 
-WEBHOOK = Path(os.environ.get("WEBHOOK_CLIENT_PATH", "/home/pi/.openclaw/webhook_client.py"))
+# webhook_client.py lives in this repo (autodev/pipeline/) since the migration
+# out of ~/.openclaw; derive the default from this file's location so the test
+# is machine-independent. WEBHOOK_CLIENT_PATH still overrides for odd layouts.
+WEBHOOK = Path(
+    os.environ.get("WEBHOOK_CLIENT_PATH")
+    or ESCALATION_DIR.parents[1] / "pipeline" / "webhook_client.py"
+)
 
 
 def test_tools_documents_message_peer_resolution():
@@ -30,8 +36,12 @@ def test_no_common_fake_e164_in_shipped_docs():
 
 
 @pytest.mark.skipif(not WEBHOOK.is_file(), reason="webhook_client.py not found — skipped in CI")
-def test_webhook_escalation_prompt_names_tools_peer_resolution():
+def test_webhook_escalation_prompt_is_notify_only():
+    """F13 contract: the escalation webhook prompt must name the operator-notify
+    channel (message tool / Signal connector) and forbid writing escalation_output
+    — the operator answers asynchronously from the dashboard."""
     src = WEBHOOK.read_text(encoding="utf-8")
     assert "default_messages" in src
     assert '"escalation"' in src
-    assert "TOOLS.md" in src or "peer" in src.lower()
+    assert "Signal" in src or "message tool" in src
+    assert "escalation_output" in src

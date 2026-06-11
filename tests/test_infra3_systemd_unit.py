@@ -31,7 +31,12 @@ def test_unit_section_contains_description_and_after():
 
 
 def test_service_section_exec_start():
-    """Service section must contain ExecStart that invokes python and references ui/server.py.
+    """Service section must launch the server as a module: python3 -m ui.server.
+
+    The module form is load-bearing: ui/server.py uses package-absolute imports
+    (``from ui.roadmap_parser import …``), so the script form
+    ``python3 ui/server.py`` dies with ModuleNotFoundError. WorkingDirectory
+    (the repo root) is what makes ``-m ui.server`` resolvable.
 
     The python path itself is intentionally flexible — distros may ship python at
     /usr/bin/python3, /usr/local/bin/python3, or elsewhere. This mirrors the
@@ -49,7 +54,10 @@ def test_service_section_exec_start():
     assert re.search(r"ExecStart=.*\bpython3?\b", service_content), (
         "ExecStart must invoke python (e.g., /usr/bin/python3 or another path)"
     )
-    assert "ui/server.py" in service_content, "ExecStart must reference ui/server.py"
+    assert re.search(r"ExecStart=.*\s-m\s+ui\.server\b", service_content), (
+        "ExecStart must use the module form: python3 -m ui.server "
+        "(python3 ui/server.py fails — package-absolute imports)"
+    )
 
 
 def test_service_section_working_directory():

@@ -120,6 +120,21 @@ if ! command -v git >/dev/null 2>&1; then
 fi
 ok "git available"
 
+# Git identity — the pipeline makes git commits inside project repos (init
+# commits, phase merges, the executor agent's own commits). A missing identity
+# does not fail here; it surfaces later as a confusing mid-pipeline commit
+# error, so check it up front and fail fast with the exact fix.
+GIT_ID_NAME="$(git config --global user.name 2>/dev/null || true)"
+GIT_ID_EMAIL="$(git config --global user.email 2>/dev/null || true)"
+if [ -z "$GIT_ID_NAME" ] || [ -z "$GIT_ID_EMAIL" ]; then
+    echo "${RED}  ✗${RESET} Git identity not configured (user.name / user.email)."
+    echo "    The pipeline commits in your project repos; set it once:"
+    echo "      git config --global user.name \"Your Name\""
+    echo "      git config --global user.email \"you@example.com\""
+    fail "Configure your git identity, then re-run install.sh."
+fi
+ok "git identity: $GIT_ID_NAME <$GIT_ID_EMAIL>"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 3/14  PYTHON DEPENDENCIES
 # ─────────────────────────────────────────────────────────────────────────────

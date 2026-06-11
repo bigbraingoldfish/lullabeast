@@ -6940,7 +6940,7 @@ async def post_setup_validate_repo_path(request: Request):
                 "valid": False,
                 "error": (
                     "Use an absolute path starting with / "
-                    "(e.g. /home/pi/projects/my-app)"
+                    f"(e.g. {os.path.join(os.path.expanduser('~'), 'projects', 'my-app')})"
                 ),
             }
         raise
@@ -7244,6 +7244,36 @@ def _preflight_materialize(
     return checks
 
 
+_GIT_FALLBACK_IDENTITY_NAME = "Lullabeast Pipeline"
+_GIT_FALLBACK_IDENTITY_EMAIL = "pipeline@lullabeast.local"
+
+
+def _ensure_repo_git_identity(repo_path: str) -> None:
+    """Set a repo-local git identity when none resolves (hermetic project init).
+
+    Pipeline flows commit inside the project repo — the init commits here, the
+    orchestrator's phase merges, the executor agent's own commits. With no
+    resolvable ``user.name``/``user.email``, those commits fail mid-pipeline on
+    a fresh machine, far from the actual cause. ``install.sh`` fails fast on a
+    missing global identity, so this fallback matters for repos initialised
+    outside that path (tests, CI, unusual HOME setups). A resolvable identity
+    (repo-local, global, or system) is never overridden.
+    """
+    for key, fallback in (
+        ("user.name", _GIT_FALLBACK_IDENTITY_NAME),
+        ("user.email", _GIT_FALLBACK_IDENTITY_EMAIL),
+    ):
+        probe = subprocess.run(
+            ["git", "-C", repo_path, "config", key],
+            capture_output=True, text=True,
+        )
+        if probe.returncode != 0 or not probe.stdout.strip():
+            subprocess.run(
+                ["git", "-C", repo_path, "config", key, fallback],
+                check=True, capture_output=True,
+            )
+
+
 def _run_preflight_checks(repo_path: str, config: dict | None = None) -> list:
     """Run ordered preflight checks for a project directory.
 
@@ -7445,6 +7475,10 @@ def _run_preflight_checks(repo_path: str, config: dict | None = None) -> list:
                 check=True,
                 capture_output=True,
             )
+            # Repo-local identity fallback so the initial commit below (and every
+            # later pipeline commit in this repo) cannot die on a machine with no
+            # global git identity.
+            _ensure_repo_git_identity(repo_path)
             did_fresh_init = True
             checks.append({
                 "check": "git repo",
@@ -9379,6 +9413,7 @@ def _run_init_project(
             subprocess.run(["git", "init", repo_path], check=True, capture_output=True)
             subprocess.run(["git", "-C", repo_path, "checkout", "-b", "main"],
                            check=True, capture_output=True)
+            _ensure_repo_git_identity(repo_path)
             subprocess.run(["git", "-C", repo_path, "add", "-A"], check=True, capture_output=True)
             subprocess.run(
                 ["git", "-C", repo_path, "commit", "-m", "init: project structure with roadmap"],
@@ -9440,6 +9475,7 @@ def _run_init_project(
                         f.write("\n" + _PIPELINE_GITIGNORE_HEADER + "\n" + "\n".join(missing) + "\n")
 
             # git add + commit new files only
+            _ensure_repo_git_identity(repo_path)
             subprocess.run(["git", "-C", repo_path, "add", "-A"], check=True, capture_output=True)
             result = subprocess.run(
                 ["git", "-C", repo_path, "status", "--porcelain"],
@@ -9726,3 +9762,21 @@ async def post_completion_review_trigger(project: str):
         print(f"[W5-E] Completion review invocation warning: {_exc}")
 
     return {"triggered": True, "session_key": session_key}
+
+
+def main():
+    """Run the dashboard: ``python -m ui.server`` from the repo root.
+
+    The module uses package-absolute imports (``from ui.roadmap_parser import …``),
+    so the script form ``python ui/server.py`` dies with ModuleNotFoundError —
+    launch with ``-m`` (or ``uvicorn ui.server:app``). Binds loopback only; see
+    "Security and network exposure" in SETUP.md before exposing the port wider.
+    """
+    import uvicorn
+
+    config = load_config()
+    uvicorn.run(app, host="127.0.0.1", port=int(config.get("port", DEFAULTS["port"])))
+
+
+if __name__ == "__main__":
+    main()

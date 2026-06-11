@@ -46,14 +46,19 @@ def test_plist_label():
 
 
 def test_plist_program_arguments():
-    """ProgramArguments must be a list whose final element references ui/server.py."""
+    """ProgramArguments must launch the server as a module: python3 -m ui.server.
+
+    Mirrors test_infra3_systemd_unit.py: the script form ``python3 ui/server.py``
+    dies with ModuleNotFoundError (package-absolute imports), so both service
+    files must use ``-m ui.server`` resolved against WorkingDirectory.
+    """
     with open(PLIST_FILE, "rb") as f:
         plist = plistlib.load(f)
     args = plist.get("ProgramArguments")
     assert isinstance(args, list), "ProgramArguments must be a list"
-    assert len(args) >= 2, "ProgramArguments must have at least python + script"
-    assert args[-1].endswith("ui/server.py"), (
-        f"Last ProgramArguments entry must reference ui/server.py, got {args[-1]!r}"
+    assert len(args) >= 3, "ProgramArguments must have at least python + -m + module"
+    assert args[-2:] == ["-m", "ui.server"], (
+        f"ProgramArguments must end with ['-m', 'ui.server'], got {args[-2:]!r}"
     )
 
 
