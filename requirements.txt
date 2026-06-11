@@ -11,4 +11,7 @@
 # `autodev/pipeline/skill_manager.py` parses `skill_mapping.yaml`; without PyYAML,
 # per-phase skill injection silently disables. `uvicorn[standard]` also pulls PyYAML
 # transitively, but the pipeline depends on it directly, so declare it explicitly.
-PyYAML==6.0
+# Must be >=6.0.1: PyYAML 6.0 ships no wheels for CPython >= 3.12 and its sdist
+# build fails under Cython 3 (the 'cython_sources' AttributeError), so the 6.0 pin
+# broke clean installs on any Python >= 3.12 system.
+PyYAML==6.0.2

@@ -4,4 +4,6 @@ uvicorn[standard]==0.42.0
 python-multipart==0.0.22
 aiohttp==3.13.4
 requests==2.33.0
-websocket-client==1.2.3
+# >=1.8.0 for current-CPython support (1.2.3 was a 2021 release); the gateway-abort
+# path uses only the stable WebSocket.connect(header=, suppress_origin=)/send/recv API.
+websocket-client==1.8.0
