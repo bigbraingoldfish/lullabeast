@@ -240,13 +240,18 @@ class TestAbortAgentSession:
             "as a handshake rejection"
         )
 
-    def test_returns_false_when_first_frame_is_not_challenge(self):
-        """If the very first frame is somehow not a ``connect.challenge``
-        event, that is a real protocol violation — return False (logged
-        as handshake rejection) rather than blindly proceeding."""
+    def test_returns_false_when_res_frame_arrives_before_challenge(self):
+        """A ``res`` frame before the challenge is a real protocol violation
+        (the client has not sent any request yet, so there is nothing a
+        response could answer) — return False rather than blindly proceeding.
+
+        Unsolicited *event* frames, by contrast, are normal gateway chatter
+        and are skipped — see TestAbortInterleavedEventFrames.
+        """
         weird_first_frame = {
-            "type": "event",
-            "event": "something.unexpected",
+            "type": "res",
+            "id": "99",
+            "ok": True,
             "payload": {},
         }
         ws = _make_ws_mock([weird_first_frame])
@@ -257,3 +262,110 @@ class TestAbortAgentSession:
                 "tok",
             )
         assert result is False
+
+
+# The gateway pushes unsolicited event frames (health, presence, …) on the
+# same socket that carries request/response traffic.  Each wait below must
+# skip those and return only the frame it is actually waiting for.  Observed
+# live (Minecraft REND-E6, 2026-06-11 02:42): a ``health`` event arrived
+# between the ``sessions.abort`` request and its response, the client read
+# it as the response, logged "unexpected response", and reported FAILED —
+# every abort in the run failed this way, so prior attempts kept streaming
+# (zombie sessions) under each retry.
+HEALTH_EVENT = {
+    "type": "event",
+    "event": "health",
+    "payload": {"ok": True, "ts": 1781145755747},
+}
+
+
+class TestAbortInterleavedEventFrames:
+    def test_succeeds_with_health_event_before_abort_response(self):
+        """The exact live failure: a ``health`` event lands between the
+        ``sessions.abort`` request and its ``res`` frame.  The client must
+        skip the event and read the real response.  Regresses to "every
+        abort reports FAILED while the gateway actually aborted the run"."""
+        ws = _make_ws_mock([CONNECT_CHALLENGE, HELLO_OK, HEALTH_EVENT, ABORT_ABORTED])
+        with patch.object(wc.websocket, "WebSocket", return_value=ws):
+            result = wc.abort_agent_session(
+                "agent:executor:pipeline:phase-22:rend-e6:executor-attempt-2",
+                "ws://127.0.0.1:18789/__openclaw__/ws",
+                "tok",
+            )
+        assert result is True, (
+            "an unsolicited event frame between request and response must be "
+            "skipped, not read as the sessions.abort response"
+        )
+
+    def test_succeeds_with_events_interleaved_at_every_wait(self):
+        """Events may interleave at any of the three wait points (before the
+        challenge, before hello-ok, before the abort response).  All three
+        must skip them.  Catches a fix applied to only one recv site."""
+        ws = _make_ws_mock([
+            HEALTH_EVENT,
+            CONNECT_CHALLENGE,
+            HEALTH_EVENT,
+            HELLO_OK,
+            HEALTH_EVENT,
+            HEALTH_EVENT,
+            ABORT_ABORTED,
+        ])
+        with patch.object(wc.websocket, "WebSocket", return_value=ws):
+            result = wc.abort_agent_session(
+                "agent:executor:pipeline:phase-22:rend-e6:executor-attempt-2",
+                "ws://127.0.0.1:18789/__openclaw__/ws",
+                "tok",
+            )
+        assert result is True
+
+    def test_event_flood_bounded_by_deadline(self):
+        """A gateway that streams events faster than the recv timeout would
+        otherwise keep the skip-loop alive forever (each recv returns an
+        event before the socket timeout can fire).  The wait must enforce a
+        wall-clock deadline derived from ``timeout_seconds`` and give up.
+
+        ``time.monotonic`` is patched to advance 3 s per call so the 8 s
+        deadline expires after a few skipped frames; ``time.sleep`` is
+        patched out so the 3-attempt retry loop does not really wait."""
+        ws = MagicMock()
+        ws.recv.return_value = json.dumps(HEALTH_EVENT)  # endless event stream
+        fake_clock = {"now": 0.0}
+
+        def _tick():
+            fake_clock["now"] += 3.0
+            return fake_clock["now"]
+
+        with patch.object(wc.websocket, "WebSocket", return_value=ws), \
+             patch.object(wc.time, "monotonic", side_effect=_tick), \
+             patch.object(wc.time, "sleep"):
+            result = wc.abort_agent_session(
+                "any:key",
+                "ws://127.0.0.1:18789/__openclaw__/ws",
+                "tok",
+                timeout_seconds=8,
+            )
+        assert result is False
+        # Deadline must bound the number of frames consumed per attempt to a
+        # small multiple of (timeout / tick), not an unbounded stream.
+        assert ws.recv.call_count < 20, (
+            f"event flood consumed {ws.recv.call_count} frames — the "
+            "wall-clock deadline is not bounding the skip loop"
+        )
+
+    def test_skips_unknown_event_before_challenge_and_proceeds(self):
+        """An unrecognised *event* name before the challenge is gateway
+        chatter, not a protocol violation — it must be skipped (the old
+        behavior failed the whole abort on any non-challenge first frame)."""
+        unknown_event = {
+            "type": "event",
+            "event": "something.unexpected",
+            "payload": {},
+        }
+        ws = _make_ws_mock([unknown_event, CONNECT_CHALLENGE, HELLO_OK, ABORT_ABORTED])
+        with patch.object(wc.websocket, "WebSocket", return_value=ws):
+            result = wc.abort_agent_session(
+                "any:key",
+                "ws://127.0.0.1:18789/__openclaw__/ws",
+                "tok",
+            )
+        assert result is True

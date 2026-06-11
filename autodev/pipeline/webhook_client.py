@@ -211,6 +211,49 @@ ABORT_MAX_ATTEMPTS = 3
 ABORT_RETRY_BACKOFF_SECONDS = 2.0
 
 
+def _recv_expected_frame(ws, session_key, deadline, expect, label):
+    """Read frames until the expected one arrives, skipping unsolicited events.
+
+    The gateway multiplexes unsolicited ``event`` frames (``health``,
+    presence, …) onto the same socket that carries request/response traffic,
+    so a wait for a specific frame must filter — a bare ``ws.recv()`` here
+    reads whatever happens to arrive next.  Observed live (REND-E6,
+    2026-06-11): a ``health`` event landed between the ``sessions.abort``
+    request and its response, was read as the response, and every abort in
+    the run reported FAILED while prior attempts kept streaming.
+
+    ``expect`` maps frame keys to required values — ``{"type": "event",
+    "event": "connect.challenge"}`` or ``{"type": "res", "id": "2"}`` (we
+    send one request at a time, so matching on the request id is exact).
+    Non-matching ``event`` frames are skipped; a non-matching ``res`` frame
+    is a protocol violation (nothing else was requested) and fails the
+    attempt.  ``deadline`` (``time.monotonic()`` basis) bounds the skip loop
+    in wall-clock terms: the per-recv socket timeout alone cannot, because a
+    gateway emitting events faster than that timeout resets it on every
+    frame.  Returns the parsed frame, or ``None`` on violation or deadline
+    expiry (socket timeouts raise and are handled by the caller).
+    """
+    while time.monotonic() < deadline:
+        frame = json.loads(ws.recv())
+        if all(frame.get(k) == v for k, v in expect.items()):
+            return frame
+        if frame.get("type") == "event":
+            logging.debug(
+                "[ABORT] skipping interleaved %r event while waiting for %s (%s)",
+                frame.get("event"), label, session_key,
+            )
+            continue
+        logging.warning(
+            "[ABORT] unexpected frame (wanted %s) for %s: %s",
+            label, session_key, frame,
+        )
+        return None
+    logging.warning(
+        "[ABORT] deadline expired waiting for %s for %s", label, session_key
+    )
+    return None
+
+
 def _attempt_abort_once(
     session_key: str,
     gateway_ws_url: str,
@@ -234,6 +277,11 @@ def _attempt_abort_once(
        need to be signed; we just need to have observed the challenge.
     4. Receive ``hello-ok`` response → handshake complete.
     5. Send ``sessions.abort`` and read the result.
+
+    Every frame wait goes through ``_recv_expected_frame``: the gateway
+    interleaves unsolicited ``event`` frames (health, …) with response
+    traffic, and reading one of those as the response fails the abort
+    spuriously (the REND-E6 every-abort-FAILED bug).
     """
     try:
         ws = websocket.WebSocket()
@@ -255,18 +303,21 @@ def _attempt_abort_once(
             suppress_origin=True,
         )
 
-        # Step 1: read the unsolicited connect.challenge event.  The gateway
-        # always sends this immediately after the socket opens; sending
-        # ``connect`` before consuming it is the pre-fix bug.
-        challenge = json.loads(ws.recv())
-        if not (
-            challenge.get("type") == "event"
-            and challenge.get("event") == "connect.challenge"
-        ):
-            logging.warning(
-                "[ABORT] Unexpected first frame (wanted connect.challenge) for %s: %s",
-                session_key, challenge,
-            )
+        # One wall-clock budget for all three frame waits of this attempt.
+        # The per-recv socket timeout (settimeout above) bounds a *silent*
+        # gateway; this deadline bounds a *chatty* one (see _recv_expected_frame).
+        deadline = time.monotonic() + timeout_seconds
+
+        # Step 1: wait for the unsolicited connect.challenge event.  The
+        # gateway sends it after the socket opens; sending ``connect``
+        # before consuming it is the pre-fix bug.  Other unsolicited events
+        # may arrive first and are skipped.
+        challenge = _recv_expected_frame(
+            ws, session_key, deadline,
+            expect={"type": "event", "event": "connect.challenge"},
+            label="connect.challenge",
+        )
+        if challenge is None:
             ws.close()
             return False
         nonce = challenge.get("payload", {}).get("nonce")
@@ -306,8 +357,14 @@ def _attempt_abort_once(
             }
         )
         ws.send(connect_frame)
-        hello = json.loads(ws.recv())
-        if not (hello.get("ok") and hello.get("payload", {}).get("type") == "hello-ok"):
+        hello = _recv_expected_frame(
+            ws, session_key, deadline,
+            expect={"type": "res", "id": "1"},
+            label="connect response",
+        )
+        if hello is None or not (
+            hello.get("ok") and hello.get("payload", {}).get("type") == "hello-ok"
+        ):
             logging.warning(
                 "[ABORT] Gateway handshake rejected for %s: %s", session_key, hello
             )
@@ -323,8 +380,14 @@ def _attempt_abort_once(
             }
         )
         ws.send(abort_frame)
-        resp = json.loads(ws.recv())
+        resp = _recv_expected_frame(
+            ws, session_key, deadline,
+            expect={"type": "res", "id": "2"},
+            label="sessions.abort response",
+        )
         ws.close()
+        if resp is None:
+            return False
 
         status = resp.get("payload", {}).get("status")
         if resp.get("ok") and status in ("aborted", "no-active-run"):
