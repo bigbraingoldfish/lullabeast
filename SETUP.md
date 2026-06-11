@@ -87,7 +87,7 @@ What the script does (summary):
 9. Confirms bundled PRD→roadmap instructions at `autodev/prompts/prd-to-roadmap-conversion.txt`.
 10. **Merges** `.env` non-destructively. Writes only the canonical names (`OPENCLAW_ROOT`, `AUTODEV_PIPELINE_ROOT`, `AUTODEV_REPO_PATH`) plus any keys added in step 8. Legacy names `AUTODEV_ROOT` and `AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME` are ignored at runtime.
 11. Installs the **`autodev-pipeline-signals`** OpenClaw plugin and sets `plugins.entries.autodev-pipeline-signals.hooks.allowConversationAccess=true` when the `openclaw` CLI is available.
-12. Optionally installs **Playwright MCP** and Chromium for UI/INT visual review (skippable with `--skip-playwright` or declining the prompt).
+12. Installs **Playwright MCP** and Chromium — **required for UI/INT visual review** (executors screenshot UI/INT phases and the reviewer reads them; without it every UI/INT phase is rejected at the reviewer gate with `ERR_VISUAL_UNVERIFIED`). Opt out with `--skip-playwright` (or by declining the prompt) only for runs that will not touch UI/INT phases.
 13. Writes the setup-complete marker (`~/.autodev_setup_complete`).
 14. Prints summary.
 

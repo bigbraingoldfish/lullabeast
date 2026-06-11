@@ -43,6 +43,17 @@ If you run without `.env` loaded, set the path explicitly:
 AUTODEV_REPO_PATH=$(pwd) pytest tests/ -q
 ```
 
+**Browser end-to-end tests** (`tests/test_browser_path_selector.py`) drive a real Chromium through Playwright's *Python* bindings — an optional dev dependency pinned in `requirements-dev.txt`. They need the package, the browser binary, **and** a running UI server:
+
+```bash
+pip install -r requirements-dev.txt              # installs the `playwright` package
+playwright install chromium                       # one-time: fetches the browser binary
+source .env && uvicorn ui.server:app --host 127.0.0.1 --port 18790   # in another shell
+pytest tests/test_browser_path_selector.py -q
+```
+
+If the package, the Chromium binary, or the server is absent, the module **skips loudly** with an actionable reason instead of erroring — but a skip is not a pass, so install all three before relying on these tests.
+
 **Path fixture rule:** `/home/pi/` paths are not acceptable in test fixtures. Use `tmp_path` (pytest's built-in fixture) for all temporary directories. Tests that hard-code machine-specific paths will be rejected.
 
 ## Environment variables

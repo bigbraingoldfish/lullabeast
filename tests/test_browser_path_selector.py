@@ -2,6 +2,10 @@
 
 Requires the UI server running (default http://127.0.0.1:18790). Skip if unreachable.
 Override with AUTODEV_UI_E2E_URL.
+
+Requires the optional Python ``playwright`` dev dependency (pinned in requirements-dev.txt).
+The module skips loudly at collection when it is absent — see the ``pytest.importorskip`` gate
+below and CHANGELOG "P1 Stage B".
 """
 from __future__ import annotations
 
@@ -16,6 +20,16 @@ import urllib.request
 
 import pytest
 
+# This module drives a real browser through Playwright's *Python* sync API — an optional
+# dev/test dependency (pinned in requirements-dev.txt; install.sh installs only the Node
+# visual-review MCP + Chromium, not the Python bindings). Gate the whole module on it so a
+# missing package skips loudly at collection (one clear skip) instead of raising fixture-setup
+# ImportErrors once the UI server is reachable. Loud + narrow: see CHANGELOG "P1 Stage B".
+sync_api = pytest.importorskip(
+    "playwright.sync_api",
+    reason="playwright not installed — pip install playwright && playwright install chromium",
+)
+
 URL = os.environ.get("AUTODEV_UI_E2E_URL", "http://127.0.0.1:18790")
 
 
@@ -29,19 +43,63 @@ def _server_ok() -> bool:
         return False
 
 
-@pytest.fixture
-def pw_page():
+def _is_missing_browser_error(err) -> bool:
+    """True only for Playwright's "browser binary not installed" launch error.
+
+    Pinning the Python ``playwright`` package (requirements-dev.txt) makes "package present but
+    Chromium not installed" a realistic state; with the UI server reachable it would otherwise
+    throw a cryptic launch error. Narrow on purpose (CHANGELOG "P1 Stage B"): a missing binary
+    is a sanctioned skip, so we match the install-hint signature rather than swallowing every
+    launch failure — any other error must surface loud.
+    """
+    msg = str(err).lower()
+    return "playwright install" in msg or "executable doesn't exist" in msg
+
+
+def _isolated_page_session(browser):
+    """Yield a page in a FRESH, isolated browser context; close only that context afterwards.
+
+    Each test gets its own ``browser.new_context()`` — a clean cookies/storage/cache jar — so
+    tests stay order-independent and one test's UI state cannot leak into the next (identical
+    isolation to launching a browser per test). The shared session browser (see ``_pw_browser``)
+    is left alive. Extracted from ``pw_page`` so the isolation contract is unit-testable without
+    a live browser — see ``tests/test_browser_path_selector_fixture_scope.py``.
+    """
+    context = browser.new_context()
+    try:
+        yield context.new_page()
+    finally:
+        context.close()
+
+
+@pytest.fixture(scope="session")
+def _pw_browser():
+    """Session-scoped Chromium — launched once for the whole module run.
+
+    Server reachability is checked here (before launch) so a down server skips every browser
+    test without paying a Chromium launch; pytest caches the skip across the session. A missing
+    browser binary degrades to a loud, actionable skip (run: playwright install chromium); any
+    other launch failure stays loud. Per-test isolation lives in ``pw_page``, not here.
+    """
     if not _server_ok():
         pytest.skip(f"AutoDev UI not reachable at {URL} (start uvicorn on port 18790)")
-    from playwright.sync_api import sync_playwright
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+    with sync_api.sync_playwright() as p:
         try:
-            yield page
+            browser = p.chromium.launch(headless=True)
+        except sync_api.Error as e:  # Playwright's base error, re-exported in sync_api
+            if _is_missing_browser_error(e):
+                pytest.skip("Chromium not installed for Playwright — run: playwright install chromium")
+            raise  # any other launch failure stays loud
+        try:
+            yield browser
         finally:
             browser.close()
+
+
+@pytest.fixture
+def pw_page(_pw_browser):
+    """Function-scoped page in a fresh, isolated browser context (see ``_isolated_page_session``)."""
+    yield from _isolated_page_session(_pw_browser)
 
 
 def _dismiss_first_run_if_present(page):

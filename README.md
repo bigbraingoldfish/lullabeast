@@ -50,6 +50,9 @@ Read this before running anything — the first item is a separate install:
   `git config --global user.name "Your Name"` and `git config --global user.email "you@example.com"`.
   `install.sh` checks this and fails fast with these commands if either is missing.
 - **Node.js 22+** with `npm` — builds the OpenClaw signals plugin and the Playwright visual-review MCP.
+  The MCP is **required for UI/INT phases**: the reviewer reads executor screenshots, and without it
+  every UI/INT phase is rejected at the reviewer gate (`ERR_VISUAL_UNVERIFIED`). `install.sh` installs
+  it by default — opt out with `--skip-playwright` only for runs that will not touch UI/INT phases.
 
 ### Install & run
 
