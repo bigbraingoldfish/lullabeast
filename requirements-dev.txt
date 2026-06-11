@@ -6,3 +6,14 @@
 # Test runner, plus the HTTP client that fastapi.testclient.TestClient requires.
 pytest==9.0.2
 httpx==0.28.1
+
+# Browser E2E tests (tests/test_browser_path_selector.py) drive a real Chromium via
+# Playwright's *Python* sync API. `pip install` fetches the bindings but NOT the browser
+# binary — after installing, run once:
+#     playwright install chromium
+# (This may reuse the Chromium that install.sh downloaded for the Node visual-review MCP if
+# the build revisions align; otherwise it fetches its own.) The tests skip loudly — via
+# pytest.importorskip when the package is absent, and a missing-binary guard when the package
+# is present but Chromium isn't — so a removed-then-missing playwright degrades to a clear skip
+# rather than a hard error.
+playwright==1.60.0
