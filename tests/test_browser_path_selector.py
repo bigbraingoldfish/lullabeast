@@ -1,7 +1,10 @@
 """Playwright browser checks for unified server path inputs (hybrid with pytest).
 
 Requires the UI server running (default http://127.0.0.1:18790). Skip if unreachable.
-Override with AUTODEV_UI_E2E_URL.
+Override with AUTODEV_UI_E2E_URL. Against a token-protected dashboard (AUTODEV_UI_TOKEN
+auth), set AUTODEV_UI_E2E_TOKEN to the dashboard token — a deliberate explicit opt-in,
+separate from AUTODEV_UI_TOKEN (which the conftest scrubs so a sourced .env cannot point
+these state-mutating tests at a live dashboard by accident).
 
 Requires the optional Python ``playwright`` dev dependency (pinned in requirements-dev.txt).
 The module skips loudly at collection when it is absent — see the ``pytest.importorskip`` gate
@@ -32,15 +35,40 @@ sync_api = pytest.importorskip(
 
 URL = os.environ.get("AUTODEV_UI_E2E_URL", "http://127.0.0.1:18790")
 
+# Dashboard access token for token-protected installs (_TokenAuthMiddleware). Read at import
+# time, like URL. Deliberately NOT a fallback to AUTODEV_UI_TOKEN: the conftest scrubs that
+# var per-test precisely so a sourced .env cannot poison the suite, and pointing these
+# state-mutating tests (queue add/delete, preflight → recents) at a live tokenized dashboard
+# must be an explicit operator opt-in.
+_E2E_TOKEN = os.environ.get("AUTODEV_UI_E2E_TOKEN", "").strip()
 
-def _server_ok() -> bool:
+
+def _auth_headers() -> dict:
+    """``Authorization: Bearer`` header for every server call, or ``{}`` when auth is off."""
+    return {"Authorization": f"Bearer {_E2E_TOKEN}"} if _E2E_TOKEN else {}
+
+
+def _context_kwargs() -> dict:
+    """Per-test browser-context kwargs — bearer header on every page request, or bare."""
+    return {"extra_http_headers": _auth_headers()} if _E2E_TOKEN else {}
+
+
+def _probe_server() -> str:
+    """Reachability probe: ``"ok"`` / ``"auth_rejected"`` / ``"unreachable"``.
+
+    The tri-state keeps the skip loud and narrow (CHANGELOG "P1 Stage B"): a 401/403 means the
+    server is alive but the dashboard token is required (or wrong) — steering the operator to
+    AUTODEV_UI_E2E_TOKEN — while any other failure is the plain server-down case. A non-auth
+    HTTP error (e.g. 500) deliberately reads as unreachable, not auth_rejected.
+    """
     try:
-        import urllib.request
-
-        r = urllib.request.urlopen(URL + "/", timeout=3)
-        return r.status == 200
+        req = urllib.request.Request(URL + "/", headers=_auth_headers())
+        with urllib.request.urlopen(req, timeout=3) as r:
+            return "ok" if r.status == 200 else "unreachable"
+    except urllib.error.HTTPError as e:
+        return "auth_rejected" if e.code in (401, 403) else "unreachable"
     except Exception:
-        return False
+        return "unreachable"
 
 
 def _is_missing_browser_error(err) -> bool:
@@ -65,7 +93,7 @@ def _isolated_page_session(browser):
     is left alive. Extracted from ``pw_page`` so the isolation contract is unit-testable without
     a live browser — see ``tests/test_browser_path_selector_fixture_scope.py``.
     """
-    context = browser.new_context()
+    context = browser.new_context(**_context_kwargs())
     try:
         yield context.new_page()
     finally:
@@ -77,11 +105,25 @@ def _pw_browser():
     """Session-scoped Chromium — launched once for the whole module run.
 
     Server reachability is checked here (before launch) so a down server skips every browser
-    test without paying a Chromium launch; pytest caches the skip across the session. A missing
-    browser binary degrades to a loud, actionable skip (run: playwright install chromium); any
-    other launch failure stays loud. Per-test isolation lives in ``pw_page``, not here.
+    test without paying a Chromium launch; pytest caches the skip across the session. The probe
+    is tri-state: a wrong explicit AUTODEV_UI_E2E_TOKEN FAILS (an operator config error, not an
+    environmental absence), a token-protected server without the opt-in skips with the
+    actionable hint, and a down server skips exactly as before. A missing browser binary
+    degrades to a loud, actionable skip (run: playwright install chromium); any other launch
+    failure stays loud. Per-test isolation lives in ``pw_page``, not here.
     """
-    if not _server_ok():
+    probe = _probe_server()
+    if probe == "auth_rejected":
+        if _E2E_TOKEN:
+            pytest.fail(
+                f"dashboard at {URL} rejected AUTODEV_UI_E2E_TOKEN (HTTP 401/403) — "
+                "wrong or rotated token"
+            )
+        pytest.skip(
+            f"AutoDev UI at {URL} is token-protected (HTTP 401/403) — "
+            "set AUTODEV_UI_E2E_TOKEN to run these tests"
+        )
+    elif probe != "ok":
         pytest.skip(f"AutoDev UI not reachable at {URL} (start uvicorn on port 18790)")
     with sync_api.sync_playwright() as p:
         try:
@@ -293,12 +335,14 @@ def test_queue_add_autorepairs_git(pw_page):
 
     # Clean up: remove the test entry from the queue so it doesn't accumulate across runs.
     try:
-        with urllib.request.urlopen(URL + "/api/queue", timeout=10) as resp:
+        list_req = urllib.request.Request(URL + "/api/queue", headers=_auth_headers())
+        with urllib.request.urlopen(list_req, timeout=10) as resp:
             entries = json.loads(resp.read().decode())
         for entry in entries.get("queue", []):
             if entry.get("project_path") == proj:
                 req = urllib.request.Request(
                     URL + f"/api/queue/{entry['id']}",
+                    headers=_auth_headers(),
                     method="DELETE",
                 )
                 urllib.request.urlopen(req, timeout=10).close()
@@ -358,7 +402,7 @@ def test_recents_appear_after_preflight(pw_page):
         req = urllib.request.Request(
             URL + "/api/setup/preflight",
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **_auth_headers()},
             method="POST",
         )
         try:
@@ -404,6 +448,7 @@ def test_recents_appear_after_preflight(pw_page):
             prune_req = urllib.request.Request(
                 URL + "/api/setup/recent-projects/prune",
                 data=b"",
+                headers=_auth_headers(),
                 method="POST",
             )
             urllib.request.urlopen(prune_req, timeout=10).close()

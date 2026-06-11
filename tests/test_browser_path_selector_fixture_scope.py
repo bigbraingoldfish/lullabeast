@@ -13,6 +13,7 @@ against a running UI server) is the primary verification; this file is the cheap
 from __future__ import annotations
 
 import importlib.util
+import os
 import pathlib
 
 import pytest
@@ -29,11 +30,19 @@ _TARGET = pathlib.Path(__file__).with_name("test_browser_path_selector.py")
 
 def _load_module():
     # Load by file path under a throwaway name so we never collide with pytest's own collection
-    # of test_browser_path_selector.py in sys.modules.
-    spec = importlib.util.spec_from_file_location("_tbs_under_test", _TARGET)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    # of test_browser_path_selector.py in sys.modules. The dashboard token is stripped around
+    # exec: these tests pin the bare NO-TOKEN contract (new_context() with zero kwargs), which
+    # must hold even when the operator's shell has AUTODEV_UI_E2E_TOKEN exported — the
+    # token-mode contract is pinned separately in test_browser_path_selector_token_auth.py.
+    prior = os.environ.pop("AUTODEV_UI_E2E_TOKEN", None)
+    try:
+        spec = importlib.util.spec_from_file_location("_tbs_under_test", _TARGET)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    finally:
+        if prior is not None:
+            os.environ["AUTODEV_UI_E2E_TOKEN"] = prior
 
 
 _MOD = _load_module()

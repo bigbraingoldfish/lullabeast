@@ -49,10 +49,10 @@ AUTODEV_REPO_PATH=$(pwd) pytest tests/ -q
 pip install -r requirements-dev.txt              # installs the `playwright` package
 playwright install chromium                       # one-time: fetches the browser binary
 source .env && uvicorn ui.server:app --host 127.0.0.1 --port 18790   # in another shell
-pytest tests/test_browser_path_selector.py -q
+AUTODEV_UI_E2E_TOKEN=$AUTODEV_UI_TOKEN pytest tests/test_browser_path_selector.py -q
 ```
 
-If the package, the Chromium binary, or the server is absent, the module **skips loudly** with an actionable reason instead of erroring — but a skip is not a pass, so install all three before relying on these tests.
+On a token-protected dashboard (`AUTODEV_UI_TOKEN` set — the default for `install.sh` installs), `AUTODEV_UI_E2E_TOKEN` is how the tests authenticate; it is a deliberate explicit opt-in (these tests add/delete queue rows and touch recents), so they never pick up `AUTODEV_UI_TOKEN` from a sourced `.env` on their own. A wrong token **fails** loudly; a token-protected server without the opt-in **skips** with a hint. If the package, the Chromium binary, or the server is absent, the module likewise **skips loudly** with an actionable reason instead of erroring — but a skip is not a pass, so set up all three before relying on these tests.
 
 **Path fixture rule:** `/home/pi/` paths are not acceptable in test fixtures. Use `tmp_path` (pytest's built-in fixture) for all temporary directories. Tests that hard-code machine-specific paths will be rejected.
 
