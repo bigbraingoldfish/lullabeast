@@ -1,0 +1,46 @@
+# Clean-install gate.
+#
+# Every runtime/dev pin must install from scratch on all supported Python
+# versions. This catches the PyYAML==6.0 failure class automatically: a pin old
+# enough to lack wheels for a newer CPython falls back to an sdist build, which
+# then breaks (PyYAML 6.0's build fails under Cython 3 with the well-known
+# 'cython_sources' AttributeError on Python >= 3.12).
+#
+# requirements-dev.txt -> requirements.txt -> ui/requirements.txt, so the
+# two-step install below exercises all three files. The import smoke test
+# validates the canonical launch path (`python -m ui.server`, see README.md)
+# resolves with only the pinned dependencies present.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  clean-install:
+    name: pip install (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Clean install — runtime pins
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Clean install — dev/test pins
+        run: pip install -r requirements-dev.txt
+
+      - name: Import smoke test
+        run: |
+          python -c "import ui.server, yaml; print('ui.server import OK')"
+          python -m pytest --version
