@@ -115,6 +115,30 @@ def _startup_grace_seconds(env_name: str, default_str: str) -> int:
     return max(1, v)
 
 
+def _infra_backstop_seconds(env_name: str, default_str: str) -> int:
+    """Parse the infrastructure backstop from env; invalid values fall back.
+
+    Governs ``poll_for_sentinel``'s ``timeout_seconds`` — the gateway-dead
+    failsafe that bounds an attempt even while the activity stamp keeps
+    refreshing.  Stall detection (:func:`_stall_timeout_seconds`) and
+    startup grace remain the death-detectors; this cap exists for the
+    zombie-streaming case, so it must be tunable to the hardware tier: on
+    a local-model host a thorough long-context reviewer pass can
+    legitimately need ~5 min *per model call* (observed live, WORLD-E1
+    2026-06-11 — three consecutive 75-min timeouts while the agent was
+    alive and working the whole time).
+
+    Parsing semantics mirror :func:`_stall_timeout_seconds` exactly:
+    invalid strings fall back to ``default_str``, minimum clamped to 1 s.
+    """
+    raw = (os.environ.get(env_name) or "").strip()
+    try:
+        v = int(raw or default_str)
+    except ValueError:
+        v = int(default_str)
+    return max(1, v)
+
+
 # Pipeline state directory. Resolved via env_resolvers: OPENCLAW_ROOT is the
 # OpenClaw hub, AUTODEV_PIPELINE_ROOT is the pipeline state directory. Operators
 # who want state to live next to OpenClaw set AUTODEV_PIPELINE_ROOT=$OPENCLAW_ROOT
@@ -5775,7 +5799,7 @@ class Orchestrator:
                     _planner_grace = _startup_grace_seconds(
                         "AUTODEV_STARTUP_GRACE_PLANNER", "600"
                     )
-                    _planner_backstop = 4500  # 75 min infrastructure backstop
+                    _planner_backstop = _infra_backstop_seconds("AUTODEV_INFRA_BACKSTOP_PLANNER", "4500")  # gateway-dead failsafe; env-tunable for slow local-model hosts
                     print(
                         f"[POLL][CONFIG] agent=planner "
                         f"startup_grace={_planner_grace}s "
@@ -6149,7 +6173,7 @@ class Orchestrator:
                     _executor_grace = _startup_grace_seconds(
                         "AUTODEV_STARTUP_GRACE_EXECUTOR", "600"
                     )
-                    _executor_backstop = 4500  # 75 min infrastructure backstop
+                    _executor_backstop = _infra_backstop_seconds("AUTODEV_INFRA_BACKSTOP_EXECUTOR", "4500")  # gateway-dead failsafe; env-tunable for slow local-model hosts
                     print(
                         f"[POLL][CONFIG] agent=executor "
                         f"startup_grace={_executor_grace}s "
@@ -6418,7 +6442,7 @@ class Orchestrator:
                         _reviewer_grace = _startup_grace_seconds(
                             "AUTODEV_STARTUP_GRACE_REVIEWER", "600"
                         )
-                        _reviewer_backstop = 4500  # 75 min infrastructure backstop
+                        _reviewer_backstop = _infra_backstop_seconds("AUTODEV_INFRA_BACKSTOP_REVIEWER", "4500")  # gateway-dead failsafe; env-tunable for slow local-model hosts
                         print(
                             f"[POLL][CONFIG] agent=reviewer "
                             f"startup_grace={_reviewer_grace}s "

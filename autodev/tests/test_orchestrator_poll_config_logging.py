@@ -158,3 +158,72 @@ class TestStartupGracePassedToPoll:
             f"{agent} poll site must read {env_name} via "
             f"_startup_grace_seconds(...)"
         )
+
+
+# ---------------------------------------------------------------------------
+# _infra_backstop_seconds helper (env-tunable 75-min infra backstop)
+# ---------------------------------------------------------------------------
+
+
+class TestInfraBackstopHelper:
+    """The infrastructure backstop (``timeout_seconds`` of the three
+    ``poll_for_sentinel`` sites) was a hardcoded 4500 s literal.  On
+    local-model hardware a thorough long-context reviewer pass can
+    legitimately need ~5 min *per model call* (observed live on WORLD-E1,
+    2026-06-11: 16 turns x ~4.7 min = three consecutive 75-min timeouts
+    with the activity stamp refreshing the whole time — the agent was
+    alive and working, not hung).  Stall detection and startup grace
+    remain the death-detectors; the backstop must be tunable to the
+    hardware tier, mirroring ``AUTODEV_STALL_TIMEOUT_*`` /
+    ``AUTODEV_STARTUP_GRACE_*`` exactly."""
+
+    def test_helper_function_defined(self):
+        helper = getattr(orch_mod, "_infra_backstop_seconds", None)
+        assert callable(helper), (
+            "orchestrator must define _infra_backstop_seconds(env_name, "
+            "default_str) mirroring _stall_timeout_seconds"
+        )
+
+    def test_returns_default_when_env_unset(self, monkeypatch):
+        monkeypatch.delenv("AUTODEV_INFRA_BACKSTOP_REVIEWER", raising=False)
+        v = orch_mod._infra_backstop_seconds("AUTODEV_INFRA_BACKSTOP_REVIEWER", "4500")
+        assert v == 4500
+
+    def test_returns_env_value_when_set(self, monkeypatch):
+        monkeypatch.setenv("AUTODEV_INFRA_BACKSTOP_REVIEWER", "10800")
+        v = orch_mod._infra_backstop_seconds("AUTODEV_INFRA_BACKSTOP_REVIEWER", "4500")
+        assert v == 10800
+
+    def test_falls_back_on_garbage_env(self, monkeypatch):
+        monkeypatch.setenv("AUTODEV_INFRA_BACKSTOP_REVIEWER", "3 hours")
+        v = orch_mod._infra_backstop_seconds("AUTODEV_INFRA_BACKSTOP_REVIEWER", "4500")
+        assert v == 4500, (
+            "Invalid env values must silently fall back to the documented "
+            "default rather than crashing the orchestrator at startup"
+        )
+
+    def test_enforces_minimum_of_one_second(self, monkeypatch):
+        monkeypatch.setenv("AUTODEV_INFRA_BACKSTOP_REVIEWER", "-5")
+        v = orch_mod._infra_backstop_seconds("AUTODEV_INFRA_BACKSTOP_REVIEWER", "4500")
+        assert v == 1, "Non-positive must clamp to 1 (same as the sibling helpers)"
+
+    @pytest.mark.parametrize("agent", ["planner", "executor", "reviewer"])
+    def test_poll_site_resolves_backstop_via_helper(self, agent):
+        """Each poll block must resolve its backstop through the env helper
+        — a bare ``_{agent}_backstop = 4500`` literal means the knob is
+        dead at that site and operators cannot tune it."""
+        marker = f"stall_detection_path=_{agent}_stamp"
+        idx = _ORCH_SRC.find(marker)
+        assert idx != -1, f"could not locate {agent} poll site"
+        window = _ORCH_SRC[max(0, idx - 2500) : idx + 200]
+        expected = (
+            f'_infra_backstop_seconds("AUTODEV_INFRA_BACKSTOP_{agent.upper()}"'
+        )
+        assert expected in window, (
+            f"{agent} poll site must resolve its infra backstop via "
+            f"_infra_backstop_seconds(\"AUTODEV_INFRA_BACKSTOP_{agent.upper()}\", "
+            f"\"4500\") instead of a hardcoded literal"
+        )
+        assert f"_{agent}_backstop = 4500" not in window, (
+            f"{agent} poll site still hardcodes the 4500 literal"
+        )
