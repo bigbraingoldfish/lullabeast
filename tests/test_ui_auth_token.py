@@ -269,3 +269,23 @@ def test_non_string_token_treated_unset(fresh_client, temp_dir):
         root = fresh_client.get("/")
     assert api.status_code == 200
     assert root.status_code == 200
+
+
+def test_config_sourced_token_neutralized_but_env_token_enforced(monkeypatch):
+    """Hermeticity guard for the conftest ``_neutralize_ui_token_auth`` autouse fixture.
+
+    A ``ui_token`` coming from ``ui/config.json`` (with no ``AUTODEV_UI_TOKEN`` env) is blanked in
+    the test environment, so a developer machine that has dashboard auth configured cannot ``401``
+    the whole suite. An *env*-sourced token is left intact — that is the env-wins branch
+    ``test_env_var_overrides_config`` depends on. Pins the config-vs-env distinction so a future
+    refactor of the fixture cannot silently re-break test hermeticity (or, worse, disable the
+    env-token enforcement the auth contract relies on)."""
+    import ui.server as srv
+
+    # No AUTODEV_UI_TOKEN (autouse _scrub_autodev_env cleared it): whatever token the real
+    # ui/config.json carries is wrapped away to "" by the fixture.
+    assert srv.load_config().get("ui_token", "") == ""
+
+    # With the env var set, the fixture must NOT strip it — load_config's env-wins path stands.
+    monkeypatch.setenv("AUTODEV_UI_TOKEN", "env-secret")
+    assert srv.load_config().get("ui_token") == "env-secret"

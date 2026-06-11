@@ -1511,6 +1511,30 @@ def _write_json_atomic(path: str, obj: dict) -> None:
     os.replace(tmp, path)
 
 
+def _rollback_pipeline_state(pipeline_state_path: str | None) -> None:
+    """Undo a pre-spawn pipeline_state.json write after a failed orchestrator spawn (C3-05).
+
+    ``/api/setup/launch`` and ``/api/setup/switch-project`` write a fresh RUNNING
+    pipeline_state.json *before* spawning the orchestrator (T6.3 write-then-act — the child
+    reads project state at startup, so it must be committed first). If the spawn then fails,
+    that RUNNING state would point at a non-existent orchestrator process and the dashboard
+    would render a live run that does not exist. This removes the just-written file, returning
+    on-disk state to "no active run".
+
+    Best-effort and idempotent — a missing file is not an error. Call ONLY when the file was
+    actually written this request: the switch-project ``--revive`` path skips the write (it
+    resumes a parked entry's existing escalated-phase state) and must NOT roll back.
+    """
+    if not pipeline_state_path:
+        return
+    try:
+        os.remove(pipeline_state_path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        print(f"[C3-05] could not roll back pipeline_state.json after spawn failure: {exc}", flush=True)
+
+
 # ---------------------------------------------------------------------------
 # Queue helpers
 # ---------------------------------------------------------------------------
@@ -9276,6 +9300,10 @@ async def post_setup_switch_project(request: Request):
     # T6.1 — confirm_lock: poll liveness post-spawn to confirm the child took the pipeline lock.
     spawned = _spawn_orchestrator(repo_abs, config, revive_entry_id=_revive_id, confirm_lock=True)
     if not spawned.get("ok"):
+        # C3-05 — roll back the pre-spawn RUNNING write so a failed spawn leaves no stale state.
+        # Guarded: the --revive path skipped the write (it preserves the parked entry's state).
+        if _revive_id is None:
+            _rollback_pipeline_state(pipeline_state_path)
         return {
             "ok": False,
             "checks": all_pre,
@@ -9571,6 +9599,8 @@ async def post_setup_launch(request: Request):
     # T6.1 — confirm_lock: poll liveness post-spawn to confirm the child took the pipeline lock.
     spawned = _spawn_orchestrator(project_real, config, confirm_lock=True)
     if not spawned.get("ok"):
+        # C3-05 — roll back the pre-spawn RUNNING write so a failed spawn leaves no stale state.
+        _rollback_pipeline_state(pipeline_state_path)
         return {"ok": False, "error": spawned.get("error") or "Failed to spawn orchestrator"}
 
     try:

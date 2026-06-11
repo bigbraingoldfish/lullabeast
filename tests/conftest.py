@@ -24,6 +24,39 @@ def _scrub_autodev_env(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _neutralize_ui_token_auth(monkeypatch):
+    """Complete ``_scrub_autodev_env``: also strip a *config-file*-sourced ``ui_token``.
+
+    The dashboard auth middleware (``_TokenAuthMiddleware``) resolves the token per-request via
+    ``_resolve_ui_token(load_config())``, which reads ``AUTODEV_UI_TOKEN`` **or** ``ui_token`` from
+    the gitignored local ``ui/config.json``. ``_scrub_autodev_env`` clears only the env var, so on
+    a developer machine with dashboard auth configured the ``ui/config.json`` token still leaks in
+    and ``401``s every test that hits a non-exempt route without patching ``load_config`` — a
+    hermeticity gap (the tests depend on the *absence* of a local config token), not a real bug.
+
+    Wrap ``ui.server.load_config`` to blank ``ui_token`` — but ONLY when ``AUTODEV_UI_TOKEN`` is
+    unset, mirroring ``load_config``'s own env-wins precedence. That preserves
+    ``test_ui_auth_token.py::test_env_var_overrides_config``, which sets the env var and relies on
+    the *real* ``load_config`` to enforce auth. Tests that ``patch("ui.server.load_config", ...)``
+    themselves — the entire dedicated ``test_ui_auth_token.py`` suite — replace this wrapper during
+    their ``with`` block, so real auth enforcement is unaffected and no test-file skip is needed.
+    ``ui_token`` is consumed only by ``_resolve_ui_token`` (auth), so blanking it touches nothing else.
+    """
+    import os
+    import ui.server as srv
+
+    real = srv.load_config
+
+    def _stripped(*args, **kwargs):
+        cfg = real(*args, **kwargs)
+        if isinstance(cfg, dict) and not os.environ.get("AUTODEV_UI_TOKEN", "").strip():
+            cfg = {**cfg, "ui_token": ""}
+        return cfg
+
+    monkeypatch.setattr(srv, "load_config", _stripped)
+
+
+@pytest.fixture(autouse=True)
 def _disable_queue_autostart(request, monkeypatch):
     """Disable server-side queue auto-start by default across the whole UI suite.
 
