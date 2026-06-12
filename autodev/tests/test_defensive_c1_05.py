@@ -131,7 +131,7 @@ class TestC105PhaseStateCorrupt:
 
     def test_corrupt_phase_state_raises(self, orch):
         """read_phase_state with corrupt JSON must raise (not return {})
-        so the caller does not silently proceed with empty blame/retry context."""
+        so the caller does not silently proceed with empty failure/retry context."""
         inst, _, phase_state_file, base, mod = orch
         phase_state_file.write_text("{ corrupt }", encoding="utf-8")
 

@@ -32,8 +32,11 @@ Write the file as valid JSON with exactly two fields:
 
 ## Timing
 
-Write this file before you submit your command recommendation. The orchestrator
-reads it immediately after your session completes.
+Write this file BEFORE you send the operator notification, and include the same
+summary in that notification. The orchestrator promotes the file onto the
+dashboard as soon as it lands — an operator may already be reading the panel
+while you compose, so the write comes first. Write it via your workspace
+`pipeline-project` symlink (`pipeline-project/.autodev/pipeline/escalation_summary.json`).
 
 ## Example (correct)
 

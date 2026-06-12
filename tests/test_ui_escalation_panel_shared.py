@@ -5,7 +5,10 @@ Pipeline Monitor and the Queue view; the forked inline render that ``QueueAction
 used to carry is gone. These static-lint guards assert the consolidation invariants:
 
 * one component, rendered at both call sites
-* the three advisory states (generating / ready / fallback) preserved
+* the two advisory states (ready / fallback) preserved — "generating" was retired
+  with the orchestrator's synchronous LLM advisory call (the deterministic
+  fallback message now appears immediately and upgrades to the escalation
+  agent's summary when escalation_summary.json lands)
 * the two previously-divergent fallback strings collapsed into one canonical message
 * STOP confirmed via the dedicated ``StopConfirmModal`` (not the generic modal)
 * a single ``/api/command`` dispatcher that carries ``target_project_path`` so the
@@ -61,19 +64,21 @@ def test_single_panel_component_used_in_both_views(html):
     assert "hubHeaderText" not in hub, "forked Queue header text still present"
 
 
-# ── Three advisory states preserved ──────────────────────────────────────────
+# ── Advisory states preserved (ready / fallback; generating retired) ─────────
 
-def test_shared_panel_renders_all_three_advisory_states(html):
+def test_shared_panel_renders_advisory_states(html):
     block = _escalation_panel_block(html)
-    # generating
-    assert 'escalation_advisory_status === "generating"' in block
-    assert "Reviewing escalation..." in block
     # ready
     assert 'escalation_advisory_status === "ready"' in block
     assert "Advisory · " in block
     assert "Suggested action · " in block
     # fallback
     assert 'escalation_advisory_status === "fallback"' in block
+    # generating is retired: the orchestrator records the deterministic
+    # fallback immediately, so nothing synchronous remains to spin on.
+    assert 'escalation_advisory_status === "generating"' not in block, (
+        "the 'generating' loader branch is dead — no writer emits that status"
+    )
 
 
 # ── Fallback copy collapsed to one canonical string ──────────────────────────

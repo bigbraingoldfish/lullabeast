@@ -14,8 +14,7 @@ issue is not at index 0.
 Tighten to "any-plan" semantics: if ANY blocking_issue carries
 ``attribution: "plan"``, route to planner. Otherwise route to executor.
 Uses more of the information the reviewer already writes; does NOT add
-new routing power; does NOT touch the orchestrator's separate
-``run_blame_attribution()`` AI-driven attribution system.
+new routing power.
 
 Pattern: direct unit tests on the pure function with mocked phase_state.
 """

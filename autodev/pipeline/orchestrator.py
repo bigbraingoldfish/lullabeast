@@ -332,9 +332,6 @@ def _atomic_temp_dir_for_project_writes():
     return AUTODEV_PIPELINE_ROOT
 
 
-# llama-server HTTP origin (scheme + host + port, no path). Set AUTODEV_LLAMA_BASE if not localhost.
-_LLAMA_ORIGIN = os.environ.get("AUTODEV_LLAMA_BASE", "http://127.0.0.1:11434").rstrip("/")
-
 # Glob patterns for mkstemp atomic-write temp files that may be stranded if the
 # orchestrator was killed mid-write.  Pattern matches the 8-character random hex
 # suffix produced by tempfile.mkstemp (e.g. pipeline_state_a3f7c219).
@@ -968,15 +965,12 @@ def _write_run_summary(outcome: str, outcome_detail: str) -> None:
         deduped_rows = list(_seen_phases.values())
 
         # --- Aggregate counters ---
+        # (Historical metrics rows may still carry blame-attribution fields
+        # from before that system was removed; they are simply not aggregated —
+        # the reader tolerates unknown row fields.)
         executor_attempts_total = sum(r.get("executor_attempts", 0) for r in deduped_rows)
         escalations_total = sum(r.get("escalations", 0) for r in deduped_rows)
-        blame_fires_total = sum(r.get("blame_fires", 0) for r in deduped_rows)
 
-        blame_attributions = [
-            {"phase": r["phase"], "blame": r["blame_verdict"]}
-            for r in deduped_rows
-            if r.get("blame_verdict")
-        ]
         skills_injected = [
             {"phase": r["phase"], "discipline": r["skill_used"]}
             for r in deduped_rows
@@ -1002,7 +996,6 @@ def _write_run_summary(outcome: str, outcome_detail: str) -> None:
             {
                 "phase": r.get("phase"),
                 "executor_attempts": r.get("executor_attempts", 0),
-                "blame": r.get("blame_verdict"),
                 "skill_used": r.get("skill_used"),
                 "last_error_code": r.get("last_error_code"),
                 "escalation_trigger_reason": r.get("escalation_trigger_reason"),
@@ -1028,9 +1021,7 @@ def _write_run_summary(outcome: str, outcome_detail: str) -> None:
             "phases_complete": phases_complete,
             "executor_attempts_total": executor_attempts_total,
             "escalations_total": escalations_total,
-            "blame_fires_total": blame_fires_total,
             "skills_injected": skills_injected,
-            "blame_attributions": blame_attributions,
             "token_usage": _tok,
             "phases": phases_list,
         }
@@ -2431,30 +2422,12 @@ class Orchestrator:
         print("[QUEUE] QUEUE_HALTED with no banked answer to revive — exiting cleanly.")
         return False
 
-    def _read_escalation_summary(self):
-        """Read escalation agent's human-facing summary from project directory.
-
-        Returns the summary string if valid, None otherwise.
-        Never raises — all failures are logged and return None.
-        """
-        try:
-            summary_path = os.path.join(PROJECT_ARTIFACTS_DIR, "escalation_summary.json")
-            if not os.path.isfile(summary_path):
-                return None
-            with open(summary_path, "r") as f:
-                data = json.load(f)
-            summary = data.get("summary", "")
-            if not isinstance(summary, str) or not summary.strip():
-                return None
-            return summary.strip()[:200]  # hard cap
-        except Exception as e:
-            print(f"[ESCALATION] Could not read escalation_summary.json: {e}")
-            return None
-
     def _read_escalation_advisory(self):
-        """Read escalation agent's full advisory (summary + recommended_action).
+        """Read the escalation agent's advisory (summary + recommended_action).
 
-        Supersedes _read_escalation_summary() at the post-resolution call site.
+        The escalation agent composes ``escalation_summary.json`` per its
+        escalation-summary skill before notifying the operator;
+        ``_promote_agent_escalation_summary`` consumes this reader.
         Returns {"summary": str, "recommended_action": str} or None.
         Never raises — all failures are caught, logged, and return None.
         """
@@ -2476,162 +2449,84 @@ class Orchestrator:
             print(f"[ADVISORY] Could not read escalation_summary.json: {e}")
             return None
 
-    def _llama_chat_completions_url(self) -> str:
-        """Resolve the local llama-server chat-completions URL from openclaw.json.
+    def _clear_stale_escalation_summary(self):
+        """Remove any prior escalation_summary.json before inviting a new one.
 
-        T4.9 — an empty-string ``baseUrl`` (the key is present but blank) is
-        treated as *absent* and falls back to the default origin, rather than
-        producing a relative URL that ``requests.post`` rejects. The blame
-        analyst and the escalation-advisory path share this single resolver so
-        the two URL derivations cannot drift.
+        The file is agent-written and load-bearing for the dashboard advisory.
+        Without this guard at dispatch, a summary from a previous escalation —
+        or a previous project, after a queue auto-advance repointed the
+        pipeline-project symlink — would be promoted as if it described the
+        current failure. Never raises.
         """
-        _base = (
-            self.openclaw_config.get("models", {})
-            .get("providers", {})
-            .get("llama-local", {})
-            .get("baseUrl")
-            or f"{_LLAMA_ORIGIN}/v1"
-        ).rstrip("/")
-        return f"{_base}/chat/completions"
-
-    def _generate_escalation_advisory(self):
-        """Call qwen3.5-27b to produce a plain-English advisory before the escalation webhook.
-
-        Reads failure_context.json and phase_state.json, calls the local LLM, and
-        returns {"summary": str, "recommended_action": str} on success, None on any
-        failure.  Never raises — all exceptions are caught and logged with [ADVISORY].
-
-        The result should be written to phase_state.json as escalation_message and
-        escalation_recommended_action BEFORE invoke_agent_webhook is called, so the
-        UI and the webhook message both carry the human-readable context.
-
-        P1 Stage G1 (de-blame): the LLM input is grounded in failure_context, the
-        project's user-voice failure_language, and the retry counts. Blame-framed
-        keys (escalation_trigger_reason, prior_blame_attributions) are NOT sent, so
-        the advisory cannot parrot internal blame-attribution jargon back to the
-        operator. failure_language is surfaced on every escalation that carries it,
-        not only reviewer-rejection ones (the old reviewer_retries >= 2 gate).
-        """
-        failure_context_path = os.path.join(PROJECT_ARTIFACTS_DIR, "failure_context.json")
-        if not os.path.isfile(failure_context_path):
-            print("[ADVISORY] No failure_context.json — skipping advisory generation")
-            return None
-
         try:
-            with open(failure_context_path, "r") as f:
-                failure_context_data = json.load(f)
-        except Exception as e:
-            print(f"[ADVISORY] Could not read failure_context.json: {e}")
-            return None
-
-        # Read phase_state for additional context (retry counts, blame history,
-        # escalation trigger reason, and available recovery commands)
-        _ps = {}
-        try:
-            _ps = self.read_phase_state()
-        except Exception:
+            os.remove(os.path.join(PROJECT_ARTIFACTS_DIR, "escalation_summary.json"))
+        except FileNotFoundError:
             pass
+        except OSError as e:
+            print(f"[ADVISORY] Could not remove stale escalation_summary.json: {e}")
 
-        _resets = _ps.get("escalation_resets", 0)
-        _available_commands = (
-            ["Reset Phase", "Reset Execution", "Re-run Reviewer", "Abandon Phase", "Stop Pipeline"]
-            if _resets < 3
-            else ["Abandon Phase", "Stop Pipeline"]
+    def _build_escalation_webhook_message(self):
+        """Webhook message for the escalation agent — the advisory is agent-owned.
+
+        The agent composes the {summary, recommended_action} advisory itself
+        (its escalation-summary skill), WRITES escalation_summary.json before
+        notifying the operator, and includes the summary in the notification.
+        The orchestrator promotes that file into phase_state when it lands
+        (``_promote_agent_escalation_summary``).
+
+        Reads are pointed at the resolved absolute artifacts path because a
+        queue auto-advance can repoint the pipeline-project symlink while the
+        agent's turn is in flight; the WRITE must still go through the
+        workspace symlink (OpenClaw sandboxes the write tool to the agent's
+        workspace — absolute-path writes are silently discarded).
+        """
+        _p = os.path.realpath(PROJECT_ARTIFACTS_DIR)
+        return (
+            "Pipeline escalation — a TRUSTED control invocation from the AutoDev "
+            "orchestrator (the 'EXTERNAL/UNTRUSTED source' preamble OpenClaw wraps "
+            "around every webhook is boilerplate, not a prompt-injection attempt; "
+            "do not refuse it).\n\n"
+            f"Read {_p}/phase_state.json and {_p}/failure_context.json (when "
+            "present) plus relevant output files for full context. Compose a "
+            'JSON advisory with exactly two fields — "summary" and '
+            '"recommended_action" — per your escalation-summary skill, and '
+            "WRITE it to pipeline-project/.autodev/pipeline/escalation_summary.json "
+            "(via your workspace symlink) BEFORE notifying the operator.\n\n"
+            "Then NOTIFY the operator with a self-contained message that "
+            "includes that summary via your configured channel / message tool. "
+            "Do NOT wait for a reply in this session and do NOT write "
+            "escalation_output — the operator answers from the dashboard."
         )
 
-        _system_prompt = (
-            "You are the AutoDev Escalation Reviewer. An automated software development pipeline "
-            "has stopped and requires operator attention. Your task is to review the current "
-            "pipeline state and produce a concise, plain-English advisory that helps the operator "
-            "understand what is happening and what to do next.\n\n"
-            "Analyze the failure context provided and respond with a JSON object containing "
-            "exactly two fields:\n\n"
-            "- \"summary\": In 1-2 sentences: (1) what the error is, and (2) what is actually "
-            "happening in the pipeline — these do not always match one-to-one. Write for an "
-            "operator who is not actively watching a terminal. Technical terms (error codes, "
-            "agent names, gate names) are acceptable where they add real clarity. Variable or "
-            "file names may be referenced when they are the essential detail, but prefer "
-            "describing the concept over naming internal specifics where possible.\n\n"
-            "- \"recommended_action\": The single most appropriate recovery action as one direct "
-            "imperative sentence. Use only the recovery commands listed as available in the "
-            "context — do not recommend commands that are not available for the current phase "
-            "state.\n\n"
-            "Maximum 200 characters per field. Be direct. No hedging, no filler phrases.\n\n"
-            "When the user-message payload includes a non-null `behavioral_verification` block, "
-            "the failure has a project-authored, user-facing description; quote the project's "
-            "pre-authored `failure_language` verbatim as part of the summary so the operator reads "
-            "the failure in their own product's voice. When the block is absent, do not reference "
-            "`failure_language` in your output."
-        )
+    def _promote_agent_escalation_summary(self):
+        """Promote the agent-written escalation_summary.json into phase_state.
 
-        # P0 Stage G + P1 Stage G1: derive a compact behavioural block from
-        # failure_context so the LLM has the project's pre-authored
-        # failure_language available. Stage G1 LOOSENED the gate: the block is
-        # built whenever failure_context carries a failure_language string,
-        # regardless of reviewer_retries. Executor-self-failure escalations
-        # (reviewer_retries < 2) now get the user-voice copy too — previously
-        # they were denied it and the advisory parroted blame jargon instead.
-        # Block stays None only when failure_context has no behavioural data; the
-        # system prompt tells the LLM not to reference failure_language then.
-        _behavioural_block = None
-        _claimed = (failure_context_data or {}).get("current_phase_behavioral_verification")
-        _observed = (failure_context_data or {}).get("behavioral_verification_evidence")
-        if isinstance(_claimed, dict) and _claimed.get("failure_language"):
-            _behavioural_block = {
-                "failure_language": _claimed.get("failure_language"),
-                "verdict": (_observed or {}).get("verdict") if isinstance(_observed, dict) else None,
-                "evidence_count": (
-                    len((_observed or {}).get("evidence") or [])
-                    if isinstance(_observed, dict) else 0
-                ),
-            }
-
-        # P1 Stage G1 (de-blame): ground the advisory in the actual failure
-        # (failure_context), the project's user-voice failure_language, and the
-        # retry counts — NOT in blame-attribution state. escalation_trigger_reason
-        # (usually the blame-cap string) and prior_blame_attributions are
-        # deliberately omitted so the summary never parrots internal jargon.
-        _user_message = json.dumps({
-            "failure_context": failure_context_data,
-            "executor_retries": _ps.get("executor_retries", 0),
-            "reviewer_retries": _ps.get("reviewer_retries", 0),
-            "available_recovery_commands": _available_commands,
-            "behavioral_verification": _behavioural_block,
-        })
-
-        _payload = {
-            "model": "qwen3.5-27b",
-            "messages": [
-                {"role": "system", "content": _system_prompt},
-                {"role": "user", "content": _user_message},
-            ],
-            "response_format": {"type": "json_object"},
-        }
-
-        _chat_url = self._llama_chat_completions_url()
-
+        Called from the WAITING_FOR_HUMAN poll loop (so the dashboard upgrades
+        within one poll cycle of the summary landing) and at resolution. When a
+        valid summary is present and the advisory is not already "ready",
+        records escalation_message / escalation_recommended_action /
+        escalation_advisory_status="ready" atomically and returns True.
+        Otherwise returns False and the deterministic fallback stays in place.
+        Never raises.
+        """
+        advisory = self._read_escalation_advisory()
+        if not advisory:
+            return False
         try:
-            _resp = requests.post(_chat_url, json=_payload, timeout=30)
-            _resp.raise_for_status()
-            _raw = _resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-            if not _raw.strip():
-                raise ValueError("[ADVISORY] Empty response from LLM")
-            _parsed = json.loads(_raw)
-            _summary = _parsed.get("summary", "")
-            _action = _parsed.get("recommended_action", "")
-            if not isinstance(_summary, str) or not _summary.strip():
-                print("[ADVISORY] LLM returned empty summary — skipping")
-                return None
-            return {
-                "summary": _summary.strip()[:200],
-                "recommended_action": _action.strip()[:200] if isinstance(_action, str) else "",
-            }
-        except json.JSONDecodeError as _e:
-            print(f"[ADVISORY] Malformed JSON from LLM: {_e}")
-            return None
-        except Exception as _e:
-            print(f"[ADVISORY] Advisory generation failed: {_e}")
-            return None
+            ps = self.read_phase_state()
+        except Exception:
+            return False
+        if ps.get("escalation_advisory_status") == "ready":
+            return False
+        ps["escalation_message"] = advisory["summary"]
+        ps["escalation_recommended_action"] = advisory["recommended_action"]
+        ps["escalation_advisory_status"] = "ready"
+        try:
+            self.write_phase_state_atomic(ps)
+        except Exception as e:
+            print(f"[ADVISORY] Could not persist promoted summary: {e}")
+            return False
+        return True
 
     def _compose_fallback_reason(self, ps):
         """Deterministic, factual escalation reason for when the LLM advisory is
@@ -2690,36 +2585,28 @@ class Orchestrator:
                 line += f" ({code_str})"
             return f"{line}. {tail}"
 
-        # Last resort: the (already de-blamed) trigger reason, else a generic line.
+        # Last resort: the trigger reason, else a generic line.
         if trigger:
             return f"{trigger}. {tail}"
         return f"The pipeline escalated and needs your input. {tail}"
 
-    def _generate_and_record_advisory(self, ps):
-        """Generate the escalation advisory and record it into ``ps``.
+    def _record_escalation_reason(self, ps):
+        """Record the honest deterministic escalation reason into ``ps``.
 
-        On success records ``escalation_message`` / ``escalation_recommended_action``
-        / ``escalation_advisory_status="ready"``; on failure (hang / timeout / None)
-        records an honest deterministic ``escalation_message`` via
-        ``_compose_fallback_reason`` and ``escalation_advisory_status="fallback"``.
-        Persists ``ps`` atomically and returns the advisory dict (or None).
-
-        Reorder contract: callers must already have transitioned to
-        ``WAITING_FOR_HUMAN`` with ``escalation_advisory_status="generating"`` BEFORE
-        calling this, so the dashboard shows the "reviewing escalation" loader for
-        the duration of the (≤30s) advisory call. The returned dict is still
-        available to build the escalation webhook message.
+        Sets ``escalation_message`` via ``_compose_fallback_reason`` and
+        ``escalation_advisory_status="fallback"``, persisting atomically — so
+        the dashboard shows a factual reason the instant the escalation panel
+        appears, with no loader and no LLM call. The escalation agent (invoked
+        via OpenClaw right after) composes the richer advisory itself and
+        writes ``escalation_summary.json``; ``_promote_agent_escalation_summary``
+        upgrades the status to "ready" when that file lands. Never raises.
         """
-        advisory = self._generate_escalation_advisory()
-        if advisory:
-            ps["escalation_message"] = advisory["summary"]
-            ps["escalation_recommended_action"] = advisory["recommended_action"]
-            ps["escalation_advisory_status"] = "ready"
-        else:
-            ps["escalation_message"] = self._compose_fallback_reason(ps)
-            ps["escalation_advisory_status"] = "fallback"
-        self.write_phase_state_atomic(ps)
-        return advisory
+        ps["escalation_message"] = self._compose_fallback_reason(ps)
+        ps["escalation_advisory_status"] = "fallback"
+        try:
+            self.write_phase_state_atomic(ps)
+        except Exception as e:
+            print(f"[ADVISORY] Could not persist escalation reason: {e}")
 
     def _check_stop_requested(self) -> bool:
         """Check for the stop sentinel file written by the UI server.
@@ -3329,7 +3216,7 @@ class Orchestrator:
         On parse failure the corrupt file is quarantined (renamed to
         phase_state.json.corrupt.<timestamp>) and a RuntimeError is raised.
         Silently returning {} on corruption would drop planner_retries /
-        executor_retries / blame attribution fields, causing misrouted retries.
+        executor_retries / escalation fields, causing misrouted retries.
         """
         if os.path.exists(PHASE_STATE_FILE):
             try:
@@ -3392,9 +3279,9 @@ class Orchestrator:
         """P1 Stage G1 — a clean, deterministic headline for the escalation panel.
 
         Returns a phase-level string the UI can render as the escalation
-        headline WITHOUT ever surfacing the raw blame-attribution
+        headline WITHOUT ever surfacing the raw internal
         ``escalation_trigger_reason``. Derived solely from the phase id, so it is
-        structurally incapable of echoing the blame-cap string. Persisted as
+        structurally incapable of echoing internal error strings. Persisted as
         ``escalation_headline`` alongside ``escalation_trigger_reason`` at every
         escalation trigger.
 
@@ -3817,8 +3704,8 @@ class Orchestrator:
 
         A thin wrapper over reset_phase(): it reuses reset_phase's mechanics verbatim
         (git reset --hard to the phase base commit, delete the phase branch, wipe all
-        phase outputs, zero every retry counter, clear prior_blame_attributions by the
-        wholesale phase_state replacement, re-plan from the planner with
+        phase outputs, zero every retry counter by the wholesale phase_state
+        replacement, re-plan from the planner with
         _current_attempt_retry_class = "initial_attempt"). It does NOT re-list those
         counters — they are cleared by reset_phase's fresh-dict write.
 
@@ -4020,19 +3907,15 @@ class Orchestrator:
         elif caller == "escalation":
             # Operator-driven reset: give the executor a fresh attempt budget.  Without
             # this, executor_retries stays at the prior cap (typically 3) so the next
-            # main-loop iteration re-enters the `retries >= 3` branch and runs blame
-            # attribution again instead of actually re-invoking the executor.  The UI
+            # main-loop iteration re-enters the `retries >= 3` exhausted branch and
+            # escalates again instead of actually re-invoking the executor.  The UI
             # attempt chips (driven by executor_retries from pipeline_state.json) also
             # remain red instead of resetting to a fresh 3-slot budget.
             phase_state["executor_retries"] = 0
             self.state["executor_retries"] = 0
-            # prior_blame_attributions feeds the consecutive-impl cap at orchestrator.py
-            # line 3870.  Leaving the prior 3-4 impl entries in place would cause the
-            # impl cap to fire again after a single new failure, defeating the reset.
-            phase_state["prior_blame_attributions"] = []
             phase_state["escalation_resets"] = phase_state.get("escalation_resets", 0) + 1
             new_count = phase_state["escalation_resets"]
-            print(f"[INFO] reset_execution(escalation): executor_retries reset to 0, prior_blame_attributions cleared, escalation_resets now {new_count}.")
+            print(f"[INFO] reset_execution(escalation): executor_retries reset to 0, escalation_resets now {new_count}.")
             # FIND-ESCALATION-CAP: log reason per reset so infra vs logic failures are
             # distinguishable when the cap is reached.
             reason = phase_state.get("last_error_code", "unknown")
@@ -4500,203 +4383,6 @@ class Orchestrator:
             print(f"[ERROR] Gate script failed: {e}")
             return False
 
-    def run_blame_attribution(self) -> dict:
-        """Three-layer blame attribution system.
-
-        Layer 1 (primary)  — qwen3.5-27b analyst reading failure_context.json.
-                             Routes immediately on high-confidence plan/impl/infra.
-                             Falls through to Layer 2 on low confidence, unknown fault,
-                             empty response, timeout, or malformed JSON.
-
-        Layer 2 (fallback) — deterministic heuristics (preserved verbatim from prior
-                             implementation).  Routes on clear interface/logic signals.
-                             Falls through to Layer 3 when inconclusive.
-
-        Layer 3 (default)  — hard default: impl.  Never routes to planner without
-                             evidence.
-
-        Returns {"blame": "plan"|"impl"|"infra", "reason": "<string>"}.
-        The orchestrator caller handles routing based on blame value.
-        """
-        phase_raw_id = self.state.get("current_phase_raw_id", "?")
-        attempt = self.state.get("executor_retries", 0)
-        lessons_path = os.path.join(PROJECT_ARTIFACTS_DIR, "lessons.md")
-
-        def _append_blame_log(layer: int, fault, confidence, routing: str, reasoning: str):
-            ts = datetime.now(timezone.utc).isoformat()
-            entry = (
-                f"\n[BLAME] ts={ts} phase={phase_raw_id} attempt={attempt} "
-                f"layer={layer} fault={fault} confidence={confidence} "
-                f"routing={routing} reasoning={reasoning}"
-            )
-            try:
-                with open(lessons_path, "a") as _f:
-                    _f.write(entry)
-            except Exception as _le:
-                print(f"[WARN] blame log write failed: {_le}")
-
-        def _record_blame_attribution(fault: str):
-            """Append this blame's fault to prior_blame_attributions in phase_state.json."""
-            _ps = self.read_phase_state()
-            _pba = _ps.get("prior_blame_attributions", [])
-            _pba.append(fault)
-            _ps["prior_blame_attributions"] = _pba
-            self.write_phase_state_atomic(_ps)
-
-        # -----------------------------------------------------------------------
-        # Layer 1 — qwen3.5-27b analyst (primary path)
-        # -----------------------------------------------------------------------
-        failure_context_path = os.path.join(PROJECT_ARTIFACTS_DIR, "failure_context.json")
-        failure_context_data = None
-        if os.path.exists(failure_context_path):
-            try:
-                with open(failure_context_path, 'r') as f:
-                    failure_context_data = json.load(f)
-            except Exception:
-                pass
-
-        if failure_context_data is not None:
-            _system_prompt = (
-                "You are a failure analyst for an autonomous software development pipeline. "
-                "You receive structured failure context from a failed executor or planner agent "
-                "and must determine the root cause and recommend a routing action.\n\n"
-                "You must respond with a JSON object containing exactly three fields:\n"
-                "- \"fault\": one of \"plan\", \"impl\", \"infrastructure\", \"unknown\"\n"
-                "- \"confidence\": one of \"high\", \"medium\", \"low\"\n"
-                "- \"reasoning\": a string of one to three sentences explaining your determination\n\n"
-                "Definitions:\n"
-                "- \"plan\": the planner produced an ambiguous, contradictory, or incomplete "
-                "specification that made correct implementation impossible\n"
-                "- \"impl\": the executor had a correct specification but failed to implement it correctly\n"
-                "- \"infrastructure\": the failure is caused by a system condition (model unavailability, "
-                "file system error, network timeout) unrelated to plan or implementation quality\n"
-                "- \"unknown\": insufficient evidence to determine fault with any confidence\n\n"
-                "When failure_context.json fields are empty, null, or missing, lower your confidence "
-                "accordingly. An empty or absent failure_reason with no gate error codes is not enough "
-                "evidence to attribute to plan — default toward \"impl\" or \"unknown\" when evidence "
-                "is thin.\n\n"
-                "Do not invent evidence. Do not speculate beyond what the failure context contains."
-            )
-            _payload = {
-                "model": "qwen3.5-27b",
-                "messages": [
-                    {"role": "system", "content": _system_prompt},
-                    {"role": "user", "content": json.dumps(failure_context_data)},
-                ],
-                "response_format": {"type": "json_object"},
-            }
-            _chat_url = self._llama_chat_completions_url()
-            try:
-                _resp = requests.post(
-                    _chat_url,
-                    json=_payload, timeout=60
-                )
-                _resp.raise_for_status()
-                # T4.2 — validate the response SHAPE before destructuring. A
-                # well-formed-but-wrong-shape 200 (e.g. {"error": ...} from a
-                # loaded llama-server) otherwise yields empty content that the
-                # broad `except` below routes to Layer 2's 'impl' default —
-                # burning a real executor retry on an infra blip. A missing/empty
-                # `choices` or empty content routes to 'unknown' (the same
-                # escalate path as malformed JSON), not the heuristic fallback.
-                _l1_json = _resp.json()
-                _l1_choices = _l1_json.get("choices") if isinstance(_l1_json, dict) else None
-                if not isinstance(_l1_choices, list) or not _l1_choices:
-                    _append_blame_log(1, "wrong_shape", "null", "unknown",
-                                      f"analyst response missing choices: {str(_l1_json)[:200]}")
-                    _record_blame_attribution("unknown")
-                    return {"blame": "unknown",
-                            "reason": "[L1] analyst response wrong shape — escalating"}
-                _l1_msg = _l1_choices[0].get("message", {}) if isinstance(_l1_choices[0], dict) else {}
-                _raw = (_l1_msg.get("content", "") if isinstance(_l1_msg, dict) else "") or ""
-                if not _raw.strip():
-                    _append_blame_log(1, "empty_content", "null", "unknown",
-                                      "analyst returned empty content")
-                    _record_blame_attribution("unknown")
-                    return {"blame": "unknown",
-                            "reason": "[L1] analyst returned empty content — escalating"}
-                _parsed = json.loads(_raw)
-                _fault = _parsed.get("fault", "unknown")
-                _conf = _parsed.get("confidence", "low")
-                _reasoning = _parsed.get("reasoning", "")
-
-                if _fault == "plan" and _conf == "high":
-                    _append_blame_log(1, _fault, _conf, "plan", _reasoning)
-                    _record_blame_attribution("plan")
-                    return {"blame": "plan", "reason": f"[L1] {_reasoning}"}
-
-                elif _fault == "impl" and _conf == "high":
-                    _append_blame_log(1, _fault, _conf, "impl", _reasoning)
-                    _record_blame_attribution("impl")
-                    return {"blame": "impl", "reason": f"[L1] {_reasoning}"}
-
-                elif _fault == "infrastructure" and _conf in ("high", "medium"):
-                    _append_blame_log(1, _fault, _conf, "escalate", _reasoning)
-                    _record_blame_attribution("infrastructure")
-                    return {"blame": "infra", "reason": f"[L1] {_reasoning}"}
-
-                else:
-                    # Low confidence or unknown — fall through to Layer 2
-                    _append_blame_log(1, _fault, _conf, "fallback", _reasoning)
-
-            except json.JSONDecodeError as _l1_json_err:
-                # Malformed analyst JSON is itself an infra symptom (model truncated output).
-                # Route to 'unknown' and return early rather than falling through to Layer 2
-                # which would default to 'impl' — misrouting an infra failure as impl wastes
-                # a full executor retry.
-                _append_blame_log(1, "malformed_json", "null", "unknown",
-                                  f"malformed analyst JSON: {_l1_json_err}")
-                _record_blame_attribution("unknown")
-                return {"blame": "unknown",
-                        "reason": f"[L1] malformed analyst JSON — escalating: {_l1_json_err}"}
-            except Exception as _l1_err:
-                _append_blame_log(1, "null", "null", "fallback",
-                                  f"analyst unavailable: {_l1_err}")
-        else:
-            _append_blame_log(1, "null", "null", "fallback",
-                              "analyst unavailable: no failure_context.json")
-
-        # -----------------------------------------------------------------------
-        # Layer 2 — deterministic heuristics (preserved from prior implementation)
-        # -----------------------------------------------------------------------
-        failure_text = ""
-        executor_output_path = os.path.join(PROJECT_ARTIFACTS_DIR, "executor_output.json")
-        if os.path.exists(executor_output_path):
-            try:
-                with open(executor_output_path, 'r') as f:
-                    exec_out = json.load(f)
-                failure_text += str(exec_out.get("failure_reason", ""))
-                failure_text += str(exec_out.get("troubleshooting_attempts", ""))
-            except Exception:
-                pass
-
-        interface_errors = [
-            "AttributeError", "NameError", "undefined", "has no attribute",
-            "not defined", "missing 1 required positional argument",
-            "missing positional argument", "unexpected keyword argument", "not found",
-        ]
-        logic_errors = ["AssertionError", "expected", "but got", "!=="]
-
-        if any(err.lower() in failure_text.lower() for err in interface_errors):
-            _r = "Interface mismatch or undefined schema."
-            _append_blame_log(2, "plan", "high", "plan", _r)
-            _record_blame_attribution("plan")
-            return {"blame": "plan", "reason": f"[L2] {_r}"}
-
-        if any(err.lower() in failure_text.lower() for err in logic_errors):
-            _r = "Implementation logic failed despite correct interface."
-            _append_blame_log(2, "impl", "high", "impl", _r)
-            _record_blame_attribution("impl")
-            return {"blame": "impl", "reason": f"[L2] {_r}"}
-
-        # -----------------------------------------------------------------------
-        # Layer 3 — hard default: impl
-        # -----------------------------------------------------------------------
-        _r = "Insufficient evidence for confident attribution; defaulting to impl."
-        _append_blame_log(3, "impl", "low", "default", _r)
-        _record_blame_attribution("impl")
-        return {"blame": "impl", "reason": f"[L3] {_r}"}
-
     def _append_failure_history(self, failure_context_path: str) -> None:
         """W1-D: Append old failure_context.json content to failure_history.jsonl before overwrite.
 
@@ -4761,8 +4447,8 @@ class Orchestrator:
         """Write failure_context.json atomically under PROJECT_ARTIFACTS_DIR.
 
         Called at every point where an agent has failed and a routing decision is about
-        to be made: planner gate fail, executor gate fail (including retry-exhausted /
-        blame path), and reviewer gate fail.  Overwrites any prior failure_context.json
+        to be made: planner gate fail, executor gate fail (including the
+        retry-exhausted escalation path), and reviewer gate fail.  Overwrites any prior failure_context.json
         — always reflects the most recent failure.  Non-blocking: errors are logged and
         swallowed so a write failure never crashes the pipeline.
 
@@ -4803,8 +4489,11 @@ class Orchestrator:
         if last_error:
             gate_error_codes = [last_error]
 
-        # --- files_present_on_disk: raw filesystem truth for blame analyst ---
+        # --- files_present_on_disk: raw filesystem truth for failure review ---
         # Walk SYMLINK_TARGET, exclude pipeline metadata files and git internals.
+        # Compared against file_manifest by the escalation agent / operator:
+        # missing files indicate deletion or failed write; unexpected files
+        # indicate scope creep.
         _pipeline_meta = {
             "phase_state.json", "planner_output.json", "planner_output.done",
             "executor_output.json", "executor_output.done",
@@ -4872,7 +4561,6 @@ class Orchestrator:
             "planner_retries_at_failure": self.state.get("planner_retries", 0),
             "executor_retries_at_failure": self.state.get("executor_retries", 0),
             "reviewer_retries_at_failure": self.state.get("reviewer_retries", 0),
-            "prior_blame_attributions": phase_state.get("prior_blame_attributions", []),
         }
 
         _gate_detail_path = os.path.join(PROJECT_ARTIFACTS_DIR, "executor_gate_detail.json")
@@ -5156,10 +4844,8 @@ class Orchestrator:
             "executor_self_failures": executor_self_failures,
             "executor_reviewer_rejections": executor_reviewer_rejections,
             "reviewer_passes": reviewer_passes,
-            "blame_fires": ps_m.get("blame_fires", 0),    # W1-A
             "escalations": ps_m.get("escalations", 0),    # W1-B
             "skill_used": ps_m.get("skill_injected"),      # W1-C
-            "blame_verdict": ps_m.get("blame_verdict"),    # null when no blame fired
             "planner_tokens": planner_tok,                 # W1-G
             "executor_tokens": executor_tok,               # W1-G
             "reviewer_tokens": reviewer_tok,               # W1-G
@@ -5283,7 +4969,6 @@ class Orchestrator:
             "reviewer",
             {
                 "executor_attempts": executor_attempts,
-                "blame_fires": ps_m.get("blame_fires", 0),
             },
         )
         print(
@@ -5619,44 +5304,32 @@ class Orchestrator:
                 token = self.openclaw_config.get("hooks", {}).get("token", "")
                 if os.path.exists(SYMLINK_TARGET):
                     cleanup_output_files(PROJECT_ARTIFACTS_DIR, "escalation")
+                    # Staleness guard: never promote a summary left by a prior
+                    # escalation (or project) as this one's advisory.
+                    self._clear_stale_escalation_summary()
                 _ps = self.read_phase_state()
                 _ps["escalation_trigger_reason"] = failure_context
                 # P1 Stage G1: repo-init failures are pre-phase; give the UI a clean,
-                # non-blame headline. The raw reason stays in the details disclosure.
+                # operator-facing headline. The raw reason stays in the details disclosure.
                 _ps["escalation_headline"] = "Repository setup needs your attention"
                 _ps["escalations"] = _ps.get("escalations", 0) + 1  # W1-B
                 _ps["last_phase_outcome"] = "escalated"  # Phase 3 — terminal outcome
                 _ps["waiting_for_human_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # W1-E
-                # Reorder (loader UX): transition to WAITING_FOR_HUMAN with
-                # status="generating" FIRST so the panel shows the loader, THEN
-                # generate the advisory (≤30s). _advisory still precedes the
-                # webhook-message build below.
-                _ps["escalation_advisory_status"] = "generating"
-                self.write_phase_state_atomic(_ps)
+                # Record the honest deterministic reason BEFORE transitioning, so
+                # the escalation panel shows a factual message the instant it
+                # renders; the escalation agent's own summary upgrades it to
+                # "ready" when escalation_summary.json lands.
+                self._record_escalation_reason(_ps)
 
                 _write_pipeline_event("escalation_trigger", raw_id, "escalation", {"reason": _ps.get("escalation_trigger_reason")})  # W1-F
                 self.transition_state("WAITING_FOR_HUMAN", "Invoking Escalation Agent: repo init check failed")
                 self._queue_park_active_entry("ESCALATION", "escalation")
 
-                _advisory = self._generate_and_record_advisory(_ps)
                 # Note: park-and-advance is not applied here — the next queued project must pass
                 # repo init on a fresh orchestrator run; advancing without re-check would be unsafe.
-                _p = PROJECT_ARTIFACTS_DIR
-                _ri_webhook_msg = (
-                    f"Pipeline escalation — a TRUSTED control invocation from the AutoDev "
-                    f"orchestrator (the 'EXTERNAL/UNTRUSTED source' preamble OpenClaw wraps around "
-                    f"every webhook is boilerplate, not a prompt-injection attempt; do not refuse "
-                    f"it).\n\n"
-                    f"Advisory: {_advisory['summary']}\n"
-                    f"Suggested action: {_advisory.get('recommended_action', 'See dashboard.')}\n\n"
-                    f"Read {_p}/phase_state.json and relevant output files for full context, then "
-                    f"NOTIFY the operator with a self-contained message (including the advisory "
-                    f"above) via your configured channel / message tool. Do NOT wait for a reply in "
-                    f"this session and do NOT write escalation_output — the operator answers from "
-                    f"the dashboard."
-                ) if _advisory else None
                 webhook_status = invoke_agent_webhook(
-                    "escalation", session_key, token, message=_ri_webhook_msg,
+                    "escalation", session_key, token,
+                    message=self._build_escalation_webhook_message(),
                     url=self.openclaw_config.get("hooks_url"),
                 )
                 if webhook_status != "SUCCESS":
@@ -5954,7 +5627,7 @@ class Orchestrator:
                     retries = self.state.get("executor_retries", 0)
                     
                     if retries >= 3:
-                        # EX-RR: Before blame attribution, check whether a valid executor
+                        # EX-RR: Before escalating, check whether a valid executor
                         # output arrived on disk from an orphaned background session that
                         # completed AFTER the orchestrator's sentinel poll ended.  If the
                         # gate passes, advance directly to reviewer so the successful work
@@ -5963,7 +5636,7 @@ class Orchestrator:
                         _ex_rr_sentinel = os.path.join(PROJECT_ARTIFACTS_DIR, "executor_output.done")
                         _ex_rr_json = os.path.join(PROJECT_ARTIFACTS_DIR, "executor_output.json")
                         if os.path.exists(_ex_rr_sentinel) and os.path.exists(_ex_rr_json):
-                            print("[INFO] [EX-RR] Surviving executor output found — running gate before blame.")
+                            print("[INFO] [EX-RR] Surviving executor output found — running gate before escalating.")
                             if self.run_executor_output_gate():
                                 print("[INFO] [EX-RR] Gate passed — advancing to reviewer instead of escalating.")
                                 _ps_rr = self.read_phase_state()
@@ -5978,65 +5651,27 @@ class Orchestrator:
                                 )
                                 time.sleep(2)
                                 continue
-                            print("[INFO] [EX-RR] Gate failed on surviving output — proceeding with blame attribution.")
-                        print("[INFO] Executor retries exhausted. Running blame attribution.")
+                            print("[INFO] [EX-RR] Gate failed on surviving output — proceeding to escalation.")
+                        # Exhaustion escalates directly, mirroring the planner-exhaustion
+                        # pattern. The transition action string carries the last gate
+                        # error code — the escalation dispatch copies it into
+                        # escalation_trigger_reason, so the operator sees the honest
+                        # deterministic signal instead of a coarse attribution label.
+                        # Fresh executor budgets come only from reviewer rejections or
+                        # the operator's RESET_EXECUTION (which resets the counter).
+                        print("[INFO] Executor retries exhausted. Escalating.")
                         self.write_failure_context("executor", self.state.get("executor_retries", 0))
-                        blame_result = self.run_blame_attribution()
-                        
-                        phase_state = {}
-                        if os.path.exists(PHASE_STATE_FILE):
-                            try:
-                                with open(PHASE_STATE_FILE, 'r') as f:
-                                    phase_state = json.load(f)
-                            except Exception:
-                                pass
-                        phase_state["blame_context"] = blame_result.get("reason", "")
-                        phase_state["blame_verdict"] = blame_result.get("blame", "")  # "plan"|"impl"|"infra"|"unknown"
-                        phase_state["blame_fires"] = phase_state.get("blame_fires", 0) + 1  # W1-A
+                        _last_err = ""
                         try:
-                            os.makedirs(PROJECT_ARTIFACTS_DIR, exist_ok=True)
-                        except OSError:
-                            pass
-                        fd, temp_path = tempfile.mkstemp(
-                            dir=os.path.dirname(PHASE_STATE_FILE.rstrip(os.sep)) or ".",
-                            prefix="phase_state_",
-                        )
-                        try:
-                            with os.fdopen(fd, 'w') as f:
-                                json.dump(phase_state, f, indent=2)
-                            os.replace(temp_path, PHASE_STATE_FILE)
+                            _last_err = str(self.read_phase_state().get("last_error_code") or "")
                         except Exception:
-                            if os.path.exists(temp_path):
-                                os.remove(temp_path)
-                                
-                        if blame_result.get("blame") == "plan":
-                            print("[INFO] Blame: Planner. Re-routing to planner.")
-                            self.state["current_agent"] = "planner"
-                            self.state["executor_retries"] = 0
-                            self.transition_state("RUNNING", f"Rerouted to planner. Reason: {blame_result.get('reason')}")
-                        elif blame_result.get("blame") == "impl":
-                            # Cap consecutive "impl" blame retries at 3 before escalating.
-                            # Without this cap the loop runs indefinitely causing OOM crashes.
-                            _pba = phase_state.get("prior_blame_attributions", [])
-                            _consecutive_impl = 0
-                            for _b in reversed(_pba):
-                                if _b == "impl":
-                                    _consecutive_impl += 1
-                                else:
-                                    break
-                            if _consecutive_impl >= 3:
-                                print(f"[INFO] Blame: Executor (impl) x{_consecutive_impl} consecutive — escalating after impl cap.")
-                                self.state["current_agent"] = "escalation"
-                                self.transition_state("RUNNING", f"Impl blame cap reached ({_consecutive_impl}x): {blame_result.get('reason')}")
-                            else:
-                                print("[INFO] Blame: Executor (impl). Re-running executor with failure context.")
-                                # reset_execution sets current_agent="executor" and transitions state.
-                                self.reset_execution("auto")
-                        else:
-                            # "infra" or any unrecognised value — escalate immediately.
-                            print("[INFO] Blame: Escalating.")
-                            self.state["current_agent"] = "escalation"
-                            self.transition_state("RUNNING", f"Executor retries exhausted. Reason: {blame_result.get('reason')}")
+                            pass
+                        self.state["current_agent"] = "escalation"
+                        self.transition_state(
+                            "RUNNING",
+                            f"Executor retries exhausted after {retries} attempts"
+                            + (f" (last error: {_last_err})" if _last_err else ""),
+                        )
                         time.sleep(5)
                         continue
                         
@@ -7244,55 +6879,37 @@ class Orchestrator:
                         self._abort_active_agent_session("escalation")
 
                         cleanup_output_files(PROJECT_ARTIFACTS_DIR, "escalation")
+                        # Staleness guard: a summary left by a previous escalation
+                        # (or project) must never be promoted as this one's advisory.
+                        self._clear_stale_escalation_summary()
                         _ps = self.read_phase_state()
                         _ps["escalation_trigger_reason"] = self.state.get("last_action", "escalation triggered")
-                        # P1 Stage G1: persist a clean, non-blame headline for the UI alongside
+                        # P1 Stage G1: persist a clean, operator-facing headline for the UI alongside
                         # the raw trigger reason (which is demoted into the details disclosure).
                         _ps["escalation_headline"] = self._clean_escalation_headline(raw_id)
                         _ps["escalations"] = _ps.get("escalations", 0) + 1  # W1-B
                         _ps["last_phase_outcome"] = "escalated"  # Phase 3 — terminal outcome
                         _ps["waiting_for_human_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # W1-E
 
-                        # Reorder (loader UX): the escalation panel renders only at
-                        # WAITING_FOR_HUMAN, so transition FIRST with status="generating"
-                        # to surface the "reviewing escalation" loader, THEN generate the
-                        # advisory (≤30s). _advisory still precedes the webhook-message
-                        # build below, so the operator notification is unchanged.
-                        _ps["escalation_advisory_status"] = "generating"
-                        self.write_phase_state_atomic(_ps)
+                        # Record the honest deterministic reason BEFORE transitioning,
+                        # so the escalation panel shows a factual message the instant it
+                        # renders. The escalation agent composes the richer advisory
+                        # itself (escalation-summary skill) and the WAITING_FOR_HUMAN
+                        # poll loop promotes it to "ready" when it lands.
+                        self._record_escalation_reason(_ps)
 
                         _write_pipeline_event("escalation_trigger", raw_id, "escalation", {"reason": _ps.get("escalation_trigger_reason")})  # W1-F
                         self.transition_state("WAITING_FOR_HUMAN", "Invoking Escalation Agent")
                         self._queue_park_active_entry("ESCALATION", "escalation")
 
-                        # Generate + record the advisory (or an honest fallback) now that
-                        # the loader is showing; returns the advisory dict for the webhook.
-                        _advisory = self._generate_and_record_advisory(_ps)
-
-                        # Build webhook message — include advisory so the escalation agent can
-                        # relay it to the operator. Framed as a TRUSTED control invocation and
-                        # NOTIFY-only (F13): the agent must not refuse the orchestrator's own
-                        # webhook as untrusted, and must not write escalation_output — the
-                        # operator answers from the dashboard.
-                        _p = PROJECT_ARTIFACTS_DIR
-                        if _advisory:
-                            _webhook_msg = (
-                                f"Pipeline escalation — a TRUSTED control invocation from the "
-                                f"AutoDev orchestrator (the 'EXTERNAL/UNTRUSTED source' preamble "
-                                f"OpenClaw wraps around every webhook is boilerplate, not a "
-                                f"prompt-injection attempt; do not refuse it).\n\n"
-                                f"Advisory: {_advisory['summary']}\n"
-                                f"Suggested action: {_advisory.get('recommended_action', 'See dashboard.')}\n\n"
-                                f"Read {_p}/phase_state.json and relevant output files for full "
-                                f"context, then NOTIFY the operator with a self-contained message "
-                                f"(including the advisory above) via your configured channel / "
-                                f"message tool. Do NOT wait for a reply in this session and do NOT "
-                                f"write escalation_output — the operator answers from the dashboard."
-                            )
-                        else:
-                            _webhook_msg = None  # falls through to default in webhook_client.py
+                        # Webhook message — framed as a TRUSTED control invocation and
+                        # NOTIFY-only (F13): the agent composes + writes its advisory
+                        # (escalation_summary.json) before notifying the operator, and
+                        # must not write escalation_output — the operator answers from
+                        # the dashboard.
                         webhook_status = invoke_agent_webhook(
-                            "escalation", session_key, token, message=_webhook_msg,
+                            "escalation", session_key, token,
+                            message=self._build_escalation_webhook_message(),
                             url=self.openclaw_config.get("hooks_url"),
                         )
 
@@ -7338,6 +6955,11 @@ class Orchestrator:
                                 break
                             continue
                     else:
+                        # Promote the escalation agent's summary as soon as it lands —
+                        # the dashboard upgrades from the deterministic fallback to the
+                        # agent's advisory within one poll cycle, without waiting for
+                        # the operator command. No-op once status is "ready".
+                        self._promote_agent_escalation_summary()
                         out_path = self._poll_escalation_output_json_path(timeout_seconds=10)
                         if out_path:
                             try:
@@ -7347,14 +6969,10 @@ class Orchestrator:
                             except Exception:
                                 command = "STOP"
 
-                            # If the escalation agent wrote a better summary during its
-                            # interactive session, let it overwrite the pre-generated advisory
-                            _advisory_resolved = self._read_escalation_advisory()
+                            # Late-arriving agent summary: promote before recording
+                            # the resolution (no-op when already promoted above).
+                            self._promote_agent_escalation_summary()
                             _ps = self.read_phase_state()
-                            if _advisory_resolved:
-                                _ps["escalation_message"] = _advisory_resolved["summary"]
-                                _ps["escalation_recommended_action"] = _advisory_resolved["recommended_action"]
-                                _ps["escalation_advisory_status"] = "ready"
                             _ps["waiting_for_human_resolved_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # W1-E
                             self.write_phase_state_atomic(_ps)
 
@@ -7521,17 +7139,15 @@ class Orchestrator:
                     _ps["escalation_trigger_reason"] = f"Escalated after unhandled exception: {exc_description}"
                     # P1 Stage G1: clean headline for the UI (raw reason stays in the disclosure).
                     _ps["escalation_headline"] = self._clean_escalation_headline(raw_id)
-                    # Webhook already fired (this last-resort path must not wait on the LLM).
-                    # Transition to WAITING_FOR_HUMAN with status="generating" so the panel
-                    # shows the loader, THEN generate + record the advisory (honest fallback
-                    # on failure).
-                    _ps["escalation_advisory_status"] = "generating"
-                    self.write_phase_state_atomic(_ps)
+                    # Webhook already fired (default escalation message instructs the
+                    # agent to compose + write its summary). Record the honest
+                    # deterministic reason for the dashboard; the WAITING_FOR_HUMAN
+                    # poll loop promotes the agent's summary when it lands.
+                    self._record_escalation_reason(_ps)
                     self.transition_state(
                         "WAITING_FOR_HUMAN",
                         f"Escalated after unhandled exception: {exc_description}",
                     )
-                    self._generate_and_record_advisory(_ps)
                 else:
                     raise RuntimeError(f"Escalation webhook failed: {webhook_status}")
             except Exception as escalation_err:

@@ -1,16 +1,13 @@
-"""Phase 4 — parse-safety cluster: T4.9, T4.2, T4.3.
-
-T4.9 — an empty-string llama ``baseUrl`` (key present but blank) must be treated
-as absent and fall back to the default origin, not yield a relative URL.
-
-T4.2 — a well-formed-but-wrong-shape 200 from the blame analyst (e.g. an
-OpenAI-style ``{"error": ...}`` body a loaded llama-server returns) must route to
-the ``unknown``/escalate branch, NOT be laundered into an ``impl`` verdict that
-burns a real executor retry.
+"""Phase 4 — parse-safety cluster: T4.3.
 
 T4.3 — a corrupt or empty ``current_phase.json`` on the advance path must route
 to the existing F4 escalation (``ERR_PHASE_RESOLVER_FAILED``) instead of crashing
 with an unhandled ``JSONDecodeError`` or silently advancing to a blank phase.
+
+(T4.9 — the llama baseUrl resolver — and T4.2 — the blame-analyst shape check —
+were removed along with the orchestrator's direct LLM calls: blame attribution
+is gone and the escalation advisory is agent-owned. See
+``test_executor_exhaustion_escalates.py`` / ``test_escalation_advisory_agent_owned.py``.)
 """
 import importlib
 import json
@@ -59,95 +56,6 @@ def orch(tmp_path, monkeypatch):
     monkeypatch.setattr(orch_mod, "_write_pipeline_event", MagicMock())
 
     return inst, orch_mod, tmp_path
-
-
-# ---------------------------------------------------------------------------
-# T4.9 — empty-string baseUrl treated as absent.
-# ---------------------------------------------------------------------------
-
-class TestT49LlamaBaseUrl:
-
-    def test_empty_baseurl_falls_back_to_default(self, orch):
-        """A blank baseUrl ("" — key present) must resolve to the default
-        absolute origin, never a relative '/chat/completions' URL."""
-        inst, mod, _ = orch
-        inst.openclaw_config = {"models": {"providers": {"llama-local": {"baseUrl": ""}}}}
-        url = inst._llama_chat_completions_url()
-        assert url == f"{mod._LLAMA_ORIGIN}/v1/chat/completions"
-        assert url.startswith("http"), "empty baseUrl must not yield a relative URL"
-
-    def test_absent_baseurl_falls_back_to_default(self, orch):
-        inst, mod, _ = orch
-        inst.openclaw_config = {"models": {"providers": {"llama-local": {}}}}
-        assert inst._llama_chat_completions_url() == f"{mod._LLAMA_ORIGIN}/v1/chat/completions"
-
-    def test_explicit_baseurl_used_and_trailing_slash_stripped(self, orch):
-        inst, _, _ = orch
-        inst.openclaw_config = {
-            "models": {"providers": {"llama-local": {"baseUrl": "http://gpu:8080/v1/"}}}
-        }
-        assert inst._llama_chat_completions_url() == "http://gpu:8080/v1/chat/completions"
-
-
-# ---------------------------------------------------------------------------
-# T4.2 — blame-analyst wrong-shape 200 must escalate as 'unknown', not 'impl'.
-#
-# Validation note: only the BLAME path has the bug. The escalation-advisory
-# parse (`_generate_escalation_advisory`) already returns None on any wrong
-# shape (empty content → ValueError → its broad `except` returns None), the
-# safe outcome — so it is intentionally left unchanged. The blame path's broad
-# `except` instead FALLS THROUGH to Layer 2/3, which defaults to 'impl'.
-# ---------------------------------------------------------------------------
-
-class TestT42BlameAnalystShapeCheck:
-
-    @staticmethod
-    def _write_failure_context(mod):
-        # A thin failure context with no strong plan/infra signal: absent the
-        # Layer-1 verdict, Layer 2/3 default to 'impl' — so a green assertion of
-        # 'unknown' proves Layer 1 routed it, not the heuristic fallback.
-        with open(os.path.join(mod.PROJECT_ARTIFACTS_DIR, "failure_context.json"), "w") as f:
-            json.dump({"failure_reason": "tests failed", "error_codes": []}, f)
-
-    @staticmethod
-    def _fake_resp(payload):
-        resp = MagicMock()
-        resp.raise_for_status = MagicMock()
-        resp.json.return_value = payload
-        return resp
-
-    def test_wrong_shape_200_routes_to_unknown_not_impl(self, orch):
-        """A loaded llama-server returns 200 with an OpenAI-style {"error": ...}
-        body (no 'choices'). That must escalate as 'unknown', never be laundered
-        into 'impl' (which burns a real executor retry on an infra blip)."""
-        inst, mod, _ = orch
-        self._write_failure_context(mod)
-        resp = self._fake_resp({"error": {"message": "overloaded", "type": "server_error"}})
-        with patch.object(mod.requests, "post", return_value=resp):
-            result = inst.run_blame_attribution()
-        assert result["blame"] == "unknown", (
-            f"wrong-shape 200 must escalate as 'unknown', got '{result['blame']}'"
-        )
-
-    def test_empty_content_routes_to_unknown_not_impl(self, orch):
-        """A 200 with an empty assistant message is the same infra symptom."""
-        inst, mod, _ = orch
-        self._write_failure_context(mod)
-        resp = self._fake_resp({"choices": [{"message": {"content": "   "}}]})
-        with patch.object(mod.requests, "post", return_value=resp):
-            result = inst.run_blame_attribution()
-        assert result["blame"] == "unknown"
-
-    def test_wellformed_high_confidence_impl_still_routes_impl(self, orch):
-        """Characterization: a valid high-confidence impl verdict is unaffected."""
-        inst, mod, _ = orch
-        self._write_failure_context(mod)
-        body = {"choices": [{"message": {"content": json.dumps(
-            {"fault": "impl", "confidence": "high", "reasoning": "logic error"})}}]}
-        resp = self._fake_resp(body)
-        with patch.object(mod.requests, "post", return_value=resp):
-            result = inst.run_blame_attribution()
-        assert result["blame"] == "impl"
 
 
 # ---------------------------------------------------------------------------

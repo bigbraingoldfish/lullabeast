@@ -683,10 +683,6 @@ def apply_reviewer_routing(data):
     ``test_route_executor_writes_failure_context_atomically`` passes
     string-shaped issues; this pivot survives them by treating non-dict
     entries as carrying no attribution).
-
-    This is *not* the orchestrator's separate ``run_blame_attribution()``
-    AI-driven attribution system — that lives elsewhere and is
-    untouched.
     """
     state_data = {}
     if os.path.exists(PHASE_STATE_FILE):

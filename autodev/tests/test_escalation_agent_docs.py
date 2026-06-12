@@ -75,22 +75,27 @@ class TestEscalationDocsTrustedAndNotifyOnly:
 
 class TestOrchestratorEscalationWebhookMessages:
     def test_advisory_webhook_msgs_are_trusted_notify_only(self):
-        """The orchestrator's two advisory-carrying escalation webhook messages (_ri_webhook_msg
-        for repo-init + _webhook_msg for the main dispatch) must be trusted + notify-only: no
-        'write your assessment to escalation_output' instruction (what the agent refused), and
-        both must carry the trusted framing + an explicit 'do NOT write escalation_output'."""
+        """The orchestrator's escalation webhook message must be trusted + notify-only: no
+        'write your assessment to escalation_output' instruction (what the agent refused),
+        with the trusted framing + an explicit 'do NOT write escalation_output'. The two
+        dispatch sites (repo-init + main) now share ONE builder
+        (_build_escalation_webhook_message) so the messages cannot drift — both-sites
+        coverage is the builder phrasing plus a >=2 call-site count."""
         src_path = os.path.join(REPO, "autodev", "pipeline", "orchestrator.py")
         with open(src_path) as f:
             src = f.read()
-        # Match substrings that are contiguous within a single f-string literal (adjacent
-        # wrapped literals are separated by `" f"` in the source, so cross-literal phrases
+        # Match substrings that are contiguous within a single string literal (adjacent
+        # wrapped literals are separated by quotes in the source, so cross-literal phrases
         # cannot be matched statically).
         assert "then write your assessment to" not in src, (
             "stale escalation_output write instruction remains in an orchestrator webhook message"
         )
-        assert src.count("TRUSTED control invocation") >= 2, (
-            "both escalation webhook messages (repo-init + main dispatch) must frame the invocation as trusted"
+        assert "TRUSTED control invocation" in src, (
+            "the escalation webhook message must frame the invocation as trusted"
         )
-        assert src.count("NOTIFY the operator") >= 2, (
-            "both escalation webhook messages must instruct the agent to NOTIFY the operator"
+        assert "NOTIFY the operator" in src, (
+            "the escalation webhook message must instruct the agent to NOTIFY the operator"
+        )
+        assert src.count("self._build_escalation_webhook_message()") >= 2, (
+            "both escalation dispatch sites (repo-init + main) must use the shared message builder"
         )

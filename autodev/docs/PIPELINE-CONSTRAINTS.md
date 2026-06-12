@@ -25,7 +25,7 @@
 
 ### Local Model Roster (updated 2026-03-10)
 
-All local models are served by the `llama-local` provider (e.g. `http://<llama-server-host>:11434/v1` — set `models.providers.llama-local.baseUrl` in `openclaw.json`, or set env `AUTODEV_LLAMA_BASE` for orchestrator/heartbeat fallbacks). All are registered at `contextWindow: 65536` (64K) in OpenClaw config.
+All local models are served by the `llama-local` provider (e.g. `http://<llama-server-host>:11434/v1` — set `models.providers.llama-local.baseUrl` in `openclaw.json`). All are registered at `contextWindow: 65536` (64K) in OpenClaw config. (The `AUTODEV_LLAMA_BASE` env fallback was retired 2026-06-11 along with the orchestrator's direct llama-server calls — the orchestrator makes no LLM calls; OpenClaw owns all model routing.)
 
 All GGUFs redownloaded 2026-03-09 from Unsloth Dynamic 2.0 (March 5 update). Includes improved quantization algorithm, new imatrix calibration data, tool calling chat template fix, and MXFP4 layer retirement from K_XL quants.
 
@@ -173,9 +173,9 @@ Cron retrying `escalation_failed.json` instead of relying on silent halt + manua
 
 Monitoring executor token usage. Verbosity cap in `AGENTS.md` + tool-call-count threshold covers the risk adequately for now.
 
-### Blame Heuristic Tuning
+### ~~Blame Heuristic Tuning~~ ✓ Mooted 2026-06-11
 
-Validate heuristic coverage after first 5 real pipeline runs — if LLM fallback never fires, heuristic is sufficient; if it fires often, invest in improving pattern matching. See: PIPELINE-SPEC.md § Gate Scripts > Blame Attribution.
+Blame attribution was removed entirely (the impl self-heal loop was structurally inert and the labels added no insight over `gate_error_codes`) — executor exhaustion escalates directly with the last gate error code. See PIPELINE-SPEC.md § Executor Retry Exhaustion → Escalation and CHANGELOG.
 
 ### Audit Archive Path Hardcoding
 
@@ -217,7 +217,7 @@ Stage H persists two additional lifetime counters alongside `executor_retries`:
 | Counter | Tracks | Reset on reviewer ROUTE_EXECUTOR | Reset on operator escalation | Reset on `reset_phase()` |
 |---|---|---|---|---|
 | `executor_retries` (legacy, unchanged) | Per-segment budget for escalation/cap logic | ✓ (segment boundary) | ✓ (operator gives fresh budget) | ✓ |
-| `executor_self_failure_retries` (NEW) | Lifetime count of executor self-failures (gate exit 1, sentinel crash, blame=impl) | ✗ preserved | ✗ preserved | ✓ |
+| `executor_self_failure_retries` (NEW) | Lifetime count of executor self-failures (gate FAIL, sentinel crash) | ✗ preserved | ✗ preserved | ✓ |
 | `executor_reviewer_rejection_retries` (NEW) | Lifetime count of reviewer-driven re-runs | ✗ preserved | ✗ preserved | ✓ |
 
 Increment sites:
@@ -228,7 +228,7 @@ The canonical `metrics.jsonl` row sources `executor_attempts` from these lifetim
 
 Also Stage H: `gate_fail` and `attempt_end` pipeline events now carry `detail.retry_class` (`"initial_attempt"` / `"executor_self_failure"` / `"reviewer_rejection"`) sourced from the orchestrator's process-local `_current_attempt_retry_class` tracker. The activity feed labels retries by class so operators can distinguish "executor stuck → auto-retry" from "reviewer rejection → executor retry" at a glance.
 
-Same release: `apply_reviewer_routing` pass-2 routing tightened from `blocking_issues[0].attribution` (ordering-sensitive) to "any-plan" semantics (if any blocking_issue is tagged `attribution: "plan"`, route to planner). Uses more of the reviewer agent's existing JSON output; does NOT touch the orchestrator's separate `run_blame_attribution()` AI-driven attribution system.
+Same release: `apply_reviewer_routing` pass-2 routing tightened from `blocking_issues[0].attribution` (ordering-sensitive) to "any-plan" semantics (if any blocking_issue is tagged `attribution: "plan"`, route to planner). Uses more of the reviewer agent's existing JSON output; does NOT add new routing power.
 
 ### Reviewer Counter Split (RR-4, 2026-03-12)
 
@@ -241,7 +241,9 @@ The single `reviewer_retries` counter was split into two distinct counters to pr
 
 `reviewer_contract_retries` (renamed from `reviewer_infra_retries` 2026-06-02 — the "INFRA" label was a misnomer, since genuine transport/provider failures are peeled off upstream) is preserved across `reset_execution()` because executor retries do not fix a reviewer that failed to emit a verdict. It is zeroed by `reset_phase()` because a phase reset constitutes a clean slate for all attempt budgets.
 
-### Heartbeat Model Decision (B7, 2026-03-03) — Requires Main Machine Endpoint
+### ~~Heartbeat Model Decision (B7, 2026-03-03)~~ — Superseded: heartbeat is lock-only
+
+> **Superseded.** The shipped `heartbeat_cron.py` makes **no model query** — its crash-recovery decision is purely `pipeline.lock`-based (see CLAUDE.md). The `AUTODEV_LLAMA_BASE` env var referenced below was retired 2026-06-11. Original decision text retained for history:
 
 - The heartbeat cron now queries local llama-server at `http://<llama-server-host>:11434` (configurable via `AUTODEV_LLAMA_BASE`) for a RESUME/WAIT/NOTIFY decision when the orchestrator lock is free. **This requires Main Machine Plan A Phase 4 (llama-server endpoint) to be complete and running.** Until the endpoint is confirmed, the heartbeat will send a Signal notification ("local model unreachable") rather than silently failing or restarting blindly. The conservative fallback ensures the cron never makes an unguided restart decision.
 - The model's system prompt is deliberately narrow: output exactly one token (RESUME / WAIT / NOTIFY). Unexpected output is treated as NOTIFY. The model is not asked to diagnose the pipeline — only to classify the state.
@@ -462,7 +464,7 @@ This fix is **model-agnostic**: it applies to any current or future executor mod
 
 **Secondary prevention:** Keep qwen3-coder-next as the executor model (already enforced). As a general-purpose coder model without OpenClaw convention fine-tuning, it doesn't follow the NO_REPLY hint. If a future model update changes this behavior, the USER.md instruction provides the backstop.
 
-**OB-3 — Blame Attribution Has No Failure Context (open):** When a sentinel is never written (due to NO_REPLY or server OOM), the gate writes `executor_output.json` with `failure_reason: null`. Blame attribution receives null and returns "ambiguous." Note: with the USER.md fix in place, NO_REPLY should no longer occur. This OB-3 item is now primarily relevant to the server OOM (HTTP 500) path, where a model crashes mid-response. Fix direction: after a sentinel timeout, the orchestrator injects a synthetic `failure_reason` before running blame. Not yet implemented.
+**OB-3 — ~~Blame Attribution Has No Failure Context~~ [MOOTED 2026-06-11]:** When a sentinel is never written (due to NO_REPLY or server OOM), the gate writes `executor_output.json` with `failure_reason: null`, which left the (since-removed) blame attribution with no signal. Blame attribution was removed — executor exhaustion now escalates directly with the last gate error code, and the escalation agent reads `failure_context.json` (which carries `gate_error_codes` even when `failure_reason` is null), so the null-reason gap no longer drives any automated routing decision.
 
 **OB-4 — Empty model completion causes 600s sentinel wait [RESOLVED 2026-03-10, updated 2026-03-13]:** Traffic cop can return an empty completion (0 tokens, `content: []`) rather than a NO_REPLY text response. The session JSONL immediately goes idle but the orchestrator waited the full 600s sentinel timeout before retrying (~540s wasted per occurrence). Root cause differs from NO_REPLY: the model returns a structurally valid but empty assistant message. Fix: `poll_for_sentinel_with_idle_detect()` added to `sentinel_poller.py`. Monitors executor session JSONL mtime alongside sentinel polling. If JSONL stops growing for `idle_threshold` seconds with no sentinel → early exit → existing `reset_execution("auto")` retry path fires. Session JSONL resolved from `sessions.json` via session key (up to 30s retry); falls back to original 600s polling if lookup fails.
 

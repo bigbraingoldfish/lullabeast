@@ -2648,7 +2648,7 @@ def _compute_escalation_view(
                 view["skill_agent"] = phase_state["skill_agent"]
             if "escalation_trigger_reason" in phase_state:
                 view["escalation_trigger_reason"] = phase_state["escalation_trigger_reason"]
-            # P1 Stage G1: clean, non-blame headline.
+            # P1 Stage G1: clean, operator-facing headline.
             if "escalation_headline" in phase_state:
                 view["escalation_headline"] = phase_state["escalation_headline"]
             if "waiting_for_human_at" in phase_state:

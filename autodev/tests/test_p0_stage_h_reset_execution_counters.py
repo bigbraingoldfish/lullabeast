@@ -168,7 +168,6 @@ def test_escalation_caller_does_not_touch_new_counters(tmp_path, monkeypatch):
             "reviewer_retries": 0,
             "reviewer_rejected": False,
             "escalation_resets": 0,
-            "prior_blame_attributions": ["impl", "impl", "impl"],
         },
     )
 
