@@ -23,6 +23,7 @@ import requests
 from webhook_client import (
     abort_agent_session,
     invoke_agent_webhook,
+    set_session_response_usage,
     verify_session_stopped,
 )
 from sentinel_poller import cleanup_output_files, initialize_activity_stamp, poll_for_sentinel
@@ -909,6 +910,7 @@ def _run_completion_review(orchestrator, project_basename: str) -> None:
             f"Then write {_p}/reviewer_output.done."
         )
         _attempt_start = time.time()
+        orchestrator._preset_session_response_usage("reviewer", session_key)
         invoke_agent_webhook(
             "reviewer",
             session_key,
@@ -2865,6 +2867,44 @@ class Orchestrator:
         )
         return False
 
+    def _preset_session_response_usage(self, role: str, session_key: str) -> None:
+        """Pre-seed ``responseUsage: "full"`` on the about-to-be-invoked session.
+
+        OpenClaw's ``responseUsage`` is a per-session-entry preference (no config
+        default exists), so every fresh pipeline session must be patched
+        individually.  ``sessions.patch`` creates the entry when the key does not
+        exist yet, so calling this *before* the webhook fires pre-seeds the
+        preference race-free; the run reuses the pre-created entry and appends a
+        token-usage + cost line to each reply it records.
+
+        ``session_key`` is the bare ``pipeline:…`` key; the gateway store key is
+        the ``agent:{role}:…`` lowercase form (same shape ``sessions.abort`` uses).
+
+        Best-effort and non-blocking: a failure is logged and the invocation
+        proceeds — usage display is observability, never worth failing a phase.
+
+        Env ``AUTODEV_RESPONSE_USAGE`` overrides the mode (default ``full``);
+        an empty value or ``off`` disables the patch entirely.
+        """
+        mode = os.environ.get("AUTODEV_RESPONSE_USAGE", "full").strip().lower()
+        if mode in ("", "off"):
+            return
+        try:
+            store_key = f"agent:{role}:{session_key}".lower()
+            gw_token = self.openclaw_config.get("gateway_token", "")
+            gw_ws_url = self.openclaw_config.get(
+                "gateway_ws_url", "ws://127.0.0.1:18789/__openclaw__/ws"
+            )
+            ok = set_session_response_usage(store_key, gw_ws_url, gw_token, mode=mode)
+            print(
+                f"[USAGE] responseUsage={mode} {'set' if ok else 'FAILED'} "
+                f"session_key={store_key}"
+            )
+        except Exception as exc:
+            print(
+                f"[USAGE] responseUsage patch failed for {role} {session_key}: {exc}"
+            )
+
     def _record_active_agent(self, role: str, session_key: str) -> None:
         """Remember the just-invoked pipeline agent's session so a later give-up
         (escalation) can abort it.
@@ -2877,6 +2917,9 @@ class Orchestrator:
         self._active_agent_role = role
         self._active_agent_session_key = session_key
         self._active_agent_stamp = os.path.join(PROJECT_ARTIFACTS_DIR, f"{role}_activity.stamp")
+        # Pre-seed responseUsage="full" on the session entry before the webhook
+        # fires so the run records a token-usage + cost line on every reply.
+        self._preset_session_response_usage(role, session_key)
 
     def _abort_active_agent_session(self, source: str) -> None:
         """Abort the last-invoked agent's still-running session when the orchestrator
@@ -5438,6 +5481,7 @@ class Orchestrator:
 
                 # Note: park-and-advance is not applied here — the next queued project must pass
                 # repo init on a fresh orchestrator run; advancing without re-check would be unsafe.
+                self._preset_session_response_usage("escalation", session_key)
                 webhook_status = invoke_agent_webhook(
                     "escalation", session_key, token,
                     message=self._build_escalation_webhook_message(),
@@ -7014,6 +7058,7 @@ class Orchestrator:
                         # (escalation_summary.json) before notifying the operator, and
                         # must not write escalation_output — the operator answers from
                         # the dashboard.
+                        self._preset_session_response_usage("escalation", session_key)
                         webhook_status = invoke_agent_webhook(
                             "escalation", session_key, token,
                             message=self._build_escalation_webhook_message(),
@@ -7247,6 +7292,7 @@ class Orchestrator:
                 raw_id = self.state.get("current_phase_raw_id", "unknown")
                 session_key = f"pipeline:phase-{phase}:{raw_id}:exception-escalation"
                 token = self.openclaw_config.get("hooks", {}).get("token", "")
+                self._preset_session_response_usage("escalation", session_key)
                 webhook_status = invoke_agent_webhook(
                     "escalation", session_key, token,
                     url=self.openclaw_config.get("hooks_url"),

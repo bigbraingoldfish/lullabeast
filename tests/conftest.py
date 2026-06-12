@@ -21,6 +21,12 @@ _ENV_KEYS_TO_SCRUB = (
 def _scrub_autodev_env(monkeypatch):
     for key in _ENV_KEYS_TO_SCRUB:
         monkeypatch.delenv(key, raising=False)
+    # Hermeticity: the responseUsage pre-seed (`_preset_session_response_usage_sync`)
+    # opens a real gateway WebSocket before each agent webhook. Tests fake the
+    # hooks HTTP endpoint but not the WS control plane, so without this a test
+    # run patches sessions into the developer's REAL gateway store and perturbs
+    # the fake-server port timing. Dedicated tests opt back in via monkeypatch.
+    monkeypatch.setenv("AUTODEV_RESPONSE_USAGE", "off")
 
 
 @pytest.fixture(autouse=True)
