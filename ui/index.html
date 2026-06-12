@@ -1331,6 +1331,17 @@
             return `in ${inp.toLocaleString()} · out ${out.toLocaleString()} · cache ${cache.toLocaleString()}`;
         }
 
+        /** Format a per-role cost split as "planner $X · executor $Y · reviewer $Z".
+         *  Returns null when every role is 0 (no-usage runs / pre-cost history) so
+         *  callers can skip the split — same contract as fmtTokenBreakdown. */
+        function fmtCostBreakdown(planner, executor, reviewer) {
+            const p = Number(planner) || 0;
+            const e = Number(executor) || 0;
+            const r = Number(reviewer) || 0;
+            if (p + e + r <= 0) return null;
+            return `planner $${p.toFixed(2)} · executor $${e.toFixed(2)} · reviewer $${r.toFixed(2)}`;
+        }
+
         /** Currency formatting — callers zero-suppress (cost 0/null renders an em-dash). */
         const fmtUSD = (v) => `$${(Number(v) || 0).toFixed(2)}`;
 
@@ -2784,6 +2795,12 @@
 
         const RoadmapPanel = React.memo(function RoadmapPanel({ roadmap, metricsSummary, pipelineStatus, completionReport, runStartedAt }) {
             const [expandedPhaseId, setExpandedPhaseId] = useState(null);
+            // "Run so far" hidden toggles — clicking the cost / token value swaps it
+            // for its breakdown (per-role cost; input/output/cache token classes).
+            // Lives here (not in the phase dropdown) because any click inside the
+            // dropdown collapses it; the header line has no such handler.
+            const [showRunCostSplit, setShowRunCostSplit] = useState(false);
+            const [showRunTokenSplit, setShowRunTokenSplit] = useState(false);
             const lastScrolledMtimeRef = useRef(null);
             const completionContentRef = useRef(null);
 
@@ -2871,11 +2888,32 @@
                         </div>
                     </div>
 
-                    {metricsSummary && metricsSummary.total_phases > 0 && (
-                        <p className="font-mono text-xs text-slate-500">
-                            Run so far: {metricsSummary.total_phases} phases · {metricsSummary.total_executor_attempts} exec attempts · {formatDuration(metricsSummary.total_duration_seconds)}{metricsSummary.total_cost > 0 ? ` · $${metricsSummary.total_cost.toFixed(2)}` : ''}{metricsSummary.total_tokens > 0 ? ` · ${fmtTokens(metricsSummary.total_tokens)} tokens` : ''}
-                        </p>
-                    )}
+                    {metricsSummary && metricsSummary.total_phases > 0 && (() => {
+                        const runCostSplit = fmtCostBreakdown(
+                            metricsSummary.planner_cost_total,
+                            metricsSummary.executor_cost_total,
+                            metricsSummary.reviewer_cost_total);
+                        const runTokenSplit = fmtTokenBreakdown(metricsSummary.tokens_breakdown);
+                        return (
+                            <p className="font-mono text-xs text-slate-500">
+                                Run so far: {metricsSummary.total_phases} phases · {metricsSummary.total_executor_attempts} exec attempts · {formatDuration(metricsSummary.total_duration_seconds)}
+                                {metricsSummary.total_cost > 0 && (
+                                    <span
+                                        className={runCostSplit ? 'cursor-pointer select-none' : undefined}
+                                        title={runCostSplit ? 'Click to toggle cost breakdown' : undefined}
+                                        onClick={runCostSplit ? () => setShowRunCostSplit(v => !v) : undefined}
+                                    >{' · '}{(showRunCostSplit && runCostSplit) ? runCostSplit : `$${metricsSummary.total_cost.toFixed(2)}`}</span>
+                                )}
+                                {metricsSummary.total_tokens > 0 && (
+                                    <span
+                                        className={runTokenSplit ? 'cursor-pointer select-none' : undefined}
+                                        title={runTokenSplit ? 'Click to toggle token breakdown' : undefined}
+                                        onClick={runTokenSplit ? () => setShowRunTokenSplit(v => !v) : undefined}
+                                    >{' · '}{(showRunTokenSplit && runTokenSplit) ? runTokenSplit : `${fmtTokens(metricsSummary.total_tokens)} tokens`}</span>
+                                )}
+                            </p>
+                        );
+                    })()}
 
                     {/* Phase list */}
                     <div className="space-y-2">
@@ -2966,24 +3004,22 @@
                                                                         <div>
                                                                             <span className="text-slate-500">Cost: </span>
                                                                             <span className="text-slate-300 font-mono">${phaseMeta.cost_total.toFixed(2)}</span>
-                                                                            {/* 3-C — per-phase role-cost split (planner/executor/reviewer),
-                                                                                already returned by /api/metrics-summary; previously orphaned. */}
-                                                                            <div className="pl-3 text-[10px] text-slate-500 font-mono leading-tight">
-                                                                                <div>planner ${(Number(phaseMeta.planner_cost) || 0).toFixed(2)}</div>
-                                                                                <div>executor ${(Number(phaseMeta.executor_cost) || 0).toFixed(2)}</div>
-                                                                                <div>reviewer ${(Number(phaseMeta.reviewer_cost) || 0).toFixed(2)}</div>
-                                                                            </div>
+                                                                            {/* 3-C — per-phase role-cost split, inline at the same size
+                                                                                (muted) after the total. */}
+                                                                            {fmtCostBreakdown(phaseMeta.planner_cost, phaseMeta.executor_cost, phaseMeta.reviewer_cost) && (
+                                                                                <span className="text-slate-500 font-mono">{' · '}{fmtCostBreakdown(phaseMeta.planner_cost, phaseMeta.executor_cost, phaseMeta.reviewer_cost)}</span>
+                                                                            )}
                                                                         </div>
                                                                     )}
                                                                     {phaseMeta.tokens_total > 0 && (
                                                                         <div>
                                                                             <span className="text-slate-500">Tokens: </span>
                                                                             <span className="text-slate-300 font-mono">{fmtTokens(phaseMeta.tokens_total)}</span>
-                                                                            {/* Token-class split, mirroring the per-role cost split above.
+                                                                            {/* Token-class split, inline at the same size (muted).
                                                                                 Cache reads dominate the total but bill far cheaper than
                                                                                 fresh input; output is the most expensive class. */}
                                                                             {fmtTokenBreakdown(phaseMeta.tokens_breakdown) && (
-                                                                                <div className="pl-3 text-[10px] text-slate-500 font-mono leading-tight">{fmtTokenBreakdown(phaseMeta.tokens_breakdown)}</div>
+                                                                                <span className="text-slate-500 font-mono">{' · '}{fmtTokenBreakdown(phaseMeta.tokens_breakdown)}</span>
                                                                             )}
                                                                         </div>
                                                                     )}
@@ -5159,6 +5195,10 @@
             const [undoOfferSlugs, setUndoOfferSlugs] = useState([]);
             const [revertConfirmSlug, setRevertConfirmSlug] = useState(null);
             const [sectionRevertError, setSectionRevertError] = useState(null);
+            const [editingSectionKey, setEditingSectionKey] = useState(null);
+            const [sectionEditDraft, setSectionEditDraft] = useState("");
+            const [sectionEditBase, setSectionEditBase] = useState("");
+            const [sectionEditError, setSectionEditError] = useState(null);
             const isLoadingRef = useRef(false);
             const [readinessExpanded, setReadinessExpanded] = useState(false);
             const [userFirstTurnPending, setUserFirstTurnPending] = useState(false);
@@ -5544,6 +5584,10 @@
                 setUndoOfferSlugs([]);
                 setRevertConfirmSlug(null);
                 setSectionRevertError(null);
+                setEditingSectionKey(null);
+                setSectionEditDraft("");
+                setSectionEditBase("");
+                setSectionEditError(null);
                 fetch(`/api/ideas/${currentIdeaId}/session`)
                     .then((r) => r.json())
                     .then((d) => {
@@ -5645,6 +5689,55 @@
                     })
                     .catch((err) => {
                         setSectionRevertError({ slug, message: err.message || String(err) });
+                    });
+            };
+
+            // Manual section edit: PUT the new body; base_content lets the server
+            // 409 when the section changed since the textarea was opened (stale
+            // tab) — the response carries the current body for a one-click reload.
+            const putPrdSection = (slug) => {
+                if (!currentIdeaId || !slug) return;
+                setSectionEditError(null);
+                fetch(`/api/ideas/${currentIdeaId}/prd-section`, {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        section_key: slug,
+                        content: sectionEditDraft,
+                        base_content: sectionEditBase,
+                    }),
+                })
+                    .then(async (r) => {
+                        const data = await r.json().catch(() => ({}));
+                        if (!r.ok) {
+                            const det = data.detail;
+                            const message =
+                                typeof det === "string"
+                                    ? det
+                                    : (det && det.message) || `HTTP ${r.status}`;
+                            const err = new Error(message);
+                            if (det && typeof det === "object" && typeof det.current === "string") {
+                                err.staleCurrent = det.current;
+                            }
+                            throw err;
+                        }
+                        return data;
+                    })
+                    .then(() => fetch(`/api/ideas/${currentIdeaId}/session`))
+                    .then((r) => r.json())
+                    .then((d) => {
+                        setPrdContent(d.prd_content || "");
+                        setEditingSectionKey(null);
+                        setSectionEditDraft("");
+                        setSectionEditBase("");
+                        fetchPrdSectionDiff(currentIdeaId);
+                    })
+                    .catch((err) => {
+                        setSectionEditError({
+                            slug,
+                            message: err.message || String(err),
+                            current: err.staleCurrent,
+                        });
                     });
             };
 
@@ -7109,6 +7202,20 @@
                                                                 className="text-[11px] text-[#6e6788] hover:text-slate-300 px-1.5 py-0.5 rounded border border-[#2a2540] hover:border-slate-600 shrink-0 header-text"
                                                             >Note</button>
                                                         )}
+                                                        {!isRemovedDiff ? (
+                                                            <button
+                                                                type="button"
+                                                                disabled={isLoading}
+                                                                title={isLoading ? "Wait for the agent to finish its reply" : "Edit this section directly (the agent is told on its next turn)"}
+                                                                onClick={() => {
+                                                                    setSectionEditError(null);
+                                                                    setEditingSectionKey(slug);
+                                                                    setSectionEditDraft(raw);
+                                                                    setSectionEditBase(raw);
+                                                                }}
+                                                                className="text-[11px] text-[#6e6788] hover:text-slate-300 px-1.5 py-0.5 rounded border border-[#2a2540] hover:border-slate-600 shrink-0 header-text disabled:opacity-40 disabled:cursor-not-allowed"
+                                                            >Edit</button>
+                                                        ) : null}
                                                         {showShowDiffBtn ? (
                                                             <button
                                                                 type="button"
@@ -7182,6 +7289,52 @@
                                                             </div>
                                                         </div>
                                                     )}
+                                                    {/* Manual section edit panel */}
+                                                    {editingSectionKey === slug && (
+                                                        <div className="mb-2 rounded border border-[#2a2540] bg-[#221b36] p-2 space-y-2">
+                                                            <textarea
+                                                                rows={6}
+                                                                value={sectionEditDraft}
+                                                                onChange={(e) => setSectionEditDraft(e.target.value)}
+                                                                placeholder={`Markdown body for "${title}" (empty clears the section)…`}
+                                                                className="w-full bg-[#100d1a] border border-[#2a2540] rounded px-2 py-1.5 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-slate-500 resize-y font-mono"
+                                                            />
+                                                            <div className="flex gap-2">
+                                                                <button
+                                                                    type="button"
+                                                                    disabled={isLoading}
+                                                                    onClick={() => putPrdSection(slug)}
+                                                                    className="header-text text-xs px-3 py-1 rounded bg-[#e2b14c]/20 border border-[#e2b14c]/40 text-[#e2b14c] disabled:opacity-40 disabled:cursor-not-allowed"
+                                                                >Save</button>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => {
+                                                                        setEditingSectionKey(null);
+                                                                        setSectionEditDraft("");
+                                                                        setSectionEditBase("");
+                                                                        setSectionEditError(null);
+                                                                    }}
+                                                                    className="text-xs text-slate-500 hover:text-slate-300"
+                                                                >Cancel</button>
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                    {sectionEditError && sectionEditError.slug === slug ? (
+                                                        <p className="text-[11px] text-red-400 mb-1">
+                                                            {sectionEditError.message}
+                                                            {typeof sectionEditError.current === "string" ? (
+                                                                <button
+                                                                    type="button"
+                                                                    className="ml-2 underline text-[#e2b14c] hover:text-amber-300"
+                                                                    onClick={() => {
+                                                                        setSectionEditDraft(sectionEditError.current);
+                                                                        setSectionEditBase(sectionEditError.current);
+                                                                        setSectionEditError(null);
+                                                                    }}
+                                                                >Reload section</button>
+                                                            ) : null}
+                                                        </p>
+                                                    ) : null}
                                                     {draftingIndicator === title && (
                                                         <p className="text-[11px] text-[#e2b14c] header-text animate-pulse mb-1">✏ Updating…</p>
                                                     )}

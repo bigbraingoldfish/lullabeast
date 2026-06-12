@@ -342,6 +342,8 @@ curl -H "Authorization: Bearer $AUTODEV_UI_TOKEN" http://localhost:18790/api/sta
 
 While Project Ideas is waiting on an assistant reply after you send a chat message, **Generate Roadmap** and **Regenerate Roadmap** stay disabled until that reply finishes, so roadmap conversion uses the PRD returned with that response (not a stale snapshot).
 
+You can also edit a PRD section directly without asking the agent: each section has an **Edit** button (disabled while a reply is in flight) that opens the section body in a textarea. Saving rewrites that section of `prd_draft.md` immediately and records a breadcrumb the agent sees at the start of its next turn (`[SYSTEM EVENTS]` block), so it treats the file on disk as authoritative instead of reverting your change. Manual edits show the same **Changed** badge, diff view, and one-click **Revert** as agent edits.
+
 Before opening Project Ideas for the first time, run the POST `/hooks/agent` check in **New User Webhook Checklist** so token mismatches are caught early.
 
 To run as a background service, see `ui/autodev-ui.service` (Linux/WSL2 systemd unit) or `ui/com.autodev.ui.plist` (macOS LaunchAgent). The install script prints OS-specific next steps after setup completes.

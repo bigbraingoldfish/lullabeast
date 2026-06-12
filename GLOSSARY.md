@@ -70,6 +70,7 @@ Each row in `pipeline_queue.json` has a `state`. Labels below are the queue-only
 | **Roadmap confidence** | Display label for **`conversion_confidence`** from the API (field name unchanged). | Agent-estimated confidence before roadmap generation; commentary only. |
 | **Alignment check** | **Run Alignment Check** | Long-running check (~tens of seconds to a few minutes); compares PRD vs roadmap direction; **commentary in thread only**, does not edit the PRD. |
 | **Adversarial review** | **Run Adversarial Review** | Stress-tests the PRD for gaps; **commentary only**. |
+| **Edit (PRD section)** | Per-section **Edit** button → `PUT /api/ideas/{id}/prd-section` | Rewrites one section of `prd_draft.md` directly, no agent turn. The agent is told on its next turn via a `[SYSTEM EVENTS]` breadcrumb so it doesn't revert your change. Refused (409) while an agent reply is in flight or when the section changed under you (offers **Reload section**). Manual edits get the same **Changed** badge / diff / **Revert** as agent edits — the snapshot replaces the previous agent-turn diff. |
 
 ---
 

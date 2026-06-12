@@ -79,3 +79,6 @@ executor-watchdog-calibration-findings.md
 # Plugin build artifacts (compiled per-host by install.sh — never committed)
 autodev/plugin/dist/
 autodev/plugin/node_modules/
+
+# Marketing site (local draft, not part of the release tree)
+/Site/
