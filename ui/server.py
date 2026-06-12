@@ -3621,6 +3621,36 @@ def _phase_token_total(p: dict) -> int:
     )
 
 
+# Keys of the per-role token-class breakdown on each metrics row (written by the
+# orchestrator's _sum_session_tokens). total_tokens = input + output + cache_read
+# + cache_write — cache reads dominate and are billed far cheaper than fresh
+# input, so the breakdown is surfaced separately from the headline total.
+_TOKEN_BREAKDOWN_KEYS = ("input", "output", "cache_read", "cache_write")
+
+
+def _role_token_breakdown(p: dict, role_key: str) -> dict:
+    """One role's token-class breakdown for one phase row. Missing/non-numeric
+    fields read as 0 (pre-breakdown history rows and local-model runs)."""
+    role_obj = p.get(role_key) or {}
+    out = {}
+    for k in _TOKEN_BREAKDOWN_KEYS:
+        try:
+            out[k] = int(role_obj.get(k, 0) or 0) if isinstance(role_obj, dict) else 0
+        except (TypeError, ValueError):
+            out[k] = 0
+    return out
+
+
+def _phase_token_breakdown(p: dict) -> dict:
+    """input/output/cache_read/cache_write summed across the three roles."""
+    out = {k: 0 for k in _TOKEN_BREAKDOWN_KEYS}
+    for role_key in ("planner_tokens", "executor_tokens", "reviewer_tokens"):
+        rb = _role_token_breakdown(p, role_key)
+        for k in _TOKEN_BREAKDOWN_KEYS:
+            out[k] += rb[k]
+    return out
+
+
 def _project_metrics_totals(project_path):
     """Aggregate ``{project_path}/.autodev/pipeline/metrics.jsonl`` (pure, read-only).
 
@@ -3850,6 +3880,15 @@ def get_metrics_summary():
     planner_tokens_total = sum(_role_token_total(p, "planner_tokens") for p in phases)
     executor_tokens_total = sum(_role_token_total(p, "executor_tokens") for p in phases)
     reviewer_tokens_total = sum(_role_token_total(p, "reviewer_tokens") for p in phases)
+    # Token-class breakdown (input vs output vs cache) — additive alongside the
+    # headline totals above. Not all tokens cost the same: cache reads typically
+    # dominate the total but are billed at a fraction of fresh input, and output
+    # is the most expensive class. Pre-breakdown history rows sum to all-zero.
+    tokens_breakdown = {k: 0 for k in _TOKEN_BREAKDOWN_KEYS}
+    for p in phases:
+        pb = _phase_token_breakdown(p)
+        for k in _TOKEN_BREAKDOWN_KEYS:
+            tokens_breakdown[k] += pb[k]
 
     # Hold time: pair escalation_trigger/escalation_resolve events from the
     # pipeline-root events log, filtered by project name.
@@ -3877,6 +3916,7 @@ def get_metrics_summary():
         "planner_tokens_total": planner_tokens_total,
         "executor_tokens_total": executor_tokens_total,
         "reviewer_tokens_total": reviewer_tokens_total,
+        "tokens_breakdown": tokens_breakdown,
         "total_hold_seconds": total_hold_seconds,
         "total_active_seconds": total_active_seconds,
         "phases": [
@@ -3902,6 +3942,7 @@ def get_metrics_summary():
                 "executor_cost": _role_cost(p, "executor_tokens"),
                 "reviewer_cost": _role_cost(p, "reviewer_tokens"),
                 "tokens_total": _phase_token_total(p),
+                "tokens_breakdown": _phase_token_breakdown(p),
                 "hold_seconds": hold_per_phase.get(p.get("phase"), 0),
             }
             for p in phases

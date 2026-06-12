@@ -760,6 +760,28 @@ def _sum_session_tokens(jsonl_path) -> dict:
     return result
 
 
+# Frozen sessions-map entry holding a pre-keyed {role}_tokens_acc captured
+# before the keyed-by-session-path accounting was deployed (mid-phase upgrade).
+# Never re-summed (there is no file behind it), never shrunk.
+_TOKENS_LEGACY_SESSION_KEY = "__pre_keyed_acc__"
+
+
+def _merge_token_sums(sums) -> dict:
+    """Sum an iterable of per-session token dicts key-wise.
+
+    Non-dict entries and non-numeric values are skipped (a corrupt
+    phase_state must not crash token accounting)."""
+    total = {}
+    for s in sums:
+        if not isinstance(s, dict):
+            continue
+        for k, v in s.items():
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                continue
+            total[k] = total.get(k, 0) + v
+    return total
+
+
 def _write_pipeline_event(event_type: str, phase: str, agent: str, detail_dict) -> None:
     """W1-F: Append one structured event line to AUTODEV_PIPELINE_ROOT/pipeline_events.jsonl.
 
@@ -3407,27 +3429,79 @@ class Orchestrator:
                 os.remove(temp_path)
 
     def _accumulate_role_tokens(self, role: str, jsonl_path: str) -> None:
-        """Accumulate this attempt's token usage into ``{role}_tokens_acc``.
+        """Record this attempt's token usage, keyed by its session JSONL path.
 
-        T4.8 — sums per key so a role RE-invoked within a phase (the reviewer's
-        CONTRACT_FAILURE / ``*_UNVERIFIED`` / multi-pass loop, or a planner /
-        executor retry) ADDS to the running total rather than overwriting it.
-        The planner, executor, and reviewer token-capture sites all call this so
-        the three cannot drift — the reviewer path had silently diverged to a
-        bare assignment, under-reporting reviewer cost across retries (the T4.8
-        bug). ``{role}_tokens_acc`` is dropped by ``reset_phase``'s fresh
-        phase_state dict, so the totals are per-phase and reset on genuine phase
-        advance (identical lifecycle to the planner/executor accumulators).
+        Maintains ``{role}_tokens_sessions`` (per-attempt sums keyed by the
+        session JSONL path) and rebuilds ``{role}_tokens_acc`` as the sum over
+        all entries. Replacing by key gives two properties the old
+        add-each-call accumulator lacked:
+
+        - Re-reading the SAME session (a RETRY after restart resumes the
+          attempt-1 session key → same JSONL) replaces its earlier
+          contribution instead of double-counting it, while distinct attempts
+          (distinct session keys → distinct JSONLs) still sum — the T4.8
+          guarantee that reviewer/planner/executor re-invocations accumulate.
+        - ``_refresh_role_token_accumulators`` can re-sum each file at
+          metrics-row-write time, picking up usage rows the agent streamed
+          AFTER writing ``.done`` (the sentinel-time snapshot under-counted
+          by ~32% on LLN-1 CORE-E2: +565k reviewer tokens post-sentinel).
+
+        A pre-keyed ``{role}_tokens_acc`` found without a sessions map (a
+        phase in flight across the deploy of this change) is frozen into the
+        map under ``_TOKENS_LEGACY_SESSION_KEY`` so its contribution survives.
+        Both keys are dropped by ``reset_phase``'s fresh phase_state dict, so
+        the totals stay per-phase and zero on genuine phase advance.
         """
-        _new = _sum_session_tokens(jsonl_path)
         _ps = self.read_phase_state()
-        _acc = _ps.get(f"{role}_tokens_acc", {})
-        if not isinstance(_acc, dict):
-            _acc = {}
-        for _k, _v in _new.items():
-            _acc[_k] = _acc.get(_k, 0) + _v
-        _ps[f"{role}_tokens_acc"] = _acc
+        _sessions = _ps.get(f"{role}_tokens_sessions")
+        if not isinstance(_sessions, dict):
+            _sessions = {}
+            _legacy = _ps.get(f"{role}_tokens_acc")
+            if isinstance(_legacy, dict) and _legacy:
+                _sessions[_TOKENS_LEGACY_SESSION_KEY] = dict(_legacy)
+        if jsonl_path:
+            _sessions[jsonl_path] = _sum_session_tokens(jsonl_path)
+        _ps[f"{role}_tokens_sessions"] = _sessions
+        _ps[f"{role}_tokens_acc"] = _merge_token_sums(_sessions.values())
         self.write_phase_state_atomic(_ps)
+
+    def _refresh_role_token_accumulators(self) -> None:
+        """Re-sum every recorded session JSONL and rebuild the accumulators.
+
+        Called by ``_write_canonical_metrics_row`` before it reads the
+        ``{role}_tokens_acc`` fields, so the durable metrics row reflects each
+        session file's FINAL contents rather than the sentinel-time snapshot
+        (agents routinely keep streaming after writing ``.done``). Covers all
+        recorded attempts, not just the last — a zombie attempt that streamed
+        past its own sentinel is recounted too.
+
+        Per-entry safety: the legacy frozen entry has no file and is kept
+        as-is; a missing file (session pruned) keeps its stored sum; and since
+        session JSONLs are append-only, a re-sum smaller than the stored
+        ``total_tokens`` (truncated/rotated/unreadable file) is discarded in
+        favour of the snapshot — the refresh never shrinks a contribution.
+        """
+        _ps = self.read_phase_state()
+        _changed = False
+        for role in ("planner", "executor", "reviewer"):
+            _sessions = _ps.get(f"{role}_tokens_sessions")
+            if not isinstance(_sessions, dict) or not _sessions:
+                continue
+            for _path, _stored in list(_sessions.items()):
+                if _path == _TOKENS_LEGACY_SESSION_KEY:
+                    continue
+                if not _path or not os.path.exists(_path):
+                    continue
+                _new = _sum_session_tokens(_path)
+                _stored_total = (
+                    _stored.get("total_tokens", 0) if isinstance(_stored, dict) else 0
+                )
+                if _new.get("total_tokens", 0) >= _stored_total:
+                    _sessions[_path] = _new
+            _ps[f"{role}_tokens_acc"] = _merge_token_sums(_sessions.values())
+            _changed = True
+        if _changed:
+            self.write_phase_state_atomic(_ps)
 
     def _clean_escalation_headline(self, raw_id=None):
         """P1 Stage G1 — a clean, deterministic headline for the escalation panel.
@@ -4942,6 +5016,13 @@ class Orchestrator:
                 "skipping"
             )
             return
+
+        # Re-sum each attempt's session JSONL before reading the token
+        # accumulators below — agents keep streaming after writing .done, so
+        # the sentinel-time snapshot under-counts (LLN-1 CORE-E2: +565k
+        # reviewer tokens, ~32%, landed after the snapshot). Writes the
+        # refreshed accumulators to phase_state, which ps_m re-reads.
+        self._refresh_role_token_accumulators()
 
         # --- Compose the canonical row (schema preserved from inline writer) ---
         duration_seconds = None
