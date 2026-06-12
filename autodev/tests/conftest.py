@@ -49,6 +49,12 @@ def _scrub_autodev_env(monkeypatch):
     aliases were removed in the hard cut."""
     for key in _ENV_KEYS_TO_SCRUB:
         monkeypatch.delenv(key, raising=False)
+    # Hermeticity: the responseUsage pre-seed (_preset_session_response_usage)
+    # opens a real gateway WebSocket before each agent webhook invocation.
+    # Orchestrator tests mock the hooks HTTP calls but not the WS control
+    # plane, so disable the patch by default; dedicated tests opt back in
+    # via monkeypatch.setenv.
+    monkeypatch.setenv("AUTODEV_RESPONSE_USAGE", "off")
 
 
 # ---------------------------------------------------------------------------

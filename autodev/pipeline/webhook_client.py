@@ -257,13 +257,20 @@ def _recv_expected_frame(ws, session_key, deadline, expect, label):
     return None
 
 
-def _attempt_abort_once(
+def _gateway_request_once(
     session_key: str,
     gateway_ws_url: str,
     gateway_token: str,
     timeout_seconds: int,
-) -> bool:
-    """Single ``sessions.abort`` round-trip.  Returns True on success.
+    method: str,
+    params: dict,
+    scopes: tuple = ("operator.write",),
+):
+    """Single gateway WS handshake + one ``method`` request round-trip.
+
+    Returns the parsed response frame (a dict) on a completed round-trip,
+    or ``None`` on any failure (connect error, handshake rejection, timeout,
+    protocol violation).  Callers interpret the frame's ``ok``/``payload``.
 
     Gateway handshake protocol (mirrors OpenClaw's own GatewayClient at
     ``client-*.js``: ``handleMessage`` / ``sendConnect``):
@@ -279,7 +286,7 @@ def _attempt_abort_once(
        For bearer-token auth (no device identity) the nonce does not
        need to be signed; we just need to have observed the challenge.
     4. Receive ``hello-ok`` response → handshake complete.
-    5. Send ``sessions.abort`` and read the result.
+    5. Send the request frame and read the result.
 
     Every frame wait goes through ``_recv_expected_frame``: the gateway
     interleaves unsolicited ``event`` frames (health, …) with response
@@ -322,7 +329,7 @@ def _attempt_abort_once(
         )
         if challenge is None:
             ws.close()
-            return False
+            return None
         nonce = challenge.get("payload", {}).get("nonce")
 
         # Step 2: now send the connect request.  The schema is strict:
@@ -349,7 +356,7 @@ def _attempt_abort_once(
                         "mode": "backend",
                     },
                     "role": "operator",
-                    "scopes": ["operator.write"],
+                    "scopes": list(scopes),
                     "caps": [],
                     "commands": [],
                     "permissions": {},
@@ -369,49 +376,111 @@ def _attempt_abort_once(
             hello.get("ok") and hello.get("payload", {}).get("type") == "hello-ok"
         ):
             logging.warning(
-                "[ABORT] Gateway handshake rejected for %s: %s", session_key, hello
+                "[GATEWAY] handshake rejected for %s: %s", session_key, hello
             )
             ws.close()
-            return False
+            return None
 
-        abort_frame = json.dumps(
+        request_frame = json.dumps(
             {
                 "type": "req",
                 "id": "2",
-                "method": "sessions.abort",
-                "params": {"key": session_key},
+                "method": method,
+                "params": params,
             }
         )
-        ws.send(abort_frame)
+        ws.send(request_frame)
         resp = _recv_expected_frame(
             ws, session_key, deadline,
             expect={"type": "res", "id": "2"},
-            label="sessions.abort response",
+            label=f"{method} response",
         )
         ws.close()
-        if resp is None:
-            return False
-
-        status = resp.get("payload", {}).get("status")
-        if resp.get("ok") and status in ("aborted", "no-active-run"):
-            logging.info(
-                "[ABORT] sessions.abort for %s: status=%s", session_key, status
-            )
-            return True
-
-        logging.warning(
-            "[ABORT] sessions.abort unexpected response for %s: %s", session_key, resp
-        )
-        return False
+        return resp
 
     except Exception as exc:
         logging.warning(
-            "[ABORT] best-effort abort failed for %s (%s: %s)",
+            "[GATEWAY] best-effort %s failed for %s (%s: %s)",
+            method,
             session_key,
             type(exc).__name__,
             exc,
         )
+        return None
+
+
+def _attempt_abort_once(
+    session_key: str,
+    gateway_ws_url: str,
+    gateway_token: str,
+    timeout_seconds: int,
+) -> bool:
+    """Single ``sessions.abort`` round-trip.  Returns True on success."""
+    resp = _gateway_request_once(
+        session_key, gateway_ws_url, gateway_token, timeout_seconds,
+        method="sessions.abort", params={"key": session_key},
+    )
+    if resp is None:
         return False
+
+    status = resp.get("payload", {}).get("status")
+    if resp.get("ok") and status in ("aborted", "no-active-run"):
+        logging.info(
+            "[ABORT] sessions.abort for %s: status=%s", session_key, status
+        )
+        return True
+
+    logging.warning(
+        "[ABORT] sessions.abort unexpected response for %s: %s", session_key, resp
+    )
+    return False
+
+
+def set_session_response_usage(
+    session_key: str,
+    gateway_ws_url: str,
+    gateway_token: str,
+    mode: str = "full",
+    timeout_seconds: int = 8,
+) -> bool:
+    """Set the per-session ``responseUsage`` preference via gateway ``sessions.patch``.
+
+    ``responseUsage: "full"`` makes OpenClaw append a token-usage + cost line to
+    every reply the session produces.  It is a **per-session-entry** preference in
+    ``sessions.json`` (there is no agent- or config-level default), so it must be
+    set on each session.  ``sessions.patch`` **creates** the entry (assigning a
+    sessionId) when the key does not exist yet, so calling this *before* the
+    ``/hooks/agent`` webhook fires pre-seeds the preference race-free — the run
+    then reuses the pre-created entry.
+
+    ``session_key`` must be the gateway **store key** — i.e. the
+    ``agent:{role}:{bare_key}`` lowercase form (same shape ``sessions.abort``
+    expects), not the bare ``pipeline:…`` key.
+
+    Best-effort: returns True when the gateway acknowledged the patch, False on
+    any failure.  Callers must never block an agent invocation on this.
+    """
+    resp = _gateway_request_once(
+        session_key, gateway_ws_url, gateway_token, timeout_seconds,
+        method="sessions.patch",
+        params={"key": session_key, "responseUsage": mode},
+        # sessions.patch is gated on operator.admin (sessions.abort needs only
+        # operator.write) — verified live against the gateway: requesting
+        # operator.write alone returns INVALID_REQUEST "missing scope:
+        # operator.admin".
+        scopes=("operator.admin",),
+    )
+    if resp is None:
+        return False
+    if resp.get("ok"):
+        logging.info(
+            "[USAGE] sessions.patch responseUsage=%s for %s", mode, session_key
+        )
+        return True
+    logging.warning(
+        "[USAGE] sessions.patch rejected for %s: %s", session_key, resp
+    )
+    return False
 
 
 def abort_agent_session(

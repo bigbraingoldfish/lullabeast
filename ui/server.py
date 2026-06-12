@@ -67,7 +67,7 @@ from autodev.pipeline.queue_semantics import (
 from autodev.pipeline.sentinel_poller import PollResult  # noqa: E402
 from env_resolvers import resolve_openclaw_root, resolve_pipeline_root  # noqa: E402
 from skill_manager import SkillManager  # noqa: E402  (W5-E: inline completion reviewer)
-from webhook_client import invoke_agent_webhook  # noqa: E402
+from webhook_client import invoke_agent_webhook, set_session_response_usage  # noqa: E402
 from sentinel_poller import cleanup_output_files  # noqa: E402
 
 ORCHESTRATOR_FILENAME = "orchestrator.py"
@@ -4216,6 +4216,41 @@ def _rollback_last_turn_pair(session_path: os.PathLike | str) -> None:
             _atomic_write_json_file(sp, data)
 
 
+def _preset_session_response_usage_sync(agent_id: str, session_key: str) -> None:
+    """Pre-seed ``responseUsage`` on an about-to-be-invoked OpenClaw session.
+
+    Mirrors the orchestrator's ``_preset_session_response_usage``: gateway
+    ``sessions.patch`` creates the session entry when it does not exist yet, so
+    patching *before* the ``/hooks/agent`` webhook fires makes the run record a
+    token-usage + cost line on every reply it produces. Gateway WS creds come
+    from ``<openclaw_root>/openclaw.json`` (``gateway.auth.token`` / ``gateway.port``)
+    — the same source the orchestrator reads.
+
+    Best-effort and non-raising; env ``AUTODEV_RESPONSE_USAGE`` overrides the
+    mode (default ``full``); empty or ``off`` disables the patch entirely.
+    """
+    mode = os.environ.get("AUTODEV_RESPONSE_USAGE", "full").strip().lower()
+    if mode in ("", "off"):
+        return
+    try:
+        cfg = load_config()
+        oc_root = os.path.expanduser(str(cfg.get("openclaw_root") or resolve_openclaw_root()))
+        with open(os.path.join(oc_root, "openclaw.json")) as f:
+            oc = json.load(f)
+        gw = oc.get("gateway") or {}
+        gw_token = (gw.get("auth") or {}).get("token", "") or ""
+        gw_port = gw.get("port", 18789)
+        ws_url = f"ws://127.0.0.1:{gw_port}/__openclaw__/ws"
+        store_key = f"agent:{agent_id}:{session_key}".lower()
+        ok = set_session_response_usage(store_key, ws_url, gw_token, mode=mode)
+        print(
+            f"[USAGE] responseUsage={mode} {'set' if ok else 'FAILED'} "
+            f"session_key={store_key}"
+        )
+    except Exception as exc:
+        print(f"[USAGE] responseUsage patch failed for {agent_id} {session_key}: {exc}")
+
+
 async def _post_agent_webhook(hooks_url: str, hooks_token: str, webhook_payload: dict) -> None:
     """POST to OpenClaw agent hook. Raises HTTPException 503 on any aiohttp client
     error (connect failure, server timeout, or a body truncated mid-stream —
@@ -4226,6 +4261,14 @@ async def _post_agent_webhook(hooks_url: str, hooks_token: str, webhook_payload:
     truncated-response error (gateway dies after headers) from escaping as an
     uncaught 500 that strands the "Working on your request…" placeholder."""
     headers = {"Authorization": f"Bearer {hooks_token}"}
+    # Pre-seed responseUsage on the target session (best-effort, off-thread so
+    # the WS round-trip never blocks the event loop).
+    _agent_id = webhook_payload.get("agentId")
+    _session_key = webhook_payload.get("sessionKey")
+    if _agent_id and _session_key:
+        await asyncio.to_thread(
+            _preset_session_response_usage_sync, _agent_id, _session_key
+        )
     try:
         async with aiohttp.ClientSession(timeout=IDEAS_WEBHOOK_POST_TIMEOUT) as session:
             resp = await session.post(hooks_url, json=webhook_payload, headers=headers)
@@ -5151,6 +5194,10 @@ async def _trigger_readiness_assessment(idea_id: str, config: dict) -> None:
                 f"skill. Write readiness.json then readiness.done as specified."
             ),
         }
+        await asyncio.to_thread(
+            _preset_session_response_usage_sync,
+            payload["agentId"], payload["sessionKey"],
+        )
         async with aiohttp.ClientSession() as session:
             resp = await session.post(
                 hooks_url,
@@ -5975,6 +6022,10 @@ async def post_ideas_clarity_check(idea_id: str):
 
     # Send webhook POST
     _attempt_start_wall = time.time()
+    await asyncio.to_thread(
+        _preset_session_response_usage_sync,
+        webhook_payload["agentId"], webhook_payload["sessionKey"],
+    )
     headers = {"Authorization": f"Bearer {hooks_token}"}
     async with aiohttp.ClientSession() as session:
         resp = await session.post(
@@ -6180,6 +6231,10 @@ async def post_ideas_convert(idea_id: str):
 
     # Send webhook POST
     _attempt_start_wall = time.time()
+    await asyncio.to_thread(
+        _preset_session_response_usage_sync,
+        webhook_payload["agentId"], webhook_payload["sessionKey"],
+    )
     headers = {"Authorization": f"Bearer {hooks_token}"}
     async with aiohttp.ClientSession() as session:
         resp = await session.post(
@@ -6348,6 +6403,10 @@ async def post_ideas_fix_roadmap_format(idea_id: str, body: FixRoadmapFormatRequ
 
     # Send webhook POST
     _attempt_start_wall = time.time()
+    await asyncio.to_thread(
+        _preset_session_response_usage_sync,
+        webhook_payload["agentId"], webhook_payload["sessionKey"],
+    )
     headers = {"Authorization": f"Bearer {hooks_token}"}
     async with aiohttp.ClientSession() as session:
         resp = await session.post(
@@ -9787,6 +9846,7 @@ async def post_completion_review_trigger(project: str):
         if _artifacts_dir:
             cleanup_output_files(_artifacts_dir, "reviewer")
 
+        _preset_session_response_usage_sync("reviewer", session_key)
         invoke_agent_webhook("reviewer", session_key, token, message=_completion_message)
     except Exception as _exc:
         print(f"[W5-E] Completion review invocation warning: {_exc}")
