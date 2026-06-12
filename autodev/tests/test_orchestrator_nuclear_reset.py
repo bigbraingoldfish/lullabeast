@@ -92,16 +92,15 @@ def _make_orch(tmp_path, monkeypatch, *, state=None, phase_state=None):
 def test_nuclear_reset_wipes_branch_and_replans(tmp_path, monkeypatch):
     """nuclear_reset_phase must do everything reset_phase does — git reset --hard
     to the phase base commit, delete the phase branch, wipe outputs, zero retry
-    counters, clear prior_blame_attributions, replan from the planner — and bump
-    nuclear_resets to 1. Catches a wrapper that forgets to delegate the destructive
-    mechanics."""
+    counters by wholesale phase_state replacement, replan from the planner — and
+    bump nuclear_resets to 1. Catches a wrapper that forgets to delegate the
+    destructive mechanics."""
     phase_state = {
         "executor_retries": 3,
         "executor_self_failure_retries": 5,
         "executor_reviewer_rejection_retries": 2,
         "reviewer_retries": 1,
         "reviewer_unverified_retries": 1,
-        "prior_blame_attributions": ["impl", "impl", "impl"],
         "escalation_resets": 3,
         "nuclear_resets": 0,
         "last_error_code": "ERR_INFRA_FAILURE",
@@ -132,8 +131,6 @@ def test_nuclear_reset_wipes_branch_and_replans(tmp_path, monkeypatch):
         "executor_reviewer_rejection_retries", "reviewer_retries",
     ):
         assert ps.get(counter, 0) == 0, f"{counter} must be zeroed by the reset"
-    # Cleared by wholesale dict replacement (key absent => empty).
-    assert ps.get("prior_blame_attributions", []) == []
     assert ps.get("reviewer_unverified_retries", 0) == 0
     # Governance: nuclear budget consumed once.
     assert ps.get("nuclear_resets") == 1

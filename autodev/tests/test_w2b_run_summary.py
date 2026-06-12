@@ -4,7 +4,7 @@ W2-B: run_summary.json written at every terminal pipeline exit.
 
 Tests verify:
 - _write_run_summary helper exists and is called before each terminal transition_state
-- run_summary.json contains full aggregated schema (phases, tokens, blame, skills)
+- run_summary.json contains full aggregated schema (phases, tokens, skills)
 - runs_index.jsonl is appended (O_APPEND), not overwritten, at AUTODEV_PIPELINE_ROOT
 - Graceful on missing metrics.jsonl (writes summary with zero aggregates)
 - Atomic write for run_summary.json; no temp files left behind
@@ -172,18 +172,20 @@ def test_write_run_summary_complete_case(tmp_path):
     assert data["phases_attempted"] == 2
     assert data["executor_attempts_total"] == 3        # 2 + 1
     assert data["escalations_total"] == 1
-    assert data["blame_fires_total"] == 1
+
+    # Blame attribution was removed: new summaries carry no blame aggregates,
+    # even when historical metrics rows (like the fixtures above) still have
+    # blame_fires / blame_verdict fields. The writer must tolerate those
+    # legacy fields without re-emitting them.
+    assert "blame_fires_total" not in data
+    assert "blame_attributions" not in data
 
     # phases array
     assert len(data["phases"]) == 2
     core_phase = next(p for p in data["phases"] if p["phase"] == "CORE-E1")
     assert core_phase["executor_attempts"] == 2
-    assert core_phase["blame"] == "impl"
+    assert "blame" not in core_phase
     assert core_phase["skill_used"] == "core-logic"
-
-    # blame_attributions: only rows with non-null blame_verdict
-    assert len(data["blame_attributions"]) == 1
-    assert data["blame_attributions"][0] == {"phase": "CORE-E1", "blame": "impl"}
 
     # skills_injected: only rows with non-null skill_used
     assert len(data["skills_injected"]) == 1
@@ -219,7 +221,7 @@ def test_write_run_summary_graceful_on_missing_metrics(tmp_path):
     assert data["executor_attempts_total"] == 0
     assert data["escalations_total"] == 0
     assert data["phases"] == []
-    assert data["blame_attributions"] == []
+    assert "blame_attributions" not in data  # removed with blame attribution
     assert data["skills_injected"] == []
     assert data["token_usage"]["total_tokens"] == 0
 

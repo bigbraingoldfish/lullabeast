@@ -160,7 +160,7 @@ Every state transition is written to `pipeline_state.json` atomically **before**
 
 ### What the Orchestrator is NOT
 
-- Not an LLM orchestrator — zero model calls during gate evaluation (exception: blame attribution LLM fallback; see § Gate Scripts > Blame Attribution)
+- Not an LLM orchestrator — the orchestrator itself makes **zero** model calls; all LLM work runs as OpenClaw agents (models configured in `agents.list[]`)
 - Not using `sessions_spawn` subagent pattern — unreliable (non-blocking spawn + LLM must maintain poll loop)
 - Not routing via messaging channels — webhook only for agent invocation; Signal used exclusively for human escalation notifications
 
@@ -247,7 +247,7 @@ THEN  skip planner invocation → advance current_agent to executor
 
 **`planner_output_preserved` flag lifecycle:**
 - Written atomically to `phase_state.json` BEFORE `transition_state` after planner gate passes (crash-safe ordering)
-- Cleared explicitly in ROUTE_PLANNER branch (reviewer's blame-plan rejection) — prevents skip from firing on intentional re-runs where the previous plan was rejected
+- Cleared explicitly in ROUTE_PLANNER branch (reviewer's plan-attributed rejection) — prevents skip from firing on intentional re-runs where the previous plan was rejected
 - Cleared by `reset_phase()` — new phase starts with no preserved output
 - Never touched by `reset_execution()` — executor failure does NOT invalidate planner output
 
@@ -342,7 +342,7 @@ The executor generates tool calls; OpenClaw executes them:
   },
   "failure_reason": {
     "type": "string",
-    "description": "Explanation of failure if status != complete. Must include raw stderr, tracebacks, or specific compiler/interpreter error names (e.g., AttributeError, TypeError). Not gate-checked — context for reviewer/escalation/blame."
+    "description": "Explanation of failure if status != complete. Must include raw stderr, tracebacks, or specific compiler/interpreter error names (e.g., AttributeError, TypeError). Not gate-checked — context for reviewer/escalation."
   },
   "troubleshooting_attempts": {
     "type": "array",
@@ -582,7 +582,9 @@ Enforced via OpenClaw per-agent tool policy in `openclaw.json` — not just AGEN
 
 ### Signal Delivery
 
-The agent reads workspace context (`phase_state.json`, failure logs, relevant output files), performs environment checks where relevant (e.g., llama-server health at `http://<llama-server-host>:11434/health` on executor failures), then sends a precise, non-verbose Signal message containing: what paused, why, what it found, open questions, available actions.
+The agent reads workspace context (`phase_state.json`, `failure_context.json`, failure logs, relevant output files), performs environment checks where relevant (e.g., llama-server health at `http://<llama-server-host>:11434/health` on executor failures), **writes the dashboard advisory first** — `escalation_summary.json` (`{"summary", "recommended_action"}`, ≤200 chars each, per its escalation-summary skill; the only pipeline file it writes, via the workspace `pipeline-project` symlink) — then sends a precise, non-verbose Signal message containing: what paused, why, what it found, open questions, available actions (including the same summary).
+
+The orchestrator records a deterministic `escalation_message` (`_compose_fallback_reason`, `escalation_advisory_status="fallback"`) at dispatch so the dashboard is never empty, deletes any stale `escalation_summary.json` (staleness guard), and promotes the agent-written file into `phase_state` (`status="ready"`) as soon as it lands — `_promote_agent_escalation_summary`, called from the WAITING_FOR_HUMAN poll loop and at resolution. The orchestrator itself makes no LLM call.
 
 Pipeline completion is also notified via Signal (not just escalation).
 
@@ -596,7 +598,7 @@ Pipeline completion is also notified via Signal (not just escalation).
 | `SKIP` | Marks phase N as `[-]` skipped in roadmap, then **re-resolves the next pending phase via the shared `_advance_to_next_pending_phase()` helper** (F3) — the same path the reviewer-PASS completion uses — clearing the per-phase pipeline artifacts and starting the genuine next pending phase (not blindly "N+1"). The git phase *branch* is not deleted (no `git reset`); manual git cleanup is still the operator's responsibility. | Only when the phase outcome is acceptable and git cleanup will be handled manually |
 | `STOP` | Pipeline stays halted, full manual intervention required | Always valid |
 | `PROCEED` | Skips the merge step; marks phase `[x]` in roadmap, force-tags `phase-N-complete`, then **re-resolves and advances via the shared `_advance_to_next_pending_phase()` helper** (F3) so it genuinely moves *past* this phase (previously it re-ran the just-closed phase and could loop straight back to escalation). Does not append to `suggestions.md`. | Phase branch already merged into base externally; use to advance after manual merge |
-| `NUCLEAR_RESET` | **Operator escape hatch (P1 Stage G2).** Thin wrapper over `reset_phase()` — same destructive mechanics (git reset to `phase_base_commit`, delete phase branch, wipe all outputs, zero retry counters, clear `prior_blame_attributions`, re-invoke planner). Differs only in governance: increments its own `nuclear_resets` counter (cap **2**) instead of `escalation_resets`, and appends a `reset_log` entry. | Every automatic retry and operator reset is spent (`escalation_resets >= 3`) but the operator fixed an *external* cause (infra/config, outside the repo) and wants a true fresh start |
+| `NUCLEAR_RESET` | **Operator escape hatch (P1 Stage G2).** Thin wrapper over `reset_phase()` — same destructive mechanics (git reset to `phase_base_commit`, delete phase branch, wipe all outputs, zero retry counters, re-invoke planner). Differs only in governance: increments its own `nuclear_resets` counter (cap **2**) instead of `escalation_resets`, and appends a `reset_log` entry. | Every automatic retry and operator reset is spent (`escalation_resets >= 3`) but the operator fixed an *external* cause (infra/config, outside the repo) and wants a true fresh start |
 
 > **`RESTART PHASE` is a legacy alias for `RESET_PHASE`** — accepted by the orchestrator for backward compatibility with in-flight Signal conversations. Use `RESET_PHASE` in new invocations.
 
@@ -703,7 +705,7 @@ When a project escalates under an **auto-queue**, the orchestrator parks it (`_q
 
 ## 7. Gate Scripts
 
-All gates are deterministic Python scripts on the Pi. Zero LLM tokens (exception: blame attribution LLM fallback). Completion detected via sentinel files (`.done`), not JSON file presence. Gates poll for sentinel then parse JSON.
+All gates are deterministic Python scripts on the Pi. Zero LLM tokens. Completion detected via sentinel files (`.done`), not JSON file presence. Gates poll for sentinel then parse JSON.
 
 Gate scripts always wrap JSON load in `try/except` — unhandled parse exception must never crash the orchestrator.
 Any updates back to `phase_state.json` must be written atomically (e.g., write to a tempfile then replace) to prevent corruption from power loss or race conditions across invocations.
@@ -764,12 +766,12 @@ The `status` check runs first. An executor that self-reports `"stuck"` or `"fail
 ```
 IF PASS                    → proceed to reviewer
 IF FAIL AND retries < 3    → re-invoke executor with failure detail
-IF FAIL AND retries >= 3   → run blame attribution
+IF FAIL AND retries >= 3   → escalate to the operator (see § Executor Retry Exhaustion)
 ```
 
 ### `failure_context.json` — Failure Context Artifact
 
-Written atomically by the orchestrator **before every routing decision** that follows an agent failure. This happens at four call sites: planner gate fail, executor gate fail, executor retries exhausted (blame path), and reviewer gate fail. The file is cleared at phase start alongside other working files.
+Written atomically by the orchestrator **before every routing decision** that follows an agent failure. This happens at four call sites: planner gate fail, executor gate fail, executor retries exhausted (escalation path), and reviewer gate fail. The file is cleared at phase start alongside other working files.
 
 **Schema:**
 ```json
@@ -803,12 +805,11 @@ Written atomically by the orchestrator **before every routing decision** that fo
   "files_present_on_disk": ["<path — glob of SYMLINK_TARGET, excluding pipeline metadata>"],
   "planner_retries_at_failure": "<int>",
   "executor_retries_at_failure": "<int>",
-  "reviewer_retries_at_failure": "<int>",
-  "prior_blame_attributions": [{"layer": 1, "fault": "...", "routing": "..."}]
+  "reviewer_retries_at_failure": "<int>"
 }
 ```
 
-`files_present_on_disk` vs `file_manifest` comparison is the primary signal for the blame analyst: missing files indicate deletion or failed write; unexpected files indicate scope creep. The file is consumed by Layer 1 blame analyst (see below).
+`files_present_on_disk` vs `file_manifest` comparison is a primary failure-review signal: missing files indicate deletion or failed write; unexpected files indicate scope creep. The file is consumed by the executor's self-heal retries and by the escalation agent when composing the operator advisory.
 
 **Self-heal feedback loop (P0 Stage G).** Three additions land here so the executor's reviewer-rejection retry pass has both halves of the failed verification in one read:
 
@@ -818,69 +819,17 @@ Written atomically by the orchestrator **before every routing decision** that fo
 
 The reviewer gate (`reviewer_gate.py:_synthesize_behavioral_blocking_issues`) synthesises `criterion_source: "behavioral"` entries from `behavioral_verification.evidence` when the reviewer leaves `blocking_issues` empty on a `fail` / `cannot_verify` verdict; the orchestrator's `_write_reviewer_failure_context` defaults entries arriving without `criterion_source` to the explicit `"free"` label so downstream code branches on a complete enum. See ASSUMPTIONS.md §J for the gate-side-vs-orchestrator-side write-back decision and the `criterion_id` format rationale.
 
-### Blame Attribution — Three-Layer System
+### Executor Retry Exhaustion → Escalation
 
-Runs after executor retries are exhausted (retries ≥ 3). Reads `failure_context.json` from the shared workspace. Every routing decision is logged to `lessons.md` in the format:
-```
-[BLAME] ts=<ISO> phase=<id> attempt=<n> layer=<1|2|3> fault=<fault> confidence=<confidence> routing=<plan|impl|escalate|default|fallback> reasoning=<string>
-```
-
-**Layer 1 — LLM analyst (always runs first):**
-
-A single structured LLM call to `qwen3.5-27b` via direct POST — not a full agent turn; one prompt, one response, parsed immediately. This is the **only** point in the pipeline where the orchestrator itself makes an LLM call.
-
-```python
-POST http://<llama-server-host>:11434/v1/chat/completions
-{
-  "model": "qwen3.5-27b",
-  "response_format": {"type": "json_object"},
-  "messages": [{"role": "user", "content": "<failure_context.json contents>"}]
-}
-```
-
-The standard OpenAI-compatible payload format is required because this POST bypasses OpenClaw and goes directly to llama-server.
-
-The analyst returns `{"fault": "<plan|impl|infrastructure|unknown>", "confidence": "<high|medium|low>", "reasoning": "<string>"}`.
-
-**Layer 1 routing table:**
-
-| `fault` | `confidence` | Routing |
-|---|---|---|
-| `"plan"` | `"high"` | → re-route to planner |
-| `"impl"` | `"high"` | → `reset_execution("auto")` (re-run executor) then escalate |
-| `"infrastructure"` | `"high"` or `"medium"` | → escalation agent |
-| Any other combination | — | Fall through to Layer 2 |
-
-If the Layer 1 call fails (network error, timeout, unparseable response), fall through to Layer 2 without crashing.
-
-**Layer 2 — Deterministic heuristics (fallback when Layer 1 is inconclusive or unavailable):**
-```
-IF tests failing on undefined interface       → planner blame (ambiguous schema)
-                                              → re-route to PLANNER with failure logged
-IF tests failing on implementation logic
-    with correct interface                    → executor blame
-                                              → ESCALATE
-IF inconclusive                               → fall through to Layer 3
-```
-
-**Layer 3 — Hard default (fallback when both Layer 1 and Layer 2 are inconclusive):**
-
-Returns `blame: "impl"` unconditionally. Routes to escalation agent. Logs `layer=3, routing=default` in `lessons.md`. Repeated Layer 3 fires signal that planner needs tighter phase scoping or that failure context collection is insufficient.
-
-Blame attribution history is accumulated in `phase_state.json` under `prior_blame_attributions` for use by subsequent blame calls and agents.
-
-**Impl blame cap — escalation after 3 consecutive `impl` attributions:**
-
-After each blame attribution that returns `"impl"`, the orchestrator counts the number of consecutive `"impl"` entries at the tail of `prior_blame_attributions`. If this count reaches **3**, the orchestrator routes to the escalation agent instead of calling `reset_execution("auto")` again. This cap prevents an infinite retry loop when the executor LLM consistently produces structurally invalid output (e.g., empty `file_manifest`, `ERR_UNACCOUNTED_DELETION`) that the blame analyst correctly attributes to implementation failure but that no amount of automatic retries will resolve.
+Runs after executor retries are exhausted (retries ≥ 3), after the EX-RR surviving-output salvage check. The orchestrator writes `failure_context.json`, then routes directly to the escalation agent — mirroring the planner-exhaustion and reviewer-contract-failure patterns, so exhaustion handling is uniform across all three agents. The transition action string (copied into `escalation_trigger_reason` by the escalation dispatch) carries the attempt count and the last gate error code:
 
 ```
-IF blame == "impl":
-    consecutive_impl = count of trailing "impl" entries in prior_blame_attributions
-    IF consecutive_impl >= 3 → escalation agent (impl blame cap reached)
-    ELSE                     → reset_execution("auto") → re-invoke executor
+Executor retries exhausted after <N> attempts (last error: <ERR_...>)
 ```
 
-The escalation agent receives the full `failure_context.json` and can issue `RESET_PHASE`, `RESET_EXECUTION`, or `STOP` as appropriate. The `escalation_resets` counter applies to any subsequent escalation-triggered resets.
+The escalation agent receives the full `failure_context.json` and the operator routes from the dashboard: `RESET_EXECUTION` (plan is sound — fresh executor budget), `RESET_PHASE` (plan is flawed — re-plan), or `STOP`. The `escalation_resets` counter applies to escalation-triggered resets. There are **no** hidden automatic retry extensions at exhaustion: fresh executor budgets come only from reviewer rejections (bounded by the reviewer gate's pass-routing) or the operator's explicit reset.
+
+> **Historical note (removed 2026-06-11):** exhaustion previously ran a three-layer "blame attribution" system — a direct `qwen3.5-27b` llama-server POST (the orchestrator's only LLM call), deterministic heuristics, and a hard `impl` default — that auto-routed plan/impl/infrastructure. It was removed because (a) the impl "self-heal retry" was structurally inert: `reset_execution("auto")` *increments* `executor_retries` past the `>= 3` gate, so the loop re-entered blame without ever re-running the executor — production behavior was up to three sequential 60s LLM calls on identical input, then escalation anyway; (b) it collapsed precise `gate_error_codes` into a vaguer label biased toward `impl` by its own prompt, and its `lessons.md` `[BLAME]` log was write-only; and (c) it hard-wired a local-GPU dependency outside OpenClaw's provider layer. Historical metrics rows / run summaries still carry `blame_fires` / `blame_verdict` / `blame_attributions` fields; readers tolerate them and new artifacts omit them. See CHANGELOG.
 
 ### Reviewer Output Gate
 
@@ -1010,7 +959,7 @@ Read `phase_state.json` for `executor_retries` and `reviewer_retries`; default t
 Append one JSON line to `pipeline-project/.autodev/pipeline/metrics.jsonl`:
 
 ```json
-{"ts": "<ISO 8601 UTC>", "phase": "<phase_raw_id>", "goal": "<detail from current_phase.json>", "executor_attempts": <int>, "executor_self_failures": <int>, "executor_reviewer_rejections": <int>, "reviewer_passes": <int>, "blame_fires": 0, "escalations": 0, "duration_seconds": null, "skill_used": "<discipline name or null>", "escalation_resets": <int>, "nuclear_resets": <int>, "reviewer_unverified_retries": <int>, "reachability_summary": <obj|null>, "reset_log": [<entries>]}
+{"ts": "<ISO 8601 UTC>", "phase": "<phase_raw_id>", "goal": "<detail from current_phase.json>", "executor_attempts": <int>, "executor_self_failures": <int>, "executor_reviewer_rejections": <int>, "reviewer_passes": <int>, "escalations": 0, "duration_seconds": null, "skill_used": "<discipline name or null>", "escalation_resets": <int>, "nuclear_resets": <int>, "reviewer_unverified_retries": <int>, "reachability_summary": <obj|null>, "reset_log": [<entries>]}
 ```
 
 - `executor_attempts` = `executor_self_failure_retries + executor_reviewer_rejection_retries + 1` (P0 Stage H — lifetime, sourced from `phase_state.json`; reflects total attempts across reviewer-driven mid-phase resets)
@@ -1018,7 +967,8 @@ Append one JSON line to `pipeline-project/.autodev/pipeline/metrics.jsonl`:
 - `executor_reviewer_rejections` = `executor_reviewer_rejection_retries` (P0 Stage H additive breakdown; default 0 for pre-Stage-H rows)
 - Invariant: `executor_attempts == executor_self_failures + executor_reviewer_rejections + 1` (the +1 is the initial attempt)
 - `reviewer_passes` = `reviewer_retries + 1`
-- `blame_fires` / `escalations`: 0 unless definitive evidence otherwise
+- `escalations`: 0 unless definitive evidence otherwise
+- Historical rows (pre-2026-06-11) may carry `blame_fires` / `blame_verdict` from the removed blame-attribution system; readers tolerate the extra fields and new rows omit them.
 - `duration_seconds`: `null` unless computable from timestamps
 - `skill_used`: discipline name string from `phase_state.json → skill_injected` (e.g. `"core-logic"`, `"infra-config"`), or `null` if no skill was injected. Written by the orchestrator's canonical post-merge row; read from `phase_state.json` before it is deleted at phase completion.
 - **Phase 3 — per-phase pain signals** (all read from `phase_state.json` at row-write time, on the reviewer-PASS path before that file is deleted on advance; additive, default-safe):
@@ -1026,7 +976,7 @@ Append one JSON line to `pipeline-project/.autodev/pipeline/metrics.jsonl`:
   - `reset_log`: snapshot of the operator-reset audit trail (`[]` when none) — captured into the durable row because the live `reset_log` is wiped on phase advance.
   - `reachability_summary`: compact `{kind, count?, files?, command?/reason?}` (or `null` when no advisory drained that phase) — stashed onto `phase_state.last_reachability_summary` by `_emit_reachability_advisory` before it removes the advisory file, then surfaced here.
 
-(The orchestrator's actual `canonical_row` also carries the W1-G token-accounting fields — `planner_tokens` / `executor_tokens` / `reviewer_tokens` / `cost_total` — and `blame_verdict`; they are omitted from this representative example.)
+(The orchestrator's actual `canonical_row` also carries the W1-G token-accounting fields — `planner_tokens` / `executor_tokens` / `reviewer_tokens` / `cost_total`; they are omitted from this representative example.)
 
 The reviewer gate verifies that the last non-empty line of `metrics.jsonl` contains `phase_raw_id` — this confirms the row was written for the current phase, not a prior one.
 
@@ -1235,7 +1185,7 @@ Replaced by direct llama-server endpoint at `http://<llama-server-host>:11434`. 
 | `pipeline.lock` | Working directory on Pi | Concurrency lock via `fcntl.flock`, PID + timestamp as metadata |
 | `pipeline_state.json` | Working directory on Pi | Orchestrator state, atomically written |
 | `current_phase.json` | Shared workspace (via symlink) | Phase detail, category, exit_criteria |
-| `phase_state.json` | Shared workspace | Retry counts, blame context, error codes |
+| `phase_state.json` | Shared workspace | Retry counts, escalation fields, error codes |
 | `planner_output.json` | Shared workspace | Planner deliverable |
 | `planner_output.done` | Shared workspace | Planner sentinel |
 | `executor_output.json` | Shared workspace | Executor deliverable |
@@ -1246,7 +1196,7 @@ Replaced by direct llama-server endpoint at `http://<llama-server-host>:11434`. 
 | `escalation_output.done` | Shared workspace | Sentinel for human resume command |
 | `escalation_failed.json` | Shared workspace | Written when escalation delivery fails |
 | `suggestions.md` | Project directory | Accumulated reviewer suggestions |
-| `lessons.md` | Project directory | Blame attribution LLM call log |
+| `lessons.md` | Project directory | Agent-authored lessons / hard-won insights |
 | `pipeline_stop_requested` | Project directory (symlink target) | Stop sentinel written by `POST /api/stop`; consumed and deleted by `_check_stop_requested()` on next loop iteration |
 
 > **Workspace-relative paths:** Agents access these files via the workspace-relative path `pipeline-project/filename.json`. The absolute paths listed in this table are from the orchestrator's perspective. Agents must not use absolute paths for writes due to the workspace sandbox restriction.
@@ -1475,12 +1425,11 @@ Complete JSON schemas for all pipeline data files. Schemas in §3–§6 define a
   "planner_output_preserved": { "type": "boolean", "default": false, "description": "RR-2: Set to true atomically after planner gate passes. Enables crash-recovery skip: if current_agent=planner, planner_retries=0, and this flag is true, the orchestrator skips planner re-invocation and advances directly to executor. Cleared by ROUTE_PLANNER (intentional reviewer-reject re-run) and by reset_phase(). Never set by reset_execution()." },
   "escalation_resets": { "type": "integer", "default": 0, "description": "Incremented by RESET_PHASE and RESET_EXECUTION resume commands. Cap: 3. NOT zeroed inside reset_phase() — only zeroed when roadmap genuinely advances to a new phase. Distinct from executor_retries." },
   "nuclear_resets": { "type": "integer", "default": 0, "description": "P1 Stage G2. Incremented by the NUCLEAR_RESET command via nuclear_reset_phase(). Cap: 2, independent of escalation_resets. Preserved inside reset_phase() (like escalation_resets) so the cap accumulates; zeroed only on genuine phase advance. The dashboard shows the nuclear-reset button only when escalation_resets >= 3 and hides it at nuclear_resets >= 2." },
-  "blame_context": { "type": "string", "description": "Appended by blame attribution" },
   "last_error_code": { "type": "string", "description": "Distinct codes for parse vs. structural failures" },
   "skill_injected": { "type": "string|null", "description": "Discipline name of the phase-prefix skill injected for the most recent agent turn (e.g. 'core-logic', 'infra-config'). null if no skill applied (prefix unmapped, phase_raw_id empty, source file missing, or kill switch suppressed injection). Written atomically by _record_injected_skill() immediately after each inject_skill() call." },
   "skill_agent": { "type": "string", "description": "Agent role for which the skill_injected value was recorded ('planner', 'executor', or 'reviewer'). Always written alongside skill_injected." },
-  "escalation_trigger_reason": { "type": "string", "description": "Internal, possibly blame-framed reason the pipeline transitioned to WAITING_FOR_HUMAN (e.g. the impl-blame-cap string). Written atomically immediately before transition_state('WAITING_FOR_HUMAN', ...) at all three escalation trigger points. P1 Stage G1: NO LONGER the UI command-panel headline — it is demoted into the panel's collapsible 'Internal reason' disclosure (and the audit log). Preserved until phase_state.json is deleted at phase completion." },
-  "escalation_headline": { "type": "string", "description": "P1 Stage G1 — clean, deterministic, non-blame headline for the escalation panel (e.g. 'Phase REND-E1 needs your input'). Derived from the phase id by _clean_escalation_headline(), so it can never echo the blame-cap string. Written alongside escalation_trigger_reason at every escalation trigger; served by GET /api/state. The UI renders the LLM advisory summary when escalation_advisory_status == 'ready', else this headline." },
+  "escalation_trigger_reason": { "type": "string", "description": "Internal reason the pipeline transitioned to WAITING_FOR_HUMAN (e.g. 'Executor retries exhausted after 3 attempts (last error: ERR_...)'). Written atomically immediately before transition_state('WAITING_FOR_HUMAN', ...) at all three escalation trigger points. P1 Stage G1: NO LONGER the UI command-panel headline — it is demoted into the panel's collapsible 'Internal reason' disclosure (and the audit log). Preserved until phase_state.json is deleted at phase completion." },
+  "escalation_headline": { "type": "string", "description": "P1 Stage G1 — clean, deterministic, operator-facing headline for the escalation panel (e.g. 'Phase REND-E1 needs your input'). Derived from the phase id by _clean_escalation_headline(), so it can never echo internal error strings. Written alongside escalation_trigger_reason at every escalation trigger; served by GET /api/state. The UI renders the agent's advisory summary when escalation_advisory_status == 'ready', else this headline." },
   "last_phase_outcome": { "type": "string|null", "description": "Phase 3 — terminal phase outcome: 'completed' / 'escalated' / 'nuclear_reset' (absent while in-progress). Set by _record_phase_outcome ('completed', on the reviewer-PASS path right after the metrics row and before the audit archive copies phase_state) and directly at the single escalation chokepoint + the repo-init escalation block ('escalated') and in nuclear_reset_phase ('nuclear_reset'). Preserved across reset_phase() so a nuclear reset's outcome survives the reset it delegates to; cleared on genuine phase advance. DURABILITY: 'completed' is wiped when phase_state.json is deleted on advance — the canonical metrics row + phase_complete event are its durable record; 'escalated'/'nuclear_reset' persist live because those states do not advance." },
   "last_reachability_summary": { "type": "object|null", "description": "Phase 3 — compact copy of the executor reachability advisory ({kind, count?, files?, command?/reason?}), stashed by _emit_reachability_advisory before it removes executor_advisory_detail.json so the canonical metrics row (written later on the reviewer-PASS path, after that file is gone) can surface it as reachability_summary. Absent when no advisory drained this phase." }
 }
@@ -1488,9 +1437,7 @@ Complete JSON schemas for all pipeline data files. Schemas in §3–§6 define a
 
 > `phase_state.json` is deleted at phase completion and re-created lazily on first counter increment. On re-creation the fallback init includes `escalation_resets: 0` and `nuclear_resets: 0` — so both counters genuinely reset only when a new phase begins, never on a phase reset.
 
-**P1 Stage G1 — escalation advisory de-blame.** The pre-escalation LLM advisory (`_generate_escalation_advisory`) is grounded only in user-facing failure data: `failure_context`, the project's `failure_language`, and the retry counts. The blame-framed keys `escalation_trigger_reason` and `prior_blame_attributions` are **not** sent to the advisory LLM, so the summary cannot parrot internal blame-attribution jargon. The `failure_language` block is included whenever `failure_context` carries it — regardless of `reviewer_retries` — so executor-self-failure escalations surface the project's user-voice copy too (previously gated on `reviewer_retries >= 2`). The advisory result is stored as `escalation_message` / `escalation_recommended_action`; the clean `escalation_headline` is what the UI shows as the panel headline (the advisory summary when `escalation_advisory_status == "ready"`, the headline otherwise). `run_blame_attribution()` is unchanged — G1 governs only what the advisory is *fed* and what the UI *renders*.
-
-**Advisory dispatch ordering + honest fallback (escalation loader).** The escalation panel renders only at `WAITING_FOR_HUMAN`, so all three escalation dispatch sites (reviewer, repo-init, crash handler) transition to `WAITING_FOR_HUMAN` with `escalation_advisory_status="generating"` **before** the ≤30 s `_generate_escalation_advisory()` call, via the shared `_generate_and_record_advisory(ps)` helper. This makes the `"generating"` loader actually visible — the dashboard shows the Ideas-chat pending loader + elapsed timer while the advisory is produced, then flips to it (`status="ready"`) on the next 3 s poll. The advisory dict is still produced before the escalation webhook message is built, so the operator Signal notification is unchanged. When the advisory hangs/fails (`None` → `status="fallback"`), `_generate_and_record_advisory` records a **deterministic, factual** `escalation_message` via `_compose_fallback_reason(ps)` — built from hard signals (`last_error_code`, the already-honest `escalation_trigger_reason`, and `failure_context.json`'s `failing_agent`/`gate_error_codes`/`attempt_number`) and **never** from the phase's `failure_language` (presenting that expected-failure description as observed reality is the fabrication that produced the misleading "blank white page" message). The UI fallback branch renders this `escalation_message`, falling back to a generic line only when it is empty.
+**Agent-owned escalation advisory (2026-06-11; supersedes the orchestrator's LLM advisory).** All three escalation dispatch sites (reviewer/main, repo-init, crash handler) record a **deterministic, factual** `escalation_message` via `_compose_fallback_reason(ps)` (`escalation_advisory_status="fallback"`, helper `_record_escalation_reason`) **before** transitioning to `WAITING_FOR_HUMAN` — the panel shows an honest reason the instant it renders, with no loader and no orchestrator LLM call. The fallback is built from hard signals (`last_error_code`, the honest `escalation_trigger_reason`, and `failure_context.json`'s `failing_agent`/`gate_error_codes`/`attempt_number`) and **never** from the phase's `failure_language` (presenting that expected-failure description as observed reality is the fabrication that produced the misleading "blank white page" message). The escalation **agent** then composes the richer advisory itself (its escalation-summary skill) and writes `escalation_summary.json` BEFORE notifying the operator; the orchestrator clears any stale copy at dispatch (`_clear_stale_escalation_summary`) and promotes a fresh one into `escalation_message` / `escalation_recommended_action` / `status="ready"` (`_promote_agent_escalation_summary`) from the WAITING_FOR_HUMAN poll loop and at resolution — so the dashboard upgrades in place within one poll cycle of the summary landing. The retired `"generating"` status no longer exists: a status only an in-process wait could clear would strand the panel after a queue auto-advance. *Known limitation:* if an auto-advance repoints the `pipeline-project` symlink while the agent's turn is in flight, the summary write lands in the repointed tree (OpenClaw's write sandbox forces symlink-relative writes) — the parked row keeps the deterministic message; the operator's Signal notification still carries the rich summary (the webhook message points the agent's *reads* at the resolved absolute path).
 
 **Counter reset matrix:**
 
@@ -1812,6 +1759,8 @@ Reads `metrics.jsonl` from `project_dir_path`. Deduplicates phase entries (keepi
 ```
 
 If `metrics.jsonl` is absent or empty, returns all-zero totals with an empty `phases` array. `null` duration values count as 0 in the sum.
+
+> `total_blame_fires` / per-phase `blame_fires` aggregate the legacy fields still present in **historical** metrics rows (blame attribution was removed 2026-06-11; new rows omit them, so these read 0 for new projects). The UI suppresses the blame copy at 0.
 
 **Total time semantics.** `total_duration_seconds` is the **sum** of per-phase `duration_seconds` — each phase's `phase_start`→PASS wall-clock, which already includes that phase's in-phase escalation hold. It is deliberately **not** `run_summary.json`'s calendar wall-clock (`run_start`→`run_end`); that span includes idle gaps across days and would inflate the figure (e.g. 74h calendar vs ~19h of real phase work). The response also carries `total_hold_seconds` (escalation waits, paired from `escalation_trigger`/`escalation_resolve` events in `pipeline_events.jsonl`) and `total_active_seconds = max(0, total_duration_seconds − total_hold_seconds)`. **Known limitation:** a phase's duration counts retried/reset work as active (it is real time the operator experienced), and the rare *non-escalation* mid-phase downtime (a hard crash, a manual STOP, or machine sleep while a phase is mid-flight) is also counted as active rather than excluded.
 

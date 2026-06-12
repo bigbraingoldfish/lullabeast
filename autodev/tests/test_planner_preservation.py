@@ -6,7 +6,7 @@ planner output already exists on disk, it must NOT delete and re-invoke the plan
 The planner is expensive (cloud API call) and should only be re-invoked when:
   - planner output is missing
   - planner output is invalid (gate fails)
-  - explicit RESET_PHASE or blame-plan reroute was triggered
+  - explicit RESET_PHASE or reviewer ROUTE_PLANNER reroute was triggered
   - planner_retries > 0 (previous planner run failed)
 
 FIND-ID: FIND-PLANNER-PRESERVE
@@ -323,7 +323,7 @@ class TestPlannerPreservation:
 
     def test_route_planner_clears_preserved_flag(self, tmp_workspace, valid_planner_output):
         """
-        Validates: When the reviewer returns ROUTE_PLANNER (blame-plan rejection),
+        Validates: When the reviewer returns ROUTE_PLANNER (plan-attributed rejection),
         the orchestrator MUST clear planner_output_preserved in BOTH phase_state.json
         AND self.state before routing current_agent back to 'planner'.
 

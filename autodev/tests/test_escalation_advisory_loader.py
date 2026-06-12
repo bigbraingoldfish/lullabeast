@@ -1,25 +1,15 @@
-"""Escalation-advisory loader + honest fallback.
+"""Honest deterministic escalation reason (``_compose_fallback_reason``).
 
-Two behaviors, both about the human-facing escalation *advisory* (the dashboard
-``escalation_message`` / ``escalation_advisory_status``) — distinct from the
-``reviewer_retry_directive`` reviewer-retry channel:
-
-1. **Loader is visible while the advisory generates.** The escalation panel only
-   renders at ``WAITING_FOR_HUMAN``; the advisory is a ≤30s LLM call. So the
-   transition to ``WAITING_FOR_HUMAN`` (with ``escalation_advisory_status=
-   "generating"``) must happen BEFORE the advisory call, or the "generating"
-   loader is never seen. These source-level guards pin that ordering at the 3
-   escalation dispatch sites (repo-init, reviewer, crash handler) — matching the
-   source-inspection idiom in ``test_reviewer_routing_dispatch.py`` /
-   ``test_traffic_cop_retired.py`` (the in-``run()`` blocks aren't extractable).
-
-2. **Honest fallback when the advisory hangs/fails.** ``_compose_fallback_reason``
-   builds a deterministic, factual reason from hard signals (``last_error_code`` /
-   ``escalation_trigger_reason`` / ``failure_context.json``) — NEVER the phase's
-   ``failure_language`` (that fabrication produced the misleading "blank white
-   page" message). ``_generate_and_record_advisory`` records it on the fallback
-   path so ``escalation_message`` is populated (not left empty for the UI to
-   show a generic line).
+``_compose_fallback_reason`` builds a deterministic, factual reason from hard
+signals (``last_error_code`` / ``escalation_trigger_reason`` /
+``failure_context.json``) — NEVER the phase's ``failure_language`` (that
+fabrication produced the misleading "blank white page" message). It is recorded
+as ``escalation_message`` the moment an escalation dispatches
+(``_record_escalation_reason``), and is upgraded in place when the escalation
+agent writes its richer ``escalation_summary.json`` — see
+``test_escalation_advisory_agent_owned.py`` for that fold-in contract. (The
+former ``_generate_and_record_advisory`` LLM wrapper and the "generating"
+loader-ordering guards were removed with the orchestrator's direct LLM call.)
 """
 
 import json
@@ -32,8 +22,6 @@ PIPELINE_DIR = os.path.join(REPO_ROOT, "autodev", "pipeline")
 for _p in (PIPELINE_DIR, REPO_ROOT):
     if _p not in sys.path:
         sys.path.insert(0, _p)
-
-_ORCH_SRC = open(os.path.join(PIPELINE_DIR, "orchestrator.py"), encoding="utf-8").read()
 
 
 # ---------------------------------------------------------------------------
@@ -132,96 +120,8 @@ class TestComposeFallbackReason:
         assert sentinel not in msg, "fallback must not surface failure_language as observed reality"
 
 
-# ---------------------------------------------------------------------------
-# Part A — _generate_and_record_advisory records ready / honest-fallback
-# ---------------------------------------------------------------------------
-
-class TestGenerateAndRecordAdvisory:
-
-    def test_ready_path_records_summary(self, tmp_workspace):
-        import orchestrator as orc_module
-        orch, ps_path = _bare_orch(tmp_workspace)
-        orch._generate_escalation_advisory = MagicMock(
-            return_value={"summary": "X failed.", "recommended_action": "Reset Phase"}
-        )
-        ps = {}
-        with patch.object(orc_module, "PHASE_STATE_FILE", ps_path), \
-             patch.object(orc_module, "PROJECT_ARTIFACTS_DIR", tmp_workspace):
-            ret = orch._generate_and_record_advisory(ps)
-        assert ret is not None
-        assert ps["escalation_advisory_status"] == "ready"
-        assert ps["escalation_message"] == "X failed."
-        assert ps["escalation_recommended_action"] == "Reset Phase"
-
-    def test_fallback_path_populates_message(self, tmp_workspace):
-        """Advisory None (hang/fail) → status='fallback' AND a non-empty honest message."""
-        import orchestrator as orc_module
-        orch, ps_path = _bare_orch(tmp_workspace)
-        orch._generate_escalation_advisory = MagicMock(return_value=None)
-        ps = {"last_error_code": "ERR_REVIEWER_CONTRACT_FAILURE",
-              "escalation_trigger_reason": "Reviewer CONTRACT_FAILURE"}
-        with patch.object(orc_module, "PHASE_STATE_FILE", ps_path), \
-             patch.object(orc_module, "PROJECT_ARTIFACTS_DIR", tmp_workspace):
-            ret = orch._generate_and_record_advisory(ps)
-        assert ret is None
-        assert ps["escalation_advisory_status"] == "fallback"
-        assert ps.get("escalation_message"), "fallback must populate escalation_message"
-        assert "log" in ps["escalation_message"].lower()
-
-
-# ---------------------------------------------------------------------------
-# Part A — source-level reorder guards (WAITING_FOR_HUMAN before the advisory)
-# ---------------------------------------------------------------------------
-
-def _slice(start_sub, end_sub):
-    start = _ORCH_SRC.find(start_sub)
-    assert start != -1, f"anchor not found: {start_sub!r}"
-    end = _ORCH_SRC.find(end_sub, start)
-    assert end != -1, f"end anchor not found after {start_sub!r}: {end_sub!r}"
-    return _ORCH_SRC[start:end]
-
-
-class TestDispatchReorderGuards:
-
-    def test_helper_exists(self):
-        assert "def _generate_and_record_advisory" in _ORCH_SRC
-        assert "def _compose_fallback_reason" in _ORCH_SRC
-
-    def test_reviewer_site_transitions_before_advisory(self):
-        # Reviewer-specific anchor: the escalation session key (repo-init uses
-        # ":repo-init-failure", crash uses ":exception-escalation").
-        block = _slice(
-            'f"pipeline:phase-{phase}:{raw_id}:escalation"',
-            "webhook_status = invoke_agent_webhook",
-        )
-        t = block.find('transition_state("WAITING_FOR_HUMAN", "Invoking Escalation Agent")')
-        a = block.find("_generate_and_record_advisory")
-        assert t != -1 and a != -1, "reviewer dispatch must transition + use the advisory helper"
-        assert t < a, "reviewer dispatch must transition to WAITING_FOR_HUMAN BEFORE generating the advisory"
-
-    def test_repo_init_site_transitions_before_advisory(self):
-        block = _slice(
-            '"Repository setup needs your attention"',
-            "webhook_status = invoke_agent_webhook",
-        )
-        t = block.find('transition_state("WAITING_FOR_HUMAN"')
-        a = block.find("_generate_and_record_advisory")
-        assert t != -1 and a != -1, "repo-init dispatch must transition + use the advisory helper"
-        assert t < a, "repo-init dispatch must transition to WAITING_FOR_HUMAN BEFORE generating the advisory"
-
-    def test_crash_site_transitions_before_advisory(self):
-        block = _slice("Escalated after unhandled exception", "except Exception as escalation_err")
-        t = block.find('transition_state(')
-        a = block.find("_generate_and_record_advisory")
-        assert t != -1 and a != -1, "crash handler must transition + use the advisory helper"
-        assert t < a, "crash handler must transition to WAITING_FOR_HUMAN BEFORE generating the advisory"
-
-    def test_sites_do_not_inline_generate_before_transition(self):
-        """No dispatch site should still call the raw _generate_escalation_advisory()
-        inline before the transition (the old advisory-before-panel ordering)."""
-        # The only direct call to the raw method is inside the helper.
-        direct = _ORCH_SRC.count("self._generate_escalation_advisory()")
-        assert direct == 1, (
-            f"expected exactly one direct _generate_escalation_advisory() call "
-            f"(inside _generate_and_record_advisory), found {direct}"
-        )
+# (The former Part A — ``_generate_and_record_advisory`` recording tests and the
+# "generating"-loader reorder guards — was removed with the orchestrator's LLM
+# advisory call. The replacement contract — fallback recorded immediately at
+# dispatch, agent summary promoted when it lands — is pinned by
+# ``test_escalation_advisory_agent_owned.py``.)

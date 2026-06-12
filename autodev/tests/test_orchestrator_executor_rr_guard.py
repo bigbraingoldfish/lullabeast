@@ -1,11 +1,11 @@
 """EX-RR: Executor valid-output guard at retries-exhausted boundary.
 
 When executor_retries >= 3 (the retry cap), the orchestrator must check whether a
-valid executor output is already on disk BEFORE running blame attribution and
-escalating. This handles the 'orphaned session' scenario: a background executor
-session completes correctly after the orchestrator's sentinel poll times out, leaving
-valid output on disk.  Without this guard the valid output is silently ignored and
-the phase escalates unnecessarily, consuming the reviewer opportunity.
+valid executor output is already on disk BEFORE escalating. This handles the
+'orphaned session' scenario: a background executor session completes correctly
+after the orchestrator's sentinel poll times out, leaving valid output on disk.
+Without this guard the valid output is silently ignored and the phase escalates
+unnecessarily, consuming the reviewer opportunity.
 
 Scenario that triggered this fix (pulse / INFRA-E1, Apr 27 2026):
   - Attempt 3 webhook sent at 16:54:19
@@ -13,6 +13,9 @@ Scenario that triggered this fix (pulse / INFRA-E1, Apr 27 2026):
   - Escalation invoked 16:55
   - Executor (background) completed and wrote valid output at 16:57
   - Gate passes on the 16:57 output, but orchestrator had already moved on
+
+(Blame attribution was removed — exhaustion now escalates directly — but the
+salvage-before-escalation ordering this file pins is unchanged.)
 
 FIND-ID: EX-RR
 """
@@ -37,6 +40,9 @@ for _p in (str(PIPELINE_DIR), str(REPO_ROOT)):
 # ---------------------------------------------------------------------------
 
 
+EXHAUSTION_MARKER = "Executor retries exhausted. Escalating."
+
+
 def _source() -> str:
     return ORCHESTRATOR_PATH.read_text(encoding="utf-8")
 
@@ -46,35 +52,34 @@ def _source() -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_executor_retries_exhausted_has_gate_check_before_blame_attribution():
-    """EX-RR: run_executor_output_gate must be called BEFORE blame attribution.
+def test_executor_retries_exhausted_has_gate_check_before_escalation():
+    """EX-RR: run_executor_output_gate must be called BEFORE escalating.
 
     In the 'if retries >= 3' executor block, a gate validity check must appear
-    before the 'write_failure_context / run_blame_attribution' path so that an
-    orphaned background session that completed successfully can still advance to
+    before the 'write_failure_context / escalate' path so that an orphaned
+    background session that completed successfully can still advance to
     reviewer rather than triggering unnecessary escalation.
     """
     src = _source()
 
-    blame_marker = "Executor retries exhausted. Running blame attribution."
     gate_marker = "run_executor_output_gate"
 
-    blame_pos = src.find(blame_marker)
-    assert blame_pos != -1, (
-        f"Expected string '{blame_marker}' not found in orchestrator.py. "
+    exhaustion_pos = src.find(EXHAUSTION_MARKER)
+    assert exhaustion_pos != -1, (
+        f"Expected string '{EXHAUSTION_MARKER}' not found in orchestrator.py. "
         "Has the executor retries-exhausted block been restructured?"
     )
 
     # The gate check should appear within the retries>=3 block, which starts
-    # just before the blame_marker.  Search up to 2000 chars before it.
-    search_window = src[max(0, blame_pos - 2000) : blame_pos]
+    # just before the exhaustion marker.  Search up to 2000 chars before it.
+    search_window = src[max(0, exhaustion_pos - 2000) : exhaustion_pos]
     gate_in_window = gate_marker in search_window
 
     assert gate_in_window, (
         f"run_executor_output_gate() does not appear within 2000 characters before "
-        f"'{blame_marker}' in orchestrator.py.\n"
+        f"'{EXHAUSTION_MARKER}' in orchestrator.py.\n"
         "Fix: inside the 'if retries >= 3' executor block, add a surviving-output "
-        "check BEFORE blame attribution:\n"
+        "check BEFORE escalating:\n"
         "  _ex_rr_sentinel = os.path.join(PROJECT_ARTIFACTS_DIR, 'executor_output.done')\n"
         "  _ex_rr_json    = os.path.join(PROJECT_ARTIFACTS_DIR, 'executor_output.json')\n"
         "  if os.path.exists(_ex_rr_sentinel) and os.path.exists(_ex_rr_json):\n"
@@ -92,13 +97,12 @@ def test_executor_retries_exhausted_advances_to_reviewer_on_valid_output():
     """
     src = _source()
 
-    blame_marker = "Executor retries exhausted. Running blame attribution."
-    blame_pos = src.find(blame_marker)
-    assert blame_pos != -1
+    exhaustion_pos = src.find(EXHAUSTION_MARKER)
+    assert exhaustion_pos != -1
 
-    # Inspect the 2000 chars before the blame attribution call for a
+    # Inspect the 2000 chars before the escalation for a
     # 'current_agent' = 'reviewer' assignment inside the EX-RR guard.
-    window = src[max(0, blame_pos - 2000) : blame_pos]
+    window = src[max(0, exhaustion_pos - 2000) : exhaustion_pos]
 
     # Either a string literal "reviewer" assignment or transition call
     reviewer_routed = '"reviewer"' in window or "'reviewer'" in window
@@ -106,7 +110,7 @@ def test_executor_retries_exhausted_advances_to_reviewer_on_valid_output():
     assert reviewer_routed, (
         "The surviving-output guard in the retries>=3 executor block must route to "
         "'reviewer' when the gate passes.  Ensure self.state['current_agent'] = 'reviewer' "
-        "(or an equivalent transition call) is present before the blame attribution path."
+        "(or an equivalent transition call) is present before the escalation path."
         "(FIND-ID: EX-RR)"
     )
 
@@ -119,11 +123,10 @@ def test_executor_retries_exhausted_resets_retry_counter_on_valid_output():
     """
     src = _source()
 
-    blame_marker = "Executor retries exhausted. Running blame attribution."
-    blame_pos = src.find(blame_marker)
-    assert blame_pos != -1
+    exhaustion_pos = src.find(EXHAUSTION_MARKER)
+    assert exhaustion_pos != -1
 
-    window = src[max(0, blame_pos - 2000) : blame_pos]
+    window = src[max(0, exhaustion_pos - 2000) : exhaustion_pos]
 
     # The counter reset can appear as:
     #   self.state["executor_retries"] = 0

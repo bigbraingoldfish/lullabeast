@@ -1,8 +1,11 @@
 """
-W1-A, W1-B, W1-C: metrics.jsonl row observability counters.
+W1-B, W1-C: metrics.jsonl row observability counters.
 
-Tests verify that blame_fires, escalations, and skill_used are wired into
-the canonical metrics row, replacing the prior hardcoded-zero placeholders.
+Tests verify that escalations and skill_used are wired into the canonical
+metrics row, replacing the prior hardcoded-zero placeholders. (The W1-A
+blame_fires counter was removed with blame attribution — the absence guard
+lives in test_executor_exhaustion_escalates.py; historical rows carrying
+blame fields stay readable by the UI.)
 
 Pattern: source-text presence tests (fast, matching existing codebase style)
 plus one AST check for ordering.
@@ -13,62 +16,6 @@ import ast
 
 _ORCH = pathlib.Path(__file__).parent.parent / "pipeline" / "orchestrator.py"
 _SRC = _ORCH.read_text()
-
-
-# ---------------------------------------------------------------------------
-# W1-A: blame_fires counter
-# ---------------------------------------------------------------------------
-
-def test_blame_fires_not_hardcoded_zero():
-    """Canonical metrics row must not contain the literal 0 for blame_fires."""
-    assert '"blame_fires": 0' not in _SRC, (
-        "blame_fires is still hardcoded to 0 in the metrics row — "
-        "wire _blame_fires counter from phase_state instead."
-    )
-
-
-def test_blame_fires_counter_incremented_after_attribution():
-    """blame_fires must be incremented after every run_blame_attribution() call."""
-    lines = _SRC.splitlines()
-    blame_call_lines = [
-        i for i, ln in enumerate(lines, 1)
-        if "run_blame_attribution()" in ln
-    ]
-    assert blame_call_lines, "run_blame_attribution() not found in orchestrator source."
-
-    # Within 15 lines after the call there must be a blame_fires increment.
-    # Accept both dict-increment form (foo["blame_fires"] = ... + 1) and augmented
-    # assignment (blame_fires += 1), since phase_state is a dict requiring .get().
-    # Window is 15 to accommodate any diagnostic fields (e.g. blame_verdict) written
-    # alongside blame_fires in the same phase_state update block.
-    for call_lineno in blame_call_lines:
-        window = lines[call_lineno : call_lineno + 15]
-        increments = [
-            l for l in window
-            if "blame_fires" in l and ("+=" in l or ("+ 1" in l or "+1" in l))
-        ]
-        assert increments, (
-            f"No blame_fires increment found within 10 lines after "
-            f"run_blame_attribution() at line {call_lineno}. "
-            "Add: phase_state['blame_fires'] = phase_state.get('blame_fires', 0) + 1"
-        )
-
-
-def test_blame_fires_sourced_from_phase_state_in_metrics_row():
-    """Canonical metrics row must source blame_fires from phase_state, not a literal."""
-    # Should find something like: "blame_fires": _ps_m.get("blame_fires", 0)
-    # (not the literal 0 placeholder replaced with a phase_state read)
-    assert "blame_fires" in _SRC
-    lines = _SRC.splitlines()
-    metrics_blame_lines = [
-        ln for ln in lines
-        if "blame_fires" in ln and '"blame_fires"' in ln and "get(" in ln
-    ]
-    assert metrics_blame_lines, (
-        "No 'blame_fires' key sourced via .get() found in orchestrator. "
-        "The metrics row should read blame_fires from phase_state, e.g.: "
-        "\"blame_fires\": _ps_m.get(\"blame_fires\", 0)"
-    )
 
 
 # ---------------------------------------------------------------------------

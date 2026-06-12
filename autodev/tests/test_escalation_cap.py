@@ -334,20 +334,19 @@ class TestResetExecutionEscalationFreshBudget:
     """
     Validates that an operator-driven RESET_EXECUTION restores a fresh executor
     retry budget so the UI attempt chips reset and the next executor invocation
-    is actually re-run (rather than re-entering the `retries >= 3` blame branch).
+    is actually re-run (rather than re-entering the `retries >= 3` exhausted
+    branch, which escalates).
     """
 
     @pytest.fixture
     def tmp_workspace(self, tmp_path):
         return str(tmp_path)
 
-    def test_reset_execution_escalation_zeros_executor_retries_and_blame_history(self, tmp_workspace):
+    def test_reset_execution_escalation_zeros_executor_retries(self, tmp_workspace):
         """After RESET_EXECUTION from the escalation path:
           - phase_state.executor_retries → 0 (fresh budget for the UI chips)
           - self.state.executor_retries → 0 (so the executor branch does not
-            immediately re-enter the retries >= 3 blame block)
-          - phase_state.prior_blame_attributions → []  (so the consecutive-impl
-            cap at orchestrator.py:3870 does not re-fire on the very next failure)
+            immediately re-enter the retries >= 3 exhausted block)
           - escalation_resets is incremented exactly once
         """
         import orchestrator as orc_module
@@ -360,8 +359,7 @@ class TestResetExecutionEscalationFreshBudget:
                 "reviewer_retries": 0,
                 "reviewer_rejected": False,
                 "escalation_resets": 0,
-                "prior_blame_attributions": ["impl", "impl", "impl", "impl"],
-                "last_error_code": "IMPL_BLAME_CAP",
+                "last_error_code": "ERR_TESTS_FAILING",
             }, f)
 
         with (
@@ -398,11 +396,7 @@ class TestResetExecutionEscalationFreshBudget:
         )
         assert orch.state.get("executor_retries") == 0, (
             "self.state.executor_retries must be zeroed so the main loop does not "
-            "immediately re-enter the `retries >= 3` blame branch on the next iteration."
-        )
-        assert ps.get("prior_blame_attributions") == [], (
-            "prior_blame_attributions must be cleared so the consecutive-impl cap "
-            "does not re-fire after a single new failure."
+            "immediately re-enter the `retries >= 3` exhausted branch on the next iteration."
         )
         assert ps.get("escalation_resets") == 1, (
             "escalation_resets must still be incremented exactly once."

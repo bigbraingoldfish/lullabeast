@@ -332,7 +332,7 @@ def test_snapshot_parked_escalation_returns_own_advisory_not_active_project(tmp_
     _write_phase_state(
         proj_active,
         escalation_headline="ACTIVE phase needs input",
-        escalation_advisory_status="generating",
+        escalation_advisory_status="fallback",
         escalation_recommended_action="active action",
         escalation_message="active message",
         escalation_trigger_reason="active reason",

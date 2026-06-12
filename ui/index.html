@@ -1829,7 +1829,6 @@
             escalation_message,
             escalation_recommended_action,
             escalation_advisory_status,
-            waiting_for_human_at,
             last_action,
             escalation_resets,
             nuclear_resets = 0,
@@ -1970,8 +1969,8 @@
                 ? ["Mark Complete — phase branch not yet merged into base"]
                 : [];
 
-            // advisoryText is only used in the ready state; generating/fallback states
-            // render their own distinct UI. Do NOT fall back to escalation_trigger_reason
+            // advisoryText is only used in the ready state; the fallback state
+            // renders its own UI. Do NOT fall back to escalation_trigger_reason
             // here — that's already in the header and duplicating it is what we're fixing.
             const advisoryText = escalation_message || null;
 
@@ -2141,17 +2140,7 @@
                                         <p className="text-slate-500 text-xs pt-2 font-mono">
                                             {counterText}
                                         </p>
-                                        {escalation_advisory_status === "generating" ? (
-                                            // Loader UX: the escalation advisory is generating (≤30s). Reuse the
-                                            // Ideas-chat pending loader (animated backdrop + elapsed timer) so the
-                                            // operator sees the agent is working, not a frozen panel. waiting_for_human_at
-                                            // (set when status flips to "generating") drives the elapsed counter.
-                                            <div className="relative overflow-hidden rounded min-h-[52px] flex items-center gap-2 px-2 py-1.5">
-                                                <PendingBubbleLifeBackdrop />
-                                                <span className="relative z-10 text-sky-400 font-medium text-xs">Reviewing escalation...</span>
-                                                <span className="relative z-10 ml-auto"><ChatElapsedSeconds startTs={waiting_for_human_at} /></span>
-                                            </div>
-                                        ) : escalation_advisory_status === "ready" && advisoryText ? (
+                                        {escalation_advisory_status === "ready" && advisoryText ? (
                                             <div className="space-y-1.5">
                                                 <p className="text-slate-400 text-xs leading-relaxed">
                                                     <span className="text-sky-400 font-medium">Advisory · </span>
@@ -2165,9 +2154,11 @@
                                                 )}
                                             </div>
                                         ) : (
-                                            // Fallback: the advisory hung/failed. escalation_message now carries an
-                                            // honest, deterministic reason (orchestrator _compose_fallback_reason);
-                                            // render it, falling back to the generic line only if it is empty.
+                                            // Fallback: the deterministic reason recorded at dispatch
+                                            // (orchestrator _compose_fallback_reason). It upgrades to the
+                                            // escalation agent's "ready" advisory in place when
+                                            // escalation_summary.json lands; render the generic line only
+                                            // if the message is empty.
                                             <p className="text-slate-400 text-xs leading-relaxed italic">
                                                 {escalation_message
                                                     ? escalation_message
@@ -8893,8 +8884,9 @@
                 // Escalation advisory (left). Read from the snapshot's escalation_* fields,
                 // which the snapshot endpoint already exposes for THIS entry's project; the
                 // right-rail command panel is rendered with showAdvisory={false} so it isn't
-                // shown twice.
-                const advGenerating = snap && snap.escalation_advisory_status === 'generating';
+                // shown twice. escalation_message is populated the instant the escalation
+                // dispatches (deterministic reason) and upgrades in place when the
+                // escalation agent's summary lands (status flips to "ready").
                 const advMsg = snap && snap.escalation_message;
                 const advAction = snap && snap.escalation_recommended_action;
                 const advLoops = (snap && snap.escalation_resets) || 0;
@@ -8922,19 +8914,13 @@
                         {(kind === 'escalation') && (
                             <div className="rounded-md border border-orange-500/40 bg-[#1a1410]/60 p-3 space-y-2">
                                 <p className="header-text text-[11px] text-orange-300/80 font-mono">Escalation loops {advLoops}/3</p>
-                                {advGenerating ? (
-                                    <p className="header-text text-xs text-sky-300">Reviewing escalation…</p>
-                                ) : (
-                                    <>
-                                        <p className="text-sm text-slate-300 leading-relaxed">
-                                            {advMsg || 'This phase needs your input. See the pipeline log for full context.'}
-                                        </p>
-                                        {advAction && (
-                                            <p className="text-xs text-slate-400 leading-relaxed">
-                                                <span className="text-emerald-400 font-medium">Suggested · </span>{advAction}
-                                            </p>
-                                        )}
-                                    </>
+                                <p className="text-sm text-slate-300 leading-relaxed">
+                                    {advMsg || 'This phase needs your input. See the pipeline log for full context.'}
+                                </p>
+                                {advAction && (
+                                    <p className="text-xs text-slate-400 leading-relaxed">
+                                        <span className="text-emerald-400 font-medium">Suggested · </span>{advAction}
+                                    </p>
                                 )}
                             </div>
                         )}
@@ -9156,7 +9142,6 @@
                                 escalation_message={escalationMsg}
                                 escalation_recommended_action={hubRecommendedAction}
                                 escalation_advisory_status={hubAdvisoryStatus}
-                                waiting_for_human_at={(snapshot && snapshot.waiting_for_human_at) || null}
                                 escalation_resets={hubEscalationResets}
                                 nuclear_resets={hubNuclearResets}
                                 executor_output_exists={hubExecutorOutputExists}
@@ -10472,7 +10457,6 @@
                                 escalation_message={pState.escalation_message}
                                 escalation_recommended_action={pState.escalation_recommended_action}
                                 escalation_advisory_status={pState.escalation_advisory_status}
-                                waiting_for_human_at={pState.waiting_for_human_at}
                                 last_action={pState.last_action}
                                 escalation_resets={pState.escalation_resets || 0}
                                 nuclear_resets={pState.nuclear_resets || 0}

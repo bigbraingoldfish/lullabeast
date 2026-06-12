@@ -64,7 +64,6 @@ def _drive_writer(
         "planner_tokens_acc": {},
         "executor_tokens_acc": {},
         "reviewer_tokens_acc": {},
-        "blame_fires": 0,
         "escalations": 0,
         "skill_injected": "core-logic",
     }))

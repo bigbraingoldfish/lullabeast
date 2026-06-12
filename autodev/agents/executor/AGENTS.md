@@ -124,12 +124,12 @@ Read `pipeline-project/.autodev/pipeline/phase_state.json` to get `executor_retr
 Append a single JSON line (no trailing newline issues — just `\n`):
 
 ```json
-{"ts": "<ISO 8601 UTC>", "phase": "<phase_raw_id>", "goal": "<detail from current_phase.json>", "executor_attempts": <int>, "reviewer_passes": <int>, "blame_fires": 0, "escalations": 0, "duration_seconds": null}
+{"ts": "<ISO 8601 UTC>", "phase": "<phase_raw_id>", "goal": "<detail from current_phase.json>", "executor_attempts": <int>, "reviewer_passes": <int>, "escalations": 0, "duration_seconds": null}
 ```
 
 - `executor_attempts` = `executor_retries + 1` (from `phase_state.json`, default 0 if absent)
 - `reviewer_passes` = `reviewer_retries + 1` (from `phase_state.json`, default 0 if absent)
-- `blame_fires` and `escalations`: use 0 unless you have definitive evidence otherwise
+- `escalations`: use 0 unless you have definitive evidence otherwise
 - `duration_seconds`: use `null` unless you can compute it from timestamps
 
 **Sentinel ordering is strict:** phase archive (under `.autodev/pipeline/phases/{id}.md`) FIRST → `.autodev/pipeline/metrics.jsonl` SECOND → `.autodev/pipeline/executor_output.done` LAST. The reviewer gate checks for these artifacts before evaluating your output; missing either causes a MISSING_ARTIFACTS re-invocation.
