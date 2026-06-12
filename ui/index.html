@@ -471,6 +471,8 @@
                 "Executor Error: the executor reported a status other than 'complete'. Discarded work. Attempting retry.",
             ERR_TDD_COVERAGE_MISMATCH:
                 "Executor Error: the tests the plan required are missing from the execution output (TDD coverage mismatch). Discarded work. Attempting retry.",
+            ERR_FILE_MISSING:
+                "Agent Error: the agent finished without producing its required output file (e.g. planner_output.json, executor_output.json, or reviewer_output.json), so its work could not be evaluated.",
             ERR_MANIFEST_FILE_MISSING:
                 "Executor Error: a file listed in the change manifest was not found on disk. Discarded work. Attempting retry.",
             ERR_PATH_TRAVERSAL:
