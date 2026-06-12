@@ -2935,10 +2935,28 @@ class Orchestrator:
         role, and the role's ``{role}_activity.stamp`` path (for verify_session_stopped).
         Called at every planner/executor/reviewer invocation; overwritten each time, so
         it always reflects the last-invoked (i.e. in-flight) agent. Cleared by
-        :meth:`_abort_active_agent_session`. See Phase 9 (zombie-session fix)."""
+        :meth:`_abort_active_agent_session`. See Phase 9 (zombie-session fix).
+
+        Also stamps the role's configured model into ``phase_state.models_used``
+        (MON-1 — the metrics row copies it so the dashboard's Run Metrics model
+        badge can show what ran the phase, mirroring ``skill_injected``).
+        Best-effort telemetry: any failure is logged, never blocks the invocation."""
         self._active_agent_role = role
         self._active_agent_session_key = session_key
         self._active_agent_stamp = os.path.join(PROJECT_ARTIFACTS_DIR, f"{role}_activity.stamp")
+        try:
+            _model = self._get_agent_model(role)
+            if _model:
+                _ps = self.read_phase_state()
+                _models = _ps.get("models_used")
+                if not isinstance(_models, dict):
+                    _models = {}
+                if _models.get(role) != _model:
+                    _models[role] = _model
+                    _ps["models_used"] = _models
+                    self.write_phase_state_atomic(_ps)
+        except Exception as e:
+            print(f"[WARN] could not record model for {role}: {e}")
         # Pre-seed responseUsage="full" on the session entry before the webhook
         # fires so the run records a token-usage + cost line on every reply.
         self._preset_session_response_usage(role, session_key)
@@ -3451,8 +3469,29 @@ class Orchestrator:
         map under ``_TOKENS_LEGACY_SESSION_KEY`` so its contribution survives.
         Both keys are dropped by ``reset_phase``'s fresh phase_state dict, so
         the totals stay per-phase and zero on genuine phase advance.
+
+        Degraded-capture signal (observability integrity finding 1): an
+        attempt whose session JSONL is missing — or whose session path never
+        resolved (``jsonl_path`` is None) — contributes silent zeros that are
+        indistinguishable from a genuinely free attempt, the same observable
+        failure as the historic usage-field-name bug. Such an attempt latches
+        ``phase_state.token_capture_degraded`` (copied onto the canonical
+        metrics row, never cleared mid-phase — the zeros are already baked
+        into the totals) and emits one ``token_capture_warning`` event per
+        degraded attempt so the activity feed shows it live.
         """
         _ps = self.read_phase_state()
+        if not jsonl_path or not os.path.exists(jsonl_path):
+            _ps["token_capture_degraded"] = True
+            _write_pipeline_event(
+                "token_capture_warning",
+                self.state.get("current_phase_raw_id", ""),
+                role,
+                {
+                    "session_jsonl": jsonl_path or None,
+                    "reason": "no_session_path" if not jsonl_path else "missing_session_file",
+                },
+            )
         _sessions = _ps.get(f"{role}_tokens_sessions")
         if not isinstance(_sessions, dict):
             _sessions = {}
@@ -5081,6 +5120,9 @@ class Orchestrator:
             "reviewer_passes": reviewer_passes,
             "escalations": ps_m.get("escalations", 0),    # W1-B
             "skill_used": ps_m.get("skill_injected"),      # W1-C
+            # MON-1 — {role: model} stamped per invocation by
+            # _record_active_agent; null for pre-deploy rows.
+            "models_used": ps_m.get("models_used"),
             "planner_tokens": planner_tok,                 # W1-G
             "executor_tokens": executor_tok,               # W1-G
             "reviewer_tokens": reviewer_tok,               # W1-G
@@ -5100,6 +5142,11 @@ class Orchestrator:
             "escalation_resets": ps_m.get("escalation_resets", 0),
             "nuclear_resets": ps_m.get("nuclear_resets", 0),
             "reviewer_unverified_retries": ps_m.get("reviewer_unverified_retries", 0),
+            # METRICS-E1 — durable degraded-capture marker: True when any
+            # attempt this phase had a missing/unresolved session JSONL, so
+            # the token fields above may silently under-count (latched by
+            # _accumulate_role_tokens; absent pre-deploy rows read as False).
+            "token_capture_degraded": bool(ps_m.get("token_capture_degraded", False)),
             "reachability_summary": ps_m.get("last_reachability_summary"),
             # Phase 3 (gate-feedback methodology) — compact copy of the demoted
             # gate warnings, stashed onto phase_state by _emit_gate_warnings on

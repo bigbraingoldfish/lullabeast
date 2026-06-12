@@ -11,13 +11,15 @@ is no JS test runner in this repo. Mirrors the pattern in
 ``test_p0_stage_h_ui_phase_dropdown.py`` and ``test_p0_ideas_screen_tab.py``.
 
 Pinned:
-- the heading "Behavioral Verification:" literal renders
+- the behavioral block renders inside the unified "Verification" section
+  (monitor redesign 2026-06-12 merged the former standalone "Behavioral
+  Verification:" heading into one section with the exit criteria)
 - all three sub-fields are referenced
 - the section renders only when ``phase.behavioral_verification`` is truthy
   (no "undefined" leakage for pre-P0 phases the orchestrator still reads
   transitionally)
-- the three user-facing labels match the labels the converter writes into
-  the roadmap and the parser extracts
+- the three user-facing row labels track the roadmap-generation skill's
+  fields one-to-one
 """
 
 from pathlib import Path
@@ -32,16 +34,21 @@ def _read_index() -> str:
 
 
 def test_phase_dropdown_renders_behavioral_verification_block():
-    """The literal heading "Behavioral Verification:" must appear in
-    ui/index.html. Catches a refactor that removes the new subsection
-    entirely — without this assertion the dropdown silently regresses
-    to its pre-Stage-J state."""
+    """The behavioral block renders inside the unified VERIFICATION section
+    (monitor redesign: one 'Verification' header covers exit criteria + the
+    Stage J fields). Catches a refactor that removes the subsection entirely
+    — without this assertion the dropdown silently regresses to its
+    pre-Stage-J state."""
     body = _read_index()
-    assert "Behavioral Verification:" in body, (
-        "ui/index.html must render the 'Behavioral Verification:' heading "
-        "inside the expanded phase block. The data is available on every "
-        "phase object served by /api/roadmap since Stage D — the JSX has to "
+    assert ">Verification</" in body, (
+        "ui/index.html must render the 'Verification' section header inside "
+        "the expanded phase block. The data is available on every phase "
+        "object served by /api/roadmap since Stage D — the JSX has to "
         "consume it."
+    )
+    i = body.index(">Verification</")
+    assert "behavioral_verification.user_observable" in body[i:i + 3000], (
+        "the behavioral fields must live inside the Verification section"
     )
 
 
@@ -92,7 +99,10 @@ def test_phase_dropdown_bv_section_uses_user_facing_labels():
     phrasing on the Ideas screen and a different one on the pipeline
     screen — confusing at best, contract-breaking at worst."""
     body = _read_index()
-    for label in ("User-observable:", "How we'll check:", "If this fails, you see:"):
+    # Monitor redesign (2026-06-12): the labels render as left-column row
+    # labels — no trailing colon, and "If this fails, you see:" shortened to
+    # "If this fails" per the operator's mock. Still one label per skill field.
+    for label in ("User-observable", "How we'll check", "If this fails"):
         assert label in body, (
             f"ui/index.html must render the user-facing label {label!r} "
             "inside the Behavioral Verification subsection. The label "

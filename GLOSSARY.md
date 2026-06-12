@@ -112,3 +112,16 @@ There is no automatic way to increment the cap. It can be manually decremented b
 - The escalation agent receives a **permanent workspace skill** at `OPENCLAW_ROOT/workspace-escalation/skills/escalation-summary/SKILL.md`, deployed by `install.sh`. It instructs the agent to write a structured `escalation_summary.json` to the project directory so the dashboard advisory block can show AI-generated context rather than the raw error code.
 - Workspace skills are **wiped and recreated** before each injection so no stale skill carries between phases.
 - Orchestrator logs lines like **`[SKILL] Status=none_mapped`** when the subsystem has no YAML mapping, skills are disabled in `openclaw.json`, the skill file is missing, PyYAML is missing, or similar — **not necessarily an error**; it means that phase ran without an injected skill file.
+
+---
+
+## Cost & token metrics
+
+- **Where the numbers come from** — each completed phase writes one durable metrics row carrying per-role (`planner`/`executor`/`reviewer`) token counts and cost, summed from the OpenClaw session files of every attempt. Models that report no usage (typical for local models) produce zeros.
+- **Zero-suppression** — every cost/token surface hides at 0, so local-model runs stay clean: a missing Cost card or token figure means "nothing reported," not "nothing happened."
+- **Token total vs. class breakdown** — the headline token figure is `input + output + cache reads + cache writes`. Cache reads usually dominate it but bill far cheaper than fresh input; the "in X · out Y · cache Z" sub-lines and tooltips show that split.
+- **Per-role splits** — the Pipeline Monitor's expanded phase rows split both cost *and* tokens by planner / executor / reviewer in the **By agent** card (tokens⇄$ toggle; the $ view hides when no cost was captured), alongside a **By token type** card. Run-level splits open from the roadmap header's **Total cost / Total tokens** pills.
+- **Skill / model badges** — the expanded phase's Run Metrics header shows which skill was injected and which model(s) ran the phase (hover a model badge for the full provider id and the roles it served). Model capture starts with new runs; older phases show no badge.
+- **Queue metric chips (METRICS column)** — each queue row shows quiet cost and token chips (totals only, e.g. `$1.20` / `11.4M tok`). Clicking a chip opens that row's expansion in a **metrics breakout**: summary cards plus a per-phase cost/token table — the same table the Pipeline Monitor's completion report uses.
+- **View report (COMPLETED rows)** — opens the project's full completion report (summary cards, per-phase table, `completion_report.md`) from the queue at any time, even after the queue has moved on to other projects.
+- **`token_capture_warning`** (activity feed) — an attempt's token usage could not be read (its session file was missing), so that phase's token totals under-count. The phase's metrics row carries `token_capture_degraded: true` as the durable marker.

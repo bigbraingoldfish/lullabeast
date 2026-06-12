@@ -43,41 +43,36 @@ def window(html, anchor, size=1800):
 
 
 def test_run_so_far_renders_tokens():
-    """3-B — the RoadmapPanel 'Run so far' line surfaces ``total_tokens`` so total
-    spend-in-tokens is visible live during a run (it rides the @5s metrics poll).
-    Window widened from 600 when the line gained the click-to-toggle breakdown
-    spans (the token segment now sits after the cost-toggle markup)."""
-    body = window(load_html(), "Run so far:", 1800)
+    """3-B — the run-total token figure stays visible live during a run (it
+    rides the @5s metrics poll). Surface moved from the prose 'Run so far'
+    line to the header strip's TOTAL TOKENS pill (monitor redesign
+    2026-06-12); the data contract is unchanged."""
+    body = window(load_html(), 'data-testid="roadmap-header-strip"', 4500)
     assert "total_tokens" in body, (
-        "the Run-so-far line must surface metricsSummary.total_tokens"
+        "the header strip must surface metricsSummary.total_tokens"
     )
 
 
 def test_run_so_far_click_toggles_breakdowns():
-    """The 'Run so far' cost and token values are hidden toggles: clicking swaps
-    the total for its breakdown (per-role cost; input/output/cache token classes).
-    The toggle lives on the header line — NOT in the phase dropdown, where any
-    click collapses the expansion — so the dropdown renders its split inline
-    instead (see test_phase_dropdown_inline_breakdowns)."""
-    body = window(load_html(), "Run so far:", 1800)
+    """The cost and token totals are hidden toggles: detail renders only on
+    click (monitor redesign — the TOTAL COST / TOTAL TOKENS pills expand the
+    by-agent / by-type split cards below the strip; the totals themselves
+    stay zero-suppressed)."""
+    body = window(load_html(), 'data-testid="roadmap-header-strip"', 4500)
     for state in ("setShowRunCostSplit", "setShowRunTokenSplit"):
-        assert state in body, f"Run-so-far line must wire the {state} toggle"
-    # The split strings are computed just above the <p> (fmtCostBreakdown /
-    # fmtTokenBreakdown into runCostSplit / runTokenSplit) and consumed here.
-    assert "runCostSplit" in body and "runTokenSplit" in body
+        assert state in body, f"the header strip must wire the {state} toggle"
 
 
 def test_phase_dropdown_inline_breakdowns():
-    """The expanded-phase Cost/Tokens rows render their splits INLINE at the same
-    font size (muted slate-500), not as a smaller indented sub-block — the old
-    ``pl-3 text-[10px]`` sub-divs are gone from the phaseMeta detail."""
+    """3-B/3-C in the expansion: the per-phase token-class and role-cost data
+    render in the BY TOKEN TYPE / BY AGENT breakout cards (monitor redesign —
+    layout pinned in tests/test_ui_monitor_redesign.py). This keeps the data
+    contract: both splits are consumed from the phaseMeta row."""
     html = load_html()
-    tokens_row = window(html, "phaseMeta.tokens_total > 0", 1200)
-    assert "fmtTokenBreakdown(phaseMeta.tokens_breakdown)" in tokens_row
-    assert "text-[10px]" not in tokens_row, "token split must be same-size inline"
-    cost_row = window(html, "phaseMeta.cost_total > 0", 1200)
-    assert "fmtCostBreakdown(phaseMeta.planner_cost" in cost_row
-    assert "text-[10px]" not in cost_row, "cost split must be same-size inline"
+    block = window(html, 'data-testid="phase-breakout-cards"', 4500)
+    for key in ("planner_cost", "executor_cost", "reviewer_cost"):
+        assert f"phaseMeta.{key}" in block, f"BY AGENT $ view must consume phaseMeta.{key}"
+    assert "phaseClassRows" in block, "BY TOKEN TYPE must consume the class breakdown"
 
 
 def test_completion_panel_total_tokens():
@@ -92,10 +87,19 @@ def test_completion_panel_total_tokens():
 
 def test_completion_per_phase_token_column():
     """3-B — the completion per-phase table gains a Tokens column, gated like the
-    Cost column (``hasTokenColumn`` mirrors ``hasCostColumn``)."""
-    body = extract_function(load_html(), "PipelineCompletePanel")
-    assert "hasTokenColumn" in body, "per-phase Tokens column gate missing"
-    assert "tokens_total" in body
+    Cost column (``hasTokenColumn`` mirrors ``hasCostColumn``). The table markup
+    moved into the shared ``PhaseMetricsTable`` (METRICS-E3 — the Queue breakout
+    renders the same component), so the gates are asserted there and the panel
+    is asserted to render it."""
+    html = load_html()
+    table_body = extract_function(html, "PhaseMetricsTable")
+    assert table_body is not None, "shared PhaseMetricsTable not found"
+    assert "hasTokenColumn" in table_body, "per-phase Tokens column gate missing"
+    assert "tokens_total" in table_body
+    panel_body = extract_function(html, "PipelineCompletePanel")
+    assert "PhaseMetricsTable" in panel_body, (
+        "completion panel must render the shared per-phase table"
+    )
 
 
 def test_roadmap_panel_per_phase_role_cost():
