@@ -2159,13 +2159,27 @@
                                             // escalation agent's "ready" advisory in place when
                                             // escalation_summary.json lands; render the generic line only
                                             // if the message is empty.
-                                            <p className="text-slate-400 text-xs leading-relaxed italic">
-                                                {escalation_message
-                                                    ? escalation_message
-                                                    : (escalation_advisory_status === "fallback"
-                                                        ? "Automated review unavailable — the analysis could not be generated. See the pipeline log for full context."
-                                                        : "See the pipeline log for details.")}
-                                            </p>
+                                            <div className="space-y-1.5">
+                                                <p className="text-slate-400 text-xs leading-relaxed italic">
+                                                    {escalation_message
+                                                        ? escalation_message
+                                                        : (escalation_advisory_status === "fallback"
+                                                            ? "Automated review unavailable — the analysis could not be generated. See the pipeline log for full context."
+                                                            : "See the pipeline log for details.")}
+                                                </p>
+                                                {/* Subtle hint, not a loader (the "generating" status stays
+                                                    retired): while WAITING_FOR_HUMAN the poll loop still
+                                                    promotes a landing escalation_summary.json, so this
+                                                    fallback text may upgrade in place. */}
+                                                {escalation_advisory_status === "fallback" && humanWait && (
+                                                    <p className="text-slate-500 text-[11px] leading-relaxed flex items-center gap-1.5">
+                                                        <span className="inline-block w-1.5 h-1.5 rounded-full bg-sky-400 flex-shrink-0"
+                                                            style={{ animation: 'pulse 2s cubic-bezier(0.4,0,0.6,1) infinite' }}
+                                                        />
+                                                        Escalation agent is reviewing — this may update shortly.
+                                                    </p>
+                                                )}
+                                            </div>
                                         )}
                                         {/* P1 Stage G1: raw internal reason, demoted out of the headline into the disclosure. */}
                                         {escalation_trigger_reason && (

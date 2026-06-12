@@ -140,6 +140,31 @@ def test_monitor_button_set_unchanged_after_defs_migration(html):
     )
 
 
+# ── Fallback pulse cue: the agent may still upgrade the advisory ─────────────
+
+def test_fallback_shows_reviewing_pulse_cue_while_waiting(html):
+    """While the advisory is still the deterministic fallback AND the pipeline is
+    WAITING_FOR_HUMAN, the escalation agent's escalation_summary.json may still
+    land (the WAITING_FOR_HUMAN poll loop promotes it in place) — a subtle pulse
+    cue tells the operator the text may upgrade. A tiny hint next to the fallback
+    text, NOT a loader state: the retired "generating" status must not return."""
+    block = _escalation_panel_block(html)
+    cue_pos = block.find("Escalation agent is reviewing")
+    assert cue_pos != -1, "fallback branch must carry the reviewing pulse cue"
+    window = block[max(0, cue_pos - 700):cue_pos]
+    # Gated on fallback status + WAITING_FOR_HUMAN (humanWait) — once the queue
+    # auto-advanced or the escalation resolved, the cue would be a lie.
+    assert '"fallback"' in window and "humanWait" in window, (
+        "the cue must render only while status is 'fallback' and the pipeline is "
+        "WAITING_FOR_HUMAN (the summary can still land and promote)"
+    )
+    # Subtle pulse dot, reusing the existing animation idiom — not a spinner.
+    assert "pulse" in window, "the cue must use the existing pulse animation idiom"
+    assert 'escalation_advisory_status === "generating"' not in block, (
+        "the cue must not reintroduce the retired 'generating' loader state"
+    )
+
+
 # ── The general header Stop kill-switch survives the dead-code sweep ──────────
 
 def test_general_stop_control_retains_api_stop_caller(html):

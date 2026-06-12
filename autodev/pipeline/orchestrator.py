@@ -139,6 +139,26 @@ def _infra_backstop_seconds(env_name: str, default_str: str) -> int:
     return max(1, v)
 
 
+def _escalation_summary_wait_seconds() -> int:
+    """Parse the escalation-summary auto-advance hold budget from env.
+
+    Bounds how long the main escalation dispatch holds a queue auto-advance
+    for the escalation agent's ``escalation_summary.json`` write — the
+    advance repoints the pipeline-project symlink out from under the
+    in-flight write (see ``_wait_for_escalation_summary_before_advance``).
+
+    Parsing mirrors :func:`_stall_timeout_seconds` — garbage falls back to
+    the default (300) — except the minimum clamp is **0, not 1**: 0 is a
+    meaningful operator value here (disable the hold entirely).
+    """
+    raw = (os.environ.get("AUTODEV_ESCALATION_SUMMARY_WAIT") or "").strip()
+    try:
+        v = int(raw or "300")
+    except ValueError:
+        v = 300
+    return max(0, v)
+
+
 # Pipeline state directory. Resolved via env_resolvers: OPENCLAW_ROOT is the
 # OpenClaw hub, AUTODEV_PIPELINE_ROOT is the pipeline state directory. Operators
 # who want state to live next to OpenClaw set AUTODEV_PIPELINE_ROOT=$OPENCLAW_ROOT
@@ -330,6 +350,31 @@ def _atomic_temp_dir_for_project_writes():
     except OSError:
         pass
     return AUTODEV_PIPELINE_ROOT
+
+
+def _write_escalation_failed_atomic(target_dir, error_data):
+    """Atomically write ``escalation_failed.json`` into ``target_dir``.
+
+    House atomic-write rule (mkstemp + os.replace): the file is the operator's
+    escalation-delivery-failure diagnostic — a reader must never observe a
+    torn write. Shared by the three escalation-failure sites (repo-init
+    dispatch, main dispatch, crash handler). Never raises: every caller is
+    already on a failure path, and a diagnostics-write failure must not mask
+    the original error or derail the HALTED_SILENT transition that follows.
+    """
+    tmp_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(dir=target_dir, prefix="escalation_failed_")
+        with os.fdopen(fd, "w") as f:
+            json.dump(error_data, f)
+        os.replace(tmp_path, os.path.join(target_dir, "escalation_failed.json"))
+    except Exception as e:
+        print(f"[ERROR] Could not write escalation_failed.json: {e}")
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 
 # Glob patterns for mkstemp atomic-write temp files that may be stranded if the
@@ -2223,6 +2268,72 @@ class Orchestrator:
         if not queue_data.get("queue") or queue_data.get("queue_mode", "auto") != "auto":
             return False
         return self._select_next_queue_project()
+
+    def _wait_for_escalation_summary_before_advance(self, poll_interval=2.0):
+        """Hold a queue auto-advance until the escalation agent's advisory lands.
+
+        The escalation agent writes ``escalation_summary.json`` through its
+        workspace ``pipeline-project`` symlink (OpenClaw sandboxes the write
+        tool to the workspace — absolute-path writes are silently discarded).
+        ``_select_next_queue_project`` repoints that symlink, so advancing
+        while the agent's turn is in flight sends the write into the WRONG
+        project and the parked row keeps the deterministic fallback message
+        forever. This bounded wait closes that race; only a hung agent (the
+        budget expiring) still leaves the fallback in place.
+
+        Engages only when the advance would actually happen — queue_mode
+        "auto" with a non-empty queue, the same read
+        ``_queue_after_park_maybe_advance`` performs. In manual /
+        single-project mode the orchestrator enters the WAITING_FOR_HUMAN
+        poll loop, which already promotes a landed summary within one cycle,
+        so waiting here would add nothing.
+
+        Cost note: on this deployment the escalation agent (qwen3.6-27b) and
+        the pipeline agents (darkqwen3.6-27b-mtp) share one single-GPU
+        llama-swap server, so the next project's planner cannot make token
+        progress during the escalation turn anyway — the hold costs ~zero
+        wall-clock; the budget only bounds a hung agent. Budget via env
+        ``AUTODEV_ESCALATION_SUMMARY_WAIT`` (default 300 s, 0 disables).
+
+        A pending STOP breaks the wait early but is NOT consumed here — the
+        loop-top ``_check_stop_requested()`` owns sentinel consumption.
+
+        Returns True when the summary landed and was promoted, False
+        otherwise (disabled, not auto-advancing, stop pending, or timeout —
+        the caller advances with the fallback advisory either way).
+        """
+        wait_budget = _escalation_summary_wait_seconds()
+        if wait_budget <= 0:
+            return False
+        try:
+            queue_data = self._read_queue()
+        except Exception:
+            # Corrupt queue: add no new failure mode here — the
+            # _queue_after_park_maybe_advance call right after owns surfacing it.
+            return False
+        if not queue_data.get("queue") or queue_data.get("queue_mode", "auto") != "auto":
+            return False
+        stop_file = os.path.join(PROJECT_ARTIFACTS_DIR, "pipeline_stop_requested")
+        deadline = time.time() + wait_budget
+        print(
+            f"[ADVISORY] Holding queue auto-advance up to {wait_budget}s for "
+            f"escalation_summary.json (poll every {poll_interval}s)"
+        )
+        while True:
+            if self._promote_agent_escalation_summary():
+                print("[ADVISORY] Escalation summary landed — promoted before queue advance.")
+                return True
+            if os.path.exists(stop_file):
+                print("[ADVISORY] Stop requested — abandoning the summary wait.")
+                return False
+            if time.time() >= deadline:
+                break
+            time.sleep(poll_interval)
+        print(
+            f"[ADVISORY] escalation_summary.json did not land within {wait_budget}s — "
+            "advancing with the fallback advisory."
+        )
+        return False
 
     def _escalation_poll_roots(self):
         """Project dirs that may contain escalation_output (active symlink + parked ESCALATION rows)."""
@@ -5341,11 +5452,7 @@ class Orchestrator:
                         "gate": "repo_init_check",
                         "original_failure_reason": failure_context
                     }
-                    try:
-                        with open(os.path.join(fallback_dir, "escalation_failed.json"), "w") as f:
-                            json.dump(error_data, f)
-                    except Exception as write_err:
-                        print(f"[ERROR] Could not write escalation_failed.json: {write_err}")
+                    _write_escalation_failed_atomic(fallback_dir, error_data)
                     _write_run_summary("HALTED_SILENT", "Escalation delivery failed after repo init failure")  # W2-B
                     self.transition_state("HALTED_SILENT", "Escalation delivery failed after repo init failure")
                     self._queue_update_active_entry(
@@ -6937,8 +7044,7 @@ class Orchestrator:
                                     "gate": "escalation",
                                     "original_failure_reason": self.state.get("last_action")
                                 }
-                                with open(os.path.join(PROJECT_ARTIFACTS_DIR, "escalation_failed.json"), "w") as f:
-                                    json.dump(error_data, f)
+                                _write_escalation_failed_atomic(PROJECT_ARTIFACTS_DIR, error_data)
                                 _write_run_summary("HALTED_SILENT", "Escalation delivery failed")  # W2-B
                                 self.transition_state("HALTED_SILENT", "Escalation delivery failed")
                                 self._queue_update_active_entry(
@@ -6946,6 +7052,17 @@ class Orchestrator:
                                     {"failed_at": datetime.now(timezone.utc).isoformat()},
                                 )
                                 break
+                        if webhook_status == "SUCCESS":
+                            # Hold the auto-advance for the in-flight agent's
+                            # advisory: _select_next_queue_project repoints the
+                            # pipeline-project symlink, and the agent writes
+                            # escalation_summary.json through that symlink
+                            # (OpenClaw write sandbox) — advancing now would send
+                            # the write into the wrong project. The dispatch just
+                            # cleared any stale summary, so any appearance is
+                            # fresh (no mtime guard needed). Bounded + promoting;
+                            # no-op outside auto-queue mode — see the helper.
+                            self._wait_for_escalation_summary_before_advance()
                         if self._queue_after_park_maybe_advance():
                             # Phase-8 re-init: the auto-advance just activated a
                             # fresh-start project — resolve its phase + capture
@@ -7158,11 +7275,7 @@ class Orchestrator:
                     "exception": exc_description,
                     "escalation_error": str(escalation_err),
                 }
-                try:
-                    with open(os.path.join(OPENCLAW_ROOT, "escalation_failed.json"), "w") as f:
-                        json.dump(error_data, f)
-                except Exception:
-                    pass
+                _write_escalation_failed_atomic(OPENCLAW_ROOT, error_data)
                 self.transition_state(
                     "HALTED_SILENT",
                     f"HALTED after unhandled exception and escalation failure: {exc_description}",
