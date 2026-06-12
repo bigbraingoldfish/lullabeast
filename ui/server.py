@@ -5796,6 +5796,114 @@ async def post_ideas_prd_section_revert(idea_id: str, request: Request):
     return {"section_key": section_key, "content": prev_trim}
 
 
+def _append_operator_edit_to_conversation_log(idea_dir: Path, title: str, ts: str) -> None:
+    """Append an '## Operator Edit' block to conversation_log.md (durable history).
+
+    Silent no-op when the log does not exist yet (pre-turn-1 edge: the
+    pending_system_events breadcrumb alone suffices; the log is bootstrapped
+    from chat pairs at the next send and operator edits are not turns).
+    """
+    log_path = idea_dir / "conversation_log.md"
+    if not log_path.exists():
+        return
+    existing = log_path.read_text(encoding="utf-8")
+    block = f"\n## Operator Edit ({ts})\n\nManually edited section: {title}\n"
+    _atomic_write_file(str(log_path), existing + block)
+
+
+@app.put("/api/ideas/{idea_id}/prd-section")
+async def put_ideas_prd_section(idea_id: str, request: Request):
+    """Manually edit one canonical PRD section without an agent turn.
+
+    Body: {"section_key": str, "content": str, "base_content"?: str}.
+    ``content`` is the new section body ("" clears the body, heading kept);
+    optional ``base_content`` is the body the client loaded — a mismatch with
+    the current on-disk body returns 409 with the current body so the UI can
+    offer a reload (concurrent-tab guard).
+
+    Refuses with 409 while an agent turn is in flight (trailing pending
+    assistant message in session.json) — the agent would overwrite the edit.
+
+    Snapshots prd_draft.previous.md BEFORE writing, so the existing section
+    diff/revert UI treats a manual edit exactly like an agent write
+    ("previous" = state before the most recent write — this intentionally
+    replaces the prior agent-turn diff).
+
+    Breadcrumb: appends to session.json's ``pending_system_events`` (drained
+    into the next chat turn's [SYSTEM EVENTS] block and cleared only after a
+    successful turn) and an '## Operator Edit' note in conversation_log.md,
+    so the agent never "fixes" the file back toward its own last reply.
+    """
+    config = load_config()
+    body = await request.json()
+
+    section_key = (body.get("section_key") or "").strip()
+    if not section_key:
+        raise HTTPException(status_code=422, detail="Body must contain {section_key: str}")
+    title = _PRD_SLUG_TO_TITLE.get(section_key)
+    if title is None:
+        raise HTTPException(status_code=422, detail="Unknown section_key")
+
+    content = body.get("content")
+    if not isinstance(content, str):
+        raise HTTPException(status_code=422, detail="Body must contain {content: str}")
+
+    ideas_dir = Path(config.get("ideas_dir") or "")
+    idea_dir = Path(ideas_dir) / idea_id
+    if not idea_dir.exists():
+        raise HTTPException(status_code=404, detail="Idea not found")
+
+    session_data = _load_session_for_idea(idea_dir)
+    messages = session_data.get("messages") or []
+    if messages and messages[-1].get("role") == "assistant" and messages[-1].get("pending"):
+        raise HTTPException(
+            status_code=409,
+            detail="Agent turn in progress — wait for it to finish before editing.",
+        )
+
+    cur_path = idea_dir / "prd_draft.md"
+    cur_doc = cur_path.read_text(encoding="utf-8") if cur_path.exists() else ""
+    if not cur_doc and not content.strip():
+        raise HTTPException(status_code=422, detail="Nothing to edit: prd_draft.md is absent")
+
+    base_content = body.get("base_content")
+    if isinstance(base_content, str):
+        current_body = (_parse_prd_sections(cur_doc).get(title) or "").strip()
+        if base_content.strip() != current_body:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Section changed since you loaded it",
+                    "current": current_body,
+                },
+            )
+
+    _snapshot_prd_draft_before_agent_write(idea_dir)
+    new_doc = _replace_prd_section_body(cur_doc, title, content)
+    _atomic_write_file(str(cur_path), new_doc)
+
+    now = datetime.utcnow().isoformat() + "Z"
+    event = (
+        f'Operator manually edited PRD section "{title}" at {now}. '
+        "prd_draft.md on disk is authoritative — re-read it before changing "
+        "the PRD and do not revert this edit unless asked."
+    )
+    session_data["prd_content"] = new_doc
+    session_data["updated"] = now
+    session_data.setdefault("pending_system_events", []).append(event)
+    _save_session_for_idea(idea_dir, session_data)
+
+    _append_operator_edit_to_conversation_log(idea_dir, title, now)
+
+    new_body = (_parse_prd_sections(new_doc).get(title) or "").strip()
+    return {
+        "section_key": section_key,
+        "title": title,
+        "content": new_body,
+        "breadcrumb_recorded": True,
+    }
+
+
 @app.get("/api/ideas/operation-metrics")
 def get_ideas_operation_metrics():
     """Return average duration and sample count per operation type.

@@ -44,11 +44,40 @@ def window(html, anchor, size=1800):
 
 def test_run_so_far_renders_tokens():
     """3-B — the RoadmapPanel 'Run so far' line surfaces ``total_tokens`` so total
-    spend-in-tokens is visible live during a run (it rides the @5s metrics poll)."""
-    body = window(load_html(), "Run so far:", 600)
+    spend-in-tokens is visible live during a run (it rides the @5s metrics poll).
+    Window widened from 600 when the line gained the click-to-toggle breakdown
+    spans (the token segment now sits after the cost-toggle markup)."""
+    body = window(load_html(), "Run so far:", 1800)
     assert "total_tokens" in body, (
         "the Run-so-far line must surface metricsSummary.total_tokens"
     )
+
+
+def test_run_so_far_click_toggles_breakdowns():
+    """The 'Run so far' cost and token values are hidden toggles: clicking swaps
+    the total for its breakdown (per-role cost; input/output/cache token classes).
+    The toggle lives on the header line — NOT in the phase dropdown, where any
+    click collapses the expansion — so the dropdown renders its split inline
+    instead (see test_phase_dropdown_inline_breakdowns)."""
+    body = window(load_html(), "Run so far:", 1800)
+    for state in ("setShowRunCostSplit", "setShowRunTokenSplit"):
+        assert state in body, f"Run-so-far line must wire the {state} toggle"
+    # The split strings are computed just above the <p> (fmtCostBreakdown /
+    # fmtTokenBreakdown into runCostSplit / runTokenSplit) and consumed here.
+    assert "runCostSplit" in body and "runTokenSplit" in body
+
+
+def test_phase_dropdown_inline_breakdowns():
+    """The expanded-phase Cost/Tokens rows render their splits INLINE at the same
+    font size (muted slate-500), not as a smaller indented sub-block — the old
+    ``pl-3 text-[10px]`` sub-divs are gone from the phaseMeta detail."""
+    html = load_html()
+    tokens_row = window(html, "phaseMeta.tokens_total > 0", 1200)
+    assert "fmtTokenBreakdown(phaseMeta.tokens_breakdown)" in tokens_row
+    assert "text-[10px]" not in tokens_row, "token split must be same-size inline"
+    cost_row = window(html, "phaseMeta.cost_total > 0", 1200)
+    assert "fmtCostBreakdown(phaseMeta.planner_cost" in cost_row
+    assert "text-[10px]" not in cost_row, "cost split must be same-size inline"
 
 
 def test_completion_panel_total_tokens():
