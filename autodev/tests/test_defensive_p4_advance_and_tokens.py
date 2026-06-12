@@ -66,13 +66,27 @@ def orch(tmp_path, monkeypatch):
 class TestT48AccumulateRoleTokens:
 
     def test_accumulates_across_calls(self, orch, monkeypatch):
-        """Two reviewer invocations in one phase must SUM, not overwrite."""
+        """Two reviewer invocations in one phase must SUM, not overwrite.
+
+        Distinct invocations use distinct session keys → distinct JSONL paths
+        (the post-sentinel-recount change keys contributions by path; the same
+        path re-read REPLACES — see test_token_post_sentinel_recount.py)."""
+        inst, mod, _ = orch
+        monkeypatch.setattr(mod, "_sum_session_tokens", lambda p: {"input": 10, "output": 5})
+        inst._accumulate_role_tokens("reviewer", "/fake-pass-1.jsonl")
+        inst._accumulate_role_tokens("reviewer", "/fake-pass-2.jsonl")
+        ps = inst.read_phase_state()
+        assert ps["reviewer_tokens_acc"] == {"input": 20, "output": 10}
+
+    def test_same_session_path_replaces_not_doubles(self, orch, monkeypatch):
+        """A resumed session (restart RETRY reuses the attempt-1 session key →
+        same JSONL path) must replace its earlier contribution, not add."""
         inst, mod, _ = orch
         monkeypatch.setattr(mod, "_sum_session_tokens", lambda p: {"input": 10, "output": 5})
         inst._accumulate_role_tokens("reviewer", "/fake.jsonl")
         inst._accumulate_role_tokens("reviewer", "/fake.jsonl")
         ps = inst.read_phase_state()
-        assert ps["reviewer_tokens_acc"] == {"input": 20, "output": 10}
+        assert ps["reviewer_tokens_acc"] == {"input": 10, "output": 5}
 
     def test_adds_to_existing_acc(self, orch, monkeypatch):
         inst, mod, _ = orch

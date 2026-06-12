@@ -1316,6 +1316,21 @@
             return n.toLocaleString();
         }
 
+        /** Format a token-class breakdown ({input, output, cache_read, cache_write})
+         *  as "in X · out Y · cache Z". Cache read+write merge into one figure (write
+         *  is usually 0). Returns null when every class is 0 — pre-breakdown history
+         *  rows and no-usage local-model runs — so callers skip the line entirely.
+         *  Not all tokens cost the same: cache reads dominate the headline total but
+         *  bill at a fraction of fresh input; output is the most expensive class. */
+        function fmtTokenBreakdown(bd) {
+            if (!bd) return null;
+            const inp = Number(bd.input) || 0;
+            const out = Number(bd.output) || 0;
+            const cache = (Number(bd.cache_read) || 0) + (Number(bd.cache_write) || 0);
+            if (inp + out + cache <= 0) return null;
+            return `in ${inp.toLocaleString()} · out ${out.toLocaleString()} · cache ${cache.toLocaleString()}`;
+        }
+
         /** Currency formatting — callers zero-suppress (cost 0/null renders an em-dash). */
         const fmtUSD = (v) => `$${(Number(v) || 0).toFixed(2)}`;
 
@@ -2325,6 +2340,12 @@
                                     <div className="bg-[#221b36] rounded p-2 flex-1 min-w-[8rem]">
                                         <div className="text-slate-500 text-xs mb-0.5 header-text uppercase tracking-wide">Total Tokens</div>
                                         <div className="header-text text-lg font-semibold text-slate-200 font-mono">{fmtTokens(totalTokens)}</div>
+                                        {/* Token-class split: cache reads dominate the headline figure but
+                                            bill far cheaper than fresh input/output. Hidden for pre-breakdown
+                                            history (fmtTokenBreakdown returns null on an all-zero split). */}
+                                        {fmtTokenBreakdown(metricsSummary.tokens_breakdown) && (
+                                            <div className="text-[10px] text-slate-500 font-mono leading-tight">{fmtTokenBreakdown(metricsSummary.tokens_breakdown)}</div>
+                                        )}
                                         <div className="mt-1 space-y-0.5 text-xs">
                                             <div className="flex justify-between text-slate-400"><span>Planner</span><span className="font-mono">{fmtTokens(metricsSummary.planner_tokens_total)}</span></div>
                                             <div className="flex justify-between text-slate-400"><span>Executor</span><span className="font-mono">{fmtTokens(metricsSummary.executor_tokens_total)}</span></div>
@@ -2360,7 +2381,7 @@
                                                         <span className="text-slate-400 w-14 flex-shrink-0 text-right font-mono">{Number(phase.cost_total) > 0 ? fmtUSD(phase.cost_total) : '—'}</span>
                                                     )}
                                                     {hasTokenColumn && (
-                                                        <span className="text-slate-400 w-16 flex-shrink-0 text-right font-mono">{Number(phase.tokens_total) > 0 ? fmtTokens(phase.tokens_total) : '—'}</span>
+                                                        <span className="text-slate-400 w-16 flex-shrink-0 text-right font-mono" title={fmtTokenBreakdown(phase.tokens_breakdown) || undefined}>{Number(phase.tokens_total) > 0 ? fmtTokens(phase.tokens_total) : '—'}</span>
                                                     )}
                                                     <span className={`ml-auto header-text ${badgeClass}`}>{badge.label}</span>
                                                 </div>
@@ -2958,6 +2979,12 @@
                                                                         <div>
                                                                             <span className="text-slate-500">Tokens: </span>
                                                                             <span className="text-slate-300 font-mono">{fmtTokens(phaseMeta.tokens_total)}</span>
+                                                                            {/* Token-class split, mirroring the per-role cost split above.
+                                                                                Cache reads dominate the total but bill far cheaper than
+                                                                                fresh input; output is the most expensive class. */}
+                                                                            {fmtTokenBreakdown(phaseMeta.tokens_breakdown) && (
+                                                                                <div className="pl-3 text-[10px] text-slate-500 font-mono leading-tight">{fmtTokenBreakdown(phaseMeta.tokens_breakdown)}</div>
+                                                                            )}
                                                                         </div>
                                                                     )}
                                                                 </div>
