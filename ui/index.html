@@ -691,7 +691,7 @@
         /** Shared queue-table column template — header and data rows must stay aligned,
          * and columns scale proportionally on wide screens (PROJECT is capped so it
          * cannot swallow the whole width). */
-        const QUEUE_TABLE_GRID = 'grid grid-cols-[minmax(230px,2.2fr)_minmax(140px,1.1fr)_minmax(120px,1fr)_minmax(150px,1.2fr)_minmax(95px,0.7fr)_minmax(80px,0.6fr)_minmax(95px,0.7fr)] items-center gap-3';
+        const QUEUE_TABLE_GRID = 'grid grid-cols-[minmax(230px,2.2fr)_minmax(140px,1.1fr)_minmax(120px,1fr)_minmax(150px,1.2fr)_minmax(95px,0.7fr)_minmax(150px,1.05fr)_minmax(95px,0.7fr)] items-center gap-3';
 
         /** One stat tile in the expansion's "Run so far" / "At a glance" trio.
          * Module-level (stable component identity) so the trio never remounts on
@@ -1316,6 +1316,29 @@
             return n.toLocaleString();
         }
 
+        /** Chip-sized token count: 11_393_463 → "11.4M", 41_200 → "41.2k".
+         *  Returns '—' for null/0 (zero-suppression, mirroring fmtTokens). Full
+         *  precision belongs to the breakout/tooltip surfaces, not the row chip. */
+        function fmtTokensCompact(v) {
+            const n = Number(v) || 0;
+            if (n <= 0) return '—';
+            if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+            if (n >= 1e3) return `${(n / 1e3).toFixed(1)}k`;
+            return String(n);
+        }
+
+        /** Percentage of a total for the split cards: >=10% rounds to an integer
+         *  ("75%"), smaller values keep two significant figures ("8.2%", "0.62%").
+         *  Returns null when the total is 0 so callers can skip the figure. */
+        function fmtPct(part, total) {
+            const p = Number(part) || 0;
+            const t = Number(total) || 0;
+            if (t <= 0) return null;
+            const pct = (p / t) * 100;
+            if (pct >= 10) return `${Math.round(pct)}%`;
+            return `${Number(pct.toPrecision(2))}%`;
+        }
+
         /** Format a token-class breakdown ({input, output, cache_read, cache_write})
          *  as "in X · out Y · cache Z". Cache read+write merge into one figure (write
          *  is usually 0). Returns null when every class is 0 — pre-breakdown history
@@ -1331,19 +1354,16 @@
             return `in ${inp.toLocaleString()} · out ${out.toLocaleString()} · cache ${cache.toLocaleString()}`;
         }
 
-        /** Format a per-role cost split as "planner $X · executor $Y · reviewer $Z".
-         *  Returns null when every role is 0 (no-usage runs / pre-cost history) so
-         *  callers can skip the split — same contract as fmtTokenBreakdown. */
-        function fmtCostBreakdown(planner, executor, reviewer) {
-            const p = Number(planner) || 0;
-            const e = Number(executor) || 0;
-            const r = Number(reviewer) || 0;
-            if (p + e + r <= 0) return null;
-            return `planner $${p.toFixed(2)} · executor $${e.toFixed(2)} · reviewer $${r.toFixed(2)}`;
-        }
-
-        /** Currency formatting — callers zero-suppress (cost 0/null renders an em-dash). */
-        const fmtUSD = (v) => `$${(Number(v) || 0).toFixed(2)}`;
+        /** Currency formatting — callers zero-suppress (cost 0/null renders an
+         *  em-dash). A nonzero total too small for two decimals renders as
+         *  "<$0.01" rather than a misleading zero-dollar figure (observed live:
+         *  a sub-cent run total slipped past the >0 gates as a zero-reading
+         *  cost pill on the roadmap header strip). */
+        const fmtUSD = (v) => {
+            const n = Number(v) || 0;
+            if (n > 0 && n < 0.005) return '<$0.01';
+            return `$${n.toFixed(2)}`;
+        };
 
         /** P0 Stage H — format "Exec attempts" with retry-source breakdown.
          *
@@ -2287,18 +2307,76 @@
             );
         }
 
-        // ─── PipelineCompletePanel ────────────────────────────────────────────────
+        // ─── SplitStatCard (monitor redesign) ────────────────────────────────────
+        /* Shared split-breakdown card: header (uppercase title + formatted total),
+           stacked proportion bar, one row per segment (dot · label · value · % of
+           total), tiny footnote. Used by the Roadmap header strip's cost/token
+           panels and the phase expansion's BY AGENT / BY TOKEN TYPE breakouts.
+           Zero-value rows are dropped (the established zero-suppression). */
+        const ROLE_SPLIT_COLORS = { planner: '#a78bfa', executor: '#e2b14c', reviewer: '#2dd4bf' };
+        const TOKEN_CLASS_COLORS = { input: '#60a5fa', output: '#f472b6', cache_read: '#64748b', cache_write: '#94a3b8' };
 
-        function PipelineCompletePanel({ roadmap, metricsSummary, completionReport, onGenerateDocs, generateDocsBusy, generateDocsError }) {
-            const completeCount = roadmap ? roadmap.filter(p => p.status === 'complete').length : 0;
-            const totalCount = roadmap ? roadmap.length : 0;
+        /** Planner/executor/reviewer rows for SplitStatCard (tokens or cost). */
+        function roleSplitRows(planner, executor, reviewer) {
+            return [
+                { label: 'Planner', color: ROLE_SPLIT_COLORS.planner, value: Number(planner) || 0 },
+                { label: 'Executor', color: ROLE_SPLIT_COLORS.executor, value: Number(executor) || 0 },
+                { label: 'Reviewer', color: ROLE_SPLIT_COLORS.reviewer, value: Number(reviewer) || 0 },
+            ];
+        }
 
-            const totalCost = metricsSummary && Number(metricsSummary.total_cost) || 0;
-            const totalTokens = metricsSummary && Number(metricsSummary.total_tokens) || 0;
-            const totalHold = metricsSummary && Number(metricsSummary.total_hold_seconds) || 0;
-            const totalActive = metricsSummary && Number(metricsSummary.total_active_seconds) || 0;
-            const totalEscalations = metricsSummary && Number(metricsSummary.total_escalations) || 0;
-            const phases = (metricsSummary && Array.isArray(metricsSummary.phases)) ? metricsSummary.phases : [];
+        /** Input/Output/Cache rows for SplitStatCard from a tokens_breakdown dict. */
+        function tokenClassRows(bd) {
+            const b = bd || {};
+            return [
+                { label: 'Input', color: TOKEN_CLASS_COLORS.input, value: Number(b.input) || 0 },
+                { label: 'Output', color: TOKEN_CLASS_COLORS.output, value: Number(b.output) || 0 },
+                { label: 'Cache read', color: TOKEN_CLASS_COLORS.cache_read, value: Number(b.cache_read) || 0 },
+                { label: 'Cache write', color: TOKEN_CLASS_COLORS.cache_write, value: Number(b.cache_write) || 0 },
+            ];
+        }
+
+        function SplitStatCard({ title, total, fmtValue, rows, footnote, headerExtra }) {
+            const fmt = fmtValue || (v => fmtTokens(v));
+            const t = Number(total) || 0;
+            const visible = rows.filter(r => (Number(r.value) || 0) > 0);
+            return (
+                <div className="bg-[#15121f] border border-[#1c1829] rounded p-3">
+                    <div className="flex items-center justify-between gap-2 mb-2">
+                        <span className="header-text text-[10px] uppercase tracking-wide text-slate-500 font-semibold flex items-center gap-2">
+                            {title}
+                            {headerExtra}
+                        </span>
+                        <span className="font-mono text-sm font-semibold text-slate-200">{fmt(t)}</span>
+                    </div>
+                    <div className="flex h-1.5 rounded-full overflow-hidden bg-[#221b36] mb-2">
+                        {visible.map((r, i) => (
+                            <span key={i} style={{ width: `${t > 0 ? (Number(r.value) || 0) / t * 100 : 0}%`, backgroundColor: r.color }}></span>
+                        ))}
+                    </div>
+                    <div className="space-y-1">
+                        {visible.map((r, i) => (
+                            <div key={i} className="flex items-center gap-2 text-xs border-b border-[#1c1829]/60 last:border-b-0 pb-1 last:pb-0">
+                                <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: r.color }}></span>
+                                <span className="text-slate-400">{r.label}</span>
+                                <span className="ml-auto font-mono text-slate-200">{fmt(r.value)}</span>
+                                <span className="font-mono text-[10px] text-slate-500 w-10 text-right flex-shrink-0">{fmtPct(r.value, t) || ''}</span>
+                            </div>
+                        ))}
+                    </div>
+                    {footnote && <div className="text-right text-[9px] header-text uppercase tracking-wide text-slate-600 mt-2">{footnote}</div>}
+                </div>
+            );
+        }
+
+        // ─── PhaseMetricsTable ───────────────────────────────────────────────────
+        /* Shared per-phase metrics table — rendered by PipelineCompletePanel
+           (completion report) and the Queue row expansion's metrics breakout
+           (METRICS-E3), so both surfaces present per-phase duration / attempts /
+           cost / tokens / outcome identically. The Cost and Tokens columns
+           self-suppress when every phase reports 0 (no-usage local-model runs);
+           the Tokens cell carries the class split as a hover title. */
+        function PhaseMetricsTable({ phases }) {
             const hasCostColumn = phases.some(p => Number(p.cost_total) > 0);
             const hasTokenColumn = phases.some(p => Number(p.tokens_total) > 0);
 
@@ -2310,6 +2388,58 @@
                 if (ex >= 2) return { label: 'retried', accent: false, muted: true };
                 return { label: 'clean', accent: false };
             };
+
+            return (
+                <div className="border border-[#1c1829] rounded">
+                    <div className="flex items-center gap-2 px-2 py-1 text-[10px] header-text uppercase tracking-wide text-slate-500 border-b border-[#1c1829]">
+                        <span className="w-16 flex-shrink-0">Phase</span>
+                        <span className="w-14 flex-shrink-0 text-right">Duration</span>
+                        <span className="w-10 flex-shrink-0 text-right">Execs</span>
+                        {hasCostColumn && <span className="w-14 flex-shrink-0 text-right">Cost</span>}
+                        {hasTokenColumn && <span className="w-16 flex-shrink-0 text-right">Tokens</span>}
+                        <span className="ml-auto">Result</span>
+                    </div>
+                    {phases.map((phase, idx) => {
+                        const badge = outcomeBadge(phase);
+                        const badgeClass = badge.accent
+                            ? 'text-red-400'
+                            : (badge.muted ? 'text-slate-500' : 'text-emerald-400');
+                        return (
+                            <div key={idx} className="flex items-center gap-2 px-2 py-1.5 text-xs border-b border-[#1c1829] last:border-b-0">
+                                <span className="header-text font-semibold text-slate-300 w-16 flex-shrink-0 font-mono">{phase.phase}</span>
+                                <span className="text-slate-400 w-14 flex-shrink-0 text-right font-mono">{formatDuration(phase.duration_seconds)}</span>
+                                <span className="text-slate-400 w-10 flex-shrink-0 text-right font-mono">{phase.executor_attempts}</span>
+                                {hasCostColumn && (
+                                    <span className="text-slate-400 w-14 flex-shrink-0 text-right font-mono">{Number(phase.cost_total) > 0 ? fmtUSD(phase.cost_total) : '—'}</span>
+                                )}
+                                {hasTokenColumn && (
+                                    <span className="text-slate-400 w-16 flex-shrink-0 text-right font-mono" title={fmtTokenBreakdown(phase.tokens_breakdown) || undefined}>{Number(phase.tokens_total) > 0 ? fmtTokens(phase.tokens_total) : '—'}</span>
+                                )}
+                                <span className={`ml-auto header-text ${badgeClass}`}>{badge.label}</span>
+                            </div>
+                        );
+                    })}
+                </div>
+            );
+        }
+
+        // ─── PipelineCompletePanel ────────────────────────────────────────────────
+
+        function PipelineCompletePanel({ roadmap, metricsSummary, completionReport, onGenerateDocs, generateDocsBusy, generateDocsError, phaseCounts }) {
+            // phaseCounts (METRICS-E4) — the Queue report modal has roadmap
+            // checkbox COUNTS (from /api/queue/{id}/report), not a parsed
+            // roadmap array; the Monitor keeps deriving from its roadmap.
+            const completeCount = phaseCounts ? (Number(phaseCounts.complete) || 0)
+                : (roadmap ? roadmap.filter(p => p.status === 'complete').length : 0);
+            const totalCount = phaseCounts ? (Number(phaseCounts.total) || 0)
+                : (roadmap ? roadmap.length : 0);
+
+            const totalCost = metricsSummary && Number(metricsSummary.total_cost) || 0;
+            const totalTokens = metricsSummary && Number(metricsSummary.total_tokens) || 0;
+            const totalHold = metricsSummary && Number(metricsSummary.total_hold_seconds) || 0;
+            const totalActive = metricsSummary && Number(metricsSummary.total_active_seconds) || 0;
+            const totalEscalations = metricsSummary && Number(metricsSummary.total_escalations) || 0;
+            const phases = (metricsSummary && Array.isArray(metricsSummary.phases)) ? metricsSummary.phases : [];
 
             return (
                 <div className="space-y-4">
@@ -2369,36 +2499,7 @@
                             {phases.length > 0 && (
                                 <div>
                                     <div className="text-slate-500 text-xs mb-1 header-text uppercase tracking-wide">Per-phase</div>
-                                    <div className="border border-[#1c1829] rounded">
-                                        <div className="flex items-center gap-2 px-2 py-1 text-[10px] header-text uppercase tracking-wide text-slate-500 border-b border-[#1c1829]">
-                                            <span className="w-16 flex-shrink-0">Phase</span>
-                                            <span className="w-14 flex-shrink-0 text-right">Duration</span>
-                                            <span className="w-10 flex-shrink-0 text-right">Execs</span>
-                                            {hasCostColumn && <span className="w-14 flex-shrink-0 text-right">Cost</span>}
-                                            {hasTokenColumn && <span className="w-16 flex-shrink-0 text-right">Tokens</span>}
-                                            <span className="ml-auto">Result</span>
-                                        </div>
-                                        {phases.map((phase, idx) => {
-                                            const badge = outcomeBadge(phase);
-                                            const badgeClass = badge.accent
-                                                ? 'text-red-400'
-                                                : (badge.muted ? 'text-slate-500' : 'text-emerald-400');
-                                            return (
-                                                <div key={idx} className="flex items-center gap-2 px-2 py-1.5 text-xs border-b border-[#1c1829] last:border-b-0">
-                                                    <span className="header-text font-semibold text-slate-300 w-16 flex-shrink-0 font-mono">{phase.phase}</span>
-                                                    <span className="text-slate-400 w-14 flex-shrink-0 text-right font-mono">{formatDuration(phase.duration_seconds)}</span>
-                                                    <span className="text-slate-400 w-10 flex-shrink-0 text-right font-mono">{phase.executor_attempts}</span>
-                                                    {hasCostColumn && (
-                                                        <span className="text-slate-400 w-14 flex-shrink-0 text-right font-mono">{Number(phase.cost_total) > 0 ? fmtUSD(phase.cost_total) : '—'}</span>
-                                                    )}
-                                                    {hasTokenColumn && (
-                                                        <span className="text-slate-400 w-16 flex-shrink-0 text-right font-mono" title={fmtTokenBreakdown(phase.tokens_breakdown) || undefined}>{Number(phase.tokens_total) > 0 ? fmtTokens(phase.tokens_total) : '—'}</span>
-                                                    )}
-                                                    <span className={`ml-auto header-text ${badgeClass}`}>{badge.label}</span>
-                                                </div>
-                                            );
-                                        })}
-                                    </div>
+                                    <PhaseMetricsTable phases={phases} />
                                 </div>
                             )}
 
@@ -2419,8 +2520,13 @@
                         </>
                     )}
 
-                    {/* W5-F: completion doc generation — only shown when completionReport.found is false (pipelineStatus === PIPELINE_COMPLETE required via CurrentPhasePanel) */}
-                    {(!completionReport || !completionReport.found) && (
+                    {/* W5-F: completion doc generation — only shown when completionReport.found
+                        is false AND an onGenerateDocs handler is wired. The Queue report modal
+                        passes no handler (generate-docs targets the ACTIVE project's reviewer
+                        webhook — the wrong project for a queue row); the Monitor passes one and
+                        renders this panel only at pipelineStatus === PIPELINE_COMPLETE (via
+                        CurrentPhasePanel). */}
+                    {onGenerateDocs && (!completionReport || !completionReport.found) && (
                         <div className="mt-4 pt-3 border-t border-[#1c1829]">
                             <p className="text-slate-400 text-xs mb-2">Want a summary and next steps for this project?</p>
                             {generateDocsError && (
@@ -2436,6 +2542,46 @@
                             </button>
                         </div>
                     )}
+                </div>
+            );
+        }
+
+        // ─── QueueReportModal (METRICS-E4) ───────────────────────────────────────
+        /* Durable completion report, recallable from a COMPLETED queue row after
+           the queue has moved on. Renders the SAME PipelineCompletePanel as the
+           Pipeline Monitor — fed per-project by GET /api/queue/{id}/report — plus
+           the completion_report.md markdown when one exists. Read-only:
+           onGenerateDocs is deliberately not passed (generate-docs fires the
+           reviewer webhook against the ACTIVE project, the wrong target here). */
+        function QueueReportModal({ report, onClose }) {
+            const summary = report.metrics_summary || null;
+            const cr = report.completion_report || null;
+            return (
+                <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50" onClick={onClose}>
+                    <div
+                        className="bg-[#15121f] border border-[#1c1829] rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[85vh] overflow-y-auto"
+                        onClick={e => e.stopPropagation()}
+                    >
+                        <div className="flex items-center justify-between gap-3 mb-4">
+                            <h3 className="header-text text-sm font-semibold text-slate-200 truncate">{report.name}</h3>
+                            <button type="button" data-testid="queue-report-close" onClick={onClose}
+                                className="header-text text-xs text-slate-400 hover:text-slate-200 flex-shrink-0">
+                                ✕ Close
+                            </button>
+                        </div>
+                        <PipelineCompletePanel
+                            roadmap={null}
+                            phaseCounts={{ total: report.phases_total, complete: report.phases_complete }}
+                            metricsSummary={summary}
+                            completionReport={cr}
+                        />
+                        {cr && cr.found && (
+                            <div
+                                className="msg-md mt-4 pt-3 border-t border-emerald-700/30 text-sm"
+                                dangerouslySetInnerHTML={{ __html: renderCompletionMarkdown(cr.content) }}
+                            />
+                        )}
+                    </div>
                 </div>
             );
         }
@@ -2801,6 +2947,9 @@
             // dropdown collapses it; the header line has no such handler.
             const [showRunCostSplit, setShowRunCostSplit] = useState(false);
             const [showRunTokenSplit, setShowRunTokenSplit] = useState(false);
+            // MON-4 — the expanded phase's BY AGENT card view ('tokens' | '$');
+            // the $ option only renders when the phase captured cost.
+            const [phaseAgentSplitMode, setPhaseAgentSplitMode] = useState('tokens');
             const lastScrolledMtimeRef = useRef(null);
             const completionContentRef = useRef(null);
 
@@ -2841,6 +2990,7 @@
 
             const handlePhaseClick = (phaseId) => {
                 setExpandedPhaseId(prev => prev === phaseId ? null : phaseId);
+                setPhaseAgentSplitMode('tokens'); // each expansion opens on the token view
             };
 
             if (!roadmap || !Array.isArray(roadmap) || roadmap.length === 0) {
@@ -2888,30 +3038,70 @@
                         </div>
                     </div>
 
+                    {/* Roadmap header strip (monitor redesign): formal run stats on the
+                        left; zero-suppressed TOTAL COST / TOTAL TOKENS toggle pills on
+                        the right (mutually exclusive — the mock highlights one at a
+                        time). Phases-complete is deliberately NOT repeated here — the
+                        progress bar above already covers it. Detail stays hidden until
+                        a pill is clicked. */}
                     {metricsSummary && metricsSummary.total_phases > 0 && (() => {
-                        const runCostSplit = fmtCostBreakdown(
-                            metricsSummary.planner_cost_total,
-                            metricsSummary.executor_cost_total,
-                            metricsSummary.reviewer_cost_total);
-                        const runTokenSplit = fmtTokenBreakdown(metricsSummary.tokens_breakdown);
+                        const runClassRows = tokenClassRows(metricsSummary.tokens_breakdown);
+                        const hasClassData = runClassRows.some(r => r.value > 0);
                         return (
-                            <p className="font-mono text-xs text-slate-500">
-                                Run so far: {metricsSummary.total_phases} phases · {metricsSummary.total_executor_attempts} exec attempts · {formatDuration(metricsSummary.total_duration_seconds)}
-                                {metricsSummary.total_cost > 0 && (
-                                    <span
-                                        className={runCostSplit ? 'cursor-pointer select-none' : undefined}
-                                        title={runCostSplit ? 'Click to toggle cost breakdown' : undefined}
-                                        onClick={runCostSplit ? () => setShowRunCostSplit(v => !v) : undefined}
-                                    >{' · '}{(showRunCostSplit && runCostSplit) ? runCostSplit : `$${metricsSummary.total_cost.toFixed(2)}`}</span>
+                            <div className="space-y-2">
+                                <div data-testid="roadmap-header-strip" className="border border-[#1c1829] rounded px-4 py-2.5 flex items-center gap-6 flex-wrap">
+                                    {/* Exec attempts deliberately not shown here — per-phase
+                                        attempts live in the expansion's Run Metrics boxes. */}
+                                    <div>
+                                        <div className="header-text text-[10px] uppercase tracking-wide text-slate-500">Total time</div>
+                                        <div className="font-mono text-sm font-semibold text-slate-200">{formatDuration(metricsSummary.total_duration_seconds)}</div>
+                                    </div>
+                                    <div className="ml-auto flex items-center gap-2">
+                                        {metricsSummary.total_cost > 0 && (
+                                            <button type="button" data-testid="run-total-cost-toggle"
+                                                aria-expanded={showRunCostSplit}
+                                                title="Cost by agent"
+                                                onClick={() => { setShowRunCostSplit(v => !v); setShowRunTokenSplit(false); }}
+                                                className={`header-text text-[10px] uppercase tracking-wide px-3 py-1.5 rounded border transition-colors ${showRunCostSplit ? 'border-[#e2b14c]/60 bg-[#241d10]/50 text-slate-300' : 'border-[#2a2540] text-slate-500 hover:text-slate-300'}`}>
+                                                Total cost <span className="font-mono text-xs font-semibold text-slate-200">{fmtUSD(metricsSummary.total_cost)}</span>
+                                                <span className="text-slate-600 ml-1">{showRunCostSplit ? '▴' : '▾'}</span>
+                                            </button>
+                                        )}
+                                        {metricsSummary.total_tokens > 0 && (
+                                            <button type="button" data-testid="run-total-tokens-toggle"
+                                                aria-expanded={showRunTokenSplit}
+                                                title="Tokens by type and by agent"
+                                                onClick={() => { setShowRunTokenSplit(v => !v); setShowRunCostSplit(false); }}
+                                                className={`header-text text-[10px] uppercase tracking-wide px-3 py-1.5 rounded border transition-colors ${showRunTokenSplit ? 'border-[#e2b14c]/60 bg-[#241d10]/50 text-slate-300' : 'border-[#2a2540] text-slate-500 hover:text-slate-300'}`}>
+                                                Total tokens <span className="font-mono text-xs font-semibold text-slate-200">{fmtTokensCompact(metricsSummary.total_tokens)}</span>
+                                                <span className="text-slate-600 ml-1">{showRunTokenSplit ? '▴' : '▾'}</span>
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                                {/* Cost has a single view (by agent) — full width per the
+                                    operator's call, no half-empty sibling slot. */}
+                                {showRunCostSplit && metricsSummary.total_cost > 0 && (
+                                    <SplitStatCard title="Cost · by agent"
+                                        total={metricsSummary.total_cost} fmtValue={fmtUSD}
+                                        rows={roleSplitRows(metricsSummary.planner_cost_total, metricsSummary.executor_cost_total, metricsSummary.reviewer_cost_total)}
+                                        footnote="% of run total" />
                                 )}
-                                {metricsSummary.total_tokens > 0 && (
-                                    <span
-                                        className={runTokenSplit ? 'cursor-pointer select-none' : undefined}
-                                        title={runTokenSplit ? 'Click to toggle token breakdown' : undefined}
-                                        onClick={runTokenSplit ? () => setShowRunTokenSplit(v => !v) : undefined}
-                                    >{' · '}{(showRunTokenSplit && runTokenSplit) ? runTokenSplit : `${fmtTokens(metricsSummary.total_tokens)} tokens`}</span>
+                                {showRunTokenSplit && metricsSummary.total_tokens > 0 && (
+                                    <div className={`grid gap-2 ${hasClassData ? 'md:grid-cols-2' : ''}`}>
+                                        {hasClassData && (
+                                            <SplitStatCard title="Tokens · by type"
+                                                total={metricsSummary.total_tokens}
+                                                rows={runClassRows}
+                                                footnote="% of run total" />
+                                        )}
+                                        <SplitStatCard title="Tokens · by agent"
+                                            total={metricsSummary.total_tokens}
+                                            rows={roleSplitRows(metricsSummary.planner_tokens_total, metricsSummary.executor_tokens_total, metricsSummary.reviewer_tokens_total)}
+                                            footnote="% of run total" />
+                                    </div>
                                 )}
-                            </p>
+                            </div>
                         );
                     })()}
 
@@ -2925,15 +3115,21 @@
                             return (
                                 <div
                                     key={phase.id || index}
-                                    role="button"
-                                    tabIndex={0}
-                                    aria-label={`${phase.id}: ${phase.goal || ''}`}
-                                    aria-expanded={isExpanded}
-                                    className={`p-3 rounded border border-[#1c1829] cursor-pointer transition-colors ${getStatusClasses(phase.status)} ${isExpanded ? 'bg-[#221b36]' : ''}`}
-                                    onClick={() => handlePhaseClick(phase.id)}
-                                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') handlePhaseClick(phase.id); }}
+                                    className={`p-3 rounded border border-[#1c1829] transition-colors ${getStatusClasses(phase.status)} ${isExpanded ? 'bg-[#221b36]' : ''}`}
                                 >
-                                    <div className="flex items-start gap-2">
+                                    {/* MON-3 — the header is the ONLY collapse target:
+                                        clicks inside the expanded body (verification /
+                                        run metrics) never collapse the row. */}
+                                    <div
+                                        data-testid="phase-row-header"
+                                        role="button"
+                                        tabIndex={0}
+                                        aria-label={`${phase.id}: ${phase.goal || ''}`}
+                                        aria-expanded={isExpanded}
+                                        className="flex items-start gap-2 cursor-pointer"
+                                        onClick={() => handlePhaseClick(phase.id)}
+                                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') handlePhaseClick(phase.id); }}
+                                    >
                                         <span className="text-lg flex-shrink-0">{getStatusIcon(phase.status)}</span>
                                         <div className="flex-1 min-w-0">
                                             <div className="font-mono text-sm font-semibold text-slate-300 flex items-center gap-2">
@@ -2949,103 +3145,137 @@
                                                     {phase.goal}
                                                 </p>
                                             )}
+                                        </div>
+                                    </div>
+                                    {isExpanded && (
+                                        <div className="ml-7 min-w-0">
                                             {/* Expanded: exit criteria (all phases) */}
-                                            {isExpanded && phase.exit_criteria && phase.exit_criteria.length > 0 && (
+                                            {/* Unified VERIFICATION section (mock style): exit-criteria
+                                                bullets + the P0 Stage J behavioral fields (null for
+                                                pre-P0 phases) under one header. */}
+                                            {((phase.exit_criteria && phase.exit_criteria.length > 0) || phase.behavioral_verification) && (
                                                 <div className="mt-3 pt-2 border-t border-[#1c1829]">
-                                                    <div className="text-xs font-semibold text-slate-400 mb-1">Exit Criteria:</div>
-                                                    <ul className="text-xs text-slate-400 space-y-1">
-                                                        {phase.exit_criteria.map((criteria, idx) => (
-                                                            <li key={idx} className="flex items-start gap-1">
-                                                                <span className="text-accent">•</span>
-                                                                <span>{criteria}</span>
-                                                            </li>
-                                                        ))}
-                                                    </ul>
-                                                </div>
-                                            )}
-                                            {/* Expanded: Behavioral Verification (P0 Stage J — null for pre-P0 phases) */}
-                                            {isExpanded && phase.behavioral_verification && (
-                                                <div className="mt-3 pt-2 border-t border-[#1c1829]">
-                                                    <div className="text-xs font-semibold text-slate-400 mb-1">Behavioral Verification:</div>
-                                                    <ul className="text-xs text-slate-400 space-y-1">
-                                                        <li className="flex items-start gap-1">
-                                                            <span className="text-accent">•</span>
-                                                            <span><span className="text-slate-500">User-observable: </span>{phase.behavioral_verification.user_observable}</span>
-                                                        </li>
-                                                        <li className="flex items-start gap-1">
-                                                            <span className="text-accent">•</span>
-                                                            <span><span className="text-slate-500">How we'll check: </span>{phase.behavioral_verification.how_to_check}</span>
-                                                        </li>
-                                                        <li className="flex items-start gap-1">
-                                                            <span className="text-accent">•</span>
-                                                            <span><span className="text-slate-500">If this fails, you see: </span>{phase.behavioral_verification.failure_language}</span>
-                                                        </li>
-                                                    </ul>
-                                                </div>
-                                            )}
-                                            {/* Expanded: run metrics for completed phases */}
-                                            {isExpanded && phase.status === 'complete' && (
-                                                <div className="mt-3 pt-2 border-t border-[#1c1829]">
-                                                    {phaseMeta ? (
-                                                        <div>
-                                                            <div className="text-xs font-semibold text-slate-400 mb-2">Run Metrics:</div>
-                                                            <div className="grid grid-cols-2 gap-x-4 text-xs">
-                                                                {/* Left column: Duration, Skill, Cost */}
-                                                                <div className="space-y-1">
-                                                                    <div>
-                                                                        <span className="text-slate-500">Duration: </span>
-                                                                        <span className="text-slate-300 font-mono">{formatDuration(phaseMeta.duration_seconds)}</span>
-                                                                    </div>
-                                                                    <div>
-                                                                        <span className="text-slate-500">Skill: </span>
-                                                                        <span className="text-slate-300">{phaseMeta.skill_used || '—'}</span>
-                                                                    </div>
-                                                                    {phaseMeta.cost_total > 0 && (
-                                                                        <div>
-                                                                            <span className="text-slate-500">Cost: </span>
-                                                                            <span className="text-slate-300 font-mono">${phaseMeta.cost_total.toFixed(2)}</span>
-                                                                            {/* 3-C — per-phase role-cost split, inline at the same size
-                                                                                (muted) after the total. */}
-                                                                            {fmtCostBreakdown(phaseMeta.planner_cost, phaseMeta.executor_cost, phaseMeta.reviewer_cost) && (
-                                                                                <span className="text-slate-500 font-mono">{' · '}{fmtCostBreakdown(phaseMeta.planner_cost, phaseMeta.executor_cost, phaseMeta.reviewer_cost)}</span>
-                                                                            )}
-                                                                        </div>
-                                                                    )}
-                                                                    {phaseMeta.tokens_total > 0 && (
-                                                                        <div>
-                                                                            <span className="text-slate-500">Tokens: </span>
-                                                                            <span className="text-slate-300 font-mono">{fmtTokens(phaseMeta.tokens_total)}</span>
-                                                                            {/* Token-class split, inline at the same size (muted).
-                                                                                Cache reads dominate the total but bill far cheaper than
-                                                                                fresh input; output is the most expensive class. */}
-                                                                            {fmtTokenBreakdown(phaseMeta.tokens_breakdown) && (
-                                                                                <span className="text-slate-500 font-mono">{' · '}{fmtTokenBreakdown(phaseMeta.tokens_breakdown)}</span>
-                                                                            )}
-                                                                        </div>
-                                                                    )}
-                                                                </div>
-                                                                {/* Right column: Exec attempts, Reviewer passes, Escalations */}
-                                                                <div className="space-y-1">
-                                                                    <div>
-                                                                        <span className="text-slate-500">Exec attempts: </span>
-                                                                        <span className="text-slate-300 font-mono">{formatExecAttemptsBreakdown(
-                                                                            phaseMeta.executor_attempts,
-                                                                            phaseMeta.executor_self_failures,
-                                                                            phaseMeta.executor_reviewer_rejections
-                                                                        )}</span>
-                                                                    </div>
-                                                                    <div>
-                                                                        <span className="text-slate-500">Reviewer passes: </span>
-                                                                        <span className="text-slate-300 font-mono">{phaseMeta.reviewer_passes}</span>
-                                                                    </div>
-                                                                    <div>
-                                                                        <span className="text-slate-500">Escalations: </span>
-                                                                        <span className="text-slate-300 font-mono">{phaseMeta.escalations}</span>
-                                                                    </div>
-                                                                </div>
+                                                    <div className="header-text text-[10px] uppercase tracking-wide text-slate-500 font-semibold mb-1.5">Verification</div>
+                                                    {phase.exit_criteria && phase.exit_criteria.length > 0 && (
+                                                        <ul className="text-xs text-slate-400 space-y-1">
+                                                            {phase.exit_criteria.map((criteria, idx) => (
+                                                                <li key={idx} className="flex items-start gap-1">
+                                                                    <span className="text-accent">•</span>
+                                                                    <span>{criteria}</span>
+                                                                </li>
+                                                            ))}
+                                                        </ul>
+                                                    )}
+                                                    {phase.behavioral_verification && (
+                                                        <div className="mt-2.5 space-y-1.5 text-xs">
+                                                            <div className="flex items-start gap-3">
+                                                                <span className="text-slate-500 w-28 flex-shrink-0">User-observable</span>
+                                                                <span className="text-slate-400">{phase.behavioral_verification.user_observable}</span>
+                                                            </div>
+                                                            <div className="flex items-start gap-3">
+                                                                <span className="text-slate-500 w-28 flex-shrink-0">How we'll check</span>
+                                                                <span className="text-slate-400">{phase.behavioral_verification.how_to_check}</span>
+                                                            </div>
+                                                            <div className="flex items-start gap-3">
+                                                                <span className="text-slate-500 w-28 flex-shrink-0">If this fails</span>
+                                                                <span className="text-slate-400">{phase.behavioral_verification.failure_language}</span>
                                                             </div>
                                                         </div>
-                                                    ) : (
+                                                    )}
+                                                </div>
+                                            )}
+                                            {/* Run metrics for completed phases (monitor redesign):
+                                                RUN METRICS header with skill + model badges, four
+                                                stat boxes, then the BY AGENT / BY TOKEN TYPE
+                                                breakout cards (stacked bars, % of phase total). */}
+                                            {phase.status === 'complete' && (
+                                                <div className="mt-3 pt-2 border-t border-[#1c1829]">
+                                                    {phaseMeta ? (() => {
+                                                        const hasPhaseCost = Number(phaseMeta.cost_total) > 0;
+                                                        const hasPhaseTokens = Number(phaseMeta.tokens_total) > 0;
+                                                        const phaseClassRows = tokenClassRows(phaseMeta.tokens_breakdown);
+                                                        const hasPhaseClassData = phaseClassRows.some(r => r.value > 0);
+                                                        // The $ view needs captured cost (established
+                                                        // suppression: no toggle when cost is 0).
+                                                        const agentMode = (phaseAgentSplitMode === '$' && hasPhaseCost) ? '$' : 'tokens';
+                                                        // Model badges — one per distinct model, the roles it
+                                                        // served in the tooltip; display the last path segment
+                                                        // ("kimi-k2.6"), full provider id on hover. (MON-1)
+                                                        const modelEntries = (phaseMeta.models_used && typeof phaseMeta.models_used === 'object')
+                                                            ? Object.entries(phaseMeta.models_used).reduce((acc, [role, model]) => {
+                                                                if (model) (acc[model] = acc[model] || []).push(role);
+                                                                return acc;
+                                                            }, {})
+                                                            : {};
+                                                        const retrySubParts = [];
+                                                        if (Number(phaseMeta.executor_self_failures) > 0) retrySubParts.push(`${phaseMeta.executor_self_failures} self-failure${phaseMeta.executor_self_failures > 1 ? 's' : ''}`);
+                                                        if (Number(phaseMeta.executor_reviewer_rejections) > 0) retrySubParts.push(`${phaseMeta.executor_reviewer_rejections} reviewer rejection${phaseMeta.executor_reviewer_rejections > 1 ? 's' : ''}`);
+                                                        return (
+                                                            <div>
+                                                                <div data-testid="run-metrics-header" className="flex items-center gap-2 mb-2 flex-wrap">
+                                                                    <span className="header-text text-[10px] uppercase tracking-wide text-slate-500 font-semibold">Run Metrics</span>
+                                                                    {phaseMeta.skill_used && (
+                                                                        <span className="header-text text-[10px] px-1.5 py-0.5 rounded bg-[#221b36] border border-[#2a2540] text-slate-300">skill: {phaseMeta.skill_used}</span>
+                                                                    )}
+                                                                    {Object.entries(modelEntries).map(([model, roles]) => (
+                                                                        <span key={model} title={`${model} — ${roles.join(', ')}`} className="header-text text-[10px] px-1.5 py-0.5 rounded bg-[#221b36] border border-[#2a2540] text-slate-300">model: {String(model).split('/').pop()}</span>
+                                                                    ))}
+                                                                </div>
+                                                                <div data-testid="run-metrics-boxes" className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                                                                    <div className="bg-[#221b36] rounded p-2">
+                                                                        <div className="header-text text-[10px] uppercase tracking-wide text-slate-500 mb-0.5">Duration</div>
+                                                                        <div className="font-mono text-sm font-semibold text-slate-200">{formatDuration(phaseMeta.duration_seconds)}</div>
+                                                                    </div>
+                                                                    <div className="bg-[#221b36] rounded p-2">
+                                                                        <div className="header-text text-[10px] uppercase tracking-wide text-slate-500 mb-0.5">Exec attempts</div>
+                                                                        <div className="font-mono text-sm font-semibold text-slate-200">{phaseMeta.executor_attempts}</div>
+                                                                        {retrySubParts.length > 0 && (
+                                                                            <div className="text-[10px] text-red-400/90 leading-tight">{retrySubParts.join(', ')}</div>
+                                                                        )}
+                                                                    </div>
+                                                                    <div className="bg-[#221b36] rounded p-2">
+                                                                        <div className="header-text text-[10px] uppercase tracking-wide text-slate-500 mb-0.5">Reviewer passes</div>
+                                                                        <div className="font-mono text-sm font-semibold text-slate-200">{phaseMeta.reviewer_passes}</div>
+                                                                    </div>
+                                                                    <div className="bg-[#221b36] rounded p-2">
+                                                                        <div className="header-text text-[10px] uppercase tracking-wide text-slate-500 mb-0.5">Escalations</div>
+                                                                        <div className="font-mono text-sm font-semibold text-slate-200">{phaseMeta.escalations}</div>
+                                                                    </div>
+                                                                </div>
+                                                                {(hasPhaseTokens || hasPhaseCost) && (
+                                                                    <div data-testid="phase-breakout-cards" className={`grid gap-2 mt-2 ${hasPhaseClassData ? 'md:grid-cols-2' : ''}`}>
+                                                                        <SplitStatCard
+                                                                            title="By agent"
+                                                                            total={agentMode === '$' ? phaseMeta.cost_total : phaseMeta.tokens_total}
+                                                                            fmtValue={agentMode === '$' ? fmtUSD : undefined}
+                                                                            rows={agentMode === '$'
+                                                                                ? roleSplitRows(phaseMeta.planner_cost, phaseMeta.executor_cost, phaseMeta.reviewer_cost)
+                                                                                : roleSplitRows(phaseMeta.planner_tokens, phaseMeta.executor_tokens, phaseMeta.reviewer_tokens)}
+                                                                            footnote="% of phase total"
+                                                                            headerExtra={(hasPhaseCost && hasPhaseTokens) ? (
+                                                                                <span data-testid="phase-agent-split-toggle" className="flex items-center rounded border border-[#2a2540] overflow-hidden">
+                                                                                    <button type="button"
+                                                                                        onClick={() => setPhaseAgentSplitMode('tokens')}
+                                                                                        className={`px-1.5 py-0.5 text-[10px] lowercase tracking-normal ${agentMode === 'tokens' ? 'bg-[#2a2245] text-[#e2b14c]' : 'text-slate-500 hover:text-slate-300'}`}>tokens</button>
+                                                                                    <button type="button"
+                                                                                        onClick={() => setPhaseAgentSplitMode('$')}
+                                                                                        className={`px-1.5 py-0.5 text-[10px] tracking-normal ${agentMode === '$' ? 'bg-[#2a2245] text-[#e2b14c]' : 'text-slate-500 hover:text-slate-300'}`}>$</button>
+                                                                                </span>
+                                                                            ) : null}
+                                                                        />
+                                                                        {hasPhaseClassData && (
+                                                                            <SplitStatCard
+                                                                                title="By token type"
+                                                                                total={phaseMeta.tokens_total}
+                                                                                rows={phaseClassRows}
+                                                                                footnote="% of phase total"
+                                                                            />
+                                                                        )}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    })() : (
                                                         <div className="text-xs text-slate-500 italic">No metrics available</div>
                                                     )}
                                                     {/* Git branch reference */}
@@ -3059,7 +3289,7 @@
                                                 </div>
                                             )}
                                         </div>
-                                    </div>
+                                    )}
                                 </div>
                             );
                         })}
@@ -8525,6 +8755,14 @@
             const [snapshot, setSnapshot] = useState(null);
             const [snapshotLoading, setSnapshotLoading] = useState(false);
             const [snapshotVersion, setSnapshotVersion] = useState(0);
+            // METRICS-E3 — which row's expansion shows the metrics breakout
+            // (chip-opened) instead of the overview snapshot. A plain row
+            // click always returns to the overview (cleared in the toggles).
+            const [metricsViewId, setMetricsViewId] = useState(null);
+            // METRICS-E4 — fetched /api/queue/{id}/report payload; non-null
+            // renders the durable completion-report modal.
+            const [reportData, setReportData] = useState(null);
+            const [reportBusy, setReportBusy] = useState(false);
             const [hubBusy, setHubBusy] = useState(false);
             const [hubError, setHubError] = useState('');
             const [revalidateChecks, setRevalidateChecks] = useState(null);
@@ -8875,6 +9113,20 @@
                     .finally(() => setHubBusy(false));
             };
 
+            // METRICS-E4 — fetch a row's durable completion report and open the modal.
+            const handleViewReport = (id) => {
+                setReportBusy(true);
+                setHubError('');
+                fetch(`/api/queue/${id}/report`)
+                    .then(async r => {
+                        const d = await r.json().catch(() => ({}));
+                        if (!r.ok) { setHubError(d.detail || 'Report fetch failed'); return; }
+                        setReportData(d);
+                    })
+                    .catch(() => setHubError('Request failed'))
+                    .finally(() => setReportBusy(false));
+            };
+
             // Drag-to-reorder: recursive descendants of a root (by parent_id), matching server group move
             const getAllDescendantIds = (q, rootId) => {
                 const out = [];
@@ -9197,6 +9449,53 @@
                 );
             }
 
+            // ── Row expansion: Metrics breakout (METRICS-E3, chip-opened) ──────────
+            function QueueMetricsBreakout() {
+                // Rendered only inside the expanded row — see QueueProjectSnapshot.
+                if (!selected) return null;
+                const snap = snapshot;
+                if (snapshotLoading && !snap) return (
+                    <p className="header-text text-xs text-slate-500 mt-2">Loading…</p>
+                );
+
+                const phases = (snap && Array.isArray(snap.metrics_phases)) ? snap.metrics_phases : [];
+                const phasesDone = phases.length;
+                const costValue = snap && snap.cost_total > 0 ? fmtUSD(snap.cost_total) : '—';
+                const tokensValue = snap && snap.tokens_total > 0 ? fmtTokens(snap.tokens_total) : '—';
+
+                return (
+                    <div className="space-y-4">
+                        <div className="flex items-center justify-between gap-3">
+                            <p className="header-text text-sm text-slate-200 font-semibold">Cost &amp; tokens</p>
+                            <button type="button" data-testid="queue-metrics-overview-link"
+                                onClick={() => setMetricsViewId(null)}
+                                className="header-text text-xs text-[#e2b14c] hover:underline flex-shrink-0">
+                                ‹ Overview
+                            </button>
+                        </div>
+
+                        {/* Summary trio — same stat-card vocabulary as the overview. */}
+                        <div className="grid grid-cols-3 gap-2">
+                            <QueueStatCard label="Cost" value={costValue}
+                                sub={snap && snap.cost_total > 0 && phasesDone > 0 ? `${fmtUSD(snap.cost_total / phasesDone)} / phase` : null} />
+                            <QueueStatCard label="Tokens" value={tokensValue}
+                                sub={snap && snap.tokens_total > 0 && phasesDone > 0 ? `${fmtTokensCompact(snap.tokens_total / phasesDone)} / phase` : null} />
+                            <QueueStatCard label="Active time"
+                                value={snap && snap.duration_seconds != null ? formatDuration(snap.duration_seconds) : '—'}
+                                sub={phasesDone > 0 ? `${phasesDone} phase${phasesDone !== 1 ? 's' : ''} recorded` : null} />
+                        </div>
+
+                        {/* Per-phase table — the SAME component the Pipeline Monitor's
+                            completion report renders, fed by snapshot.metrics_phases. */}
+                        {phasesDone > 0 ? (
+                            <PhaseMetricsTable phases={phases} />
+                        ) : (
+                            <p className="header-text text-xs text-slate-500">No completed-phase metrics recorded yet.</p>
+                        )}
+                    </div>
+                );
+            }
+
             // ── Row expansion: Action Hub ───────────────────────────────────────────
             function QueueActionHub() {
                 // Rendered only inside the expanded row — see QueueProjectSnapshot.
@@ -9487,12 +9786,21 @@
                 if (state === 'COMPLETED') return (
                     <div className="space-y-3">
                         <p className="header-text text-xs text-slate-500">Pipeline complete.</p>
+                        {/* METRICS-E4 — durable completion report (same panel the
+                            Monitor shows at PIPELINE_COMPLETE, recallable any time). */}
+                        <button type="button" data-testid="queue-view-report"
+                            onClick={() => handleViewReport(selected.id)}
+                            disabled={reportBusy}
+                            className="header-text text-xs px-3 py-2 rounded-md bg-[#221b36] text-[#e2b14c] border border-[#2a2540] hover:bg-[#2a2245] w-full disabled:opacity-50">
+                            {reportBusy ? 'Loading…' : 'View report'}
+                        </button>
                         <button onClick={() => handleRemove(selected.id)}
                             disabled={reorderDirty}
                             title={reorderDirty ? "Save or cancel reorder first" : undefined}
                             className="header-text text-xs px-3 py-1.5 rounded bg-red-900/40 text-red-300 hover:bg-red-900/70 w-full disabled:opacity-40">
                             Remove from Queue
                         </button>
+                        {hubError && <p className="header-text text-xs text-red-400">{hubError}</p>}
                     </div>
                 );
 
@@ -9592,7 +9900,9 @@
                             dead void to the right of the ACTIONS rail. */}
                         <div className="flex-1 min-w-0">
                             <div className={wide ? 'max-w-3xl' : 'max-w-2xl'}>
-                                {QueueProjectSnapshot()}
+                                {/* METRICS-E3 — a metric-chip click swaps the overview for the
+                                    cost/token breakout; a plain row click restores the overview. */}
+                                {selected && metricsViewId === selected.id ? QueueMetricsBreakout() : QueueProjectSnapshot()}
                             </div>
                         </div>
                         <div className={`w-full flex-shrink-0 md:border-l md:border-[#221b36] md:pl-6 ${wide ? 'md:w-80' : 'md:w-64'}`}>
@@ -9730,7 +10040,7 @@
                                     <span className="min-w-0">PHASE</span>
                                     <span className="min-w-0">PROGRESS</span>
                                     <span className="min-w-0 text-right">ELAPSED</span>
-                                    <span className="min-w-0 text-right">COST</span>
+                                    <span className="min-w-0 text-right">METRICS</span>
                                     <span className="min-w-0 text-right">QUEUED</span>
                                 </div>
                                 {/* Queue table rows */}
@@ -9768,7 +10078,17 @@
                                         elapsedCell = relTime(entry.failed_at) || '—';
                                     }
 
-                                    const costCell = Number(entry.cost_total) > 0 ? fmtUSD(entry.cost_total) : '—';
+                                    // METRICS chips — totals only (the breakout owns per-phase
+                                    // detail); both zero-suppressed so no-usage runs stay clean.
+                                    const hasCostChip = Number(entry.cost_total) > 0;
+                                    const hasTokensChip = Number(entry.tokens_total) > 0;
+                                    const openMetricsBreakout = (e) => {
+                                        e.stopPropagation();
+                                        setExpandedId(entry.id);
+                                        setMetricsViewId(entry.id);
+                                        setHubError('');
+                                        setRevalidateChecks(null);
+                                    };
 
                                     const pt = entry.phases_total, pc = entry.phases_complete;
                                     const hasProgress = pt != null && pt > 0;
@@ -9791,8 +10111,8 @@
                                                 onDragOver={e => handleDragOver(e, entry)}
                                                 onDrop={e => handleDrop(e, entry)}
                                                 onDragEnd={handleDragEnd}
-                                                onClick={() => { setExpandedId(prev => prev === entry.id ? null : entry.id); setHubError(''); setRevalidateChecks(null); }}
-                                                onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpandedId(prev => prev === entry.id ? null : entry.id); setHubError(''); setRevalidateChecks(null); } }}
+                                                onClick={() => { setExpandedId(prev => prev === entry.id ? null : entry.id); setMetricsViewId(null); setHubError(''); setRevalidateChecks(null); }}
+                                                onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpandedId(prev => prev === entry.id ? null : entry.id); setMetricsViewId(null); setHubError(''); setRevalidateChecks(null); } }}
                                                 title={entry.parent_id && reorderMode ? 'Move the parent project to reorder this group' : undefined}
                                                 className={`${QUEUE_TABLE_GRID} px-4 py-2.5 text-xs border-b border-[#1c1829] cursor-pointer transition-colors ${
                                                     isExpanded ? 'bg-[#241d10]/70 border-l-2 border-l-[#e2b14c]' : 'hover:bg-[#221b36]/50'
@@ -9846,8 +10166,28 @@
                                                 </span>
                                                 {/* ELAPSED */}
                                                 <span className="min-w-0 text-right font-mono text-slate-400 truncate">{elapsedCell}</span>
-                                                {/* COST */}
-                                                <span className="min-w-0 text-right font-mono text-slate-400">{costCell}</span>
+                                                {/* METRICS — quiet cost/token chips; click opens the
+                                                    row's expansion in the metrics-breakout view. */}
+                                                <span className="min-w-0 flex items-center justify-end gap-1.5">
+                                                    {(hasCostChip || hasTokensChip) ? (<>
+                                                        {hasCostChip && (
+                                                            <button type="button" data-testid="queue-metrics-chip-cost"
+                                                                title="View cost & token breakdown"
+                                                                onClick={openMetricsBreakout}
+                                                                className="font-mono text-[11px] px-1.5 py-0.5 rounded border border-[#2a2540] bg-[#221b36] text-slate-300 hover:border-[#e2b14c]/50 transition-colors">
+                                                                {fmtUSD(entry.cost_total)}
+                                                            </button>
+                                                        )}
+                                                        {hasTokensChip && (
+                                                            <button type="button" data-testid="queue-metrics-chip-tokens"
+                                                                title={`${fmtTokens(entry.tokens_total)} tokens — view breakdown`}
+                                                                onClick={openMetricsBreakout}
+                                                                className="font-mono text-[11px] px-1.5 py-0.5 rounded border border-[#2a2540] bg-[#221b36] text-slate-300 hover:border-[#e2b14c]/50 transition-colors">
+                                                                {fmtTokensCompact(entry.tokens_total)} tok
+                                                            </button>
+                                                        )}
+                                                    </>) : <span className="font-mono text-slate-600">—</span>}
+                                                </span>
                                                 {/* QUEUED */}
                                                 <span className="min-w-0 text-right font-mono text-slate-500 truncate">{queuedCell}</span>
                                             </div>
@@ -9865,6 +10205,10 @@
                             onClose={() => setShowAddModal(false)}
                             onAdded={() => { fetchQueue(); setShowAddModal(false); }}
                         />
+                    )}
+                    {/* METRICS-E4 — durable per-project completion report */}
+                    {reportData && (
+                        <QueueReportModal report={reportData} onClose={() => setReportData(null)} />
                     )}
                 </div>
             );

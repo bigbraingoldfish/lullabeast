@@ -3668,6 +3668,7 @@ def _project_metrics_totals(project_path):
         {
           "phases":           list[dict],  # deduped keep-LAST per phase, first-seen order
           "cost_total":       float,       # round(sum of per-row cost_total, 6)
+          "tokens_total":     int,         # sum of per-phase role token totals (METRICS-E3)
           "duration_seconds": int,         # sum of per-phase duration_seconds (active work)
           "last_phase":       str | None,  # phases[-1]["phase"], or None when phases empty
         }
@@ -3713,9 +3714,32 @@ def _project_metrics_totals(project_path):
     return {
         "phases": phases,
         "cost_total": round(sum(_phase_cost(p) for p in phases), 6),
+        "tokens_total": sum(_phase_token_total(p) for p in phases),
         "duration_seconds": sum((p.get("duration_seconds") or 0) for p in phases),
         "last_phase": phases[-1].get("phase") if phases else None,
     }
+
+
+def _compact_metrics_phases(totals) -> list[dict]:
+    """Project a ``_project_metrics_totals`` result onto the compact per-phase
+    shape the dashboard's phase-metrics table consumes — the SAME keys as the
+    ``/api/metrics-summary`` per-phase rows it shares markup with (METRICS-E3:
+    the Queue row expansion's breakout table). ``[]`` when ``totals`` is None.
+    """
+    if not totals:
+        return []
+    return [
+        {
+            "phase": p.get("phase"),
+            "duration_seconds": p.get("duration_seconds"),
+            "executor_attempts": p.get("executor_attempts", 0),
+            "escalations": p.get("escalations", 0),
+            "cost_total": _phase_cost(p),
+            "tokens_total": _phase_token_total(p),
+            "tokens_breakdown": _phase_token_breakdown(p),
+        }
+        for p in totals["phases"]
+    ]
 
 
 def _empty_metrics_summary():
@@ -3829,6 +3853,17 @@ def get_metrics_summary():
     per phase, so cumulative attempt counts are correct even if a phase was reset
     and re-run). Returns sensible zeros if the file is absent or empty.
 
+    The whole aggregation lives in ``_build_project_metrics_summary`` —
+    parameterised by project so ``GET /api/queue/{entry_id}/report``
+    (METRICS-E4) builds the identical shape for a non-active project.
+    """
+    config = load_config()
+    return _build_project_metrics_summary(config.get("project_dir_path"), config)
+
+
+def _build_project_metrics_summary(project_dir_path, config):
+    """Full metrics-summary dict for ONE project directory (pure read).
+
     ``total_duration_seconds`` is the SUM of per-phase ``duration_seconds`` (real
     phase work, in-phase holds included) — never run_summary.json's calendar
     wall-clock, which spans idle gaps across days and inflates the figure.
@@ -3838,11 +3873,13 @@ def get_metrics_summary():
     per-phase ``tokens_total`` — each summed from the row's per-role
     ``total_tokens`` via ``_role_token_total`` (missing/non-numeric → 0). Cost and
     tokens are surfaced together so the Pipeline Monitor renders both live and at
-    completion.
-    """
-    config = load_config()
-    project_dir_path = config.get("project_dir_path")
+    completion. Per-phase rows also carry the METRICS-E2 role-token split.
 
+    Hold time pairs escalation events from ``config["events_path"]`` by the
+    project's basename, so it works for any project the events log names —
+    active or parked. Returns ``_empty_metrics_summary()`` when the project
+    has no readable metrics rows.
+    """
     # Shared aggregation (read + parse + dedup keep-last + cost/duration sums)
     # lives in _project_metrics_totals — also consumed by the GET /api/queue
     # per-entry summary block. None covers exactly the old empty-summary cases.
@@ -3875,8 +3912,9 @@ def get_metrics_summary():
     reviewer_cost_total = round(sum(_role_cost(p, "reviewer_tokens") for p in phases), 6)
     # 3-B — token totals parallel the cost totals above (run total + per-role). The
     # underlying per-role total_tokens already lives on each metrics row; the endpoint
-    # simply surfaces it so the Pipeline Monitor can render spend-in-tokens.
-    total_tokens = sum(_phase_token_total(p) for p in phases)
+    # simply surfaces it so the Pipeline Monitor can render spend-in-tokens. The run
+    # total comes from the shared aggregator (same source the queue surfaces read).
+    total_tokens = totals["tokens_total"]
     planner_tokens_total = sum(_role_token_total(p, "planner_tokens") for p in phases)
     executor_tokens_total = sum(_role_token_total(p, "executor_tokens") for p in phases)
     reviewer_tokens_total = sum(_role_token_total(p, "reviewer_tokens") for p in phases)
@@ -3937,11 +3975,19 @@ def get_metrics_summary():
                 "blame_fires": p.get("blame_fires", 0),
                 "escalations": p.get("escalations", 0),
                 "skill_used": p.get("skill_used"),
+                # MON-1 — {role: model} stamped by the orchestrator at each
+                # invocation; null for pre-deploy rows / malformed values.
+                "models_used": p.get("models_used") if isinstance(p.get("models_used"), dict) else None,
                 "cost_total": _phase_cost(p),
                 "planner_cost": _role_cost(p, "planner_tokens"),
                 "executor_cost": _role_cost(p, "executor_tokens"),
                 "reviewer_cost": _role_cost(p, "reviewer_tokens"),
                 "tokens_total": _phase_token_total(p),
+                # METRICS-E2 — per-phase role-token split, paralleling the cost
+                # split above (ints; missing/non-numeric role dicts read as 0).
+                "planner_tokens": _role_token_total(p, "planner_tokens"),
+                "executor_tokens": _role_token_total(p, "executor_tokens"),
+                "reviewer_tokens": _role_token_total(p, "reviewer_tokens"),
                 "tokens_breakdown": _phase_token_breakdown(p),
                 "hold_seconds": hold_per_phase.get(p.get("phase"), 0),
             }
@@ -8370,9 +8416,10 @@ def get_queue():
 
     - ``phases_total`` / ``phases_complete`` — roadmap checkbox stats from the
       project's ``*oadmap*.md`` (W3-B, extended from ACTIVE-only to all states)
-    - ``cost_total`` / ``duration_seconds`` — aggregated from the project's
-      ``metrics.jsonl`` via ``_project_metrics_totals`` (active work time, not
-      calendar wall-clock)
+    - ``cost_total`` / ``tokens_total`` / ``duration_seconds`` — aggregated
+      from the project's ``metrics.jsonl`` via ``_project_metrics_totals``
+      (active work time, not calendar wall-clock; tokens are METRICS-E3, the
+      row's token metric chip)
     - ``current_phase_raw_id`` — live entry: from pipeline_state; parked
       ESCALATION/ESCALATION_ANSWERED/BLOCKED entry: from its
       ``parked_state_snapshot``; COMPLETED/FAILED entry: last deduped metrics
@@ -8459,13 +8506,16 @@ def get_queue():
             except Exception:
                 pass  # non-fatal — keys stay None
 
-        # cost_total / duration_seconds — aggregated from the project's
-        # metrics.jsonl via the shared helper (None when no metrics exist).
+        # cost_total / tokens_total / duration_seconds — aggregated from the
+        # project's metrics.jsonl via the shared helper (None when no metrics
+        # exist). tokens_total (METRICS-E3) feeds the row's token metric chip,
+        # parallel to the cost chip.
         try:
             _totals = _project_metrics_totals(_proj)
         except Exception:
-            _totals = None  # non-fatal — cost/duration stay None
+            _totals = None  # non-fatal — cost/tokens/duration stay None
         entry["cost_total"] = _totals["cost_total"] if _totals else None
+        entry["tokens_total"] = _totals["tokens_total"] if _totals else None
         entry["duration_seconds"] = _totals["duration_seconds"] if _totals else None
 
         # current_phase_raw_id / parked_agent — state-dependent sources. The
@@ -8943,14 +8993,18 @@ def get_queue_entry_snapshot(entry_id: str):
         except Exception:
             pass
 
-    # Cost + active-work duration from the entry's own metrics.jsonl (shared
-    # helper; None when the project has no metrics — the UI suppresses both).
+    # Cost + tokens + active-work duration from the entry's own metrics.jsonl
+    # (shared helper; None when the project has no metrics — the UI suppresses
+    # all three). metrics_phases (METRICS-E3) is the compact per-phase
+    # projection behind the row expansion's cost/token breakout table.
     try:
         _totals = _project_metrics_totals(project_path)
     except Exception:
         _totals = None
     snapshot_cost_total = _totals["cost_total"] if _totals else None
+    snapshot_tokens_total = _totals["tokens_total"] if _totals else None
     snapshot_duration_seconds = _totals["duration_seconds"] if _totals else None
+    snapshot_metrics_phases = _compact_metrics_phases(_totals)
 
     # Per-entry escalation/advisory view + eligibility probes, computed by the SHARED
     # _compute_escalation_view helper against THIS entry's project (not the active one).
@@ -8998,7 +9052,9 @@ def get_queue_entry_snapshot(entry_id: str):
         "phases_total": phases_total,
         "phases_complete": phases_complete,
         "cost_total": snapshot_cost_total,
+        "tokens_total": snapshot_tokens_total,
         "duration_seconds": snapshot_duration_seconds,
+        "metrics_phases": snapshot_metrics_phases,
         "current_phase_raw_id": current_phase_raw_id,
         "current_phase_desc": current_phase_desc,
         "current_phase": current_phase,
@@ -9027,6 +9083,66 @@ def get_queue_entry_snapshot(entry_id: str):
         "planner_output_exists": planner_output_exists,
         "phase_branch_exists": phase_branch_exists,
         "merge_probe_passed": merge_probe_passed,
+    }
+
+
+@app.get("/api/queue/{entry_id}/report")
+def get_queue_entry_report(entry_id: str):
+    """Durable completion report for a queue entry (METRICS-E4).
+
+    The Pipeline Monitor's completion view reads the ACTIVE project's metrics
+    and ``completion_report.md`` — both go dark once the queue advances. This
+    endpoint rebuilds the same payload against THIS entry's project so a
+    COMPLETED row's report stays recallable: ``metrics_summary`` (the exact
+    ``/api/metrics-summary`` shape, via the shared
+    ``_build_project_metrics_summary``), ``completion_report``
+    ({found, content, mtime} — the ``/api/completion-report`` shape), and
+    roadmap checkbox counts. Read-only; 404 on unknown entry.
+    """
+    config = load_config()
+    q = _read_queue_file(config)
+    entry = next((e for e in q.get("queue", []) if e["id"] == entry_id), None)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Queue entry not found")
+    project_path = entry.get("project_path", "")
+
+    metrics_summary = _build_project_metrics_summary(project_path, config)
+
+    completion_report = {"found": False, "content": "", "mtime": None}
+    if project_path and os.path.isdir(project_path):
+        report_path = os.path.join(project_path, "completion_report.md")
+        if os.path.exists(report_path):
+            try:
+                with open(report_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                completion_report = {
+                    "found": True,
+                    "content": content,
+                    "mtime": os.path.getmtime(report_path),
+                }
+            except OSError:
+                pass  # unreadable → keep found:False, never 500
+
+    phases_total = None
+    phases_complete = None
+    import glob as glob_mod
+    candidates = glob_mod.glob(os.path.join(project_path, "*oadmap*.md")) if project_path else []
+    if candidates:
+        try:
+            with open(candidates[0], "r", errors="replace") as f:
+                phases_total, phases_complete = _roadmap_phase_checkbox_stats(f.read())
+        except Exception:
+            pass  # non-fatal — counts stay None (modal header degrades)
+
+    return {
+        "id": entry["id"],
+        "name": entry.get("name"),
+        "project_path": project_path,
+        "state": entry.get("state"),
+        "metrics_summary": metrics_summary,
+        "completion_report": completion_report,
+        "phases_total": phases_total,
+        "phases_complete": phases_complete,
     }
 
 

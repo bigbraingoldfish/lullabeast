@@ -62,7 +62,9 @@ def test_filter_chips_rendered_with_counts(html):
 def test_table_column_headers_present(html):
     q = _queue_block(html)
     assert "{/* Queue table header */}" in q
-    for col in ("PROJECT", "STATUS", "PHASE", "PROGRESS", "ELAPSED", "COST", "QUEUED"):
+    # COST became METRICS (METRICS-E3): the column hosts the cost + tokens
+    # metric chips rather than a bare cost figure.
+    for col in ("PROJECT", "STATUS", "PHASE", "PROGRESS", "ELAPSED", "METRICS", "QUEUED"):
         assert f">{col}</span>" in q, f"table header column {col} missing"
 
 
