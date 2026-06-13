@@ -372,7 +372,7 @@ These are explicitly out of scope for this build. Do not implement:
 
 - Signal message viewer
 - Agent session log viewer (OpenClaw's domain)
-- Multi-project switcher
+- Concurrent multi-project orchestration — running more than one project's pipeline at the same time. (Single-active-project switching while stopped, via `/api/setup/switch-project`, **is** implemented and supported; the queue serializes multiple projects rather than running them in parallel.)
 - User authentication
 - Mobile-optimized layout (Tailscale + browser on the same network is the access model)
 - Persistent storage or database

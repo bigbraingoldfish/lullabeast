@@ -781,9 +781,11 @@ orchestrator_script = os.path.join(autodev_repo_path, "autodev", "pipeline", ORC
 
 `autodev_repo_path` should be set to the repo root (written by `install.sh` into `.env`). The workaround of pointing `autodev_repo_path` at `{repo_root}/autodev/pipeline` is no longer necessary or correct.
 
-### 2. Multi-project switcher (`/api/setup/switch-project`)
+### 2. ~~Multi-project switcher (`/api/setup/switch-project`)~~ — **RESOLVED**
 
-`POST /api/setup/switch-project` has a test file (`tests/test_api_setup_switch_project.py`) and is implemented in `ui/server.py`. The `AUTODEV-UI-PRD.md` explicitly marks a multi-project switcher as a **v1 non-requirement**. It is unclear whether this endpoint was added intentionally during the build or was included as scaffolding. Before documenting it in `SETUP.md` or exposing it in the UI, confirm whether it is production-ready.
+`POST /api/setup/switch-project` is production-ready, UI-wired, and well-tested — not scaffolding. It re-targets the **single active project** (while the pipeline is stopped) and is at parity with `/api/setup/launch`: dual liveness (409) guards, write-then-act with `_rollback_pipeline_state` on spawn failure (C3-05), `confirm_lock=True`, multi-roadmap disambiguation, and parked-escalation revival routing (`_entry_is_parked_escalation` → `revive_entry_id`, shared with `resume-orchestrator` and `queue/{id}/relaunch`). It is reachable from the dashboard: clicking the Pipeline-Monitor-header project path while stopped opens the switch modal (`postSwitchProject`, `ui/index.html`). Covered by `tests/test_api_setup_switch_project.py` plus the revival-routing, rollback, liveness, and modal test files.
+
+The endpoint is *single-active-project re-targeting*, **not** concurrent multi-project orchestration — running several projects' pipelines at once remains out of scope (the queue serializes projects rather than running them in parallel). `AUTODEV-UI-PRD.md`'s "Multi-project switcher" non-requirement was reworded to that effect, and operator docs live in `SETUP.md` (Starting Lullabeast → "Switching the active project").
 
 ### 3. ~~`autodev_repo_path` DEFAULTS fallback~~ — **RESOLVED**
 
