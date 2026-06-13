@@ -692,16 +692,29 @@
          * and columns scale proportionally on wide screens (PROJECT is capped so it
          * cannot swallow the whole width). */
         const QUEUE_TABLE_GRID = 'grid grid-cols-[minmax(230px,2.2fr)_minmax(140px,1.1fr)_minmax(120px,1fr)_minmax(150px,1.2fr)_minmax(95px,0.7fr)_minmax(150px,1.05fr)_minmax(95px,0.7fr)] items-center gap-3';
+        /* QT-4 — the Cost & Tokens tab's SPEND BY PHASE table:
+           phase | share-by-agent bar | value | % | exec | dur | result | caret */
+        const QUEUE_SPEND_GRID = 'grid grid-cols-[minmax(80px,0.9fr)_minmax(120px,1.8fr)_minmax(90px,1fr)_48px_44px_56px_minmax(78px,auto)_14px] items-center gap-3';
 
         /** One stat tile in the expansion's "Run so far" / "At a glance" trio.
          * Module-level (stable component identity) so the trio never remounts on
          * the 5s poll re-render. */
-        function QueueStatCard({ label, value, sub }) {
+        function QueueStatCard({ label, value, sub, onClick }) {
+            // Optional onClick (QT-3): the overview's Cost/Tokens cards link
+            // into the Cost & Tokens tab — clickable cards get hover affordance
+            // and an accent-tinted sub line ("view breakdown ›").
+            const clickable = typeof onClick === 'function';
             return (
-                <div className="border border-[#1c1829] rounded-md bg-[#15121f] p-3 min-w-0">
+                <div
+                    role={clickable ? 'button' : undefined}
+                    tabIndex={clickable ? 0 : undefined}
+                    onClick={onClick}
+                    onKeyDown={clickable ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } } : undefined}
+                    className={`border border-[#1c1829] rounded-md bg-[#15121f] p-3 min-w-0 ${clickable ? 'cursor-pointer hover:border-[#e2b14c]/40 transition-colors' : ''}`}
+                >
                     <p className="header-text text-[10px] uppercase tracking-wide text-slate-500">{label}</p>
                     <p className="font-mono text-base text-slate-200 mt-1 truncate">{value}</p>
-                    {sub && <p className="header-text text-[11px] text-slate-500 mt-0.5 truncate">{sub}</p>}
+                    {sub && <p className={`header-text text-[11px] mt-0.5 truncate ${clickable ? 'text-[#e2b14c]/80' : 'text-slate-500'}`}>{sub}</p>}
                 </div>
             );
         }
@@ -2369,6 +2382,40 @@
             );
         }
 
+        // ─── PhaseOutcomeBadge ───────────────────────────────────────────────────
+        /* Pill-style outcome badge for a metrics phase row — shared by the
+           completion report's per-phase table and the Queue Cost & Tokens tab's
+           spend table so outcomes read identically everywhere (QT-2). Single-word
+           label per the operator mock (ESCALATED wins over RETRIED wins over
+           CLEAN); the compound detail ("escalated + retried") lives in the
+           tooltip. */
+        function phaseOutcome(phase) {
+            const ex = Number(phase.executor_attempts) || 0;
+            const esc = Number(phase.escalations) || 0;
+            if (esc > 0) return {
+                label: 'escalated',
+                detail: ex >= 2 ? 'escalated + retried' : 'escalated',
+                cls: 'border-red-500/50 text-red-400 bg-red-950/30',
+            };
+            if (ex >= 2) return {
+                label: 'retried',
+                detail: `${ex} executor attempts`,
+                cls: 'border-amber-500/50 text-amber-400 bg-amber-950/20',
+            };
+            return {
+                label: 'clean',
+                detail: 'passed on the first attempt',
+                cls: 'border-emerald-600/50 text-emerald-400 bg-emerald-950/20',
+            };
+        }
+
+        function PhaseOutcomeBadge({ phase }) {
+            const o = phaseOutcome(phase);
+            return (
+                <span title={o.detail} className={`header-text text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded-full border ${o.cls}`}>{o.label}</span>
+            );
+        }
+
         // ─── PhaseMetricsTable ───────────────────────────────────────────────────
         /* Shared per-phase metrics table — rendered by PipelineCompletePanel
            (completion report) and the Queue row expansion's metrics breakout
@@ -2380,15 +2427,6 @@
             const hasCostColumn = phases.some(p => Number(p.cost_total) > 0);
             const hasTokenColumn = phases.some(p => Number(p.tokens_total) > 0);
 
-            const outcomeBadge = (phase) => {
-                const ex = Number(phase.executor_attempts) || 0;
-                const esc = Number(phase.escalations) || 0;
-                if (esc > 0 && ex >= 2) return { label: 'escalated + retried', accent: true };
-                if (esc > 0) return { label: 'escalated', accent: true };
-                if (ex >= 2) return { label: 'retried', accent: false, muted: true };
-                return { label: 'clean', accent: false };
-            };
-
             return (
                 <div className="border border-[#1c1829] rounded">
                     <div className="flex items-center gap-2 px-2 py-1 text-[10px] header-text uppercase tracking-wide text-slate-500 border-b border-[#1c1829]">
@@ -2399,26 +2437,20 @@
                         {hasTokenColumn && <span className="w-16 flex-shrink-0 text-right">Tokens</span>}
                         <span className="ml-auto">Result</span>
                     </div>
-                    {phases.map((phase, idx) => {
-                        const badge = outcomeBadge(phase);
-                        const badgeClass = badge.accent
-                            ? 'text-red-400'
-                            : (badge.muted ? 'text-slate-500' : 'text-emerald-400');
-                        return (
-                            <div key={idx} className="flex items-center gap-2 px-2 py-1.5 text-xs border-b border-[#1c1829] last:border-b-0">
-                                <span className="header-text font-semibold text-slate-300 w-16 flex-shrink-0 font-mono">{phase.phase}</span>
-                                <span className="text-slate-400 w-14 flex-shrink-0 text-right font-mono">{formatDuration(phase.duration_seconds)}</span>
-                                <span className="text-slate-400 w-10 flex-shrink-0 text-right font-mono">{phase.executor_attempts}</span>
-                                {hasCostColumn && (
-                                    <span className="text-slate-400 w-14 flex-shrink-0 text-right font-mono">{Number(phase.cost_total) > 0 ? fmtUSD(phase.cost_total) : '—'}</span>
-                                )}
-                                {hasTokenColumn && (
-                                    <span className="text-slate-400 w-16 flex-shrink-0 text-right font-mono" title={fmtTokenBreakdown(phase.tokens_breakdown) || undefined}>{Number(phase.tokens_total) > 0 ? fmtTokens(phase.tokens_total) : '—'}</span>
-                                )}
-                                <span className={`ml-auto header-text ${badgeClass}`}>{badge.label}</span>
-                            </div>
-                        );
-                    })}
+                    {phases.map((phase, idx) => (
+                        <div key={idx} className="flex items-center gap-2 px-2 py-1.5 text-xs border-b border-[#1c1829] last:border-b-0">
+                            <span className="header-text font-semibold text-slate-300 w-16 flex-shrink-0 font-mono">{phase.phase}</span>
+                            <span className="text-slate-400 w-14 flex-shrink-0 text-right font-mono">{formatDuration(phase.duration_seconds)}</span>
+                            <span className="text-slate-400 w-10 flex-shrink-0 text-right font-mono">{phase.executor_attempts}</span>
+                            {hasCostColumn && (
+                                <span className="text-slate-400 w-14 flex-shrink-0 text-right font-mono">{Number(phase.cost_total) > 0 ? fmtUSD(phase.cost_total) : '—'}</span>
+                            )}
+                            {hasTokenColumn && (
+                                <span className="text-slate-400 w-16 flex-shrink-0 text-right font-mono" title={fmtTokenBreakdown(phase.tokens_breakdown) || undefined}>{Number(phase.tokens_total) > 0 ? fmtTokens(phase.tokens_total) : '—'}</span>
+                            )}
+                            <span className="ml-auto"><PhaseOutcomeBadge phase={phase} /></span>
+                        </div>
+                    ))}
                 </div>
             );
         }
@@ -8755,10 +8787,18 @@
             const [snapshot, setSnapshot] = useState(null);
             const [snapshotLoading, setSnapshotLoading] = useState(false);
             const [snapshotVersion, setSnapshotVersion] = useState(0);
-            // METRICS-E3 — which row's expansion shows the metrics breakout
-            // (chip-opened) instead of the overview snapshot. A plain row
-            // click always returns to the overview (cleared in the toggles).
-            const [metricsViewId, setMetricsViewId] = useState(null);
+            // QT-3 — row-expansion sub-tab: 'overview' (default) | 'metrics'
+            // (the Cost & Tokens view). A metric chip quick-opens 'metrics';
+            // a plain row click resets to 'overview'.
+            const [expansionTab, setExpansionTab] = useState('overview');
+            // QT-4 — Cost & Tokens tab state: which totals pill is open
+            // (null | 'cost' | 'tokens'), the tokens/$ value mode and sort
+            // for the spend table (sticky across rows — operator preference),
+            // and the spend row whose per-phase breakout is open.
+            const [queueTotalsView, setQueueTotalsView] = useState(null);
+            const [spendMode, setSpendMode] = useState('tokens');
+            const [spendSort, setSpendSort] = useState('timeline');
+            const [spendExpandedPhase, setSpendExpandedPhase] = useState(null);
             // METRICS-E4 — fetched /api/queue/{id}/report payload; non-null
             // renders the durable completion-report modal.
             const [reportData, setReportData] = useState(null);
@@ -9277,8 +9317,14 @@
                 }
 
                 const costValue = snap && snap.cost_total > 0 ? fmtUSD(snap.cost_total) : '—';
-                const costSub = snap && snap.cost_total > 0 && phasesComplete > 0
-                    ? `${fmtUSD(snap.cost_total / phasesComplete)} / phase` : null;
+                const tokensValue = snap && snap.tokens_total > 0 ? fmtTokensCompact(snap.tokens_total) : '—';
+                // QT-3 — the Cost/Tokens cards link into the Cost & Tokens tab
+                // (only when there is something to break down).
+                const breakdownLink = (snap && (snap.cost_total > 0 || snap.tokens_total > 0))
+                    ? { sub: 'view breakdown ›', onClick: () => { setExpansionTab('metrics'); setQueueTotalsView(null); setSpendExpandedPhase(null); } }
+                    : { sub: null, onClick: undefined };
+                const costCard = { label: 'Cost', value: costValue, sub: breakdownLink.sub, onClick: breakdownLink.onClick };
+                const tokensCard = { label: 'Tokens', value: tokensValue, sub: breakdownLink.sub, onClick: breakdownLink.onClick };
 
                 // Stat-card trio — content is per-kind (em-dash where unknowable). The
                 // queued family deliberately omits cost (unknown before a run runs).
@@ -9287,27 +9333,31 @@
                     cards = [
                         { label: 'Elapsed', value: selected.started_at ? (formatElapsedSince(selected.started_at) || '—') : '—',
                           sub: snap && snap.duration_seconds != null ? `active ${formatDuration(snap.duration_seconds)}` : null },
-                        { label: 'Cost', value: costValue, sub: costSub },
                         { label: 'Phases', value: phasesNode, sub: phasesTotal > 0 ? `${remaining} remaining` : null },
+                        costCard,
+                        tokensCard,
                     ];
                 } else if (kind === 'completed') {
                     cards = [
                         { label: 'Duration', value: snap && snap.duration_seconds != null ? formatDuration(snap.duration_seconds) : '—', sub: 'active work' },
-                        { label: 'Cost', value: costValue, sub: costSub },
                         { label: 'Phases', value: phasesNode, sub: phasesTotal > 0 ? 'all complete' : null },
+                        costCard,
+                        tokensCard,
                     ];
                 } else if (kind === 'failed') {
                     cards = [
                         { label: 'Ran for', value: selected.started_at ? (formatElapsedSince(selected.started_at) || '—') : '—',
                           sub: selected.failed_at ? `failed ${relTime(selected.failed_at)}` : null },
-                        { label: 'Cost', value: costValue, sub: costSub },
                         { label: 'Reached', value: phasesNode, sub: null },
+                        costCard,
+                        tokensCard,
                     ];
                 } else if (kind === 'blocked') {
                     cards = [
                         { label: 'Phases', value: phasesNode, sub: phasesTotal > 0 ? `${remaining} remaining` : null },
-                        { label: 'Cost', value: costValue, sub: costSub },
                         { label: 'Blocked', value: selected.blocked_at ? relTime(selected.blocked_at) : '—', sub: null },
+                        costCard,
+                        tokensCard,
                     ];
                 } else if (kind === 'queued') {
                     cards = [
@@ -9321,8 +9371,9 @@
                     const waitingSince = selected.parked_at || (snap && snap.waiting_for_human_at) || null;
                     cards = [
                         { label: 'Phases', value: phasesNode, sub: phasesTotal > 0 ? `${remaining} remaining` : null },
-                        { label: 'Cost', value: costValue, sub: costSub },
                         { label: 'Waiting', value: waitingSince ? (formatElapsedSince(waitingSince) || '—') : '—', sub: kind === 'answered' ? 'for its turn' : 'on you' },
+                        costCard,
+                        tokensCard,
                     ];
                 }
 
@@ -9419,8 +9470,10 @@
                                 <p className="header-text text-[10px] text-slate-500 font-semibold uppercase tracking-wide mb-2">
                                     {kind === 'queued' ? 'At a glance' : 'Run so far'}
                                 </p>
-                                <div className="grid grid-cols-3 gap-2">
-                                    {cards.map((c, i) => <QueueStatCard key={i} label={c.label} value={c.value} sub={c.sub}/>)}
+                                {/* QT-3 — 4-card kinds spread 2→4 columns with the window
+                                    (the stretch ask); the queued trio keeps its row. */}
+                                <div className={cards.length >= 4 ? 'grid grid-cols-2 lg:grid-cols-4 gap-2' : 'grid grid-cols-3 gap-2'}>
+                                    {cards.map((c, i) => <QueueStatCard key={i} label={c.label} value={c.value} sub={c.sub} onClick={c.onClick}/>)}
                                 </div>
                             </div>
                         )}
@@ -9449,8 +9502,8 @@
                 );
             }
 
-            // ── Row expansion: Metrics breakout (METRICS-E3, chip-opened) ──────────
-            function QueueMetricsBreakout() {
+            // ── Row expansion: Cost & Tokens tab (QT-4) ─────────────────────────────
+            function QueueCostTokensTab() {
                 // Rendered only inside the expanded row — see QueueProjectSnapshot.
                 if (!selected) return null;
                 const snap = snapshot;
@@ -9459,36 +9512,179 @@
                 );
 
                 const phases = (snap && Array.isArray(snap.metrics_phases)) ? snap.metrics_phases : [];
-                const phasesDone = phases.length;
-                const costValue = snap && snap.cost_total > 0 ? fmtUSD(snap.cost_total) : '—';
-                const tokensValue = snap && snap.tokens_total > 0 ? fmtTokens(snap.tokens_total) : '—';
+                const totalCost = (snap && Number(snap.cost_total)) || 0;
+                const totalTokens = (snap && Number(snap.tokens_total)) || 0;
+
+                // Project-level by-agent / by-type splits, summed client-side
+                // from the per-phase projection (the QT-1 keys).
+                const sumPhases = (key) => phases.reduce((a, p) => a + (Number(p[key]) || 0), 0);
+                const classTotals = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
+                phases.forEach(p => {
+                    const b = p.tokens_breakdown || {};
+                    Object.keys(classTotals).forEach(k => { classTotals[k] += Number(b[k]) || 0; });
+                });
+                const projectClassRows = tokenClassRows(classTotals);
+                const hasProjectClassData = projectClassRows.some(r => r.value > 0);
+
+                // Spend table — the $ mode needs captured cost (established
+                // suppression: the toggle hides when cost is 0).
+                const spendModeEffective = (spendMode === '$' && totalCost > 0) ? '$' : 'tokens';
+                const valKey = spendModeEffective === '$' ? 'cost_total' : 'tokens_total';
+                const fmtVal = spendModeEffective === '$' ? fmtUSD : fmtTokens;
+                const grandTotal = spendModeEffective === '$' ? totalCost : totalTokens;
+                const sortedSpendPhases = spendSort === 'top'
+                    ? [...phases].sort((a, b) => (Number(b[valKey]) || 0) - (Number(a[valKey]) || 0))
+                    : phases; // timeline = the order the pipeline actioned the roadmap
+                const maxSpend = phases.reduce((m, p) => Math.max(m, Number(p[valKey]) || 0), 0);
+
+                const totalsPillCls = (active) => `header-text text-[10px] uppercase tracking-wide px-3 py-1.5 rounded border transition-colors ${active ? 'border-[#e2b14c]/60 bg-[#241d10]/50 text-slate-300' : 'border-[#2a2540] text-slate-500 hover:text-slate-300'}`;
+                const segBtnCls = (active) => `px-1.5 py-0.5 text-[10px] tracking-normal ${active ? 'bg-[#2a2245] text-[#e2b14c]' : 'text-slate-500 hover:text-slate-300'}`;
 
                 return (
-                    <div className="space-y-4">
-                        <div className="flex items-center justify-between gap-3">
-                            <p className="header-text text-sm text-slate-200 font-semibold">Cost &amp; tokens</p>
-                            <button type="button" data-testid="queue-metrics-overview-link"
-                                onClick={() => setMetricsViewId(null)}
-                                className="header-text text-xs text-[#e2b14c] hover:underline flex-shrink-0">
-                                ‹ Overview
-                            </button>
+                    <div className="space-y-3">
+                        {/* Header strip — mirrors the Pipeline Monitor's roadmap strip:
+                            totals stay collapsed pills until clicked. */}
+                        <div data-testid="queue-metrics-header-strip" className="border border-[#1c1829] rounded px-4 py-2.5 flex items-center gap-6 flex-wrap">
+                            <div>
+                                <div className="header-text text-[10px] uppercase tracking-wide text-slate-500">Phases recorded</div>
+                                <div className="font-mono text-sm font-semibold text-slate-200">{phases.length}</div>
+                            </div>
+                            <div>
+                                <div className="header-text text-[10px] uppercase tracking-wide text-slate-500">Active time</div>
+                                <div className="font-mono text-sm font-semibold text-slate-200">{snap && snap.duration_seconds != null ? formatDuration(snap.duration_seconds) : '—'}</div>
+                            </div>
+                            <div className="ml-auto flex items-center gap-2">
+                                {totalCost > 0 && (
+                                    <button type="button" data-testid="queue-total-cost-toggle"
+                                        aria-expanded={queueTotalsView === 'cost'}
+                                        title="Cost by agent"
+                                        onClick={() => setQueueTotalsView(v => v === 'cost' ? null : 'cost')}
+                                        className={totalsPillCls(queueTotalsView === 'cost')}>
+                                        Total cost <span className="font-mono text-xs font-semibold text-slate-200">{fmtUSD(totalCost)}</span>
+                                        <span className="text-slate-600 ml-1">{queueTotalsView === 'cost' ? '▴' : '▾'}</span>
+                                    </button>
+                                )}
+                                {totalTokens > 0 && (
+                                    <button type="button" data-testid="queue-total-tokens-toggle"
+                                        aria-expanded={queueTotalsView === 'tokens'}
+                                        title="Tokens by type and by agent"
+                                        onClick={() => setQueueTotalsView(v => v === 'tokens' ? null : 'tokens')}
+                                        className={totalsPillCls(queueTotalsView === 'tokens')}>
+                                        Total tokens <span className="font-mono text-xs font-semibold text-slate-200">{fmtTokensCompact(totalTokens)}</span>
+                                        <span className="text-slate-600 ml-1">{queueTotalsView === 'tokens' ? '▴' : '▾'}</span>
+                                    </button>
+                                )}
+                            </div>
                         </div>
+                        {/* Cost has a single view (by agent) — full width, same call
+                            as the Monitor strip. */}
+                        {queueTotalsView === 'cost' && totalCost > 0 && (
+                            <SplitStatCard title="Cost · by agent" total={totalCost} fmtValue={fmtUSD}
+                                rows={roleSplitRows(sumPhases('planner_cost'), sumPhases('executor_cost'), sumPhases('reviewer_cost'))}
+                                footnote="% of project total" />
+                        )}
+                        {queueTotalsView === 'tokens' && totalTokens > 0 && (
+                            <div className={`grid gap-2 ${hasProjectClassData ? 'md:grid-cols-2' : ''}`}>
+                                {hasProjectClassData && (
+                                    <SplitStatCard title="Tokens · by type" total={totalTokens} rows={projectClassRows} footnote="% of project total" />
+                                )}
+                                <SplitStatCard title="Tokens · by agent" total={totalTokens}
+                                    rows={roleSplitRows(sumPhases('planner_tokens'), sumPhases('executor_tokens'), sumPhases('reviewer_tokens'))}
+                                    footnote="% of project total" />
+                            </div>
+                        )}
 
-                        {/* Summary trio — same stat-card vocabulary as the overview. */}
-                        <div className="grid grid-cols-3 gap-2">
-                            <QueueStatCard label="Cost" value={costValue}
-                                sub={snap && snap.cost_total > 0 && phasesDone > 0 ? `${fmtUSD(snap.cost_total / phasesDone)} / phase` : null} />
-                            <QueueStatCard label="Tokens" value={tokensValue}
-                                sub={snap && snap.tokens_total > 0 && phasesDone > 0 ? `${fmtTokensCompact(snap.tokens_total / phasesDone)} / phase` : null} />
-                            <QueueStatCard label="Active time"
-                                value={snap && snap.duration_seconds != null ? formatDuration(snap.duration_seconds) : '—'}
-                                sub={phasesDone > 0 ? `${phasesDone} phase${phasesDone !== 1 ? 's' : ''} recorded` : null} />
-                        </div>
-
-                        {/* Per-phase table — the SAME component the Pipeline Monitor's
-                            completion report renders, fed by snapshot.metrics_phases. */}
-                        {phasesDone > 0 ? (
-                            <PhaseMetricsTable phases={phases} />
+                        {/* SPEND BY PHASE — sortable per-phase spend table; a row click
+                            reveals the BY AGENT / BY TOKEN TYPE breakout cards. */}
+                        {phases.length > 0 ? (
+                            <div data-testid="queue-spend-by-phase">
+                                <div className="flex items-center gap-3 flex-wrap mb-2">
+                                    <span className="header-text text-[10px] uppercase tracking-wide text-slate-500 font-semibold">Spend by phase</span>
+                                    <span className="flex-1"></span>
+                                    <span className="flex items-center gap-2.5">
+                                        {Object.entries(ROLE_SPLIT_COLORS).map(([role, color]) => (
+                                            <span key={role} className="flex items-center gap-1 header-text text-[10px] text-slate-400">
+                                                <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: color }}></span>
+                                                {role.charAt(0).toUpperCase() + role.slice(1)}
+                                            </span>
+                                        ))}
+                                    </span>
+                                    {totalCost > 0 && (
+                                        <span data-testid="queue-spend-mode-toggle" className="flex items-center rounded border border-[#2a2540] overflow-hidden">
+                                            <button type="button" onClick={() => setSpendMode('tokens')} className={segBtnCls(spendModeEffective === 'tokens')}>tokens</button>
+                                            <button type="button" onClick={() => setSpendMode('$')} className={segBtnCls(spendModeEffective === '$')}>$</button>
+                                        </span>
+                                    )}
+                                    <span data-testid="queue-spend-sort-toggle" className="flex items-center rounded border border-[#2a2540] overflow-hidden">
+                                        <button type="button" onClick={() => setSpendSort('timeline')} className={segBtnCls(spendSort === 'timeline')}>timeline</button>
+                                        <button type="button" onClick={() => setSpendSort('top')} className={segBtnCls(spendSort === 'top')}>top spend</button>
+                                    </span>
+                                </div>
+                                <div className="border border-[#1c1829] rounded">
+                                    <div className={`${QUEUE_SPEND_GRID} px-3 py-1.5 text-[9px] header-text uppercase tracking-wide text-slate-500 border-b border-[#1c1829]`}>
+                                        <span>Phase</span>
+                                        <span>Share · by agent</span>
+                                        <span className="text-right">{spendModeEffective === '$' ? 'Cost' : 'Tokens'}</span>
+                                        <span className="text-right">%</span>
+                                        <span className="text-right">Exec</span>
+                                        <span className="text-right">Dur</span>
+                                        <span className="text-right">Result</span>
+                                        <span></span>
+                                    </div>
+                                    {sortedSpendPhases.map((p) => {
+                                        const phaseVal = Number(p[valKey]) || 0;
+                                        // Share bar: width normalized to the LARGEST phase
+                                        // (proportional-to-total made small phases invisible),
+                                        // segmented by each agent's share of THIS phase.
+                                        const spendRoleVals = spendModeEffective === '$'
+                                            ? [p.planner_cost, p.executor_cost, p.reviewer_cost]
+                                            : [p.planner_tokens, p.executor_tokens, p.reviewer_tokens];
+                                        const spendRows = roleSplitRows(spendRoleVals[0], spendRoleVals[1], spendRoleVals[2]);
+                                        const barPct = maxSpend > 0 && phaseVal > 0 ? Math.max(4, phaseVal / maxSpend * 100) : 0;
+                                        const isOpen = spendExpandedPhase === p.phase;
+                                        const escalated = Number(p.escalations) > 0;
+                                        return (
+                                            <React.Fragment key={p.phase}>
+                                                <div data-testid="queue-spend-row" role="button" tabIndex={0}
+                                                    aria-expanded={isOpen}
+                                                    onClick={() => setSpendExpandedPhase(prev => prev === p.phase ? null : p.phase)}
+                                                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSpendExpandedPhase(prev => prev === p.phase ? null : p.phase); } }}
+                                                    className={`${QUEUE_SPEND_GRID} px-3 py-1.5 text-xs border-b border-[#1c1829] last:border-b-0 cursor-pointer transition-colors ${isOpen ? 'bg-[#221b36]/60' : 'hover:bg-[#221b36]/40'}`}>
+                                                    <span className={`header-text font-mono font-semibold truncate ${escalated ? 'text-amber-300' : 'text-slate-300'}`}>{p.phase}</span>
+                                                    <span className="flex items-center min-w-0">
+                                                        <span className="flex h-1.5 rounded-full overflow-hidden" style={{ width: `${barPct}%` }}>
+                                                            {spendRows.filter(r => r.value > 0).map((r, i) => (
+                                                                <span key={i} style={{ width: `${phaseVal > 0 ? (Number(r.value) || 0) / phaseVal * 100 : 0}%`, backgroundColor: r.color }}></span>
+                                                            ))}
+                                                        </span>
+                                                    </span>
+                                                    <span className="text-right font-mono text-slate-200">{phaseVal > 0 ? fmtVal(phaseVal) : '—'}</span>
+                                                    <span className="text-right font-mono text-[10px] text-slate-500">{fmtPct(phaseVal, grandTotal) || '—'}</span>
+                                                    <span className={`text-right font-mono ${Number(p.executor_attempts) > 1 ? 'text-amber-400' : 'text-slate-500'}`}>{p.executor_attempts}×</span>
+                                                    <span className="text-right font-mono text-slate-400">{formatDuration(p.duration_seconds)}</span>
+                                                    <span className="text-right"><PhaseOutcomeBadge phase={p} /></span>
+                                                    <span className="text-slate-600 text-[10px] text-right">{isOpen ? '▾' : '▸'}</span>
+                                                </div>
+                                                {spendExpandedPhase === p.phase && (() => {
+                                                    const phaseClassRows = tokenClassRows(p.tokens_breakdown);
+                                                    const hasPhaseClassData = phaseClassRows.some(r => r.value > 0);
+                                                    return (
+                                                        <div className={`px-3 py-3 border-b border-[#1c1829] last:border-b-0 bg-[#120e1b]/60 grid gap-2 ${hasPhaseClassData ? 'md:grid-cols-2' : ''}`}>
+                                                            <SplitStatCard title="By agent" total={phaseVal}
+                                                                fmtValue={spendModeEffective === '$' ? fmtUSD : undefined}
+                                                                rows={spendRows} footnote="% of phase total" />
+                                                            {hasPhaseClassData && (
+                                                                <SplitStatCard title="By token type" total={Number(p.tokens_total) || 0}
+                                                                    rows={phaseClassRows} footnote="% of phase total" />
+                                                            )}
+                                                        </div>
+                                                    );
+                                                })()}
+                                            </React.Fragment>
+                                        );
+                                    })}
+                                </div>
+                            </div>
                         ) : (
                             <p className="header-text text-xs text-slate-500">No completed-phase metrics recorded yet.</p>
                         )}
@@ -9899,10 +10095,24 @@
                             lives on the INNER content — capping the wrapper instead left a
                             dead void to the right of the ACTIONS rail. */}
                         <div className="flex-1 min-w-0">
-                            <div className={wide ? 'max-w-3xl' : 'max-w-2xl'}>
-                                {/* METRICS-E3 — a metric-chip click swaps the overview for the
-                                    cost/token breakout; a plain row click restores the overview. */}
-                                {selected && metricsViewId === selected.id ? QueueMetricsBreakout() : QueueProjectSnapshot()}
+                            {/* Width cap raised for the redesign (QT-3): the overview's
+                                stat cards and the spend table stretch into wide windows
+                                instead of pinning to a column. Escalation keeps the
+                                tighter cap for advisory readability. */}
+                            <div className={wide ? 'max-w-3xl' : 'max-w-5xl'}>
+                                {/* QT-3 — expansion sub-tabs: Overview (snapshot) and
+                                    Cost & Tokens (spend view); metric chips quick-open
+                                    the latter, a plain row click resets to Overview. */}
+                                <div className="flex items-center gap-5 border-b border-[#221b36] mb-4">
+                                    {[['overview', 'Overview'], ['metrics', 'Cost & Tokens']].map(([id, label]) => (
+                                        <button key={id} type="button" data-testid={`queue-tab-${id}`}
+                                            onClick={() => setExpansionTab(id)}
+                                            className={`header-text text-[10px] uppercase tracking-wide pb-2 border-b-2 -mb-px transition-colors ${expansionTab === id ? 'border-[#e2b14c] text-[#e2b14c]' : 'border-transparent text-slate-500 hover:text-slate-300'}`}>
+                                            {label}
+                                        </button>
+                                    ))}
+                                </div>
+                                {expansionTab === 'metrics' ? QueueCostTokensTab() : QueueProjectSnapshot()}
                             </div>
                         </div>
                         <div className={`w-full flex-shrink-0 md:border-l md:border-[#221b36] md:pl-6 ${wide ? 'md:w-80' : 'md:w-64'}`}>
@@ -10078,14 +10288,17 @@
                                         elapsedCell = relTime(entry.failed_at) || '—';
                                     }
 
-                                    // METRICS chips — totals only (the breakout owns per-phase
-                                    // detail); both zero-suppressed so no-usage runs stay clean.
+                                    // METRICS chips — totals only (the Cost & Tokens tab owns
+                                    // per-phase detail); both zero-suppressed so no-usage runs
+                                    // stay clean. A chip click quick-opens that tab (QT-3).
                                     const hasCostChip = Number(entry.cost_total) > 0;
                                     const hasTokensChip = Number(entry.tokens_total) > 0;
                                     const openMetricsBreakout = (e) => {
                                         e.stopPropagation();
                                         setExpandedId(entry.id);
-                                        setMetricsViewId(entry.id);
+                                        setExpansionTab('metrics');
+                                        setQueueTotalsView(null);
+                                        setSpendExpandedPhase(null);
                                         setHubError('');
                                         setRevalidateChecks(null);
                                     };
@@ -10111,8 +10324,8 @@
                                                 onDragOver={e => handleDragOver(e, entry)}
                                                 onDrop={e => handleDrop(e, entry)}
                                                 onDragEnd={handleDragEnd}
-                                                onClick={() => { setExpandedId(prev => prev === entry.id ? null : entry.id); setMetricsViewId(null); setHubError(''); setRevalidateChecks(null); }}
-                                                onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpandedId(prev => prev === entry.id ? null : entry.id); setMetricsViewId(null); setHubError(''); setRevalidateChecks(null); } }}
+                                                onClick={() => { setExpandedId(prev => prev === entry.id ? null : entry.id); setExpansionTab('overview'); setQueueTotalsView(null); setSpendExpandedPhase(null); setHubError(''); setRevalidateChecks(null); }}
+                                                onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpandedId(prev => prev === entry.id ? null : entry.id); setExpansionTab('overview'); setQueueTotalsView(null); setSpendExpandedPhase(null); setHubError(''); setRevalidateChecks(null); } }}
                                                 title={entry.parent_id && reorderMode ? 'Move the parent project to reorder this group' : undefined}
                                                 className={`${QUEUE_TABLE_GRID} px-4 py-2.5 text-xs border-b border-[#1c1829] cursor-pointer transition-colors ${
                                                     isExpanded ? 'bg-[#241d10]/70 border-l-2 border-l-[#e2b14c]' : 'hover:bg-[#221b36]/50'

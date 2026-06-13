@@ -133,7 +133,9 @@ def test_expansion_renders_snapshot_and_action_hub(html):
     q = _queue_block(html)
     assert "function QueueRowExpansion" in q
     i = q.index("function QueueRowExpansion")
-    body = q[i:i + 2400]
+    # Slice widened when the expansion gained the QT-3 sub-tab bar above the
+    # snapshot call.
+    body = q[i:i + 3800]
     assert "QueueProjectSnapshot()" in body
     assert "QueueActionHub()" in body
     rows = _rows_region(html)

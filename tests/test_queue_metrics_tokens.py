@@ -172,6 +172,15 @@ class TestSnapshotBreakout:
         assert p1["tokens_breakdown"] == {
             "input": 350, "output": 0, "cache_read": 0, "cache_write": 0,
         }
+        # QT-1 — per-role splits ride the projection too: the Cost & Tokens
+        # tab's share-by-agent bars and per-phase BY AGENT card consume them,
+        # and the client sums them for the project-level by-agent panels.
+        assert p1["planner_tokens"] == 100
+        assert p1["executor_tokens"] == 200
+        assert p1["reviewer_tokens"] == 50
+        assert p1["planner_cost"] == 0.5
+        assert p1["executor_cost"] == 0.25
+        assert p1["reviewer_cost"] == 0.25
         assert p2["phase"] == "UI-E1"
         assert p2["tokens_total"] == 35
 

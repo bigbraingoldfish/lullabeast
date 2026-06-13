@@ -57,31 +57,32 @@ def test_queue_row_renders_metric_chips():
 
 
 def test_chip_click_opens_metrics_breakout():
-    """Chip click expands the row AND switches the expansion to the breakout
-    view (stopPropagation so the row's own click toggle doesn't fight it).
-    Both chips share the openMetricsBreakout handler."""
+    """Chip click expands the row AND switches the expansion to the Cost &
+    Tokens tab (QT-3 superseded the standalone breakout view with the tab;
+    stopPropagation so the row's own click toggle doesn't fight it). Both
+    chips share the openMetricsBreakout handler."""
     html = load_html()
-    handler = window(html, "const openMetricsBreakout", 600)
+    handler = window(html, "const openMetricsBreakout", 700)
     assert "stopPropagation" in handler
-    assert "setMetricsViewId(entry.id)" in handler
+    assert "setExpansionTab('metrics')" in handler
     assert "setExpandedId(entry.id)" in handler
     for chip_id in ("queue-metrics-chip-cost", "queue-metrics-chip-tokens"):
         chip = window(html, f'data-testid="{chip_id}"', 400)
         assert "openMetricsBreakout" in chip
-    # Plain row click returns to the overview snapshot (clears the view).
-    assert html.count("setMetricsViewId(null)") >= 1
+    # Plain row click returns to the overview tab.
+    assert html.count("setExpansionTab('overview')") >= 1
 
 
 def test_breakout_renders_shared_phase_table():
-    """The breakout consumes snapshot.metrics_phases through the SAME table
-    component the completion panel uses — one markup source, two surfaces."""
+    """The Cost & Tokens tab (QT-4, superseding QueueMetricsBreakout) consumes
+    snapshot.metrics_phases; the completion panel keeps the shared
+    PhaseMetricsTable — one per-phase data source across surfaces."""
     html = load_html()
     assert re.search(r"function PhaseMetricsTable\s*\(", html), (
         "the per-phase metrics table must be a shared component"
     )
-    breakout = window(html, "function QueueMetricsBreakout", 3500)
-    assert "PhaseMetricsTable" in breakout
-    assert "metrics_phases" in breakout
+    tab = window(html, "function QueueCostTokensTab", 3500)
+    assert "metrics_phases" in tab
 
 
 def test_completion_panel_uses_shared_phase_table():

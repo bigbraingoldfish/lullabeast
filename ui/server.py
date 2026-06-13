@@ -3722,9 +3722,12 @@ def _project_metrics_totals(project_path):
 
 def _compact_metrics_phases(totals) -> list[dict]:
     """Project a ``_project_metrics_totals`` result onto the compact per-phase
-    shape the dashboard's phase-metrics table consumes — the SAME keys as the
-    ``/api/metrics-summary`` per-phase rows it shares markup with (METRICS-E3:
-    the Queue row expansion's breakout table). ``[]`` when ``totals`` is None.
+    shape the dashboard's phase-metrics surfaces consume — the SAME keys as
+    the ``/api/metrics-summary`` per-phase rows they share markup with
+    (METRICS-E3: the Queue row expansion; QT-1 added the per-role token/cost
+    splits for the Cost & Tokens tab's share-by-agent bars, per-phase BY
+    AGENT card, and client-summed project-level by-agent panels). ``[]``
+    when ``totals`` is None.
     """
     if not totals:
         return []
@@ -3737,6 +3740,12 @@ def _compact_metrics_phases(totals) -> list[dict]:
             "cost_total": _phase_cost(p),
             "tokens_total": _phase_token_total(p),
             "tokens_breakdown": _phase_token_breakdown(p),
+            "planner_tokens": _role_token_total(p, "planner_tokens"),
+            "executor_tokens": _role_token_total(p, "executor_tokens"),
+            "reviewer_tokens": _role_token_total(p, "reviewer_tokens"),
+            "planner_cost": _role_cost(p, "planner_tokens"),
+            "executor_cost": _role_cost(p, "executor_tokens"),
+            "reviewer_cost": _role_cost(p, "reviewer_tokens"),
         }
         for p in totals["phases"]
     ]
