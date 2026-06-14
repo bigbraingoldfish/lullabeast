@@ -129,6 +129,23 @@ def _pipeline_artifacts_dir(project_root: str | os.PathLike) -> str:
     return os.path.join(root, ".autodev", "pipeline")
 
 
+def _agent_activity_age_seconds(artifacts_dir, current_agent):
+    """Seconds since the active agent's Tier-A activity stamp was last touched, or None.
+
+    The OpenClaw plugin refreshes ``{agent}_activity.stamp`` (the orchestrator-written
+    sibling of ``phase_state.json`` in the project's ``.autodev/pipeline`` dir) on every
+    model/tool hook, so ``now - mtime`` is a liveness proxy: small = the agent is working,
+    growing = it has gone quiet. Returns ``None`` when there is no current agent or the
+    stamp is absent/unreadable, so the UI shows "no signal" instead of a misleading age."""
+    if not artifacts_dir or not current_agent:
+        return None
+    try:
+        stamp = os.path.join(artifacts_dir, f"{current_agent}_activity.stamp")
+        return max(0.0, time.time() - os.path.getmtime(stamp))
+    except OSError:
+        return None
+
+
 def _migrate_legacy_pipeline_artifacts(repo_path: str) -> list[str]:
     """Move legacy root-level pipeline files into ``.autodev/pipeline/``. Idempotent."""
     repo_path = os.path.realpath(os.path.expanduser(repo_path))
@@ -2821,6 +2838,12 @@ def get_state():
     RoadmapPanel "(from previous run)" staleness badge compares against the
     completion report's mtime. ``None`` when absent (no run started / pre-feature
     state); the whitelist below adds it explicitly (state is not passed through).
+
+    P2-A — also surfaces the live phase-outcome fields (``last_poll_reason``,
+    ``last_attempt_summary``, ``last_phase_outcome``, ``last_gate_warnings``) and the
+    in-progress phase's spend (``current_phase_tokens``) present-only from phase_state,
+    plus ``agent_activity_age_seconds`` (always present, null when idle) — the live
+    telemetry the Pipeline screen renders without scraping logs (integrity finding 6).
     """
     config = load_config()
     
@@ -2905,6 +2928,36 @@ def get_state():
             # reviewer_retries. Default 0 so the UI's gate-on-revContract>0 honesty branch
             # is a no-op when no contract failures occurred.
             response["reviewer_contract_retries"] = _ps_extra.get("reviewer_contract_retries", 0)
+            # P2-A — live phase-outcome fields (Section 6.4) + the in-progress phase's
+            # token spend. /api/state-local: the Queue snapshot has its own per-phase
+            # metrics (metrics_phases), so these ride here, not in the shared escalation
+            # view. Present-only (mirrors the view's "absent when unset" contract).
+            for _k in ("last_poll_reason", "last_attempt_summary",
+                       "last_phase_outcome", "last_gate_warnings"):
+                if _k in _ps_extra:
+                    response[_k] = _ps_extra[_k]
+            # current_phase_tokens: the three live per-role accumulators + a summed
+            # {total_tokens, cost_total}. Included only when at least one acc dict is
+            # present, so the "absent when unset" contract holds; lets the Monitor strip
+            # add the in-progress phase's spend to the completed-phase totals (C1). The
+            # sums reuse the hardened _role_token_total / _role_cost helpers
+            # (missing/non-dict/non-numeric → 0), so a malformed phase_state can never
+            # 500 this 5-second-polled endpoint.
+            _roles = ("planner", "executor", "reviewer")
+            _accs = {_r: _ps_extra.get(f"{_r}_tokens_acc") for _r in _roles}
+            if any(isinstance(_accs[_r], dict) and _accs[_r] for _r in _roles):
+                _cpt = {_r: (_accs[_r] if isinstance(_accs[_r], dict) else {}) for _r in _roles}
+                _cpt["total_tokens"] = sum(_role_token_total(_ps_extra, f"{_r}_tokens_acc") for _r in _roles)
+                _cpt["cost_total"] = round(sum(_role_cost(_ps_extra, f"{_r}_tokens_acc") for _r in _roles), 6)
+                response["current_phase_tokens"] = _cpt
+
+    # P2-A — agent liveness proxy: now - mtime of the active agent's activity stamp
+    # (sibling of phase_state.json). Always present (null when idle / no stamp); the
+    # Pipeline screen renders a pulse that ambers as this nears the stall threshold.
+    response["agent_activity_age_seconds"] = _agent_activity_age_seconds(
+        os.path.dirname(phase_state_path) if phase_state_path else None,
+        response.get("current_agent") or "",
+    )
 
     # Add server-derived fields
     # Orchestrator liveness
@@ -3947,6 +4000,11 @@ def _build_project_metrics_summary(project_dir_path, config):
     project's basename, so it works for any project the events log names —
     active or parked. Returns ``_empty_metrics_summary()`` when the project
     has no readable metrics rows.
+
+    P2-A — per-phase rows also pass through the canonical row's pain signals
+    (``escalation_resets`` / ``nuclear_resets`` / ``reviewer_unverified_retries``
+    counters, plus the ``gate_warnings`` / ``reachability_summary`` compact dicts) so
+    the roadmap rows can render ⚠/↻/⛔ chips (integrity finding 3).
     """
     # Shared aggregation (read + parse + dedup keep-last + cost/duration sums)
     # lives in _project_metrics_totals — also consumed by the GET /api/queue
@@ -4058,6 +4116,15 @@ def _build_project_metrics_summary(project_dir_path, config):
                 "reviewer_tokens": _role_token_total(p, "reviewer_tokens"),
                 "tokens_breakdown": _phase_token_breakdown(p),
                 "hold_seconds": hold_per_phase.get(p.get("phase"), 0),
+                # P2-A — per-phase pain signals (integrity finding 3): the canonical
+                # metrics row persists these for analysis but they were dropped here.
+                # Surfaced so the roadmap rows can render ⚠/↻/⛔ chips. Counters default
+                # to 0; the compact dicts default to null (stable types for the UI).
+                "escalation_resets": p.get("escalation_resets", 0),
+                "nuclear_resets": p.get("nuclear_resets", 0),
+                "reviewer_unverified_retries": p.get("reviewer_unverified_retries", 0),
+                "gate_warnings": p.get("gate_warnings"),
+                "reachability_summary": p.get("reachability_summary"),
             }
             for p in phases
         ],
