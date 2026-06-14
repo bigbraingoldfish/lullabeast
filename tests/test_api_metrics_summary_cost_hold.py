@@ -55,7 +55,6 @@ def _make_phase_row(phase: str, *, duration: int, executor: int, escalations: in
         "goal": f"phase {phase} goal",
         "executor_attempts": executor,
         "reviewer_passes": 1,
-        "blame_fires": 0,
         "escalations": escalations,
         "skill_used": "core-logic",
         "planner_tokens": {"cost_total": planner_cost},

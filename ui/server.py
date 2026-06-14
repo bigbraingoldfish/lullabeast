@@ -3878,7 +3878,6 @@ def _empty_metrics_summary():
         "total_duration_seconds": 0,
         "total_executor_attempts": 0,
         "total_reviewer_passes": 0,
-        "total_blame_fires": 0,
         "total_escalations": 0,
         "total_cost": 0.0,
         "planner_cost_total": 0.0,
@@ -4026,7 +4025,6 @@ def _build_project_metrics_summary(project_dir_path, config):
     total_duration_summed = totals["duration_seconds"]
     total_executor = sum((p.get("executor_attempts") or 0) for p in phases)
     total_reviewer = sum((p.get("reviewer_passes") or 0) for p in phases)
-    total_blame = sum((p.get("blame_fires") or 0) for p in phases)
     total_escalations = sum((p.get("escalations") or 0) for p in phases)
 
     # TOTAL TIME is the sum of per-phase wall-clock durations. Each phase's
@@ -4078,7 +4076,6 @@ def _build_project_metrics_summary(project_dir_path, config):
         "total_duration_seconds": total_duration,
         "total_executor_attempts": total_executor,
         "total_reviewer_passes": total_reviewer,
-        "total_blame_fires": total_blame,
         "total_escalations": total_escalations,
         "total_cost": total_cost,
         "planner_cost_total": planner_cost_total,
@@ -4106,7 +4103,6 @@ def _build_project_metrics_summary(project_dir_path, config):
                     "executor_reviewer_rejections", 0
                 ),
                 "reviewer_passes": p.get("reviewer_passes", 0),
-                "blame_fires": p.get("blame_fires", 0),
                 "escalations": p.get("escalations", 0),
                 "skill_used": p.get("skill_used"),
                 # MON-1 — {role: model} stamped by the orchestrator at each

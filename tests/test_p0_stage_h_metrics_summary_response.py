@@ -71,7 +71,6 @@ def test_phases_include_self_failure_counter(seeded_project):
         "goal": "x",
         "executor_attempts": 4,
         "reviewer_passes": 1,
-        "blame_fires": 0,
         "escalations": 0,
         "skill_used": "core-logic",
         "blame_verdict": None,
@@ -135,3 +134,33 @@ def test_phases_default_new_counters_to_zero_when_missing(seeded_project):
     assert phase["executor_self_failures"] == 0
     assert "executor_reviewer_rejections" in phase
     assert phase["executor_reviewer_rejections"] == 0
+
+
+def test_metrics_summary_drops_legacy_blame_fires(seeded_project):
+    """The blame-attribution system was removed; the orchestrator no longer
+    writes ``blame_fires`` to metrics rows. A legacy metrics.jsonl row that
+    still carries the field must NOT be surfaced — neither per-phase nor as
+    the run-level ``total_blame_fires`` aggregate. Both were dead always-0
+    passthroughs of a removed counter."""
+    project_dir, write_rows = seeded_project
+    # A legacy row that still carries a non-zero blame_fires — the reader
+    # must drop it, not echo it back.
+    write_rows([{
+        "ts": "2026-05-22T00:00:00Z",
+        "phase": "CORE-E1",
+        "executor_attempts": 2,
+        "reviewer_passes": 1,
+        "blame_fires": 3,
+    }])
+
+    client = TestClient(server_mod.app)
+    data = _get_metrics(client)
+    assert "total_blame_fires" not in data, (
+        "run-level total_blame_fires was a dead always-0 aggregate of a "
+        "removed counter — it must not appear in the response"
+    )
+    phase = next(p for p in data["phases"] if p["phase"] == "CORE-E1")
+    assert "blame_fires" not in phase, (
+        "per-phase blame_fires was a dead passthrough of a removed counter — "
+        "it must not be surfaced even when a legacy row still carries it"
+    )

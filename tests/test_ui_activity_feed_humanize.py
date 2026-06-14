@@ -49,10 +49,6 @@ def test_humanize_phase_complete_multiple_attempts(html_content):
     assert "executor attempts" in html_content, \
         "phase_complete with N attempts should say 'N executor attempts'"
 
-def test_humanize_phase_complete_blame_cycles(html_content):
-    assert "blame cycle" in html_content, \
-        "phase_complete with blame_fires > 0 should mention blame cycles"
-
 def test_humanize_escalation_trigger_planner(html_content):
     assert "ran out of retries" in html_content, \
         "escalation_trigger for planner should say 'ran out of retries'"

@@ -961,10 +961,8 @@
                 }
                 case 'phase_complete': {
                     const a = d.executor_attempts;
-                    const b = d.blame_fires;
-                    if (a === 1 && !b) return 'Completed on first attempt';
-                    if (a > 1 && !b) return `Completed after ${a} executor attempts`;
-                    if (b > 0) return `Completed after ${a} executor attempts (${b} blame cycle${b > 1 ? 's' : ''})`;
+                    if (a === 1) return 'Completed on first attempt';
+                    if (a > 1) return `Completed after ${a} executor attempts`;
                     return 'Phase completed';
                 }
                 case 'escalation_trigger': {
