@@ -17,14 +17,49 @@ TEST_PORT = 18810
 
 
 def start_test_server(port, config):
-    """Start the test server in a background thread."""
-    def run():
-        uvicorn.run(app, host='127.0.0.1', port=port, log_level='error')
+    """Start the test server in a controllable background thread.
 
-    thread = threading.Thread(target=run, daemon=True)
+    Returns ``(thread, server)`` so the caller can STOP it on teardown.
+
+    This used to be a bare ``uvicorn.run(app, ...)`` in a daemon thread with the
+    comment "Server is daemon, will stop when test ends" — but daemon threads die
+    only at *process* exit, not test end. The leaked server kept running the
+    lifespan ``_polling_loop`` (an infinite ``while True: ... await
+    asyncio.sleep(2.5)``) for the rest of the pytest session. Any later test that
+    globally patches ``ui.server.asyncio.sleep`` / ``time.*`` then had its
+    deterministic mock consumed by these leaked loops — and when ``sleep`` was
+    patched to a no-op the loops busy-spun and pegged every core. That is the root
+    cause of the non-deterministic, moving Ideas-poll flake
+    (``test_ideas_stamp_detect`` / ``test_api_ideas_message`` /
+    ``test_p0_ideas_convert``). Hand the server back so the fixture can shut it
+    down. ``config`` is accepted for signature stability but is unused (the app
+    reads its own config).
+    """
+    server_config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
+    server = uvicorn.Server(server_config)
+    thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
-    time.sleep(2)  # Wait for server to start
-    return thread
+    # Wait for real startup rather than a fixed sleep (faster and reliable).
+    deadline = time.monotonic() + 10
+    while not server.started and time.monotonic() < deadline:
+        time.sleep(0.02)
+    if not server.started:
+        raise RuntimeError(f"test uvicorn server failed to start on port {port}")
+    return thread, server
+
+
+def stop_test_server(thread, server):
+    """Gracefully stop a server from :func:`start_test_server` and join its thread.
+
+    Stopping is load-bearing for suite hermeticity (see ``start_test_server``):
+    it cancels the lifespan ``_polling_loop`` so nothing survives the test to
+    consume a later test's globally-patched ``asyncio.sleep`` / ``time.*``.
+    """
+    server.should_exit = True
+    thread.join(timeout=10)
+    if thread.is_alive():
+        server.force_exit = True
+        thread.join(timeout=5)
 
 
 @pytest.fixture
@@ -59,11 +94,19 @@ def mock_events_jsonl(temp_dir):
 
 @pytest.fixture
 def server(mock_config):
-    """Start a test server for each test."""
+    """Start a test server for each test, and STOP it on teardown.
+
+    The teardown is load-bearing for suite hermeticity: an un-stopped uvicorn
+    server keeps its lifespan ``_polling_loop`` (``await asyncio.sleep(2.5)``
+    forever) alive in a daemon thread, which corrupts later tests that patch
+    ``ui.server.asyncio.sleep`` globally. See ``start_test_server``.
+    """
     port = TEST_PORT + hash(mock_config['events_path']) % 100
-    thread = start_test_server(port, mock_config)
-    yield port
-    # Server is daemon, will stop when test ends
+    thread, uv_server = start_test_server(port, mock_config)
+    try:
+        yield port
+    finally:
+        stop_test_server(thread, uv_server)
 
 
 class TestApiEventsStream:
@@ -186,3 +229,26 @@ class TestApiEventsStream:
                     break
 
             assert found_heartbeat, "Should receive heartbeat within 15 seconds"
+
+
+def test_start_test_server_stops_cleanly_no_daemon_leak():
+    """Regression: the test server must be STOPPABLE (no leaked lifespan loop).
+
+    A leaked uvicorn server runs the lifespan ``_polling_loop``
+    (``while True: ... await asyncio.sleep(2.5)``) for the rest of the process.
+    A later test that globally patches ``ui.server.asyncio.sleep`` / ``time.*``
+    then has its deterministic mock consumed by that leaked loop (and, when sleep
+    is patched to a no-op, the loop busy-spins and pegs the CPU) — the root cause
+    of the moving, single-test Ideas-poll flake. Pin that ``start_test_server``
+    yields a controllable server whose thread actually terminates on shutdown.
+    """
+    # Port outside the [TEST_PORT, TEST_PORT+99] range the fixtures use.
+    port = TEST_PORT + 100
+    thread, uv_server = start_test_server(port, {})
+    assert thread.is_alive() and uv_server.started
+    stop_test_server(thread, uv_server)
+    assert not thread.is_alive(), (
+        "uvicorn test server thread must terminate on shutdown — a daemon that "
+        "outlives the test leaks the lifespan _polling_loop and corrupts later "
+        "tests that patch ui.server.asyncio.sleep / time.* globally"
+    )
