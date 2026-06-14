@@ -1,5 +1,6 @@
 import { handleAgentEnd } from "./agent-end-handler.ts";
 import { handleBeforeAgentFinalize } from "./before-finalize-handler.ts";
+import { registerInboundEscalationHook } from "./inbound-escalation.ts";
 import type { OpenClawPluginApi } from "./openclaw-types.d.ts";
 import { registerStallDetectorHooks } from "./stall-detector.ts";
 
@@ -33,6 +34,12 @@ export function register(api: OpenClawPluginApi): void {
   );
 
   registerStallDetectorHooks(api);
+
+  // Inbound escalation forwarder: an operator's reply on the configured
+  // escalation channel is forwarded to the UI server's /api/escalation/inbound
+  // (opt-in via AUTODEV_ESCALATION_CHANNEL + AUTODEV_HOOKS_TOKEN). No-op when
+  // unconfigured, so this is a zero-behavior-change default.
+  registerInboundEscalationHook(api);
 }
 
 export default {
@@ -40,6 +47,7 @@ export default {
   name: "Lullabeast Pipeline Signals",
   description:
     "Pipeline + Ideas signals: agent_end sentinels, before_agent_finalize structural revise, " +
-    "and Tier A stall activity stamps (model_call_*, after_tool_call, agent event streams)",
+    "Tier A stall activity stamps (model_call_*, after_tool_call, agent event streams), " +
+    "and inbound_claim escalation-reply forwarding to the UI server",
   register,
 };

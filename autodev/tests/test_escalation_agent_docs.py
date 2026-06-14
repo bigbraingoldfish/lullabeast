@@ -96,6 +96,8 @@ class TestOrchestratorEscalationWebhookMessages:
         assert "NOTIFY the operator" in src, (
             "the escalation webhook message must instruct the agent to NOTIFY the operator"
         )
-        assert src.count("self._build_escalation_webhook_message()") >= 2, (
+        # Count the call prefix — the main dispatch now passes a reply_token (B1),
+        # the repo-init dispatch passes none; both still share the one builder.
+        assert src.count("self._build_escalation_webhook_message(") >= 2, (
             "both escalation dispatch sites (repo-init + main) must use the shared message builder"
         )

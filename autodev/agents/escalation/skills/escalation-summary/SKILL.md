@@ -38,6 +38,11 @@ dashboard as soon as it lands — an operator may already be reading the panel
 while you compose, so the write comes first. Write it via your workspace
 `pipeline-project` symlink (`pipeline-project/.autodev/pipeline/escalation_summary.json`).
 
+If your invocation includes a **correlation token**, include it verbatim in the
+notification so the operator can answer by replying on the configured channel
+(see `AGENTS.md` → Operator Notification Format). You still never write the
+command yourself — the Lullabeast server does.
+
 ## Example (correct)
 
 ```json

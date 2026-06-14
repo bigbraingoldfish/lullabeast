@@ -248,7 +248,9 @@ class TestWebhookMessage:
 
     def test_used_by_both_dispatch_sites(self):
         src = _source()
-        assert src.count("self._build_escalation_webhook_message()") >= 2, (
+        # Both dispatch sites share the single builder (count the call prefix —
+        # the main dispatch now passes a reply_token, the repo-init passes none).
+        assert src.count("self._build_escalation_webhook_message(") >= 2, (
             "both the main dispatch and the repo-init dispatch must share the "
             "single message builder so the two cannot drift"
         )

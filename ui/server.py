@@ -1039,7 +1039,17 @@ class _TokenAuthMiddleware:
             return
 
         path = scope.get("path", "")
-        if path == "/health" or path == "/static" or path.startswith("/static/"):
+        if (
+            path == "/health"
+            or path == "/static"
+            or path.startswith("/static/")
+            # Inbound escalation replies arrive from OpenClaw with the HOOKS
+            # bearer secret, not the UI token — exempt this exact path so the
+            # hooks-token caller is not refused by the dashboard-token gate. The
+            # endpoint does its own secrets.compare_digest check against
+            # hooks_token (fail-closed). Exact match only — never a prefix.
+            or path == "/api/escalation/inbound"
+        ):
             await self.app(scope, receive, send)
             return
 
@@ -3105,7 +3115,7 @@ def _validate_command_request(project_dir_path, pipeline_status, escalation_rese
     return True, None, None
 
 
-def _write_escalation_files(project_dir_path, command):
+def _write_escalation_files(project_dir_path, command, source="ui"):
     """Write the live operator-command channel under ``.autodev/pipeline/``.
 
     Crash-atomic, mirroring the already-hardened ``_write_pending_escalation_files``:
@@ -3115,6 +3125,10 @@ def _write_escalation_files(project_dir_path, command):
     ``.done`` sentinel is written last — so the sentinel always trails a complete
     payload and is never observed ahead of it. Uses realpath so writes land in
     the symlink target when ``project_dir_path`` is a symlink.
+
+    ``source`` stamps the payload provenance ("ui" for the dashboard,
+    "inbound" for POST /api/escalation/inbound). Defaults to "ui" so existing
+    positional callers are unchanged.
     """
     root = os.path.realpath(os.path.expanduser(str(project_dir_path)))
     project_path = Path(_pipeline_artifacts_dir(root))
@@ -3124,7 +3138,7 @@ def _write_escalation_files(project_dir_path, command):
 
     data = {
         "command": command,
-        "source": "ui",
+        "source": source,
         "timestamp": datetime.utcnow().isoformat() + "Z"
     }
 
@@ -3151,8 +3165,12 @@ def _write_escalation_files(project_dir_path, command):
     return True
 
 
-def _write_pending_escalation_files(project_dir_path, command):
-    """Defer a command for a parked project (symlink points elsewhere). Write-then-done ordering."""
+def _write_pending_escalation_files(project_dir_path, command, source="ui"):
+    """Defer a command for a parked project (symlink points elsewhere). Write-then-done ordering.
+
+    ``source`` stamps payload provenance ("ui" / "inbound"); defaults to "ui" so
+    existing positional callers are unchanged.
+    """
     root = os.path.realpath(os.path.expanduser(str(project_dir_path)))
     root_path = Path(root)
     if not root_path.is_dir():
@@ -3163,7 +3181,7 @@ def _write_pending_escalation_files(project_dir_path, command):
     done_path = project_path / "pending_escalation_command.done"
     data = {
         "command": command,
-        "source": "ui",
+        "source": source,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     fd, tmp = mkstemp(dir=str(project_path), prefix="pec_")
@@ -3342,6 +3360,279 @@ def post_command(request: dict):
 
     _write_operator_event(config, "command", target=project_dir_path, command=command)
     return {"status": "ok", "command": command}
+
+
+# ---------------------------------------------------------------------------
+# Inbound operator-reply path (POST /api/escalation/inbound)
+#
+# OpenClaw forwards an operator's channel reply here (authenticated by the hooks
+# shared secret). The reply is mapped to a pipeline command and written through
+# the SAME files the dashboard's POST /api/command writes, so the orchestrator
+# consumer needs no change. The UI server stays the only writer of
+# escalation_output / pending_escalation_command; the escalation agent never
+# applies commands.
+#
+# Project-boundedness (B0): a reply is routed to the project that ESCALATED — via
+# its correlation token in that project's phase_state.json (set by the
+# orchestrator's _prepare_escalation_reply_token) — and the command is written to
+# THAT project's directory by absolute path, never the live symlink / currently
+# active project.
+# ---------------------------------------------------------------------------
+
+# Operator reply text -> command verb. Word-boundary regex; a reply that matches
+# zero OR >=2 DISTINCT verbs is unrecognized/ambiguous and maps to None — the
+# endpoint then asks for clarification rather than defaulting to a command (a
+# stray default STOP would halt the pipeline). SKIP / NUCLEAR_RESET ride the same
+# all-or-nothing rule, so they fire only on an explicit, unambiguous request.
+_INBOUND_VERB_PATTERNS = (
+    ("NUCLEAR_RESET", (r"nuclear\s*reset", r"\bnuke\b")),
+    ("RESET_PHASE", (r"reset\s*phase", r"restart\s*phase", r"reset_phase")),
+    ("RESET_EXECUTION", (r"reset\s*execut", r"reset_execution")),
+    ("RESET_REVIEWER", (r"reset\s*review", r"reset_reviewer")),
+    ("RETRY", (r"\bretry\b", r"\bresume\b")),
+    ("PROCEED", (r"\bproceed\b", r"\bcontinue\b", r"\bgo\b")),
+    ("STOP", (r"\bstop\b", r"\bhalt\b", r"\babort\b")),
+    ("SKIP", (r"\bskip\b",)),
+)
+
+
+def _inbound_text_to_command(text):
+    """Map an operator's free-text reply to a single command verb, or None.
+
+    Strips a leading ``prefix.<6hex>`` correlation token (so it can't false-match
+    a verb), then matches the verb patterns. Returns the verb only when EXACTLY one
+    distinct verb matches; zero or multiple matches return None (caller clarifies).
+    """
+    if not isinstance(text, str):
+        return None
+    t = re.sub(r"^\s*\S+\.[0-9a-f]{6}\b", "", text).strip().lower()
+    if not t:
+        return None
+    matched = [verb for verb, patterns in _INBOUND_VERB_PATTERNS
+               if any(re.search(p, t) for p in patterns)]
+    return matched[0] if len(matched) == 1 else None
+
+
+def _project_escalation_reply_token(project_real):
+    """Read *project_real*'s phase_state.json ``escalation_reply_token``, or None. Read-only."""
+    try:
+        p = os.path.join(_pipeline_artifacts_dir(project_real), "phase_state.json")
+        ps = _read_json_file(p) if os.path.exists(p) else None
+        tok = ps.get("escalation_reply_token") if isinstance(ps, dict) else None
+        return tok if isinstance(tok, str) and tok.strip() else None
+    except Exception:
+        return None
+
+
+def _inbound_active_pipeline_status(config):
+    """The live pipeline_status from pipeline_state.json, or None. Read-only."""
+    try:
+        psp = config.get("pipeline_state_path")
+        psp = os.path.expanduser(psp) if psp else None
+        st = _read_json_file(psp) if psp and os.path.exists(psp) else None
+        return st.get("pipeline_status") if isinstance(st, dict) else None
+    except Exception:
+        return None
+
+
+def _resolve_inbound_target(config, token):
+    """Resolve an inbound reply to ``(project_real, entry, status)``. Read-only.
+
+    ``status``:
+      "ok"        -> project_real resolved (entry may be None in single-project mode)
+      "ambiguous" -> a no-token reply with >=2 candidate escalations (reject)
+      "none"      -> nothing matched
+
+    With a token: match it against every queue project's + the active project's
+    phase_state.json. Without a token: single-candidate fallback over parked
+    escalations + the active WAITING_FOR_HUMAN project.
+    """
+    try:
+        entries = (_read_queue_file(config) or {}).get("queue") or []
+    except Exception:
+        entries = []
+    active_real = None
+    try:
+        pdp = config.get("project_dir_path")
+        active_real = os.path.realpath(os.path.expanduser(pdp)) if pdp else None
+    except OSError:
+        active_real = None
+
+    if token:
+        for e in entries:
+            real = _queue_entry_realpath(e)
+            if real and _project_escalation_reply_token(real) == token:
+                return real, e, "ok"
+        if active_real and _project_escalation_reply_token(active_real) == token:
+            return active_real, _queue_entry_for_project(config, active_real), "ok"
+        return None, None, "none"
+
+    # No token — single-candidate fallback over parked escalations + active waiting.
+    candidates = {}  # real -> entry
+    for e in entries:
+        if _entry_is_parked_escalation(e):
+            real = _queue_entry_realpath(e)
+            if real:
+                candidates.setdefault(real, e)
+    if active_real and _inbound_active_pipeline_status(config) == "WAITING_FOR_HUMAN":
+        candidates.setdefault(active_real, _queue_entry_for_project(config, active_real))
+    if len(candidates) == 1:
+        real = next(iter(candidates))
+        return real, candidates[real], "ok"
+    if len(candidates) >= 2:
+        return None, None, "ambiguous"
+    return None, None, "none"
+
+
+def _resolve_notification_channel_server(config, agent_id="escalation"):
+    """Server-side mirror of the orchestrator's channel resolver.
+
+    Order: explicit ``notification_channel``, then the escalation binding's
+    ``match.channel``, then None. Provider-agnostic — never a hardcoded literal.
+    """
+    explicit = config.get("notification_channel")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+    for b in config.get("bindings", []) or []:
+        if isinstance(b, dict) and b.get("agentId") == agent_id:
+            ch = (b.get("match") or {}).get("channel")
+            if isinstance(ch, str) and ch.strip():
+                return ch.strip()
+    return None
+
+
+async def _post_inbound_ack(config, message):
+    """Best-effort channel-neutral acknowledgement back to the operator.
+
+    Resolves the channel server-side and POSTs ``{channel, message}`` to the
+    gateway (mirroring the orchestrator's raw notification). Skips silently when
+    no channel resolves; never raises — the command was already accepted, so a
+    failed ack must not fail the request. (Targeting: OpenClaw resolves the
+    channel's default recipient from its channel config, same as the
+    orchestrator's raw posts; per-sender targeting is a B3-era refinement.)
+    """
+    channel = _resolve_notification_channel_server(config)
+    if not channel:
+        return
+    hooks_url = config.get("hooks_url") or "http://localhost:18789/hooks/agent"
+    hooks_token = config.get("hooks_token", "")
+    try:
+        async with aiohttp.ClientSession() as session:
+            await session.post(
+                hooks_url,
+                json={"channel": channel, "message": message},
+                headers={"Authorization": f"Bearer {hooks_token}"},
+                timeout=aiohttp.ClientTimeout(total=15),
+            )
+    except Exception as e:
+        print(f"[WARN] inbound ack failed: {e}")
+
+
+@app.post("/api/escalation/inbound")
+async def post_escalation_inbound(request: Request):
+    """Inbound operator reply -> pipeline command (see section header above).
+
+    Auth: the hooks shared secret (``AUTODEV_HOOKS_TOKEN`` / ``hooks_token``) as a
+    Bearer token. This endpoint is the only one exempt from the UI-token middleware
+    (added to its exact-path allowlist), so it does its own check here — fail
+    closed: no hooks token configured -> 503; bad/missing -> 401.
+
+    Body: ``{"sender": str?, "text": str, "token": str?}``. Producer-agnostic — any
+    caller presenting the hooks bearer + this JSON drives it (the B3 OpenClaw hook,
+    a test, or curl).
+    """
+    config = load_config()
+
+    # 1. Authenticate against the hooks secret (fail closed).
+    expected = (config.get("hooks_token") or "").strip()
+    if not expected:
+        raise HTTPException(status_code=503,
+                            detail="Inbound escalation is disabled: no hooks token configured.")
+    scheme, _, presented = request.headers.get("authorization", "").partition(" ")
+    presented = presented.strip()
+    if scheme.lower() != "bearer" or not presented or not secrets.compare_digest(presented, expected):
+        raise HTTPException(status_code=401,
+                            detail="Inbound escalation requires the hooks bearer token.",
+                            headers={"WWW-Authenticate": "Bearer"})
+
+    # 2. Parse the payload.
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Request body must be JSON.")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object.")
+    text = body.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise HTTPException(status_code=422, detail="Field 'text' (the operator reply) is required.")
+    token = body.get("token")
+    token = token.strip() if isinstance(token, str) and token.strip() else None
+
+    # 3. Resolve the reply to the project that escalated (B0 — token-keyed).
+    project_real, entry, status = _resolve_inbound_target(config, token)
+    if status == "ambiguous":
+        await _post_inbound_ack(config,
+            "Multiple escalations are waiting. Reply starting with the correlation "
+            "token from the notification you're answering.")
+        raise HTTPException(status_code=409,
+            detail="Ambiguous: multiple parked escalations and no correlation token in the reply.")
+    if project_real is None:
+        await _post_inbound_ack(config,
+            "Couldn't match your reply to a waiting escalation. Start your reply with "
+            "the correlation token from the notification.")
+        raise HTTPException(status_code=404, detail="No matching escalation for this reply.")
+
+    # 4. Map the reply text to a command verb (never default to one).
+    command = _inbound_text_to_command(text)
+    if command is None:
+        await _post_inbound_ack(config,
+            "Didn't recognize a command. Reply one of: RETRY, RESET_PHASE, "
+            "RESET_EXECUTION, RESET_REVIEWER, PROCEED, STOP.")
+        return {"status": "clarify", "reason": "unrecognized_command"}
+
+    # 5. Re-check the target is STILL answerable, validate caps, and write through
+    #    the SAME files the dashboard uses — to the escalated project's own dir.
+    _ps_path = os.path.join(_pipeline_artifacts_dir(project_real), "phase_state.json")
+    ps = _read_json_file(_ps_path) if os.path.exists(_ps_path) else {}
+    if not isinstance(ps, dict):
+        ps = {}
+    escalation_resets = ps.get("escalation_resets", 0)
+    nuclear_resets = ps.get("nuclear_resets", 0)
+
+    active_real = None
+    try:
+        pdp = config.get("project_dir_path")
+        active_real = os.path.realpath(os.path.expanduser(pdp)) if pdp else None
+    except OSError:
+        active_real = None
+    active_status = _inbound_active_pipeline_status(config)
+
+    if project_real == active_real and active_status == "WAITING_FOR_HUMAN":
+        # Live in-place escalation (manual mode / before any auto-advance).
+        ok, err_msg, err_code = _validate_command_request(
+            project_real, "WAITING_FOR_HUMAN", escalation_resets, command, nuclear_resets)
+        if not ok:
+            await _post_inbound_ack(config, err_msg)
+            raise HTTPException(status_code=err_code, detail=err_msg)
+        _write_escalation_files(project_real, command, source="inbound")
+        deferred = False
+    elif _entry_is_parked_escalation(entry) and entry.get("parked_pipeline_status") in (None, "WAITING_FOR_HUMAN"):
+        # Parked escalation (auto-advanced; a different project is active now).
+        ok, err_msg, err_code = _validate_command_request(
+            project_real, "WAITING_FOR_HUMAN", escalation_resets, command, nuclear_resets)
+        if not ok:
+            await _post_inbound_ack(config, err_msg)
+            raise HTTPException(status_code=err_code, detail=err_msg)
+        _write_pending_escalation_files(project_real, command, source="inbound")
+        deferred = True
+    else:
+        # The escalation isn't answerable anymore (already resolved / project moved on).
+        await _post_inbound_ack(config, "That escalation is no longer waiting for an answer.")
+        raise HTTPException(status_code=409, detail="That escalation is no longer answerable.")
+
+    _write_operator_event(config, "command", target=project_real, command=command, source="inbound")
+    await _post_inbound_ack(config, f"Got it — {command} queued for {os.path.basename(project_real)}.")
+    return {"status": "ok", "command": command, "deferred": deferred}
 
 
 @app.post("/api/pipeline/git-recover")
