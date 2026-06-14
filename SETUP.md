@@ -494,6 +494,35 @@ Once `cost.total` is non-zero on disk, Lullabeast surfaces it automatically — 
 
 ---
 
+## Running with local models (experimental)
+
+OpenClaw owns all model configuration, so Lullabeast doesn't care whether an agent runs on a cloud
+or a local model — you point each agent's `model.primary` in `openclaw.json` wherever you like. A
+fully-local configuration has been run end-to-end (planner/executor/reviewer on Qwen-27B-class
+models via a local llama.cpp / llama-swap server), and it works — but this is still an area of
+active experimentation, not a tuned, guaranteed setup. Treat the notes below as a starting point,
+not a spec, and expect to do your own dialing-in.
+
+Things worth knowing before you try it:
+
+- **`"apiKey": "no-key"` is mandatory on every local provider entry.** Without it OpenClaw inherits
+  the cloud auth profile and silently falls back to a cloud model — with no error. The only signal
+  is `fallbackNoticeReason: auth` in the agent's `sessions.json`.
+- **A multi-modal model is needed for the executor and reviewer** (the reviewer does
+  screenshot-based visual review on UI phases); it's only recommended for the planner.
+- **The reviewer's infra backstop may need raising** (`AUTODEV_INFRA_BACKSTOP_REVIEWER`) — a
+  thorough long-context local reviewer pass can take minutes per model call on local hardware.
+- **The idea-to-PRD chat (`prd-creator`) does noticeably better on a cloud model** in testing, so a
+  cloud PRD agent with a local build loop is a reasonable mix.
+- **Output quality is a real trade-off.** Local results have been functional with room for
+  improvement; a hybrid setup (some roles local, some cloud) is worth exploring rather than
+  assuming all-local or all-cloud is best. Which combination wins is not settled.
+
+Qwen-style models need llama-server flags to suppress inline `<think>` tokens (they corrupt JSON
+tool-call parsing) — see the Qwen notes in [CLAUDE.md](CLAUDE.md) under *Agent LLM Configuration*.
+
+---
+
 ## Re-approving Gate Scripts
 
 OpenClaw maintains an `exec-approvals.json` file at `~/.openclaw/exec-approvals.json`. This file records which shell scripts and Python files each agent is permitted to execute. Gate scripts (the Python files in `autodev/pipeline/gate_scripts/`) must be pre-approved, or agent sessions will refuse to run them.

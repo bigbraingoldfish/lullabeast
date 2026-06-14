@@ -5,15 +5,16 @@
 # Lullabeast
 
 **From plain English to shipped MVP.**
+*A gated multi-agent pipeline that gets usable results from cheap open models — cloud, local, or hybrid. Your hardware or your API key.*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![CI](https://github.com/[[FILL: org/repo]]/actions/workflows/ci.yml/badge.svg)](https://github.com/[[FILL: org/repo]]/actions/workflows/ci.yml)
+[![CI](https://github.com/bigbraingoldfish/lullabeast/actions/workflows/ci.yml/badge.svg)](https://github.com/bigbraingoldfish/lullabeast/actions/workflows/ci.yml)
 [![Runs on OpenClaw](https://img.shields.io/badge/runs%20on-OpenClaw-c9962e.svg)](https://docs.openclaw.ai)
 ![Status](https://img.shields.io/badge/status-beta-orange.svg)
 ![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20WSL2-lightgrey.svg)
 
-Lullabeast is an open-source, local-first, autonomous multi-agent development pipeline: describe
+Lullabeast is an open-source, local-capable, autonomous multi-agent development pipeline: describe
 what you want to build in plain English, and a team of LLM agents — **planner → executor →
 reviewer** — implements it phase by phase against a real git repository, with deterministic gate
 scripts checking every step and an escalation path back to you when a run gets stuck. Lullabeast
@@ -28,9 +29,10 @@ It is built on top of OpenClaw — not a fork of it, and not a competitor to it.
 > apology.
 
 **Who it's for.** Today: developers willing to run a beta — you install two services, point
-Lullabeast at a git repo, and supervise runs from a dashboard. The longer arc: the idea-to-PRD and
-escalation flows are built so that someone who can *describe* software in plain English — not
-necessarily write it — can take a project from idea to working MVP.
+Lullabeast at a git repo, and check in on runs from a dashboard when you want to. The near-term
+audience is homelab and self-hosted operators comfortable running two services. The longer arc: the
+idea-to-PRD and escalation flows are built so that someone who can *describe* software in plain
+English — not necessarily write it — can take a project from idea to working MVP.
 
 ---
 
@@ -62,7 +64,7 @@ Read this before running anything — the first item is a separate install:
 curl -s http://localhost:18789/v1/models   # should respond; "connection refused" = gateway not up
 
 # 2. Install Lullabeast.
-git clone [[FILL: public repo URL — current origin is https://github.com/bigbraingoldfish/autodev-oc.git]] autodev-ui
+git clone https://github.com/bigbraingoldfish/lullabeast.git autodev-ui
 cd autodev-ui
 ./install.sh            # interactive; registers agents with OpenClaw, generates your dashboard access token; safe to re-run
 
@@ -130,6 +132,24 @@ Queue several projects and Lullabeast works them in order, honoring dependencies
 
 ---
 
+## Run it your way
+
+Lullabeast is model-agnostic — OpenClaw owns all model configuration, so you choose the
+cost/quality trade-off:
+
+| Mode | What runs the agents | Trade-off |
+|---|---|---|
+| **Budget cloud** (default) | Open-weight multi-modal models via your OpenRouter key (e.g. MiniMax, Kimi, Qwen) | Cheap per token; your key, your provider |
+| **Fully local** | Validated on one consumer GPU with `unsloth/Qwen3.6-27B-MTP-GGUF` (q8_0) and `unsloth/Qwen3.6-35B-A3B-MTP-GGUF` (Q6_K_XL) | No cloud in the loop; outputs are functional with room for improvement vs. larger cloud models |
+| **Hybrid** | Local for **escalation + executor** (where most of the work — and the cost savings — happen), cloud for **planner and/or reviewer** (cheap to build a strong foundation and review thoroughly) | Often the best cost/quality balance — still being tuned |
+
+**Model notes.** A **multi-modal** model is **required** for the **executor** and **reviewer**
+(the reviewer does screenshot-based visual review for UI phases) and **recommended** for the
+**planner**. We also suggest keeping the **idea-to-PRD chat (`prd-creator`) on a cloud model**,
+where it produces noticeably better drafts.
+
+---
+
 ## Architecture
 
 Four pipeline agents and two ideation agents, sequenced by a single orchestrator state machine
@@ -161,8 +181,11 @@ model call, and owns all model/provider configuration: API keys and model choice
 `openclaw.json`, never in Lullabeast — which is what keeps Lullabeast itself model-agnostic.
 Lullabeast drives OpenClaw from the outside (webhook invocations in, session files out) and ships
 a small OpenClaw plugin for activity signals; it contains no OpenClaw code. Not a fork, not a
-competitor — a pipeline that needs a capable agent runtime, and uses OpenClaw as that runtime. New
-to OpenClaw? Start with its [install guide](https://openclaw.dev/install).
+competitor — a pipeline that needs a capable agent runtime, and uses OpenClaw as that runtime.
+(OpenClaw was acquired by OpenAI in early 2026; Lullabeast drives it from the outside via webhooks
+and ships one small plugin, so the coupling surface is narrow and documented — and the gates, caps,
+and human escalation are Lullabeast's, not the model's.) New to OpenClaw? Start with its
+[install guide](https://openclaw.dev/install).
 
 ---
 
@@ -175,6 +198,8 @@ to OpenClaw? Start with its [install guide](https://openclaw.dev/install).
 - **Pipeline Monitor** — watch the live planner → executor → reviewer loop, per-phase metrics, and
   a real-time activity feed; recover from git errors or answer escalations.
 - **Queue** — line up multiple projects with dependency ordering; Lullabeast runs them sequentially.
+- **Cost & token visibility** — per-phase and per-agent cost/token breakdowns, live during a run
+  and recallable after, in both the Monitor and the Queue (shown when your models report usage).
 
 ---
 
