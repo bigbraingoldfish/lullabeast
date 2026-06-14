@@ -40,6 +40,38 @@ ARTIFACTS_DIR = os.path.join(WORKSPACE_DIR.rstrip(os.sep), AUTODEV_PIPELINE_SUBD
 PHASE_STATE_FILE = os.path.join(ARTIFACTS_DIR, "phase_state.json")
 
 
+def path_escapes_workspace(path):
+    """Return True if ``path`` resolves outside the pipeline workspace.
+
+    Canonical (``os.path.realpath``) workspace-boundary check shared by the
+    reviewer gate's contract validators and its failure-verdict blocking-issue
+    synthesisers. Symlinks are resolved on BOTH sides, so an in-workspace
+    symlink pointing outside the workspace is caught (a lexical compare is not
+    enough). A relative ``path`` is joined against :data:`WORKSPACE_DIR`; an
+    absolute ``path`` is used as-is. A path sharing no common root with the
+    workspace (``os.path.commonpath`` raises ``ValueError``) counts as an escape.
+
+    Boundary check ONLY. On-disk existence is a separate, caller-owned concern:
+    the pass-verdict validators additionally require the artifact to exist, but
+    the failure-verdict synthesisers must NOT — a failed phase may legitimately
+    have produced no artifact, so absence there is not an escape.
+
+    A non-string or empty ``path`` cannot describe a traversal target and is
+    reported as non-escaping (``False``); the caller decides what to store for
+    such a value. Reads the module-level :data:`WORKSPACE_DIR` at call time so
+    tests that patch it take effect without arguments.
+    """
+    if not isinstance(path, str) or not path:
+        return False
+    workspace_real = os.path.realpath(WORKSPACE_DIR)
+    abs_path = path if os.path.isabs(path) else os.path.join(WORKSPACE_DIR, path)
+    real_path = os.path.realpath(abs_path)
+    try:
+        return os.path.commonpath([workspace_real, real_path]) != workspace_real
+    except ValueError:
+        return True
+
+
 def phase_has_behavioral_block(current_phase):
     """Content-driven: True iff ``current_phase`` carries a populated
     Behavioral Verification block with all three required sub-fields.
