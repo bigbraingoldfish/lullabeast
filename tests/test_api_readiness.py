@@ -155,7 +155,7 @@ class TestTriggerReadinessAssessment:
 
     def test_readiness_webhook_is_file_only_not_delivered(self, tmp_path, monkeypatch):
         """Readiness webhook must set deliver=False so the gateway does not try to
-        deliver the agent reply to the bound Signal channel (which fails with
+        deliver the agent reply to the bound notification channel (which fails with
         'Delivering to Signal requires target' and marks the run errored)."""
         from ui.server import _trigger_readiness_assessment
 

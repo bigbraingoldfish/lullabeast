@@ -118,13 +118,13 @@ class TestCapEnforcement:
             }
             orch.write_state = MagicMock()
             orch.transition_state = MagicMock()
-            orch.send_signal_notification = lambda msg: notifications_sent.append(msg)
+            orch.send_raw_notification = lambda msg: notifications_sent.append(msg)
             orch.reset_execution = MagicMock()
 
             # Attempt RESET_EXECUTION with cap at 3 — must NOT call reset_execution
             _ps = orch.read_phase_state()
             if _ps.get("escalation_resets", 0) >= 3:
-                orch.send_signal_notification(
+                orch.send_raw_notification(
                     "Escalation reset cap reached (3). Human PROCEED required."
                 )
             else:
@@ -299,7 +299,7 @@ class TestCapEnforcement:
             orch.write_state = MagicMock()
             orch.transition_state = MagicMock()
             notifications = []
-            orch.send_signal_notification = lambda m: notifications.append(m)
+            orch.send_raw_notification = lambda m: notifications.append(m)
 
             def _mock_reset_execution(caller):
                 _ps = orch.read_phase_state()
@@ -313,14 +313,14 @@ class TestCapEnforcement:
             # First attempt — should succeed (2 < 3)
             _ps = orch.read_phase_state()
             if _ps.get("escalation_resets", 0) >= 3:
-                orch.send_signal_notification("cap reached")
+                orch.send_raw_notification("cap reached")
             else:
                 orch.reset_execution("escalation")
 
             # Second attempt — must be blocked (now 3 >= 3)
             _ps2 = orch.read_phase_state()
             if _ps2.get("escalation_resets", 0) >= 3:
-                orch.send_signal_notification("cap reached")
+                orch.send_raw_notification("cap reached")
             else:
                 orch.reset_execution("escalation")
 
