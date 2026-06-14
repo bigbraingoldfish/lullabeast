@@ -65,6 +65,7 @@ from autodev.pipeline.queue_semantics import (
     scrub_parked_fields,
 )
 from autodev.pipeline.sentinel_poller import PollResult  # noqa: E402
+from autodev.pipeline.event_log import append_pipeline_event  # noqa: E402
 from env_resolvers import resolve_openclaw_root, resolve_pipeline_root  # noqa: E402
 from skill_manager import SkillManager  # noqa: E402  (W5-E: inline completion reviewer)
 from webhook_client import invoke_agent_webhook, set_session_response_usage  # noqa: E402
@@ -252,6 +253,53 @@ def _poll_pipeline_events_file(path: str) -> list[dict]:
     except OSError:
         pass
     return events
+
+
+def _write_operator_event(config, action, target="", command=None, source="ui"):
+    """P1-C — append an ``operator_action`` event to the shared ``pipeline_events.jsonl``.
+
+    Human interventions (escalation commands, stop, resume, git-recover, queue edits,
+    launch, switch-project) become first-class durable events so "interventions by
+    type per week" is answerable from the events log alone. Operators act while the
+    orchestrator may be stopped, so the SERVER writes these — via the same
+    ``event_log.append_pipeline_event`` the orchestrator uses, so the line format +
+    size-based rotation have one home. ``run_id`` / current phase / project are read
+    from ``pipeline_state`` (null-tolerant — the state may not exist yet).
+
+    Non-raising: any failure is swallowed — telemetry must never break an API request.
+    For queue endpoints, call this AFTER the CAS mutation commits (never inside the
+    side-effect-free ``_apply`` closure) so a CAS retry cannot double-emit.
+    """
+    try:
+        events_path = (config or {}).get("events_path")
+        if not events_path:
+            return
+        run_id, phase, project = None, "", ""
+        ps_path = (config or {}).get("pipeline_state_path")
+        if ps_path:
+            try:
+                with open(ps_path) as f:
+                    ps = json.load(f)
+                run_id = ps.get("run_id")
+                phase = ps.get("current_phase_raw_id", "") or ""
+                _pp = (ps.get("project_path") or "").rstrip("/")
+                project = os.path.basename(_pp) if _pp else ""
+            except Exception:
+                pass
+        detail = {"action": action, "target": target, "source": source}
+        if command:
+            detail["command"] = command
+        append_pipeline_event(events_path, {
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "event": "operator_action",
+            "run_id": run_id,
+            "project": project,
+            "phase": phase,
+            "agent": "operator",
+            "detail": detail,
+        })
+    except Exception as e:
+        print(f"[WARN] _write_operator_event({action}): {e}")
 
 
 async def _poll_state(prev_state):
@@ -3191,6 +3239,7 @@ def post_command(request: dict):
         if not is_valid:
             raise HTTPException(status_code=error_code, detail=error_msg)
         _write_pending_escalation_files(deferred_target, command)
+        _write_operator_event(config, "command", target=deferred_target, command=command)
         return {"status": "ok", "command": command, "deferred": True}
 
     # Read pipeline and phase state (active symlink project)
@@ -3224,6 +3273,7 @@ def post_command(request: dict):
             if not is_valid:
                 raise HTTPException(status_code=error_code, detail=error_msg)
             _write_pending_escalation_files(active_real, command)
+            _write_operator_event(config, "command", target=active_real, command=command)
             return {"status": "ok", "command": command, "deferred": True}
 
     # Validate request
@@ -3236,7 +3286,8 @@ def post_command(request: dict):
     
     # Write escalation files
     _write_escalation_files(project_dir_path, command)
-    
+
+    _write_operator_event(config, "command", target=project_dir_path, command=command)
     return {"status": "ok", "command": command}
 
 
@@ -3285,6 +3336,7 @@ def post_pipeline_git_recover(request: dict):
         state["last_action_timestamp"] = datetime.now(timezone.utc).isoformat()
         _write_json_atomic(pipeline_state_file, state)
 
+    _write_operator_event(config, "git_recover", target=base_branch)
     return {"ok": True, "base_branch": base_branch}
 
 
@@ -3333,6 +3385,7 @@ def post_resume_ready():
         json.dump(pipeline_state, f, indent=2)
     os.replace(tmp_path, pipeline_state_path)
 
+    _write_operator_event(config, "resume_ready")
     return {"ok": True}
 
 
@@ -3518,6 +3571,7 @@ def post_resume_orchestrator():
         except Exception:
             pass
 
+    _write_operator_event(config, "resume_orchestrator", target=canonical_project_real)
     return {
         "ok": True,
         "reconciled": reconciled,
@@ -6813,6 +6867,7 @@ def post_stop():
         stop_file.parent.mkdir(parents=True, exist_ok=True)
         stop_file.touch()
 
+        _write_operator_event(config, "stop")
         return {
             "ok": True,
             "message": "Stop requested — pipeline will halt after current agent completes",
@@ -6838,6 +6893,7 @@ def post_stop():
                 "the orchestrator starts. Use Resume in the header, or start it manually on the server."
             )
 
+        _write_operator_event(config, "stop")
         return {
             "ok": True,
             "message": "Stop command queued for orchestrator",
@@ -8410,6 +8466,7 @@ async def patch_queue_mode(request: Request):
     # The helper additionally self-gates on queue_mode=="auto" for the other call sites.
     if mode == "auto" and prev_mode == "manual":
         response["auto_advance"] = _maybe_autostart_queue(config)
+    _write_operator_event(config, "queue_mode", target=mode)
     return response
 
 
@@ -8587,6 +8644,7 @@ async def put_queue_order(request: Request):
         return True
     # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
     _mutate_queue_file(config, _apply)
+    _write_operator_event(config, "queue_reorder")
     return {"ok": True}
 
 
@@ -8709,6 +8767,7 @@ async def post_queue_add(request: Request):
         (e for e in _read_queue_file(config).get("queue", []) if e.get("id") == entry["id"]),
         entry,
     )
+    _write_operator_event(config, "queue_add", target=entry.get("name", ""))
     return {**refreshed, "auto_start": auto_start}
 
 
@@ -8770,6 +8829,7 @@ def delete_queue_entry(entry_id: str):
         return True
     # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
     _mutate_queue_file(config, _apply)
+    _write_operator_event(config, "queue_delete", target=entry_id)
     return {"ok": True}
 
 
@@ -8810,6 +8870,7 @@ async def post_queue_clear(request: Request):
         return n
     # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
     cleared = _mutate_queue_file(config, _apply)
+    _write_operator_event(config, "queue_clear")
     return {"ok": True, "cleared": cleared}
 
 
@@ -8862,6 +8923,7 @@ async def patch_queue_position(entry_id: str, request: Request):
         return True
     # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
     _mutate_queue_file(config, _apply)
+    _write_operator_event(config, "queue_position", target=entry_id)
     return {"ok": True}
 
 
@@ -8922,6 +8984,7 @@ async def patch_queue_parent(entry_id: str, request: Request):
         if result["cleared_to_ready"]
         else {"attempted": False, "reason": "not_ready_transition"}
     )
+    _write_operator_event(config, "queue_parent", target=entry_id)
     return {**target, "auto_start": auto_start}
 
 
@@ -9190,6 +9253,7 @@ def post_queue_entry_relaunch(entry_id: str):
     result = _spawn_orchestrator(entry["project_path"], config, revive_entry_id=entry_id, confirm_lock=True)
     if not result.get("ok"):
         raise HTTPException(status_code=500, detail=result.get("error", "Failed to spawn orchestrator"))
+    _write_operator_event(config, "queue_relaunch", target=entry_id)
     return {"ok": True}
 
 
@@ -9230,6 +9294,7 @@ async def post_queue_entry_revalidate(entry_id: str):
     # Auto-start if this revalidation left an eligible READY row in an idle auto queue
     # (no-op when the row stayed SKIPPED_PENDING / not in auto mode). Non-raising; additive.
     auto_start = _maybe_autostart_queue(config)
+    _write_operator_event(config, "queue_revalidate", target=entry_id)
     return {"ok": True, "checks": checks, "entry": target, "auto_start": auto_start}
 
 
@@ -9655,6 +9720,7 @@ async def post_setup_switch_project(request: Request):
         except Exception:
             pass
 
+    _write_operator_event(config, "switch_project", target=repo_abs)
     return {
         "ok": True,
         "checks": all_pre,
@@ -9998,6 +10064,7 @@ async def post_setup_launch(request: Request):
         except Exception:
             pass
 
+    _write_operator_event(config, "launch", target=project_real)
     return {"ok": True, "error": None}
 
 
