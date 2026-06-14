@@ -6,8 +6,10 @@ Covers:
   helper used at the planner-invocation branch.
 - T2.1: the webhook call sites forward `url=self.openclaw_config["hooks_url"]`
   (so a non-default gateway port is actually used).
-- T2.4: `send_signal_notification` bounds its POST with `timeout=15` and posts
-  to the configured `hooks_url`, not hardcoded localhost.
+- T2.4 / provider-agnostic notifications: the raw operator notification
+  (`_post_raw_notification`) resolves the channel from config/bindings (never a
+  hardcoded "signal" literal), bounds its POST with `timeout=15`, posts to the
+  configured `hooks_url`, and skips the POST when no channel resolves.
 """
 
 import os
@@ -106,18 +108,96 @@ def test_completion_review_tolerates_missing_hooks_url():
 
 
 # ---------------------------------------------------------------------------
-# T2.4 — raw signal notification is bounded and uses the configured url
+# T2.4 / provider-agnostic notifications — channel resolver + raw POST helper
 # ---------------------------------------------------------------------------
 
-def test_send_signal_notification_is_timed_and_uses_hooks_url():
+def _orch_with_config(config):
+    m = MagicMock()
+    m.openclaw_config = config
+    return m
+
+
+def test_resolve_notification_channel_explicit_key():
+    """An explicit ``notification_channel`` config key wins outright."""
+    m = _orch_with_config({"notification_channel": "telegram"})
+    assert orc.Orchestrator._resolve_notification_channel(m) == "telegram"
+
+
+def test_resolve_notification_channel_from_binding_match():
+    """Auto-detect from the escalation binding — the live shape nests the
+    channel under ``match.channel``, not a top-level ``channel`` key."""
+    m = _orch_with_config(
+        {"bindings": [{"agentId": "escalation", "match": {"channel": "signal"}}]}
+    )
+    assert orc.Orchestrator._resolve_notification_channel(m) == "signal"
+
+
+def test_resolve_notification_channel_none_when_unresolvable():
+    """No explicit key and no matching binding → None (caller must skip, not guess)."""
+    m = _orch_with_config(
+        {"bindings": [{"agentId": "other", "match": {"channel": "x"}}]}
+    )
+    assert orc.Orchestrator._resolve_notification_channel(m) is None
+
+
+def test_resolve_notification_channel_explicit_overrides_binding():
+    m = _orch_with_config({
+        "notification_channel": "telegram",
+        "bindings": [{"agentId": "escalation", "match": {"channel": "signal"}}],
+    })
+    assert orc.Orchestrator._resolve_notification_channel(m) == "telegram"
+
+
+def test_post_raw_notification_uses_resolved_channel_and_is_timed():
+    """The raw POST carries the RESOLVED channel (not a hardcoded "signal"),
+    bounds with timeout=15, uses the configured hooks_url, and returns True."""
     m = MagicMock()
     m.openclaw_config = {"hooks_url": _HOOKS_URL, "hooks": {"token": "tok"}}
+    m._resolve_notification_channel.return_value = "signal"
 
     with patch("orchestrator.requests.post") as mock_post:
         mock_post.return_value = MagicMock(status_code=200)
-        orc.Orchestrator.send_signal_notification(m, "hello operator")
+        result = orc.Orchestrator._post_raw_notification(m, "hello operator")
 
+    assert result is True
     assert mock_post.called
     args, kwargs = mock_post.call_args
-    assert kwargs.get("timeout") == 15
     assert args[0] == _HOOKS_URL
+    assert kwargs.get("timeout") == 15
+    assert kwargs["json"]["channel"] == "signal"
+    assert kwargs["json"]["message"] == "hello operator"
+
+
+def test_post_raw_notification_skips_when_channel_unresolved():
+    """No resolvable channel → skip the POST entirely and return False (honest,
+    never POST to a guessed connector)."""
+    m = MagicMock()
+    m.openclaw_config = {"hooks_url": _HOOKS_URL, "hooks": {"token": "tok"}}
+    m._resolve_notification_channel.return_value = None
+
+    with patch("orchestrator.requests.post") as mock_post:
+        result = orc.Orchestrator._post_raw_notification(m, "hello operator")
+
+    assert result is False
+    mock_post.assert_not_called()
+
+
+def test_post_raw_notification_returns_false_on_post_failure():
+    """A POST exception is swallowed and reported as a failed delivery (False),
+    so the escalation fallback can halt rather than crash."""
+    m = MagicMock()
+    m.openclaw_config = {"hooks_url": _HOOKS_URL, "hooks": {"token": "tok"}}
+    m._resolve_notification_channel.return_value = "signal"
+
+    with patch("orchestrator.requests.post", side_effect=RuntimeError("boom")) as mock_post:
+        result = orc.Orchestrator._post_raw_notification(m, "hi")
+
+    assert result is False
+    assert mock_post.called
+
+
+def test_send_raw_notification_delegates_to_post_helper():
+    """The fire-and-forget cap-notice wrapper just delegates to the shared helper."""
+    m = MagicMock()
+    orc.Orchestrator.send_raw_notification(m, "msg")
+    m._post_raw_notification.assert_called_once_with("msg")

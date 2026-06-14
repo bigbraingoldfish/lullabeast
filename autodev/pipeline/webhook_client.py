@@ -123,7 +123,7 @@ def invoke_agent_webhook(
             f'exactly two fields — "summary" and "recommended_action" — per your escalation-summary '
             f"skill, and WRITE it to {_p}/escalation_summary.json BEFORE notifying the operator. "
             f"Then NOTIFY the operator with a self-contained message that includes that summary via "
-            f"your configured channel (your message tool / the Signal connector). Do NOT wait for a "
+            f"your configured channel (your message tool / the bound notification connector). Do NOT wait for a "
             f"reply in this session and do NOT write escalation_output — the operator answers "
             f"asynchronously from the dashboard."
         ),
@@ -145,9 +145,9 @@ def invoke_agent_webhook(
     }
     # File-only run for the working agents: completion is detected via sentinel
     # files, never channel delivery.  Without deliver=False the gateway tries to
-    # deliver every reply to the bound Signal channel and marks the run errored
+    # deliver every reply to the bound notification channel and marks the run errored
     # ("Delivering to Signal requires target").  Escalation is the sole exception
-    # — it sends the human a real Signal notification, so it keeps default delivery.
+    # — it sends the human a real operator notification, so it keeps default delivery.
     if agent_id != "escalation":
         payload["deliver"] = False
     if model:

@@ -3934,20 +3934,68 @@ class Orchestrator:
                     return model
         return None
 
-    def send_signal_notification(self, message):
-        """Send a raw Signal notification via the OpenClaw gateway."""
+    def _resolve_notification_channel(self, agent_id: str = "escalation") -> str | None:
+        """Resolve the operator-notification channel for raw gateway POSTs, or None.
+
+        Provider-agnostic: the channel is whatever the operator has bound in
+        OpenClaw, never a hardcoded literal. Resolution order:
+          1. an explicit ``notification_channel`` key in the merged config;
+          2. the OpenClaw binding whose ``agentId`` is *agent_id* — its
+             ``match.channel`` (the live shape is
+             ``{"agentId": "escalation", "match": {"channel": "signal"}}``);
+          3. ``None`` — the caller must skip the POST and log, not guess a channel.
+
+        Never raises (mirrors ``_get_agent_model``).
+        """
+        explicit = self.openclaw_config.get("notification_channel")
+        if isinstance(explicit, str) and explicit.strip():
+            return explicit.strip()
+        for binding in self.openclaw_config.get("bindings", []) or []:
+            if isinstance(binding, dict) and binding.get("agentId") == agent_id:
+                channel = (binding.get("match") or {}).get("channel")
+                if isinstance(channel, str) and channel.strip():
+                    return channel.strip()
+        return None
+
+    def _post_raw_notification(self, message) -> bool:
+        """Resolve the operator channel and POST one raw notification to the gateway.
+
+        Returns ``True`` on a delivered 2xx; ``False`` when the channel cannot be
+        resolved (logs + skips the POST — never guesses a channel) or the POST
+        fails. Never raises; callers branch on the bool. This is the single
+        raw-notification POST implementation, shared by the reset-cap notices
+        (via ``send_raw_notification``) and the escalation-webhook-failed fallback.
+        """
+        channel = self._resolve_notification_channel()
+        if not channel:
+            print(
+                "[WARN] No operator notification channel resolved (no "
+                "notification_channel config key and no escalation binding "
+                "match.channel); skipping raw notification."
+            )
+            return False
         token = self.openclaw_config.get("hooks", {}).get("token", "")
         url = self.openclaw_config.get("hooks_url") or "http://localhost:18789/hooks/agent"
-        payload = {"channel": "signal", "message": message}
+        payload = {"channel": channel, "message": message}
         try:
             headers = {"Authorization": f"Bearer {token}"}
             # timeout bounds the call so it can never hang the orchestrator while it
             # holds pipeline.lock (heartbeat-cron could not then restart it).
             r = requests.post(url, json=payload, headers=headers, timeout=15)
             r.raise_for_status()
-            print(f"[INFO] Signal notification sent: {message[:80]}")
+            print(f"[INFO] Operator notification sent via {channel}: {message[:80]}")
+            return True
         except Exception as e:
-            print(f"[ERROR] Failed to send signal notification: {e}")
+            print(f"[ERROR] Failed to send operator notification via {channel}: {e}")
+            return False
+
+    def send_raw_notification(self, message):
+        """Send a raw operator notification over the configured channel (fire-and-forget).
+
+        Thin wrapper over ``_post_raw_notification`` for the reset-cap notices,
+        which do not branch on delivery success.
+        """
+        self._post_raw_notification(message)
 
     def reset_phase(self):
         """Full phase-level reset. Triggered by RESET_PHASE resume command (escalation-only).
@@ -7381,23 +7429,19 @@ class Orchestrator:
                         )
 
                         if webhook_status != "SUCCESS":
-                            print("[ERROR] Escalation agent webhook failed. Attempting raw signal.")
-                            raw_payload = {
-                                "channel": "signal",
-                                "message": f"Pipeline failed at Phase {phase}. Last action: {self.state.get('last_action')}"
-                            }
-                            try:
-                                headers = {"Authorization": f"Bearer {token}"}
-                                _raw_url = self.openclaw_config.get("hooks_url") or "http://localhost:18789/hooks/agent"
-                                # timeout: the structured webhook just failed, so the
-                                # gateway is reachable-but-degraded — exactly the case
-                                # where it accepts the socket and never replies. An
-                                # unbounded block would freeze the orchestrator with
-                                # pipeline.lock held.
-                                r = requests.post(_raw_url, json=raw_payload, headers=headers, timeout=15)
-                                r.raise_for_status()
-                            except Exception as e:
-                                print(f"[ERROR] Raw signal failed: {e}")
+                            print("[ERROR] Escalation agent webhook failed. Attempting raw notification.")
+                            raw_message = (
+                                f"Pipeline failed at Phase {phase}. "
+                                f"Last action: {self.state.get('last_action')}"
+                            )
+                            # Shared raw-POST helper (provider-agnostic): resolves the
+                            # operator channel and returns False if it cannot be resolved
+                            # OR the bounded (timeout=15) POST fails. Either way the
+                            # escalation could not be delivered, so the pipeline halts with
+                            # the unchanged terminal sequence below. An unresolved channel
+                            # now halts honestly (with an escalation_failed breadcrumb)
+                            # instead of POSTing to a guessed "signal" connector.
+                            if not self._post_raw_notification(raw_message):
                                 error_data = {
                                     "timestamp": datetime.now(timezone.utc).isoformat(),
                                     "phase": phase,
@@ -7471,7 +7515,7 @@ class Orchestrator:
                                 self._queue_restore_parked_entry_to_active()
                                 _ps = self.read_phase_state()
                                 if _ps.get("escalation_resets", 0) >= 3:
-                                    self.send_signal_notification(
+                                    self.send_raw_notification(
                                         "Escalation reset cap reached (3). Human PROCEED required to advance past this phase."
                                     )
                                 else:
@@ -7503,7 +7547,7 @@ class Orchestrator:
                                 self._queue_restore_parked_entry_to_active()
                                 _ps = self.read_phase_state()
                                 if _ps.get("nuclear_resets", 0) >= 2:
-                                    self.send_signal_notification(
+                                    self.send_raw_notification(
                                         "Nuclear reset cap reached (2). Only Abandon Phase or Stop remain for this phase."
                                     )
                                 else:
@@ -7512,7 +7556,7 @@ class Orchestrator:
                                 self._queue_restore_parked_entry_to_active()
                                 _ps = self.read_phase_state()
                                 if _ps.get("escalation_resets", 0) >= 3:
-                                    self.send_signal_notification(
+                                    self.send_raw_notification(
                                         "Escalation reset cap reached (3). Human PROCEED required to advance past this phase."
                                     )
                                 else:
@@ -7522,7 +7566,7 @@ class Orchestrator:
                                 self._queue_restore_parked_entry_to_active()
                                 _ps = self.read_phase_state()
                                 if _ps.get("escalation_resets", 0) >= 3:
-                                    self.send_signal_notification(
+                                    self.send_raw_notification(
                                         "Escalation reset cap reached (3). Human PROCEED required to advance past this phase."
                                     )
                                 else:

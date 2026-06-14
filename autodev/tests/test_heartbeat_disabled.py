@@ -5,7 +5,7 @@ The OpenClaw native heartbeat was disabled (2026-03-10) because it caused model 
 interruptions and noisy Signal DMs.  The sole monitoring mechanism is now the system
 cron heartbeat_cron.py, which only acts when the orchestrator lock is FREE (dead process).
 
-The model-query path (query_heartbeat_model / send_signal_notification) was removed
+The model-query path (query_heartbeat_model / send_raw_notification) was removed
 from heartbeat_cron.py because the model returned NOTIFY for normal idle/terminal states
 (IDLE, PIPELINE_COMPLETE, STOPPED, etc.), causing false-positive Signal notifications.
 All decisions are now fully deterministic — no model query, no outbound notifications.
