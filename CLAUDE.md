@@ -38,7 +38,9 @@ autodev-ui/
 │   │       ├── executor_gate.py    # Evaluates executor output, file manifest, unaccounted deletions
 │   │       └── reviewer_gate.py    # Evaluates reviewer output, 3-pass attribution routing
 │   ├── skill-library/
-│   │   ├── {discipline}/{role}/SKILL.md   # 27 files: 9 disciplines × 3 roles
+│   │   ├── {discipline}/{role}/SKILL.md   # 27 files: 7 phase-injectable disciplines × 3 roles (21)
+│   │   │                                   # + completion/reviewer, prd-creator/readiness-reviewer,
+│   │   │                                   # and 4 roadmap-converter skills
 │   │   └── legacy/                        # Pre-discipline-library skills (historical)
 │   ├── agents/
 │   │   ├── {planner,executor,reviewer,escalation,prd-creator}/
