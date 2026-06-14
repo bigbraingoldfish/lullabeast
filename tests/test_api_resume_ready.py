@@ -86,3 +86,37 @@ def test_resume_ready_docstring_mentions_halted_silent():
     assert "HALTED_SILENT" in (post_resume_ready.__doc__ or ""), (
         "post_resume_ready docstring must mention HALTED_SILENT"
     )
+
+
+def test_resume_ready_stashes_pre_stop_agent_as_resume_target(tmp_path):
+    """Issue 1: resume-ready must stash the pre-stop ``current_agent`` into
+    ``resume_target_agent`` *before* overwriting it to "escalation", so a later
+    RETRY resumes that agent instead of restarting the phase from the planner.
+
+    ``_write_state`` sets ``current_agent="executor"`` — the field the operator
+    would lose today. Catches a regression where the in-flight agent is dropped
+    and the executor's completed turn gets re-run.
+    """
+    state_path = _write_state(tmp_path, "STOPPED")
+    client = load_client()
+    with patch("ui.server.load_config", return_value=_config(tmp_path)):
+        resp = client.post("/api/resume-ready")
+    assert resp.status_code == 200, resp.text
+    after = json.loads(state_path.read_text())
+    assert after["current_agent"] == "escalation"        # routing unchanged
+    assert after["resume_target_agent"] == "executor"    # NEW: pre-stop agent preserved
+
+
+def test_resume_ready_no_stash_when_agent_missing(tmp_path):
+    """When the stopped state has no usable ``current_agent``, resume-ready must
+    NOT invent a ``resume_target_agent`` — RETRY then cleanly defaults to the
+    planner. Catches stashing a garbage/empty target."""
+    p = tmp_path / "pipeline_state.json"
+    p.write_text(json.dumps({"pipeline_status": "STOPPED"}))  # no current_agent
+    client = load_client()
+    with patch("ui.server.load_config", return_value=_config(tmp_path)):
+        resp = client.post("/api/resume-ready")
+    assert resp.status_code == 200, resp.text
+    after = json.loads(p.read_text())
+    assert after["current_agent"] == "escalation"
+    assert "resume_target_agent" not in after
