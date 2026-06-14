@@ -1030,6 +1030,7 @@ _SNAPSHOT_KEYS = (
     "phase_base_commit",
     "phase_start_time",
     "run_started_at",
+    "run_id",  # P1-A — run identity preserved across park→revival (same run)
 )
 
 
@@ -1047,6 +1048,7 @@ def _escalated_state(project_path):
         "phase_base_commit": "abc123def",
         "phase_start_time": "2026-05-30T00:00:00Z",
         "run_started_at": "2026-05-30T11:11:11Z",
+        "run_id": "run-escalated-0001",
         "last_action": "executor attempt failed",
         "pipeline_status": "WAITING_FOR_HUMAN",
         "project_path": project_path,
@@ -1067,6 +1069,7 @@ def _snapshot(phase=4, raw_id="CORE-2"):
         "phase_base_commit": "abc123def",
         "phase_start_time": "2026-05-30T00:00:00Z",
         "run_started_at": "2026-05-29T09:00:00Z",
+        "run_id": "run-snapshot-0001",
     }
 
 

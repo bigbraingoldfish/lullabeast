@@ -1483,9 +1483,10 @@ def _expand_lock_path(config: dict) -> str | None:
 def _clean_pipeline_state_for_project(project_real: str) -> dict:
     """Match orchestrator.py reset template when switching projects.
 
-    Stamps a fresh ``run_started_at`` (ISO8601): this is the run-start marker the
-    RoadmapPanel "(from previous run)" staleness badge compares against the
-    completion report's mtime. Both server fresh-run writers — ``/api/setup/launch``
+    Stamps a fresh ``run_started_at`` (ISO8601 run-start marker the RoadmapPanel
+    "(from previous run)" staleness badge compares against the completion report's
+    mtime) and a fresh ``run_id`` (uuid run identity that groups this run's events /
+    metrics / run_summary — P1-A). Both server fresh-run writers — ``/api/setup/launch``
     and ``/api/setup/switch-project`` — go through here; resume paths (git-recover,
     resume-ready) read-modify-write existing state and so preserve it (3-A).
     """
@@ -1499,6 +1500,7 @@ def _clean_pipeline_state_for_project(project_real: str) -> dict:
         "last_action": "initialized for new project",
         "last_action_timestamp": datetime.now(timezone.utc).isoformat(),
         "run_started_at": datetime.now(timezone.utc).isoformat(),
+        "run_id": str(uuid.uuid4()),
         "pipeline_status": "RUNNING",
         "project_path": project_real,
     }
@@ -2804,6 +2806,8 @@ def get_state():
             # template). The RoadmapPanel staleness badge compares it against the
             # completion report's mtime; absent → null → badge never shows.
             "run_started_at": pipeline_state.get("run_started_at"),
+            # P1-A — run identity; groups this run's events/metrics. null pre-deploy.
+            "run_id": pipeline_state.get("run_id"),
             "sentinel_wait_started_at": pipeline_state.get("sentinel_wait_started_at"),
             "queue_halted_reason": pipeline_state.get("queue_halted_reason"),
             "counters": counters,
@@ -2822,6 +2826,7 @@ def get_state():
             "executor_retries": 0,
             "reviewer_retries": 0,
             "run_started_at": None,
+            "run_id": None,
             "sentinel_wait_started_at": None,
         }
     
