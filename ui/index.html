@@ -10540,9 +10540,11 @@
         // phase_state.json is deleted on phase advance (or there is no active
         // escalation). fetchState re-seeds them on every poll (spread BEFORE ...data)
         // so a stale value can't survive the shallow merge — this is what made the
-        // "Reset ×N" badge stick across phases until a manual refresh. skill_injected/
-        // skill_agent and the event-level last_error_code are intentionally excluded
-        // (different feature family / not rendered from pState).
+        // "Reset ×N" badge stick across phases until a manual refresh. The per-phase
+        // skill label (skill_injected / skill_agent) is the same present-only bug
+        // class but a different feature family, so it lives in the sibling map below
+        // (PHASE_SKILL_VIEW_DEFAULTS); the event-level last_error_code stays excluded
+        // (not rendered from pState).
         const ESCALATION_VIEW_DEFAULTS = {
             escalation_resets: 0,
             nuclear_resets: 0,
@@ -10551,6 +10553,18 @@
             escalation_message: null,
             escalation_recommended_action: null,
             escalation_advisory_status: null,
+        };
+
+        // Per-phase skill label — _compute_escalation_view emits skill_injected /
+        // skill_agent present-only too, so GET /api/state DROPS them on phase advance
+        // (phase_state.json deleted) and whenever the new phase maps no discipline.
+        // Re-seeded to null (spread BEFORE ...data, same as the escalation map) so the
+        // label tracks the CURRENT phase and clears when none is injected, instead of
+        // showing the previous phase's skill until a manual refresh. Separate from
+        // ESCALATION_VIEW_DEFAULTS by feature family (the skill label is not escalation).
+        const PHASE_SKILL_VIEW_DEFAULTS = {
+            skill_injected: null,
+            skill_agent: null,
         };
 
         function PipelineScreen() {
@@ -10835,10 +10849,10 @@
                     .then(data => {
                         // ctx.pipelineStatus is owned by App's live /api/state poll;
                         // PipelineScreen keeps only its local pState for detail rendering.
-                        // Re-seed ESCALATION_VIEW_DEFAULTS BEFORE ...data so present-only
-                        // fields the backend dropped on phase advance reset to default
-                        // rather than surviving this shallow merge as stale values.
-                        setPState(prev => ({ ...prev, ...ESCALATION_VIEW_DEFAULTS, ...data }));
+                        // Re-seed the present-only defaults (escalation + per-phase skill)
+                        // BEFORE ...data so fields the backend dropped on phase advance reset
+                        // to default rather than surviving this shallow merge as stale values.
+                        setPState(prev => ({ ...prev, ...ESCALATION_VIEW_DEFAULTS, ...PHASE_SKILL_VIEW_DEFAULTS, ...data }));
                     })
                     .catch(() => {});
             }
