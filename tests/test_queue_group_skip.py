@@ -197,6 +197,11 @@ def orch(tmp_path, monkeypatch):
     """Orchestrator instance with mocked filesystem paths."""
     import importlib
     monkeypatch.setenv("OPENCLAW_ROOT", str(tmp_path))
+    # Pin the pipeline root to tmp BEFORE reload — otherwise the module re-executes and
+    # recomputes AUTODEV_PIPELINE_ROOT / SYMLINK_TARGET back to the real <repo>/.autodev,
+    # leaking this test's queue_halted events into the developer's live activity feed
+    # (matches the isolation pattern used by every other reloader test).
+    monkeypatch.setenv("AUTODEV_PIPELINE_ROOT", str(tmp_path))
     import orchestrator as orch_mod
     importlib.reload(orch_mod)
     from orchestrator import Orchestrator as FreshOrch
