@@ -85,7 +85,56 @@ export type PluginAgentEventSubscription = {
   ) => Promise<void> | void;
 };
 
+/**
+ * Inbound message hook (`inbound_claim`) — fires when a message arrives on a
+ * connector channel, BEFORE it is routed to an agent. A handler may claim the
+ * message (``{ handled: true }``) to suppress normal routing, or return void /
+ * ``{ handled: false }`` to let it route. Used by the inbound-escalation
+ * forwarder. Only the fields this plugin reads are typed precisely; the real
+ * SDK event carries more.
+ */
+export type PluginHookInboundClaimEvent = {
+  content: string;
+  body?: string;
+  channel: string;
+  accountId?: string;
+  conversationId?: string;
+  senderId?: string;
+  senderName?: string;
+  senderUsername?: string;
+  isGroup: boolean;
+  messageId?: string;
+  sessionKey?: string;
+  runId?: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type PluginHookInboundClaimContext = {
+  sessionKey?: string;
+  runId?: string;
+  senderId?: string;
+  messageId?: string;
+  // The real SDK context also carries pluginBinding etc.; unused here.
+};
+
+export type PluginHookInboundClaimResult = {
+  handled: boolean;
+  /** Optional native reply payload; unused by this plugin (the UI server acks). */
+  reply?: unknown;
+};
+
 export type OpenClawPluginApi = {
+  on(
+    hookName: "inbound_claim",
+    handler: (
+      event: PluginHookInboundClaimEvent,
+      ctx: PluginHookInboundClaimContext,
+    ) =>
+      | Promise<PluginHookInboundClaimResult | void>
+      | PluginHookInboundClaimResult
+      | void,
+    opts?: { priority?: number; timeoutMs?: number },
+  ): void;
   on(
     hookName: "agent_end",
     handler: (

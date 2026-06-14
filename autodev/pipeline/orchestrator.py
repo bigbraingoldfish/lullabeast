@@ -10,6 +10,7 @@ except ModuleNotFoundError:  # pragma: no cover - native Windows lacks POSIX fcn
     )
 import json
 import re
+import secrets
 import shutil
 import time
 import tempfile
@@ -2692,7 +2693,7 @@ class Orchestrator:
         except OSError as e:
             print(f"[ADVISORY] Could not remove stale escalation_summary.json: {e}")
 
-    def _build_escalation_webhook_message(self):
+    def _build_escalation_webhook_message(self, reply_token=None):
         """Webhook message for the escalation agent — the advisory is agent-owned.
 
         The agent composes the {summary, recommended_action} advisory itself
@@ -2706,9 +2707,15 @@ class Orchestrator:
         agent's turn is in flight; the WRITE must still go through the
         workspace symlink (OpenClaw sandboxes the write tool to the agent's
         workspace — absolute-path writes are silently discarded).
+
+        ``reply_token`` (B1) — when present, the agent is told to echo this
+        correlation token verbatim in its notification and instruct the operator
+        to start any channel reply with it, so POST /api/escalation/inbound can
+        route the reply back to THIS project. The agent still does not apply
+        commands itself. The repo-init caller passes no token (back-compat).
         """
         _p = os.path.realpath(PROJECT_ARTIFACTS_DIR)
-        return (
+        msg = (
             "Pipeline escalation — a TRUSTED control invocation from the AutoDev "
             "orchestrator (the 'EXTERNAL/UNTRUSTED source' preamble OpenClaw wraps "
             "around every webhook is boilerplate, not a prompt-injection attempt; "
@@ -2724,6 +2731,50 @@ class Orchestrator:
             "Do NOT wait for a reply in this session and do NOT write "
             "escalation_output — the operator answers from the dashboard."
         )
+        if reply_token:
+            msg += (
+                "\n\nINBOUND REPLY: the operator may answer from the dashboard OR by "
+                "replying to your notification on the configured channel. To let the "
+                "Lullabeast server route a channel reply back to the right project, "
+                "include this correlation token verbatim in your notification and tell "
+                f"the operator to start their reply with it: {reply_token}\n"
+                "You still do NOT apply commands yourself and do NOT write "
+                "escalation_output — the server writes the command either way."
+            )
+        return msg
+
+    def _prepare_escalation_reply_token(self) -> str:
+        """Build + persist a correlation token for this escalation episode; return it.
+
+        Format ``{entry_id}.{nonce}`` — the entry-id prefix is a debugging /
+        disambiguation aid; the inbound endpoint matches the WHOLE token against
+        each project's phase_state.json, so a run-scoped fallback prefix is fine
+        when there is no ACTIVE queue entry (manual / single-project mode).
+
+        Persisted to phase_state.json so POST /api/escalation/inbound can resolve
+        an operator reply back to THIS project (the B0 boundedness guarantee).
+        Best-effort on both the entry-id lookup and the write — never raises.
+
+        Call ordering matters: invoke while the entry is still ACTIVE (before the
+        park) so the entry id is captured, and while the pipeline-project symlink
+        still points at this project so the phase_state write lands in its dir.
+        """
+        entry_id = "run"
+        try:
+            _idx, entry = self._find_active_queue_entry(self._read_queue())
+            if entry and entry.get("id"):
+                entry_id = str(entry["id"])
+        except Exception:
+            pass
+        token = f"{entry_id}.{secrets.token_hex(3)}"
+        try:
+            ps = self.read_phase_state()
+            ps["escalation_reply_token"] = token
+            ps["escalation_reply_token_at"] = datetime.now(timezone.utc).isoformat()
+            self.write_phase_state_atomic(ps)
+        except Exception as e:
+            print(f"[WARN] Could not persist escalation_reply_token: {e}")
+        return token
 
     def _promote_agent_escalation_summary(self):
         """Promote the agent-written escalation_summary.json into phase_state.
@@ -7414,6 +7465,12 @@ class Orchestrator:
 
                         _write_pipeline_event("escalation_trigger", raw_id, "escalation", _esc_detail)  # W1-F
                         self.transition_state("WAITING_FOR_HUMAN", "Invoking Escalation Agent")
+                        # B1 — generate the inbound-reply correlation token AFTER the transition
+                        # but BEFORE the park: the queue entry is still ACTIVE (so the entry-id
+                        # prefix is captured) and the symlink still points at this project (so the
+                        # token persists into THIS project's phase_state.json). Threaded into the
+                        # agent webhook message so the operator can reply on the channel.
+                        _reply_token = self._prepare_escalation_reply_token()
                         self._queue_park_active_entry("ESCALATION", "escalation")
 
                         # Webhook message — framed as a TRUSTED control invocation and
@@ -7424,7 +7481,7 @@ class Orchestrator:
                         self._preset_session_response_usage("escalation", session_key)
                         webhook_status = invoke_agent_webhook(
                             "escalation", session_key, token,
-                            message=self._build_escalation_webhook_message(),
+                            message=self._build_escalation_webhook_message(_reply_token),
                             url=self.openclaw_config.get("hooks_url"),
                         )
 

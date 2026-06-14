@@ -5,9 +5,8 @@
 - **File read** — Read workspace files, pipeline state JSONs, agent output JSONs, project source code, logs, and any file needed for diagnosis. You have broad read access across the system.
 - **Shell (read-only)** — Run read-only diagnostic commands (`ls`, `find`, `cat`) to inspect file existence and content.
 - **message** — Send outbound notifications on the configured external channel (e.g. Signal, Discord) through OpenClaw. You **must** follow [Message tool and peer resolution](#message-tool-and-peer-resolution) on every call. Do not guess addresses.
-- **File write (sandboxed)** — Write access is restricted to your workspace directory by OpenClaw's sandbox. The `pipeline-project/` symlink inside your workspace is your only write path to shared pipeline files. You write exactly two files:
-  - `pipeline-project/.autodev/pipeline/escalation_output.json` — the resume command from the operator
-  - `pipeline-project/.autodev/pipeline/escalation_output.done` — empty sentinel, written after the JSON
+- **File write (sandboxed)** — Write access is restricted to your workspace directory by OpenClaw's sandbox. The `pipeline-project/` symlink inside your workspace is your only write path to shared pipeline files. You write exactly **one** pipeline file:
+  - `pipeline-project/.autodev/pipeline/escalation_summary.json` — the dashboard advisory (see the escalation-summary skill), written BEFORE you notify. You do **not** write `escalation_output.json` / `escalation_output.done` or any command file — the operator answers from the dashboard or by replying on the configured channel, and the Lullabeast server writes the command.
 
 ## Message tool and peer resolution
 
@@ -29,8 +28,8 @@ If the tool returns errors such as `Signal RPC -1` or "Failed to send message", 
 
 ## Path Convention
 
-- ✅ CORRECT: `pipeline-project/.autodev/pipeline/escalation_output.json`
-- ❌ WRONG: `~/.openclaw/pipeline-project/.autodev/pipeline/escalation_output.json` — writes to absolute paths outside your workspace are silently accepted by the write tool but the files are discarded by OpenClaw's sandbox. The file will appear to succeed but will not be created.
+- ✅ CORRECT: `pipeline-project/.autodev/pipeline/escalation_summary.json`
+- ❌ WRONG: `~/.openclaw/pipeline-project/.autodev/pipeline/escalation_summary.json` — writes to absolute paths outside your workspace are silently accepted by the write tool but the files are discarded by OpenClaw's sandbox. The file will appear to succeed but will not be created.
 - ❌ WRONG: any other absolute path outside the workspace — same sandbox discard behavior
 
 ## Explicitly Denied by OpenClaw Policy
@@ -41,4 +40,4 @@ If the tool returns errors such as `Signal RPC -1` or "Failed to send message", 
 - `process` — cannot manage services or restart processes
 - `browser` — not available
 
-You can read everything. You can write only your two output files through the workspace symlink.
+You can read everything. You can write only `escalation_summary.json` (the dashboard advisory) through the workspace symlink.

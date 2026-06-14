@@ -352,6 +352,34 @@ To run as a background service, see `ui/autodev-ui.service` (Linux/WSL2 systemd 
 
 ---
 
+## Inbound escalation replies (answer an escalation from your phone)
+
+When a phase escalates, the escalation agent notifies you on your configured channel (Signal, Discord, …). By default you answer from the **dashboard**. You can also enable a parallel **inbound** path so a reply typed on that channel becomes the recovery command — useful when you are away from the dashboard.
+
+**How it works.** The notification includes a short **correlation token** (e.g. `e2.ab12cd`). You reply starting with that token followed by a command — e.g. `e2.ab12cd reset phase`. The `autodev-pipeline-signals` plugin forwards the reply to the UI server's `POST /api/escalation/inbound`, which maps it to a pipeline command and writes it through the **same files the dashboard uses**. The escalation agent never applies the command itself — the UI server does, exactly as for a dashboard answer. The answer is always applied to the project that **escalated** (matched by the token), never to whatever project happens to be active when your reply lands.
+
+**Recognized replies** (case-insensitive; start with the token): `retry`, `proceed` (or `continue`), `stop`, `reset phase`, `reset execution`, `reset reviewer`; `skip` and `nuclear reset` only on an explicit, unambiguous request. An unrecognized or ambiguous reply gets a clarification request — it never defaults to a command. Reset caps still apply.
+
+**Enable it (opt-in).** The forwarder is dormant until you set these in the OpenClaw **gateway's** environment (e.g. its systemd unit `Environment=` / `gateway.systemd.env`), then rebuild the plugin and restart the gateway:
+
+| Variable | Purpose |
+|----------|---------|
+| `AUTODEV_ESCALATION_CHANNEL` | The channel the escalation agent is bound to (e.g. `signal`). Replies on this channel are forwarded; **unset = inbound disabled**. |
+| `AUTODEV_HOOKS_TOKEN` | The hooks Bearer secret (same value the UI uses). The plugin presents it; the endpoint verifies it. |
+| `AUTODEV_UI_URL` | The UI server base URL. Defaults to `http://127.0.0.1:18790`. |
+
+```bash
+# rebuild the plugin bundle, redeploy it, then restart the gateway
+cd autodev/plugin && npm run build && npm run deploy
+systemctl --user restart openclaw-gateway   # Linux/WSL2 user unit
+```
+
+If `AUTODEV_ESCALATION_CHANNEL` or `AUTODEV_HOOKS_TOKEN` is unset, the plugin no-ops and behavior is unchanged (replies route to the escalation agent as before). No `openclaw.json` change is required — the forwarder runs on the `inbound_claim` hook, before routing.
+
+**Security.** `POST /api/escalation/inbound` is the only endpoint exempt from the dashboard token; it authenticates with the **hooks** Bearer secret and **fails closed** (no hooks token configured → it refuses). Keep `AUTODEV_HOOKS_TOKEN` secret, and prefer loopback for the UI server.
+
+---
+
 ## Known Compatible OpenClaw Version
 
 Tested against OpenClaw 2026.5.18 — earlier versions may have schema differences in `pipeline_state.json`. See openclaw.json requirements below.
