@@ -10537,6 +10537,24 @@
             );
         }
 
+        // Mirror of the escalation/advisory "present-only" keys emitted by
+        // _compute_escalation_view (ui/server.py): GET /api/state DROPS these once
+        // phase_state.json is deleted on phase advance (or there is no active
+        // escalation). fetchState re-seeds them on every poll (spread BEFORE ...data)
+        // so a stale value can't survive the shallow merge — this is what made the
+        // "Reset ×N" badge stick across phases until a manual refresh. skill_injected/
+        // skill_agent and the event-level last_error_code are intentionally excluded
+        // (different feature family / not rendered from pState).
+        const ESCALATION_VIEW_DEFAULTS = {
+            escalation_resets: 0,
+            nuclear_resets: 0,
+            escalation_trigger_reason: null,
+            escalation_headline: null,
+            escalation_message: null,
+            escalation_recommended_action: null,
+            escalation_advisory_status: null,
+        };
+
         function PipelineScreen() {
             const { setCurrentScreen } = useContext(AppCtx);
             const [pState, setPState] = useState({
@@ -10819,7 +10837,10 @@
                     .then(data => {
                         // ctx.pipelineStatus is owned by App's live /api/state poll;
                         // PipelineScreen keeps only its local pState for detail rendering.
-                        setPState(prev => ({ ...prev, ...data }));
+                        // Re-seed ESCALATION_VIEW_DEFAULTS BEFORE ...data so present-only
+                        // fields the backend dropped on phase advance reset to default
+                        // rather than surviving this shallow merge as stale values.
+                        setPState(prev => ({ ...prev, ...ESCALATION_VIEW_DEFAULTS, ...data }));
                     })
                     .catch(() => {});
             }

@@ -3399,9 +3399,12 @@ def post_resume_ready():
 
     Reads pipeline_state.json, confirms pipeline_status is STOPPED or HALTED_SILENT,
     then atomically writes pipeline_status: WAITING_FOR_HUMAN + current_agent:
-    escalation (all other fields preserved). This is the clean operator recovery
-    from a silent halt (F11) — git-recover remains the heavy, phase-destroying
-    fallback. Returns 409 if pipeline is not in STOPPED or HALTED_SILENT state.
+    escalation (all other fields preserved). The pre-stop current_agent is first
+    stashed into resume_target_agent so a subsequent RETRY resumes the in-flight
+    agent (e.g. the reviewer, after the executor passed) instead of restarting the
+    phase from the planner. This is the clean operator recovery from a silent halt
+    (F11) — git-recover remains the heavy, phase-destroying fallback. Returns 409 if
+    pipeline is not in STOPPED or HALTED_SILENT state.
     """
     config = load_config()
     pipeline_state_path = config.get("pipeline_state_path")
@@ -3428,10 +3431,15 @@ def post_resume_ready():
                    f"Resume is available from STOPPED or HALTED_SILENT.",
         )
 
+    # current_agent="escalation" routes the orchestrator into the command-consumption
+    # branch (_should_invoke_escalation_agent gates on it), but that erases which
+    # agent was in-flight at stop time. Stash it first so a RETRY resumes that agent
+    # instead of restarting the phase from the planner. RETRY consumes the field.
+    _prev_agent = pipeline_state.get("current_agent")
     pipeline_state["pipeline_status"] = "WAITING_FOR_HUMAN"
-    # Ensure the orchestrator hits the escalation command handler (WAITING_FOR_HUMAN branch)
-    # regardless of what current_agent was when the pipeline stopped.
     pipeline_state["current_agent"] = "escalation"
+    if _prev_agent in ("planner", "executor", "reviewer", "escalation"):
+        pipeline_state["resume_target_agent"] = _prev_agent
 
     tmp_path = pipeline_state_path + ".tmp"
     with open(tmp_path, "w") as f:

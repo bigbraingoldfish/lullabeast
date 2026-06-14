@@ -2882,6 +2882,23 @@ class Orchestrator:
             return True
         return False
 
+    def _restore_resume_target_agent(self):
+        """Resume the agent that was in-flight when the operator stopped.
+
+        Reads ``resume_target_agent`` (stashed by ``/api/resume-ready`` before it
+        set ``current_agent="escalation"`` to route into the command-consumption
+        branch), applies it to ``current_agent``, and clears it. Defaults to
+        "planner" when the stash is absent or invalid.
+
+        Replaces the former ``last_action`` string-match heuristic, which always
+        fell through to "planner" because the STOPPED transition overwrites
+        ``last_action`` before this code runs — silently re-running completed
+        executor work on every stop→resume.
+        """
+        target = self.state.pop("resume_target_agent", None)
+        self.state["current_agent"] = target if target in (
+            "planner", "executor", "reviewer", "escalation") else "planner"
+
     def increment_planner_retries(self):
         phase_state = {}
         if os.path.exists(PHASE_STATE_FILE):
@@ -5968,6 +5985,12 @@ class Orchestrator:
                         ):
                             return
 
+                    if getattr(sentinel_found, "reason", None) == "stopped":
+                        # Operator stop: the stop sentinel is still on disk; let the
+                        # loop-top _check_stop_requested() halt cleanly. Do not misread
+                        # it as a sentinel timeout and burn an agent retry.
+                        continue
+
                     # W1-G: Resolve planner session JSONL and capture token usage.
                     # agent_end fires after sessions.json is populated, so a single
                     # read after the sentinel is sufficient.
@@ -6584,6 +6607,12 @@ class Orchestrator:
                                 reason=sentinel_found.reason,
                             ):
                                 return
+
+                    if getattr(sentinel_found, "reason", None) == "stopped":
+                        # Operator stop: the stop sentinel is still on disk; let the
+                        # loop-top _check_stop_requested() halt cleanly. Do not misread
+                        # it as a sentinel timeout and burn an agent retry.
+                        continue
 
                     # W1-G: Resolve reviewer session JSONL and capture token usage.
                     # agent_end fires after sessions.json is populated, so a single
@@ -7433,12 +7462,8 @@ class Orchestrator:
                                 # Used by StoppedRecoveryPanel resume flow (STOPPED → WAITING_FOR_HUMAN → RETRY).
                                 # Not shown in the escalation agent UI panel.
                                 self._queue_restore_parked_entry_to_active()
-                                last_action = self.state.get("last_action", "")
-                                if "planner" in last_action.lower(): self.state["current_agent"] = "planner"
-                                elif "executor" in last_action.lower(): self.state["current_agent"] = "executor"
-                                elif "reviewer" in last_action.lower(): self.state["current_agent"] = "reviewer"
-                                else: self.state["current_agent"] = "planner"
-                                self.transition_state("RUNNING", "RETRY: resuming from last known agent")
+                                self._restore_resume_target_agent()
+                                self.transition_state("RUNNING", "RETRY: resuming in-flight agent")
                             elif command in ("RESET_PHASE", "RESTART PHASE"):
                                 # RESTART PHASE is a legacy alias — remove once confirmed no
                                 # in-flight Signal conversations still reference it.
