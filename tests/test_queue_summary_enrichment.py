@@ -58,7 +58,6 @@ def _metrics_row(phase, duration=100, cost=1.25, planner_tok=10, executor_tok=20
         "duration_seconds": duration,
         "executor_attempts": 1,
         "reviewer_passes": 1,
-        "blame_fires": 0,
         "escalations": 0,
         "skill_used": None,
         "cost_total": cost,

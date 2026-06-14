@@ -211,7 +211,7 @@ def _drive_writer(tmp_path, monkeypatch, phase_state_extra=None):
         "executor_retries": 0, "executor_self_failure_retries": 0,
         "executor_reviewer_rejection_retries": 0, "reviewer_retries": 0,
         "planner_tokens_acc": {}, "executor_tokens_acc": {}, "reviewer_tokens_acc": {},
-        "blame_fires": 0, "escalations": 0, "skill_injected": "core-logic",
+        "escalations": 0, "skill_injected": "core-logic",
     }
     if phase_state_extra:
         phase_state.update(phase_state_extra)

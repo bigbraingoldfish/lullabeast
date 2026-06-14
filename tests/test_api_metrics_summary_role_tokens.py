@@ -50,7 +50,6 @@ def _row(phase, planner, executor, reviewer, duration=60):
         "goal": f"phase {phase}",
         "executor_attempts": 1,
         "reviewer_passes": 1,
-        "blame_fires": 0,
         "escalations": 0,
         "skill_used": "core-logic",
         "planner_tokens": planner,
