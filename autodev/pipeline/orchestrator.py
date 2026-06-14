@@ -15,6 +15,7 @@ import time
 import tempfile
 import subprocess
 import traceback
+import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
 import logging
@@ -28,6 +29,7 @@ from webhook_client import (
 )
 from sentinel_poller import cleanup_output_files, initialize_activity_stamp, poll_for_sentinel
 from skill_manager import SkillManager
+from event_log import append_pipeline_event
 from queue_semantics import (
     parent_blocks_child, ESCALATION_ANSWERED, REVIVABLE_ANSWERED_STATES,
     QUEUE_MAX_CAS_RETRIES, QUEUE_VERSION_KEY, QueueAbort, QueueVersionConflict,
@@ -326,11 +328,12 @@ VALID_STATES = [
     "QUEUE_HALTED",
 ]
 
-# 3-A — statuses that mean "a run is still in flight". A same-project --project-path
-# (re)start while the on-disk status is one of these is a crash/restart RESUME of that
-# run, so run_started_at is preserved; any other (terminal/idle) status — or no stamp at
-# all — means a NEW run is beginning (e.g. queue trigger-next re-running a finished
-# project) and run_started_at is freshly stamped. See apply_cli_project_path.
+# 3-A / P1-A — statuses that mean "a run is still in flight". A same-project
+# --project-path (re)start while the on-disk status is one of these is a crash/restart
+# RESUME of that run, so run_started_at AND run_id are preserved; any other
+# (terminal/idle) status — or no stamp at all — means a NEW run is beginning (e.g.
+# queue trigger-next re-running a finished project) and both are freshly stamped. See
+# apply_cli_project_path. (run_started_at = WHEN the run began; run_id = WHICH run.)
 _RESUMABLE_ACTIVE_RUN_STATUSES = frozenset(
     {"RUNNING", "WAITING_FOR_SENTINEL", "WAITING_FOR_HUMAN", "QUEUE_HALTED"}
 )
@@ -782,12 +785,37 @@ def _merge_token_sums(sums) -> dict:
     return total
 
 
+def _new_run_id() -> str:
+    """Mint a fresh run identity (uuid4).
+
+    A run_id travels with ``run_started_at``: it is minted wherever a NEW run
+    begins and preserved across phase advance and queue revival, so events,
+    metrics rows, and run_summary can be grouped per run (``jq 'group_by(.run_id)'``)
+    without fragile timestamp joins."""
+    return str(uuid.uuid4())
+
+
+def _current_run_id():
+    """Read the current run_id from pipeline_state.json (its durable home).
+
+    Used by the two module-level event writers, which have no ``self`` to read
+    ``self.state`` from. Returns ``None`` on any read/parse error — events still
+    emit, just without a run_id (e.g. a run that predates this field)."""
+    try:
+        with open(STATE_FILE, "r") as f:
+            return json.load(f).get("run_id")
+    except Exception:
+        return None
+
+
 def _write_pipeline_event(event_type: str, phase: str, agent: str, detail_dict) -> None:
     """W1-F: Append one structured event line to AUTODEV_PIPELINE_ROOT/pipeline_events.jsonl.
 
-    Non-blocking: any OSError is printed and swallowed.  The UI SSE stream tails this
-    file when present, making events durable across server restarts with no UI changes.
-    Schema: {"ts", "event", "project", "phase", "agent", "detail"}
+    Delegates the write + size-based rotation to ``event_log.append_pipeline_event``
+    (the single source of truth for the line format — see that module's docstring).
+    Non-blocking: errors are swallowed. The UI SSE stream tails this file, making
+    events durable across server restarts with no UI changes.
+    Schema: {"ts", "event", "run_id", "project", "phase", "agent", "detail"}.
     """
     try:
         # Resolve the active project name from the pipeline-project symlink.
@@ -797,17 +825,18 @@ def _write_pipeline_event(event_type: str, phase: str, agent: str, detail_dict) 
                 _project = os.path.basename(os.path.realpath(SYMLINK_TARGET))
         except Exception:
             pass
-        path = os.path.join(AUTODEV_PIPELINE_ROOT, "pipeline_events.jsonl")
         entry = {
             "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "event": event_type,
+            "run_id": _current_run_id(),
             "project": _project,
             "phase": phase,
             "agent": agent,
             "detail": detail_dict or {},
         }
-        with open(path, "a") as f:
-            f.write(json.dumps(entry) + "\n")
+        append_pipeline_event(
+            os.path.join(AUTODEV_PIPELINE_ROOT, "pipeline_events.jsonl"), entry
+        )
     except OSError as e:
         print(f"[WARN] _write_pipeline_event({event_type}): {e}")
 
@@ -969,11 +998,14 @@ def _write_run_summary(outcome: str, outcome_detail: str) -> None:
     """W2-B: Write run_summary.json at every terminal pipeline exit.
 
     Also appends one line to AUTODEV_PIPELINE_ROOT/runs_index.jsonl (O_APPEND) so
-    cross-run history survives projects being removed from the queue.
+    cross-run history survives projects being removed from the queue. Both the
+    summary and the index line carry ``run_id`` (P1-A) so a terminal run can be
+    joined to its events/metrics by run identity rather than timestamp.
     Graceful: any failure is logged and swallowed — must never block a transition_state call.
     """
     try:
         run_end = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _run_id = _current_run_id()  # run identity; null for runs that predate this field
 
         # --- Read run_manifest.json for project identity + run_start ---
         manifest = {}
@@ -1078,6 +1110,7 @@ def _write_run_summary(outcome: str, outcome_detail: str) -> None:
         summary = {
             "schema_version": 1,
             "generated_at": run_end,
+            "run_id": _run_id,
             "outcome": outcome,
             "outcome_detail": outcome_detail,
             "project_path": project_path,
@@ -1111,6 +1144,7 @@ def _write_run_summary(outcome: str, outcome_detail: str) -> None:
         _index_path = os.path.join(AUTODEV_PIPELINE_ROOT, "runs_index.jsonl")
         _index_entry = json.dumps({
             "ts": run_end,
+            "run_id": _run_id,
             "outcome": outcome,
             "project_path": project_path,
             "project_name": project_name,
@@ -1157,10 +1191,12 @@ class Orchestrator:
             "reviewer_retries": 0,
             "last_action": "initialized",
             "last_action_timestamp": datetime.now(timezone.utc).isoformat(),
-            # run_started_at: run-scoped marker for the staleness badge. Set once per
-            # fresh run, survives every phase advance (the advance mutates in place),
-            # refreshed on a new run / queue advance (3-A).
+            # run_started_at = WHEN this run began (staleness badge); run_id = WHICH
+            # run it is (groups events/metrics/run_summary). Both are minted together
+            # at every fresh-run start and preserved across phase advance (the advance
+            # mutates in place) and queue revival (3-A / P1-A).
             "run_started_at": datetime.now(timezone.utc).isoformat(),
+            "run_id": _new_run_id(),
             "pipeline_status": "RUNNING"
         }
         # P0 Stage H — orchestrator-private tracker for the current attempt's
@@ -1979,10 +2015,13 @@ class Orchestrator:
                     self.state["phase_base_commit"] = snap["phase_base_commit"]
                 if snap.get("phase_start_time"):
                     self.state["phase_start_time"] = snap["phase_start_time"]
-                # A revived project is the SAME run — keep the original run start so
-                # the staleness badge stays correct (3-A).
+                # A revived project is the SAME run — keep the original run start AND
+                # run_id so the staleness badge stays correct and events/metrics stay
+                # grouped under the original run (3-A / P1-A).
                 if snap.get("run_started_at"):
                     self.state["run_started_at"] = snap["run_started_at"]
+                if snap.get("run_id"):
+                    self.state["run_id"] = snap["run_id"]
             else:
                 self.state = {
                     "current_phase": 0,
@@ -1995,9 +2034,11 @@ class Orchestrator:
                     "reviewer_retries": 0,
                     "last_action": f"queue auto-advance to {entry['name']}",
                     "last_action_timestamp": now,
-                    # A fresh queue advance is a new run — stamp run_started_at (3-A).
-                    # Same value as the queue entry's started_at / run_manifest.
+                    # A fresh queue advance is a new run — stamp run_started_at + a
+                    # fresh run_id (3-A / P1-A). Same run_started_at value as the queue
+                    # entry's started_at / run_manifest.
                     "run_started_at": now,
+                    "run_id": _new_run_id(),
                     "pipeline_status": "RUNNING",
                     "project_path": project_path,
                 }
@@ -2095,9 +2136,12 @@ class Orchestrator:
                 self.state["phase_base_commit"] = snap["phase_base_commit"]
             if snap.get("phase_start_time"):
                 self.state["phase_start_time"] = snap["phase_start_time"]
-            # A revived escalation is the SAME run — preserve the original run start (3-A).
+            # A revived escalation is the SAME run — preserve the original run start
+            # AND run_id (3-A / P1-A).
             if snap.get("run_started_at"):
                 self.state["run_started_at"] = snap["run_started_at"]
+            if snap.get("run_id"):
+                self.state["run_id"] = snap["run_id"]
             self.state.pop("queue_halted_reason", None)
             self._current_attempt_retry_class = "initial_attempt"
             self.write_state()
@@ -2204,9 +2248,10 @@ class Orchestrator:
             "reviewer_retries": self.state.get("reviewer_retries", 0),
             "phase_base_commit": self.state.get("phase_base_commit", ""),
             "phase_start_time": self.state.get("phase_start_time", ""),
-            # run_started_at: a parked project is the SAME run — snapshot it so the
-            # revival restores the original run start, not a fresh one (3-A).
+            # run_started_at / run_id: a parked project is the SAME run — snapshot both
+            # so the revival restores the original run identity, not a fresh one (3-A / P1-A).
             "run_started_at": self.state.get("run_started_at", ""),
+            "run_id": self.state.get("run_id", ""),
         }
 
         def _apply(data):
@@ -5047,6 +5092,9 @@ class Orchestrator:
         path *before* ``phase_state.json`` is deleted on advance, so
         ``reset_log`` + the counters are still present here — that ordering
         is load-bearing for the durable record.
+
+        P1-A — the row also carries ``run_id`` (from ``self.state``) so
+        completed-phase history is groupable per run.
         """
         raw_id = self.state.get("current_phase_raw_id", "")
         if not raw_id:
@@ -5111,6 +5159,7 @@ class Orchestrator:
         reviewer_tok = ps_m.get("reviewer_tokens_acc", {}) or {}
         canonical_row = json.dumps({
             "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "run_id": self.state.get("run_id"),  # run identity (null pre-deploy)
             "phase": raw_id,
             "goal": goal_text,
             "executor_attempts": executor_attempts,
@@ -7487,6 +7536,10 @@ def apply_cli_project_path(orchestrator, new_target: str) -> None:
     queue ``trigger-next`` path (which spawns ``--project-path`` on a finished
     project, hitting the same-project branch) a run-start marker for the staleness
     badge — without it, queue-launched runs left ``run_started_at`` null.
+
+    ``run_id`` (P1-A) follows the exact same mint/preserve rule (the two travel
+    together): a switch / re-run mints a fresh run identity while a crash-resume
+    keeps the original, so events and metrics can be grouped per run.
     """
     new_target = os.path.abspath(os.path.expanduser(new_target))
     new_target_real = _realpath_safe(new_target)
@@ -7518,8 +7571,9 @@ def apply_cli_project_path(orchestrator, new_target: str) -> None:
             "reviewer_retries": 0,
             "last_action": "initialized for new project",
             "last_action_timestamp": datetime.now(timezone.utc).isoformat(),
-            # A CLI project switch is a new run — stamp run_started_at (3-A).
+            # A CLI project switch is a new run — stamp run_started_at + a fresh run_id (3-A / P1-A).
             "run_started_at": datetime.now(timezone.utc).isoformat(),
+            "run_id": _new_run_id(),
             "pipeline_status": "RUNNING",
             "project_path": new_target,
         }
@@ -7537,6 +7591,9 @@ def apply_cli_project_path(orchestrator, new_target: str) -> None:
         if (orchestrator.state.get("pipeline_status") not in _RESUMABLE_ACTIVE_RUN_STATUSES
                 or not orchestrator.state.get("run_started_at")):
             orchestrator.state["run_started_at"] = datetime.now(timezone.utc).isoformat()
+            # A fresh run-start ⇒ a fresh run_id (P1-A). The resume branch (condition
+            # False) keeps the run_id already carried in disk_state → same run.
+            orchestrator.state["run_id"] = _new_run_id()
 
     # Update symlink before writing state: if the symlink fails the on-disk state
     # must not be updated, otherwise the orchestrator starts with the new project
