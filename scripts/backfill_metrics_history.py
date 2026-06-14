@@ -98,7 +98,6 @@ def _row_from_audit(audit_phase_dir: str, phase_raw_id: str) -> dict | None:
         "reviewer_passes": ps.get("reviewer_retries", 0) + 1,
         "escalations": ps.get("escalations", 0),
         "skill_used": ps.get("skill_injected"),
-        "blame_verdict": ps.get("blame_verdict"),
         "planner_tokens": ps.get("planner_tokens_acc", {}) or {},
         "executor_tokens": ps.get("executor_tokens_acc", {}) or {},
         "reviewer_tokens": ps.get("reviewer_tokens_acc", {}) or {},

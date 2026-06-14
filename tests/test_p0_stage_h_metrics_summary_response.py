@@ -73,7 +73,6 @@ def test_phases_include_self_failure_counter(seeded_project):
         "reviewer_passes": 1,
         "escalations": 0,
         "skill_used": "core-logic",
-        "blame_verdict": None,
         "executor_self_failures": 2,
         "executor_reviewer_rejections": 1,
         "duration_seconds": 60,
