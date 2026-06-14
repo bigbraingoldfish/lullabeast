@@ -338,6 +338,53 @@ _RESUMABLE_ACTIVE_RUN_STATUSES = frozenset(
     {"RUNNING", "WAITING_FOR_SENTINEL", "WAITING_FOR_HUMAN", "QUEUE_HALTED"}
 )
 
+# P1-B — structured escalation taxonomy. Every escalation carries one of these
+# classes (in the `escalation_trigger` event detail + the canonical metrics row), so
+# "escalations by cause" is answerable from durable data without parsing the free-text
+# reason. Resolution (Orchestrator._resolve_escalation_trigger_class) prefers an
+# explicit per-chokepoint stamp, else derives from `last_error_code`, else `"unknown"`
+# — so the taxonomy degrades gracefully and never silently lies.
+ESCALATION_TRIGGER_CLASSES = frozenset({
+    "planner_retries_exhausted",
+    "executor_retries_exhausted",
+    "reviewer_retries_exhausted",
+    "reviewer_routed",            # reviewer gate returned ROUTE_ESCALATE
+    "reviewer_verification_unmet",  # missing-artifacts / contract / unverified caps
+    "provider_rejected",          # provider quota/policy reject or session dead-on-arrival
+    "webhook_failure",            # /hooks/agent returned non-SUCCESS
+    "resolver_failed",            # phase_resolver exit 1 / crash
+    "roadmap_checkbox_failed",
+    "repo_init_failed",
+    "stamp_init_failed",          # activity-stamp workspace unwritable
+    "reset_git_failed",           # reset_phase / reset_execution git failure
+    "git_op_failed",              # branch / merge / tag op failed on the PASS path
+    "preempted_output_invalid",
+    "gate_crash",                 # unhandled / unrecognised gate verdict
+    "unknown",                    # derivation fallback
+})
+
+# Error codes that uniquely identify a cause — the error-coded chokepoints are
+# classified by derivation, so they need no explicit stamp.
+_ERR_CODE_TO_TRIGGER_CLASS = {
+    "ERR_PROVIDER_REJECTED": "provider_rejected",
+    "ERR_SESSION_DEAD_ON_ARRIVAL": "provider_rejected",
+    "ERR_RESET_PHASE_GIT_FAILED": "reset_git_failed",
+    "ERR_RESET_EXECUTION_GIT_FAILED": "reset_git_failed",
+    "ERR_ROADMAP_CHECKBOX_FAILED": "roadmap_checkbox_failed",
+    "ERR_PHASE_RESOLVER_FAILED": "resolver_failed",
+    "ERR_MERGE_FAILED": "git_op_failed",
+}
+
+
+def _derive_escalation_trigger_class(last_error_code):
+    """Map a distinguishing ERR_* code to its escalation_trigger_class, or
+    ``"unknown"`` when the code is missing/unmapped.
+
+    The exhaustion / reviewer-routing / webhook / stamp-init / repo-init chokepoints
+    carry no distinguishing code at dispatch time and instead stamp the class
+    explicitly (see ``Orchestrator._resolve_escalation_trigger_class``)."""
+    return _ERR_CODE_TO_TRIGGER_CLASS.get(last_error_code or "", "unknown")
+
 QUEUE_FILE = os.path.join(AUTODEV_PIPELINE_ROOT, "pipeline_queue.json")
 
 
@@ -2788,6 +2835,35 @@ class Orchestrator:
         except Exception as e:
             print(f"[ADVISORY] Could not persist escalation reason: {e}")
 
+    def _resolve_escalation_trigger_class(self, ps):
+        """P1-B — resolve the structured escalation_trigger_class at dispatch time.
+
+        Precedence: an explicit ``self.state["escalation_trigger_class"]`` stamp (set by
+        the exhaustion / reviewer-routing / webhook / stamp-init / repo-init chokepoints,
+        which have no distinguishing error code) wins; otherwise derive from
+        ``ps["last_error_code"]`` (the error-coded chokepoints); otherwise ``"unknown"``.
+        A stamp outside the enum is ignored, so a typo can't inject a junk class."""
+        explicit = self.state.get("escalation_trigger_class")
+        if explicit in ESCALATION_TRIGGER_CLASSES:
+            return explicit
+        return _derive_escalation_trigger_class(ps.get("last_error_code"))
+
+    def _prepare_escalation_trigger(self, ps):
+        """P1-B — resolve the trigger class, persist it onto ``ps`` (so it rides
+        phase_state → the metrics row), clear the consumed ``self.state`` stamp so the
+        NEXT escalation re-resolves cleanly, and return the ``escalation_trigger`` event
+        detail. MUST be called BEFORE ``ps`` is persisted (``_record_escalation_reason``)
+        so the class is in the durable write."""
+        cls = self._resolve_escalation_trigger_class(ps)
+        ps["escalation_trigger_class"] = cls
+        self.state.pop("escalation_trigger_class", None)
+        return {
+            "reason": ps.get("escalation_trigger_reason"),
+            "escalation_trigger_class": cls,
+            "last_error_code": ps.get("last_error_code"),
+            "last_poll_reason": ps.get("last_poll_reason"),
+        }
+
     def _check_stop_requested(self) -> bool:
         """Check for the stop sentinel file written by the UI server.
 
@@ -2927,6 +3003,7 @@ class Orchestrator:
             },
         )
         self.state["current_agent"] = "escalation"
+        self.state["escalation_trigger_class"] = "stamp_init_failed"  # P1-B
         self.transition_state(
             "RUNNING",
             f"activity stamp init failed for {agent_role} — workspace missing "
@@ -5203,6 +5280,10 @@ class Orchestrator:
             # warnings). Durable record of "what the gate flagged for the reviewer."
             "gate_warnings": ps_m.get("last_gate_warnings"),
             "reset_log": ps_m.get("reset_log", []),
+            # P1-B — structured cause of this phase's escalation(s), resolved at the
+            # escalation dispatch and persisted to phase_state. null when the phase
+            # never escalated.
+            "escalation_trigger_class": ps_m.get("escalation_trigger_class"),
         })
 
         # --- Resolve paths.  Two files:
@@ -5628,6 +5709,7 @@ class Orchestrator:
             if not init_passed:
                 failure_context = f"Repo init check failed: {init_details}"
                 self.state["current_agent"] = "escalation"
+                self.state["escalation_trigger_class"] = "repo_init_failed"  # P1-B
                 self.transition_state("RUNNING", failure_context)
                 phase = self.state.get("current_phase", 0)
                 raw_id = self.state.get("current_phase_raw_id", "unknown")
@@ -5646,13 +5728,17 @@ class Orchestrator:
                 _ps["escalations"] = _ps.get("escalations", 0) + 1  # W1-B
                 _ps["last_phase_outcome"] = "escalated"  # Phase 3 — terminal outcome
                 _ps["waiting_for_human_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # W1-E
+                # P1-B — resolve + persist the structured trigger class onto _ps before
+                # _record_escalation_reason persists phase_state; returns the event detail.
+                _esc_detail = self._prepare_escalation_trigger(_ps)
+
                 # Record the honest deterministic reason BEFORE transitioning, so
                 # the escalation panel shows a factual message the instant it
                 # renders; the escalation agent's own summary upgrades it to
                 # "ready" when escalation_summary.json lands.
                 self._record_escalation_reason(_ps)
 
-                _write_pipeline_event("escalation_trigger", raw_id, "escalation", {"reason": _ps.get("escalation_trigger_reason")})  # W1-F
+                _write_pipeline_event("escalation_trigger", raw_id, "escalation", _esc_detail)  # W1-F
                 self.transition_state("WAITING_FOR_HUMAN", "Invoking Escalation Agent: repo init check failed")
                 self._queue_park_active_entry("ESCALATION", "escalation")
 
@@ -5785,6 +5871,7 @@ class Orchestrator:
 
                     if webhook_status != "SUCCESS":
                         self.state["current_agent"] = "escalation"
+                        self.state["escalation_trigger_class"] = "webhook_failure"  # P1-B
                         error_reason = webhook_failure_reason(webhook_status)
                         self.transition_state("RUNNING", error_reason)
                         time.sleep(5)
@@ -5936,6 +6023,9 @@ class Orchestrator:
                                 {
                                     "exit_code": 1,
                                     "last_error_code": self.read_phase_state().get("last_error_code"),
+                                    # P1-B — uniform retry-source label across all three
+                                    # gate_fail emits; the planner has a single retry source.
+                                    "retry_class": "planner_retry",
                                 },
                             )  # W1-F
                             self.write_failure_context("planner", self.state.get("planner_retries", 0) + 1)
@@ -5943,6 +6033,7 @@ class Orchestrator:
                             
                     if retries >= 3:
                         self.state["current_agent"] = "escalation"
+                        self.state["escalation_trigger_class"] = "planner_retries_exhausted"  # P1-B
                         self.transition_state("RUNNING", "Planner retries exhausted")
                         time.sleep(5)
                     else:
@@ -5995,6 +6086,7 @@ class Orchestrator:
                         except Exception:
                             pass
                         self.state["current_agent"] = "escalation"
+                        self.state["escalation_trigger_class"] = "executor_retries_exhausted"  # P1-B
                         self.transition_state(
                             "RUNNING",
                             f"Executor retries exhausted after {retries} attempts"
@@ -6121,6 +6213,7 @@ class Orchestrator:
 
                     if webhook_status != "SUCCESS":
                         self.state["current_agent"] = "escalation"
+                        self.state["escalation_trigger_class"] = "webhook_failure"  # P1-B
                         error_reason = "Auth Config Error" if webhook_status == "AUTH_ERROR" else "Webhook infra failure"
                         self.transition_state("RUNNING", error_reason)
                         time.sleep(5)
@@ -6324,6 +6417,7 @@ class Orchestrator:
                             # Do NOT consume executor_retries — route directly to escalation.
                             print("[ERROR] [EXECUTOR] Preempted executor output failed gate — escalating (EXECUTOR_PREEMPTED_OUTPUT_INVALID).")
                             self.state["current_agent"] = "escalation"
+                            self.state["escalation_trigger_class"] = "preempted_output_invalid"  # P1-B
                             self.transition_state(
                                 "RUNNING",
                                 "EXECUTOR_PREEMPTED_OUTPUT_INVALID: escalating without consuming executor_retries",
@@ -6390,6 +6484,7 @@ class Orchestrator:
 
                         if webhook_status != "SUCCESS":
                             self.state["current_agent"] = "escalation"
+                            self.state["escalation_trigger_class"] = "webhook_failure"  # P1-B
                             error_reason = "Auth Config Error" if webhook_status == "AUTH_ERROR" else "Webhook infra failure"
                             self.transition_state("RUNNING", error_reason)
                             time.sleep(5)
@@ -6552,6 +6647,7 @@ class Orchestrator:
                         # avoid a re-read race with the phase_state write inside that call.
                         if _rv_retries >= 3:
                             self.state["current_agent"] = "escalation"
+                            self.state["escalation_trigger_class"] = "reviewer_retries_exhausted"  # P1-B
                             self.transition_state(
                                 "RUNNING",
                                 f"Reviewer sentinel timeout cap reached ({_rv_retries}): "
@@ -6668,6 +6764,7 @@ class Orchestrator:
                                 if not self._ensure_phase_branch(branch):
                                     print(f"[ERROR] Phase {phase}: cannot ensure branch '{branch}' before commit — escalating.")
                                     self.state["current_agent"] = "escalation"
+                                    self.state["escalation_trigger_class"] = "git_op_failed"  # P1-B
                                     self.transition_state(
                                         "RUNNING",
                                         f"Phase {phase} branch integrity failure: cannot checkout '{branch}'",
@@ -6747,6 +6844,7 @@ class Orchestrator:
                                 self.write_phase_state_atomic(_ps_mf)
 
                                 self.state["current_agent"] = "escalation"
+                                self.state["escalation_trigger_class"] = "git_op_failed"  # P1-B
                                 self.transition_state(
                                     "RUNNING",
                                     f"Phase {phase} merge failed: {_merge_reason}",
@@ -6796,6 +6894,7 @@ class Orchestrator:
                         except subprocess.CalledProcessError as e:
                             print(f"[ERROR] Git operation failed: {e}")
                             self.state["current_agent"] = "escalation"
+                            self.state["escalation_trigger_class"] = "git_op_failed"  # P1-B
                             self.transition_state("RUNNING", f"Git operation failed on Phase {phase}: {str(e)}")
                             time.sleep(5)
                             continue
@@ -6972,6 +7071,7 @@ class Orchestrator:
                     elif gate_result == "ROUTE_ESCALATE":
                         self.increment_reviewer_retries()
                         self.state["current_agent"] = "escalation"
+                        self.state["escalation_trigger_class"] = "reviewer_routed"  # P1-B
                         self.transition_state("RUNNING", "Reviewer ROUTE_ESCALATE: escalating after 3 failed passes")
                         time.sleep(5)
                         continue
@@ -6988,6 +7088,7 @@ class Orchestrator:
                         if _ma_retries >= 2:
                             print("[WARN] MISSING_ARTIFACTS retry cap reached — escalating.")
                             self.state["current_agent"] = "escalation"
+                            self.state["escalation_trigger_class"] = "reviewer_verification_unmet"  # P1-B
                             self.transition_state(
                                 "RUNNING",
                                 f"Reviewer MISSING_ARTIFACTS: artifact retry cap reached ({_ma_retries})",
@@ -7060,6 +7161,7 @@ class Orchestrator:
                         print(f"[WARN] Reviewer CONTRACT_FAILURE — contract retry {_contract_soft}/3.")
                         if _contract_soft >= 3:
                             self.state["current_agent"] = "escalation"
+                            self.state["escalation_trigger_class"] = "reviewer_verification_unmet"  # P1-B
                             self.transition_state(
                                 "RUNNING",
                                 f"Reviewer CONTRACT_FAILURE: contract retry cap reached ({_contract_soft}): CONTRACT_FAILURE_SOFT_RETRY_EXHAUSTED — reviewer ended without a verdict (gave up or was cut off)",
@@ -7146,6 +7248,7 @@ class Orchestrator:
                                 f"escalating."
                             )
                             self.state["current_agent"] = "escalation"
+                            self.state["escalation_trigger_class"] = "reviewer_verification_unmet"  # P1-B
                             self.transition_state(
                                 "RUNNING",
                                 f"Reviewer {gate_result}: contract-shape retry "
@@ -7183,6 +7286,7 @@ class Orchestrator:
                             f"than silently re-invoking the reviewer."
                         )
                         self.state["current_agent"] = "escalation"
+                        self.state["escalation_trigger_class"] = "gate_crash"  # P1-B
                         self.transition_state(
                             "RUNNING",
                             f"Unknown reviewer-gate verdict: {gate_result!r} — "
@@ -7219,6 +7323,11 @@ class Orchestrator:
                         _ps["last_phase_outcome"] = "escalated"  # Phase 3 — terminal outcome
                         _ps["waiting_for_human_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # W1-E
 
+                        # P1-B — resolve + persist the structured trigger class onto _ps
+                        # BEFORE _record_escalation_reason writes phase_state (so the
+                        # metrics row sees it); returns the enriched event detail.
+                        _esc_detail = self._prepare_escalation_trigger(_ps)
+
                         # Record the honest deterministic reason BEFORE transitioning,
                         # so the escalation panel shows a factual message the instant it
                         # renders. The escalation agent composes the richer advisory
@@ -7226,7 +7335,7 @@ class Orchestrator:
                         # poll loop promotes it to "ready" when it lands.
                         self._record_escalation_reason(_ps)
 
-                        _write_pipeline_event("escalation_trigger", raw_id, "escalation", {"reason": _ps.get("escalation_trigger_reason")})  # W1-F
+                        _write_pipeline_event("escalation_trigger", raw_id, "escalation", _esc_detail)  # W1-F
                         self.transition_state("WAITING_FOR_HUMAN", "Invoking Escalation Agent")
                         self._queue_park_active_entry("ESCALATION", "escalation")
 
