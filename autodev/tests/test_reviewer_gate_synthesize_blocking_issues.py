@@ -136,6 +136,69 @@ class TestSynthesizeBehavioralBlockingIssues:
                 "the reviewer inspected"
             )
 
+    def test_behavioral_synthesis_blanks_escaping_affected_file_on_fail(self, tmp_workspace):
+        """An evidence path that escapes the workspace must be blanked in
+        ``affected_file`` — not copied verbatim — while the blocking issue
+        itself (its claim) is preserved.
+
+        The pass-verdict validator's boundary check is skipped on ``fail`` (early
+        return), so the synthesiser is the only guard against a traversal-shaped
+        path flowing into failure_context.json. RED before the fix: line ~279
+        copies ``"../../etc/passwd"`` straight into ``affected_file``. Mixing a
+        safe entry in guards against over-blanking (the safe path must survive)."""
+        safe = _make_evidence_entries(tmp_workspace, count=1)
+        escaping = {
+            "claim": "Traversal claim",
+            "file_or_screenshot_or_log": "../../etc/passwd",
+            "method": "stdout_capture",
+        }
+        data = {
+            "blocking_issues": [],
+            "behavioral_verification": {
+                "verdict": "fail",
+                "how_to_check_followed": True,
+                "evidence": safe + [escaping],
+            },
+        }
+        with _patch_workspace(tmp_workspace):
+            reviewer_gate_module._synthesize_behavioral_blocking_issues(data)
+        issues = data["blocking_issues"]
+        assert len(issues) == 2, "one blocking issue per evidence entry, order preserved"
+        assert issues[0]["affected_file"] == safe[0]["file_or_screenshot_or_log"], (
+            "a safe in-workspace path must survive — the guard blanks only "
+            "escaping paths, never legitimate evidence"
+        )
+        assert issues[1]["affected_file"] == "", (
+            "an escaping path must be blanked, not propagated verbatim into "
+            "failure_context.json via affected_file"
+        )
+        assert issues[1]["description"] == "Traversal claim", (
+            "the blocking issue itself is preserved — only the unsafe path is "
+            "dropped, so the executor still gets the self-heal claim"
+        )
+
+    def test_behavioral_synthesis_blanks_escaping_affected_file_on_cannot_verify(self, tmp_workspace):
+        """Same boundary guard on the other non-pass verdict (cannot_verify),
+        which the validator also skips. RED before the fix."""
+        data = {
+            "blocking_issues": [],
+            "behavioral_verification": {
+                "verdict": "cannot_verify",
+                "how_to_check_followed": False,
+                "evidence": [{
+                    "claim": "Unverifiable claim",
+                    "file_or_screenshot_or_log": "../../../etc/shadow",
+                    "method": "stdout_capture",
+                }],
+            },
+        }
+        with _patch_workspace(tmp_workspace):
+            reviewer_gate_module._synthesize_behavioral_blocking_issues(data)
+        issues = data["blocking_issues"]
+        assert len(issues) == 1
+        assert issues[0]["affected_file"] == "", "escaping path blanked on cannot_verify too"
+        assert issues[0]["description"] == "Unverifiable claim", "issue preserved"
+
     def test_synthesizes_on_cannot_verify_verdict(self, tmp_workspace):
         """cannot_verify is also a rejection signal — the reviewer could not
         complete the how_to_check procedure end-to-end. The synthesis still

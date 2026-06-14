@@ -15,6 +15,7 @@ from utils import (
     requires_regression_verification,
     PHASE_STATE_FILE,
     WORKSPACE_DIR,
+    path_escapes_workspace,
 )
 
 # Phases that produce user-visible output and therefore require a screenshot
@@ -102,7 +103,6 @@ def _check_behavioral_verification(data):
             f"behavioral_verification.evidence must have at least "
             f"{_MIN_BEHAVIORAL_EVIDENCE_ANCHORS} entries when verdict='pass'"
         ]
-    workspace_real = os.path.realpath(WORKSPACE_DIR)
     for i, entry in enumerate(evidence):
         if not isinstance(entry, dict):
             return [f"behavioral_verification.evidence[{i}] must be an object"]
@@ -112,26 +112,22 @@ def _check_behavioral_verification(data):
                     f"behavioral_verification.evidence[{i}] missing required key {key!r}"
                 ]
         path = entry["file_or_screenshot_or_log"]
-        # T1.2 — the key-presence loop above only checks truthiness; reject a
-        # truthy non-string path before it reaches os.path.isabs (which raises
-        # TypeError on a non-str), mirroring _check_visual_verification's guard.
+        # The key-presence loop above only checks truthiness; reject a truthy
+        # non-string path first, since path_escapes_workspace treats a non-str as
+        # non-escaping (the validator owns the "must be a string" contract error).
         if not isinstance(path, str):
             return [
                 f"behavioral_verification.evidence[{i}] file_or_screenshot_or_log must be a string"
             ]
-        abs_path = path if os.path.isabs(path) else os.path.join(WORKSPACE_DIR, path)
-        # T1.4 — canonical (realpath) bounds check: resolve symlinks on both sides
-        # so an in-workspace symlink that points outside the workspace is caught.
-        real_path = os.path.realpath(abs_path)
-        try:
-            if os.path.commonpath([workspace_real, real_path]) != workspace_real:
-                return [
-                    f"behavioral_verification.evidence[{i}] path escapes workspace: {path}"
-                ]
-        except ValueError:
+        # Canonical (realpath) workspace-boundary check via the shared helper
+        # (utils.path_escapes_workspace) — resolves symlinks on both sides.
+        if path_escapes_workspace(path):
             return [
                 f"behavioral_verification.evidence[{i}] path escapes workspace: {path}"
             ]
+        real_path = os.path.realpath(
+            path if os.path.isabs(path) else os.path.join(WORKSPACE_DIR, path)
+        )
         if not os.path.exists(real_path):
             return [
                 f"behavioral_verification.evidence[{i}] path does not exist on disk: {path}"
@@ -197,7 +193,6 @@ def _check_regression_verification(data, current_phase):
             f"{_MIN_BEHAVIORAL_EVIDENCE_ANCHORS} entries when "
             f"verdict='pass' and prior_phase_how_to_check_followed=True"
         ]
-    workspace_real = os.path.realpath(WORKSPACE_DIR)
     for i, entry in enumerate(evidence):
         if not isinstance(entry, dict):
             return [f"regression_verification.evidence[{i}] must be an object"]
@@ -207,25 +202,20 @@ def _check_regression_verification(data, current_phase):
                     f"regression_verification.evidence[{i}] missing required key {key!r}"
                 ]
         path = entry["file_or_screenshot_or_log"]
-        # T1.2 — reject a truthy non-string path before os.path.isabs (which raises
-        # TypeError on a non-str); the key-presence loop only checks truthiness.
+        # Reject a truthy non-string path first (path_escapes_workspace treats a
+        # non-str as non-escaping; the validator owns the "must be a string" contract).
         if not isinstance(path, str):
             return [
                 f"regression_verification.evidence[{i}] file_or_screenshot_or_log must be a string"
             ]
-        abs_path = path if os.path.isabs(path) else os.path.join(WORKSPACE_DIR, path)
-        # T1.4 — canonical (realpath) bounds check: resolve symlinks on both sides
-        # so an in-workspace symlink that points outside the workspace is caught.
-        real_path = os.path.realpath(abs_path)
-        try:
-            if os.path.commonpath([workspace_real, real_path]) != workspace_real:
-                return [
-                    f"regression_verification.evidence[{i}] path escapes workspace: {path}"
-                ]
-        except ValueError:
+        # Canonical (realpath) workspace-boundary check via the shared helper.
+        if path_escapes_workspace(path):
             return [
                 f"regression_verification.evidence[{i}] path escapes workspace: {path}"
             ]
+        real_path = os.path.realpath(
+            path if os.path.isabs(path) else os.path.join(WORKSPACE_DIR, path)
+        )
         if not os.path.exists(real_path):
             return [
                 f"regression_verification.evidence[{i}] path does not exist on disk: {path}"
@@ -251,7 +241,7 @@ def _synthesize_behavioral_blocking_issues(data):
       attribution     = "impl"        (behavioural failures are impl failures
                                        by definition — the artifact did not
                                        exhibit the claimed behaviour)
-      affected_file   = file_or_screenshot_or_log
+      affected_file   = file_or_screenshot_or_log (blanked when it escapes the workspace)
       criterion_source = "behavioral"
       criterion_id    = f"behavioral_evidence[{i}]"
 
@@ -273,10 +263,19 @@ def _synthesize_behavioral_blocking_issues(data):
     for i, entry in enumerate(evidence):
         if not isinstance(entry, dict):
             continue
+        raw_path = entry.get("file_or_screenshot_or_log", "")
+        # Boundary-check the evidence path even on failure verdicts — the
+        # pass-verdict validator (_check_behavioral_verification) was skipped via
+        # its early return, so this is the only guard. An escaping path is blanked
+        # (the blocking issue's claim is preserved so the executor still gets the
+        # self-heal signal); the unsafe path is not propagated into
+        # failure_context.json. Boundary only: a safe-but-absent path is kept,
+        # because a failed phase may legitimately have produced no artifact.
+        affected_file = "" if path_escapes_workspace(raw_path) else raw_path
         synthesised.append({
             "description": entry.get("claim", ""),
             "attribution": "impl",
-            "affected_file": entry.get("file_or_screenshot_or_log", ""),
+            "affected_file": affected_file,
             "criterion_source": "behavioral",
             "criterion_id": f"behavioral_evidence[{i}]",
         })
@@ -308,7 +307,7 @@ def _synthesize_regression_blocking_issue(data, current_phase):
     Entry shape:
 
       attribution      = "impl"
-      affected_file    = evidence[0].file_or_screenshot_or_log if evidence else ""
+      affected_file    = evidence[0].file_or_screenshot_or_log if evidence else "" (blanked when it escapes the workspace)
       criterion_source = "regression_prior_phase"
       criterion_id     = current_phase.prior_phase_raw_id
     """
@@ -340,7 +339,11 @@ def _synthesize_regression_blocking_issue(data, current_phase):
     evidence = block.get("evidence") or []
     first_path = ""
     if isinstance(evidence, list) and evidence and isinstance(evidence[0], dict):
-        first_path = evidence[0].get("file_or_screenshot_or_log") or ""
+        candidate = evidence[0].get("file_or_screenshot_or_log") or ""
+        # Same boundary guard as the behavioural synthesiser: blank an escaping
+        # path (the validator's check was skipped on this non-pass verdict),
+        # keep the regression blocking issue's description.
+        first_path = "" if path_escapes_workspace(candidate) else candidate
 
     new_entry = {
         "description": description,
@@ -398,24 +401,20 @@ def _check_visual_verification(data):
     if verdict == "pass":
         if not isinstance(artifacts, list) or len(artifacts) == 0:
             return ["visual_smoke_artifacts must be a non-empty list when visual_verification='pass'"]
-        workspace_real = os.path.realpath(WORKSPACE_DIR)
         for i, entry in enumerate(artifacts):
             if not isinstance(entry, dict):
                 return [f"visual_smoke_artifacts[{i}] must be an object"]
             path = entry.get("path")
             if not path or not isinstance(path, str):
                 return [f"visual_smoke_artifacts[{i}] missing path"]
-            abs_path = path if os.path.isabs(path) else os.path.join(WORKSPACE_DIR, path)
-            # T7.4 — canonical (realpath) bounds check, parity with behavioral/
-            # regression evidence: resolve symlinks on both sides so an
-            # in-workspace symlink pointing outside the workspace is caught
-            # (CLAUDE.md Security Constraints; do not weaken).
-            real_path = os.path.realpath(abs_path)
-            try:
-                if os.path.commonpath([workspace_real, real_path]) != workspace_real:
-                    return [f"visual_smoke_artifacts[{i}] path escapes workspace: {path}"]
-            except ValueError:
+            # Canonical (realpath) workspace-boundary check via the shared helper,
+            # parity with behavioral/regression evidence — resolves symlinks on
+            # both sides (CLAUDE.md Security Constraints; do not weaken).
+            if path_escapes_workspace(path):
                 return [f"visual_smoke_artifacts[{i}] path escapes workspace: {path}"]
+            real_path = os.path.realpath(
+                path if os.path.isabs(path) else os.path.join(WORKSPACE_DIR, path)
+            )
             if not os.path.exists(real_path):
                 return [f"visual_smoke_artifacts[{i}] path does not exist on disk: {path}"]
     return []

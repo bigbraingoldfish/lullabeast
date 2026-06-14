@@ -8,6 +8,10 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Security
+
+- **Reviewer gate — workspace-boundary check now covers failure-verdict evidence paths.** `_check_behavioral_verification` / `_check_regression_verification` validated evidence-path safety only on a `pass` verdict (they early-return on `fail`/`cannot_verify`), but the failure-verdict synthesisers (`_synthesize_behavioral_blocking_issues`, `_synthesize_regression_blocking_issue`) copied `file_or_screenshot_or_log` verbatim into `blocking_issues[].affected_file` — so a traversal-shaped evidence path on a failure verdict reached `failure_context.json` unchecked. The synthesisers now run the same `os.path.realpath` + `os.path.commonpath` boundary check and **blank** an escaping `affected_file` (the blocking issue's `description` is preserved; a safe-but-absent path is kept, since a failed phase may produce no artifact). Defense-in-depth: the reviewer is a trusted in-session agent and the value never reaches a filesystem syscall, so this closes a consistency gap, not an active exploit. The previously-inlined boundary check was extracted into a shared `utils.path_escapes_workspace()`, and the three `reviewer_gate.py` contract validators were converged onto it (no behavior change, pinned by existing escape/symlink/existence tests). Tests: `autodev/tests/test_gate_path_safety.py` (helper contract), plus non-pass traversal cases in `test_reviewer_gate_synthesize_blocking_issues.py` and `test_reviewer_gate_regression_prior_phase.py`.
+
 ### Added
 
 - **Provider-agnostic escalation comms + inbound operator-reply path.** The escalation agent now notifies — and can be answered — over whatever channel the operator bound in OpenClaw, both outbound and inbound. No hardcoded `signal` literal; an operator away from the dashboard can recover an escalation by replying on the channel.

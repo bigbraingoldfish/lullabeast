@@ -654,6 +654,42 @@ class TestRegressionSynthesisCoexistence:
     only skips when an existing entry already carries
     ``criterion_source == "regression_prior_phase"``."""
 
+    def test_regression_synthesis_blanks_escaping_affected_file(self, tmp_workspace):
+        """An escaping evidence path on a regression ``fail`` verdict must be
+        blanked in ``affected_file`` while the regression blocking issue itself
+        survives. The validator's boundary check is skipped on non-pass verdicts
+        (early return at ``_check_regression_verification``), so the synthesiser
+        is the only guard. RED before the fix: ``first_path`` copies
+        ``"../../etc/passwd"`` straight into ``affected_file``. Direct unit call
+        mirrors the behavioural-synthesiser tests."""
+        data = {
+            "blocking_issues": [],
+            "regression_verification": {
+                "verdict": "fail",
+                "prior_phase_raw_id": "CORE-E1",
+                "prior_phase_how_to_check_followed": True,
+                "evidence": [{
+                    "claim": "Prior recipe regressed",
+                    "file_or_screenshot_or_log": "../../etc/passwd",
+                    "method": "stdout_capture",
+                }],
+            },
+        }
+        current_phase = {"prior_phase_raw_id": "CORE-E1"}
+        with _patch_workspace(tmp_workspace):
+            reviewer_gate_module._synthesize_regression_blocking_issue(data, current_phase)
+        issues = data["blocking_issues"]
+        assert len(issues) == 1
+        assert issues[0]["criterion_source"] == "regression_prior_phase"
+        assert issues[0]["affected_file"] == "", (
+            "an escaping evidence path must be blanked, not propagated into "
+            "failure_context.json via affected_file"
+        )
+        assert issues[0]["description"], (
+            "the regression blocking issue must survive — only the unsafe path "
+            "is dropped, the failure signal is preserved"
+        )
+
     def test_regression_synthesis_idempotent_when_blocking_issue_already_has_regression_source(
         self, tmp_workspace
     ):
