@@ -831,6 +831,7 @@
                 case 'queue_parked':
                     return '#e8893e';
                 // secondary-info — lifecycle / relational (periwinkle)
+                case 'operator_action':
                 case 'escalation_resolve':
                 case 'dependency_hold':
                     return '#7c86c8';
@@ -880,6 +881,8 @@
             queue_parked: 'Parked',
             queue_revived: 'Revived',
             dependency_hold: 'Dep Hold',
+            // P1-C — server-written operator interventions (the only non-orchestrator event source).
+            operator_action: 'Operator',
         };
 
         // Hover descriptions for each event type (rendered as the badge
@@ -915,6 +918,7 @@
             queue_parked: 'The active project escalated (or hit a roadmap block) and was parked; the queue advanced to the next project. The escalated phase pointer is snapshotted for later revival.',
             queue_revived: 'A parked project with a banked escalation answer was revived and resumed at its escalated phase, with the banked command applied.',
             dependency_hold: 'A queued project was held because its parent project has not completed yet. It returns to READY when the parent completes.',
+            operator_action: 'A human operator action recorded by the dashboard (server-written, so it appears even while the orchestrator is stopped): a recovery command, stop / resume, git-recover, a queue edit, or a launch / project switch. Detail.action names which.',
         };
 
         function getEventDescription(eventType) {
@@ -998,6 +1002,28 @@
                 }
                 case 'status_changed':
                     return 'Pipeline state updated';
+                case 'operator_action': {
+                    // P1-C — server-written operator interventions; keyed off detail.action.
+                    const labels = {
+                        command: d.command ? `Operator issued ${d.command}` : 'Operator issued a recovery command',
+                        stop: 'Operator stopped the pipeline',
+                        resume_ready: 'Operator marked the pipeline ready to resume',
+                        resume_orchestrator: 'Operator resumed the orchestrator',
+                        git_recover: 'Operator ran git recovery',
+                        queue_add: 'Operator added a project to the queue',
+                        queue_delete: 'Operator removed a project from the queue',
+                        queue_reorder: 'Operator reordered the queue',
+                        queue_mode: 'Operator changed the queue mode',
+                        queue_position: 'Operator moved a queue entry',
+                        queue_parent: 'Operator changed a queue dependency',
+                        queue_clear: 'Operator cleared the queue',
+                        queue_relaunch: 'Operator relaunched a queue entry',
+                        queue_revalidate: 'Operator revalidated a queue entry',
+                        launch: 'Operator launched a project',
+                        switch_project: 'Operator switched the active project',
+                    };
+                    return labels[d.action] || `Operator action: ${d.action || 'unknown'}`;
+                }
 
                 // ─── Section 6 diagnostic events — readable prose instead of raw JSON ───
                 case 'poll_start': {
@@ -2796,6 +2822,9 @@
             onGenerateDocs,
             generateDocsBusy,
             generateDocsError,
+            agent_activity_age_seconds,
+            last_attempt_summary,
+            last_poll_reason,
         }) {
             if (pipeline_status === 'PIPELINE_COMPLETE') {
                 return <PipelineCompletePanel
@@ -2860,6 +2889,25 @@
                             orchestratorAlive={orchestrator_alive}
                             pipeline_status={pipeline_status}
                         />
+                        {/* C2 — agent liveness pulse from agent_activity_age_seconds
+                            (now − activity-stamp mtime). Pulsing green = the agent's
+                            stamp is fresh (working); ambers as the silence approaches
+                            the ~300s stall threshold. null (idle / no stamp) → omitted. */}
+                        {agent_activity_age_seconds != null && (() => {
+                            const age = Number(agent_activity_age_seconds) || 0;
+                            const stale = age >= 210;  // ~0.7 × the 300s default stall threshold
+                            const ageStr = age < 60 ? `${Math.round(age)}s` : `${Math.round(age / 60)}m`;
+                            return (
+                                <span data-testid="agent-liveness"
+                                    title={stale
+                                        ? 'Agent has been quiet — approaching the stall threshold'
+                                        : 'Agent is actively working (activity stamp refreshing)'}
+                                    className="flex items-center gap-1 text-[11px]">
+                                    <span className={`inline-block w-1.5 h-1.5 rounded-full ${stale ? 'bg-amber-400' : 'bg-emerald-400 animate-pulse'}`}></span>
+                                    <span className={stale ? 'text-amber-400/90' : 'text-slate-500'}>active {ageStr} ago</span>
+                                </span>
+                            );
+                        })()}
                     </div>
                     {goal && (
                         <p className="text-slate-400 text-sm leading-relaxed">{goal}</p>
@@ -2867,6 +2915,15 @@
                     {last_action && (
                         <p className="text-xs italic text-slate-500 truncate" title={last_action}>
                             {last_action.slice(0, 80)}
+                        </p>
+                    )}
+                    {/* C3 — the dense last-attempt verdict (last_attempt_summary), with the
+                        poller reason in parens. The prebuilt one-liner the orchestrator
+                        writes to phase_state for exactly this surface (Section 6.4). */}
+                    {last_attempt_summary && (
+                        <p data-testid="last-attempt-summary" className="text-xs text-slate-500 leading-relaxed">
+                            <span className="text-slate-600">Last attempt:</span> {last_attempt_summary}
+                            {last_poll_reason && <span className="ml-1 text-slate-600">({last_poll_reason})</span>}
                         </p>
                     )}
                     <div className="space-y-1">
@@ -2971,7 +3028,7 @@
         // Wrapped in React.memo so it only re-renders when roadmap or metricsSummary
         // props actually change — avoids DOM churn caused by parent pState polling.
 
-        const RoadmapPanel = React.memo(function RoadmapPanel({ roadmap, metricsSummary, pipelineStatus, completionReport, runStartedAt }) {
+        const RoadmapPanel = React.memo(function RoadmapPanel({ roadmap, metricsSummary, pipelineStatus, completionReport, runStartedAt, currentPhaseTokens }) {
             const [expandedPhaseId, setExpandedPhaseId] = useState(null);
             // "Run so far" hidden toggles — clicking the cost / token value swaps it
             // for its breakdown (per-role cost; input/output/cache token classes).
@@ -3054,6 +3111,16 @@
                 }
             }
 
+            // C1 — live in-progress-phase spend (P2-A current_phase_tokens), shown on the
+            // strip ALONGSIDE the completed-phase totals. The live phase is not yet a
+            // metrics.jsonl row, so this is additive (no double-count) and clears once the
+            // phase lands as a completed row. Only meaningful during an active run.
+            const liveTok = currentPhaseTokens || null;
+            const liveRunActive = (pipelineStatus === 'RUNNING' || pipelineStatus === 'WAITING_FOR_SENTINEL');
+            const liveCost = liveTok ? (Number(liveTok.cost_total) || 0) : 0;
+            const liveTokens = liveTok ? (Number(liveTok.total_tokens) || 0) : 0;
+            const hasLiveSpend = liveRunActive && (liveCost > 0 || liveTokens > 0);
+
             return (
                 <div className="space-y-4 overflow-y-auto max-h-full">
                     {/* Progress bar */}
@@ -3076,7 +3143,7 @@
                         time). Phases-complete is deliberately NOT repeated here — the
                         progress bar above already covers it. Detail stays hidden until
                         a pill is clicked. */}
-                    {metricsSummary && metricsSummary.total_phases > 0 && (() => {
+                    {metricsSummary && (metricsSummary.total_phases > 0 || hasLiveSpend) && (() => {
                         const runClassRows = tokenClassRows(metricsSummary.tokens_breakdown);
                         const hasClassData = runClassRows.some(r => r.value > 0);
                         return (
@@ -3088,6 +3155,15 @@
                                         <div className="header-text text-[10px] uppercase tracking-wide text-slate-500">Total time</div>
                                         <div className="font-mono text-sm font-semibold text-slate-200">{formatDuration(metricsSummary.total_duration_seconds)}</div>
                                     </div>
+                                    {hasLiveSpend && (
+                                        <div data-testid="live-phase-spend" className="text-[10px] text-slate-500"
+                                            title="In-progress phase — updates after each attempt completes, not mid-stream">
+                                            <span className="uppercase tracking-wide">+ this phase</span>{' '}
+                                            {liveCost > 0 && <span className="font-mono text-slate-300">{fmtUSD(liveCost)}</span>}
+                                            {liveCost > 0 && liveTokens > 0 && <span className="text-slate-600"> · </span>}
+                                            {liveTokens > 0 && <span className="font-mono text-slate-300">{fmtTokensCompact(liveTokens)}</span>}
+                                        </div>
+                                    )}
                                     <div className="ml-auto flex items-center gap-2">
                                         {metricsSummary.total_cost > 0 && (
                                             <button type="button" data-testid="run-total-cost-toggle"
@@ -3171,6 +3247,28 @@
                                                 ) : (
                                                     <span className="text-slate-500 text-xs">▶</span>
                                                 )}
+                                                {phaseMeta && (() => {
+                                                    // C5 — glanceable per-phase pain signals from the metrics
+                                                    // row (passed through by P2-A): ⚠ demoted gate warnings,
+                                                    // ↻ multiple executor attempts, ⛔ the phase escalated.
+                                                    const warnN = (phaseMeta.gate_warnings && Number(phaseMeta.gate_warnings.count)) || 0;
+                                                    const attempts = Number(phaseMeta.executor_attempts) || 0;
+                                                    const escalated = (Number(phaseMeta.escalations) || 0) > 0;
+                                                    if (!warnN && attempts <= 1 && !escalated) return null;
+                                                    return (
+                                                        <span data-testid="phase-chips" className="flex items-center gap-1 text-[10px] font-sans font-normal">
+                                                            {warnN > 0 && (
+                                                                <span title={`${warnN} demoted gate warning${warnN > 1 ? 's' : ''}`} className="px-1 rounded bg-amber-900/40 text-amber-300/90 border border-amber-700/30">⚠{warnN}</span>
+                                                            )}
+                                                            {attempts > 1 && (
+                                                                <span title={`${attempts} executor attempts`} className="px-1 rounded bg-[#221b36] text-slate-400 border border-[#2a2540]">↻{attempts}</span>
+                                                            )}
+                                                            {escalated && (
+                                                                <span title="Phase escalated for human input" className="px-1 rounded bg-rose-900/40 text-rose-300/90 border border-rose-700/30">⛔</span>
+                                                            )}
+                                                        </span>
+                                                    );
+                                                })()}
                                             </div>
                                             {phase.goal && (
                                                 <p className={`text-sm text-slate-400 mt-1 ${isExpanded ? '' : 'truncate'}`}>
@@ -3253,6 +3351,18 @@
                                                                         <span key={model} title={`${model} — ${roles.join(', ')}`} className="header-text text-[10px] px-1.5 py-0.5 rounded bg-[#221b36] border border-[#2a2540] text-slate-300">model: {String(model).split('/').pop()}</span>
                                                                     ))}
                                                                 </div>
+                                                                {/* C5 — the codes behind the collapsed ⚠ chip + any
+                                                                    reachability advisory, explainable on drill-in. */}
+                                                                {(((phaseMeta.gate_warnings && Number(phaseMeta.gate_warnings.count) > 0)) || (phaseMeta.reachability_summary && phaseMeta.reachability_summary.kind)) && (
+                                                                    <div data-testid="phase-advisory-detail" className="mb-2 text-[11px] text-slate-500 space-y-0.5">
+                                                                        {phaseMeta.gate_warnings && Number(phaseMeta.gate_warnings.count) > 0 && (
+                                                                            <div>⚠ Gate warnings: <span className="text-amber-400/80">{(phaseMeta.gate_warnings.codes || []).join(', ') || phaseMeta.gate_warnings.count}</span></div>
+                                                                        )}
+                                                                        {phaseMeta.reachability_summary && phaseMeta.reachability_summary.kind && (
+                                                                            <div>Reachability: <span className="text-slate-400">{phaseMeta.reachability_summary.kind}{phaseMeta.reachability_summary.count != null ? ` (${phaseMeta.reachability_summary.count})` : ''}</span></div>
+                                                                        )}
+                                                                    </div>
+                                                                )}
                                                                 <div data-testid="run-metrics-boxes" className="grid grid-cols-2 md:grid-cols-4 gap-2">
                                                                     <div className="bg-[#221b36] rounded p-2">
                                                                         <div className="header-text text-[10px] uppercase tracking-wide text-slate-500 mb-0.5">Duration</div>
@@ -11161,6 +11271,9 @@
                                 onGenerateDocs={handleGenerateDocs}
                                 generateDocsBusy={generateDocsBusy}
                                 generateDocsError={generateDocsError}
+                                agent_activity_age_seconds={pState.agent_activity_age_seconds}
+                                last_attempt_summary={pState.last_attempt_summary}
+                                last_poll_reason={pState.last_poll_reason}
                             />
                             {showRestartOrchestratorButton && (
                                 <div
@@ -11234,6 +11347,7 @@
                                 pipelineStatus={status}
                                 completionReport={completionReport}
                                 runStartedAt={pState.run_started_at || null}
+                                currentPhaseTokens={pState.current_phase_tokens}
                             />
                         </div>
                     </main>
