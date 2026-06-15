@@ -3384,33 +3384,56 @@ def post_command(request: dict):
 # endpoint then asks for clarification rather than defaulting to a command (a
 # stray default STOP would halt the pipeline). SKIP / NUCLEAR_RESET ride the same
 # all-or-nothing rule, so they fire only on an explicit, unambiguous request.
+# "go ahead" (not a bare "go", which is far too common in prose) signals PROCEED.
 _INBOUND_VERB_PATTERNS = (
     ("NUCLEAR_RESET", (r"nuclear\s*reset", r"\bnuke\b")),
     ("RESET_PHASE", (r"reset\s*phase", r"restart\s*phase", r"reset_phase")),
     ("RESET_EXECUTION", (r"reset\s*execut", r"reset_execution")),
     ("RESET_REVIEWER", (r"reset\s*review", r"reset_reviewer")),
     ("RETRY", (r"\bretry\b", r"\bresume\b")),
-    ("PROCEED", (r"\bproceed\b", r"\bcontinue\b", r"\bgo\b")),
+    ("PROCEED", (r"\bproceed\b", r"\bcontinue\b", r"\bgo\s+ahead\b")),
     ("STOP", (r"\bstop\b", r"\bhalt\b", r"\babort\b")),
     ("SKIP", (r"\bskip\b",)),
 )
+
+# A negation that appears BEFORE the matched verb flips its intent ("don't stop",
+# "do not proceed") — such a reply is treated as unrecognized (the caller asks for
+# clarification) rather than firing the verb. Position-aware on purpose: a negation
+# AFTER the verb ("retry — the executor did not crash") leaves the leading command
+# intact. The "n't" form requires the apostrophe so it cannot false-match the "nt"
+# inside ordinary words ("want to stop" must still map to STOP); the bare "dont"
+# typo is listed explicitly.
+_INBOUND_NEGATION_RE = re.compile(r"\bnot\b|\bnever\b|\bcannot\b|\bdont\b|n't\b")
 
 
 def _inbound_text_to_command(text):
     """Map an operator's free-text reply to a single command verb, or None.
 
-    Strips a leading ``prefix.<6hex>`` correlation token (so it can't false-match
-    a verb), then matches the verb patterns. Returns the verb only when EXACTLY one
-    distinct verb matches; zero or multiple matches return None (caller clarifies).
+    Strips a leading ``prefix.<6hex>`` correlation token (so it can't false-match a
+    verb), then matches the verb patterns. Returns the verb only when EXACTLY one
+    distinct verb matches AND no negation precedes it — so a negated reply
+    ("don't stop") or an ambiguous one ("stop or proceed") asks for clarification
+    instead of firing a command. Zero/multiple matches also return None.
     """
     if not isinstance(text, str):
         return None
     t = re.sub(r"^\s*\S+\.[0-9a-f]{6}\b", "", text).strip().lower()
     if not t:
         return None
-    matched = [verb for verb, patterns in _INBOUND_VERB_PATTERNS
-               if any(re.search(p, t) for p in patterns)]
-    return matched[0] if len(matched) == 1 else None
+    # Earliest match position per verb, so a trailing negation can be told apart
+    # from one that precedes (and so negates) the command.
+    matched = []  # (verb, start_index_of_earliest_match)
+    for verb, patterns in _INBOUND_VERB_PATTERNS:
+        starts = [m.start() for m in (re.search(p, t) for p in patterns) if m]
+        if starts:
+            matched.append((verb, min(starts)))
+    if len(matched) != 1:
+        return None
+    verb, verb_pos = matched[0]
+    neg = _INBOUND_NEGATION_RE.search(t)
+    if neg and neg.start() < verb_pos:
+        return None
+    return verb
 
 
 def _project_escalation_reply_token(project_real):

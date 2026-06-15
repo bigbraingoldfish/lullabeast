@@ -358,7 +358,7 @@ When a phase escalates, the escalation agent notifies you on your configured cha
 
 **How it works.** The notification includes a short **correlation token** (e.g. `e2.ab12cd`). You reply starting with that token followed by a command — e.g. `e2.ab12cd reset phase`. The `autodev-pipeline-signals` plugin forwards the reply to the UI server's `POST /api/escalation/inbound`, which maps it to a pipeline command and writes it through the **same files the dashboard uses**. The escalation agent never applies the command itself — the UI server does, exactly as for a dashboard answer. The answer is always applied to the project that **escalated** (matched by the token), never to whatever project happens to be active when your reply lands.
 
-**Recognized replies** (case-insensitive; start with the token): `retry`, `proceed` (or `continue`), `stop`, `reset phase`, `reset execution`, `reset reviewer`; `skip` and `nuclear reset` only on an explicit, unambiguous request. An unrecognized or ambiguous reply gets a clarification request — it never defaults to a command. Reset caps still apply.
+**Recognized replies** (case-insensitive; start with the token): `retry`, `proceed` (or `continue`), `stop`, `reset phase`, `reset execution`, `reset reviewer`; `skip` and `nuclear reset` only on an explicit, unambiguous request. An unrecognized, **negated** ("don't stop"), or ambiguous reply gets a clarification request — it never defaults to a command. Reset caps still apply.
 
 **Enable it (opt-in).** The forwarder is dormant until you set these in the OpenClaw **gateway's** environment (e.g. its systemd unit `Environment=` / `gateway.systemd.env`), then rebuild the plugin and restart the gateway:
 
