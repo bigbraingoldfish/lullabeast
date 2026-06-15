@@ -465,3 +465,64 @@ class TestEvaluateReviewerBehavioralPath:
             f"A malformed behavioral_verification on a non-behavioural phase must "
             f"be ignored, not crash into ROUTE_ESCALATE; got {result!r}"
         )
+
+
+class TestMockedExternalApiEvidenceAccepted:
+    """PREREQ-4 — characterization + regression guard.
+
+    ``_check_behavioral_verification`` is *shape*-driven: it validates
+    verdict / anchor-count / required-keys / workspace-bounded path, and NEVER
+    inspects the evidence text for "live" vs "mock". So behavioral evidence
+    describing a MOCKED paid-API interaction already satisfies the gate.
+
+    PREREQ-4's skill guidance (mock paid APIs by default; the reviewer accepts
+    mocked evidence) rests on this property. This test is green-on-arrival by
+    design — the phase makes no gate change, so there is no red-first state to
+    assert. Its job is to LOCK the property: a future change that re-introduced a
+    "live call required" assumption in the reviewer gate would turn this test
+    red, which is exactly the regression PREREQ-4 must prevent.
+    """
+
+    def _mocked_paid_api_block(self, workspace, n_anchors=3):
+        """A valid behavioral_verification(pass) whose evidence explicitly
+        describes a mocked paid-API boundary — no live call asserted."""
+        paths = _make_evidence_files(workspace, n=n_anchors)
+        claims = [
+            "POST /v1/charges to Stripe mocked via the responses library -> 200; "
+            "no live API call made",
+            "Provider 401 path exercised against a recorded fixture, not a live key",
+            "Idempotency-key retry verified against a local fake endpoint",
+        ]
+        return {
+            "verdict": "pass",
+            "evidence": [
+                {
+                    "claim": claims[i],
+                    "file_or_screenshot_or_log": paths[i],
+                    "method": "mock_intercept",
+                }
+                for i in range(n_anchors)
+            ],
+            "how_to_check_followed": True,
+        }
+
+    def test_mocked_paid_api_evidence_passes_gate(self, tmp_workspace):
+        """An external/paid-API phase whose behavioral evidence is entirely
+        MOCKED (no live call) must PASS the reviewer gate."""
+        _write_current_phase_with_behavioral(tmp_workspace, raw_id="API-E1")
+        _write_phase_state(tmp_workspace)
+        _write_done_artifacts(tmp_workspace, "API-E1")
+
+        block = self._mocked_paid_api_block(tmp_workspace)
+        output_path = os.path.join(tmp_workspace, "reviewer_output.json")
+        with open(output_path, "w") as f:
+            json.dump(_reviewer_output(behavioral_verification=block), f)
+
+        with _patch_workspace(tmp_workspace):
+            result = reviewer_gate_module.evaluate_reviewer(output_path)
+        assert result == "PASS", (
+            f"Mocked paid-API behavioral evidence must satisfy the gate (no live "
+            f"call required); got {result!r}. If this is red, a live-call "
+            f"assumption was re-introduced into reviewer_gate — the PREREQ-4 "
+            f"regression this test guards."
+        )

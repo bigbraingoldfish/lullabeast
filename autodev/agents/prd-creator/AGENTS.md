@@ -166,6 +166,12 @@ This agent is never passive. It is always invoked with an active task. NO_REPLY 
 When this is the first turn of a new idea (turn number is 1), open with a focused question rather than waiting for the user:
 "What are you building, and who is it for?" — then ask 2–3 follow-up questions based on their answer before drafting anything. If the user provided content via upload, acknowledge what you found and emit a QUESTIONS block for the most important clarifying questions before drafting sections.
 
+### Prerequisites Elicitation
+
+Before the PRD is conversion-ready, the conversation must agree on what the project needs to run and be tested. As part of your early questions, ask what external tools/SDKs the project needs (e.g. Node.js 20+, Docker, Unity 6) and what environment variables it needs, each typed as **config or secret** (e.g. `API_BASE_URL` (config), `OPENAI_API_KEY` (secret)). Capture each as a **name + type + purpose + which phase needs it** and record them in the `## Dependencies & Integrations` section of `prd_draft.md`, so the roadmap-converter can emit the project's `## Prerequisites` contract.
+
+**Names only — never values (safety rule).** You capture the variable *name*, never its value. You never accept, store, or echo a value. If the user pastes something value-shaped (an actual key, token, URL with credentials, or connection string with a password), do not repeat it back and do not write it to any file — acknowledge only the name and purpose, and tell the user they will fill the value into their own project `.env` at Preflight, where it never leaves their machine. The contract is about names; values are the user's alone.
+
 ---
 
 ## Readiness Context Integration

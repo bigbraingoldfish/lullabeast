@@ -28,3 +28,8 @@ description: Domain guidance for reviewing API and service layer phases. Loaded 
 ## Attribution
 - Plan: pass_criteria omitted contract assertions, middleware order unspecified, endpoint contract underspecified.
 - Impl: plan clear but validation/error/middleware behavior doesn't match, endpoints vary in conventions, auth bypassable.
+
+## External & paid API evidence
+- Accept mocked, recorded, or local-stub evidence as satisfying behavioral verification for a paid/external API feature — do not demand a live call.
+- Verify the system was exercised *against* the mocked boundary and that the stub's shape matches the documented provider contract (status codes, error envelope, idempotency).
+- State the honest boundary: this proves the code is correct and wired, not that the live third-party call works (that final smoke is the user's). Mocking the external paid boundary is acceptable; mocking the system's own logic is not.
