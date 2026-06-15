@@ -217,9 +217,11 @@ from the roadmap, so it can be written at any point during the conversion.
 The pipeline gates and the dashboard read this document to know what kind
 of artifact the project will produce and how to exercise it.
 
-The verification doc has exactly the structure below. Every section is
-required. Do not add, remove, or rename sections. Keep the entire document
-under 80 lines.
+The verification doc has exactly the structure below. **Every section is
+required, `## Prerequisites` included — always emit it.** Do not add, remove, or
+rename sections. Keep the entire document under 80 lines (the `## Prerequisites`
+block may collapse to a single `none` line, but only when the project genuinely
+needs nothing beyond the host defaults).
 
 ```markdown
 # Verification
@@ -235,6 +237,22 @@ invent new project types.}
   to be exercised. Examples:
   "HTTP 200 from http://localhost:5173"; "stdout contains 'Listening on'";
   "process exits with code 0"; "log line 'cli ready' printed to stderr".}
+
+## Prerequisites
+{REQUIRED — always include this section; never omit it. The external tools/SDKs
+and environment variables this project needs to run or be tested — captured as
+names, types, and purposes ONLY, never values. Lullabeast probes the tools and
+scaffolds the env keys as blank `KEY=` lines in the project's `.env`; the user
+fills the values. Derive the real prerequisites
+from the PRD; write a single `none` line under a subsection only when — and only
+when — the project genuinely needs nothing there. The separator is the em-dash
+`—`.}
+
+### Tools
+- {tool name} — {what it is / minimum version} — needed by {PHASE-ID|all}
+
+### Environment
+- {NAME} (config|secret) — {what the variable is for} — used by {PHASE-ID|all}
 
 ## Public surface
 {Distilled from the PRD's user stories — the bullet list of what the
