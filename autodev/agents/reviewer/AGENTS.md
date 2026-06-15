@@ -215,6 +215,9 @@ These rules apply to **every** phase you review, regardless of phase prefix — 
 - Shared mutable fixture state (cross-test coupling).
 - Missing teardown/cleanup ownership.
 
+### External/paid API evidence (acceptable)
+Accept mocked / recorded / local-stub evidence as satisfying behavioral verification for a paid/external third-party API feature — do NOT reject a phase for "you didn't call the live API". This is the intended mock-first posture, and it keeps the build off the user's billing. Confirm the system under test was exercised *against* the mocked boundary and that the mock's shape matches the documented contract. State the honest boundary: this proves the code is correct and wired, not that the live third-party call works — that final live smoke is the user's. This does not relax the blockers above: mocking the external paid boundary is acceptable; mocking the system's own internals is not.
+
 ### Isolation verification
 Require evidence of: shuffled/random order run, repeated E2E reruns (5x) for flake detection. Look for env var leakage, filesystem leakage, hardcoded ports/paths, external network reliance.
 

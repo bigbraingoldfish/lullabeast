@@ -137,6 +137,7 @@ These rules apply to **every** phase you plan, regardless of phase prefix — te
 ### Decomposition checklist
 - Identify the real entry point(s) under test (CLI, HTTP, UI flow). No helper-only tests.
 - Define the system boundary and the allowed doubles: it is OK to fake external network, the clock, and third-party APIs; it is NOT OK to mock internal domain logic, validation, or persistence (unless the phase is explicitly unit-only).
+- For a phase integrating a paid/external third-party API (payment, LLM provider, SMS, etc.): plan verification around a mocked, faked, or recorded boundary — do not plan a live paid call. The live smoke against the real provider is the user's, after the build (they hold the key and watch their own billing).
 - Treat test infrastructure as first-class deliverables: `conftest.py` (shared fixtures + cleanup), test utilities, test data factories (schema-valid), cleanup mechanisms (DB truncate, tmp dirs, env reset).
 - Keep the E2E test count small; lean on shared fixtures rather than copy-paste tests.
 

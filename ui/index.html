@@ -7392,6 +7392,13 @@
                             )}
                             {/* M2 UI-5: input composer */}
                             <div className="flex flex-col gap-2">
+                                {/* PREREQ-5: names-only env safety notice (persistent during the exchange) */}
+                                <div
+                                    data-testid="ideas-prereq-safety-banner"
+                                    className="rounded border border-amber-700/50 bg-amber-950/30 px-3 py-2 text-xs text-amber-200 leading-relaxed"
+                                >
+                                    Share the variable <strong>name</strong> (e.g. <code className="text-amber-100">OPENAI_API_KEY</code>) — not the value. You'll add values to your project's <code className="text-amber-100">.env</code> yourself; Lullabeast never sees them.
+                                </div>
                                 <textarea
                                     ref={taRef}
                                     rows={1}

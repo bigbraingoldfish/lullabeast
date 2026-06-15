@@ -31,3 +31,8 @@ At least 5 negative cases per endpoint: invalid type, missing required field, ex
 
 ## TDD test structure
 Minimum: one contract test file per endpoint group, one middleware-order test, one error-envelope conformance test.
+
+## External & paid API boundaries
+- When a phase integrates a paid/external third-party API (payment, LLM provider, SMS, etc.), pin the boundary contract with the same rigor as an internal endpoint: request shape, response shape(s), error/status mapping, idempotency/retry semantics.
+- Plan verification against a mock, fake, or recorded boundary. The live paid call is out of scope for the pipeline — it is the user's final smoke, post-build.
+- Make the boundary swappable: plan a seam (client interface, injected client, or base-URL override) so the executor defaults to a stub and the user can later point it at the live provider.

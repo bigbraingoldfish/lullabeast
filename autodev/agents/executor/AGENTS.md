@@ -228,6 +228,7 @@ Tests must fail if the system is broken. No "it runs" checks.
 - Mock at boundaries only (network, clock, filesystem, third-party).
 - Strict mocks that enforce interface contracts (no permissive "anything goes").
 - Reset/clear mocks between tests (especially global monkeypatches).
+- Paid/external third-party APIs: route calls through a seam (a client interface or injected dependency) that defaults to a mock, fake, or local stub. Never make a live paid call during the pipeline run — exercise the integration against the stub and capture the request/response as the behavioral evidence. The live smoke against the real provider is the user's, after the build.
 
 ### Isolation
 - Filesystem: per-test temp dirs. Never hardcode /tmp paths.

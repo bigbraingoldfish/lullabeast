@@ -31,3 +31,8 @@ description: Domain guidance for implementing API and service layer phases. Load
 - Assert: status code, headers, body shape, error envelope.
 - Include: wrong types, missing fields, extra fields, boundary sizes, auth failure.
 - Add routing tests for 404/405 and route param extraction.
+
+## External & paid API integration
+- Implement paid/external API calls behind a seam (a client interface or injected dependency) that defaults to a mock, fake, or local stub.
+- Never make a live paid call during the pipeline run. Exercise the integration against the stub and capture the request/response as behavioral evidence (a saved log or fixture file).
+- Keep the stub schema faithful to the provider's documented contract (status codes, error envelope, idempotency) so the wiring you prove is the wiring the user runs against the live provider later.

@@ -246,7 +246,9 @@ scaffolds the env keys as blank `KEY=` lines in the project's `.env`; the user
 fills the values. Derive the real prerequisites
 from the PRD; write a single `none` line under a subsection only when — and only
 when — the project genuinely needs nothing there. The separator is the em-dash
-`—`.}
+`—`. If the PRD ever contains a value for a key (an actual secret, token, or
+credential), do not copy the value — emit only the name; a value never belongs
+in `verification.md`.}
 
 ### Tools
 - {tool name} — {what it is / minimum version} — needed by {PHASE-ID|all}
