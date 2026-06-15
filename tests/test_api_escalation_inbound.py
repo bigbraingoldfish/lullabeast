@@ -142,8 +142,11 @@ def test_write_pending_escalation_files_accepts_source_inbound(tmp_path):
     ("reset reviewer", "RESET_REVIEWER"),
     ("proceed", "PROCEED"),
     ("continue", "PROCEED"),
+    ("go ahead", "PROCEED"),
     ("stop", "STOP"),
     ("halt", "STOP"),
+    ("i want to stop", "STOP"),          # "want" must not read as a negation ("n't")
+    ("retry — the executor did not crash", "RETRY"),  # negation AFTER the verb is harmless
     ("skip", "SKIP"),
     ("nuclear reset", "NUCLEAR_RESET"),
 ])
@@ -159,6 +162,20 @@ def test_text_to_command_maps_known_verbs(text, verb):
     "i think we should think about it",
 ])
 def test_text_to_command_unrecognized_or_ambiguous_is_none(text):
+    assert srv._inbound_text_to_command(text) is None
+
+
+@pytest.mark.parametrize("text", [
+    "don't stop the pipeline",   # negation immediately before the verb
+    "do not proceed",
+    "please don't reset phase",
+    "cannot continue right now",
+    "let's not retry",
+    "go look at the logs first",  # bare "go" is no longer a PROCEED trigger
+])
+def test_text_to_command_negation_or_loose_prose_is_none(text):
+    # A verb negated by a preceding "not"/"don't"/… must NOT fire — the endpoint
+    # asks for clarification instead of issuing a (potentially destructive) command.
     assert srv._inbound_text_to_command(text) is None
 
 
