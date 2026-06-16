@@ -127,3 +127,12 @@ There is no automatic way to increment the cap. It can be manually decremented b
 - **Outcome badges** — per-phase results render as pills everywhere (spend table + completion report): **CLEAN** (passed first attempt), **RETRIED** (multiple executor attempts), **ESCALATED** (needed a human); hover for detail.
 - **View report (COMPLETED rows)** — opens the project's full completion report (summary cards, per-phase table, `completion_report.md`) from the queue at any time, even after the queue has moved on to other projects.
 - **`token_capture_warning`** (activity feed) — an attempt's token usage could not be read (its session file was missing), so that phase's token totals under-count. The phase's metrics row carries `token_capture_degraded: true` as the durable marker.
+
+## Prerequisites & environment readiness
+
+Full history + de-scope note: `plans/Active/PREREQUISITE_READINESS_ROADMAP.md`; operator walkthrough in SETUP.
+
+- **Prerequisite** — a tool/SDK or environment-variable **name** a project declares it needs to build or be tested, in `verification.md`'s `## Prerequisites` block (`### Tools` / `### Environment`). Names, types, and purposes only — **never values**.
+- **`### Tools`** — a documentation-only list of host tools the project needs. **Not checked or gated** — host-tool detection was removed (2026-06-16) because a reliable verdict from an arbitrary declared name isn't achievable and a false-positive block with no recourse is worse than nothing. Make sure your host has them before you run; a genuinely-missing tool surfaces when a phase fails.
+- **`.env.example`** — the committed file Preflight materializes from the declared `### Environment` names (`# purpose` + blank `KEY=` lines, append-only, value-free). You copy it to your own `.env` and fill the values, which never leave your machine. Preflight also gitignores that real `.env` (so the per-phase `git add .` can't commit your secrets) while keeping `.env.example` trackable. Env vars are **not** a Preflight gate.
+- **Mock-first verification** — the pipeline mocks paid/external APIs by default and accepts mocked / recorded / local-stub evidence as satisfying behavioral verification (DEC-6). A paid-API feature is built and verified without spending your provider budget; there is no live-paid call in the automated loop. Final live validation is the user's, with their own key.

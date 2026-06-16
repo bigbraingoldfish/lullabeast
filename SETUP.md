@@ -352,6 +352,56 @@ To run as a background service, see `ui/autodev-ui.service` (Linux/WSL2 systemd 
 
 ---
 
+## Prerequisites (`.env.example` only)
+
+A project's prerequisites live in its `verification.md` under a `## Prerequisites` block (the
+roadmap-converter authors it from your Project Ideas conversation; you can also hand-edit it). **Names
+only, never values:**
+
+```markdown
+## Prerequisites
+
+### Tools
+- node — Node.js 20+ runtime — needed by all
+- unity6 — Unity 6 LTS + Android Build Support — needed by INFRA-1
+
+### Environment
+- API_BASE_URL (config) — base URL the app calls — used by all
+- OPENAI_API_KEY (secret) — provider key for the app's LLM calls — used by CORE-3
+```
+
+**`### Tools` is documentation only — Lullabeast does not check it.** We tried probing declared tools
+on PATH and it produced false-positive blocks (you can't reliably `which` `Python 3.10+` or `Unity 6
+LTS`, and the converter writes human names, not binary tokens). Rather than block you on a bad signal,
+we removed the check. Use `### Tools` as a note-to-self of what your host needs; make sure those tools
+are installed before you run. If the host genuinely lacks a tool, the pipeline will surface it when a
+phase fails (later, but honestly) — there is no up-front gate.
+
+**`### Environment` → a committed `.env.example`.** From the declared env-var names, Preflight writes a
+committed **`.env.example`** in the project (each key as a blank `KEY=` line preceded by a `# purpose`
+comment — append-only, never overwriting a line you filled). Copy it to your own `.env` and fill in the
+values. Lullabeast writes only the blank example; it **never** ingests, transmits, stores, or logs an env
+**value** — only names/types/purposes are captured (in `verification.md`). Env vars are **not** a
+Preflight gate — they're yours to set.
+
+**Your real `.env` is kept out of git.** Because the pipeline commits the whole project tree each phase
+(`git add .`), Preflight also ensures the project `.gitignore` ignores `.env` (and keeps `.env.example`
+trackable) — so the secrets you put in `.env` are never committed or pushed. This is automatic; you
+don't have to do anything.
+
+**How the build reads your `.env` (DEC-5).** The agent webhook has no env channel — agents inherit the
+OpenClaw gateway's environment. So the project's **entry-point/test command must load its own `.env`**
+(most frameworks do this via a dotenv loader; otherwise prepend `set -a; . ./.env; set +a` to the
+command). This is a contract, not something Lullabeast enforces.
+
+**Paid/external calls are mocked during the build (DEC-6).** The pipeline mocks paid/external APIs by
+default and accepts mocked / recorded / local-stub evidence as satisfying behavioral verification — so a
+paid-API feature is built and verified **without spending your provider budget**. There is no live-paid
+call inside the automated loop. Final live validation against a paid provider is **yours** to run
+afterward, with your own key, watching your own billing.
+
+---
+
 ## Inbound escalation replies (answer an escalation from your phone)
 
 When a phase escalates, the escalation agent notifies you on your configured channel (Signal, Discord, …). By default you answer from the **dashboard**. You can also enable a parallel **inbound** path so a reply typed on that channel becomes the recovery command — useful when you are away from the dashboard.

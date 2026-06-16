@@ -37,8 +37,6 @@ from queue_semantics import (
     bump_queue_version, mutate_queue, read_queue_version, scrub_parked_fields,
 )
 from env_resolvers import resolve_openclaw_root, resolve_pipeline_root
-from prereq_spec import parse_prerequisites  # PREREQ-3: declared-tool re-probe on auto-advance
-from host_probes import probe  # PREREQ-3: bounded, never-raising host-capability probe
 
 # Route module-level logging.* calls (including those from webhook_client —
 # notably abort_agent_session's success/failure lines) to stdout so they land
@@ -1683,8 +1681,7 @@ class Orchestrator:
         )
 
     def _queue_preflight(self, project_path):
-        """Lightweight queue preflight: dir exists, is git repo, has roadmap*.md,
-        and (PREREQ-3) every declared *required* tool is present on the host.
+        """Lightweight queue preflight: dir exists, is a git repo, has a roadmap*.md.
 
         LIGHTWEIGHT PREFLIGHT ONLY — this check is intentionally narrower than the
         server-side `_run_preflight_checks` (which also validates symlink integrity,
@@ -1694,17 +1691,10 @@ class Orchestrator:
         and at trigger-next time; this method runs only when the orchestrator
         auto-advances between queue entries without a UI trigger.
 
-        The declared-tool re-probe (PREREQ-3) fails fast on a missing *required* tool
-        before the orchestrator burns executor attempts on an unsatisfiable phase (the
-        `baseball` INFRA-E1 incident). It reads only the declared tool *names* from
-        `verification.md` and probes them — never an env value. Every declared tool is
-        required, so a definitively `missing` probe blocks; an inconclusive `unknown`
-        probe (e.g. browser/timeout) does not, so a false negative never strands work.
-
-        If you add new checks here, keep them deterministic and bounded — no network,
-        no LLM. Bounded host-capability probes of declared tools are permitted
-        (`host_probes.probe` is timeout-bounded and never raises); other subprocess
-        work is not. Keep checks a subset of `_run_preflight_checks` to avoid divergence.
+        Host-tool probing was removed: a reliable present/absent verdict from an
+        arbitrary declared tool name is not achievable (e.g. `Python 3.10+` / `Unity 6`
+        are not PATH binaries), so it produced false-positive blocks. Keep checks here
+        deterministic and bounded — no network, no LLM, no subprocess.
         """
         if not os.path.isdir(project_path):
             return False, "directory does not exist"
@@ -1721,20 +1711,6 @@ class Orchestrator:
         )
         if not roadmap:
             return False, "no roadmap*.md found"
-        # PREREQ-3 — declared-tool re-probe. Read the project's prerequisite
-        # declaration (tool names only) and probe each on the host; a missing
-        # required tool fails fast. Absent/unreadable verification.md ⇒ no
-        # declaration to enforce, so behavior is identical to pre-feature.
-        try:
-            with open(os.path.join(project_path, "verification.md"), "r", errors="replace") as _vf:
-                ver_text = _vf.read()
-        except OSError:
-            ver_text = None
-        if ver_text:
-            for tool in parse_prerequisites(ver_text)["tools"]:
-                name = tool["name"]
-                if probe(name).get("status") == "missing":
-                    return False, f"missing required tool: {name}"
         return True, "ok"
 
     def _find_active_queue_entry(self, queue_data):

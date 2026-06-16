@@ -239,19 +239,22 @@ invent new project types.}
   "process exits with code 0"; "log line 'cli ready' printed to stderr".}
 
 ## Prerequisites
-{REQUIRED — always include this section; never omit it. The external tools/SDKs
-and environment variables this project needs to run or be tested — captured as
-names, types, and purposes ONLY, never values. Lullabeast probes the tools and
-scaffolds the env keys as blank `KEY=` lines in the project's `.env`; the user
-fills the values. Derive the real prerequisites
-from the PRD; write a single `none` line under a subsection only when — and only
-when — the project genuinely needs nothing there. The separator is the em-dash
-`—`. If the PRD ever contains a value for a key (an actual secret, token, or
-credential), do not copy the value — emit only the name; a value never belongs
-in `verification.md`.}
+{REQUIRED — always include this section; never omit it. Captured as names, types,
+and purposes ONLY, never values. Derive the real prerequisites from the PRD; write a
+single `none` line under a subsection only when — and only when — the project
+genuinely needs nothing there. The separator is the em-dash `—`. If the PRD ever
+contains a value for a key (an actual secret, token, or credential), do not copy the
+value — emit only the name; a value never belongs in `verification.md`.
+
+`### Tools` is a **documentation-only** list of host tools/SDKs the project needs to
+build or be tested (a compiler, language runtime, Unity, docker, a browser). Lullabeast
+does NOT check or gate on it — it is a note for the human. Do NOT list language packages
+here (pip/npm deps like `pyyaml`, `requests`) — those are installed by the build.
+`### Environment` declares the env-var NAMES the project needs; Lullabeast materializes
+them into a committed `.env.example` for the user to fill in.}
 
 ### Tools
-- {tool name} — {what it is / minimum version} — needed by {PHASE-ID|all}
+- {host tool name} — {what it is / minimum version} — needed by {PHASE-ID|all}
 
 ### Environment
 - {NAME} (config|secret) — {what the variable is for} — used by {PHASE-ID|all}
