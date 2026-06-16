@@ -346,3 +346,33 @@ def test_advance_resolver_unexpected_output_escalates(tmp_path, monkeypatch):
     assert orch.state["current_agent"] == "escalation"
     assert orch.state["pipeline_status"] == "RUNNING"
     assert orch.read_phase_state().get("last_error_code") == "ERR_PHASE_RESOLVER_FAILED"
+
+
+def test_advance_resolver_timeout_routes_to_escalation(tmp_path, monkeypatch):
+    """The resolver subprocess.run is bounded by GATE_SUBPROCESS_TIMEOUT; a hung
+    resolver raises ``TimeoutExpired``. The helper's ``except`` must include
+    ``TimeoutExpired`` so it is caught and routed to the SAME F4 escalation a
+    resolver crash gets (result stays None → 'raised before returning a verdict'),
+    returning 'continue'. Without TimeoutExpired in that except, a bounded-but-hung
+    resolver would escape the helper entirely — the regression this guards."""
+    from subprocess import TimeoutExpired
+
+    def _raise_timeout(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args")
+        if isinstance(cmd, list) and any("phase_resolver" in str(x) for x in cmd):
+            raise TimeoutExpired(cmd, kwargs.get("timeout", 60))
+        return _R(0, "")
+
+    orch = _make_advance_orch(tmp_path, monkeypatch, run=_raise_timeout)
+
+    sig = orch._advance_to_next_pending_phase(trigger="phase_complete")
+
+    assert sig == "continue"
+    assert orch.state["current_agent"] == "escalation"
+    assert orch.state["pipeline_status"] == "RUNNING"
+    ps = orch.read_phase_state()
+    assert ps.get("last_error_code") == "ERR_PHASE_RESOLVER_FAILED"
+    assert "raised before returning a verdict" in (ps.get("escalation_trigger_reason") or ""), (
+        "a timed-out resolver must escalate via the result-is-None F4 path, proving "
+        "TimeoutExpired is caught by the helper's except and not propagated"
+    )

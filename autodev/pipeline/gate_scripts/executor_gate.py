@@ -1,3 +1,10 @@
+"""Executor verdict gate — validates the executor's output, file manifest, and TDD coverage.
+
+Verdict gate (see ./README.md): prints ``PASS`` / ``FAIL`` on stdout and **always exits 0**;
+FAIL detail rides side channels (``executor_gate_detail.json`` / ``gate_warnings.json`` /
+``last_error_code``), never stdout. Includes the fail-closed unaccounted-deletion guard (the
+MiniMax file-deletion defence). Deterministic — no LLM, network, or clock.
+"""
 import json
 import os
 import re as _re

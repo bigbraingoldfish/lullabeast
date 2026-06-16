@@ -1,3 +1,10 @@
+"""Repo-init gate — verifies the workspace is ready before the pipeline runs.
+
+Init gate (see ./README.md): signals via **EXIT CODE** — ``0`` = all preconditions pass,
+``1`` = a failed precondition (missing pipeline-project symlink / roadmap / agent workspace
+docs / ``.gitignore``). Self-heals missing pipeline-metadata ``.gitignore`` entries.
+Deterministic — no LLM, network, or clock.
+"""
 import os
 import sys
 import glob

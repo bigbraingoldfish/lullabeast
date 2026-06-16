@@ -1,3 +1,10 @@
+"""Shared helpers for the gate scripts — NOT a gate itself.
+
+Imported by the verdict and resolver gates in this directory. Provides the workspace path
+constants, the atomic phase-state writers (``record_error_code_only`` / ``update_phase_state_error``),
+``load_json_safe``, and ``path_escapes_workspace`` — the ``os.path.realpath`` workspace-boundary
+check shared by the executor and reviewer gates. See ./README.md for the gate execution model.
+"""
 import os
 import sys
 import json

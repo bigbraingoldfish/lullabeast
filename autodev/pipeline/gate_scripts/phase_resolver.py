@@ -1,3 +1,10 @@
+"""Phase resolver — parses the roadmap and identifies the next pending phase.
+
+Resolver gate (see ./README.md): signals via **EXIT CODE**, not a stdout verdict —
+``0`` = PENDING / PIPELINE_COMPLETE, ``1`` = error (roadmap missing / non-absolute path /
+write failure), ``2`` = the next phase is blocked (``[!]``). Writes ``current_phase.json`` for
+the orchestrator. Deterministic — no LLM, network, or clock.
+"""
 import os
 import re
 import json

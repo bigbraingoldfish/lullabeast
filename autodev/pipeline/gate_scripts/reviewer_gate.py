@@ -1,3 +1,10 @@
+"""Reviewer verdict gate — adjudicates the reviewer's verdict and routes the next step.
+
+Verdict gate (see ./README.md): prints ``PASS`` or a route token (``ROUTE_EXECUTOR`` /
+``ROUTE_PLANNER`` / ``ROUTE_ESCALATE`` / ``*_UNVERIFIED`` / ``MISSING_ARTIFACTS`` /
+``CONTRACT_FAILURE``) on stdout and **always exits 0**. Enforces the workspace-boundary check
+on every evidence path. Deterministic — no LLM, network, or clock.
+"""
 import os
 import sys
 import json

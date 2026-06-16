@@ -1,3 +1,9 @@
+"""Planner verdict gate — validates the structure of the planner's output JSON.
+
+Verdict gate (see ./README.md): prints ``PASS`` / ``FAIL`` on stdout and **always exits 0**;
+a non-zero exit means the gate script itself crashed. Records ``last_error_code`` on a
+structural failure via the shared utils. Deterministic — no LLM, network, or clock.
+"""
 import os
 import sys
 
