@@ -68,6 +68,7 @@ from autodev.pipeline.sentinel_poller import PollResult  # noqa: E402
 from autodev.pipeline.event_log import append_pipeline_event  # noqa: E402
 from autodev.pipeline.prereq_spec import parse_prerequisites  # noqa: E402  (PREREQ-3)
 from autodev.pipeline.atomic_io import write_json_atomic, write_text_atomic  # noqa: E402
+from autodev.pipeline.log_utils import configure_stream_logging, resolve_log_level, set_level, tagged  # noqa: E402
 from env_resolvers import resolve_openclaw_root, resolve_pipeline_root  # noqa: E402
 from skill_manager import SkillManager  # noqa: E402  (W5-E: inline completion reviewer)
 from webhook_client import invoke_agent_webhook, set_session_response_usage  # noqa: E402
@@ -105,20 +106,25 @@ _sse_clients = set()  # Set of asyncio.Queue objects for each connected client
 _sse_clients_lock = asyncio.Lock()
 _file_positions = {}  # Track file positions per client for file-based tailing
 
-logger = logging.getLogger("autodev.readiness")
-logger.setLevel(logging.DEBUG)
-if not logger.handlers:
-    _fmt = logging.Formatter("%(levelname)s:%(name)s:%(message)s")
-    _stream = logging.StreamHandler()
-    _stream.setFormatter(_fmt)
-    logger.addHandler(_stream)
-    try:
-        _file = logging.FileHandler("/tmp/ui-server.log")
-        _file.setFormatter(_fmt)
-        logger.addHandler(_file)
-    except Exception:
-        pass
-logger.propagate = False
+# LAUNCH-8 — server logging is env/config-gated. The level is resolved from UI_LOG_LEVEL
+# (env, default INFO — not the former hardcoded DEBUG) at import, and re-applied by
+# load_config from ui/config.json's `log_level` (env still wins) via set_level(), so
+# config.json actually takes effect and config["log_level"] always equals the active level.
+# The readiness logger no longer ships DEBUG to a world-readable /tmp file by default, keeps
+# its own compact format and its pre-LAUNCH-8 stderr destination, and the /tmp file handler
+# is best-effort (configure_stream_logging swallows an OSError opening it).
+_UI_LOG_LEVEL = resolve_log_level(os.environ.get("UI_LOG_LEVEL"), logging.INFO)
+logger = configure_stream_logging(
+    "autodev.readiness",
+    _UI_LOG_LEVEL,
+    stream=_sys.stderr,  # preserve the pre-LAUNCH-8 destination (logging.StreamHandler() default)
+    fmt="%(levelname)s:%(name)s:%(message)s",
+    logfile="/tmp/ui-server.log",
+    propagate=False,
+)
+# General server-diagnostics logger backing log_utils.tagged() (replaces the scattered
+# ad-hoc print("[TAG] …") calls — see LAUNCH-8 Part C).
+_ui_logger = configure_stream_logging("autodev.ui", _UI_LOG_LEVEL, propagate=False)
 _active_readiness_jobs: set[str] = set()  # idea IDs currently sending readiness webhook
 _readiness_job_started_at: dict[str, float] = {}  # idea ID -> epoch seconds
 # Ideas UI polls readiness for 60×3s (180s); keep this window aligned (ui/index.html startReadinessPoll).
@@ -303,7 +309,7 @@ def _write_operator_event(config, action, target="", command=None, source="ui"):
                 phase = ps.get("current_phase_raw_id", "") or ""
                 _pp = (ps.get("project_path") or "").rstrip("/")
                 project = os.path.basename(_pp) if _pp else ""
-            except Exception:
+            except (OSError, json.JSONDecodeError):
                 pass
         detail = {"action": action, "target": target, "source": source}
         if command:
@@ -318,7 +324,7 @@ def _write_operator_event(config, action, target="", command=None, source="ui"):
             "detail": detail,
         })
     except Exception as e:
-        print(f"[WARN] _write_operator_event({action}): {e}")
+        tagged("operator-event", f"{action}: {e}", level=logging.WARNING, logger=_ui_logger)
 
 
 async def _poll_state(prev_state):
@@ -408,8 +414,8 @@ async def _polling_loop():
                 # Notify SSE clients about new event
                 try:
                     await _notify_sse_clients(event)
-                except Exception:
-                    pass
+                except Exception as e:
+                    tagged("sse", f"notify failed: {e}", level=logging.DEBUG, logger=_ui_logger)
             
             # Tail pipeline_events.jsonl for new events written by the orchestrator.
             # Delivers gate_pass, gate_fail, escalation_trigger, etc. to connected
@@ -422,17 +428,17 @@ async def _polling_loop():
                     for evt in _poll_pipeline_events_file(events_path):
                         _ring_buffer.append(evt)
                         await _notify_sse_clients(evt)
-            except Exception:
-                pass
+            except Exception as e:
+                tagged("poll", f"event fan-out failed: {e}", level=logging.DEBUG, logger=_ui_logger)
             
         except Exception as e:
             # Log error but continue polling
-            print(f"Polling error: {e}")
+            tagged("poll", f"error: {e}", level=logging.WARNING, logger=_ui_logger)
         
         try:
             await asyncio.sleep(2.5)
         except asyncio.CancelledError:
-            break
+            break  # clean-shutdown: polling task cancelled during teardown
 
 
 async def _notify_sse_clients(event):
@@ -499,7 +505,7 @@ async def _tail_events_file(events_path, client_id):
                             # Skip malformed lines
                             pass
         except asyncio.CancelledError:
-            break
+            break  # clean-shutdown: event-tail task cancelled during teardown
         except Exception:
             # Continue on error
             pass
@@ -526,32 +532,42 @@ async def lifespan(app: FastAPI):
         _ui_token = _resolve_ui_token(_auth_cfg)
         _ui_port = _auth_cfg.get("port", DEFAULTS["port"])
         if _ui_token:
-            print(
-                f"[AUTH] Dashboard access URL: http://127.0.0.1:{_ui_port}/?token={_ui_token}"
+            tagged(
+                "auth",
+                f"Dashboard access URL: http://127.0.0.1:{_ui_port}/?token={_ui_token}",
+                logger=_ui_logger,
             )
-            print(
-                "[AUTH] Scripts may send the same value as "
-                "'Authorization: Bearer <AUTODEV_UI_TOKEN>'."
+            tagged(
+                "auth",
+                "Scripts may send the same value as "
+                "'Authorization: Bearer <AUTODEV_UI_TOKEN>'.",
+                logger=_ui_logger,
             )
         else:
-            print(
-                "[AUTH] WARNING: no dashboard access token configured — the UI and "
-                "/api/* are UNAUTHENTICATED on loopback, and non-loopback requests "
-                "are refused. Set AUTODEV_UI_TOKEN in .env (install.sh generates "
-                "one) to enable token auth."
+            tagged(
+                "auth",
+                "no dashboard access token configured — the UI and /api/* are "
+                "UNAUTHENTICATED on loopback, and non-loopback requests are refused. "
+                "Set AUTODEV_UI_TOKEN in .env (install.sh generates one) to enable "
+                "token auth.",
+                level=logging.WARNING,
+                logger=_ui_logger,
             )
         # Env sanity: an unset HOME makes os.path.expanduser("~") return "~"
         # verbatim, so the recent-projects file and any ~/.openclaw fallback land in
         # a literal ./~ directory under the cwd. Warn loudly instead of degrading
         # silently — usually a service unit missing HOME / EnvironmentFile.
         if os.path.expanduser("~") in ("~", ""):
-            print(
-                "[ENV] WARNING: HOME is not set — '~' paths resolve to a literal "
-                "'./~' under the working directory. Set HOME (and "
-                "EnvironmentFile=.env) in your service unit; see SETUP.md."
+            tagged(
+                "env",
+                "HOME is not set — '~' paths resolve to a literal './~' under the "
+                "working directory. Set HOME (and EnvironmentFile=.env) in your "
+                "service unit; see SETUP.md.",
+                level=logging.WARNING,
+                logger=_ui_logger,
             )
     except Exception as _auth_exc:
-        print(f"[AUTH] startup banner skipped: {_auth_exc}")
+        tagged("auth", f"startup banner skipped: {_auth_exc}", level=logging.WARNING, logger=_ui_logger)
     # Start polling loop
     task = asyncio.create_task(_polling_loop())
     yield
@@ -560,7 +576,7 @@ async def lifespan(app: FastAPI):
     try:
         await task
     except asyncio.CancelledError:
-        pass
+        pass  # clean-shutdown: the polling task was cancelled on shutdown
 
 # Canonical default values
 DEFAULTS = {
@@ -597,6 +613,10 @@ DEFAULTS = {
     # UI server start (same mtime rules as install.sh). Set False to manage workspace
     # files only via ./install.sh (e.g. custom agent instructions).
     "auto_sync_agent_workspaces": True,
+    # LAUNCH-8 — server log level (canonical name). UI_LOG_LEVEL env overrides this;
+    # the active logger level is set at import from the env. Default INFO (the
+    # readiness logger was previously hardcoded to DEBUG).
+    "log_level": "INFO",
 }
 
 
@@ -738,6 +758,20 @@ def load_config(config_path=None):
             config["ideas_idle_threshold"] = float(_idle_env)
         except ValueError:
             pass
+
+    # LAUNCH-8 — log level: UI_LOG_LEVEL env wins over ui/config.json's `log_level`.
+    # Normalize to a canonical level name; an unknown value degrades to INFO. The
+    # *active* logger level is set at import from UI_LOG_LEVEL (the loggers exist
+    # before load_config runs); this surfaces the resolved value for visibility.
+    _loglevel_env = os.environ.get("UI_LOG_LEVEL", "").strip()
+    if _loglevel_env:
+        config["log_level"] = _loglevel_env
+    _resolved_level = resolve_log_level(config.get("log_level"), logging.INFO)
+    config["log_level"] = logging.getLevelName(_resolved_level)
+    # Apply it to the already-created server loggers (built at import, before config loads)
+    # so ui/config.json's `log_level` actually takes effect — and so the reported
+    # config["log_level"] always equals the level that is really active. Idempotent.
+    set_level(_resolved_level, "autodev.readiness", "autodev.ui")
 
     # Coerce numeric keys after the dual-source merge. A string in ui/config.json
     # (e.g. "300", or a typo like "5 min") would otherwise flow straight through
@@ -1603,7 +1637,7 @@ def _rollback_pipeline_state(pipeline_state_path: str | None) -> None:
     except FileNotFoundError:
         pass
     except OSError as exc:
-        print(f"[C3-05] could not roll back pipeline_state.json after spawn failure: {exc}", flush=True)
+        tagged("C3-05", f"could not roll back pipeline_state.json after spawn failure: {exc}", level=logging.ERROR, logger=_ui_logger)
 
 
 # ---------------------------------------------------------------------------
@@ -2566,7 +2600,7 @@ async def events_stream():
                                     except json.JSONDecodeError:
                                         pass
                     except Exception:
-                        pass
+                        pass  # best-effort: one bad event must not kill the SSE stream
                 
                 # Send heartbeat if needed
                 if current_time - last_heartbeat >= heartbeat_interval:
@@ -2598,7 +2632,7 @@ async def events_stream():
                         except asyncio.QueueEmpty:
                             break
                 except Exception:
-                    pass
+                    pass  # best-effort: a serialization error on one event must not kill the stream
                 
                 # Small sleep to avoid busy loop
                 await asyncio.sleep(0.5)
@@ -3524,7 +3558,7 @@ async def _post_inbound_ack(config, message):
                 timeout=aiohttp.ClientTimeout(total=15),
             )
     except Exception as e:
-        print(f"[WARN] inbound ack failed: {e}")
+        tagged("inbound-ack", f"failed: {e}", level=logging.WARNING, logger=_ui_logger)
 
 
 @app.post("/api/escalation/inbound")
@@ -3885,8 +3919,11 @@ def post_resume_orchestrator():
                 raise HTTPException(status_code=409, detail="Orchestrator is already running")
         except HTTPException:
             raise
-        except Exception:
-            pass
+        except OSError as _live_exc:
+            # Fail-open (proceed) is the existing behavior; surface it so a possible
+            # double-spawn from an unreadable lock is visible. (Control-flow change to
+            # fail-safe is a flagged LAUNCH-8 follow-up, not made here.)
+            tagged("liveness", f"could not verify orchestrator lock, proceeding: {_live_exc}", level=logging.WARNING, logger=_ui_logger)
 
     # Defect C — if the project being resumed has a PARKED escalation queue entry, resume it
     # through the orchestrator's --revive path (restore escalated phase + apply any banked
@@ -3916,8 +3953,8 @@ def post_resume_orchestrator():
     if _revive_id is None:
         try:
             _queue_mark_matching_entry_active(config, project_path)
-        except Exception:
-            pass
+        except Exception as e:
+            tagged("queue", f"mark-active failed after spawn for {project_path}: {e}", level=logging.WARNING, logger=_ui_logger)
 
     _write_operator_event(config, "resume_orchestrator", target=canonical_project_real)
     return {
@@ -4236,10 +4273,12 @@ def _derive_hold_seconds_per_phase(events_path: str, project_name: str) -> dict[
                     continue
                 if event_name == "escalation_trigger":
                     if phase in pending:
-                        print(
-                            f"[WARN] _derive_hold_seconds_per_phase: unpaired "
-                            f"escalation_trigger for {project_name}/{phase} "
-                            f"superseded by a new trigger"
+                        tagged(
+                            "hold-derive",
+                            f"unpaired escalation_trigger for {project_name}/{phase} "
+                            f"superseded by a new trigger",
+                            level=logging.WARNING,
+                            logger=_ui_logger,
                         )
                     pending[phase] = ts
                 else:  # escalation_resolve
@@ -4250,12 +4289,14 @@ def _derive_hold_seconds_per_phase(events_path: str, project_name: str) -> dict[
                     if delta > 0:
                         holds[phase] = holds.get(phase, 0) + delta
     except OSError as e:
-        print(f"[WARN] _derive_hold_seconds_per_phase: read failed: {e}")
+        tagged("hold-derive", f"read failed: {e}", level=logging.WARNING, logger=_ui_logger)
         return holds
     for phase in pending:
-        print(
-            f"[WARN] _derive_hold_seconds_per_phase: unpaired "
-            f"escalation_trigger for {project_name}/{phase} (no resolve event)"
+        tagged(
+            "hold-derive",
+            f"unpaired escalation_trigger for {project_name}/{phase} (no resolve event)",
+            level=logging.WARNING,
+            logger=_ui_logger,
         )
     return holds
 
@@ -4756,12 +4797,14 @@ def _preset_session_response_usage_sync(agent_id: str, session_key: str) -> None
         ws_url = f"ws://127.0.0.1:{gw_port}/__openclaw__/ws"
         store_key = f"agent:{agent_id}:{session_key}".lower()
         ok = set_session_response_usage(store_key, ws_url, gw_token, mode=mode)
-        print(
-            f"[USAGE] responseUsage={mode} {'set' if ok else 'FAILED'} "
-            f"session_key={store_key}"
+        tagged(
+            "usage",
+            f"responseUsage={mode} {'set' if ok else 'FAILED'} "
+            f"session_key={store_key}",
+            logger=_ui_logger,
         )
     except Exception as exc:
-        print(f"[USAGE] responseUsage patch failed for {agent_id} {session_key}: {exc}")
+        tagged("usage", f"responseUsage patch failed for {agent_id} {session_key}: {exc}", level=logging.WARNING, logger=_ui_logger)
 
 
 async def _post_agent_webhook(hooks_url: str, hooks_token: str, webhook_payload: dict) -> None:
@@ -6421,7 +6464,7 @@ def get_ideas():
                     v = rd.get("score")
                     if isinstance(v, (int, float)):
                         readiness_score = int(v)
-            except Exception:
+            except (OSError, ValueError, json.JSONDecodeError):
                 pass
 
         has_prd = bool((session_data.get("prd_content") or "").strip())
@@ -9511,7 +9554,7 @@ def get_queue_entry_snapshot(entry_id: str):
                             current_phase_desc = desc
                         break
         except Exception:
-            pass
+            pass  # best-effort: phase description is decorative; parse failure leaves it blank
 
     # Cost + tokens + active-work duration from the entry's own metrics.jsonl
     # (shared helper; None when the project has no metrics — the UI suppresses
@@ -9690,8 +9733,11 @@ def post_queue_entry_relaunch(entry_id: str):
                 raise HTTPException(status_code=409, detail="Orchestrator is already running")
         except HTTPException:
             raise
-        except Exception:
-            pass
+        except OSError as _live_exc:
+            # Fail-open (proceed) is the existing behavior; surface it so a possible
+            # double-spawn from an unreadable lock is visible. (Control-flow change to
+            # fail-safe is a flagged LAUNCH-8 follow-up, not made here.)
+            tagged("liveness", f"could not verify orchestrator lock, proceeding: {_live_exc}", level=logging.WARNING, logger=_ui_logger)
 
     result = _spawn_orchestrator(entry["project_path"], config, revive_entry_id=entry_id, confirm_lock=True)
     if not result.get("ok"):
@@ -9964,8 +10010,8 @@ def _check_installer_status(config: dict) -> dict:
             stale = [p for p in gate_paths if not p.startswith(repo_path)]
             if stale:
                 missing_items.append("exec_approvals_stale_paths")
-        except Exception:
-            pass
+        except OSError:
+            pass  # best-effort stale-path scan; an unreadable file → no report
 
     setup_marker = os.path.expanduser("~/.autodev_setup_complete")
     marker_exists = os.path.exists(setup_marker)
@@ -10160,8 +10206,8 @@ async def post_setup_switch_project(request: Request):
     if _revive_id is None:
         try:
             _queue_mark_matching_entry_active(config, repo_abs)
-        except Exception:
-            pass
+        except Exception as e:
+            tagged("queue", f"mark-active failed after spawn for {repo_abs}: {e}", level=logging.WARNING, logger=_ui_logger)
 
     _write_operator_event(config, "switch_project", target=repo_abs)
     return {
@@ -10449,8 +10495,8 @@ async def post_setup_launch(request: Request):
 
     try:
         _queue_mark_matching_entry_active(config, project_real)
-    except Exception:
-        pass
+    except Exception as e:
+        tagged("queue", f"mark-active failed after spawn for {project_real}: {e}", level=logging.WARNING, logger=_ui_logger)
 
     # W5-G: ensure queue entry exists with completion_review flag.
     # _queue_mark_matching_entry_active early-returns when the queue is empty
@@ -10501,8 +10547,8 @@ async def post_setup_launch(request: Request):
             # Best-effort (a CAS exhaustion is swallowed like any other error below).
             # CAS-pure: id-keyed mutation only, no spawn/symlink/IO — re-applied ≤QUEUE_MAX_CAS_RETRIES× on CAS retry (CLAUDE.md F9).
             _mutate_queue_file(config, _apply)
-        except Exception:
-            pass
+        except Exception as e:
+            tagged("queue", f"completion-review flag CAS failed (non-fatal): {e}", level=logging.DEBUG, logger=_ui_logger)
 
     _write_operator_event(config, "launch", target=project_real)
     return {"ok": True, "error": None}
@@ -10570,7 +10616,7 @@ async def post_completion_review_trigger(project: str):
             with open(ps_path, "r", encoding="utf-8") as _f:
                 _ps = json.load(_f)
             pipeline_status = _ps.get("pipeline_status")
-        except Exception:
+        except (OSError, json.JSONDecodeError):
             pass
     if pipeline_status != "PIPELINE_COMPLETE":
         return JSONResponse(
@@ -10625,7 +10671,7 @@ async def post_completion_review_trigger(project: str):
             try:
                 with open(openclaw_cfg_path, "r", encoding="utf-8") as _f:
                     _oc_cfg = json.load(_f)
-            except Exception:
+            except (OSError, json.JSONDecodeError):
                 pass
 
         _sm.inject_skill("COMPLETE-R0", "reviewer", _oc_cfg)
@@ -10635,7 +10681,7 @@ async def post_completion_review_trigger(project: str):
         _preset_session_response_usage_sync("reviewer", session_key)
         invoke_agent_webhook("reviewer", session_key, token, message=_completion_message)
     except Exception as _exc:
-        print(f"[W5-E] Completion review invocation warning: {_exc}")
+        tagged("W5-E", f"Completion review invocation warning: {_exc}", level=logging.WARNING, logger=_ui_logger)
 
     return {"triggered": True, "session_key": session_key}
 

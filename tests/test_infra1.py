@@ -21,7 +21,7 @@ def test_load_config_default_returns_seven_keys():
     )
     
     # Path-like string values should have ~ expanded to absolute paths (skip URLs and secrets)
-    non_path_keys = {"port", "hooks_url", "hooks_token", "ui_token", "base_branch"}
+    non_path_keys = {"port", "hooks_url", "hooks_token", "ui_token", "base_branch", "log_level"}
     path_keys = [k for k in result.keys() if k not in non_path_keys]
     for key in path_keys:
         val = result[key]

@@ -48,6 +48,7 @@ from error_codes import (
     ERR_SESSION_DEAD_ON_ARRIVAL,
     ERR_UNACCOUNTED_DELETION,
 )
+from log_utils import configure_stream_logging
 
 # Route module-level logging.* calls (including those from webhook_client —
 # notably abort_agent_session's success/failure lines) to stdout so they land
@@ -57,28 +58,13 @@ from error_codes import (
 # attaches a handler if no stdout-bound INFO handler is already present
 # (so tests that pre-configure logging are not clobbered).
 def _ensure_stdout_logging() -> None:
-    """Attach an INFO-level StreamHandler to the root logger bound to the
-    *current* ``sys.stdout``.
+    """Route module-level ``logging.*`` to stdout at INFO (root logger).
 
-    Idempotent in production (a no-op if a handler already targets the
-    current stdout).  Safe to re-invoke if ``sys.stdout`` is swapped
-    (e.g. pytest capsys) — it will attach a fresh handler bound to the
-    new stream so log lines remain visible.
+    Thin wrapper over :func:`log_utils.configure_stream_logging` — kept as a
+    named function because tests import it by name and it reads clearly at the
+    call site. Idempotent; re-binds to a swapped ``sys.stdout`` (pytest capsys).
     """
-    root = logging.getLogger()
-    for h in root.handlers:
-        if (
-            isinstance(h, logging.StreamHandler)
-            and getattr(h, "stream", None) is sys.stdout
-            and h.level <= logging.INFO
-        ):
-            return
-    handler = logging.StreamHandler(stream=sys.stdout)
-    handler.setLevel(logging.INFO)
-    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-    root.addHandler(handler)
-    if root.level == logging.WARNING or root.level > logging.INFO:
-        root.setLevel(logging.INFO)
+    configure_stream_logging(None, logging.INFO)
 
 
 _ensure_stdout_logging()
@@ -481,8 +467,8 @@ def cleanup_stranded_temp_files(base_dir: str) -> None:
             real_project = os.path.realpath(project_dir)
             if os.path.isdir(real_project) and real_project not in search_dirs:
                 search_dirs.append(real_project)
-    except Exception:
-        pass
+    except OSError:
+        pass  # best-effort: a dangling project path just yields fewer search dirs
 
     removed = []
     for directory in search_dirs:
@@ -491,8 +477,8 @@ def cleanup_stranded_temp_files(base_dir: str) -> None:
                 try:
                     os.remove(stale_path)
                     removed.append(stale_path)
-                except Exception:
-                    pass
+                except OSError:
+                    pass  # best-effort temp cleanup
         # Stranded mkstemp files may also live under .autodev/pipeline/.
         _ad_pipe = os.path.join(directory, ".autodev", "pipeline")
         if os.path.isdir(_ad_pipe):
@@ -501,8 +487,8 @@ def cleanup_stranded_temp_files(base_dir: str) -> None:
                     try:
                         os.remove(stale_path)
                         removed.append(stale_path)
-                    except Exception:
-                        pass
+                    except OSError:
+                        pass  # best-effort temp cleanup
 
     # Always log the orphan scan result so the operator can see what was cleaned.
     logging.info(
@@ -522,8 +508,8 @@ def cleanup_stranded_temp_files(base_dir: str) -> None:
                 glob_root = _artifact_sub if os.path.isdir(_artifact_sub) else _real_pp
                 for p in _glob.glob(os.path.join(glob_root, pattern)):
                     artifacts.append(os.path.basename(p))
-    except Exception:
-        pass
+    except OSError:
+        pass  # best-effort: artifact listing is for logging only
     logging.info(
         "[startup] pipeline artifacts present in workspace: %s",
         sorted(artifacts) if artifacts else [],
@@ -886,8 +872,8 @@ def _write_pipeline_event(event_type: str, phase: str, agent: str, detail_dict) 
         try:
             if os.path.lexists(SYMLINK_TARGET):
                 _project = os.path.basename(os.path.realpath(SYMLINK_TARGET))
-        except Exception:
-            pass
+        except OSError:
+            pass  # best-effort: project name in the event is decorative
         entry = {
             "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "event": event_type,
@@ -1070,7 +1056,7 @@ def _write_run_summary(outcome: str, outcome_detail: str) -> None:
             try:
                 with open(_manifest_path, "r") as _f:
                     manifest = json.load(_f)
-            except Exception:
+            except (OSError, json.JSONDecodeError):
                 pass
 
         project_path = manifest.get("project_path", "")
@@ -1086,7 +1072,7 @@ def _write_run_summary(outcome: str, outcome_detail: str) -> None:
                 project_path = _ps.get("project_path", "")
                 if not run_start:
                     run_start = _ps.get("last_action_timestamp", "")
-            except Exception:
+            except (OSError, json.JSONDecodeError):
                 pass
 
         # --- Compute duration ---
@@ -1096,8 +1082,8 @@ def _write_run_summary(outcome: str, outcome_detail: str) -> None:
                 _start_dt = datetime.fromisoformat(run_start.replace("Z", "+00:00"))
                 _end_dt = datetime.fromisoformat(run_end.replace("Z", "+00:00"))
                 total_duration_seconds = int((_end_dt - _start_dt).total_seconds())
-            except Exception:
-                pass
+            except (ValueError, TypeError, AttributeError):
+                pass  # unparseable timestamps → duration stays None
 
         # --- Read and deduplicate metrics.jsonl (last row per phase wins) ---
         _summary_source = os.path.join(PROJECT_ARTIFACTS_DIR, "metrics.jsonl")
@@ -1116,8 +1102,8 @@ def _write_run_summary(outcome: str, outcome_detail: str) -> None:
                                 _seen_phases[_pid] = _row
                         except json.JSONDecodeError:
                             pass
-            except Exception:
-                pass
+            except (OSError, UnicodeDecodeError):
+                pass  # best-effort: an unreadable/undecodable metrics file just skips its rows
 
         deduped_rows = list(_seen_phases.values())
 
@@ -2469,8 +2455,8 @@ class Orchestrator:
                 if rp and os.path.isdir(rp) and rp not in seen:
                     seen.add(rp)
                     roots.append(rp)
-        except Exception:
-            pass
+        except OSError:
+            pass  # best-effort: a dangling root just isn't searched
         return roots
 
     def _poll_escalation_output_json_path(self, timeout_seconds=10, interval=0.5):
@@ -2748,7 +2734,7 @@ class Orchestrator:
             if entry and entry.get("id"):
                 entry_id = str(entry["id"])
         except Exception:
-            pass
+            pass  # best-effort: entry_id falls back to "run" if the queue is unreadable
         token = f"{entry_id}.{secrets.token_hex(3)}"
         try:
             ps = self.read_phase_state()
@@ -2933,24 +2919,33 @@ class Orchestrator:
         self.state["current_agent"] = target if target in (
             "planner", "executor", "reviewer", "escalation") else "planner"
 
-    def increment_planner_retries(self):
-        phase_state = {}
-        if os.path.exists(PHASE_STATE_FILE):
-            try:
-                with open(PHASE_STATE_FILE, 'r') as f:
-                    phase_state = json.load(f)
-            except Exception:
-                pass
-        else:
-            phase_state = {"planner_retries": 0, "executor_retries": 0, "executor_self_failure_retries": 0, "executor_reviewer_rejection_retries": 0, "reviewer_retries": 0, "reviewer_rejected": False, "escalation_resets": 0, "nuclear_resets": 0}
+    @staticmethod
+    def _default_phase_state() -> dict:
+        """Fresh phase_state with all retry/reset counters zeroed (single source of truth)."""
+        return {
+            "planner_retries": 0,
+            "executor_retries": 0,
+            "executor_self_failure_retries": 0,
+            "executor_reviewer_rejection_retries": 0,
+            "reviewer_retries": 0,
+            "reviewer_rejected": False,
+            "escalation_resets": 0,
+            "nuclear_resets": 0,
+        }
 
+    def increment_planner_retries(self):
+        # LAUNCH-8: read via read_phase_state() so a *corrupt* phase_state is quarantined
+        # and raises (→ escalation) instead of silently degrading to {} and writing back a
+        # single-key dict that wipes escalation_resets / nuclear_resets / the executor
+        # counters. An absent file reads as {} → start from the zeroed default.
+        phase_state = self.read_phase_state() or self._default_phase_state()
         phase_state["planner_retries"] = phase_state.get("planner_retries", 0) + 1
-        
+
         try:
             write_json_atomic(PHASE_STATE_FILE, phase_state, indent=2)
         except Exception as e:
             print(f"[ERROR] Failed to write phase_state: {e}")
-        
+
         self.state["planner_retries"] = phase_state["planner_retries"]
         self.transition_state("RUNNING", f"Incremented planner retries to {phase_state['planner_retries']}")
         return phase_state["planner_retries"]
@@ -4487,8 +4482,8 @@ class Orchestrator:
             if sym.returncode == 0 and sym.stdout.strip() == branch:
                 return True
             print(f"[WARN] _ensure_phase_branch: HEAD on '{sym.stdout.strip()}', expected '{branch}' — correcting.")
-        except Exception:
-            pass
+        except (OSError, subprocess.SubprocessError):
+            pass  # best-effort branch check; the checkout below is the real guard
         try:
             self._checkout_or_create_branch(branch)
             print(f"[INFO] _ensure_phase_branch: HEAD corrected to '{branch}'.")
@@ -4867,23 +4862,16 @@ class Orchestrator:
         return "continue"
 
     def increment_executor_retries(self):
-        phase_state = {}
-        if os.path.exists(PHASE_STATE_FILE):
-            try:
-                with open(PHASE_STATE_FILE, 'r') as f:
-                    phase_state = json.load(f)
-            except Exception:
-                pass
-        else:
-            phase_state = {"planner_retries": 0, "executor_retries": 0, "executor_self_failure_retries": 0, "executor_reviewer_rejection_retries": 0, "reviewer_retries": 0, "reviewer_rejected": False, "escalation_resets": 0, "nuclear_resets": 0}
-
+        # LAUNCH-8: read via read_phase_state() — see increment_planner_retries. A corrupt
+        # phase_state quarantines + raises (→ escalation) rather than clobbering counters.
+        phase_state = self.read_phase_state() or self._default_phase_state()
         phase_state["executor_retries"] = phase_state.get("executor_retries", 0) + 1
-        
+
         try:
             write_json_atomic(PHASE_STATE_FILE, phase_state, indent=2)
         except Exception as e:
             print(f"[ERROR] Failed to write phase_state: {e}")
-        
+
         self.state["executor_retries"] = phase_state["executor_retries"]
         self.transition_state("RUNNING", f"Incremented executor retries to {phase_state['executor_retries']}")
         return phase_state["executor_retries"]
@@ -5001,7 +4989,7 @@ class Orchestrator:
             try:
                 with open(executor_output_path, 'r') as f:
                     executor_output = json.load(f)
-            except Exception:
+            except (OSError, json.JSONDecodeError):
                 pass
 
         # --- Reviewer blocking issues (if reviewer just failed) ---
@@ -5011,7 +4999,7 @@ class Orchestrator:
             try:
                 with open(reviewer_output_path, 'r') as f:
                     reviewer_output = json.load(f)
-            except Exception:
+            except (OSError, json.JSONDecodeError):
                 pass
 
         # --- Gate error codes from phase_state (last_error_code field) ---
@@ -5321,8 +5309,8 @@ class Orchestrator:
             try:
                 start_dt = datetime.fromisoformat(phase_start_time)
                 duration_seconds = int(time.time() - start_dt.timestamp())
-            except Exception:
-                pass
+            except (ValueError, TypeError):
+                pass  # unparseable phase_start_time → duration stays None
 
         goal_text = ""
         cp_path = os.path.join(PROJECT_ARTIFACTS_DIR, "current_phase.json")
@@ -5331,7 +5319,7 @@ class Orchestrator:
                 with open(cp_path) as f:
                     cp_data = json.load(f)
                 goal_text = cp_data.get("detail", "")
-            except Exception:
+            except (OSError, json.JSONDecodeError):
                 pass
 
         reviewer_passes = self.state.get("reviewer_retries", 0) + 1
@@ -5341,7 +5329,7 @@ class Orchestrator:
             try:
                 with open(PHASE_STATE_FILE) as f:
                     ps_m = json.load(f)
-            except Exception:
+            except (OSError, json.JSONDecodeError):
                 pass
 
         # P0 Stage H — source executor_attempts from the lifetime counters,
@@ -5506,13 +5494,16 @@ class Orchestrator:
         )
 
     def set_reviewer_rejected(self):
-        phase_state = {}
-        if os.path.exists(PHASE_STATE_FILE):
-            try:
-                with open(PHASE_STATE_FILE, 'r') as f:
-                    phase_state = json.load(f)
-            except Exception:
-                pass
+        # LAUNCH-8: read via read_phase_state() so a corrupt phase_state is quarantined
+        # rather than silently degrading to {} and writing back a single-key dict that
+        # wipes the other counters. This path is contractually never-raise (ROUTE_EXECUTOR
+        # must not crash), so a corrupt read is caught here: skip the write (don't clobber)
+        # and surface it; the flag is reconstructed on the next clean phase_state read.
+        try:
+            phase_state = self.read_phase_state()
+        except RuntimeError as e:
+            print(f"[WARN] set_reviewer_rejected: corrupt phase_state quarantined, skipping write — {e}")
+            return
         phase_state["reviewer_rejected"] = True
         # Best-effort, never-raise: matches the pre-LAUNCH-5 contract
         # (_atomic_temp_dir_for_project_writes() + swallowed os.replace). The
@@ -5527,23 +5518,16 @@ class Orchestrator:
             pass
 
     def increment_reviewer_retries(self):
-        phase_state = {}
-        if os.path.exists(PHASE_STATE_FILE):
-            try:
-                with open(PHASE_STATE_FILE, 'r') as f:
-                    phase_state = json.load(f)
-            except Exception:
-                pass
-        else:
-            phase_state = {"planner_retries": 0, "executor_retries": 0, "executor_self_failure_retries": 0, "executor_reviewer_rejection_retries": 0, "reviewer_retries": 0, "reviewer_rejected": False, "escalation_resets": 0, "nuclear_resets": 0}
-
+        # LAUNCH-8: read via read_phase_state() — see increment_planner_retries. A corrupt
+        # phase_state quarantines + raises (→ escalation) rather than clobbering counters.
+        phase_state = self.read_phase_state() or self._default_phase_state()
         phase_state["reviewer_retries"] = phase_state.get("reviewer_retries", 0) + 1
-        
+
         try:
             write_json_atomic(PHASE_STATE_FILE, phase_state, indent=2)
         except Exception as e:
             print(f"[ERROR] Failed to write phase_state: {e}")
-        
+
         self.state["reviewer_retries"] = phase_state["reviewer_retries"]
         self.transition_state("RUNNING", f"Incremented reviewer retries to {phase_state['reviewer_retries']}")
         return phase_state["reviewer_retries"]
@@ -6098,7 +6082,11 @@ class Orchestrator:
                         _sid = _sd.get(_planner_full_key, {}).get("sessionId")
                         if _sid:
                             _planner_jsonl_path = os.path.join(_planner_sessions_dir, f"{_sid}.jsonl")
-                    except Exception:
+                    except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+                        # best-effort: a missing file, bad JSON, or an odd-shaped session entry
+                        # (a null/non-dict value → .get on None) leaves a None jsonl_path, which
+                        # _accumulate_role_tokens handles (latches token_capture_degraded + emits
+                        # token_capture_warning). It must NOT escape to the escalation path.
                         pass
                     self._accumulate_role_tokens("planner", _planner_jsonl_path)
 
@@ -6200,8 +6188,8 @@ class Orchestrator:
                         _last_err = ""
                         try:
                             _last_err = str(self.read_phase_state().get("last_error_code") or "")
-                        except Exception:
-                            pass
+                        except RuntimeError:
+                            pass  # best-effort: a corrupt phase_state must not crash escalation
                         self.state["current_agent"] = "escalation"
                         self.state["escalation_trigger_class"] = "executor_retries_exhausted"  # P1-B
                         self.transition_state(
@@ -6440,7 +6428,9 @@ class Orchestrator:
                         _sid = _sd.get(_full_key, {}).get("sessionId")
                         if _sid:
                             _jsonl_path = os.path.join(_sessions_dir, f"{_sid}.jsonl")
-                    except Exception:
+                    except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+                        # best-effort: missing/bad/odd-shaped session entry → None jsonl_path →
+                        # token_capture_warning downstream; must not escape to escalation.
                         pass
 
                     # Dead-on-arrival check: sessions.json is reliably populated by the time
@@ -6721,7 +6711,9 @@ class Orchestrator:
                         _sid = _sd.get(_rev_full_key, {}).get("sessionId")
                         if _sid:
                             _jsonl_path = os.path.join(_rev_sessions_dir, f"{_sid}.jsonl")
-                    except Exception:
+                    except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+                        # best-effort: missing/bad/odd-shaped session entry → None jsonl_path →
+                        # token_capture_warning downstream; must not escape to escalation.
                         pass
 
                     # Dead-on-arrival check runs after sentinel poll (sessions.json guaranteed
