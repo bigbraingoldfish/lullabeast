@@ -1,7 +1,6 @@
 import os
 import sys
 import json
-import tempfile
 
 # Import the shared env resolvers. Gate scripts live one directory below the
 # pipeline package, so add pipeline/ to sys.path before importing.
@@ -10,6 +9,7 @@ if _PIPELINE_DIR not in sys.path:
     sys.path.insert(0, _PIPELINE_DIR)
 
 from env_resolvers import resolve_pipeline_root  # noqa: E402
+from atomic_io import write_json_atomic, write_text_atomic  # noqa: E402,F401
 
 
 def _derive_runtime_root() -> str:
@@ -124,14 +124,7 @@ def record_error_code_only(agent_type, error_code):
             pass
     state["last_error_code"] = error_code
     os.makedirs(ARTIFACTS_DIR, exist_ok=True)
-    fd, temp_path = tempfile.mkstemp(dir=ARTIFACTS_DIR, prefix="phase_state_")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(state, f, indent=2)
-        os.replace(temp_path, PHASE_STATE_FILE)
-    except Exception:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+    write_json_atomic(PHASE_STATE_FILE, state, indent=2, raise_on_error=False)
 
 
 def load_json_safe(filepath, agent_type):
@@ -164,14 +157,6 @@ def update_phase_state_error(agent_type, error_code):
     state["last_error_code"] = error_code
 
     os.makedirs(ARTIFACTS_DIR, exist_ok=True)
-
-    fd, temp_path = tempfile.mkstemp(dir=ARTIFACTS_DIR, prefix="phase_state_")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(state, f, indent=2)
-        os.replace(temp_path, PHASE_STATE_FILE)
-    except Exception:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+    write_json_atomic(PHASE_STATE_FILE, state, indent=2, raise_on_error=False)
 
     return state[retry_key]

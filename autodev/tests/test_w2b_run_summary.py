@@ -273,10 +273,14 @@ def test_run_summary_uses_atomic_write(tmp_path):
 
     files = {f.name for f in art.iterdir()}
     assert "run_summary.json" in files
-    leftover_temps = {f for f in files if f.startswith(".run_summary_")}
+    # LAUNCH-5: the atomic writer's temp is named "run_summary.json.<hex>.tmp"
+    # (was ".run_summary_<hex>"), so match the ".tmp" suffix — the prior
+    # ".run_summary_" prefix filter could never match the new name and had
+    # silently become a no-op guard.
+    leftover_temps = {f for f in files if f.endswith(".tmp")}
     assert not leftover_temps, (
         f"Temp files left behind after atomic write: {leftover_temps}. "
-        "Use mkstemp + os.replace."
+        "Use atomic_io.write_json_atomic (mkstemp + os.replace + cleanup)."
     )
 
 

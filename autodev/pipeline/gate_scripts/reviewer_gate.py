@@ -1,7 +1,6 @@
 import os
 import sys
 import json
-import tempfile
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
@@ -16,6 +15,7 @@ from utils import (
     PHASE_STATE_FILE,
     WORKSPACE_DIR,
     path_escapes_workspace,
+    write_json_atomic,
 )
 
 # Phases that produce user-visible output and therefore require a screenshot
@@ -605,11 +605,7 @@ def evaluate_reviewer(output_path=None):
             _mutated = True
         if _mutated:
             try:
-                _out_dir = os.path.dirname(output_path) or "."
-                _fd, _tmp = tempfile.mkstemp(dir=_out_dir, prefix="reviewer_output_")
-                with os.fdopen(_fd, "w") as _wf:
-                    json.dump(data, _wf, indent=2)
-                os.replace(_tmp, output_path)
+                write_json_atomic(output_path, data, indent=2)
             except Exception as _e:
                 print(f"[GATE] synthesise write-back failed: {_e}", file=sys.stderr)
 

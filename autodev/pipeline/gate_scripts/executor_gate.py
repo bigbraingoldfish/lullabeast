@@ -3,7 +3,6 @@ import os
 import re as _re
 import subprocess
 import sys
-import tempfile
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
@@ -16,6 +15,7 @@ from utils import (
     record_error_code_only,
     PHASE_STATE_FILE,
     WORKSPACE_DIR,
+    write_json_atomic,
 )
 
 # Vite content-hash pattern: dist/assets/<name>-<6-12 alphanum chars>.<js|css>
@@ -89,37 +89,15 @@ def _clear_advisory_detail():
 
 def _write_executor_gate_detail(payload: dict) -> None:
     """Atomic JSON write for orchestrator to merge into failure_context.json."""
-    dest = _executor_gate_detail_path()
     os.makedirs(ARTIFACTS_DIR, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=ARTIFACTS_DIR.rstrip(os.sep), prefix="executor_gate_detail_")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(payload, f, indent=2)
-        os.replace(tmp, dest)
-    except Exception:
-        if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+    write_json_atomic(_executor_gate_detail_path(), payload, indent=2, raise_on_error=False)
 
 
 def _write_advisory_detail(payload: dict) -> None:
     """Atomic write to executor_advisory_detail.json — same shape as
     _write_executor_gate_detail but to the advisory channel."""
-    dest = _executor_advisory_detail_path()
     os.makedirs(ARTIFACTS_DIR, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=ARTIFACTS_DIR.rstrip(os.sep), prefix="executor_advisory_detail_")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(payload, f, indent=2)
-        os.replace(tmp, dest)
-    except Exception:
-        if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+    write_json_atomic(_executor_advisory_detail_path(), payload, indent=2, raise_on_error=False)
 
 
 def _clear_gate_warnings():
@@ -141,23 +119,12 @@ def _clear_gate_warnings():
 def _write_gate_warnings(payload: dict) -> None:
     """Atomic write to gate_warnings.json — the reviewer-facing PASS channel.
 
-    Same atomic mkstemp+os.replace shape as the sibling detail writers. Unlike
-    them, this file is NOT removed by the gate on PASS: the reviewer reads it to
-    adjudicate the demoted warnings (accept-and-proceed or reject-with-specifics).
+    Unlike the sibling detail writers, this file is NOT removed by the gate on
+    PASS: the reviewer reads it to adjudicate the demoted warnings
+    (accept-and-proceed or reject-with-specifics).
     """
-    dest = _gate_warnings_path()
     os.makedirs(ARTIFACTS_DIR, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=ARTIFACTS_DIR.rstrip(os.sep), prefix="gate_warnings_")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(payload, f, indent=2)
-        os.replace(tmp, dest)
-    except Exception:
-        if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+    write_json_atomic(_gate_warnings_path(), payload, indent=2, raise_on_error=False)
 
 
 def _check_reachability_advisory(current_phase, executor_output, project_root):
@@ -639,16 +606,8 @@ def evaluate_executor(output_path=None):
         except Exception:
             pass
     _state["executor_succeeded"] = True
-    _phase_dir = os.path.dirname(PHASE_STATE_FILE) or "."
-    os.makedirs(_phase_dir, exist_ok=True)
-    _fd, _tmp = tempfile.mkstemp(dir=_phase_dir, prefix="phase_state_")
-    try:
-        with os.fdopen(_fd, "w") as _f:
-            json.dump(_state, _f, indent=2)
-        os.replace(_tmp, PHASE_STATE_FILE)
-    except Exception:
-        if os.path.exists(_tmp):
-            os.remove(_tmp)
+    os.makedirs(os.path.dirname(PHASE_STATE_FILE) or ".", exist_ok=True)
+    write_json_atomic(PHASE_STATE_FILE, _state, indent=2, raise_on_error=False)
 
     _clear_executor_gate_detail()
 

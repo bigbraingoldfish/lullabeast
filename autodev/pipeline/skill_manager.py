@@ -12,11 +12,9 @@ Design principles:
     global tier) is deliberately left untouched to avoid loading all 27 skills simultaneously
 """
 
-import json
 import os
 import shutil
 import sys
-import tempfile
 from datetime import datetime, timezone
 
 try:
@@ -31,6 +29,7 @@ if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
 from env_resolvers import resolve_openclaw_root  # noqa: E402
+from atomic_io import write_json_atomic  # noqa: E402
 
 OPENCLAW_ROOT = resolve_openclaw_root()
 
@@ -247,12 +246,7 @@ class SkillManager:
         health_path = os.path.join(self._workspace_dir, "skill_health.json")
         try:
             os.makedirs(self._workspace_dir, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(dir=self._workspace_dir, prefix=".skill_health_")
-            try:
-                os.write(fd, json.dumps(health, indent=2).encode("utf-8"))
-            finally:
-                os.close(fd)
-            os.replace(tmp, health_path)
+            write_json_atomic(health_path, health, indent=2)
         except OSError as exc:
             print(f"[SKILL] [WARN] Could not write skill_health.json: {exc}")
 

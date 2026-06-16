@@ -145,7 +145,9 @@ class TestT37AtomicWriteUsesUniqueTemp:
             names.add(name)
             return fd, name
 
-        with patch("ui.server.mkstemp", side_effect=spy_mkstemp):
+        # LAUNCH-5: _atomic_write_json_file now delegates to the shared
+        # atomic_io.write_json_atomic, which is where mkstemp is called.
+        with patch("atomic_io.tempfile.mkstemp", side_effect=spy_mkstemp):
             srv._atomic_write_json_file(target, {"x": 1})
             srv._atomic_write_json_file(target, {"x": 2})
 
@@ -182,6 +184,52 @@ class TestT37AtomicWriteUsesUniqueTemp:
         assert data["annotations"] == []
 
 
+class TestLaunch5FormerlyUnsafeWritersFixed:
+    """LAUNCH-5: three server writers (``_write_json_atomic``,
+    ``_write_recent_projects_atomic``, ``_atomic_write_file``) used a *fixed*
+    ``<path>.tmp`` with no cleanup — two concurrent writers collided on the one
+    temp name and could corrupt the file. They now delegate to the shared
+    ``atomic_io`` helpers (unique mkstemp temp + cleanup on failure).
+
+    Catches: reverting any of them to the fixed-``.tmp`` form.
+    """
+
+    def test_recent_projects_writer_uses_unique_temp(self, tmp_path, monkeypatch):
+        dest = tmp_path / "recent.json"
+        monkeypatch.setattr(srv, "_ui_recent_projects_path", lambda: str(dest))
+        srcs = []
+        real_replace = os.replace
+
+        def cap(src, dst):
+            srcs.append(str(src))
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(srv.os, "replace", cap)
+        srv._write_recent_projects_atomic([{"path": "/a"}])
+        srv._write_recent_projects_atomic([{"path": "/b"}])
+
+        assert all(s != str(dest) + ".tmp" for s in srcs)  # not the fixed suffix
+        assert srcs[0] != srcs[1]                          # unique temp per write
+        assert json.loads(dest.read_text()) == [{"path": "/b"}]
+        assert not list(tmp_path.glob("*.tmp"))            # no stranded temp
+
+    def test_write_json_atomic_preserves_prior_and_cleans_temp_on_failure(
+        self, tmp_path, monkeypatch
+    ):
+        dest = tmp_path / "s.json"
+        dest.write_text('{"keep": 1}')
+
+        def boom(*a, **k):
+            raise RuntimeError("simulated serialization crash")
+
+        monkeypatch.setattr(srv.json, "dumps", boom)
+        with pytest.raises(RuntimeError):
+            srv._write_json_atomic(str(dest), {"new": 2})
+
+        assert json.loads(dest.read_text()) == {"keep": 1}  # prior file intact
+        assert not list(tmp_path.glob("*.tmp"))             # temp cleaned up
+
+
 # ---------------------------------------------------------------------------
 # T3.5 — Atomic escalation_output.json write (RV-3.5)
 # ---------------------------------------------------------------------------
@@ -202,14 +250,17 @@ class TestT35EscalationWriteIsAtomic:
         def boom(*a, **k):
             raise RuntimeError("simulated crash mid-write")
 
-        monkeypatch.setattr(srv.json, "dump", boom)
+        # LAUNCH-5: the write routes through atomic_io.write_json_atomic, which
+        # serializes via json.dumps — crash there to simulate a mid-write failure.
+        monkeypatch.setattr(srv.json, "dumps", boom)
         with pytest.raises(RuntimeError):
             srv._write_escalation_files(str(tmp_path), "RETRY")
 
-        # Pre-fix: open('w') already truncated json_path → content lost.
+        # Atomic write never touches the destination until os.replace, so a crash
+        # during serialization leaves the prior file intact.
         assert json.loads(json_path.read_text()) == {"command": "PRIOR", "source": "ui"}
-        # No orphaned mkstemp temp left behind.
-        leftovers = [p for p in art_dir.iterdir() if p.name.startswith("eo_")]
+        # No orphaned temp left behind (atomic_io removes its mkstemp temp on failure).
+        leftovers = [p for p in art_dir.iterdir() if p.name.endswith(".tmp")]
         assert leftovers == []
 
     def test_happy_path_writes_payload_then_done(self, tmp_path):

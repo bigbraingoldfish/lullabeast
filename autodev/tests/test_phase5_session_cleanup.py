@@ -166,7 +166,7 @@ class TestDurability:
 
         with (
             patch.object(mod, "AGENTS", ["executor"]),
-            patch("session_cleanup.os.replace", side_effect=spy),
+            patch("atomic_io.os.replace", side_effect=spy),
         ):
             mod.cleanup_sessions()
 

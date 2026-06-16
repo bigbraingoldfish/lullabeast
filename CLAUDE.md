@@ -608,6 +608,8 @@ Also delete all pipeline metadata files in the project directory: `*.done`, `cur
 
 All files written by the orchestrator that will be read by a downstream step must use `mkstemp` + `os.replace`. The sentinel (`.done`) file must be written **after** the payload file. Never reverse this order — a reader finding the sentinel before the payload is ready produces a race condition. This applies to: `pipeline_state.json`, `phase_state.json`, `current_phase.json`, any gate output files.
 
+**Use the canonical helper, don't hand-roll it (LAUNCH-5).** The `mkstemp`+`os.replace` idiom lives in one place — **`autodev/pipeline/atomic_io.py`**: `write_json_atomic(path, data, *, indent=2, raise_on_error=True, fsync=False)` and its text sibling `write_text_atomic(path, content, ...)`. Both write a **unique** temp in the destination's directory, `os.replace` it in, and remove the temp on failure; `raise_on_error=False` swallows-and-returns-`False` for best-effort/telemetry callers (e.g. the gate scripts' `phase_state` writes), while the default re-raises for state/queue writes. The orchestrator, `ui/server.py`, `session_cleanup.py`, and the gate scripts (via `gate_scripts/utils.py`, which re-exports it) all route through this helper — do **not** re-introduce an inline `mkstemp`/`os.replace` block or a fixed `<path>.tmp` write (the latter is concurrent-unsafe: two writers collide on the one temp name and corrupt the file). The only deliberate non-users are `event_log.append_pipeline_event` (O_APPEND, append-not-replace) and the `.done` sentinel/`*_activity.stamp` touches (empty-file markers, different semantics).
+
 ---
 
 ## Operational Constants
