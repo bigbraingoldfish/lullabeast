@@ -2,6 +2,8 @@
 
 This file is the complete orientation for a contributor or Claude Code session working in this repo. Read it before touching anything else. All facts are drawn directly from source files; check the cited paths if anything is surprising.
 
+> **New here as a human contributor?** Start with **[README.md](README.md)** (what Lullabeast is + quickstart) and **[SETUP.md](SETUP.md)** (install and run). This file is the exhaustive *technical* orientation — long by design; skim to the section you need rather than reading top to bottom.
+
 ---
 
 ## What This Repo Is
@@ -50,15 +52,15 @@ autodev-ui/
 │   │   └── mcp.json                # MCP server configuration
 │   ├── tests/                      # Pipeline-level tests (orchestration, sentinel, skills)
 │   └── docs/
-│       ├── PIPELINE-SPEC.md        # Architecture spec — single source of truth (1631 lines)
-│       ├── PIPELINE-CONSTRAINTS.md # Known issues, hardware limits, model bugs (533 lines)
+│       ├── PIPELINE-SPEC.md        # Architecture spec — single source of truth (~1,900 lines)
+│       ├── PIPELINE-CONSTRAINTS.md # Known issues, hardware limits, model bugs (~520 lines)
 │       ├── AUTODEV-UI-PRD.md       # Full product requirements for the dashboard UI
 │       ├── ASSUMPTIONS.md          # Live spec divergences and resolved ambiguities
 │       └── ...                     # Vision docs, roadmaps, templates
 ├── ui/
-│   ├── server.py                   # FastAPI server (3562 lines) — all API endpoints
+│   ├── server.py                   # FastAPI server (~10,700 lines) — all API endpoints
 │   ├── roadmap_parser.py           # Display roadmap parser (all phases → list)
-│   ├── index.html                  # Single-file React frontend (CDN React, no build step)
+│   ├── index.html                  # Single-file React frontend (React/Babel/Tailwind vendored in ui/static/, in-browser transpile, no build step)
 │   ├── config.example.json         # Template for local ui/config.json (committed)
 │   ├── config.json                 # Local overrides — gitignored; copy from config.example.json
 │   ├── requirements.txt            # fastapi, uvicorn, python-multipart, aiohttp
@@ -72,7 +74,7 @@ autodev-ui/
 
 ### Architectural note: intentional single-file design
 
-`ui/server.py` is deliberately a single large file (3,562 lines). The UI was built TDD across 23 phases; keeping all FastAPI routes in one file avoids cross-module import complexity in a single-process server. Do not split it into sub-modules without a deliberate refactoring decision.
+`ui/server.py` is deliberately a single large file (~10,700 lines). The UI was built TDD across 23 phases; keeping all FastAPI routes in one file avoids cross-module import complexity in a single-process server. Do not split it into sub-modules without a deliberate refactoring decision.
 
 `autodev/pipeline/orchestrator.py` is similarly monolithic by design: the pipeline state machine, all agent invocations, git operations, and escalation logic live together to make the control flow auditable in one place. Extracting pieces to helper modules requires understanding all the shared state.
 

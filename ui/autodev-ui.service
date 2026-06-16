@@ -3,12 +3,30 @@ Description=Lullabeast UI Service
 After=network.target
 
 [Service]
-# EDIT THE PATH BELOW BEFORE INSTALLING - set to your Lullabeast checkout root.
-# The module form (-m ui.server) is required and must run from the repo root:
-# `python3 ui/server.py` fails with ModuleNotFoundError because the server uses
-# package-absolute imports.
+# EDIT THE PATHS + USER BELOW BEFORE INSTALLING.
+# WorkingDirectory = your Lullabeast checkout root. The module form (-m ui.server)
+# is required and must run from the repo root: `python3 ui/server.py` fails with
+# ModuleNotFoundError because the server uses package-absolute imports.
 WorkingDirectory=/path/to/autodev
 ExecStart=/usr/bin/python3 -m ui.server
+
+# Run as the user whose ~/.openclaw holds your OpenClaw install — NOT root. The
+# server talks to per-user ~/.openclaw files and resolves `~` paths; as root those
+# point at /root. (For a per-login-session install you can instead drop User= and
+# load this as a `systemctl --user` unit.)
+User=youruser
+
+# Load OPENCLAW_ROOT / AUTODEV_REPO_PATH / AUTODEV_UI_TOKEN (and the stall/grace
+# knobs) from the repo .env that install.sh generates. WITHOUT this the service
+# starts with fallback roots and NO dashboard token — the server logs a loud
+# AUTH warning and serves loopback-only. EDIT the path to match WorkingDirectory.
+EnvironmentFile=/path/to/autodev/.env
+
+# HOME must be set so the server's `~`-relative paths (the recent-projects file and
+# any ~/.openclaw fallback) resolve to a real home instead of a literal ./~ directory
+# created under WorkingDirectory. EDIT to match the User above.
+Environment=HOME=/home/youruser
+
 Restart=on-failure
 RestartSec=5
 
