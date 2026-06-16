@@ -13,6 +13,12 @@ from env_resolvers import resolve_pipeline_root  # noqa: E402
 
 # Stage D — structured per-phase block extraction (P0 §2.3).
 _PHASE_HEADER_RE = re.compile(r'^- \[( |x|-|!)\] `([^`]+)` \| ([^\|]+) \| (.+)$')
+# LAUNCH-3 — the *selected* phase id becomes a git branch (``phase/<raw_id>``) and
+# is checked out by the orchestrator. ``_PHASE_HEADER_RE`` captures the id as any
+# non-backtick string, so constrain it to a safe branch token here, at ingestion,
+# before a malformed/tampered id (spaces, ``;``, ``$()`` …) can reach a branch name.
+# The orchestrator's checkout is also list-form (no shell) as defense-in-depth.
+_PHASE_ID_SAFE_RE = re.compile(r'^[A-Za-z0-9._-]+$')
 _BV_BLOCK_HEADER_RE = re.compile(r'^\s*\*\*Behavioral Verification:\*\*\s*$')
 _BV_SUBBULLET_RES = {
     "user_observable": re.compile(r"^\s*-\s+\*\*User-observable:\*\*\s+(.+)$"),
@@ -299,7 +305,19 @@ def validate_and_identify(roadmap_path=None):
     if not phase:
         print("PIPELINE_COMPLETE")
         sys.exit(0)
-        
+
+    # LAUNCH-3 — refuse a selected phase id that is not a safe branch token. The id
+    # becomes ``phase/<raw_id>`` and is checked out by the orchestrator; a malformed
+    # or tampered roadmap id is a roadmap-format error, not a branch name. Exit 1 →
+    # the orchestrator routes resolver failures to escalation (F4) rather than acting
+    # on it. Validated here, before current_phase.json is written, so a rejected id
+    # never propagates downstream.
+    _raw_id = phase.get("raw_id", "")
+    if not _PHASE_ID_SAFE_RE.match(_raw_id or ""):
+        print(f"[ERROR] Phase id {_raw_id!r} is not a valid branch token "
+              f"(allowed: letters, digits, '.', '_', '-'). Fix the roadmap phase header.")
+        sys.exit(1)
+
     # Write current_phase.json under .autodev/pipeline/ in the project root (roadmap dir).
     project_root = os.path.dirname(os.path.abspath(_rp))
     out_dir = os.path.join(project_root, ".autodev", "pipeline")
