@@ -1,3 +1,19 @@
+"""OpenClaw gateway client — agent invocation, session abort/verify, usage seeding.
+
+The HTTP + WebSocket layer between the orchestrator and the OpenClaw gateway:
+
+* ``invoke_agent_webhook`` — POST /hooks/agent with a per-call idempotency key and
+  the retry/backoff resilience contract; classifies the result as
+  ``SUCCESS`` / ``AUTH_ERROR`` / ``REQUEST_ERROR`` / ``INFRA_ERROR`` so the caller
+  can route any non-success outcome to escalation.
+* ``abort_agent_session`` / ``verify_session_stopped`` — the WebSocket
+  ``sessions.abort`` handshake (retried) plus the post-abort stamp-settle check that
+  confirms a prior/zombie attempt has stopped before the next one launches.
+* ``set_session_response_usage`` — seeds full response-usage on a session so token
+  accounting is captured.
+
+All gateway calls are timeout-bounded; this module performs no pipeline state I/O.
+"""
 import json
 import logging
 import os

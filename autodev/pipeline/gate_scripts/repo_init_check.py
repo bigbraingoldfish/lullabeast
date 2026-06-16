@@ -39,19 +39,19 @@ def check_repo_init():
     if not os.path.exists(pipeline_project):
         print(f"[ERROR] Shared workspace symlink not found: {pipeline_project}")
         sys.exit(1)
-        
+
     roadmap_files = []
     for ext in ['*.md', '*.yaml', '*.json']:
         roadmap_files.extend(glob.glob(os.path.join(pipeline_project, f"*oadmap{ext}")))
         roadmap_files.extend(glob.glob(os.path.join(pipeline_project, f"*Roadmap{ext}")))
-        
+
     if not roadmap_files:
         print(f"[ERROR] No roadmap file found in {pipeline_project}")
         sys.exit(1)
-        
+
     agents = ["planner", "executor", "reviewer", "escalation"]
     required_docs = ["AGENTS.md", "TOOLS.md", "SOUL.md", "USER.md", "IDENTITY.md"]
-    
+
     for agent in agents:
         agent_dir = os.path.join(oc_root, f"workspace-{agent}")
         if not os.path.exists(agent_dir):
@@ -62,7 +62,7 @@ def check_repo_init():
             if not os.path.exists(doc_path):
                 print(f"[ERROR] Required support doc missing: {doc_path}")
                 sys.exit(1)
-                
+
     gitignore_path = os.path.join(pipeline_project, ".gitignore")
     if not os.path.exists(gitignore_path):
         print(f"[ERROR] .gitignore file missing in project root: {pipeline_project}")

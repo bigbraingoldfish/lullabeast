@@ -3774,17 +3774,17 @@
                                 });
                             }
                         } catch (e) {
-                            console.log('Failed to parse SSE event:', e);
+                            console.warn('Failed to parse SSE event:', e);
                         }
                     };
                     eventSource.onerror = () => {
-                        console.log('SSE connection error, falling back to polling');
+                        console.warn('SSE connection error, falling back to polling');
                         eventSource.close();
                         isUsingSSE.current = false;
                         startPollingFallback();
                     };
                 } catch (err) {
-                    console.log('Failed to create EventSource, using polling fallback');
+                    console.warn('Failed to create EventSource, using polling fallback');
                     startPollingFallback();
                 }
             }

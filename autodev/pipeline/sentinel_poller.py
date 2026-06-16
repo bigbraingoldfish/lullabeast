@@ -1,3 +1,14 @@
+"""Agent-completion detection — sentinel polling with two-tier stall detection.
+
+Watches for an agent attempt's ``.done`` sentinel while distinguishing "alive and
+working" from "stalled" from "never started". ``poll_for_sentinel`` returns a
+structured :class:`PollResult` whose ``.reason`` is one of
+``succeeded`` / ``stalled`` / ``no_first_activity`` / ``stopped`` / ``timeout``,
+driven by the Tier-A activity stamp (a post-first-hook stall threshold plus a
+pre-first-hook startup grace) and an infrastructure backstop. ``cleanup_output_files``
+clears stale output before an attempt and ``initialize_activity_stamp`` seeds the
+stamp the OpenClaw plugin then refreshes.
+"""
 import os
 import sys
 import tempfile
