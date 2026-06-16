@@ -16,6 +16,13 @@ from utils import (
     WORKSPACE_DIR,
     path_escapes_workspace,
     write_json_atomic,
+    ERR_MISSING_ARTIFACTS,
+    ERR_REVIEWER_CONTRACT_FAILURE,
+    ERR_VISUAL_UNVERIFIED,
+    ERR_BEHAVIORAL_UNVERIFIED,
+    ERR_REGRESSION_UNVERIFIED,
+    ERR_REGRESSION_PRIOR_PHASE,
+    ERR_VALIDATION_FAILED,
 )
 
 # Phases that produce user-visible output and therefore require a screenshot
@@ -434,7 +441,7 @@ def evaluate_reviewer(output_path=None):
     if _current_phase_raw_id:
         _missing = _check_done_criteria_artifacts(_current_phase_raw_id)
         if _missing:
-            record_error_code_only("reviewer", "ERR_MISSING_ARTIFACTS")
+            record_error_code_only("reviewer", ERR_MISSING_ARTIFACTS)
             print(
                 f"[GATE] MISSING_ARTIFACTS: {_missing}",
                 file=sys.stderr,
@@ -453,7 +460,7 @@ def evaluate_reviewer(output_path=None):
         # unconditionally, so the session may have given up cleanly OR been
         # aborted/crashed. Either way the reviewer breached its output contract.
         # FIND-REVIEWER-CONTRACT: distinct from the valid-rejection path.
-        record_error_code_only("reviewer", "ERR_REVIEWER_CONTRACT_FAILURE")
+        record_error_code_only("reviewer", ERR_REVIEWER_CONTRACT_FAILURE)
         return "CONTRACT_FAILURE"
 
     # ------------------------------------------------------------------
@@ -467,7 +474,7 @@ def evaluate_reviewer(output_path=None):
     if _is_visual_phase(_current_phase_raw_id):
         visual_problems = _check_visual_verification(data)
         if visual_problems:
-            record_error_code_only("reviewer", "ERR_VISUAL_UNVERIFIED")
+            record_error_code_only("reviewer", ERR_VISUAL_UNVERIFIED)
             print(
                 f"[GATE] VISUAL_UNVERIFIED ({_current_phase_raw_id}): {visual_problems}",
                 file=sys.stderr,
@@ -487,7 +494,7 @@ def evaluate_reviewer(output_path=None):
     if phase_has_behavioral_block(_current_phase):
         behavioral_problems = _check_behavioral_verification(data)
         if behavioral_problems:
-            record_error_code_only("reviewer", "ERR_BEHAVIORAL_UNVERIFIED")
+            record_error_code_only("reviewer", ERR_BEHAVIORAL_UNVERIFIED)
             print(
                 f"[GATE] BEHAVIORAL_UNVERIFIED ({_current_phase_raw_id}): {behavioral_problems}",
                 file=sys.stderr,
@@ -508,7 +515,7 @@ def evaluate_reviewer(output_path=None):
     if requires_regression_verification(_current_phase):
         regression_problems = _check_regression_verification(data, _current_phase)
         if regression_problems:
-            record_error_code_only("reviewer", "ERR_REGRESSION_UNVERIFIED")
+            record_error_code_only("reviewer", ERR_REGRESSION_UNVERIFIED)
             print(
                 f"[GATE] REGRESSION_UNVERIFIED ({_current_phase_raw_id}): {regression_problems}",
                 file=sys.stderr,
@@ -582,9 +589,9 @@ def evaluate_reviewer(output_path=None):
             and data.get("integration_tests_passing")
         )
         if _only_regression:
-            record_error_code_only("reviewer", "ERR_REGRESSION_PRIOR_PHASE")
+            record_error_code_only("reviewer", ERR_REGRESSION_PRIOR_PHASE)
         else:
-            record_error_code_only("reviewer", "ERR_VALIDATION_FAILED")
+            record_error_code_only("reviewer", ERR_VALIDATION_FAILED)
 
         # P0 Stage G: synthesise per-evidence-entry blocking_issues when the
         # reviewer recorded a behavioural failure with an empty list.

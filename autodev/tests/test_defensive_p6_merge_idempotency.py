@@ -69,8 +69,11 @@ class TestMergeBlockStructure:
                     and isinstance(node.test.left, ast.Attribute)
                     and node.test.left.attr == "returncode"
                     and "merge" in getattr(node.test.left.value, "id", "").lower()):
+                # LAUNCH-7: ERR_MERGE_FAILED is now an imported constant (ast.Name),
+                # not an inline string literal — accept either form.
                 lits = {c.value for c in ast.walk(node) if isinstance(c, ast.Constant) and isinstance(c.value, str)}
-                if "ERR_MERGE_FAILED" in lits:
+                names = {c.id for c in ast.walk(node) if isinstance(c, ast.Name)}
+                if "ERR_MERGE_FAILED" in lits or "ERR_MERGE_FAILED" in names:
                     found = True
         assert found, "merge-failure ERR_MERGE_FAILED block missing/renamed"
 

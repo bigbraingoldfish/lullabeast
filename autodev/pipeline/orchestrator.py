@@ -37,6 +37,17 @@ from queue_semantics import (
 )
 from env_resolvers import resolve_openclaw_root, resolve_pipeline_root
 from atomic_io import write_json_atomic, write_text_atomic
+from error_codes import (
+    ERR_MERGE_FAILED,
+    ERR_PHASE_RESOLVER_FAILED,
+    ERR_PROVIDER_REJECTED,
+    ERR_RESET_EXECUTION_GIT_FAILED,
+    ERR_RESET_PHASE_GIT_FAILED,
+    ERR_REVIEWER_CONTRACT_FAILURE,
+    ERR_ROADMAP_CHECKBOX_FAILED,
+    ERR_SESSION_DEAD_ON_ARRIVAL,
+    ERR_UNACCOUNTED_DELETION,
+)
 
 # Route module-level logging.* calls (including those from webhook_client —
 # notably abort_agent_session's success/failure lines) to stdout so they land
@@ -367,13 +378,13 @@ ESCALATION_TRIGGER_CLASSES = frozenset({
 # Error codes that uniquely identify a cause — the error-coded chokepoints are
 # classified by derivation, so they need no explicit stamp.
 _ERR_CODE_TO_TRIGGER_CLASS = {
-    "ERR_PROVIDER_REJECTED": "provider_rejected",
-    "ERR_SESSION_DEAD_ON_ARRIVAL": "provider_rejected",
-    "ERR_RESET_PHASE_GIT_FAILED": "reset_git_failed",
-    "ERR_RESET_EXECUTION_GIT_FAILED": "reset_git_failed",
-    "ERR_ROADMAP_CHECKBOX_FAILED": "roadmap_checkbox_failed",
-    "ERR_PHASE_RESOLVER_FAILED": "resolver_failed",
-    "ERR_MERGE_FAILED": "git_op_failed",
+    ERR_PROVIDER_REJECTED: "provider_rejected",
+    ERR_SESSION_DEAD_ON_ARRIVAL: "provider_rejected",
+    ERR_RESET_PHASE_GIT_FAILED: "reset_git_failed",
+    ERR_RESET_EXECUTION_GIT_FAILED: "reset_git_failed",
+    ERR_ROADMAP_CHECKBOX_FAILED: "roadmap_checkbox_failed",
+    ERR_PHASE_RESOLVER_FAILED: "resolver_failed",
+    ERR_MERGE_FAILED: "git_op_failed",
 }
 
 
@@ -2814,7 +2825,7 @@ class Orchestrator:
 
         # CONTRACT_FAILURE: the reviewer session ended without a verdict. The trigger
         # reason is already honest (6244f3a) — surface a clean, factual version.
-        if last_err == "ERR_REVIEWER_CONTRACT_FAILURE" or "CONTRACT_FAILURE" in trigger:
+        if last_err == ERR_REVIEWER_CONTRACT_FAILURE or "CONTRACT_FAILURE" in trigger:
             return (
                 "The reviewer ended without a usable verdict (it gave up or was cut "
                 "off) after repeated fresh-session retries "
@@ -3374,7 +3385,7 @@ class Orchestrator:
             return False
         print(f"[ERROR] [{role_label}] Provider rejected request: {msg[:240]}")
         _ps = self.read_phase_state()
-        _ps["last_error_code"] = "ERR_PROVIDER_REJECTED"
+        _ps["last_error_code"] = ERR_PROVIDER_REJECTED
         _ps["escalation_trigger_reason"] = (
             f"{role_label} blocked — inference provider rejected the request: {msg[:900]}"
         )
@@ -4069,7 +4080,7 @@ class Orchestrator:
             # nuclear_resets++ on confirmed success.
             print(f"[ERROR] reset_phase git operations failed: {e}")
             _ps_fail = self.read_phase_state()
-            _ps_fail["last_error_code"] = "ERR_RESET_PHASE_GIT_FAILED"
+            _ps_fail["last_error_code"] = ERR_RESET_PHASE_GIT_FAILED
             _ps_fail["escalation_trigger_reason"] = f"reset_phase git operations failed: {e}"
             self.write_phase_state_atomic(_ps_fail)
             self.state["current_agent"] = "escalation"
@@ -4263,7 +4274,7 @@ class Orchestrator:
         # HEAD`` is kept ONLY for ERR_UNACCOUNTED_DELETION, where it restores
         # committed files MiniMax deleted under context pressure.
         _preserve_worktree = (
-            self.read_phase_state().get("last_error_code") != "ERR_UNACCOUNTED_DELETION"
+            self.read_phase_state().get("last_error_code") != ERR_UNACCOUNTED_DELETION
         )
         try:
             subprocess.run(["git", "checkout", branch], cwd=SYMLINK_TARGET, check=True)
@@ -4280,7 +4291,7 @@ class Orchestrator:
             # reset budget is charged.
             print(f"[ERROR] reset_execution git operations failed: {e}")
             _ps_fail = self.read_phase_state()
-            _ps_fail["last_error_code"] = "ERR_RESET_EXECUTION_GIT_FAILED"
+            _ps_fail["last_error_code"] = ERR_RESET_EXECUTION_GIT_FAILED
             _ps_fail["escalation_trigger_reason"] = f"reset_execution({caller}) git operations failed: {e}"
             self.write_phase_state_atomic(_ps_fail)
             self.state["current_agent"] = "escalation"
@@ -4612,7 +4623,7 @@ class Orchestrator:
             )
             print(f"[ERROR] {reason} — routing to escalation.", file=sys.stderr)
             _ps = self.read_phase_state()
-            _ps["last_error_code"] = "ERR_ROADMAP_CHECKBOX_FAILED"
+            _ps["last_error_code"] = ERR_ROADMAP_CHECKBOX_FAILED
             _ps["escalation_trigger_reason"] = reason
             self.write_phase_state_atomic(_ps)
             self.state["current_agent"] = "escalation"
@@ -4722,7 +4733,7 @@ class Orchestrator:
                                   f"(trigger={trigger}): {_cp_err}")
                         print(f"[ERROR] {reason} — routing to escalation.", file=sys.stderr)
                         _ps = self.read_phase_state()
-                        _ps["last_error_code"] = "ERR_PHASE_RESOLVER_FAILED"
+                        _ps["last_error_code"] = ERR_PHASE_RESOLVER_FAILED
                         _ps["escalation_trigger_reason"] = reason
                         self.write_phase_state_atomic(_ps)
                         self.state["current_agent"] = "escalation"
@@ -4827,7 +4838,7 @@ class Orchestrator:
         reason = f"phase_resolver produced no actionable verdict (trigger={trigger}): {_detail}"
         print(f"[ERROR] {reason} — routing to escalation.", file=sys.stderr)
         _ps = self.read_phase_state()
-        _ps["last_error_code"] = "ERR_PHASE_RESOLVER_FAILED"
+        _ps["last_error_code"] = ERR_PHASE_RESOLVER_FAILED
         _ps["escalation_trigger_reason"] = reason
         self.write_phase_state_atomic(_ps)
         self.state["current_agent"] = "escalation"
@@ -5079,7 +5090,7 @@ class Orchestrator:
         # makes a targeted fix instead of rebuilding blind.
         context["source"] = "gate"
         _codes = ", ".join(gate_error_codes) if gate_error_codes else "(none reported)"
-        if "ERR_UNACCOUNTED_DELETION" in gate_error_codes:
+        if ERR_UNACCOUNTED_DELETION in gate_error_codes:
             _work_note = (
                 "Files you deleted without declaring them have been RESTORED from the "
                 "last commit; redo your change without removing tracked files (list any "
@@ -5676,7 +5687,7 @@ class Orchestrator:
                 # branch-checkout / blind-planner path below.
                 print(f"[ERROR] {startup_resolver_reason} — routing to escalation.", file=sys.stderr)
                 _ps = self.read_phase_state()
-                _ps["last_error_code"] = "ERR_PHASE_RESOLVER_FAILED"
+                _ps["last_error_code"] = ERR_PHASE_RESOLVER_FAILED
                 _ps["escalation_trigger_reason"] = startup_resolver_reason
                 self.write_phase_state_atomic(_ps)
                 self.state["current_agent"] = "escalation"
@@ -6406,7 +6417,7 @@ class Orchestrator:
                     if _is_dead:
                         print(f"[ERROR] [EXECUTOR] Session dead on arrival: {_dead_msg}")
                         _ps_dead = self.read_phase_state()
-                        _ps_dead["last_error_code"] = "ERR_SESSION_DEAD_ON_ARRIVAL"
+                        _ps_dead["last_error_code"] = ERR_SESSION_DEAD_ON_ARRIVAL
                         _ps_dead["escalation_trigger_reason"] = (
                             f"Executor session terminated immediately (provider rejected): {_dead_msg}"
                         )
@@ -6687,7 +6698,7 @@ class Orchestrator:
                     if _is_dead:
                         print(f"[ERROR] [REVIEWER] Session dead on arrival: {_dead_msg}")
                         _ps_dead = self.read_phase_state()
-                        _ps_dead["last_error_code"] = "ERR_SESSION_DEAD_ON_ARRIVAL"
+                        _ps_dead["last_error_code"] = ERR_SESSION_DEAD_ON_ARRIVAL
                         _ps_dead["escalation_trigger_reason"] = (
                             f"Reviewer session terminated immediately (provider rejected): {_dead_msg}"
                         )
@@ -6914,7 +6925,7 @@ class Orchestrator:
                                 ).returncode == 0
                                 _ps_mf = self.read_phase_state()
                                 _ps_mf.update({
-                                    "last_error_code": "ERR_MERGE_FAILED",
+                                    "last_error_code": ERR_MERGE_FAILED,
                                     "merge_failure_reason": _merge_reason,
                                     "merge_failure_branch": branch,
                                     "merge_failure_branch_exists": _branch_present,
