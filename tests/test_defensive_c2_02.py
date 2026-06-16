@@ -55,25 +55,33 @@ async def _mock_post_401(*args, **kwargs):
 
 
 def _make_fast_expire_datetime(skip_calls: int = 3):
-    """Return a datetime mock whose utcnow() returns a past epoch for the first
-    `skip_calls` invocations (allowing session-key + op_start setup), then returns
-    a far-future timestamp so that the first while-loop deadline check fails
+    """Return a datetime mock whose now()/utcnow() returns a past epoch for the
+    first `skip_calls` invocations (allowing the session-key timestamp setup),
+    then a far-future timestamp so any datetime-based deadline check fails
     immediately — preventing a real 60-408s wait in pre-fix test runs.
 
-    After the fix, the status check raises HTTPException(502) before any deadline
-    is set, so this mock is irrelevant for the passing case.
+    Production now builds the session-key timestamp with ``datetime.now(timezone.utc)``
+    (the deprecated ``utcnow()`` was removed), so the mock primarily implements
+    ``now``; ``utcnow`` stays as a back-compat alias. After the C2-02 fix the status
+    check raises HTTPException(502) before any deadline is set, so the far-future
+    branch is irrelevant for the passing case — the mock only needs ``.timestamp()``
+    to keep working when the session key is built.
     """
     _state = {"n": 0}
 
     class _MockDT:
         @staticmethod
-        def utcnow() -> real_datetime:
+        def now(tz=None) -> real_datetime:
             _state["n"] += 1
             if _state["n"] <= skip_calls:
-                # Normal time — used for session_key timestamp / op_start
+                # Normal time — used for the session_key timestamp_ms
                 return real_datetime(2000, 1, 1, 0, 0, 0)
-            # Far future — deadline is at epoch+60; this timestamp >> that
+            # Far future — overshoots any datetime-based deadline
             return real_datetime(9999, 12, 31, 23, 59, 59)
+
+        # No production caller uses utcnow() anymore; keep the alias so the mock
+        # tolerates either spelling.
+        utcnow = now
 
     return _MockDT
 

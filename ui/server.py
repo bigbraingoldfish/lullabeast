@@ -214,7 +214,7 @@ def _create_synthetic_event(event_type, agent=None, phase=None, detail=None):
     """
     return {
         "id": str(uuid.uuid4()),
-        "ts": datetime.utcnow().isoformat() + "Z",
+        "ts": _utc_now_iso(),
         "event_type": event_type,
         "agent": agent,
         "phase": phase,
@@ -1378,7 +1378,7 @@ def _record_operation_metric(op_name: str, duration_seconds: float, config: dict
         entries = operations.get(op_name, [])
         entries.append({
             "duration_seconds": round(duration_seconds, 2),
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": _utc_now_iso(),
         })
         # Trim to last N entries
         if len(entries) > _METRICS_MAX_ENTRIES:
@@ -2238,7 +2238,7 @@ def append_recent_project(repo_abs: str) -> None:
     """Record repo_abs (realpath) at the front of the recent-projects list (cap 20)."""
     repo_abs = os.path.realpath(os.path.expanduser(repo_abs))
     entries = _read_recent_projects()
-    now = datetime.utcnow().isoformat() + "Z"
+    now = _utc_now_iso()
     entries = [e for e in entries if isinstance(e, dict) and e.get("path") != repo_abs]
     entries.insert(0, {"path": repo_abs, "last_used": now})
     entries = entries[:20]
@@ -2266,7 +2266,7 @@ def _archive_extra_roadmaps(repo_abs: str, keep_basename: str) -> None:
     """Move every *oadmap*.md except keep_basename into repo_abs/autodev_archive/."""
     archive_dir = os.path.join(repo_abs, "autodev_archive")
     os.makedirs(archive_dir, exist_ok=True)
-    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     for p in _glob_project_roadmap_paths(repo_abs):
         base = os.path.basename(p)
         if base == keep_basename:
@@ -3171,7 +3171,7 @@ def _write_escalation_files(project_dir_path, command, source="ui"):
     data = {
         "command": command,
         "source": source,
-        "timestamp": datetime.utcnow().isoformat() + "Z"
+        "timestamp": _utc_now_iso()
     }
 
     # Drop a stale sentinel before committing the new payload so a reader can
@@ -5247,8 +5247,19 @@ def _default_idea_session(name: str = "") -> dict:
     }
 
 
+def _utc_now_iso() -> str:
+    """Current UTC time as ISO-8601 with a 'Z' suffix (e.g. 2026-06-16T12:00:00.123456Z).
+
+    Exact drop-in for the deprecated ``utcnow().isoformat() + "Z"`` idiom. The
+    ``.replace("+00:00", "Z")`` is load-bearing: the seemingly-obvious
+    ``now(timezone.utc).isoformat() + "Z"`` would append a second offset
+    (``...+00:00Z``) and break every ``datetime.fromisoformat`` reader/test.
+    """
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def _iso_from_mtime(path: Path) -> str:
-    return datetime.utcfromtimestamp(path.stat().st_mtime).isoformat() + "Z"
+    return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _rehydrate_session_from_artifacts(idea_dir: Path, session_data: dict) -> tuple[dict, bool]:
@@ -5327,7 +5338,7 @@ def _rehydrate_session_from_artifacts(idea_dir: Path, session_data: dict) -> tup
             ts_candidates.append(_iso_from_mtime(idea_dir / "prd_draft.md"))
         if (idea_dir / "verification_draft.md").exists():
             ts_candidates.append(_iso_from_mtime(idea_dir / "verification_draft.md"))
-        latest_ts = max(ts_candidates) if ts_candidates else datetime.utcnow().isoformat() + "Z"
+        latest_ts = max(ts_candidates) if ts_candidates else _utc_now_iso()
         if not session_data.get("updated") or str(session_data.get("updated")) < latest_ts:
             session_data["updated"] = latest_ts
 
@@ -5458,7 +5469,7 @@ def _reconcile_ideas_session_after_late_done(
     prd_content = prd_draft_path.read_text() if prd_draft_path.exists() else ""
 
     parsed = _parse_agent_response(agent_response)
-    now = datetime.utcnow().isoformat() + "Z"
+    now = _utc_now_iso()
     asst = msgs[asst_idx]
     asst["pending"] = False
     asst["error"] = False
@@ -5709,7 +5720,7 @@ def _late_done_valid_for_attempt(done_path: Path | str, attempt_start_wall: floa
 async def _trigger_readiness_assessment(idea_id: str, config: dict) -> None:
     """Fire non-blocking readiness webhook; deletes prior readiness.done first."""
     _active_readiness_jobs.add(idea_id)
-    _readiness_job_started_at[idea_id] = datetime.utcnow().timestamp()
+    _readiness_job_started_at[idea_id] = datetime.now(timezone.utc).timestamp()
     logger.info(f"[READINESS] Triggering assessment for idea {idea_id}")
     try:
         ideas_dir = Path(config.get("ideas_dir") or "")
@@ -5886,7 +5897,7 @@ async def post_ideas_message(idea_id: str, request: Request):
     # On refresh, the UI will show the user's message with an error placeholder
     # instead of losing it entirely.
     session_path = idea_dir / "session.json"
-    _pre_save_ts = datetime.utcnow().isoformat() + "Z"
+    _pre_save_ts = _utc_now_iso()
     _pre_save_data = dict(pre_session)
     _pre_save_data.setdefault("messages", [])
     _user_pre_row: dict[str, Any] = {
@@ -5999,7 +6010,7 @@ async def post_ideas_message(idea_id: str, request: Request):
 
     # Replace the pending assistant placeholder with the real response.
     # If no placeholder found (unexpected), append a new assistant entry.
-    now = datetime.utcnow().isoformat() + "Z"
+    now = _utc_now_iso()
     session_data.setdefault("messages", [])
     replaced = False
     for _m in reversed(session_data["messages"]):
@@ -6076,7 +6087,7 @@ async def post_ideas_message(idea_id: str, request: Request):
         logger.warning("conversation_log append failed for idea=%s turn=%s",
                        idea_id, turn_n, exc_info=True)
 
-    _readiness_job_started_at[idea_id] = datetime.utcnow().timestamp()
+    _readiness_job_started_at[idea_id] = datetime.now(timezone.utc).timestamp()
     asyncio.create_task(_trigger_readiness_assessment(idea_id, config))
 
     out_body: dict[str, Any] = {
@@ -6143,7 +6154,7 @@ async def post_idea_annotation(idea_id: str, request: Request):
         "id": annotation_id,
         "section": section,
         "comment": comment,
-        "ts": datetime.utcnow().isoformat() + "Z",
+        "ts": _utc_now_iso(),
         "submitted": False,
     }
 
@@ -6290,7 +6301,7 @@ async def post_ideas_prd_section_revert(idea_id: str, request: Request):
     if session_path.exists():
         session_data = _read_json_file(str(session_path)) or {}
         session_data["prd_content"] = new_cur
-        session_data["updated"] = datetime.utcnow().isoformat() + "Z"
+        session_data["updated"] = _utc_now_iso()
         _atomic_write_json_file(str(session_path), session_data)
 
     prev_trim = prev_body.strip()
@@ -6383,7 +6394,7 @@ async def put_ideas_prd_section(idea_id: str, request: Request):
     new_doc = _replace_prd_section_body(cur_doc, title, content)
     _atomic_write_file(str(cur_path), new_doc)
 
-    now = datetime.utcnow().isoformat() + "Z"
+    now = _utc_now_iso()
     event = (
         f'Operator manually edited PRD section "{title}" at {now}. '
         "prd_draft.md on disk is authoritative — re-read it before changing "
@@ -6507,7 +6518,7 @@ def post_ideas():
     idea_dir = ideas_path / idea_id
     idea_dir.mkdir(parents=True, exist_ok=True)
 
-    now = datetime.utcnow().isoformat() + "Z"
+    now = _utc_now_iso()
     session_data = {
         "name": "New Idea",
         "messages": [],
@@ -6548,7 +6559,7 @@ def patch_ideas(idea_id: str, body: RenameIdeaRequest):
 
     session_data = _read_json_file(str(session_path)) if session_path.exists() else _default_idea_session()
     session_data["name"] = new_name
-    session_data["updated"] = datetime.utcnow().isoformat() + "Z"
+    session_data["updated"] = _utc_now_iso()
     _atomic_write_json_file(session_path, session_data)
     return {"ok": True, "id": idea_id, "name": new_name}
 
@@ -6651,7 +6662,7 @@ async def post_ideas_clarity_check(idea_id: str):
 
     ip = _idea_paths_for_messages(config, idea_id)
     # Build webhook payload
-    timestamp_ms = int(datetime.utcnow().timestamp() * 1000)
+    timestamp_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     session_key = f"ideas:{idea_id}:clarity-{timestamp_ms}"
     webhook_payload = {
         "agentId": WEBHOOK_AGENT_ID,
@@ -6784,7 +6795,7 @@ def get_idea_readiness(idea_id: str):
 
     started_at = _readiness_job_started_at.get(idea_id)
     if started_at is not None:
-        age = datetime.utcnow().timestamp() - started_at
+        age = datetime.now(timezone.utc).timestamp() - started_at
         if age <= READINESS_ACTIVE_WINDOW_SECONDS:
             status = "updating"
             logger.debug(f"[READINESS] Status for {idea_id}: {status}")
@@ -6860,7 +6871,7 @@ async def post_ideas_convert(idea_id: str):
 
     ip = _idea_paths_for_messages(config, idea_id)
     # Build webhook payload
-    timestamp_ms = int(datetime.utcnow().timestamp() * 1000)
+    timestamp_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     session_key = f"ideas:{idea_id}:convert-{timestamp_ms}"
     webhook_payload = {
         "agentId": ROADMAP_CONVERTER_AGENT_ID,
@@ -6953,7 +6964,7 @@ async def post_ideas_convert(idea_id: str):
     # so a concurrent readiness/salvage write can't corrupt the file).
     session_data["roadmap_content"] = roadmap_content
     session_data["verification_content"] = verification_content
-    session_data["updated"] = datetime.utcnow().isoformat() + "Z"
+    session_data["updated"] = _utc_now_iso()
     _atomic_write_json_file(session_path, session_data)
 
     return {
@@ -7032,7 +7043,7 @@ async def post_ideas_fix_roadmap_format(idea_id: str, body: FixRoadmapFormatRequ
 
     ip = _idea_paths_for_messages(config, idea_id)
     # Build webhook payload
-    timestamp_ms = int(datetime.utcnow().timestamp() * 1000)
+    timestamp_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     session_key = f"ideas:{idea_id}:format-correction-{timestamp_ms}"
     webhook_payload = {
         "agentId": ROADMAP_CONVERTER_AGENT_ID,
@@ -7109,7 +7120,7 @@ async def post_ideas_fix_roadmap_format(idea_id: str, body: FixRoadmapFormatRequ
     # Store in session.json
     updated_session = dict(session_data)
     updated_session["roadmap_content"] = corrected_content
-    updated_session["updated"] = datetime.utcnow().isoformat() + "Z"
+    updated_session["updated"] = _utc_now_iso()
     _atomic_write_json_file(session_path, updated_session)
 
     return {"roadmap_content": corrected_content}
@@ -10250,7 +10261,7 @@ def _run_init_project(
 
     repo_path = os.path.expanduser(repo_path)
     name = os.path.basename(repo_path.rstrip(os.sep))
-    now = datetime.utcnow().isoformat() + "Z"
+    now = _utc_now_iso()
     mode = "B" if os.path.exists(os.path.join(repo_path, ".git")) else "A"
 
     # Strict check before any filesystem writes: if no verification doc is
