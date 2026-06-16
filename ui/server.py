@@ -24,7 +24,6 @@ import uuid
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from tempfile import mkstemp
 
 import asyncio
 
@@ -68,6 +67,7 @@ from autodev.pipeline.queue_semantics import (
 from autodev.pipeline.sentinel_poller import PollResult  # noqa: E402
 from autodev.pipeline.event_log import append_pipeline_event  # noqa: E402
 from autodev.pipeline.prereq_spec import parse_prerequisites  # noqa: E402  (PREREQ-3)
+from autodev.pipeline.atomic_io import write_json_atomic, write_text_atomic  # noqa: E402
 from env_resolvers import resolve_openclaw_root, resolve_pipeline_root  # noqa: E402
 from skill_manager import SkillManager  # noqa: E402  (W5-E: inline completion reviewer)
 from webhook_client import invoke_agent_webhook, set_session_response_usage  # noqa: E402
@@ -1211,50 +1211,21 @@ def _should_resolve_idea_name(name: str) -> bool:
 
 
 def _atomic_write_json_file(path, data: dict) -> None:
-    """Write JSON atomically via a unique temp file + ``os.replace``.
-
-    Uses ``mkstemp`` (unique name in the same directory) rather than a fixed
-    ``<path>.tmp`` suffix: two concurrent writers to the same ``session.json``
-    (e.g. a chat turn racing the auto-fired readiness job or a GET /session
-    salvage write) would otherwise collide on the one temp name — the second
-    truncates the first's temp before ``os.replace``, leaving corrupt JSON that
-    ``_read_json_file`` then reads as ``None``. A unique temp per write makes
-    concurrent writers independent. The temp is removed if the write fails, so
-    a failure never leaves the destination truncated. Accepts ``str`` or
-    ``Path`` (call sites pass both).
-    """
-    path = Path(path)
-    fd, tmp = mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f)
-        os.replace(tmp, str(path))
-    except Exception:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-        raise
+    """Write JSON atomically. Thin wrapper over the shared
+    :func:`atomic_io.write_json_atomic` (LAUNCH-5): a unique ``mkstemp`` temp in
+    the target dir (NOT a fixed ``<path>.tmp`` — concurrent writers stay
+    independent), ``os.replace`` commit, temp removed on failure, re-raises.
+    Compact (no indent), preserving the prior on-disk shape. Accepts ``str`` or
+    ``Path`` (call sites pass both)."""
+    write_json_atomic(path, data, indent=None)
 
 
 def _atomic_write_text_file(path, content: str) -> None:
-    """Write text atomically via a unique temp file + ``os.replace``.
-
-    The text-mode sibling of :func:`_atomic_write_json_file` — same ``mkstemp``
-    reasoning (unique temp name, removed on failure, never leaving a truncated
-    destination). Used by the value-free ``.env.example`` emission path,
-    where the roadmap mandates a ``mkstemp + os.replace`` write and the
-    pre-existing fixed-suffix ``_atomic_write_file`` is not concurrent-safe.
-    Accepts ``str`` or ``Path``.
-    """
-    path = Path(path)
-    fd, tmp = mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-        os.replace(tmp, str(path))
-    except Exception:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-        raise
+    """Write text atomically. Thin wrapper over the shared
+    :func:`atomic_io.write_text_atomic` (LAUNCH-5): unique ``mkstemp`` temp,
+    ``os.replace`` commit, temp removed on failure, re-raises. Accepts ``str``
+    or ``Path``."""
+    write_text_atomic(path, content)
 
 
 def _atomic_symlink_swap(target: str, link_path: str) -> None:
@@ -1426,17 +1397,7 @@ def _inject_converter_skill(skill_name: str, config: dict) -> None:
         )
     dest = Path(config["roadmap_converter_workspace"]) / "skills" / skill_name / "SKILL.md"
     dest.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = mkstemp(dir=str(dest.parent))
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(source.read_text())
-        os.replace(tmp, str(dest))
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    write_text_atomic(str(dest), source.read_text())
 
 
 def _resolve_display_name_for_listing(idea_dir: Path, session_data: dict) -> tuple:
@@ -1616,10 +1577,9 @@ def _clean_pipeline_state_for_project(project_real: str) -> dict:
 
 
 def _write_json_atomic(path: str, obj: dict) -> None:
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(obj, f, indent=2)
-    os.replace(tmp, path)
+    # LAUNCH-5: delegate to the shared helper — fixes the prior fixed-".tmp" name
+    # (concurrent-writer corruption) and adds temp cleanup on failure.
+    write_json_atomic(path, obj, indent=2)
 
 
 def _rollback_pipeline_state(pipeline_state_path: str | None) -> None:
@@ -2230,10 +2190,8 @@ def _write_recent_projects_atomic(entries: list) -> None:
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(entries, f, indent=2)
-    os.replace(tmp, path)
+    # LAUNCH-5: shared helper (was a fixed-".tmp" write — concurrent-unsafe, no cleanup).
+    write_json_atomic(path, entries, indent=2)
 
 
 def append_recent_project(repo_abs: str) -> None:
@@ -3182,15 +3140,7 @@ def _write_escalation_files(project_dir_path, command, source="ui"):
         done_path.unlink()
 
     # Atomic payload write (unique temp + os.replace; temp cleaned on failure).
-    fd, tmp = mkstemp(dir=str(project_path), prefix="eo_")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f)
-        os.replace(tmp, str(json_path))
-    except Exception:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-        raise
+    write_json_atomic(str(json_path), data, indent=None)
 
     # Sentinel last — always trails the committed payload.
     with open(done_path, "w") as f:
@@ -3218,15 +3168,7 @@ def _write_pending_escalation_files(project_dir_path, command, source="ui"):
         "source": source,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-    fd, tmp = mkstemp(dir=str(project_path), prefix="pec_")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f)
-        os.replace(tmp, str(json_path))
-    except Exception:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-        raise
+    write_json_atomic(str(json_path), data, indent=None)
     with open(done_path, "w") as f:
         f.write("")
     return True
@@ -3789,10 +3731,7 @@ def post_resume_ready():
     if _prev_agent in ("planner", "executor", "reviewer", "escalation"):
         pipeline_state["resume_target_agent"] = _prev_agent
 
-    tmp_path = pipeline_state_path + ".tmp"
-    with open(tmp_path, "w") as f:
-        json.dump(pipeline_state, f, indent=2)
-    os.replace(tmp_path, pipeline_state_path)
+    write_json_atomic(pipeline_state_path, pipeline_state, indent=2)
 
     _write_operator_event(config, "resume_ready")
     return {"ok": True}
@@ -4953,17 +4892,7 @@ def _append_conversation_log(
     )
     new_content = existing + block
     idea_dir.mkdir(parents=True, exist_ok=True)
-    fd, tmp = mkstemp(dir=str(idea_dir), prefix=".conv_log_", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(new_content)
-        os.replace(tmp, str(log_path))
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    write_text_atomic(str(log_path), new_content)
 
 
 def _ensure_conversation_log_exists(idea_dir: Path, prior_messages: list) -> None:
@@ -4980,17 +4909,7 @@ def _ensure_conversation_log_exists(idea_dir: Path, prior_messages: list) -> Non
         parts.append(f"### User\n{(u.get('content') or '').strip()}\n\n")
         parts.append(f"### Assistant\n{(a.get('content') or '').strip()}\n")
     idea_dir.mkdir(parents=True, exist_ok=True)
-    fd, tmp = mkstemp(dir=str(idea_dir), prefix=".conv_log_", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write("".join(parts))
-        os.replace(tmp, str(log_path))
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    write_text_atomic(str(log_path), "".join(parts))
 
 
 def _build_ideas_history_block(prior_messages: list, idea_id: str) -> str:
@@ -7339,10 +7258,7 @@ async def post_setup_roadmap_seed(request: Request):
         raise HTTPException(status_code=422, detail="Missing required field: content")
     setup_path = Path("~/.openclaw/setup_session.json").expanduser()
     setup_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = str(setup_path) + ".tmp"
-    with open(tmp_path, "w") as f:
-        json.dump({"roadmap_seed": content}, f)
-    os.replace(tmp_path, str(setup_path))
+    write_json_atomic(str(setup_path), {"roadmap_seed": content}, indent=None)
     return {"ok": True}
 
 
@@ -7841,10 +7757,9 @@ def _normalize_doc_text_for_compare(s: str) -> str:
 
 
 def _atomic_write_file(path: str, content: str) -> None:
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        f.write(content)
-    os.replace(tmp, path)
+    # LAUNCH-5: delegate to the shared helper — fixes the prior fixed-".tmp" name
+    # (concurrent-writer corruption) and adds temp cleanup on failure.
+    write_text_atomic(path, content)
 
 
 def _preflight_materialize(
@@ -10305,10 +10220,7 @@ def _run_init_project(
             return {"ok": False, "error": f"verification.md invalid: {errs}"}
 
     def atomic_write(path: str, content: str):
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            f.write(content)
-        os.replace(tmp, path)
+        write_text_atomic(path, content)  # LAUNCH-5: shared helper (was fixed-".tmp")
 
     try:
         if mode == "A":

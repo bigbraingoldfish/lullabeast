@@ -13,7 +13,6 @@ import re
 import secrets
 import shutil
 import time
-import tempfile
 import subprocess
 import traceback
 import uuid
@@ -37,6 +36,7 @@ from queue_semantics import (
     bump_queue_version, mutate_queue, read_queue_version, scrub_parked_fields,
 )
 from env_resolvers import resolve_openclaw_root, resolve_pipeline_root
+from atomic_io import write_json_atomic, write_text_atomic
 
 # Route module-level logging.* calls (including those from webhook_client —
 # notably abort_agent_session's success/failure lines) to stdout so they land
@@ -414,28 +414,26 @@ def _write_escalation_failed_atomic(target_dir, error_data):
     already on a failure path, and a diagnostics-write failure must not mask
     the original error or derail the HALTED_SILENT transition that follows.
     """
-    tmp_path = None
     try:
-        fd, tmp_path = tempfile.mkstemp(dir=target_dir, prefix="escalation_failed_")
-        with os.fdopen(fd, "w") as f:
-            json.dump(error_data, f)
-        os.replace(tmp_path, os.path.join(target_dir, "escalation_failed.json"))
+        write_json_atomic(
+            os.path.join(target_dir, "escalation_failed.json"), error_data, indent=None)
     except Exception as e:
         print(f"[ERROR] Could not write escalation_failed.json: {e}")
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
 
 
 # Glob patterns for mkstemp atomic-write temp files that may be stranded if the
 # orchestrator was killed mid-write.  Pattern matches the 8-character random hex
 # suffix produced by tempfile.mkstemp (e.g. pipeline_state_a3f7c219).
 _STRANDED_TEMP_PATTERNS = [
+    # Legacy mkstemp(prefix="X_") temp names (pre-LAUNCH-5) — kept so an upgrade
+    # that inherits a crash-stranded temp from the old code still cleans it.
     "pipeline_state_????????",
     "phase_state_????????",
     "current_phase_????????",
+    # atomic_io.write_*_atomic temp names: mkstemp(prefix="<dest>.", suffix=".tmp").
+    "pipeline_state.json.*.tmp",
+    "phase_state.json.*.tmp",
+    "current_phase.json.*.tmp",
 ]
 
 
@@ -936,15 +934,8 @@ def _write_run_manifest(entry: dict) -> None:
         }
 
         os.makedirs(PROJECT_ARTIFACTS_DIR, exist_ok=True)
-        _fd, _tmp = tempfile.mkstemp(dir=PROJECT_ARTIFACTS_DIR, prefix=".run_manifest_")
-        try:
-            with os.fdopen(_fd, "w") as _f:
-                json.dump(manifest, _f)
-            os.replace(_tmp, os.path.join(PROJECT_ARTIFACTS_DIR, "run_manifest.json"))
-        except Exception:
-            if os.path.exists(_tmp):
-                os.remove(_tmp)
-            raise
+        write_json_atomic(
+            os.path.join(PROJECT_ARTIFACTS_DIR, "run_manifest.json"), manifest, indent=None)
         print(f"[W2A] run_manifest.json written: {phase_count} phases, subsystems={subsystem_set}")
     except Exception as _e:
         print(f"[W2A] run_manifest write failed (non-fatal): {_e}")
@@ -1178,15 +1169,8 @@ def _write_run_summary(outcome: str, outcome_detail: str) -> None:
 
         # --- Atomic write of run_summary.json ---
         os.makedirs(PROJECT_ARTIFACTS_DIR, exist_ok=True)
-        _fd, _tmp = tempfile.mkstemp(dir=PROJECT_ARTIFACTS_DIR, prefix=".run_summary_")
-        try:
-            with os.fdopen(_fd, "w") as _f:
-                json.dump(summary, _f)
-            os.replace(_tmp, os.path.join(PROJECT_ARTIFACTS_DIR, "run_summary.json"))
-        except Exception:
-            if os.path.exists(_tmp):
-                os.remove(_tmp)
-            raise
+        write_json_atomic(
+            os.path.join(PROJECT_ARTIFACTS_DIR, "run_summary.json"), summary, indent=None)
 
         # --- Append to runs_index.jsonl at AUTODEV_PIPELINE_ROOT ---
         _index_path = os.path.join(AUTODEV_PIPELINE_ROOT, "runs_index.jsonl")
@@ -1512,16 +1496,11 @@ class Orchestrator:
         
         # Write to temp file then atomic rename
         os.makedirs(AUTODEV_PIPELINE_ROOT, exist_ok=True)
-        fd, temp_path = tempfile.mkstemp(dir=AUTODEV_PIPELINE_ROOT, prefix="pipeline_state_")
         try:
-            with os.fdopen(fd, 'w') as f:
-                json.dump(self.state, f, indent=2)
-            os.replace(temp_path, STATE_FILE)
+            write_json_atomic(STATE_FILE, self.state, indent=2)
             print(f"[INFO] Atomically updated state: {self.state.get('pipeline_status', '?')} - {self.state.get('last_action', '')}")
         except Exception as e:
             print(f"[ERROR] Failed to write state: {e}")
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
             raise
 
     def transition_state(self, new_status, action_description):
@@ -1641,15 +1620,10 @@ class Orchestrator:
         bump_queue_version(data)
         data["last_updated"] = datetime.now(timezone.utc).isoformat()
         os.makedirs(AUTODEV_PIPELINE_ROOT, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=AUTODEV_PIPELINE_ROOT, prefix="queue_")
         try:
-            with os.fdopen(fd, "w") as f:
-                json.dump(data, f, indent=2)
-            os.replace(tmp, QUEUE_FILE)
+            write_json_atomic(QUEUE_FILE, data, indent=2)
         except Exception as e:
             print(f"[QUEUE] Failed to write queue file: {e}")
-            if os.path.exists(tmp):
-                os.remove(tmp)
             raise
 
     def _peek_queue_version(self):
@@ -2577,15 +2551,7 @@ class Orchestrator:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         try:
-            fd, tmp = tempfile.mkstemp(dir=art, prefix="esc_out_")
-            try:
-                with os.fdopen(fd, "w") as f:
-                    json.dump(payload, f)
-                os.replace(tmp, esc_json)
-            except Exception:
-                if os.path.exists(tmp):
-                    os.remove(tmp)
-                raise
+            write_json_atomic(esc_json, payload, indent=None)
             with open(esc_done, "w") as f:
                 f.write("")
         except OSError as e:
@@ -2965,16 +2931,10 @@ class Orchestrator:
 
         phase_state["planner_retries"] = phase_state.get("planner_retries", 0) + 1
         
-        target_dir = _atomic_temp_dir_for_project_writes()
-        fd, temp_path = tempfile.mkstemp(dir=target_dir, prefix="phase_state_")
         try:
-            with os.fdopen(fd, 'w') as f:
-                json.dump(phase_state, f, indent=2)
-            os.replace(temp_path, PHASE_STATE_FILE)
+            write_json_atomic(PHASE_STATE_FILE, phase_state, indent=2)
         except Exception as e:
             print(f"[ERROR] Failed to write phase_state: {e}")
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
         
         self.state["planner_retries"] = phase_state["planner_retries"]
         self.transition_state("RUNNING", f"Incremented planner retries to {phase_state['planner_retries']}")
@@ -3627,16 +3587,10 @@ class Orchestrator:
             os.makedirs(PROJECT_ARTIFACTS_DIR, exist_ok=True)
         except OSError:
             pass
-        target_dir = _atomic_temp_dir_for_project_writes()
-        fd, temp_path = tempfile.mkstemp(dir=target_dir, prefix="phase_state_")
         try:
-            with os.fdopen(fd, 'w') as f:
-                json.dump(phase_state, f, indent=2)
-            os.replace(temp_path, PHASE_STATE_FILE)
+            write_json_atomic(PHASE_STATE_FILE, phase_state, indent=2)
         except Exception as e:
             print(f"[ERROR] Failed to write phase_state: {e}")
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
 
     def _accumulate_role_tokens(self, role: str, jsonl_path: str) -> None:
         """Record this attempt's token usage, keyed by its session JSONL path.
@@ -4588,18 +4542,8 @@ class Orchestrator:
             if _new_content == _content:
                 print(f"[WARN] _mark_roadmap_phase: pattern not found for {raw_id!r} in {_roadmap_path}.")
                 return
-            _fd, _tmp = tempfile.mkstemp(dir=os.path.dirname(_roadmap_path))
-            try:
-                with os.fdopen(_fd, "w") as _wf:
-                    _wf.write(_new_content)
-                os.replace(_tmp, _roadmap_path)
-                print(f"[INFO] _mark_roadmap_phase: marked {raw_id} as [{marker}] in roadmap.")
-            except Exception:
-                try:
-                    os.unlink(_tmp)
-                except OSError:
-                    pass
-                raise
+            write_text_atomic(_roadmap_path, _new_content)
+            print(f"[INFO] _mark_roadmap_phase: marked {raw_id} as [{marker}] in roadmap.")
         except Exception as _e:
             print(f"[WARN] _mark_roadmap_phase: could not update roadmap for {raw_id!r}: {_e}")
 
@@ -4903,16 +4847,10 @@ class Orchestrator:
 
         phase_state["executor_retries"] = phase_state.get("executor_retries", 0) + 1
         
-        target_dir = _atomic_temp_dir_for_project_writes()
-        fd, temp_path = tempfile.mkstemp(dir=target_dir, prefix="phase_state_")
         try:
-            with os.fdopen(fd, 'w') as f:
-                json.dump(phase_state, f, indent=2)
-            os.replace(temp_path, PHASE_STATE_FILE)
+            write_json_atomic(PHASE_STATE_FILE, phase_state, indent=2)
         except Exception as e:
             print(f"[ERROR] Failed to write phase_state: {e}")
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
         
         self.state["executor_retries"] = phase_state["executor_retries"]
         self.transition_state("RUNNING", f"Incremented executor retries to {phase_state['executor_retries']}")
@@ -5164,24 +5102,18 @@ class Orchestrator:
             os.makedirs(PROJECT_ARTIFACTS_DIR, exist_ok=True)
         except OSError:
             pass
-        _fc_dir = os.path.dirname(_failure_context_path) or "."
-        fd, temp_path = tempfile.mkstemp(dir=_fc_dir, prefix="failure_context_")
         try:
-            with os.fdopen(fd, 'w') as f:
-                json.dump(context, f, indent=2)
-            self._append_failure_history(_failure_context_path)  # W1-D: archive before overwrite
-            os.replace(temp_path, _failure_context_path)
+            # _append_failure_history archives the currently-committed file, so it
+            # must run BEFORE write_json_atomic replaces it (W1-D: archive before
+            # overwrite). The shared helper does temp-write + os.replace atomically.
+            self._append_failure_history(_failure_context_path)
+            write_json_atomic(_failure_context_path, context, indent=2)
             print(
                 f"[INFO] write_failure_context: wrote failure_context.json "
                 f"(phase={context['phase_raw_id']}, agent={failing_agent}, attempt={attempt_number})"
             )
         except Exception as e:
             print(f"[ERROR] write_failure_context failed: {e}")
-            try:
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
-            except Exception:
-                pass
 
     def _enrich_blocking_issue_with_criterion_default(self, bi):
         """P0 Stage G: every blocking issue carries an explicit
@@ -5275,12 +5207,7 @@ class Orchestrator:
         except OSError:
             pass
         try:
-            fd, tmp_path = tempfile.mkstemp(
-                dir=PROJECT_ARTIFACTS_DIR, prefix="failure_context_"
-            )
-            with os.fdopen(fd, "w") as f:
-                json.dump(existing, f, indent=2)
-            os.replace(tmp_path, fc_path)
+            write_json_atomic(fc_path, existing, indent=2)
             print(
                 f"[REVIEWER_GATE] failure_context augmented "
                 f"(phase={existing['phase_id']}, "
@@ -5288,11 +5215,6 @@ class Orchestrator:
             )
         except Exception as e:
             print(f"[ERROR] _write_reviewer_failure_context failed: {e}")
-            try:
-                if "tmp_path" in locals() and os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-            except Exception:
-                pass
 
     def _write_canonical_metrics_row(self) -> None:
         """Write the canonical metrics row for the just-completed phase.
@@ -5520,25 +5442,14 @@ class Orchestrator:
         # ``mkstemp + os.replace`` so a crash mid-write to one file does
         # not corrupt the other.
         for target in (history_path, metrics_path):
-            tmpdir = os.path.dirname(target) or "."
-            tmp_path = None
             try:
-                os.makedirs(tmpdir, exist_ok=True)
-                fd, tmp_path = tempfile.mkstemp(dir=tmpdir, prefix=".metrics_")
-                with os.fdopen(fd, "w") as f:
-                    f.write(full_content)
-                os.replace(tmp_path, target)
-                tmp_path = None  # consumed by replace
+                os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+                write_text_atomic(target, full_content)
             except Exception as e:
                 print(
                     f"[ERROR] Failed to write canonical metrics to "
                     f"{target}: {e}"
                 )
-                if tmp_path and os.path.exists(tmp_path):
-                    try:
-                        os.remove(tmp_path)
-                    except OSError:
-                        pass
 
         _write_pipeline_event(  # W1-F
             "phase_complete",
@@ -5564,15 +5475,17 @@ class Orchestrator:
             except Exception:
                 pass
         phase_state["reviewer_rejected"] = True
-        target_dir = _atomic_temp_dir_for_project_writes()
-        fd, temp_path = tempfile.mkstemp(dir=target_dir, prefix="phase_state_")
+        # Best-effort, never-raise: matches the pre-LAUNCH-5 contract
+        # (_atomic_temp_dir_for_project_writes() + swallowed os.replace). The
+        # makedirs guarantees the temp dir exists so write_json_atomic's mkstemp
+        # cannot raise FileNotFoundError *before* its raise_on_error=False try
+        # block; the surrounding except swallows a makedirs/mkstemp OSError so a
+        # missing/unwritable artifacts dir can never crash the ROUTE_EXECUTOR path.
         try:
-            with os.fdopen(fd, 'w') as f:
-                json.dump(phase_state, f, indent=2)
-            os.replace(temp_path, PHASE_STATE_FILE)
-        except Exception:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+            os.makedirs(os.path.dirname(PHASE_STATE_FILE) or ".", exist_ok=True)
+            write_json_atomic(PHASE_STATE_FILE, phase_state, indent=2, raise_on_error=False)
+        except OSError:
+            pass
 
     def increment_reviewer_retries(self):
         phase_state = {}
@@ -5587,16 +5500,10 @@ class Orchestrator:
 
         phase_state["reviewer_retries"] = phase_state.get("reviewer_retries", 0) + 1
         
-        target_dir = _atomic_temp_dir_for_project_writes()
-        fd, temp_path = tempfile.mkstemp(dir=target_dir, prefix="phase_state_")
         try:
-            with os.fdopen(fd, 'w') as f:
-                json.dump(phase_state, f, indent=2)
-            os.replace(temp_path, PHASE_STATE_FILE)
+            write_json_atomic(PHASE_STATE_FILE, phase_state, indent=2)
         except Exception as e:
             print(f"[ERROR] Failed to write phase_state: {e}")
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
         
         self.state["reviewer_retries"] = phase_state["reviewer_retries"]
         self.transition_state("RUNNING", f"Incremented reviewer retries to {phase_state['reviewer_retries']}")

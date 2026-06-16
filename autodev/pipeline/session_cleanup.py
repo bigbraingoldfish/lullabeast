@@ -3,7 +3,6 @@ import sys
 import json
 import logging
 import logging.handlers
-import tempfile
 from datetime import datetime, timezone, timedelta
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -15,6 +14,7 @@ from env_resolvers import (  # noqa: E402
     resolve_openclaw_root,
     resolve_pipeline_root,
 )
+from atomic_io import write_json_atomic  # noqa: E402
 
 # Cron self-load: under system cron `.env` is not sourced, so populate any unset
 # canonical vars from <repo>/.env before resolving the roots (setdefault — a
@@ -87,25 +87,14 @@ def rotate_pipeline_logs():
 
 
 def _atomic_write_json(path, data):
-    """Write *data* as JSON to *path* atomically (mkstemp in the same dir + os.replace).
+    """Write *data* as JSON to *path* atomically.
 
-    Matches the repo-wide atomic-write rule (cf. ``gate_scripts/utils.py``) so a
-    Pi power-loss mid-write can never leave a truncated session store, and the
-    unique mkstemp name keeps two concurrent writers from colliding on a fixed
-    ``.tmp`` suffix. The temp file is removed if the write fails.
+    Thin wrapper over the shared :func:`atomic_io.write_json_atomic` (LAUNCH-5):
+    unique ``mkstemp`` temp in the target dir, ``os.replace`` commit, temp removed
+    on failure. Re-raises (``raise_on_error`` default) so the caller learns of a
+    failed prune-index write *before* it deletes the transcripts.
     """
-    directory = os.path.dirname(path) or "."
-    fd, tmp = tempfile.mkstemp(dir=directory, prefix="sessions.json.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        raise
+    write_json_atomic(path, data, indent=2)
 
 
 def _is_valid_ms_timestamp(value):

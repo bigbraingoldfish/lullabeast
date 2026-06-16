@@ -9,6 +9,7 @@ if _PIPELINE_DIR not in sys.path:
     sys.path.insert(0, _PIPELINE_DIR)
 
 from env_resolvers import resolve_pipeline_root  # noqa: E402
+from atomic_io import write_json_atomic  # noqa: E402
 
 
 # Stage D — structured per-phase block extraction (P0 §2.3).
@@ -337,15 +338,12 @@ def validate_and_identify(roadmap_path=None):
     phase["entry_point"] = _extract_entry_point(phase["verification_path"])
 
     try:
-        import tempfile
         os.makedirs(out_dir, exist_ok=True)
-        fd, temp_path = tempfile.mkstemp(dir=out_dir, prefix="current_phase_")
-        with os.fdopen(fd, 'w') as f:
-            # exclude status and raw_id from the spec's output schema, but we need status to halt orchestrator
-            # Actually, spec says Write "current_phase.json" – phase detail, category, exit_criteria
-            # We'll just dump the whole object, the extra fields are fine.
-            json.dump(phase, f, indent=2)
-        os.replace(temp_path, out_path)
+        # Dump the whole phase object; current_phase.json consumers ignore the
+        # extra fields (status/raw_id). raise_on_error=True (default) so a write
+        # failure raises into the except below and halts the orchestrator
+        # (exit 1), preserving this gate's fatal-on-write-failure contract.
+        write_json_atomic(out_path, phase, indent=2)
     except Exception as e:
         print(f"[ERROR] Failed to write current_phase.json: {e}")
         sys.exit(1)
