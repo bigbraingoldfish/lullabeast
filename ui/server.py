@@ -768,10 +768,16 @@ def load_config(config_path=None):
         config["log_level"] = _loglevel_env
     _resolved_level = resolve_log_level(config.get("log_level"), logging.INFO)
     config["log_level"] = logging.getLevelName(_resolved_level)
-    # Apply it to the already-created server loggers (built at import, before config loads)
+    # Apply to the already-created server loggers (built at import, before config loads)
     # so ui/config.json's `log_level` actually takes effect — and so the reported
-    # config["log_level"] always equals the level that is really active. Idempotent.
-    set_level(_resolved_level, "autodev.readiness", "autodev.ui")
+    # config["log_level"] always equals the level that is really active. Guarded on a
+    # real change: load_config runs on nearly every request, so re-applying an unchanged
+    # level each call is pure overhead — only touch the loggers when the level moves.
+    # Compared against the live logger level (not a module flag) so it stays correct if
+    # the loggers are re-levelled out of band, e.g. by a test's restore fixture.
+    _level_loggers = ("autodev.readiness", "autodev.ui")
+    if any(logging.getLogger(_n).level != _resolved_level for _n in _level_loggers):
+        set_level(_resolved_level, *_level_loggers)
 
     # Coerce numeric keys after the dual-source merge. A string in ui/config.json
     # (e.g. "300", or a typo like "5 min") would otherwise flow straight through

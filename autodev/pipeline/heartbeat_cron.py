@@ -1,3 +1,13 @@
+"""Crash-recovery watchdog cron (run by system cron) — lock-based, no model calls.
+
+Restarts the orchestrator only when it has genuinely died: liveness is decided
+purely by trying to acquire ``pipeline.lock`` (held → alive → do nothing), so an
+active run has zero model/GPU dependency. When the lock is free and
+``pipeline_state.json`` looks stale-orphaned-midflight, it relaunches the
+orchestrator on the recorded project. Self-loads ``<repo>/.env`` and exits non-zero
+when ``OPENCLAW_ROOT`` is not a directory; a corrupt state read while the
+orchestrator is dead fails loud rather than being swallowed as "nothing to do".
+"""
 import os
 import sys
 try:

@@ -85,6 +85,24 @@ def _env_truthy(name: str) -> bool:
     return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _env_int(env_name: str, default_str: str, *, min_clamp: int = 1) -> int:
+    """Parse an int from ``env_name``; fall back to ``default_str`` on a missing or
+    non-numeric value, then clamp to a ``min_clamp`` floor.
+
+    The shared body behind the named timeout / grace / backstop wrappers below —
+    each keeps its own docstring (the *why* of its threshold) and delegates the
+    parse + clamp here so the parsing discipline lives in exactly one place.
+    ``min_clamp`` is 1 for the poll thresholds (a 0 would race poll-tick cadence)
+    and 0 for the escalation-summary hold (0 means "disable the hold").
+    """
+    raw = (os.environ.get(env_name) or "").strip()
+    try:
+        v = int(raw or default_str)
+    except ValueError:
+        v = int(default_str)
+    return max(min_clamp, v)
+
+
 def _stall_timeout_seconds(env_name: str, default_str: str) -> int:
     """Parse stall-detection threshold from env; invalid values fall back to default.
 
@@ -93,12 +111,7 @@ def _stall_timeout_seconds(env_name: str, default_str: str) -> int:
     threshold treats the attempt as stalled.  Independent from startup
     grace — see :func:`_startup_grace_seconds`.
     """
-    raw = (os.environ.get(env_name) or "").strip()
-    try:
-        v = int(raw or default_str)
-    except ValueError:
-        v = int(default_str)
-    return max(1, v)
+    return _env_int(env_name, default_str)
 
 
 def _startup_grace_seconds(env_name: str, default_str: str) -> int:
@@ -114,12 +127,7 @@ def _startup_grace_seconds(env_name: str, default_str: str) -> int:
     invalid strings fall back to ``default_str``, and the minimum is
     clamped to 1 second (a 0 value would race poll-tick cadence).
     """
-    raw = (os.environ.get(env_name) or "").strip()
-    try:
-        v = int(raw or default_str)
-    except ValueError:
-        v = int(default_str)
-    return max(1, v)
+    return _env_int(env_name, default_str)
 
 
 def _infra_backstop_seconds(env_name: str, default_str: str) -> int:
@@ -138,12 +146,7 @@ def _infra_backstop_seconds(env_name: str, default_str: str) -> int:
     Parsing semantics mirror :func:`_stall_timeout_seconds` exactly:
     invalid strings fall back to ``default_str``, minimum clamped to 1 s.
     """
-    raw = (os.environ.get(env_name) or "").strip()
-    try:
-        v = int(raw or default_str)
-    except ValueError:
-        v = int(default_str)
-    return max(1, v)
+    return _env_int(env_name, default_str)
 
 
 def _escalation_summary_wait_seconds() -> int:
@@ -158,12 +161,7 @@ def _escalation_summary_wait_seconds() -> int:
     the default (300) — except the minimum clamp is **0, not 1**: 0 is a
     meaningful operator value here (disable the hold entirely).
     """
-    raw = (os.environ.get("AUTODEV_ESCALATION_SUMMARY_WAIT") or "").strip()
-    try:
-        v = int(raw or "300")
-    except ValueError:
-        v = 300
-    return max(0, v)
+    return _env_int("AUTODEV_ESCALATION_SUMMARY_WAIT", "300", min_clamp=0)
 
 
 # Pipeline state directory. Resolved via env_resolvers: OPENCLAW_ROOT is the
@@ -4128,6 +4126,11 @@ class Orchestrator:
         # escalation reset do NOT reset them (those preserve lifetime
         # visibility into prior failures).
         new_phase_state = {
+            # NB: the base counters are spelled out literally here (not spread from
+            # _default_phase_state()) on purpose — test_p0_stage_h_phase_state_defaults
+            # asserts each executor counter appears at *every* phase_state init site, which
+            # guards the metrics-row invariant that the keys exist on the first write of a
+            # new phase. Keep them inline if you touch this block.
             "planner_retries": 0,
             "executor_retries": 0,
             "executor_self_failure_retries": 0,
@@ -6082,7 +6085,7 @@ class Orchestrator:
                         _sid = _sd.get(_planner_full_key, {}).get("sessionId")
                         if _sid:
                             _planner_jsonl_path = os.path.join(_planner_sessions_dir, f"{_sid}.jsonl")
-                    except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+                    except (OSError, UnicodeDecodeError, json.JSONDecodeError, AttributeError, TypeError):
                         # best-effort: a missing file, bad JSON, or an odd-shaped session entry
                         # (a null/non-dict value → .get on None) leaves a None jsonl_path, which
                         # _accumulate_role_tokens handles (latches token_capture_degraded + emits
@@ -6428,7 +6431,7 @@ class Orchestrator:
                         _sid = _sd.get(_full_key, {}).get("sessionId")
                         if _sid:
                             _jsonl_path = os.path.join(_sessions_dir, f"{_sid}.jsonl")
-                    except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+                    except (OSError, UnicodeDecodeError, json.JSONDecodeError, AttributeError, TypeError):
                         # best-effort: missing/bad/odd-shaped session entry → None jsonl_path →
                         # token_capture_warning downstream; must not escape to escalation.
                         pass
@@ -6711,7 +6714,7 @@ class Orchestrator:
                         _sid = _sd.get(_rev_full_key, {}).get("sessionId")
                         if _sid:
                             _jsonl_path = os.path.join(_rev_sessions_dir, f"{_sid}.jsonl")
-                    except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+                    except (OSError, UnicodeDecodeError, json.JSONDecodeError, AttributeError, TypeError):
                         # best-effort: missing/bad/odd-shaped session entry → None jsonl_path →
                         # token_capture_warning downstream; must not escape to escalation.
                         pass

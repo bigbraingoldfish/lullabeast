@@ -14,33 +14,42 @@ if current_dir not in sys.path:
 from utils import ARTIFACTS_DIR, load_json_safe, record_error_code_only, ERR_VALIDATION_FAILED
 
 def evaluate_planner(output_path=None):
+    """Return ``"PASS"`` if the planner output JSON is structurally valid, else ``"FAIL"``.
+
+    Requires ``implementation_plan`` and ``tdd_test_structure`` to be non-empty lists and
+    ``pass_criteria`` to be a non-empty list of dicts each carrying a ``condition`` key. On a
+    structural failure records ``ERR_VALIDATION_FAILED`` (the orchestrator owns the retry
+    increment) and returns ``"FAIL"``; a missing/unparseable file already returns ``"FAIL"``
+    via ``load_json_safe``. ``output_path`` defaults to ``planner_output.json`` under the
+    artifacts dir.
+    """
     if output_path is None:
         output_path = os.path.join(ARTIFACTS_DIR, "planner_output.json")
-        
+
     data = load_json_safe(output_path, "planner")
-    if data is None: 
+    if data is None:
         return "FAIL"
-        
+
     # Structural checks
     valid = True
     if not data.get("implementation_plan") or not isinstance(data["implementation_plan"], list):
         valid = False
     elif not data.get("tdd_test_structure") or not isinstance(data["tdd_test_structure"], list):
         valid = False
-    
+
     pass_criteria = data.get("pass_criteria")
-    if not pass_criteria or not isinstance(pass_criteria, list) or len(pass_criteria) < 1: 
+    if not pass_criteria or not isinstance(pass_criteria, list) or len(pass_criteria) < 1:
         valid = False
     else:
         for crit in pass_criteria:
             if not isinstance(crit, dict) or "condition" not in crit:
                 valid = False
                 break
-            
+
     if not valid:
         record_error_code_only("planner", ERR_VALIDATION_FAILED)
         return "FAIL"
-        
+
     return "PASS"
 
 if __name__ == "__main__":

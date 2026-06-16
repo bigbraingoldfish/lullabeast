@@ -299,7 +299,7 @@ def validate_and_identify(roadmap_path=None):
                     roadmap_path = matches[0]
                     break
             if roadmap_path: break
-            
+
     if not roadmap_path or not os.path.exists(roadmap_path):
         print("[ERROR] Roadmap file not found.")
         sys.exit(1)
@@ -335,7 +335,7 @@ def validate_and_identify(roadmap_path=None):
               f"(roadmap_path={roadmap_path!r}). "
               "Pass an absolute roadmap path so the output directory is unambiguous.")
         sys.exit(1)
-        
+
     # Stage D: point agents at the project-level verification.md.
     phase["verification_path"] = os.path.join(project_root, "verification.md")
 
@@ -354,11 +354,11 @@ def validate_and_identify(roadmap_path=None):
     except Exception as e:
         print(f"[ERROR] Failed to write current_phase.json: {e}")
         sys.exit(1)
-        
+
     if phase["status"] == "BLOCKED":
         print(f"BLOCKED: Phase {phase['raw_id']} is blocked.")
         sys.exit(2)
-        
+
     print(f"PENDING: Phase {phase['raw_id']} identified.")
     sys.exit(0)
 

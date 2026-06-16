@@ -15,6 +15,13 @@ Short reference for operators and contributors. Install and networking details s
 | **Lullabeast UI** | FastAPI app in `ui/server.py` (default port **18790**). Serves the React dashboard and **`/api/*`** routes. Access requires the **`AUTODEV_UI_TOKEN`** dashboard token (browser cookie via the startup URL, or `Authorization: Bearer` for scripts) — still bind to loopback on trusted machines (see SETUP **Security and network exposure**). |
 | **This repository** | Contains pipeline code, UI, skills, agent identity sources, and tests. **`AUTODEV_REPO_PATH`** should point at this clone for a correct install. |
 
+**A note on the three names you'll meet.** *Lullabeast* is the product/brand. *autodev* is the
+internal name — it surfaces as the repo directory (`autodev-ui`), the package path (`autodev/…`),
+and the **`AUTODEV_`** environment-variable prefix; that prefix is legacy, so newer feature-scoped
+knobs are intentionally **unprefixed** (e.g. `PREREQ_PROBE_TIMEOUT`). *OpenClaw* is the external
+runtime Lullabeast drives, not part of this codebase. So the three are layers — brand / internal +
+env / external dependency — not competing names for the same thing.
+
 ---
 
 ## Pipeline states

@@ -1,3 +1,13 @@
+"""Session-store TTL pruning + log-rotation cron (run by system cron).
+
+Prunes OpenClaw agent sessions past the 30-day TTL from each
+``OPENCLAW_ROOT/agents/{agent}/sessions/sessions.json`` (escalation sessions are
+exempt), writing the pruned index atomically *before* deleting each expired
+session's ``.jsonl`` + trajectory siblings; a missing/invalid ``updatedAt`` is
+kept-and-warned, never deleted. Also rotates the pipeline logs. Self-loads
+``<repo>/.env`` and exits non-zero when ``OPENCLAW_ROOT`` is not a directory rather
+than degrading silently.
+"""
 import os
 import sys
 import json
