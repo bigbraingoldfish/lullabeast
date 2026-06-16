@@ -1,0 +1,27 @@
+# Ruff configuration — added in LAUNCH-4 (plans/Active/MVP-LAUNCH-READINESS-ROADMAP.md).
+#
+# CI runs `ruff check` as an ADVISORY job (continue-on-error) for now: the existing
+# baseline is ~410 findings, dominated by F401 (unused-import). Cleaning that baseline
+# and promoting the CI job to blocking is LAUNCH-8/LAUNCH-9 follow-up. The pinned ruff
+# version lives in requirements-dev.txt.
+target-version = "py311"   # minimum supported runtime (CI matrix: 3.11–3.13)
+line-length = 100
+
+# Vendored / generated trees are not ours to lint. (.venv, __pycache__, and
+# .gitignore'd paths — e.g. analyze_executor_sessions.py — are already excluded by
+# ruff's defaults.)
+extend-exclude = [
+    "autodev/plugin/node_modules",
+    "autodev/plugin/dist",
+    "ui/static",
+]
+
+[lint]
+# Ruff's default rule set (E4 / E7 / E9 + F) is kept as-is. Only drop the one rule
+# that flags a deliberate, load-bearing pattern in this codebase:
+ignore = [
+    # E402 module-import-not-at-top — gate scripts intentionally `sys.path.insert(...)`
+    # before importing sibling modules (many already annotated `# noqa: E402`). The
+    # ordering is required, not accidental.
+    "E402",
+]
