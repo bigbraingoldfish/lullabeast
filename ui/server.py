@@ -8109,6 +8109,68 @@ def _emit_env_example(repo_path: str, spec: dict) -> list:
         return []  # best-effort: a write failure must not break preflight
 
 
+def _find_nested_git_repos(root_path: str, *, max_depth: int = 4,
+                           max_dirs_scanned: int = 2000, max_hits: int = 10) -> list:
+    """Best-effort, bounded scan for git repositories nested *below* ``root_path``.
+
+    Preflight auto-runs ``git init`` when a target directory is not itself a git
+    repo. If the operator points Lullabeast at a *parent* of existing projects
+    (e.g. ``~/projects``), that auto-init + ``git add -A`` would swallow the whole
+    tree. This helper detects the hazard: a child directory carrying a ``.git``
+    entry — a directory, or a gitlink *file* for submodules/worktrees — means
+    ``root_path`` contains other repos and must not be initialized.
+
+    Returns the repo-relative paths of nested repos found. The scan is bounded by
+    depth, total directories visited, and hit count so a huge tree (``$HOME``)
+    cannot hang preflight; heavy/uninteresting directories are pruned and symlinks
+    are not followed. Never raises — on any OS error it returns what it found so far.
+    """
+    hits: list = []
+    scanned = 0
+    root_path = os.path.abspath(root_path)
+    _PRUNE = {"node_modules", "venv", ".venv", "__pycache__", ".cache",
+              ".tox", "dist", "build", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
+    try:
+        for dirpath, dirnames, filenames in os.walk(root_path):
+            scanned += 1
+            if scanned > max_dirs_scanned or len(hits) >= max_hits:
+                break
+            if dirpath != root_path and (".git" in dirnames or ".git" in filenames):
+                hits.append(os.path.relpath(dirpath, root_path))
+                dirnames[:] = []  # found a repo — do not descend into it
+                continue
+            rel = os.path.relpath(dirpath, root_path)
+            depth = 0 if rel == os.curdir else rel.count(os.sep) + 1
+            if depth >= max_depth:
+                dirnames[:] = []
+                continue
+            # Prune heavy/hidden dirs for descent (a `.git` here was already checked above).
+            dirnames[:] = [d for d in dirnames if d not in _PRUNE and not d.startswith(".")]
+    except OSError:
+        pass
+    return hits
+
+
+def _nested_repo_refusal_message(repo_path: str) -> str | None:
+    """Return an actionable refusal message if ``repo_path`` contains nested git
+    repositories (and so must not be auto-``git init``ed), else ``None``.
+
+    Shared by the two auto-init sites — the preflight check (preview) and
+    :func:`_run_init_project` Mode A (the actual Launch mutation) — so both refuse
+    to ``git init`` + ``git add -A`` a *parent* of existing projects with one
+    consistent message (REL-3). Callers gate the call on "not already a git repo".
+    """
+    nested = _find_nested_git_repos(repo_path)
+    if not nested:
+        return None
+    shown = ", ".join(nested[:3]) + ("..." if len(nested) > 3 else "")
+    return (
+        f"'{repo_path}' is not a git repository but contains existing git "
+        f"repositories ({shown}). Refusing to auto-initialize here — point "
+        "Lullabeast at a single project directory, not a parent of other repos."
+    )
+
+
 def _run_preflight_checks(repo_path: str, config: dict | None = None) -> list:
     """Run ordered preflight checks for a project directory.
 
@@ -8309,7 +8371,22 @@ def _run_preflight_checks(repo_path: str, config: dict | None = None) -> list:
     # the single "git not available" failure above is the actionable signal.
     did_fresh_init = False
     git_dir = os.path.join(repo_path, ".git")
-    if git_ok and not os.path.exists(git_dir):
+    # Containment guard (REL-3): never auto-`git init` a directory that already
+    # CONTAINS other git repositories. Pointing preflight at a parent of existing
+    # projects (e.g. ~/projects) would otherwise `git init` + `git add -A` the whole
+    # tree (observed live). Fail closed with an actionable row instead.
+    _nested_refusal = (
+        _nested_repo_refusal_message(repo_path)
+        if (git_ok and not os.path.exists(git_dir))
+        else None
+    )
+    if _nested_refusal:
+        checks.append({
+            "check": "git repo",
+            "status": "fail",
+            "message": _nested_refusal,
+        })
+    elif git_ok and not os.path.exists(git_dir):
         try:
             subprocess.run(["git", "init", repo_path], check=True, capture_output=True)
             subprocess.run(
@@ -10262,6 +10339,16 @@ def _run_init_project(
     name = os.path.basename(repo_path.rstrip(os.sep))
     now = _utc_now_iso()
     mode = "B" if os.path.exists(os.path.join(repo_path, ".git")) else "A"
+
+    # Containment guard (REL-3): Mode A runs `git init` + `git add -A` on
+    # ``repo_path``. If Launch is aimed at a *parent* of existing projects (e.g.
+    # ~/projects), that would swallow every child repo into one tree. Refuse
+    # before any scaffolding writes — same hazard, same message as the preflight
+    # guard, so the actual mutation path is protected, not only the preview.
+    if mode == "A":
+        _nested_refusal = _nested_repo_refusal_message(repo_path)
+        if _nested_refusal:
+            return {"ok": False, "error": _nested_refusal}
 
     # Strict check before any filesystem writes: if no verification doc is
     # available (neither in the request body nor already on disk), refuse.

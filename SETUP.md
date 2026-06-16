@@ -392,6 +392,13 @@ Preflight gate — they're yours to set.
 trackable) — so the secrets you put in `.env` are never committed or pushed. This is automatic; you
 don't have to do anything.
 
+**Point Preflight at a single project, not a parent folder.** If the directory you select is not yet a git
+repository, Preflight initializes one for you (`git init` + an initial commit) so the pipeline has a HEAD to
+build on. To keep that convenience from misfiring, Preflight **refuses to auto-init a directory that already
+contains other git repositories** — e.g. selecting `~/projects` (which holds many repos) fails Preflight with
+an actionable message instead of running `git init` + `git add .` across the whole tree. Always aim Lullabeast
+at one project's own directory.
+
 **How the build reads your `.env` (DEC-5).** The agent webhook has no env channel — agents inherit the
 OpenClaw gateway's environment. So the project's **entry-point/test command must load its own `.env`**
 (most frameworks do this via a dotenv loader; otherwise prepend `set -a; . ./.env; set +a` to the
