@@ -66,7 +66,6 @@ from autodev.pipeline.queue_semantics import (
 )
 from autodev.pipeline.sentinel_poller import PollResult  # noqa: E402
 from autodev.pipeline.event_log import append_pipeline_event  # noqa: E402
-from autodev.pipeline import host_probes  # noqa: E402  (PREREQ-3: declared-tool capability probes)
 from autodev.pipeline.prereq_spec import parse_prerequisites  # noqa: E402  (PREREQ-3)
 from env_resolvers import resolve_openclaw_root, resolve_pipeline_root  # noqa: E402
 from skill_manager import SkillManager  # noqa: E402  (W5-E: inline completion reviewer)
@@ -1230,7 +1229,7 @@ def _atomic_write_text_file(path, content: str) -> None:
 
     The text-mode sibling of :func:`_atomic_write_json_file` — same ``mkstemp``
     reasoning (unique temp name, removed on failure, never leaving a truncated
-    destination). Used by the value-free ``.env`` scaffolding path (PREREQ-3),
+    destination). Used by the value-free ``.env.example`` emission path,
     where the roadmap mandates a ``mkstemp + os.replace`` write and the
     pre-existing fixed-suffix ``_atomic_write_file`` is not concurrent-safe.
     Accepts ``str`` or ``Path``.
@@ -8031,113 +8030,98 @@ def _ensure_repo_git_identity(repo_path: str) -> None:
             )
 
 
-def _env_key_presence(env_path, names) -> dict:
-    """Map each declared env var NAME to a presence state — **value-free**.
+def _ensure_env_gitignore_hygiene(repo_path: str) -> None:
+    """Keep the user's real ``.env`` out of git, while keeping ``.env.example`` in it.
 
-    Reads the project ``.env`` (if present) and classifies each declared key:
+    The user creates a real ``.env`` from ``.env.example`` and fills it with secret
+    values; the orchestrator then commits the whole tree every phase (``git add .``).
+    So this **must** ensure a standalone ``.env`` ignore line exists before that can
+    stage the secret (the DEC-1/DEC-2 never-store-a-value spine). Separately, if some
+    existing pattern would *also* ignore ``.env.example`` (a ``.env*``-style glob), add
+    an explicit ``!.env.example`` un-ignore so the template can still be committed.
 
-      - ``"set"``    — a ``NAME=`` line whose value (after the first ``=``) is non-empty
-      - ``"empty"``  — a ``NAME=`` line present but with an empty value
-      - ``"absent"`` — no line for NAME
-
-    Only the three-state label is ever returned. The text after ``=`` is inspected
-    *solely* for emptiness and is never stored, returned, or logged — the
-    never-ingest-a-value invariant (roadmap PREREQ ``DEC-2``). A missing/unreadable
-    ``.env`` yields all-``absent`` (never raises). ``export NAME=…`` and ``#`` comments
-    are tolerated.
+    Append-only, idempotent, best-effort (a write failure never breaks preflight).
     """
-    states = {n: "absent" for n in names}
+    import fnmatch
+    gi_path = os.path.join(repo_path, ".gitignore")
     try:
-        with open(env_path, "r", errors="replace") as f:
-            raw = f.read()
+        existing = ""
+        if os.path.exists(gi_path):
+            with open(gi_path, "r", errors="replace") as f:
+                existing = f.read()
+        patterns = [ln.strip() for ln in existing.splitlines()]
+
+        def _ignored(name: str) -> bool:
+            # Simplified gitignore eval: last matching pattern wins; ``!`` negates.
+            verdict = False
+            for pat in patterns:
+                if not pat or pat.startswith("#"):
+                    continue
+                neg = pat.startswith("!")
+                p = (pat[1:] if neg else pat).strip().strip("/")
+                if p and fnmatch.fnmatch(name, p):
+                    verdict = not neg
+            return verdict
+
+        additions = []
+        if not _ignored(".env"):
+            additions.append(".env")
+            patterns.append(".env")
+        if _ignored(".env.example"):  # a .env* glob would swallow the template
+            additions.append("!.env.example")
+        if additions:
+            prefix = "" if (not existing or existing.endswith("\n")) else "\n"
+            with open(gi_path, "a") as f:
+                f.write(prefix + "\n".join(additions) + "\n")
     except OSError:
-        return states  # no/unreadable .env ⇒ everything is "not yet"
-    for line in raw.splitlines():
-        s = line.strip()
-        if s.startswith("export "):
-            s = s[len("export "):].strip()
-        if not s or s.startswith("#") or "=" not in s:
-            continue
-        key, _, value = s.partition("=")
-        key = key.strip()
-        if key in states:
-            states[key] = "set" if value.strip() else "empty"
-    return states
+        pass  # best-effort; never break preflight
 
 
-def _prerequisite_check_rows(ver_text: str, repo_path: str) -> list:
-    """Build preflight rows for the verification.md ``## Prerequisites`` block.
+def _emit_env_example(repo_path: str, spec: dict) -> list:
+    """Materialize the project's declared env-var NAMES into a committed ``.env.example``.
 
-    Returns ``[]`` when no block is present (additive — a project that predates
-    the feature contributes zero rows). Tool rows probe the host via
-    :func:`host_probes.probe`; **every declared tool is required** (the schema has
-    no advisory marker — see the roadmap template glossary), so a definitively
-    ``missing`` tool is a blocking ``fail`` (the ``baseball`` fix) while an
-    inconclusive ``unknown`` probe (browser/timeout) ``warn``s and never blocks
-    (``DEC-4``). Env rows are **presence-only** — three states, never a value.
-
-    Each row carries the standard ``{check, status, message}`` plus additive
-    ``{prereq, required, guidance?, kind?}`` so :func:`post_setup_preflight` can
-    compute ``launch_blocked`` from the required-tool fails alone.
+    For each ``## Prerequisites`` → ``### Environment`` declaration, append a
+    ``# <purpose>`` comment + a blank ``KEY=`` line to ``<repo>/.env.example``
+    (created if absent). **Append-only** (never overwrites/reorders an existing line),
+    **atomic** (``_atomic_write_text_file``), and **value-free** — it writes no value,
+    ever: the user copies ``.env.example`` to their own ``.env`` and fills the values,
+    which never leave their machine. Before writing, :func:`_ensure_env_gitignore_hygiene`
+    makes sure git ignores that real ``.env`` (so the orchestrator's per-phase
+    ``git add .`` can never commit a secret) and keeps ``.env.example`` trackable.
+    Returns the list of names written (empty when there is nothing to add). Best-effort.
     """
-    spec = parse_prerequisites(ver_text)
-    if not spec["block_present"]:
+    env = (spec or {}).get("env") or []
+    if not env:
         return []
-    rows = []
-    for tool in spec["tools"]:
-        name = tool["name"]
-        result = host_probes.probe(name)
-        status = result.get("status")
-        if status == "found":
-            version = result.get("version")
-            row = {
-                "check": f"tool: {name}",
-                "status": "pass",
-                "message": f"{name} found" + (f" ({version})" if version else ""),
-                "prereq": "tool",
-                "required": True,
-            }
-        elif status == "missing":
-            guidance = result.get("guidance") or "install it and ensure it is on PATH"
-            row = {
-                "check": f"tool: {name}",
-                "status": "fail",
-                "message": f"{name} not found — {guidance}",
-                "prereq": "tool",
-                "required": True,
-                "guidance": guidance,
-            }
-        else:  # "unknown" — inconclusive; never strand legitimate work (DEC-4)
-            row = {
-                "check": f"tool: {name}",
-                "status": "warn",
-                "message": f"{name}: could not verify ({result.get('detail') or 'inconclusive'})",
-                "prereq": "tool",
-                "required": True,
-            }
-        rows.append(row)
-    if spec["env"]:
-        presence = _env_key_presence(
-            os.path.join(repo_path, ".env"), [e["name"] for e in spec["env"]]
-        )
-        for env in spec["env"]:
-            name = env["name"]
-            state = presence.get(name, "absent")
-            if state == "set":
-                row_status, msg = "pass", f"{name} set in .env"
-            elif state == "empty":
-                row_status, msg = "warn", f"{name} in .env, empty — fill in the value"
-            else:  # absent
-                row_status, msg = "warn", f"{name} not yet in .env"
-            rows.append({
-                "check": f"env: {name}",
-                "status": row_status,
-                "message": msg,           # name + state only — never the value
-                "prereq": "env",
-                "required": False,        # env keys are the user's to set; never block
-                "kind": env.get("kind", "config"),
-            })
-    return rows
+    # Protect the user's real .env (secrets) BEFORE it can ever exist alongside git.
+    _ensure_env_gitignore_hygiene(repo_path)
+    example_path = os.path.join(repo_path, ".env.example")
+    try:
+        existing = ""
+        if os.path.exists(example_path):
+            with open(example_path, "r", errors="replace") as f:
+                existing = f.read()
+        present = set()
+        for line in existing.splitlines():
+            s = line.strip()
+            if s.startswith("export "):
+                s = s[len("export "):].strip()
+            if s and not s.startswith("#") and "=" in s:
+                present.add(s.partition("=")[0].strip())
+        absent = [e for e in env if e["name"] not in present]
+        if not absent:
+            return []
+        block_lines = []
+        for e in absent:
+            purpose = (e.get("purpose") or "").strip()
+            if purpose:
+                block_lines.append(f"# {purpose}")
+            block_lines.append(f"{e['name']}=")  # blank — never a value
+        sep = "" if (not existing or existing.endswith("\n")) else "\n"
+        _atomic_write_text_file(example_path, existing + sep + "\n".join(block_lines) + "\n")
+        return [e["name"] for e in absent]
+    except OSError:
+        return []  # best-effort: a write failure must not break preflight
 
 
 def _run_preflight_checks(repo_path: str, config: dict | None = None) -> list:
@@ -8147,12 +8131,11 @@ def _run_preflight_checks(repo_path: str, config: dict | None = None) -> list:
     {"check": str, "status": str, "message": str} rows with status
     pass|fail|warn|fixed.
 
-    PREREQ-3: when the project's ``verification.md`` carries a ``## Prerequisites``
-    block, additional rows are appended via :func:`_prerequisite_check_rows` — one
-    per declared tool (probed) and one per declared env key (presence-only, never a
-    value). Those rows additionally carry ``{prereq, required, guidance?, kind?}``;
-    :func:`post_setup_preflight` reads them to compute ``launch_blocked``. A project
-    with no ``## Prerequisites`` block contributes zero extra rows (baseline-identical).
+    Host tools are **not** probed or gated (removed — unreliable from arbitrary declared
+    names). When the project's ``verification.md`` carries a ``## Prerequisites`` block,
+    the declared env-var **names** are materialized into a committed ``.env.example`` via
+    :func:`_emit_env_example` (value-free; not a check; also gitignores the real ``.env``).
+    A project with no ``## Prerequisites`` block is baseline-identical.
     """
     import subprocess
     import glob as glob_mod
@@ -8591,11 +8574,10 @@ def _run_preflight_checks(repo_path: str, config: dict | None = None) -> list:
                         "Re-run conversion from the Ideas screen to regenerate it."
                     ),
                 })
-            # PREREQ-3 — declared-prerequisite rows parsed from the same ver_text
-            # (probed tools + presence-only env keys). Additive: a verification.md
-            # with no ## Prerequisites block contributes zero rows, so a project
-            # that predates the feature is byte-identical to baseline here.
-            checks.extend(_prerequisite_check_rows(ver_text, repo_path))
+            # Materialize the declared env-var NAMES into a committed .env.example for
+            # the user to fill in (value-free, append-only; also gitignores the real
+            # .env). Not a check — host tools are no longer probed/gated at all.
+            _emit_env_example(repo_path, parse_prerequisites(ver_text))
 
     return checks
 
@@ -8608,11 +8590,8 @@ async def post_setup_preflight(request: Request):
            "verification_content": optional, "confirm_roadmap_archive": optional bool,
            "keep_filename": optional str}
     When multiple *oadmap*.md exist, returns roadmap_ambiguous until confirm_roadmap_archive.
-    Returns: {"checks": [...], "launch_blocked": bool, optional roadmap_ambiguous,
-    roadmap_files, recommended_keep}. ``launch_blocked`` (PREREQ-3) is True iff a
-    declared *required tool* is missing (env keys and advisory/unknown probes never
-    block); the early roadmap-ambiguous / materialization-fail returns omit it (the UI
-    treats absent as not-blocked-by-prerequisites).
+    Returns: {"checks": [...], optional roadmap_ambiguous, roadmap_files, recommended_keep}.
+    Any check row with status ``fail`` blocks Launch via the UI's any-fail gate.
     """
     body = await request.json()
     repo_path = body.get("repo_path", "")
@@ -8676,104 +8655,9 @@ async def post_setup_preflight(request: Request):
     all_checks = header_checks + mat + checks
     if not any(c.get("status") == "fail" for c in all_checks):
         append_recent_project(repo_abs)
-    # PREREQ-3 — Launch is gated only by a missing *required tool* (env keys are
-    # the user's to set and never block; advisory/unknown probes warn-and-allow).
-    launch_blocked = any(
-        c.get("prereq") == "tool" and c.get("required") and c.get("status") == "fail"
-        for c in all_checks
-    )
-    return {"checks": all_checks, "launch_blocked": launch_blocked}
-
-
-def _ensure_env_gitignored(repo_path: str) -> None:
-    """Ensure a standalone ``.env`` line exists in the project's ``.gitignore``.
-
-    Append-only: creates ``.gitignore`` if absent and appends ``.env`` only when no
-    standalone ``.env`` line is already present (``.env.example`` does not count).
-    Never rewrites or reorders existing entries. Best-effort — a write failure is
-    swallowed because the ``.env`` scaffold itself has already succeeded; a missing
-    ignore line is a warning condition, not a hard failure.
-    """
-    gi_path = os.path.join(repo_path, ".gitignore")
-    try:
-        existing = ""
-        if os.path.exists(gi_path):
-            with open(gi_path, "r", errors="replace") as f:
-                existing = f.read()
-        if any(ln.strip() == ".env" for ln in existing.splitlines()):
-            return
-        prefix = "" if (not existing or existing.endswith("\n")) else "\n"
-        with open(gi_path, "a") as f:
-            f.write(prefix + ".env\n")
-    except OSError:
-        pass  # best-effort; the scaffold already succeeded
-
-
-@app.post("/api/setup/scaffold-env")
-async def post_setup_scaffold_env(request: Request):
-    """Scaffold the project ``.env`` with declared env-var **names** as blank
-    ``KEY=`` lines — value-free, append-only, atomic.
-
-    Body: ``{"repo_path": str}``. Reads the project's ``verification.md``
-    ``## Prerequisites`` → ``### Environment`` declarations (PREREQ-1 parser) and,
-    for every declared key **not already present** in ``.env``, appends a blank
-    ``KEY=`` line preceded by a ``# <purpose>`` comment. It **never** overwrites or
-    reorders an existing line (a value the user already set is untouched — worst
-    case is an extra blank line) and **never writes a value**: the user fills the
-    values in their own ``.env``, which never leave their machine (``DEC-1`` /
-    ``DEC-2``). Also ensures ``.env`` is gitignored.
-
-    Returns ``{ok, env: {NAME: "set"|"empty"|"absent"}, written: [NAMES]}`` — the
-    presence map is value-free. A project with no ``verification.md`` or no declared
-    env keys is a no-op (``{ok: True, env: {}, written: []}``) — no file is created.
-    """
-    body = await request.json()
-    repo_path = body.get("repo_path", "")
-    if not repo_path:
-        raise HTTPException(status_code=422, detail="repo_path is required")
-    repo_abs = os.path.realpath(os.path.expanduser(repo_path.strip()))
-    if not os.path.isdir(repo_abs):
-        raise HTTPException(status_code=422, detail=f"Not a directory: {repo_abs}")
-
-    try:
-        ver_text = Path(os.path.join(repo_abs, "verification.md")).read_text()
-    except OSError:
-        return {"ok": True, "env": {}, "written": []}  # no declaration ⇒ nothing to scaffold
-
-    spec = parse_prerequisites(ver_text)
-    if not spec["env"]:
-        return {"ok": True, "env": {}, "written": []}
-
-    names = [e["name"] for e in spec["env"]]
-    env_path = os.path.join(repo_abs, ".env")
-    before = _env_key_presence(env_path, names)
-    absent = [e for e in spec["env"] if before.get(e["name"], "absent") == "absent"]
-
-    if absent:
-        existing = ""
-        if os.path.exists(env_path):
-            try:
-                with open(env_path, "r", errors="replace") as f:
-                    existing = f.read()
-            except OSError as exc:
-                # Do not risk clobbering an unreadable existing .env.
-                raise HTTPException(status_code=500, detail=f"Could not read .env: {exc}") from exc
-        block_lines = []
-        for e in absent:
-            purpose = (e.get("purpose") or "").strip()
-            if purpose:
-                block_lines.append(f"# {purpose}")
-            block_lines.append(f"{e['name']}=")  # blank — never a value
-        appended = "\n".join(block_lines) + "\n"
-        sep = "" if (not existing or existing.endswith("\n")) else "\n"
-        _atomic_write_text_file(env_path, existing + sep + appended)
-
-    _ensure_env_gitignored(repo_abs)
-    return {
-        "ok": True,
-        "env": _env_key_presence(env_path, names),  # value-free presence map
-        "written": [e["name"] for e in absent],
-    }
+    # No separate launch_blocked flag: any check row with status "fail" already
+    # blocks Launch via the UI's existing any-fail gate.
+    return {"checks": all_checks}
 
 
 @app.get("/api/setup/recent-projects")
@@ -9288,7 +9172,8 @@ async def post_queue_add(request: Request):
     ``_run_preflight_checks`` (symlink, gitignore, git init, workspaces, roadmap).
     On success, appends the project to recent-projects.
 
-    Body: {"project_path": str, "idea_id": str|null, "parent_id": str|null}
+    Body: {"project_path": str, "idea_id": str|null, "parent_id": str|null,
+           "completion_review": optional bool}
     Returns 400 with validation_errors if preflight fails.
     Returns 422 if project_path is invalid.
     Returns 409 if the same project path (realpath) is already queued in a non-terminal state
