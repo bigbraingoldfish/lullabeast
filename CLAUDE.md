@@ -32,7 +32,6 @@ autodev-ui/
 │   │   └── gate_scripts/
 │   │       ├── utils.py            # Shared gate utilities, error codes, atomic writes
 │   │       ├── phase_resolver.py   # Roadmap parser + phase identification (formerly roadmap_parser.py)
-│   │       ├── phase_init.py       # Phase initialisation gate
 │   │       ├── repo_init_check.py  # Git repo readiness gate
 │   │       ├── planner_gate.py     # Evaluates planner output
 │   │       ├── executor_gate.py    # Evaluates executor output, file manifest, unaccounted deletions
@@ -48,7 +47,6 @@ autodev-ui/
 │   │   │   └── HEARTBEAT.md  # planner, executor, reviewer only
 │   ├── config/
 │   │   ├── skill_mapping.yaml      # Maps roadmap subsystem prefixes → skill disciplines
-│   │   ├── setup_session.json      # OpenClaw session setup configuration
 │   │   └── mcp.json                # MCP server configuration
 │   ├── tests/                      # Pipeline-level tests (orchestration, sentinel, skills)
 │   └── docs/
