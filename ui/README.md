@@ -7,8 +7,7 @@ FastAPI server (`server.py`) and a single-file React app (`index.html`) for the 
 | File | Purpose |
 |------|---------|
 | `server.py` | API routes, OpenClaw webhook helpers, setup/preflight/launch; on startup, optional **auto sync** of `autodev/agents/*` into `OPENCLAW_ROOT/workspace-*` (see `auto_sync_agent_workspaces` in `config.json` / `DEFAULTS` in `server.py`, same mtime rules as `install.sh` step 5) |
-| `index.html` | Inline Babel/React UI (all screens in one file) |
-| `_build_screens.py` | Optional splice helper for `MIDDLE` → `index.html` — **may lag** `index.html`; treat `index.html` as source of truth for Ideas/Preflight until regenerated |
+| `index.html` | Inline Babel/React UI (all screens in one file) — hand-maintained source of truth (no build/generate step) |
 
 ### Layout notes (Project Ideas)
 
@@ -71,9 +70,13 @@ Agent turns in Project Ideas (prd-creator webhook → file writes → sentinel p
 
 ## Editing `index.html`
 
-1. **Backup:** `cp ui/index.html ui/index.html.bak` (per roadmap).
-2. **Regenerate middle block:** from a clean `git` baseline, run `python3 ui/_build_screens.py` after changing the `MIDDLE` string in `_build_screens.py`.
-3. **App shell:** Root `App()` with `AppCtx.Provider`, setup state, and `PreflightScreen` props lives after `PipelineScreen` in `index.html` — re-apply if you only re-run `_build_screens.py`.
+`index.html` is the single, hand-maintained source of truth — edit it directly. There is **no** build,
+transpile, or generate step (Babel runs in the browser; the former `_build_screens.py` splice helper was
+removed in favour of editing the file directly).
+
+1. **Backup:** `cp ui/index.html ui/index.html.bak` before a large edit.
+2. **Where things live:** all screen components are inline; the root `App()` (with `AppCtx.Provider` and
+   setup state) and the `PreflightScreen` props sit after `PipelineScreen` near the end of the file.
 
 ## Tests
 

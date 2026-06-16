@@ -615,7 +615,6 @@ OpenClaw maintains an `exec-approvals.json` file at `~/.openclaw/exec-approvals.
 - `<repo>/autodev/pipeline/gate_scripts/executor_gate.py`
 - `<repo>/autodev/pipeline/gate_scripts/reviewer_gate.py`
 - `<repo>/autodev/pipeline/gate_scripts/phase_resolver.py`
-- `<repo>/autodev/pipeline/gate_scripts/phase_init.py`
 - `<repo>/autodev/pipeline/gate_scripts/repo_init_check.py`
 
 The simplest way to trigger the approval prompt is to start a pipeline run — OpenClaw will pause and ask for approval the first time each script is encountered.
