@@ -20,7 +20,9 @@ def load_server():
 
 from ui.server import (
     _PIPELINE_GITIGNORE_ENTRIES,
+    _find_nested_git_repos,
     _preflight_materialize,
+    _run_init_project,
     _run_preflight_checks,
 )
 
@@ -1112,3 +1114,104 @@ class TestPreflightEndpointVerification:
             and ("Behavioral Verification" in c["message"] or "roadmap" in c["check"].lower())
             for c in data["checks"]
         ), f"Expected failure for old-format roadmap; got: {data['checks']}"
+
+
+# ---------------------------------------------------------------------------
+# REL-3 — preflight refuses to auto-`git init` a parent of existing repos
+# ---------------------------------------------------------------------------
+
+class TestNestedGitRepoContainmentGuard:
+
+    def test_find_nested_git_repos_detects_child_repos(self, tmp_path):
+        """A directory containing child `.git` repos is reported with their paths."""
+        (tmp_path / "alpha" / ".git").mkdir(parents=True)
+        (tmp_path / "beta" / ".git").mkdir(parents=True)
+        (tmp_path / "plain").mkdir()  # no .git → not a hit
+
+        hits = _find_nested_git_repos(str(tmp_path))
+
+        assert sorted(hits) == ["alpha", "beta"]
+
+    def test_find_nested_git_repos_detects_gitlink_file(self, tmp_path):
+        """A `.git` *file* (submodule/worktree gitlink) also marks a nested repo."""
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / ".git").write_text("gitdir: /elsewhere\n")
+
+        assert _find_nested_git_repos(str(tmp_path)) == ["sub"]
+
+    def test_find_nested_git_repos_clean_dir_returns_empty(self, tmp_path):
+        """A directory with no nested repos yields no hits (normal single-project)."""
+        (tmp_path / "src").mkdir()
+        (tmp_path / "README.md").write_text("# x\n")
+
+        assert _find_nested_git_repos(str(tmp_path)) == []
+
+    def test_preflight_refuses_parent_of_repos(self, tmp_path):
+        """Pointing preflight at a parent of existing repos fails closed, no init."""
+        repo_path = tmp_path / "projects"
+        repo_path.mkdir()
+        (repo_path / "alpha" / ".git").mkdir(parents=True)
+        (repo_path / "beta" / ".git").mkdir(parents=True)
+        openclaw = _make_openclaw_dir(tmp_path, repo_path)
+        _make_gitignore(repo_path, _full_gitignore_content())
+        (repo_path / "roadmap.md").write_text("# Roadmap\n")
+
+        with patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
+
+        git_repo = next(c for c in results if c["check"] == "git repo")
+        assert git_repo["status"] == "fail"
+        assert "existing git repositories" in git_repo["message"]
+        # The auto-init path must NOT have run.
+        assert not any(
+            "Initialized git repository" in c["message"] for c in results
+        ), f"init should have been skipped; got: {results}"
+
+    def test_preflight_clean_dir_still_auto_inits(self, tmp_path):
+        """Guard does not regress the normal single-project auto-init path."""
+        repo_path = tmp_path / "myproject"
+        repo_path.mkdir()  # no .git, no nested repos
+        openclaw = _make_openclaw_dir(tmp_path, repo_path)
+        _make_gitignore(repo_path, _full_gitignore_content())
+        (repo_path / "roadmap.md").write_text("# Roadmap\n")
+
+        with patch("subprocess.run", side_effect=_mock_subprocess_preflight_pass()):
+            results = _run_preflight_checks(
+                str(repo_path), config=_preflight_config(openclaw, repo_path)
+            )
+
+        assert not any(
+            "existing git repositories" in c["message"] for c in results
+        )
+        assert any(
+            c["check"] == "git repo"
+            and c["status"] == "fixed"
+            and "Initialized git repository" in c["message"]
+            for c in results
+        ), f"expected normal auto-init; got: {results}"
+
+    def test_init_project_mode_a_refuses_parent_of_repos(self, tmp_path):
+        """REL-3: the Launch mutation path (_run_init_project Mode A) refuses to
+        `git init` a parent of existing repos — not just the preflight preview."""
+        parent = tmp_path / "projects"
+        parent.mkdir()
+        (parent / "alpha" / ".git").mkdir(parents=True)
+        (parent / "beta" / ".git").mkdir(parents=True)
+
+        result = _run_init_project(
+            str(parent),
+            VALID_ROADMAP_SEED,
+            verification_content=VALID_VERIFICATION_CONTENT,
+        )
+
+        assert result["ok"] is False
+        assert "existing git repositories" in result["error"]
+        # The guard must fire BEFORE any scaffolding/init writes into the parent.
+        assert not (parent / "src").exists()
+        assert not (parent / "roadmap.md").exists()
+        assert not (parent / ".git").exists()
+        # Child repos are untouched.
+        assert (parent / "alpha" / ".git").is_dir()
+        assert (parent / "beta" / ".git").is_dir()
