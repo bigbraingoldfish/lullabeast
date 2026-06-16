@@ -19,5 +19,6 @@
   "poll_timeout": 900,
   "poll_interval": 2,
   "ideas_idle_threshold": 300,
-  "auto_sync_agent_workspaces": true
+  "auto_sync_agent_workspaces": true,
+  "log_level": "INFO"
 }

@@ -43,7 +43,7 @@ _SRC = _ORCH_PATH.read_text()
 # ---------------------------------------------------------------------------
 
 
-_EXPECTED_INIT_SITES = 6  # __init__, queue-advance, 3 fallbacks, reset_phase
+_EXPECTED_INIT_SITES = 4  # __init__, queue-advance, _default_phase_state (shared increment_* fallback), reset_phase
 
 
 def test_self_failure_counter_present_at_all_init_sites():
@@ -55,9 +55,9 @@ def test_self_failure_counter_present_at_all_init_sites():
     assert occurrences >= _EXPECTED_INIT_SITES, (
         f'"executor_self_failure_retries": 0 appears {occurrences} time(s) '
         f"in orchestrator.py — expected >= {_EXPECTED_INIT_SITES} "
-        "(__init__, queue auto-advance self.state, increment_planner_retries "
-        "fallback, reset_phase new_phase_state, increment_executor_retries "
-        "fallback, increment_reviewer_retries fallback). Missing defaults "
+        "(__init__, queue auto-advance self.state, _default_phase_state — the "
+        "shared fallback the three increment_* helpers now delegate to after the "
+        "LAUNCH-8 consolidation — and reset_phase new_phase_state). Missing defaults "
         "would let phase_state.json fall back to .get(..., 0) at read time, "
         "but the canonical metrics row invariant breaks if the keys are "
         "absent on the first phase_state write of a new phase."
@@ -186,21 +186,28 @@ def test_reset_phase_initialises_new_counters(monkeypatch, tmp_path):
     "increment_reviewer_retries",
 ])
 def test_increment_helper_fallback_includes_new_counters(helper_name):
-    """Each ``increment_*_retries`` helper has a fallback dict for when
-    phase_state.json is missing. That fallback must include both new
-    counters so the first write after the fallback fires does not produce
-    a phase_state.json missing the new keys."""
+    """Each ``increment_*_retries`` helper must guarantee a missing phase_state.json
+    yields a dict carrying both lifetime counters. LAUNCH-8 consolidated the three
+    formerly-inline fallback dicts into the single ``_default_phase_state()`` helper,
+    so each increment_* now delegates to it (``read_phase_state() or
+    self._default_phase_state()``) rather than carrying its own literal."""
     needle = f"def {helper_name}"
     idx = _SRC.find(needle)
     assert idx != -1, f"{helper_name} not found in orchestrator source"
-    # The fallback dict literal sits within ~40 lines of the method header.
-    block = _SRC[idx : idx + 2000]
-    assert '"executor_self_failure_retries": 0' in block, (
-        f"{helper_name} fallback dict must include "
-        '"executor_self_failure_retries": 0 so a missing phase_state.json '
-        "does not produce a phase_state lacking the new lifetime counter"
+    block = _SRC[idx : idx + 1200]
+    assert "_default_phase_state()" in block, (
+        f"{helper_name} must fall back to self._default_phase_state() when "
+        "phase_state.json is absent — the single source of truth for the zeroed "
+        "counter defaults after the LAUNCH-8 consolidation."
     )
-    assert '"executor_reviewer_rejection_retries": 0' in block, (
-        f"{helper_name} fallback dict must include "
-        '"executor_reviewer_rejection_retries": 0 for the same reason'
-    )
+
+
+def test_default_phase_state_includes_new_counters():
+    """The consolidated ``_default_phase_state()`` (the shared fallback the three
+    increment_* helpers delegate to) must include both lifetime counters at 0, or a
+    missing phase_state.json would produce a dict lacking them."""
+    idx = _SRC.find("def _default_phase_state")
+    assert idx != -1, "_default_phase_state not found in orchestrator source"
+    block = _SRC[idx : idx + 800]
+    assert '"executor_self_failure_retries": 0' in block
+    assert '"executor_reviewer_rejection_retries": 0' in block
