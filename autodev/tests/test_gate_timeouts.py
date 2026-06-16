@@ -118,3 +118,22 @@ class TestGateTimeouts:
             ok, _ = orch.run_repo_init_check()
             assert ok is True
             assert mock_run4.call_args.kwargs.get("timeout") == 60
+
+    def test_phase_resolver_complete_check_passes_timeout_60(self, orch):
+        """The phase_resolver completion check is a gate subprocess too — it must be
+        bounded by GATE_SUBPROCESS_TIMEOUT like the verdict gates (it was previously
+        the one resolver call hardcoded to 120)."""
+        from subprocess import CompletedProcess
+
+        fake = CompletedProcess(args=[], returncode=0, stdout="PIPELINE_COMPLETE\n", stderr="")
+        with patch("orchestrator.subprocess.run", return_value=fake) as mock_run:
+            assert orch._phase_resolver_indicates_pipeline_complete() is True
+            assert mock_run.call_args.kwargs.get("timeout") == 60
+
+    def test_phase_resolver_complete_check_timeout_returns_false(self, orch):
+        """A hung phase_resolver (TimeoutExpired) must be a safe negative, not a
+        stall: the completion check returns False so the caller proceeds normally."""
+        from subprocess import TimeoutExpired
+
+        with patch("orchestrator.subprocess.run", side_effect=TimeoutExpired("cmd", 60)):
+            assert orch._phase_resolver_indicates_pipeline_complete() is False

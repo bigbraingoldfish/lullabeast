@@ -88,6 +88,12 @@ AUTODEV_REPO_PATH = os.environ.get(
     "AUTODEV_REPO_PATH",
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+# Directory holding the deterministic gate scripts the orchestrator invokes as subprocesses
+# (planner/executor/reviewer verdict gates + phase_resolver / repo_init_check). Single source
+# of truth for the path so it is never rebuilt inline at each call site; see
+# autodev/pipeline/gate_scripts/README.md for the gate execution-model contract.
+GATE_SCRIPTS_DIR = os.path.join(AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts")
+
 
 def _env_truthy(name: str) -> bool:
     return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
@@ -1538,9 +1544,7 @@ class Orchestrator:
 
     def _phase_resolver_indicates_pipeline_complete(self) -> bool:
         """True iff phase_resolver reports no pending phases for the current symlink project."""
-        gate_script = os.path.join(
-            AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts", "phase_resolver.py"
-        )
+        gate_script = os.path.join(GATE_SCRIPTS_DIR, "phase_resolver.py")
         if not os.path.isfile(gate_script):
             return False
         try:
@@ -1548,7 +1552,7 @@ class Orchestrator:
                 [sys.executable, gate_script],
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=GATE_SUBPROCESS_TIMEOUT,
             )
             output = (result.stdout or "").strip()
             return result.returncode == 0 and "PIPELINE_COMPLETE" in output
@@ -2952,7 +2956,16 @@ class Orchestrator:
         return phase_state["planner_retries"]
         
     def run_planner_output_gate(self):
-        gate_script = os.path.join(AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts", "planner_gate.py")
+        """Run the planner verdict gate as a subprocess; return True iff it emits ``PASS``.
+
+        Verdict-gate convention (see gate_scripts/README.md): the gate always exits 0 and
+        prints its verdict on stdout, which we read from ``result.stdout``. A gate-script
+        crash or timeout is treated as a safe failure (``False``), never a pipeline crash.
+        Sibling :meth:`planner_output_is_valid` evaluates the *same* gate in-process for the
+        restart short-circuit; the two share one verdict contract — see its note for why both
+        mechanisms exist.
+        """
+        gate_script = os.path.join(GATE_SCRIPTS_DIR, "planner_gate.py")
         json_path = os.path.join(PROJECT_ARTIFACTS_DIR, "planner_output.json")
         try:
             result = subprocess.run(
@@ -3494,10 +3507,15 @@ class Orchestrator:
         json_path = os.path.join(PROJECT_ARTIFACTS_DIR, "planner_output.json")
         if not os.path.exists(done_path) or not os.path.exists(json_path):
             return False
-        # Import and call the gate function directly so workspace patches in tests take effect.
-        # Subprocess-based call would inherit the real OPENCLAW_ROOT and ignore test mocks.
+        # Deliberately in-process (NOT the subprocess path used by run_planner_output_gate):
+        # importing and calling the gate function directly lets a test's workspace patches take
+        # effect, whereas a subprocess would inherit the real OPENCLAW_ROOT and ignore the mocks.
+        # The two paths share one verdict contract (planner_gate.evaluate_planner) and are kept
+        # as two mechanisms ON PURPOSE — run_planner_output_gate wants process isolation on the
+        # normal loop; this restart-detection helper wants test-mockability. Not reconciled. See
+        # gate_scripts/README.md.
         try:
-            gate_dir = os.path.join(AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts")
+            gate_dir = GATE_SCRIPTS_DIR
             if gate_dir not in sys.path:
                 sys.path.insert(0, gate_dir)
             import planner_gate as _pg
@@ -4154,7 +4172,7 @@ class Orchestrator:
         # which may be stale from a previously completed phase.  Without this call the
         # planner reads the wrong phase context on the next invocation.
         import glob as _glob
-        gate_script = os.path.join(AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts", "phase_resolver.py")
+        gate_script = os.path.join(GATE_SCRIPTS_DIR, "phase_resolver.py")
         _roadmap_candidates = _glob.glob(os.path.join(SYMLINK_TARGET, "*[Rr]oadmap*.md"))
         if _roadmap_candidates:
             try:
@@ -4302,7 +4320,7 @@ class Orchestrator:
         # version of current_phase.json, which may be stale from a prior completed phase.
         # Re-run roadmap_parser to refresh it before the executor retries.
         import glob as _re_glob
-        _re_gate = os.path.join(AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts", "phase_resolver.py")
+        _re_gate = os.path.join(GATE_SCRIPTS_DIR, "phase_resolver.py")
         _re_roadmap = _re_glob.glob(os.path.join(SYMLINK_TARGET, "*[Rr]oadmap*.md"))
         if _re_roadmap:
             try:
@@ -4703,12 +4721,12 @@ class Orchestrator:
         self.state["current_phase"] = 0
         self.state["current_phase_raw_id"] = ""
         # Phase identification is a pure script.
-        gate_script = os.path.join(AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts", "phase_resolver.py")
+        gate_script = os.path.join(GATE_SCRIPTS_DIR, "phase_resolver.py")
         result = None
         output = ""
         try:
             # Pass nothing to use default locator
-            result = subprocess.run([sys.executable, gate_script], capture_output=True, text=True)
+            result = subprocess.run([sys.executable, gate_script], capture_output=True, text=True, timeout=GATE_SUBPROCESS_TIMEOUT)
             output = result.stdout.strip()
             if result.returncode == 0 and "PENDING: Phase" in output:
                 # Start next phase correctly.
@@ -4718,7 +4736,7 @@ class Orchestrator:
                     # T4.3 — guard the resolver-written phase file. A truncated /
                     # corrupt file (crash mid-write, disk-full) raises
                     # JSONDecodeError — uncaught, since the outer except only
-                    # catches CalledProcessError; a valid-but-shapeless file
+                    # catches CalledProcessError / TimeoutExpired; a valid-but-shapeless file
                     # (no raw_id) would silently advance to current_phase=0,
                     # raw_id="" (branch "phase/", colliding session keys). Route
                     # either to the same F4 ERR_PHASE_RESOLVER_FAILED escalation
@@ -4817,7 +4835,10 @@ class Orchestrator:
                         return "break"
                     return "continue"
                 return "break"
-        except subprocess.CalledProcessError as e:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            # TimeoutExpired: the gate hit GATE_SUBPROCESS_TIMEOUT. result stays None,
+            # so the F4 block below escalates via the "raised before returning a verdict"
+            # path — the same routing a CalledProcessError gets.
             print(f"[ERROR] phase_resolver subprocess raised: {e}")
 
         # F4 — reached only when the resolver produced no actionable verdict:
@@ -4868,7 +4889,14 @@ class Orchestrator:
         return phase_state["executor_retries"]
 
     def run_executor_output_gate(self):
-        gate_script = os.path.join(AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts", "executor_gate.py")
+        """Run the executor verdict gate as a subprocess; return True iff it emits ``PASS``.
+
+        Verdict-gate convention (see gate_scripts/README.md): exits 0 with the verdict on
+        stdout; FAIL detail rides side channels (``executor_gate_detail.json`` /
+        ``gate_warnings.json`` / ``last_error_code``), not the return value. A gate-script
+        crash or timeout is treated as a safe failure (``False``).
+        """
+        gate_script = os.path.join(GATE_SCRIPTS_DIR, "executor_gate.py")
         try:
             result = subprocess.run(
                 [sys.executable, gate_script],
@@ -5521,7 +5549,15 @@ class Orchestrator:
         return phase_state["reviewer_retries"]
 
     def run_reviewer_output_gate(self):
-        gate_script = os.path.join(AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts", "reviewer_gate.py")
+        """Run the reviewer verdict gate as a subprocess; return its raw verdict/route token.
+
+        Verdict-gate convention (see gate_scripts/README.md): exits 0 and prints one of
+        ``PASS`` or a route token (``ROUTE_EXECUTOR`` / ``ROUTE_PLANNER`` / ``ROUTE_ESCALATE``
+        / ``*_UNVERIFIED`` / ``MISSING_ARTIFACTS`` / ``CONTRACT_FAILURE``), returned verbatim
+        for the caller to dispatch on. A gate-script crash or timeout fails safe to
+        ``ROUTE_ESCALATE`` (never parsed as a PASS).
+        """
+        gate_script = os.path.join(GATE_SCRIPTS_DIR, "reviewer_gate.py")
         try:
             result = subprocess.run(
                 [sys.executable, gate_script],
@@ -5542,7 +5578,7 @@ class Orchestrator:
     def run_repo_init_check(self):
         """Runs repo_init_check.py as a subprocess per PIPELINE-SPEC §13.
         Returns (passed: bool, details: str). Never retries on failure."""
-        gate_script = os.path.join(AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts", "repo_init_check.py")
+        gate_script = os.path.join(GATE_SCRIPTS_DIR, "repo_init_check.py")
         try:
             # Inherit env so repo_init_check.py sees OPENCLAW_ROOT (Docker / custom OpenClaw roots).
             result = subprocess.run(
@@ -5597,14 +5633,12 @@ class Orchestrator:
             return "enter_main_loop"
 
         if self.state.get("current_phase", 0) == 0:
-            gate_script = os.path.join(
-                AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts", "phase_resolver.py"
-            )
+            gate_script = os.path.join(GATE_SCRIPTS_DIR, "phase_resolver.py")
             # F4 — set by the rc-1/unexpected ``else`` or the crash ``except``; a
             # non-None value triggers the shared escalation block after the try.
             startup_resolver_reason = None
             try:
-                result = subprocess.run([sys.executable, gate_script], capture_output=True, text=True)
+                result = subprocess.run([sys.executable, gate_script], capture_output=True, text=True, timeout=GATE_SUBPROCESS_TIMEOUT)
                 output = result.stdout.strip()
                 if result.returncode == 0 and "PENDING: Phase" in output:
                     cp_path = os.path.join(PROJECT_ARTIFACTS_DIR, "current_phase.json")
@@ -5674,9 +5708,9 @@ class Orchestrator:
                         f"stderr={(result.stderr or '')[-500:]!r}"
                     )
             except Exception as startup_err:
-                # F4 (B2) — the resolver subprocess itself crashed. Escalate too:
-                # proceeding here would invoke the planner blind (empty raw_id, no
-                # current_phase.json), the same dead condition one layer over.
+                # F4 (B2) — the resolver subprocess crashed or hit GATE_SUBPROCESS_TIMEOUT.
+                # Escalate too: proceeding here would invoke the planner blind (empty
+                # raw_id, no current_phase.json), the same dead condition one layer over.
                 startup_resolver_reason = f"Startup phase_resolver crashed: {startup_err}"
 
             if startup_resolver_reason is not None:
@@ -5710,9 +5744,7 @@ class Orchestrator:
 
             import glob as _startup_glob
 
-            _startup_gate = os.path.join(
-                AUTODEV_REPO_PATH, "autodev", "pipeline", "gate_scripts", "phase_resolver.py"
-            )
+            _startup_gate = os.path.join(GATE_SCRIPTS_DIR, "phase_resolver.py")
             _startup_roadmap = _startup_glob.glob(os.path.join(SYMLINK_TARGET, "*[Rr]oadmap*.md"))
             if _startup_roadmap:
                 try:
