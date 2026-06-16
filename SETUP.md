@@ -34,7 +34,7 @@ source .env
 uvicorn ui.server:app --host 127.0.0.1 --port 18790
 ```
 
-If using systemd for the UI service, configure an `EnvironmentFile=` entry that points at the repo `.env`.
+If using **systemd** for the UI service, the shipped `ui/autodev-ui.service` carries placeholder `User=`, `EnvironmentFile=<repo>/.env`, and `Environment=HOME=…` lines — **edit all three before installing.** `EnvironmentFile` is load-bearing: without the repo `.env` loaded, the service starts with fallback roots and **no `AUTODEV_UI_TOKEN`**, so the dashboard runs unauthenticated on loopback (the server logs a loud `[AUTH] WARNING`). `User`/`HOME` keep `~`-relative paths (the recent-projects file, `~/.openclaw` fallbacks) resolving to the right home instead of a literal `./~` directory under the working directory.
 
 4. Verify webhook auth with a **POST** (GET checks alone are insufficient):
 
@@ -122,8 +122,11 @@ The OS check prints `OS: macOS (Darwin)` and proceeds without warnings.
 **Register as a LaunchAgent (background service):**
 
 ```bash
-# 1. Edit WorkingDirectory and ProgramArguments in ui/com.autodev.ui.plist
-#    (set your actual checkout path and python3 path)
+# 1. Edit WorkingDirectory, ProgramArguments, AND the EnvironmentVariables block
+#    in ui/com.autodev.ui.plist (checkout path, python3 path, OPENCLAW_ROOT,
+#    AUTODEV_REPO_PATH, and your AUTODEV_UI_TOKEN). launchd cannot source .env,
+#    so unless AUTODEV_UI_TOKEN is set here the dashboard is unauthenticated on
+#    loopback (the server logs a loud [AUTH] WARNING).
 nano ui/com.autodev.ui.plist
 
 # 2. Install the plist

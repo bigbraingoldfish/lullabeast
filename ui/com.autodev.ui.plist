@@ -55,6 +55,23 @@
     <key>KeepAlive</key>
     <true/>
 
+    <!-- launchd has no EnvironmentFile equivalent, so it CANNOT source the repo
+         .env. Set the vars the server needs here, in your LOCAL copy of this plist,
+         before loading it. WITHOUT AUTODEV_UI_TOKEN the dashboard runs UNAUTHENTICATED
+         on loopback (the server logs a loud [AUTH] WARNING). EDIT the two paths below
+         to match WorkingDirectory / your home; uncomment AUTODEV_UI_TOKEN and paste the
+         token install.sh generated into .env (do NOT commit your real token). HOME is
+         already set by launchd for a per-user agent, so no literal ./~ issue here. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>OPENCLAW_ROOT</key>
+        <string>/Users/youruser/.openclaw</string>
+        <key>AUTODEV_REPO_PATH</key>
+        <string>/path/to/autodev</string>
+        <!-- <key>AUTODEV_UI_TOKEN</key>
+             <string>paste-your-generated-token-here</string> -->
+    </dict>
+
     <key>StandardOutPath</key>
     <string>/tmp/autodev-ui.log</string>
     <key>StandardErrorPath</key>

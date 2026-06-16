@@ -539,6 +539,16 @@ async def lifespan(app: FastAPI):
                 "are refused. Set AUTODEV_UI_TOKEN in .env (install.sh generates "
                 "one) to enable token auth."
             )
+        # Env sanity: an unset HOME makes os.path.expanduser("~") return "~"
+        # verbatim, so the recent-projects file and any ~/.openclaw fallback land in
+        # a literal ./~ directory under the cwd. Warn loudly instead of degrading
+        # silently — usually a service unit missing HOME / EnvironmentFile.
+        if os.path.expanduser("~") in ("~", ""):
+            print(
+                "[ENV] WARNING: HOME is not set — '~' paths resolve to a literal "
+                "'./~' under the working directory. Set HOME (and "
+                "EnvironmentFile=.env) in your service unit; see SETUP.md."
+            )
     except Exception as _auth_exc:
         print(f"[AUTH] startup banner skipped: {_auth_exc}")
     # Start polling loop
