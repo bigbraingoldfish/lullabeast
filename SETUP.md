@@ -6,7 +6,7 @@ Lullabeast is an autonomous development pipeline that runs on top of OpenClaw. I
 
 ## Prerequisites
 
-**Python 3.9 or later.** The pipeline code uses `fcntl` for advisory file locking. `fcntl` is part of the POSIX standard and is available on Linux and macOS. Native Windows lacks `fcntl` and is not supported; WSL2 runs a real Linux kernel and works without any code changes.
+**Python 3.11 or later.** The pipeline code uses `fcntl` for advisory file locking. `fcntl` is part of the POSIX standard and is available on Linux and macOS. Native Windows lacks `fcntl` and is not supported; WSL2 runs a real Linux kernel and works without any code changes.
 
 **Linux, macOS, or WSL2.** Lullabeast runs on Linux (including WSL2) and macOS. Native Windows is not supported. `fcntl.flock` is how the orchestrator and heartbeat watchdog coordinate without racing — it is a POSIX advisory lock, not a Linux-only mechanism.
 
@@ -77,7 +77,7 @@ cd autodev-ui
 What the script does (summary):
 
 1. OS check (Linux, macOS, and WSL2 supported; native Windows is rejected).
-2. Python 3.9+ and pip availability.
+2. Python 3.11+ and pip availability.
 3. `pip install -r ui/requirements.txt` (interactive confirm unless `--non-interactive`).
 4. OpenClaw detection: resolves `OPENCLAW_ROOT`, **requires** `openclaw.json`, creates **`$AUTODEV_REPO_PATH/.autodev/`**, updates **`ui/config.json`** paths from `config.example.json` when needed.
 5. **Creates** missing `workspace-{agent}/` directories under OpenClaw and deploys agent identity files (skipping any destination file that is already newer).
@@ -100,7 +100,7 @@ Lullabeast runs on macOS without any code changes. The pipeline uses `fcntl.floc
 **Prerequisites on macOS:**
 
 ```bash
-# Python 3.9+ via Homebrew (recommended)
+# Python 3.11+ via Homebrew (recommended)
 brew install python@3.11
 # or via pyenv
 pyenv install 3.11 && pyenv global 3.11

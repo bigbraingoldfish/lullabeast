@@ -6071,9 +6071,8 @@ async def post_ideas_message(idea_id: str, request: Request):
     # post_ideas_message has prior unconditional mutations (assistant response,
     # possible name extraction above) so session.json must be written below
     # regardless of whether the roadmap merge fires. Bool return intentionally
-    # ignored. See plans/upcomming/FUTURE-ENHANCEMENTS.md →
-    # "Audit _merge_*_into_session_data bool-return contract" for the L3
-    # API-design question deferred from P0 Stage I.
+    # ignored — the "audit _merge_*_into_session_data bool-return contract" L3
+    # API-design question is deferred from P0 Stage I (tracked in the internal backlog).
     _merge_roadmap_draft_into_session_data(idea_dir, session_data)
 
     _atomic_write_json_file(str(session_path), session_data)
