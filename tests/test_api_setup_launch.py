@@ -560,7 +560,13 @@ class TestVerificationContentPlumbing:
     def test_mode_a_writes_verification_md(self, tmp_path):
         """Mode A (fresh repo) writes verification.md to repo root."""
         repo_path = tmp_path / "myproject"
-        with patch("subprocess.run", side_effect=_make_subprocess_pass()):
+        # Isolate the symlink swap (mirrors TestSymlinkSetting) so the real
+        # _pipeline_symlink_paths(load_config()) — whose first entry is the
+        # repo-root .autodev/pipeline-project — is never touched. Without this the
+        # test passes only where that path is a symlink; on a clean runner it is a
+        # directory and os.replace raises EISDIR → ok: False.
+        with patch("subprocess.run", side_effect=_make_subprocess_pass()), \
+             patch("ui.server._atomic_symlink_swap"):
             result = _run_init_project(
                 str(repo_path),
                 VALID_ROADMAP_SEED,

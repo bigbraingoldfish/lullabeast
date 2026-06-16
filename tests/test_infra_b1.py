@@ -33,6 +33,10 @@ class TestProjectPathArg:
         )
 
 
+@pytest.mark.skipif(
+    not os.path.exists(OPENCLAW_JSON),
+    reason="requires a local OpenClaw install (~/.openclaw/openclaw.json); absent in CI",
+)
 class TestOpenClawConfig:
     """Pass criteria 2 & 3: openclaw.json has prd-creator and ideas: prefix."""
 
