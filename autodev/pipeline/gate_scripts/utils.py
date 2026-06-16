@@ -10,6 +10,27 @@ if _PIPELINE_DIR not in sys.path:
 
 from env_resolvers import resolve_pipeline_root  # noqa: E402
 from atomic_io import write_json_atomic, write_text_atomic  # noqa: E402,F401
+from error_codes import (  # noqa: E402,F401  (FILE_MISSING/JSON_PARSE used here; rest re-exported to the gate scripts, same hub pattern as write_json_atomic)
+    ERR_FILE_MISSING,
+    ERR_JSON_PARSE,
+    ERR_VALIDATION_FAILED,
+    ERR_STATUS_NOT_COMPLETE,
+    ERR_TESTS_FAILING,
+    ERR_PATH_TRAVERSAL,
+    ERR_MANIFEST_FILE_MISSING,
+    ERR_TDD_COVERAGE_MISMATCH,
+    ERR_BEHAVIORAL_ARTIFACTS_MISSING,
+    ERR_MISSING_BASE_COMMIT,
+    ERR_UNACCOUNTED_DELETION,
+    ERR_GIT_DIFF_FAILED,
+    ERR_DELETION_CHECK_CRASHED,
+    ERR_MISSING_ARTIFACTS,
+    ERR_REVIEWER_CONTRACT_FAILURE,
+    ERR_VISUAL_UNVERIFIED,
+    ERR_BEHAVIORAL_UNVERIFIED,
+    ERR_REGRESSION_UNVERIFIED,
+    ERR_REGRESSION_PRIOR_PHASE,
+)
 
 
 def _derive_runtime_root() -> str:
@@ -131,14 +152,14 @@ def load_json_safe(filepath, agent_type):
     """Loads JSON and handles parse errors without crashing."""
     if not os.path.exists(filepath):
         # Orchestrator owns the retry increment; we only record the error code here.
-        record_error_code_only(agent_type, "ERR_FILE_MISSING")
+        record_error_code_only(agent_type, ERR_FILE_MISSING)
         return None
     try:
         with open(filepath, "r") as f:
             return json.load(f)
     except json.JSONDecodeError:
         # Orchestrator owns the retry increment; we only record the error code here.
-        record_error_code_only(agent_type, "ERR_JSON_PARSE")
+        record_error_code_only(agent_type, ERR_JSON_PARSE)
         return None
 
 

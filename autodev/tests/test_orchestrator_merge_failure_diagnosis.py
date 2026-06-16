@@ -86,6 +86,22 @@ def _call_names_in_nodes(nodes):
     return names
 
 
+def _referenced_names_in_nodes(nodes):
+    """Collect all bare-name identifiers referenced within the given nodes.
+
+    Since LAUNCH-7 the error codes are module constants imported from
+    ``error_codes`` (e.g. ``last_error_code = ERR_MERGE_FAILED``) rather than
+    inline string literals, so a code now shows up as an ``ast.Name`` here
+    instead of an ``ast.Constant`` in :func:`_string_literals_in_nodes`.
+    """
+    names = set()
+    for node in nodes:
+        for child in ast.walk(node):
+            if isinstance(child, ast.Name):
+                names.add(child.id)
+    return names
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -105,10 +121,14 @@ class TestMergeFailureDiagnosis:
             "Could not locate the 'if merge_result.returncode != 0' block in orchestrator.py. "
             "Ensure Phase 10 merge failure handling is present."
         )
+        # Accept either an inline string literal or a reference to the
+        # error_codes.ERR_MERGE_FAILED constant (LAUNCH-7 centralized the codes).
         literals = _string_literals_in_nodes(nodes)
-        assert "ERR_MERGE_FAILED" in literals, (
-            "The merge failure block does not set last_error_code to 'ERR_MERGE_FAILED'. "
-            "Add this key to the phase_state.json write inside the merge failure handler."
+        names = _referenced_names_in_nodes(nodes)
+        assert "ERR_MERGE_FAILED" in literals or "ERR_MERGE_FAILED" in names, (
+            "The merge failure block does not set last_error_code to ERR_MERGE_FAILED "
+            "(neither a string literal nor a reference to the error_codes.ERR_MERGE_FAILED "
+            "constant). Set last_error_code inside the merge failure handler."
         )
 
     def test_merge_failure_block_records_branch_name(self):

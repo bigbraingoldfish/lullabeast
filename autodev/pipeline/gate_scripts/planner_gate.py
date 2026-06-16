@@ -5,7 +5,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
-from utils import ARTIFACTS_DIR, load_json_safe, record_error_code_only
+from utils import ARTIFACTS_DIR, load_json_safe, record_error_code_only, ERR_VALIDATION_FAILED
 
 def evaluate_planner(output_path=None):
     if output_path is None:
@@ -32,7 +32,7 @@ def evaluate_planner(output_path=None):
                 break
             
     if not valid:
-        record_error_code_only("planner", "ERR_VALIDATION_FAILED")
+        record_error_code_only("planner", ERR_VALIDATION_FAILED)
         return "FAIL"
         
     return "PASS"

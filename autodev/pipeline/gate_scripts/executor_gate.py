@@ -16,6 +16,17 @@ from utils import (
     PHASE_STATE_FILE,
     WORKSPACE_DIR,
     write_json_atomic,
+    ERR_STATUS_NOT_COMPLETE,
+    ERR_TESTS_FAILING,
+    ERR_VALIDATION_FAILED,
+    ERR_PATH_TRAVERSAL,
+    ERR_MANIFEST_FILE_MISSING,
+    ERR_TDD_COVERAGE_MISMATCH,
+    ERR_BEHAVIORAL_ARTIFACTS_MISSING,
+    ERR_MISSING_BASE_COMMIT,
+    ERR_UNACCOUNTED_DELETION,
+    ERR_GIT_DIFF_FAILED,
+    ERR_DELETION_CHECK_CRASHED,
 )
 
 # Vite content-hash pattern: dist/assets/<name>-<6-12 alphanum chars>.<js|css>
@@ -263,12 +274,12 @@ def evaluate_executor(output_path=None):
     if data is None: return "FAIL"
 
     if data.get("status") != "complete":
-        record_error_code_only("executor", "ERR_STATUS_NOT_COMPLETE")
+        record_error_code_only("executor", ERR_STATUS_NOT_COMPLETE)
         return "FAIL"
 
     test_results = data.get("test_results", {})
     if test_results.get("all_passing") is not True:
-        record_error_code_only("executor", "ERR_TESTS_FAILING")
+        record_error_code_only("executor", ERR_TESTS_FAILING)
         return "FAIL"
 
     # Verify file manifest existences and bounds
@@ -281,7 +292,7 @@ def evaluate_executor(output_path=None):
     _file_manifest = data.get("file_manifest", [])
     _tests_written = data.get("tests_written", [])
     if not isinstance(_file_manifest, list) or not isinstance(_tests_written, list):
-        record_error_code_only("executor", "ERR_VALIDATION_FAILED")
+        record_error_code_only("executor", ERR_VALIDATION_FAILED)
         return "FAIL"
     expected_files = _file_manifest + _tests_written
     workspace_real = os.path.realpath(WORKSPACE_DIR)
@@ -296,10 +307,10 @@ def evaluate_executor(output_path=None):
         # Constraints; do not weaken).
         try:
             if os.path.commonpath([workspace_real, target_real]) != workspace_real:
-                record_error_code_only("executor", "ERR_PATH_TRAVERSAL")
+                record_error_code_only("executor", ERR_PATH_TRAVERSAL)
                 return "FAIL"
         except ValueError:
-            record_error_code_only("executor", "ERR_PATH_TRAVERSAL")
+            record_error_code_only("executor", ERR_PATH_TRAVERSAL)
             return "FAIL"
 
         # Phase 3 — a declared-but-absent (in-bounds) file is now a warning the
@@ -311,7 +322,7 @@ def evaluate_executor(output_path=None):
 
     if _missing_manifest_files:
         warnings.append({
-            "code": "ERR_MANIFEST_FILE_MISSING",
+            "code": ERR_MANIFEST_FILE_MISSING,
             "detail": (
                 "File(s) listed in file_manifest/tests_written are not present "
                 "on disk. The reviewer must confirm each declared file exists "
@@ -341,7 +352,7 @@ def evaluate_executor(output_path=None):
             # assertions), not a hard FAIL.
             print(f"[GATE WARN] Planned tests not in tests_written: {missing}", file=sys.stderr)
             warnings.append({
-                "code": "ERR_TDD_COVERAGE_MISMATCH",
+                "code": ERR_TDD_COVERAGE_MISMATCH,
                 "detail": (
                     "Planner tdd_test_structure entries are missing from "
                     "tests_written. The reviewer must confirm coverage of the "
@@ -372,7 +383,7 @@ def evaluate_executor(output_path=None):
                 file=sys.stderr,
             )
             warnings.append({
-                "code": "ERR_BEHAVIORAL_ARTIFACTS_MISSING",
+                "code": ERR_BEHAVIORAL_ARTIFACTS_MISSING,
                 "detail": (
                     "behavioral_smoke_artifacts is missing or empty on a phase "
                     "with a behavioral_verification block. The reviewer must "
@@ -389,7 +400,7 @@ def evaluate_executor(output_path=None):
                         file=sys.stderr,
                     )
                     warnings.append({
-                        "code": "ERR_BEHAVIORAL_ARTIFACTS_MISSING",
+                        "code": ERR_BEHAVIORAL_ARTIFACTS_MISSING,
                         "detail": f"behavioral_smoke_artifacts[{i}] is not a {{path, description}} object.",
                     })
                     continue
@@ -400,7 +411,7 @@ def evaluate_executor(output_path=None):
                         file=sys.stderr,
                     )
                     warnings.append({
-                        "code": "ERR_BEHAVIORAL_ARTIFACTS_MISSING",
+                        "code": ERR_BEHAVIORAL_ARTIFACTS_MISSING,
                         "detail": f"behavioral_smoke_artifacts[{i}] is missing its path.",
                     })
                     continue
@@ -409,14 +420,14 @@ def evaluate_executor(output_path=None):
                 # (realpath) resolution on both sides so a symlink escape is caught.
                 try:
                     if os.path.commonpath([workspace_real, target_real]) != workspace_real:
-                        record_error_code_only("executor", "ERR_PATH_TRAVERSAL")
+                        record_error_code_only("executor", ERR_PATH_TRAVERSAL)
                         print(
                             f"[GATE FAIL] behavioral_smoke_artifacts[{i}] path escapes workspace: {path}",
                             file=sys.stderr,
                         )
                         return "FAIL"
                 except ValueError:
-                    record_error_code_only("executor", "ERR_PATH_TRAVERSAL")
+                    record_error_code_only("executor", ERR_PATH_TRAVERSAL)
                     print(
                         f"[GATE FAIL] behavioral_smoke_artifacts[{i}] path escapes workspace: {path}",
                         file=sys.stderr,
@@ -428,7 +439,7 @@ def evaluate_executor(output_path=None):
                         file=sys.stderr,
                     )
                     warnings.append({
-                        "code": "ERR_BEHAVIORAL_ARTIFACTS_MISSING",
+                        "code": ERR_BEHAVIORAL_ARTIFACTS_MISSING,
                         "detail": f"behavioral_smoke_artifacts[{i}] path does not exist on disk: {path}",
                         "files": [path],
                     })
@@ -464,11 +475,11 @@ def evaluate_executor(output_path=None):
         # deletions.  Without it the check is a no-op and MiniMax file deletion goes
         # undetected.  Return FAIL so the orchestrator retries with a fresh session.
         print(
-            json.dumps({"error": "ERR_MISSING_BASE_COMMIT", "detail": "cannot verify deletions"}),
+            json.dumps({"error": ERR_MISSING_BASE_COMMIT, "detail": "cannot verify deletions"}),
             file=sys.stdout,
         )
         print("[GATE FAIL] phase_base_commit unavailable — failing closed to protect deletion guard.", file=sys.stderr)
-        record_error_code_only("executor", "ERR_MISSING_BASE_COMMIT")
+        record_error_code_only("executor", ERR_MISSING_BASE_COMMIT)
         return "FAIL"
     else:
         try:
@@ -522,11 +533,11 @@ def evaluate_executor(output_path=None):
                     _sorted_unaccounted = sorted(set(_unaccounted))
                     _write_executor_gate_detail(
                         {
-                            "gate_error": "ERR_UNACCOUNTED_DELETION",
+                            "gate_error": ERR_UNACCOUNTED_DELETION,
                             "unaccounted_deletions": _sorted_unaccounted,
                         }
                     )
-                    record_error_code_only("executor", "ERR_UNACCOUNTED_DELETION")
+                    record_error_code_only("executor", ERR_UNACCOUNTED_DELETION)
                     print(
                         f"[GATE FAIL] Unaccounted file deletion(s): {_sorted_unaccounted}. "
                         "List intentionally deleted files in `files_deleted` in executor_output.json.",
@@ -539,7 +550,7 @@ def evaluate_executor(output_path=None):
                     f" — failing closed to protect deletion guard.",
                     file=sys.stderr,
                 )
-                record_error_code_only("executor", "ERR_GIT_DIFF_FAILED")
+                record_error_code_only("executor", ERR_GIT_DIFF_FAILED)
                 return "FAIL"
         except Exception as _del_err:
             # Fail closed: if the deletion check itself crashes (git missing,
@@ -553,7 +564,7 @@ def evaluate_executor(output_path=None):
                 "to protect the MiniMax deletion guard.",
                 file=sys.stderr,
             )
-            record_error_code_only("executor", "ERR_DELETION_CHECK_CRASHED")
+            record_error_code_only("executor", ERR_DELETION_CHECK_CRASHED)
             return "FAIL"
 
     # P1 Stage F — reachability advisory. Pure addition; never fails the gate.
