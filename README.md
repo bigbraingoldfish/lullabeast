@@ -11,7 +11,7 @@
 [![CI](https://github.com/bigbraingoldfish/lullabeast/actions/workflows/ci.yml/badge.svg)](https://github.com/bigbraingoldfish/lullabeast/actions/workflows/ci.yml)
 [![Runs on OpenClaw](https://img.shields.io/badge/runs%20on-OpenClaw-c9962e.svg)](https://docs.openclaw.ai)
 ![Status](https://img.shields.io/badge/status-beta-orange.svg)
-![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20WSL2-lightgrey.svg)
 
 Lullabeast is an open-source, local-capable, autonomous multi-agent development pipeline: describe
@@ -43,11 +43,11 @@ English — not necessarily write it — can take a project from idea to working
 Read this before running anything — the first item is a separate install:
 
 - **A running [OpenClaw](https://docs.openclaw.ai) gateway** — required; Lullabeast cannot run
-  without it. Install it first ([install guide](https://openclaw.dev/install)) and have it
+  without it. Install it first ([install guide](https://docs.openclaw.ai/start/getting-started)) and have it
   listening on `localhost:18789`. Tested against **OpenClaw 2026.5.18**; earlier versions may
   have state-schema differences (see [SETUP.md](SETUP.md)).
 - **Linux, macOS, or WSL2** — native Windows is unsupported (the pipeline uses POSIX `fcntl` locking).
-- **Python 3.9+** and `git` — with a configured git identity: the pipeline makes commits in your
+- **Python 3.11+** and `git` — with a configured git identity: the pipeline makes commits in your
   project repos (the executor's commits, phase merges, init commits), so set it once —
   `git config --global user.name "Your Name"` and `git config --global user.email "you@example.com"`.
   `install.sh` checks this and fails fast with these commands if either is missing.
@@ -60,7 +60,7 @@ Read this before running anything — the first item is a separate install:
 
 ```bash
 # 1. Install and start OpenClaw first — Lullabeast cannot run without it.
-#    https://openclaw.dev/install
+#    https://docs.openclaw.ai/start/getting-started
 curl -s http://localhost:18789/v1/models   # should respond; "connection refused" = gateway not up
 
 # 2. Install Lullabeast.
@@ -185,13 +185,14 @@ competitor — a pipeline that needs a capable agent runtime, and uses OpenClaw 
 (OpenClaw was acquired by OpenAI in early 2026; Lullabeast drives it from the outside via webhooks
 and ships one small plugin, so the coupling surface is narrow and documented — and the gates, caps,
 and human escalation are Lullabeast's, not the model's.) New to OpenClaw? Start with its
-[install guide](https://openclaw.dev/install).
+[install guide](https://docs.openclaw.ai/start/getting-started).
 
 ---
 
 ## The dashboard
 
-[[FILL: dashboard screenshot or short demo GIF — screenshots/ is currently empty; capture the Pipeline Monitor mid-run]]
+<!-- maintainer: add a Pipeline Monitor screenshot or short demo GIF here (capture mid-run) before tagging a
+     public release — drop the image into ui/static/img/ (or a screenshots/ dir) and reference it from this line. -->
 
 - **Project Ideas** — chat an idea into a PRD, then generate the roadmap + verification contract.
 - **Setup & Preflight** — point at a project repo, run preflight checks, launch the pipeline.

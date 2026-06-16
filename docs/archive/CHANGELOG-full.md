@@ -4,6 +4,11 @@ This project follows [Semantic Versioning](https://semver.org/). First public re
 
 All notable changes are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+> **Note on internal references.** This archived development log mentions internal planning documents under
+> `plans/` (e.g. `plans/Active/…`, `plans/upcomming/…`). That directory is gitignored and intentionally **not**
+> part of the public tree, so any `plans/…` path referenced below will not resolve in this repository — those
+> references are retained for historical fidelity only.
+
 ---
 
 ## [Unreleased]

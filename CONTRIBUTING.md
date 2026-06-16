@@ -30,7 +30,7 @@ source .env
 pytest autodev/tests/ -q
 ```
 
-**UI server tests** (~50 pytest files):
+**UI server tests** (FastAPI routes + frontend):
 
 ```bash
 source .env

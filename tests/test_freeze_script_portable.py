@@ -4,7 +4,7 @@
 The portable replacement is a one-line Python invocation:
     python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$PP"
 
-The repo already requires Python 3.9+ (install.sh §2), so this is
+The repo already requires Python 3.11+ (install.sh §2), so this is
 dependency-neutral.
 """
 from pathlib import Path

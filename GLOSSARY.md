@@ -137,7 +137,7 @@ There is no automatic way to increment the cap. It can be manually decremented b
 
 ## Prerequisites & environment readiness
 
-Full history + de-scope note: `plans/Active/PREREQUISITE_READINESS_ROADMAP.md`; operator walkthrough in SETUP.
+Full history + de-scope note live in an internal roadmap (not part of the public tree); operator walkthrough in SETUP.
 
 - **Prerequisite** — a tool/SDK or environment-variable **name** a project declares it needs to build or be tested, in `verification.md`'s `## Prerequisites` block (`### Tools` / `### Environment`). Names, types, and purposes only — **never values**.
 - **`### Tools`** — a documentation-only list of host tools the project needs. **Not checked or gated** — host-tool detection was removed (2026-06-16) because a reliable verdict from an arbitrary declared name isn't achievable and a false-positive block with no recourse is worse than nothing. Make sure your host has them before you run; a genuinely-missing tool surfaces when a phase fails.

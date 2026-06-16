@@ -89,7 +89,7 @@ for candidate in python3 python; do
             'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)
         major=$(echo "$ver" | cut -d. -f1)
         minor=$(echo "$ver" | cut -d. -f2)
-        if [ "$major" -ge 3 ] && [ "$minor" -ge 9 ]; then
+        if [ "$major" -gt 3 ] || { [ "$major" -eq 3 ] && [ "$minor" -ge 11 ]; }; then
             PYTHON="$candidate"
             PYTHON_VERSION="$ver"
             ok "Python $ver found ($candidate)"
@@ -99,7 +99,7 @@ for candidate in python3 python; do
 done
 
 if [ -z "$PYTHON" ]; then
-    echo "${RED}  ✗${RESET} Python 3.9+ not found."
+    echo "${RED}  ✗${RESET} Python 3.11+ not found."
     if [ "$OS_TYPE" = "Darwin" ]; then
         echo "    Install via Homebrew:  brew install python@3.11"
         echo "    Or via pyenv:          pyenv install 3.11 && pyenv global 3.11"
@@ -107,7 +107,7 @@ if [ -z "$PYTHON" ]; then
         echo "    Install via apt:       sudo apt install python3.11"
         echo "    Or via pyenv:          pyenv install 3.11 && pyenv global 3.11"
     fi
-    fail "Python 3.9+ is required. Install it and re-run install.sh."
+    fail "Python 3.11+ is required. Install it and re-run install.sh."
 fi
 
 if ! "$PYTHON" -m pip --version >/dev/null 2>&1; then
@@ -214,7 +214,7 @@ if [ -z "$OPENCLAW_ROOT" ]; then
             echo "    Is OpenClaw installed there? Check the path and try again."
         else
             echo "  ${RED}✗${RESET} Directory not found: $user_path"
-            echo "    To install OpenClaw: https://openclaw.dev/install"
+            echo "    To install OpenClaw: https://docs.openclaw.ai/start/getting-started"
             if ! prompt_yn "Try another path? [Y/n]" "Y"; then
                 fail "OpenClaw not found. Install OpenClaw and re-run install.sh."
             fi

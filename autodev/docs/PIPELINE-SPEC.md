@@ -537,7 +537,7 @@ The reviewer gate runs the same script on each pass. Routing on failure varies b
 >   how answers arrive**: the operator answers from the **dashboard** (`POST /api/command`), which
 >   writes `escalation_output` (or banks `pending_escalation_command.json`); the orchestrator polls
 >   and consumes it exactly as before. (A real inbound Signal→`escalation_output` channel is a
->   future enhancement — `plans/upcomming/signal-inbound-escalation-channel.md`.)
+>   future enhancement.)
 > - **A parked `ESCALATION` no longer counts as `all_blocked` (F8).** When it is the next/only
 >   remaining work, `_select_next_queue_project` revives the lowest-position one to
 >   `WAITING_FOR_HUMAN` (after startable + `ESCALATION_ANSWERED` entries get priority), so it stays
