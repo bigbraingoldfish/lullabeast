@@ -4507,15 +4507,62 @@ class Orchestrator:
         except Exception:
             pass
         try:
-            subprocess.run(
-                f"git checkout {branch} 2>/dev/null || git checkout -b {branch}",
-                shell=True, cwd=SYMLINK_TARGET, check=True
-            )
+            self._checkout_or_create_branch(branch)
             print(f"[INFO] _ensure_phase_branch: HEAD corrected to '{branch}'.")
             return True
         except subprocess.CalledProcessError:
             print(f"[ERROR] _ensure_phase_branch: could not checkout or create '{branch}'.")
             return False
+
+    def _checkout_or_create_branch(self, branch: str, *, check: bool = True):
+        """Check out ``branch``, creating it if absent — without invoking a shell.
+
+        Replaces the former
+        ``subprocess.run(f"git checkout {b} 2>/dev/null || git checkout -b {b}", shell=True)``
+        idiom at its three call sites (``_ensure_phase_branch``, the phase-advance
+        block, and startup). Passing argv as a **list** means ``branch`` is handed to
+        git as a single argument and is never parsed by a shell, closing the
+        command-injection path from a roadmap-supplied ``raw_id`` (LAUNCH-3). The id
+        is *also* charset-validated at parse time in ``phase_resolver`` — this is the
+        sink-side guard, defense-in-depth.
+
+        Behaviour mirrors the old idiom: try ``git checkout <branch>``; on failure
+        fall back to ``git checkout -b <branch>``. ``check`` defaults to ``True``
+        (matching the two former ``check=True`` sites) so a branch that can be
+        neither checked out nor created raises ``CalledProcessError``; the startup
+        site passes ``check=False`` to preserve its best-effort behaviour. Output is
+        captured so the first checkout's "pathspec did not match" noise stays hidden,
+        as the old ``2>/dev/null`` did.
+
+        If the ``-b`` creation itself fails, git's stderr is logged once here before
+        raising (``check=True``) or returning (``check=False``) — the old idiom left
+        that fallback's stderr un-redirected on the console, so capturing it without
+        surfacing it would silently drop the failure reason at every call site
+        (including the best-effort startup site, which inspects no return value).
+        The raised ``CalledProcessError`` also carries ``stderr`` for callers that
+        want it.
+        """
+        existing = subprocess.run(
+            ["git", "checkout", branch],
+            cwd=SYMLINK_TARGET, capture_output=True, text=True,
+        )
+        if existing.returncode == 0:
+            return existing
+        created = subprocess.run(
+            ["git", "checkout", "-b", branch],
+            cwd=SYMLINK_TARGET, capture_output=True, text=True,
+        )
+        if created.returncode != 0:
+            _stderr = (created.stderr or "").strip()
+            if _stderr:
+                print(f"[ERROR] _checkout_or_create_branch: git could not check out "
+                      f"or create '{branch}': {_stderr}")
+            if check:
+                raise subprocess.CalledProcessError(
+                    created.returncode, created.args,
+                    output=created.stdout, stderr=created.stderr,
+                )
+        return created
 
     def _mark_roadmap_phase(self, raw_id: str, marker: str) -> None:
         """Atomically update the roadmap.md checkbox for raw_id to [marker].
@@ -4757,7 +4804,7 @@ class Orchestrator:
                     _next_raw = self.state.get("current_phase_raw_id", "")
                     branch = f"phase/{_next_raw}" if _next_raw else f"phase/{self.state['current_phase']}"
                     try:
-                        subprocess.run(f"git checkout {branch} 2>/dev/null || git checkout -b {branch}", shell=True, cwd=SYMLINK_TARGET, check=True)
+                        self._checkout_or_create_branch(branch)
                     except subprocess.CalledProcessError as e:
                         print(f"[ERROR] Failed to checkout new phase branch: {e}")
 
@@ -5740,11 +5787,7 @@ class Orchestrator:
                 if _base_result.returncode == 0:
                     self.state["phase_base_commit"] = _base_result.stdout.strip()
                     self.write_state()
-            subprocess.run(
-                f"git checkout {branch} 2>/dev/null || git checkout -b {branch}",
-                shell=True,
-                cwd=SYMLINK_TARGET,
-            )
+            self._checkout_or_create_branch(branch, check=False)
             print(f"[INFO] Startup: checked out branch {branch} for phase {_startup_raw or _startup_num}.")
 
             import glob as _startup_glob
