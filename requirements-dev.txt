@@ -17,3 +17,9 @@ httpx==0.28.1
 # is present but Chromium isn't — so a removed-then-missing playwright degrades to a clear skip
 # rather than a hard error.
 playwright==1.60.0
+
+# Linter (LAUNCH-4). CI runs `ruff check` as an ADVISORY (non-blocking) job for now —
+# the existing baseline is ~410 findings, mostly F401 unused-import; cleaning it and
+# promoting lint to blocking is LAUNCH-8/9 follow-up. Config + rationale in ruff.toml.
+# Pinned for reproducible CI; bump deliberately after reviewing the new rules.
+ruff==0.15.17

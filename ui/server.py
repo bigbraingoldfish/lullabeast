@@ -1,5 +1,6 @@
 """UI server module."""
 import base64
+import binascii  # referenced as binascii.Error in the image-attachment except clause
 import aiohttp
 try:
     import fcntl
