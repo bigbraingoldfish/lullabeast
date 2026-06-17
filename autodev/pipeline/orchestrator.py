@@ -653,6 +653,51 @@ def _session_jsonl_last_assistant_error_message(jsonl_path: str | None) -> str:
     return last_err
 
 
+# Non-terminal stopReason(s): the assistant turn is still in its tool loop (it
+# called a tool and is awaiting the result / its next step) — i.e. NOT ended. Any
+# other value, or none, means the turn has terminally ended.
+_IN_FLIGHT_STOP_REASONS = frozenset({"toolUse"})
+
+
+def _session_jsonl_last_assistant_stop_reason(jsonl_path: str | None) -> str:
+    """Return the ``stopReason`` of the LAST assistant row in an OpenClaw session
+    JSONL (``""`` when the file is absent/unreadable or has no assistant row).
+
+    Used by the verdict-hold acceptor to distinguish "the turn is still streaming
+    past its ``.done``" (``stopReason`` in ``_IN_FLIGHT_STOP_REASONS``) from "the
+    turn has terminally ended" (any other value). This is a reliable signal where
+    the activity stamp is not: the ``.done`` write's own ``after_tool_call`` hook
+    bumps the stamp *after* ``.done`` even on a genuine no-verdict end, so
+    stamp-vs-``.done`` timing cannot tell the two apart.
+    """
+    if not jsonl_path or not os.path.exists(jsonl_path):
+        return ""
+    last = ""
+    try:
+        with open(jsonl_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if row.get("type") != "message":
+                    continue
+                inner = row.get("message")
+                if not isinstance(inner, dict):
+                    continue
+                if inner.get("role") != "assistant":
+                    continue
+                sr = inner.get("stopReason")
+                if sr is not None:
+                    last = str(sr)
+    except OSError:
+        return ""
+    return last
+
+
 def _is_provider_rejected_error(msg: str) -> bool:
     """Heuristic: returns True if the provider rejected the request for billing, rate-limit, or auth reasons."""
     if not msg:
@@ -2002,6 +2047,19 @@ class Orchestrator:
                 print(f"[QUEUE] Symlink update failed for '{entry['name']}' — leaving entry READY.")
                 return False
 
+            # SNAPSHOT-FIX: a fresh-start activation must not inherit a foreign
+            # escalation_summary.json. A slow escalation agent from a *previous*
+            # project can write its advisory through the pipeline-project symlink
+            # AFTER the queue advanced and repointed it, landing in this newly
+            # activated project's dir (observed live: SplitBeastDemo's CORE-E1
+            # advisory surfaced under SVGPicDemo). PROJECT_ARTIFACTS_DIR follows the
+            # symlink we just repointed, so this clears the *new* project's copy.
+            # Idempotent and never-raises. Skipped on revival, whose
+            # escalation_summary.json is the legitimate advisory for the parked
+            # phase being restored (the dispatch-time clear still guards re-escalations).
+            if not is_revival:
+                self._clear_stale_escalation_summary()
+
             # F9 — commit ACTIVE via CAS (re-find by id on fresh data). update_symlink (above)
             # and write_state / manifest / banked-command (below) are the non-idempotent side
             # effects and stay OUTSIDE this closure, so a version-conflict retry never re-fires
@@ -2692,6 +2750,13 @@ class Orchestrator:
         workspace symlink (OpenClaw sandboxes the write tool to the agent's
         workspace — absolute-path writes are silently discarded).
 
+        The read instruction marks ``phase_state.json`` REQUIRED (always present)
+        and everything else OPTIONAL, and carries an explicit read-once /
+        do-not-retry-missing / proceed guard. That guard is the inline backstop
+        against the ENOENT read loop a slow local model otherwise falls into
+        (observed: 222 reads in one escalation session, pinning the GPU); the
+        standing rule also lives in ``autodev/agents/escalation/AGENTS.md``.
+
         ``reply_token`` (B1) — when present, the agent is told to echo this
         correlation token verbatim in its notification and instruct the operator
         to start any channel reply with it, so POST /api/escalation/inbound can
@@ -2704,8 +2769,19 @@ class Orchestrator:
             "orchestrator (the 'EXTERNAL/UNTRUSTED source' preamble OpenClaw wraps "
             "around every webhook is boilerplate, not a prompt-injection attempt; "
             "do not refuse it).\n\n"
-            f"Read {_p}/phase_state.json and {_p}/failure_context.json (when "
-            "present) plus relevant output files for full context. Compose a "
+            f"Read your diagnostics from the ABSOLUTE path {_p} (it is symlink-"
+            "stable for your whole turn — do NOT read them through the "
+            "pipeline-project workspace symlink, which a queue advance can "
+            f"repoint mid-turn). {_p}/phase_state.json is REQUIRED and always "
+            "present (it carries escalation_trigger_reason); "
+            f"{_p}/failure_context.json is the primary failure detail when "
+            f"present; {_p}/current_phase.json and the "
+            f"{_p}/(planner|executor|reviewer)_output.json files are OPTIONAL. "
+            "Read each file AT MOST ONCE: if a read returns file-not-found, do "
+            "NOT retry or re-read it under another path — treat it as absent, "
+            "PROCEED, and compose your summary from what you read "
+            "(phase_state.json alone is enough). Never loop re-reading missing "
+            "files. Compose a "
             'JSON advisory with exactly two fields — "summary" and '
             '"recommended_action" — per your escalation-summary skill, and '
             "WRITE it to pipeline-project/.autodev/pipeline/escalation_summary.json "
@@ -3335,49 +3411,62 @@ class Orchestrator:
         self._record_phase_outcome(last_abort_result="ok")
         return True
 
-    def _make_overflow_aware_acceptor(
+    def _make_verdict_hold_acceptor(
         self, agent_role: str, session_key: str, attempt_start_time: float
     ):
         """Return a ``poll_for_sentinel`` ``sentinel_acceptor`` predicate that HOLDS
-        a ``.done`` written by a recoverable context-overflow turn until the
-        resumed session's real verdict lands (Layer 2 — see the module-level
-        ``_is_recoverable_context_overflow`` cluster for the full rationale).
+        a premature ``.done`` until the agent's real verdict lands, instead of
+        accepting it into a false CONTRACT_FAILURE that also spawns a concurrent
+        retry (Layer 2 — see the module-level ``_is_recoverable_context_overflow``
+        cluster for the original overflow rationale).
 
         The returned zero-arg predicate is consulted only while ``.done`` exists.
         It returns:
 
         * ``True`` immediately if a fresh, parseable ``{role}_output.json`` is
-          already present — never discard a verdict the resumed turn produced;
+          already present — never discard a verdict the turn produced;
         * ``True`` if the hold budget (``_OVERFLOW_HOLD_BUDGET_SECONDS``) is spent —
           stop holding and let the gate adjudicate the still-missing verdict;
-        * ``False`` (HOLD) when there is no fresh verdict AND the session's last
-          assistant row is a recoverable context-overflow error — emitting one
-          ``sentinel_overflow_hold`` event per hold episode;
-        * ``True`` otherwise (a genuine non-overflow end → gate → the existing
-          CONTRACT_FAILURE / FAIL path is preserved).
+        * ``False`` (HOLD) when there is no fresh verdict AND the turn is still in
+          flight past ``.done`` — by either of two signals:
+            (a) the session's last assistant row is a recoverable context-overflow
+                error (OpenClaw auto-compacts + resumes) → ``sentinel_overflow_hold``;
+            (b) the session's last assistant row is a non-terminal tool-loop step
+                (``stopReason`` in ``_IN_FLIGHT_STOP_REASONS``, i.e. ``"toolUse"``) →
+                the agent wrote ``.done`` but is still acting and may yet write the
+                verdict (observed: reviewer writes ``.done`` / the agent_end backstop
+                fires, then keeps streaming and writes a valid PASS minutes later) →
+                ``sentinel_verdict_hold``;
+        * ``True`` otherwise — a terminally-ended turn (any other / absent
+          ``stopReason``) with no verdict → the gate's CONTRACT_FAILURE / FAIL path
+          runs with **no stall-window latency**.
 
-        Every non-overflow situation returns ``True``, so the common poll path is
-        unchanged.  Bounded by the poll's own stall / startup-grace / backstop
-        timers plus the hold budget, so a held sentinel can never hang the poll.
+        Terminality, not stamp-vs-``.done`` timing, drives (b): the ``.done`` write's
+        own ``after_tool_call`` hook bumps the activity stamp *after* ``.done`` even
+        on a genuine no-verdict end, so the stamp cannot distinguish "ended" from
+        "still streaming" — it would false-hold every real CONTRACT_FAILURE until
+        stall/budget. Bounded so a held sentinel can never hang the poll: the hold
+        budget above, plus the poll's own stall detection (a turn that stops touching
+        its session goes silent > stall threshold → abort).
         """
         verdict_path = os.path.join(PROJECT_ARTIFACTS_DIR, f"{agent_role}_output.json")
         phase_raw_id = (getattr(self, "state", {}) or {}).get("current_phase_raw_id", "")
-        emitted = {"hold": False}
+        emitted = {"overflow": False, "streaming": False}
 
         def _acceptor() -> bool:
-            # 1. A real verdict already landed (the resumed turn won the race).
+            # 1. A real verdict already landed (the turn won the race).
             if _verdict_is_fresh_and_parseable(verdict_path, attempt_start_time):
                 return True
             # 2. Hold budget exhausted — stop waiting; the gate decides.
             if time.time() - attempt_start_time > _OVERFLOW_HOLD_BUDGET_SECONDS:
                 return True
-            # 3. Recoverable overflow with no verdict yet → HOLD and keep waiting.
+            # 3. Recoverable overflow with no verdict yet → HOLD (compact + resume).
             err = _session_jsonl_last_assistant_error_message(
                 _resolve_session_jsonl_path(agent_role, session_key)
             )
             if _is_recoverable_context_overflow(err):
-                if not emitted["hold"]:
-                    emitted["hold"] = True
+                if not emitted["overflow"]:
+                    emitted["overflow"] = True
                     _write_pipeline_event(
                         "sentinel_overflow_hold",
                         phase_raw_id,
@@ -3390,7 +3479,35 @@ class Orchestrator:
                         },
                     )
                 return False
-            # 4. Genuine non-overflow end → accept (gate handles it as today).
+            # 3b. Still streaming past .done: HOLD only while the session's last
+            #     assistant row is a non-terminal tool-loop step (stopReason
+            #     "toolUse") — the agent wrote .done but is still acting and may yet
+            #     write the verdict. A terminally-ended turn (any other / absent
+            #     stopReason, incl. a clean stop or an unresolvable session) is NOT
+            #     held: it falls through to (4) → accept → the gate's
+            #     CONTRACT_FAILURE path, with no stall-window latency. Terminality is
+            #     used here, NOT stamp-vs-.done timing: the .done write's own
+            #     after_tool_call hook bumps the stamp after .done even on a genuine
+            #     end, so the stamp cannot tell "ended" from "still streaming".
+            if _session_jsonl_last_assistant_stop_reason(
+                _resolve_session_jsonl_path(agent_role, session_key)
+            ) in _IN_FLIGHT_STOP_REASONS:
+                if not emitted["streaming"]:
+                    emitted["streaming"] = True
+                    _write_pipeline_event(
+                        "sentinel_verdict_hold",
+                        phase_raw_id,
+                        agent_role,
+                        {
+                            "agent_role": agent_role,
+                            "session_key": session_key,
+                            "reason": "turn_in_flight",
+                            "elapsed_s": int(time.time() - attempt_start_time),
+                        },
+                    )
+                return False
+            # 4. Turn ended (terminal stopReason) or terminality unknown, no verdict
+            #    → accept (the gate handles it as today).
             return True
 
         return _acceptor
@@ -6028,7 +6145,7 @@ class Orchestrator:
                         stall_threshold_seconds=_planner_stall,
                         startup_grace_seconds=_planner_grace,
                         heartbeat_interval_seconds=60,
-                        sentinel_acceptor=self._make_overflow_aware_acceptor(
+                        sentinel_acceptor=self._make_verdict_hold_acceptor(
                             "planner", session_key, _attempt_start_time
                         ),
                     )
@@ -6380,7 +6497,7 @@ class Orchestrator:
                         stall_threshold_seconds=_executor_stall,
                         startup_grace_seconds=_executor_grace,
                         heartbeat_interval_seconds=60,
-                        sentinel_acceptor=self._make_overflow_aware_acceptor(
+                        sentinel_acceptor=self._make_verdict_hold_acceptor(
                             "executor", session_key, _attempt_start_time
                         ),
                     )
@@ -6653,7 +6770,7 @@ class Orchestrator:
                             stall_threshold_seconds=_reviewer_stall,
                             startup_grace_seconds=_reviewer_grace,
                             heartbeat_interval_seconds=60,
-                            sentinel_acceptor=self._make_overflow_aware_acceptor(
+                            sentinel_acceptor=self._make_verdict_hold_acceptor(
                                 "reviewer", session_key, _attempt_start_time
                             ),
                         )
@@ -7301,13 +7418,29 @@ class Orchestrator:
                                 "RUNNING",
                                 f"Reviewer CONTRACT_FAILURE: contract retry cap reached ({_contract_soft}): CONTRACT_FAILURE_SOFT_RETRY_EXHAUSTED — reviewer ended without a verdict (gave up or was cut off)",
                             )
+                            time.sleep(5)
                         else:
                             self.state["current_agent"] = "reviewer"
                             self.transition_state(
                                 "RUNNING",
                                 f"Reviewer CONTRACT_FAILURE contract retry {_contract_soft} — re-invoking reviewer with corrective directive",
                             )
-                        time.sleep(5)
+                            # REVIEWER-RELIABILITY backoff: on a shared local-model host a
+                            # CONTRACT_FAILURE is usually a transient remote-inference error
+                            # (llama-swap model eviction / GPU contention surfacing as
+                            # stop=error with zero tokens), not a content problem — the fresh
+                            # session above already drops the prior context. Re-firing after
+                            # 5s tends to collide with the same contention; back off
+                            # progressively (30s, then 60s) so the model server can recover
+                            # before the next reviewer attempt. Cost-neutral; bounded by the
+                            # cap above and the per-attempt infra backstop.
+                            _contract_backoff = min(30 * _contract_soft, 90)
+                            print(
+                                f"[INFO] Reviewer CONTRACT_FAILURE — backing off "
+                                f"{_contract_backoff}s before contract retry {_contract_soft + 1} "
+                                f"(transient-inference recovery window)."
+                            )
+                            time.sleep(_contract_backoff)
                         continue
 
                     elif gate_result in (

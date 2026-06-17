@@ -94,6 +94,12 @@ from sentinel_poller import cleanup_output_files  # noqa: E402
 ORCHESTRATOR_FILENAME = "orchestrator.py"
 WEBHOOK_AGENT_ID = "prd-creator"
 ROADMAP_CONVERTER_AGENT_ID = "roadmap-converter"
+# Thinking level for the PRD-creator agent on POST /hooks/agent. OpenClaw defaults
+# MiniMax (and the Anthropic-compatible path) to thinking disabled unless the field is
+# set; "medium" mirrors the pipeline agents' DEFAULT_PIPELINE_THINKING_LEVEL
+# (webhook_client.py). Applied to every prd-creator invocation: chat draft, the
+# background readiness assessment, and the clarity check.
+PRD_CREATOR_THINKING_LEVEL = "medium"
 # ORCHESTRATOR_POLL_TIMEOUT: spawn/orchestrator wait (separate from ideas POLL_TIMEOUT below).
 ORCHESTRATOR_POLL_TIMEOUT = 120
 # Stdout/stderr from UI-spawned orchestrator (`_spawn_orchestrator`); tail surfaced on /api/state when down mid-flight (B-04).
@@ -4118,8 +4124,58 @@ def _phase_token_breakdown(p: dict) -> dict:
     return out
 
 
-def _project_metrics_totals(project_path):
+def _metrics_history_rows(project_path, pipeline_root):
+    """Read the orchestrator-private canonical history at
+    ``<pipeline_root>/metrics_history/<project_name>.jsonl`` (read-only).
+
+    This is the rich source of truth ``_write_canonical_metrics_row`` maintains —
+    it carries per-role token dicts, ``cost_total``, ``models_used`` and computed
+    ``duration_seconds``. The project-local ``metrics.jsonl`` is only a mirror and
+    can be clobbered by the agent down to a minimal hand-written row (no cost/
+    tokens, ``duration_seconds: null``); when a run escalates or stops before the
+    next phase completes, that minimal row is what survives on disk. Reading the
+    canonical history here lets the dashboard show the real cost/tokens/duration
+    even for those runs.
+
+    ``pipeline_root`` is the resolved ``autodev_pipeline_root`` (passed in by the
+    caller from its config — NOT read from a global/env here, so the lookup stays
+    scoped to the caller's configured root and same-named projects don't collide).
+    Returns ``[]`` when ``pipeline_root`` is falsy or the file is absent/unreadable;
+    never raises.
+    """
+    if not project_path or not pipeline_root:
+        return []
+    try:
+        project_name = os.path.basename(os.path.realpath(project_path))
+    except OSError:
+        return []
+    if not project_name:
+        return []
+    hist_path = Path(os.path.expanduser(pipeline_root)) / "metrics_history" / f"{project_name}.jsonl"
+    rows = []
+    try:
+        with open(hist_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        return []
+    return rows
+
+
+def _project_metrics_totals(project_path, pipeline_root=None):
     """Aggregate ``{project_path}/.autodev/pipeline/metrics.jsonl`` (pure, read-only).
+
+    When ``pipeline_root`` is given, the orchestrator's canonical rich history at
+    ``<pipeline_root>/metrics_history/<project>.jsonl`` is overlaid per phase (it
+    wins, being the unclobberable source of cost/tokens/duration). When ``None``
+    (the default — e.g. callers without a configured root, or tests), only the
+    project-local file is read, preserving the prior pure behavior.
 
     Shared by ``GET /api/metrics-summary`` (the active project) and the
     ``GET /api/queue`` per-entry summary block (any queued project's cost,
@@ -4170,14 +4226,37 @@ def _project_metrics_totals(project_path):
     if not rows:
         return None
 
-    # Deduplicate by phase — keep the last occurrence (highest attempt counts)
+    # Merge the orchestrator's canonical rich history (METRICS read-side fix) with
+    # the project-local rows, deduped by phase (last occurrence wins). The
+    # orchestrator's metrics_history/<project>.jsonl is the **chronological source
+    # of truth** — append-only, one row per phase completion, and unreachable by
+    # the agent — so it drives phase ORDER (and thus ``last_phase``). The
+    # project-local file can be clobbered/reordered by the agent down to a minimal
+    # row, so it must NOT seed the order. History wins per phase; phases present
+    # only in the project file (e.g. the in-flight / escalated phase that has no
+    # canonical row yet) are appended AFTER the historical ones, in project order.
     seen: dict = {}
+    order: list = []
+    history_phases: set = set()
+    for hrow in _metrics_history_rows(project_path, pipeline_root):
+        phase = hrow.get("phase")
+        if not phase:
+            continue
+        if phase not in seen:
+            order.append(phase)
+        seen[phase] = hrow          # rich canonical row wins (last per phase)
+        history_phases.add(phase)
     for row in rows:
         phase = row.get("phase")
-        if phase:
-            seen[phase] = row
+        if not phase:
+            continue
+        if phase in history_phases:
+            continue                # history already supplied this phase's row
+        if phase not in seen:
+            order.append(phase)
+        seen[phase] = row           # project-only phase (e.g. escalated), keep last
 
-    phases = list(seen.values())
+    phases = [seen[p] for p in order]
     return {
         "phases": phases,
         "cost_total": round(sum(_phase_cost(p) for p in phases), 6),
@@ -4367,7 +4446,7 @@ def _build_project_metrics_summary(project_dir_path, config):
     # Shared aggregation (read + parse + dedup keep-last + cost/duration sums)
     # lives in _project_metrics_totals — also consumed by the GET /api/queue
     # per-entry summary block. None covers exactly the old empty-summary cases.
-    totals = _project_metrics_totals(project_dir_path)
+    totals = _project_metrics_totals(project_dir_path, (config or {}).get("autodev_pipeline_root"))
     if totals is None:
         return _empty_metrics_summary()
 
@@ -5757,6 +5836,7 @@ async def _trigger_readiness_assessment(idea_id: str, config: dict) -> None:
             # gateway tries to deliver the reply to the bound Signal channel and the
             # run is marked errored ("Delivering to Signal requires target").
             "deliver": False,
+            "thinking": PRD_CREATOR_THINKING_LEVEL,
             "message": (
                 f"[SESSION] ideas:{idea_id}:readiness\n\n"
                 f"A new PRD draft is available. Read {ip['prd_draft']} and produce an "
@@ -5899,6 +5979,7 @@ async def post_ideas_message(idea_id: str, request: Request):
         "wakeMode": "now",
         # File-only run; reply is read from the workspace, never delivered to Signal.
         "deliver": False,
+        "thinking": PRD_CREATOR_THINKING_LEVEL,
         "message": (
             f"[SESSION] ideas:{idea_id}:session-{turn_n}\n\n"
             f"{history_block}{system_events_block}{message_content}{_contract_footer}"
@@ -6686,6 +6767,7 @@ async def post_ideas_clarity_check(idea_id: str):
         "wakeMode": "now",
         # File-only run; reply is read from the workspace, never delivered to Signal.
         "deliver": False,
+        "thinking": PRD_CREATOR_THINKING_LEVEL,
         "message": (
             "Review the following PRD for clarity and completeness. "
             "Do not write or modify any files other than clarity_result.json and clarity_result.done listed below. "
@@ -9177,7 +9259,7 @@ def get_queue():
         # exist). tokens_total (METRICS-E3) feeds the row's token metric chip,
         # parallel to the cost chip.
         try:
-            _totals = _project_metrics_totals(_proj)
+            _totals = _project_metrics_totals(_proj, (config or {}).get("autodev_pipeline_root"))
         except Exception:
             _totals = None  # non-fatal — cost/tokens/duration stay None
         entry["cost_total"] = _totals["cost_total"] if _totals else None
@@ -9671,7 +9753,7 @@ def get_queue_entry_snapshot(entry_id: str):
     # all three). metrics_phases (METRICS-E3) is the compact per-phase
     # projection behind the row expansion's cost/token breakout table.
     try:
-        _totals = _project_metrics_totals(project_path)
+        _totals = _project_metrics_totals(project_path, (config or {}).get("autodev_pipeline_root"))
     except Exception:
         _totals = None
     snapshot_cost_total = _totals["cost_total"] if _totals else None

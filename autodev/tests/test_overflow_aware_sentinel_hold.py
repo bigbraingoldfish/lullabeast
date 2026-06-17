@@ -76,7 +76,7 @@ def _write_session_jsonl(openclaw_root, role, session_key, last_error_message=No
 
 
 def _acceptor(orch, role, key, attempt_start):
-    return orch._make_overflow_aware_acceptor(role, key, attempt_start)
+    return orch._make_verdict_hold_acceptor(role, key, attempt_start)
 
 
 # --------------------------------------------------------------------------- T6: matcher
@@ -215,11 +215,11 @@ def test_acceptor_emits_overflow_hold_event_once(tmp_path):
 
 def test_all_agent_poll_sites_wire_sentinel_acceptor():
     src = inspect.getsource(orc)
-    n = len(re.findall(r"sentinel_acceptor=self\._make_overflow_aware_acceptor\(", src))
+    n = len(re.findall(r"sentinel_acceptor=self\._make_verdict_hold_acceptor\(", src))
     assert n >= 3, f"expected >=3 wired poll sites (planner/executor/reviewer), found {n}"
     for role in ("planner", "executor", "reviewer"):
-        assert re.search(rf'_make_overflow_aware_acceptor\(\s*["\']{role}["\']', src), (
-            f"poll site for {role} must wire the overflow-aware acceptor"
+        assert re.search(rf'_make_verdict_hold_acceptor\(\s*["\']{role}["\']', src), (
+            f"poll site for {role} must wire the verdict-hold acceptor"
         )
 
 
