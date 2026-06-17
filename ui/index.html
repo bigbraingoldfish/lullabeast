@@ -1,4 +1,9 @@
 <!DOCTYPE html>
+<!--
+  Lullabeast dashboard — intentionally a single self-contained file. React, Babel,
+  and Tailwind are vendored under ui/static/ and transpiled in-browser (no build
+  step, no bundler); all components live here. See CLAUDE.md ("single-file design").
+-->
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -11,10 +16,10 @@
     <link rel="icon" type="image/png" sizes="16x16" href="/static/img/lullabeast_tilted_16.png" />
     <link rel="apple-touch-icon" sizes="180x180" href="/static/img/lullabeast_tilted_180.png" />
     
-    <!-- Google Fonts: Hanken Grotesk for chrome (wordmark + prose), JetBrains Mono for data -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+    <!-- Typography: Hanken Grotesk for chrome (wordmark + prose), JetBrains Mono for data -->
+    <!-- Fonts are self-hosted (woff2 variable fonts under /static/fonts/) — no external CDN, so the
+         dashboard renders fully offline. See the @font-face rules in the <style> block below. -->
+
     
     <!-- React and ReactDOM UMD -->
     <script src="/static/react.min.js"></script>
@@ -78,6 +83,23 @@
     </script>
     
     <style>
+        /* Self-hosted variable fonts (woff2). Vendored under ui/static/fonts/, served at
+           /static/fonts/ — replaces the former Google Fonts CDN link so the UI has no
+           external runtime dependency. Both families are SIL OFL (see THIRD-PARTY-NOTICES). */
+        @font-face {
+            font-family: 'Hanken Grotesk';
+            font-style: normal;
+            font-weight: 300 700;
+            font-display: swap;
+            src: url('/static/fonts/hanken-grotesk.woff2') format('woff2');
+        }
+        @font-face {
+            font-family: 'JetBrains Mono';
+            font-style: normal;
+            font-weight: 400 700;
+            font-display: swap;
+            src: url('/static/fonts/jetbrains-mono.woff2') format('woff2');
+        }
         :root {
             --ll-bg-base: #0B0A12;
             --ll-bg-panel: #15121F;
