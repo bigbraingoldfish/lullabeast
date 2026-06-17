@@ -1,5 +1,7 @@
 # Contributing to Lullabeast
 
+This project follows a [Code of Conduct](CODE_OF_CONDUCT.md) (the Contributor Covenant); by participating you agree to uphold it.
+
 ## Development setup
 
 ```bash

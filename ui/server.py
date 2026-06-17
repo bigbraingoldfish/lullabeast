@@ -1,4 +1,21 @@
-"""UI server module."""
+"""Lullabeast dashboard server — every FastAPI route for the UI, in one process.
+
+This module is the whole backend: the Setup/Preflight, Pipeline Monitor, Queue, and
+Project Ideas APIs; the SSE event stream; the OpenClaw webhook calls that drive the
+idea -> PRD -> roadmap front end; and the pure-ASGI token-auth middleware that guards
+every non-exempt route. It reads pipeline/queue state written by the orchestrator and
+spawns it; it never imports it.
+
+It is **intentionally one large file.** The UI was built TDD across many phases as a
+single-process server; keeping all routes together avoids cross-module import churn
+and keeps request flow auditable in one place. See CLAUDE.md ("intentional single-file
+design") before splitting it.
+
+Configuration is a two-layer merge — the hardcoded ``DEFAULTS`` dict overlaid by an
+optional ``ui/config.json`` (the "config dual-source rule" in CLAUDE.md); ``load_config``
+applies it and expands ``~`` in path values. The full product spec is
+autodev/docs/AUTODEV-UI-PRD.md.
+"""
 import base64
 import binascii  # referenced as binascii.Error in the image-attachment except clause
 import aiohttp

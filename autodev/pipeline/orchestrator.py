@@ -1,3 +1,20 @@
+"""Lullabeast pipeline orchestrator — the single state machine that drives a run.
+
+This module owns the entire deterministic build loop: it resolves the next roadmap
+phase, invokes the planner / executor / reviewer / escalation agents through the
+OpenClaw gateway, runs the gate scripts between each handoff, performs every git
+operation (phase branches, commits, merges), and handles retries, escalation, and
+crash recovery. The queue logic that sequences multiple projects lives here too.
+
+It is **intentionally one large file.** The pipeline's control flow — state
+transitions, agent coordination, git side effects, and the shared mutable state they
+all touch — is kept in one place so the whole loop is auditable end to end without
+chasing call paths across modules. Extracting helpers requires understanding that
+shared state; see CLAUDE.md ("intentional single-file design") before refactoring.
+
+The authoritative architecture spec is autodev/docs/PIPELINE-SPEC.md; the state
+machine, gate contracts, and sentinel-polling rules are summarized in CLAUDE.md.
+"""
 import os
 import sys
 try:

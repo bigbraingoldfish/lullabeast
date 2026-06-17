@@ -288,6 +288,7 @@ install.sh          # interactive installer
 | [CLAUDE.md](CLAUDE.md) | Complete contributor orientation and architecture deep-dive |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup, PR conventions, adding skills |
 | [SECURITY.md](SECURITY.md) | Security model and vulnerability reporting |
+| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Community expectations for participation (Contributor Covenant) |
 | `autodev/docs/PIPELINE-SPEC.md` | The architecture spec / single source of truth |
 
 ---

@@ -8,12 +8,12 @@ def test_lullabeast_wordmark_uses_jetbrains_mono():
     with open("ui/index.html", "r") as f:
         content = f.read()
     
-    # Check Google Fonts link includes JetBrains Mono
-    assert "JetBrains+Mono" in content, \
-        "JetBrains Mono font not loaded"
-    
-    # Check header-text class uses JetBrains Mono
-    assert "font-header" in content or "JetBrains+Mono" in content, \
+    # JetBrains Mono is self-hosted (woff2 under /static/fonts/) via @font-face
+    assert "jetbrains-mono.woff2" in content, \
+        "JetBrains Mono font not loaded (self-hosted woff2 missing)"
+
+    # Check header-text class uses JetBrains Mono (the @font-face family name)
+    assert "font-header" in content or "JetBrains Mono" in content, \
         "Header font not properly configured"
 
 
@@ -33,9 +33,9 @@ def test_body_text_uses_hanken_grotesk():
     with open("ui/index.html", "r") as f:
         content = f.read()
 
-    # Check Google Fonts link includes Hanken Grotesk
-    assert "Hanken+Grotesk" in content, \
-        "Hanken Grotesk font not loaded"
+    # Hanken Grotesk is self-hosted (woff2 under /static/fonts/) via @font-face
+    assert "hanken-grotesk.woff2" in content, \
+        "Hanken Grotesk font not loaded (self-hosted woff2 missing)"
 
     # Check body style uses Hanken Grotesk
     body_font_match = re.search(r"font-family:\s*'([^']+)'", content)
