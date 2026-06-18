@@ -948,6 +948,26 @@
             return EVENT_TYPE_DESCRIPTION[key] || '';
         }
 
+        // Phase 3 (gate-feedback) — per-code hover copy for the demoted
+        // executor-gate warnings surfaced in the Run Metrics drill-in. These
+        // render only on phases whose canonical metrics row exists — i.e. the
+        // reviewer already passed the phase — so the past-tense "accepted"
+        // framing in the preamble is always accurate here.
+        const GATE_WARNING_PREAMBLE =
+            'Non-blocking warning. The executor gate flagged this error to the reviewer, who inspected it and accepted the work.';
+        const GATE_WARNING_TOOLTIPS = {
+            ERR_TDD_COVERAGE_MISMATCH:
+                "A test the planner expected wasn't found by name in the executor's reported tests. (Usually the coverage exists under a different filename.) The reviewer confirmed the planned behavior was met before passing the phase.",
+            ERR_MANIFEST_FILE_MISSING:
+                "A file the executor listed as changed wasn't found on disk when the gate checked. The reviewer independently re-verified that each declared file exists with real implementation before passing the phase.",
+            ERR_BEHAVIORAL_ARTIFACTS_MISSING:
+                "The executor didn't attach valid smoke-test evidence for this phase as expected. The reviewer produced its own behavioral evidence by running the phase's verification steps before passing the phase.",
+        };
+        function gateWarningTooltip(code) {
+            const specific = GATE_WARNING_TOOLTIPS[code];
+            return specific ? `${GATE_WARNING_PREAMBLE}\n\n${specific}` : GATE_WARNING_PREAMBLE;
+        }
+
         function humanizeSummary(event) {
             const type = event.event || event.event_type || '';
             const d = event.detail || {};
@@ -3376,7 +3396,14 @@
                                                                 {(((phaseMeta.gate_warnings && Number(phaseMeta.gate_warnings.count) > 0)) || (phaseMeta.reachability_summary && phaseMeta.reachability_summary.kind)) && (
                                                                     <div data-testid="phase-advisory-detail" className="mb-2 text-[11px] text-slate-500 space-y-0.5">
                                                                         {phaseMeta.gate_warnings && Number(phaseMeta.gate_warnings.count) > 0 && (
-                                                                            <div>⚠ Gate warnings: <span className="text-amber-400/80">{(phaseMeta.gate_warnings.codes || []).join(', ') || phaseMeta.gate_warnings.count}</span></div>
+                                                                            <div>⚠ Gate warnings: {(phaseMeta.gate_warnings.codes && phaseMeta.gate_warnings.codes.length)
+                                                                                ? phaseMeta.gate_warnings.codes.map((code, i) => (
+                                                                                    <React.Fragment key={code}>
+                                                                                        {i > 0 && ', '}
+                                                                                        <span title={gateWarningTooltip(code)} className="text-amber-400/80 underline decoration-dotted underline-offset-2 cursor-help">{code}</span>
+                                                                                    </React.Fragment>
+                                                                                ))
+                                                                                : <span className="text-amber-400/80">{phaseMeta.gate_warnings.count}</span>}</div>
                                                                         )}
                                                                         {phaseMeta.reachability_summary && phaseMeta.reachability_summary.kind && (
                                                                             <div>Reachability: <span className="text-slate-400">{phaseMeta.reachability_summary.kind}{phaseMeta.reachability_summary.count != null ? ` (${phaseMeta.reachability_summary.count})` : ''}</span></div>
@@ -11238,7 +11265,7 @@
                                         >
                                             {pState.queue_halted
                                                 ? 'Queue: halted'
-                                                : `Queue: ${((pState.queue_length || 0) - (pState.completed_count || 0))} waiting`}
+                                                : `Queue: ${Math.max(0, (pState.queue_length || 0) - (pState.completed_count || 0) - (pState.active_count || 0))} waiting`}
                                         </button>
                                     )}
                                 </div>

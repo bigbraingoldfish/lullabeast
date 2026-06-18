@@ -3079,6 +3079,7 @@ def get_state():
                 response["ready_count"] = sum(1 for e in q_entries if e["state"] == "READY")
                 response["blocked_count"] = sum(1 for e in q_entries if e["state"] in ("BLOCKED", "ESCALATION"))
                 response["completed_count"] = sum(1 for e in q_entries if e["state"] == "COMPLETED")
+                response["active_count"] = sum(1 for e in q_entries if e["state"] == "ACTIVE")
                 response["queue_mode"] = q.get("queue_mode", "auto")
                 response["queue_halted"] = response.get("pipeline_status") == "QUEUE_HALTED"
     except Exception:
