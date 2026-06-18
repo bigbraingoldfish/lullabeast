@@ -54,9 +54,7 @@ autodev-ui/
 │   └── docs/
 │       ├── PIPELINE-SPEC.md        # Architecture spec — single source of truth (~1,900 lines)
 │       ├── PIPELINE-CONSTRAINTS.md # Known issues, hardware limits, model bugs (~520 lines)
-│       ├── AUTODEV-UI-PRD.md       # Full product requirements for the dashboard UI
-│       ├── ASSUMPTIONS.md          # Live spec divergences and resolved ambiguities
-│       └── ...                     # Vision docs, roadmaps, templates
+│       └── ASSUMPTIONS.md          # Live spec divergences and resolved ambiguities
 ├── ui/
 │   ├── server.py                   # FastAPI server (~10,700 lines) — all API endpoints
 │   ├── roadmap_parser.py           # Display roadmap parser (all phases → list)
@@ -851,6 +849,6 @@ Operator setup and dashboard terminology: **`SETUP.md`** and **`GLOSSARY.md`** a
 |----------|-----------|-----------------|
 | `PIPELINE-SPEC.md` | Architecture spec — state machine, gate interfaces, component behaviors, infrastructure topology | Before modifying orchestrator.py or any gate script |
 | `PIPELINE-CONSTRAINTS.md` | Known issues, hardware limits, model-specific bugs, mitigations | Before changing model config, sentinel timing, or gate logic |
-| `AUTODEV-UI-PRD.md` | Full product requirements for the dashboard | Before adding or modifying any API endpoint or UI behavior |
 | `ASSUMPTIONS.md` | Resolved spec ambiguities, divergences from original design | When PIPELINE-SPEC and live code appear to contradict each other |
-| `Dev_Roadmap_template-v3-...md` | Canonical roadmap format for target projects | When creating or validating a user project's roadmap |
+
+For the UI/API, `ui/README.md` is the live overview (server routes, the single-file React app, layout notes); the original `AUTODEV-UI-PRD.md` product spec is archived and no longer tracks the current UI. The roadmap format a target project must follow is defined operatively by the roadmap-converter's `roadmap-generation` skill (`autodev/skill-library/roadmap-converter/roadmap-generation/SKILL.md`) and enforced by the gates (the reviewer gate requires each phase's behavioral-verification block) — there is no standalone template document.

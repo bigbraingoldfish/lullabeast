@@ -1,21 +1,14 @@
 # scripts/
 
-## `queue-e2e-reset-test-projects.sh`
+## `backfill_metrics_history.py`
 
-Resets Pi **queue-test** repos used for strict queue E2E validation:
-
-- Backs up `~/.openclaw/pipeline_queue.json` and `pipeline_state.json` with a timestamp suffix.
-- For `queue-test1` … `queue-test5` under `$PROJECTS_ROOT` (default `/tmp/autodev-queue-e2e-projects`): removes common pipeline artifact files, normalizes **git** on **`main`** with at least one commit, writes default **roadmap A** (single pending `CORE-E1`) and **`roadmap.B.v1-complete.md`** for **V1** startup-complete tests.
-- Optional **`--create-phaseonly`**: creates `$PROJECTS_ROOT/queue-test-phaseonly` with only branch **`phase/demo`** (no `main`/`master`) for **V4** preflight **warn** path.
-
-The queue-E2E symlink / git invariants are tracked in an internal source-of-truth doc that is not part of the public tree.
+One-off operator recovery tool. Rebuilds `metrics_history/<project>.jsonl` from the
+per-phase audit archives under `$OPENCLAW_ROOT/pipeline-audit/<project>/` — recovering
+canonical metrics rows lost when the live `metrics.jsonl` was truncated by an executor
+overwrite. The merge is non-destructive (existing rows preserved, only missing phases
+appended) and idempotent, so re-running after a backfill is a no-op.
 
 ```bash
-# From autodev-ui repo root
-./scripts/queue-e2e-reset-test-projects.sh
-./scripts/queue-e2e-reset-test-projects.sh --create-phaseonly
+OPENCLAW_ROOT=~/.openclaw AUTODEV_PIPELINE_ROOT=/path/to/.autodev \
+  python3 scripts/backfill_metrics_history.py <project_name> [--dry-run]
 ```
-
-## `queue-e2e-strict-freeze.sh`
-
-Timestamped copies of `pipeline_queue.json`, `pipeline_state.json`, and a `readlink` snapshot of `pipeline-project` under `$OPENCLAW_ROOT` (default `~/.openclaw`). Use before/after strict dual validations; restore with `cp` + `ln -sfn "$(cat …readlink)"`.

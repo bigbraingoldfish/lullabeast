@@ -13,8 +13,8 @@ design") before splitting it.
 
 Configuration is a two-layer merge — the hardcoded ``DEFAULTS`` dict overlaid by an
 optional ``ui/config.json`` (the "config dual-source rule" in CLAUDE.md); ``load_config``
-applies it and expands ``~`` in path values. The full product spec is
-autodev/docs/AUTODEV-UI-PRD.md.
+applies it and expands ``~`` in path values. See ``ui/README.md`` for the UI
+overview and ``CLAUDE.md`` for the architecture.
 """
 import base64
 import binascii  # referenced as binascii.Error in the image-attachment except clause
