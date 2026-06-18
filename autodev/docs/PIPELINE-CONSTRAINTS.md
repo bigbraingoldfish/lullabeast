@@ -90,7 +90,7 @@ Ollama tools API limitation; role now served by Qwen3.5-27B.
 
 ### Webhook `agentId` Routing
 
-- `POST /hooks/agent` routes to specific agents via the `agentId` field in the request body — this is a built-in feature of the OpenClaw webhook endpoint, not a custom `hooks.mappings` configuration. The `hooks.allowedAgentIds` array in `openclaw.json` restricts which agents can be targeted. Phase 0 should validate that this routes correctly in the deployed environment. See: PIPELINE-ROADMAP.md § Phase 0.
+- `POST /hooks/agent` routes to specific agents via the `agentId` field in the request body — this is a built-in feature of the OpenClaw webhook endpoint, not a custom `hooks.mappings` configuration. The `hooks.allowedAgentIds` array in `openclaw.json` restricts which agents can be targeted. Phase 0 should validate that this routes correctly in the deployed environment.
 
 ### Tool Policy Granularity
 

@@ -37,9 +37,8 @@ ui/index.html.bak
 /GEMINI.md
 /.cursorrules
 /.windsurfrules
-/.claude/skills/
-.claude/settings.json
-.claude/settings.local.json
+# Claude Code tool config (like .vscode / .cursor — not part of the release)
+/.claude/
 
 # Local / internal planning (not for the public tree)
 /plans/
@@ -73,7 +72,6 @@ PIPELINE_STATE_MACHINE_AUDIT.md
 *-metaprompt.md
 analyze_executor_sessions.py
 executor-watchdog-calibration-findings.md
-.claude/scheduled_tasks.lock
 
 
 # Plugin build artifacts (compiled per-host by install.sh — never committed)
@@ -82,3 +80,8 @@ autodev/plugin/node_modules/
 
 # Marketing site (local draft, not part of the release tree)
 /Site/
+
+# Internal queue-E2E validation rig (manual; references unpublished runbooks — kept local, not shipped)
+scripts/queue-e2e-reset-test-projects.sh
+scripts/queue-e2e-strict-freeze.sh
+tests/test_freeze_script_portable.py
