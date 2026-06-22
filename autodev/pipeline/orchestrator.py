@@ -52,7 +52,7 @@ from queue_semantics import (
     QUEUE_MAX_CAS_RETRIES, QUEUE_VERSION_KEY, QueueAbort, QueueVersionConflict,
     bump_queue_version, mutate_queue, read_queue_version, scrub_parked_fields,
 )
-from env_resolvers import resolve_openclaw_root, resolve_pipeline_root
+from env_resolvers import resolve_openclaw_root, resolve_pipeline_root, load_repo_env_file
 from atomic_io import write_json_atomic, write_text_atomic
 from error_codes import (
     ERR_MERGE_FAILED,
@@ -716,6 +716,48 @@ def _is_provider_rejected_error(msg: str) -> bool:
     if "429" in msg or "rate limit" in lower:
         return True
     return False
+
+
+def _is_transient_provider_error(msg: str) -> bool:
+    """Strict subset of :func:`_is_provider_rejected_error` that is plausibly
+    *transient* — a rate-limit the provider clears on its own (HTTP 429 / "rate
+    limit") — as opposed to a *terminal* billing/auth rejection (401/402, invalid
+    key, insufficient credits) that retrying cannot fix.
+
+    The signatures here MUST stay a subset of ``_is_provider_rejected_error`` (which
+    recognizes a rate-limit via ``"429"`` / ``"rate limit"``): the opt-in override
+    below gates on that function first, so anything it does not classify as a
+    rejection already flows to the normal retry path and never reaches here. The
+    override only ever *narrows* the escalate set, never widens it.
+
+    Used only by the opt-in provider-error retry path (``PROVIDER_ERROR_RETRY``); a
+    terminal rejection always escalates immediately regardless of that flag.
+    """
+    if not msg:
+        return False
+    return "429" in msg or "rate limit" in msg.lower()
+
+
+def provider_error_retry_limit() -> int:
+    """Max number of *transient* provider-error (rate-limit) retries before escalating.
+
+    Read from the ``PROVIDER_ERROR_RETRY`` env var — an integer **count**, default
+    ``0`` = disabled = the historical fail-fast behavior. A positive N enables the
+    retry: a transient provider rejection (rate-limit; see
+    :func:`_is_transient_provider_error`) re-invokes the *same* agent in place up to
+    N times before escalating, each retry on a fresh OpenClaw session and **without**
+    consuming the agent's own self-failure retry budget. Terminal (auth/billing)
+    rejections always escalate regardless — retrying cannot fix them.
+
+    Parsed leniently via :func:`_env_int`: a missing / non-numeric / negative value
+    yields ``0`` (disabled). This is a count, not a 1/0 toggle — ``PROVIDER_ERROR_RETRY=3``
+    means "retry a rate-limit up to 3 times", and a non-integer like ``true`` does
+    **not** silently enable an unbounded retry (it reads as 0).
+
+    Read at call time so a value self-loaded from ``<repo>/.env`` at orchestrator
+    startup (see the ``__main__`` block) takes effect without code changes.
+    """
+    return _env_int("PROVIDER_ERROR_RETRY", "0", min_clamp=0)
 
 
 # ---------------------------------------------------------------------------
@@ -3519,10 +3561,47 @@ class Orchestrator:
 
         Returns True when escalation was triggered (caller must ``continue`` the main loop). May be
         called more than once per attempt (post-poll and post-gate) to absorb JSONL flush ordering.
+
+        Opt-in override (``PROVIDER_ERROR_RETRY=N``): a *transient* provider rejection
+        (rate-limit) re-invokes the same agent in place up to N times before escalating
+        (current_agent unchanged → the caller's ``continue`` re-runs it). See
+        :func:`provider_error_retry_limit` and :meth:`_provider_retry_suffix`.
         """
         msg = _session_jsonl_last_assistant_error_message(jsonl_path)
         if not msg or not _is_provider_rejected_error(msg):
+            # Not a provider rejection: the agent produced real output (or failed for a
+            # non-provider reason), so the provider worked this turn and the consecutive
+            # transient-error streak is broken — clear the retry budget for a later 429.
+            self._reset_provider_error_retries()
             return False
+
+        # Opt-in (PROVIDER_ERROR_RETRY=N): retry a *transient* provider rejection
+        # (rate-limit) up to N times before escalating, by re-invoking the SAME agent in
+        # place — current_agent is left unchanged, so the caller's `continue` re-runs the
+        # loop on the same agent. The agent block appends _provider_retry_suffix() to the
+        # session key, so each retry runs on a fresh OpenClaw session (never resuming the
+        # rate-limited one) and the per-agent self-failure attempt counter is NOT consumed
+        # (a flaky provider must not burn the executor's "bad code, try again" budget).
+        # Terminal (auth/billing) rejections fall through and always escalate — retrying
+        # cannot fix them.
+        limit = provider_error_retry_limit()
+        if limit > 0 and _is_transient_provider_error(msg):
+            used = self._provider_error_retries()
+            if used < limit:
+                _ps = self.read_phase_state()
+                _ps["provider_error_retries"] = used + 1
+                self.write_phase_state_atomic(_ps)
+                print(
+                    f"[PROVIDER-RETRY] [{role_label}] Transient provider rejection "
+                    f"(retry {used + 1}/{limit}) — re-invoking instead of escalating: "
+                    f"{msg[:200]}"
+                )
+                return True  # caller continues; current_agent unchanged → same agent re-runs
+            print(
+                f"[PROVIDER-RETRY] [{role_label}] Transient provider rejection — retry "
+                f"budget exhausted ({used}/{limit}); escalating: {msg[:200]}"
+            )
+
         print(f"[ERROR] [{role_label}] Provider rejected request: {msg[:240]}")
         _ps = self.read_phase_state()
         _ps["last_error_code"] = ERR_PROVIDER_REJECTED
@@ -3536,6 +3615,35 @@ class Orchestrator:
             f"ERR_PROVIDER_REJECTED ({role_label}): {msg[:240]}",
         )
         return True
+
+    def _provider_error_retries(self) -> int:
+        """Consecutive transient-provider-error retries already used this phase
+        (``provider_error_retries`` in phase_state; auto-resets when phase_state is
+        deleted on advance / reset_phase). 0 on any read error."""
+        try:
+            return int(self.read_phase_state().get("provider_error_retries", 0) or 0)
+        except (ValueError, TypeError):
+            return 0
+
+    def _provider_retry_suffix(self) -> str:
+        """Session-key suffix (``-pr{N}``) that makes an in-place PROVIDER_ERROR_RETRY
+        re-invoke use a fresh OpenClaw session instead of resuming the rate-limit-killed
+        one — without bumping the per-agent attempt counter that the base key encodes.
+        Empty on the common path (no provider retry in flight), so non-retry session
+        keys stay byte-identical to the legacy shape. Mirrors the reviewer ``-c{N}``
+        contract-retry discriminator."""
+        n = self._provider_error_retries()
+        return f"-pr{n}" if n else ""
+
+    def _reset_provider_error_retries(self) -> None:
+        """Clear the consecutive provider-retry counter (writes only when set). Called
+        whenever an attempt ends in a non-(transient-provider) outcome, so the budget is
+        per *consecutive* rate-limit streak: a success or a genuine code failure means
+        the provider worked, so a later 429 gets the full N retries again."""
+        _ps = self.read_phase_state()
+        if _ps.get("provider_error_retries", 0):
+            _ps["provider_error_retries"] = 0
+            self.write_phase_state_atomic(_ps)
 
     def _reviewer_session_key(self, phase, raw_id, reviewer_retries, contract_retries):
         """Build the reviewer session key for an attempt.
@@ -6077,7 +6185,7 @@ class Orchestrator:
                         time.sleep(2)
                         continue
 
-                    session_key = f"pipeline:phase-{phase}:{raw_id}:planner-attempt-{retries + 1}"
+                    session_key = f"pipeline:phase-{phase}:{raw_id}:planner-attempt-{retries + 1}" + self._provider_retry_suffix()
                     self._record_active_agent("planner", session_key)  # Phase 9 — abort-on-escalation target
                     sentinel_path = os.path.join(PROJECT_ARTIFACTS_DIR, "planner_output.done")
                     token = self.openclaw_config.get("hooks", {}).get("token", "")
@@ -6350,7 +6458,7 @@ class Orchestrator:
                         time.sleep(2)
                         continue
 
-                    session_key = f"pipeline:phase-{phase}:{raw_id}:executor-attempt-{retries + 1}"
+                    session_key = f"pipeline:phase-{phase}:{raw_id}:executor-attempt-{retries + 1}" + self._provider_retry_suffix()
                     self._record_active_agent("executor", session_key)  # Phase 9 — abort-on-escalation target
                     attempt_label = "Cloud"
 
@@ -6683,7 +6791,7 @@ class Orchestrator:
                     # mix the contract-retry count into the key for a fresh, distinct
                     # session per contract retry (see _reviewer_session_key).
                     _contract_retries = self.read_phase_state().get("reviewer_contract_retries", 0)
-                    session_key = self._reviewer_session_key(phase, raw_id, retries, _contract_retries)
+                    session_key = self._reviewer_session_key(phase, raw_id, retries, _contract_retries) + self._provider_retry_suffix()
                     self._record_active_agent("reviewer", session_key)  # Phase 9 — abort-on-escalation target
 
                     sentinel_path = os.path.join(PROJECT_ARTIFACTS_DIR, "reviewer_output.done")
@@ -8022,6 +8130,17 @@ def apply_cli_revive(orchestrator, entry_id: str) -> None:
 
 
 if __name__ == "__main__":
+    # Self-load <repo>/.env so operator knobs declared there (e.g. PROVIDER_ERROR_RETRY)
+    # reach the orchestrator even when the spawning process (UI server / CLI) did not
+    # `source .env`. setdefault semantics: an already-set env var (a sourced .env or a
+    # test override) always wins. Entry-point only — never at import time, because the
+    # test suite imports this module and load_repo_env_file()'s contract forbids an
+    # import-time side effect for library importers. The module-level OPENCLAW_ROOT /
+    # AUTODEV_PIPELINE_ROOT constants are already resolved by now (they rely on the
+    # spawning env); only call-time reads like provider_error_retry_limit() depend on
+    # this self-load.
+    load_repo_env_file(AUTODEV_REPO_PATH)
+
     # Configure logging before anything else so cleanup_stranded_temp_files()
     # and all startup INFO messages reach stdout (not silently discarded).
     logging.basicConfig(
