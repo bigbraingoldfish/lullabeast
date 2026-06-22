@@ -38,6 +38,10 @@ _ENV_KEYS_TO_SCRUB = (
     "OPENCLAW_ROOT",
     "AUTODEV_PIPELINE_ROOT",
     "AUTODEV_HOOKS_TOKEN",
+    # Opt-in provider-error retry flag. Scrub so a developer's real `.env`
+    # (PROVIDER_ERROR_RETRY=1, sourced into the shell) cannot flip the
+    # default-off behavior under test; the dedicated tests set it explicitly.
+    "PROVIDER_ERROR_RETRY",
 )
 
 
