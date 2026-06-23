@@ -10,11 +10,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Lullabeast Pipeline</title>
 
-    <!-- Favicon / app icon — Lullabeast mascot (tilted) -->
-    <link rel="icon" type="image/svg+xml" href="/static/img/lullabeast_tilted.svg" />
-    <link rel="icon" type="image/png" sizes="32x32" href="/static/img/lullabeast_tilted_32.png" />
-    <link rel="icon" type="image/png" sizes="16x16" href="/static/img/lullabeast_tilted_16.png" />
-    <link rel="apple-touch-icon" sizes="180x180" href="/static/img/lullabeast_tilted_180.png" />
+    <!-- Favicon / browser-tab icon — Lullabeast app mark (solid background; crisp at tab size).
+         The in-UI header logo stays the transparent tilted mascot (see the <img> tags below). -->
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/img/lullabeast-icon-32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/static/img/lullabeast-icon-16.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/img/lullabeast-icon-256.png" />
     
     <!-- Typography: Hanken Grotesk for chrome (wordmark + prose), JetBrains Mono for data -->
     <!-- Fonts are self-hosted (woff2 variable fonts under /static/fonts/) — no external CDN, so the
@@ -2579,17 +2579,18 @@
                                     <div className="bg-[#221b36] rounded p-2 flex-1 min-w-[8rem]">
                                         <div className="text-slate-500 text-xs mb-0.5 header-text uppercase tracking-wide">Total Tokens</div>
                                         <div className="header-text text-lg font-semibold text-slate-200 font-mono">{fmtTokens(totalTokens)}</div>
-                                        {/* Token-class split: cache reads dominate the headline figure but
-                                            bill far cheaper than fresh input/output. Hidden for pre-breakdown
-                                            history (fmtTokenBreakdown returns null on an all-zero split). */}
+                                        {/* Token-class split (in/out/cache) replaces the per-agent breakout
+                                            for a cleaner completion summary. Cache reads dominate the headline
+                                            figure but bill far cheaper than fresh input/output. Hidden for
+                                            pre-breakdown history (fmtTokenBreakdown returns null on an
+                                            all-zero split). */}
                                         {fmtTokenBreakdown(metricsSummary.tokens_breakdown) && (
-                                            <div className="text-[10px] text-slate-500 font-mono leading-tight">{fmtTokenBreakdown(metricsSummary.tokens_breakdown)}</div>
+                                            <div className="mt-1 space-y-0.5 text-xs">
+                                                <div className="flex justify-between text-slate-400"><span>In</span><span className="font-mono">{fmtTokens(metricsSummary.tokens_breakdown.input)}</span></div>
+                                                <div className="flex justify-between text-slate-400"><span>Out</span><span className="font-mono">{fmtTokens(metricsSummary.tokens_breakdown.output)}</span></div>
+                                                <div className="flex justify-between text-slate-400"><span>Cache</span><span className="font-mono">{fmtTokens((Number(metricsSummary.tokens_breakdown.cache_read) || 0) + (Number(metricsSummary.tokens_breakdown.cache_write) || 0))}</span></div>
+                                            </div>
                                         )}
-                                        <div className="mt-1 space-y-0.5 text-xs">
-                                            <div className="flex justify-between text-slate-400"><span>Planner</span><span className="font-mono">{fmtTokens(metricsSummary.planner_tokens_total)}</span></div>
-                                            <div className="flex justify-between text-slate-400"><span>Executor</span><span className="font-mono">{fmtTokens(metricsSummary.executor_tokens_total)}</span></div>
-                                            <div className="flex justify-between text-slate-400"><span>Reviewer</span><span className="font-mono">{fmtTokens(metricsSummary.reviewer_tokens_total)}</span></div>
-                                        </div>
                                     </div>
                                 )}
                             </div>
