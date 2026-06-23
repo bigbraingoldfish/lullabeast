@@ -76,13 +76,20 @@ def test_phase_dropdown_inline_breakdowns():
 
 
 def test_completion_panel_total_tokens():
-    """3-B — PipelineCompletePanel renders the run-total token count and the per-role
-    token totals (parallel to the existing per-role cost card)."""
+    """PipelineCompletePanel renders the run-total token count and the in/out/cache
+    token-class breakdown. The per-agent role breakout was removed (2026-06-23) in
+    favour of a cleaner completion summary — the class split now mirrors the Total
+    Cost card's labelled rows."""
     body = extract_function(load_html(), "PipelineCompletePanel")
     assert body is not None, "PipelineCompletePanel not found"
     assert "total_tokens" in body
+    # in/out/cache token-class rows replace the former per-role totals
+    assert "tokens_breakdown" in body
+    for key in ("input", "output", "cache_read", "cache_write"):
+        assert key in body, f"completion panel must read tokens_breakdown.{key}"
+    # the per-agent token breakout was intentionally dropped from the summary
     for key in ("planner_tokens_total", "executor_tokens_total", "reviewer_tokens_total"):
-        assert key in body, f"completion panel must read {key}"
+        assert key not in body, f"per-role token breakout should be gone; found {key}"
 
 
 def test_completion_per_phase_token_column():
