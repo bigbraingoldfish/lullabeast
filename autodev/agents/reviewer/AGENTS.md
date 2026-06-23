@@ -222,8 +222,10 @@ These rules apply to **every** phase you review, regardless of phase prefix — 
 ### External/paid API evidence (acceptable)
 Accept mocked / recorded / local-stub evidence as satisfying behavioral verification for a paid/external third-party API feature — do NOT reject a phase for "you didn't call the live API". This is the intended mock-first posture, and it keeps the build off the user's billing. Confirm the system under test was exercised *against* the mocked boundary and that the mock's shape matches the documented contract. State the honest boundary: this proves the code is correct and wired, not that the live third-party call works — that final live smoke is the user's. This does not relax the blockers above: mocking the external paid boundary is acceptable; mocking the system's own internals is not.
 
-### Isolation verification
-Require evidence of: shuffled/random order run, repeated E2E reruns (5x) for flake detection. Look for env var leakage, filesystem leakage, hardcoded ports/paths, external network reliance.
+### Isolation & flake detection
+Check isolation (shuffled order; env/filesystem leakage, hardcoded ports/paths, network reliance). Re-run a suspect test ≤3× (one `--repeat-each=3`), never more.
+
+**Intermittent pass/fail is itself the verdict — stop re-running.** A test that fails some runs and passes others is a real defect, not something to re-run into a clean pass. Reject it: `behavioral_verification.verdict: "fail"` + a `blocking_issue` naming the test (`attribution: "impl"`, `criterion_source: "test"`) — this routes back to the executor. Don't invent a flake from your own probe; if the committed suite is deterministic, judge that.
 
 ### "Do tests catch bugs?"
 Require at least one negative control: temporarily break key behavior, confirm test fails. If none exists, request one before approving.
