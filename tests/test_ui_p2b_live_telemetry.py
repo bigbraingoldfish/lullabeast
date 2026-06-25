@@ -107,14 +107,13 @@ def test_agent_liveness_indicator_present(html):
     assert re.search(r"amber", cpp), "liveness should amber as it nears the stall threshold"
 
 
-# ── C3 — last attempt summary line ──────────────────────────────────────────
+# ── C3 — last attempt summary line (removed per operator request) ────────────
 
-def test_last_attempt_summary_line_present(html):
-    """CurrentPhasePanel renders the dense last_attempt_summary (with last_poll_reason)."""
+def test_last_attempt_summary_line_absent(html):
+    """The dense last_attempt_summary line was removed from CurrentPhasePanel — the
+    raw "phase=… agent=… attempt=… reason=…" string was operator-facing noise."""
     cpp = _current_phase_panel_slice(html)
-    assert 'data-testid="last-attempt-summary"' in cpp, "last-attempt-summary line missing"
-    assert "last_attempt_summary" in cpp
-    assert "last_poll_reason" in cpp
+    assert 'data-testid="last-attempt-summary"' not in cpp, "last-attempt-summary line should be gone"
 
 
 # ── C5 — collapsed-row chips + expanded code list ───────────────────────────

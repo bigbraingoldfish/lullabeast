@@ -2958,15 +2958,6 @@
                             {last_action.slice(0, 80)}
                         </p>
                     )}
-                    {/* C3 — the dense last-attempt verdict (last_attempt_summary), with the
-                        poller reason in parens. The prebuilt one-liner the orchestrator
-                        writes to phase_state for exactly this surface (Section 6.4). */}
-                    {last_attempt_summary && (
-                        <p data-testid="last-attempt-summary" className="text-xs text-slate-500 leading-relaxed">
-                            <span className="text-slate-600">Last attempt:</span> {last_attempt_summary}
-                            {last_poll_reason && <span className="ml-1 text-slate-600">({last_poll_reason})</span>}
-                        </p>
-                    )}
                     <div className="space-y-1">
                         <div className="text-slate-500 text-xs font-medium tracking-wide uppercase mb-0.5" data-testid="agent-attempts-heading">
                             Agent attempts
