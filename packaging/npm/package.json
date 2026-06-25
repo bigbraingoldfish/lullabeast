@@ -1,0 +1,23 @@
+{
+  "name": "lullabeast",
+  "version": "0.0.2",
+  "description": "Lullabeast — autonomous multi-agent build pipeline. Reserved; release coming soon.",
+  "license": "MIT",
+  "author": "bigbraingoldfish <quitescale@proton.me>",
+  "homepage": "https://github.com/bigbraingoldfish/lullabeast#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bigbraingoldfish/lullabeast.git"
+  },
+  "bugs": {
+    "url": "https://github.com/bigbraingoldfish/lullabeast/issues"
+  },
+  "keywords": [
+    "autonomous-agents",
+    "multi-agent",
+    "llm",
+    "pipeline",
+    "code-generation",
+    "openclaw"
+  ]
+}
