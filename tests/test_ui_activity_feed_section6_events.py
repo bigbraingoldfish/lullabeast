@@ -6,7 +6,9 @@ labels ("Poll Outcome", "Attempt End") that wrap across two lines, with
 the detail rendered as raw JSON like
 ``{"startup_grace":600,"stall_threshold":1200,...}``.  Operator wants:
 
-* Event tags rendered on a single line (``whitespace-nowrap`` + room).
+* Event tags rendered on a single line (``truncate`` — single-line +
+  ellipsis so a long label is clipped to the column instead of wrapping
+  or overlapping the WHAT HAPPENED text; ``whitespace-nowrap`` also ok).
 * A consistent purple ``#764cc5`` colour for the new event family.
 * Readable "what happened" prose like the existing ``gate_pass`` /
   ``gate_fail`` summaries — not raw JSON.
@@ -200,10 +202,14 @@ def test_humanize_summary_reviewer_verdict_handles_dispatch_outcomes(html):
 
 
 def test_event_badge_does_not_wrap(html):
-    """The badge span that renders the event tag must include
-    ``whitespace-nowrap`` so multi-word labels like "Reviewer Verdict"
-    stay on one line (operator regression: "Attempt End" / "Poll
-    Outcome" wrapping to two lines because the column was narrow)."""
+    """The badge label must stay on a single line so multi-word labels like
+    "Reviewer Verdict" don't wrap to two lines (operator regression: "Attempt
+    End" / "Poll Outcome" wrapping because the column was narrow). The label
+    span uses Tailwind ``truncate`` (white-space: nowrap + overflow:hidden +
+    ellipsis), which keeps it one line AND clips an over-long label (e.g. the
+    snake-case fallback "Token Capture Warning") to the column instead of
+    letting it overlap the WHAT HAPPENED text. A plain ``whitespace-nowrap``
+    on the badge is also accepted (the prior mechanism)."""
     # Find the EventRow's badge span — anchor on ``data-event-type``.
     badge_match = re.search(
         r"<span[^>]*data-event-type=[^>]*>",
@@ -211,13 +217,15 @@ def test_event_badge_does_not_wrap(html):
     )
     assert badge_match, "Could not locate event-type badge span"
     badge_open_tag = badge_match.group(0)
-    # whitespace-nowrap can be on the badge directly OR on its wrapper.
-    # Search a small window around the badge for the class.
     badge_idx = badge_match.start()
-    window = html[max(0, badge_idx - 600) : badge_idx + 400]
-    assert "whitespace-nowrap" in window, (
-        "The event-type badge (or its wrapper) must apply "
-        "``whitespace-nowrap`` so the tag stays on a single line. "
+    # Search forward from the badge open tag through its rendered subtree
+    # (open tag + dot span + label span). Forward-only so the preceding
+    # PROJECT/PHASE column's own ``truncate`` can't satisfy this falsely.
+    window = html[badge_idx : badge_idx + 800]
+    assert ("truncate" in window) or ("whitespace-nowrap" in window), (
+        "The event-type badge label must stay on a single line via "
+        "``truncate`` (preferred — also clips an over-long label so it can't "
+        "overlap the summary column) or ``whitespace-nowrap``. "
         "Found tag: " + badge_open_tag
     )
 
