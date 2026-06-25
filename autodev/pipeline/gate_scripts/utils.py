@@ -137,11 +137,17 @@ def requires_regression_verification(current_phase):
     )
 
 
-def record_error_code_only(agent_type, error_code):
+def record_error_code_only(agent_type, error_code, detail=None, detail_field=None):
     """Writes last_error_code to phase_state.json without incrementing retry counters.
 
     Use this when the orchestrator owns the retry increment (e.g. parse errors,
     TDD coverage mismatches) to avoid double-counting.
+
+    When ``detail_field`` is supplied, ``detail`` is written into that phase_state key
+    in the **same atomic write** as ``last_error_code`` (no two-write race). The
+    reviewer gate uses this to stash its specific problem list under
+    ``reviewer_unverified_detail`` so the orchestrator can enrich the reviewer retry
+    directive with exactly what failed. Single-arg callers are unaffected.
     """
     state = {}
     if os.path.exists(PHASE_STATE_FILE):
@@ -151,6 +157,8 @@ def record_error_code_only(agent_type, error_code):
         except Exception:
             pass
     state["last_error_code"] = error_code
+    if detail_field:
+        state[detail_field] = detail
     os.makedirs(ARTIFACTS_DIR, exist_ok=True)
     write_json_atomic(PHASE_STATE_FILE, state, indent=2, raise_on_error=False)
 

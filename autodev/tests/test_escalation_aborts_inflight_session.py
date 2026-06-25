@@ -9,17 +9,21 @@ off to the human (observed live on Tick-Tac-Toe, 2026-06-06: a CORE-E1 commit + 
 inert `phase_base_commit` git tag created ~64 s post-escalation).
 
 **The fix.** Track the last-invoked agent's session (`_record_active_agent`) and at
-the single escalation chokepoint abort it (`_abort_active_agent_session`). OpenClaw's
-`sessions.abort` is cooperative (no force-kill), so when the abort is NOT confirmed
-to have stopped the session, we additionally inject a "halt — end your turn" message
-as a fallback. Crucially we do NOT inject the message when the session is already
-confirmed-stopped — that would needlessly wake it just to read "do nothing"
-(operator-directed).
+the single escalation chokepoint abort it (`_abort_active_agent_session`). The abort
+now issues `sessions.steer {key, message:<non-empty>}` (via `abort_agent_session`), which is
+the only call that reaches a `/hooks`-launched embedded run and blocks server-side
+until it ends. The old `_HALT_SESSION_MESSAGE`-via-`invoke_agent_webhook` fallback was
+**removed**: it fired a *second* `/hooks` run rather than interrupting the streaming
+one — the actual cause of "two agents updating at once". The helper now never sends a
+webhook; a not-confirmed-stopped session emits `abort_verify_failed` and soft-continues.
 
-These tests pin the helper's branch logic (abort target key shape; message sent iff
-not-confirmed-stopped; verify-failed vs abort-failed; best-effort message; no-op when
-nothing is in-flight) and the refactor wiring (record at the 3 invocation sites +
-abort at the escalation dispatch).
+The same helper is reused by the reviewer contract-shape retry handlers
+(`source="reviewer_retry"`) to kill the prior reviewer run before re-invoking.
+
+These tests pin the helper's branch logic (abort target key shape; NO webhook on any
+branch; verify-failed vs abort-failed; no-op when nothing is in-flight; the new
+reviewer_retry source) and the refactor wiring (record at the 3 invocation sites +
+abort at the escalation dispatch + the removal of `_HALT_SESSION_MESSAGE`).
 """
 
 import os
@@ -40,9 +44,13 @@ _ORCH_SRC = open(
 ).read()
 
 
-def _make_orch(monkeypatch, tmp_path, *, abort_ret=True, verify_ret=True, webhook_raises=False):
+def _make_orch(monkeypatch, tmp_path, *, abort_ret=True, verify_ret=True):
     """A bare Orchestrator with the module-level abort/verify/webhook/event functions
-    stubbed to record calls. Returns (orch, calls)."""
+    stubbed to record calls. Returns (orch, calls).
+
+    ``invoke_agent_webhook`` is still stubbed so that any *unexpected* webhook call
+    (a regression that re-introduces the removed halt fallback) is recorded and the
+    no-webhook assertions catch it."""
     monkeypatch.setattr(orch_mod, "PROJECT_ARTIFACTS_DIR", str(tmp_path))
     calls = {"abort": [], "verify": [], "webhook": [], "events": []}
 
@@ -56,8 +64,6 @@ def _make_orch(monkeypatch, tmp_path, *, abort_ret=True, verify_ret=True, webhoo
 
     def _webhook(agent_id, session_key, token, **k):
         calls["webhook"].append((agent_id, session_key, k.get("message"), k.get("url")))
-        if webhook_raises:
-            raise RuntimeError("boom")
         return "SUCCESS"
 
     monkeypatch.setattr(orch_mod, "abort_agent_session", _abort)
@@ -99,11 +105,12 @@ def test_record_active_agent_sets_fields(monkeypatch, tmp_path):
     assert str(tmp_path) in orch._active_agent_stamp
 
 
-def test_abort_confirmed_stopped_does_not_inject_halt(monkeypatch, tmp_path):
-    """Abort acked AND verify says stopped → do NOT inject the halt message (waking a
-    confirmed-stopped session just to tell it to do nothing is the exact waste the
-    operator flagged). The abort targets the gateway `agent:{role}:…` lowercased key.
-    No abort_verify_failed; abort_attempted carries halt_message_sent=False."""
+def test_abort_confirmed_stopped_sends_no_webhook(monkeypatch, tmp_path):
+    """Abort acked AND verify says stopped → the steer interrupt is enough; the
+    helper never sends a webhook (the removed halt-message fallback used to fire a
+    second /hooks run). The abort targets the gateway `agent:{role}:…` lowercased
+    key. No abort_verify_failed; abort_attempted has result=ok and no
+    halt_message_sent key."""
     orch, calls = _make_orch(monkeypatch, tmp_path, abort_ret=True, verify_ret=True)
     orch._record_active_agent("executor", "pipeline:phase-2:CORE-1:executor-attempt-3")
 
@@ -111,51 +118,46 @@ def test_abort_confirmed_stopped_does_not_inject_halt(monkeypatch, tmp_path):
 
     assert calls["abort"], "abort_agent_session must be called"
     assert calls["abort"][0][0] == "agent:executor:pipeline:phase-2:core-1:executor-attempt-3"
-    assert calls["webhook"] == [], "must NOT wake a confirmed-stopped session with a message"
+    assert calls["webhook"] == [], "the helper must never send a webhook (halt fallback removed)"
     assert _event(calls, "abort_verify_failed") is None
     att = _event(calls, "abort_attempted")
     assert att is not None and att["source"] == "escalation"
     assert att["result"] == "ok"
-    assert att["halt_message_sent"] is False
+    assert "halt_message_sent" not in att, "the removed halt-fallback field must be gone"
     assert orch._active_agent_session_key is None and orch._active_agent_role is None
 
 
-def test_abort_verify_failed_injects_halt(monkeypatch, tmp_path):
+def test_abort_verify_failed_emits_event_no_halt(monkeypatch, tmp_path):
     """Abort acked but verify shows the stamp still advancing → emit abort_verify_failed
-    AND inject the halt message (the session is still streaming; tell it to wind down).
-    The message goes to the agent's own bare session via invoke_agent_webhook."""
+    and soft-continue. The helper must NOT send any webhook (the halt-message fallback
+    that fired a second /hooks run — the double-write cause — is removed)."""
     orch, calls = _make_orch(monkeypatch, tmp_path, abort_ret=True, verify_ret=False)
     orch._record_active_agent("executor", "pipeline:phase-2:CORE-1:executor-attempt-3")
 
     orch._abort_active_agent_session("escalation")
 
     assert _event(calls, "abort_verify_failed") is not None
-    assert len(calls["webhook"]) == 1
-    agent_id, sk, msg, url = calls["webhook"][0]
-    assert agent_id == "executor"
-    assert sk == "pipeline:phase-2:CORE-1:executor-attempt-3"
-    assert "end your turn" in (msg or "").lower()
-    assert url == "http://h"
+    assert calls["webhook"] == [], "no halt webhook — the fallback was removed"
     att = _event(calls, "abort_attempted")
-    assert att is not None and att["halt_message_sent"] is True
+    assert att is not None and "halt_message_sent" not in att
     assert orch._active_agent_session_key is None
 
 
-def test_abort_failed_injects_halt(monkeypatch, tmp_path):
-    """Abort call itself failed → don't verify; inject the halt message as a fallback
-    (the HTTP webhook is a different channel from the WS abort and may still land).
-    abort_attempted records result=FAILED + halt_message_sent=True."""
+def test_abort_failed_clears_tracking_no_halt(monkeypatch, tmp_path):
+    """Abort call itself failed → skip verify, send no webhook, still clear tracking and
+    emit abort_attempted result=FAILED. The removed halt fallback used to fire a webhook
+    here; it must not anymore."""
     orch, calls = _make_orch(monkeypatch, tmp_path, abort_ret=False)
     orch._record_active_agent("planner", "pipeline:phase-1:CORE-1:planner-attempt-1")
 
     orch._abort_active_agent_session("escalation")
 
     assert calls["verify"] == [], "verify must be skipped when the abort call failed"
-    assert len(calls["webhook"]) == 1
-    assert calls["webhook"][0][0] == "planner"
+    assert calls["webhook"] == [], "no halt webhook — the fallback was removed"
     att = _event(calls, "abort_attempted")
     assert att is not None and att["result"] == "FAILED"
-    assert att["halt_message_sent"] is True
+    assert "halt_message_sent" not in att
+    assert orch._active_agent_session_key is None and orch._active_agent_role is None
 
 
 def test_abort_active_agent_session_noop_when_none(monkeypatch, tmp_path):
@@ -169,19 +171,21 @@ def test_abort_active_agent_session_noop_when_none(monkeypatch, tmp_path):
     assert calls["events"] == []
 
 
-def test_halt_message_is_best_effort(monkeypatch, tmp_path):
-    """A raising invoke_agent_webhook (gateway down / session busy) must not propagate —
-    the abort already happened, the fields are still cleared, and abort_attempted records
-    halt_message_sent=False. Escalation must never be blocked by the halt attempt."""
-    orch, calls = _make_orch(monkeypatch, tmp_path, abort_ret=True, verify_ret=False, webhook_raises=True)
-    orch._record_active_agent("executor", "pipeline:phase-2:CORE-1:executor-attempt-3")
+def test_reviewer_retry_source_aborts_without_halt(monkeypatch, tmp_path):
+    """The reviewer contract-shape retry path reuses this helper with
+    source="reviewer_retry" to kill the prior reviewer run before re-invoking.
+    It must abort the recorded reviewer key, emit abort_attempted with that source,
+    send no webhook, and clear tracking (the next reviewer invoke re-records it)."""
+    orch, calls = _make_orch(monkeypatch, tmp_path, abort_ret=True, verify_ret=True)
+    orch._record_active_agent("reviewer", "pipeline:phase-3:STATS-E1:reviewer-attempt-1")
 
-    orch._abort_active_agent_session("escalation")  # must not raise
+    orch._abort_active_agent_session("reviewer_retry")
 
-    assert calls["abort"]
-    assert orch._active_agent_session_key is None
+    assert calls["abort"][0][0] == "agent:reviewer:pipeline:phase-3:stats-e1:reviewer-attempt-1"
+    assert calls["webhook"] == []
     att = _event(calls, "abort_attempted")
-    assert att is not None and att["halt_message_sent"] is False
+    assert att is not None and att["source"] == "reviewer_retry"
+    assert orch._active_agent_session_key is None
 
 
 # ---------------------------------------------------------------------------
@@ -208,4 +212,17 @@ def test_three_invocation_sites_record_active_agent():
     that forgets to register (leaving a fresh zombie class)."""
     assert _ORCH_SRC.count("self._record_active_agent(") >= 3, (
         "all 3 pipeline-agent invocation sites must call _record_active_agent"
+    )
+
+
+def test_no_halt_message_constant():
+    """Removal completeness: the `_HALT_SESSION_MESSAGE`-via-`/hooks` fallback (which
+    fired a *second* run instead of interrupting the streaming one — the double-write
+    cause) is gone. Neither the constant nor the `halt_message_sent` event field may
+    remain. `sessions.steer` now actually stops embedded runs, so the fallback is dead."""
+    assert "_HALT_SESSION_MESSAGE" not in _ORCH_SRC, (
+        "the dead _HALT_SESSION_MESSAGE constant/fallback must be removed entirely"
+    )
+    assert "halt_message_sent" not in _ORCH_SRC, (
+        "the halt_message_sent event field must be removed (no halt message is sent)"
     )

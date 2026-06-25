@@ -314,18 +314,36 @@ def _validate_openclaw_root(root: str) -> None:
         sys.exit(1)
 WEBHOOK_AGENT_ID_PRD = "prd-creator"
 
-# Phase 9 — injected into a still-streaming agent session when the orchestrator gives
-# up (escalation) and its WS abort is NOT confirmed to have stopped the session. Tells
-# the model to wind down instead of continuing to mutate the repo (git commit/tag/edit)
-# after the orchestrator has handed off to the human. NOT sent to a confirmed-stopped
-# session (that would needlessly wake it). OpenClaw's sessions.abort is cooperative
-# (AbortController) with no force-kill, so this message is the strongest backstop.
-_HALT_SESSION_MESSAGE = (
-    "PIPELINE HALT — this phase has been stopped by the AutoDev orchestrator and your "
-    "output is no longer being read. Do NOT make any further changes, file edits, git "
-    "commits, tags, or tool calls. No further action or output is required. End your "
-    "turn now."
-)
+# Per-verdict reviewer retry instructions for the contract-shape verdicts. Shared by
+# _compose_unverified_directive (the *_UNVERIFIED handler enriches these with the gate's
+# specific problem list). Module-level so the directive composition is unit-testable.
+_UNVERIFIED_INSTRUCTIONS = {
+    "VISUAL_UNVERIFIED": (
+        "VISUAL VERIFICATION REQUIRED: Before writing reviewer_output.done, you "
+        "MUST attach screenshot paths and a visual_verification block to "
+        "reviewer_output.json per your AGENTS.md.  A phase that touches UI cannot "
+        "pass without this."
+    ),
+    "BEHAVIORAL_UNVERIFIED": (
+        "BEHAVIORAL VERIFICATION REQUIRED: Before writing reviewer_output.done, you "
+        "MUST attach a ``behavioral_verification`` object to reviewer_output.json "
+        "with verdict ∈ {pass, fail, cannot_verify}, at least three evidence anchors "
+        "when verdict='pass' (each with claim + file_or_screenshot_or_log + method), "
+        "and how_to_check_followed as a boolean — see your AGENTS.md. A phase whose "
+        "current_phase.json carries a Behavioral Verification block cannot pass "
+        "without this."
+    ),
+    "REGRESSION_UNVERIFIED": (
+        "REGRESSION VERIFICATION REQUIRED: Before writing reviewer_output.done, you "
+        "MUST attach a ``regression_verification`` object to reviewer_output.json "
+        "with verdict ∈ {pass, fail, cannot_verify}, prior_phase_raw_id matching "
+        "current_phase.prior_phase_raw_id, prior_phase_how_to_check_followed as a "
+        "boolean, and at least three evidence anchors when verdict='pass' and "
+        "followed=True (each with claim + file_or_screenshot_or_log + method). "
+        "Execute current_phase.prior_phase_how_to_check against the artifact and "
+        "report what you saw."
+    ),
+}
 
 # Hard cap for gate script subprocess.run — prevents hung gates from stalling the orchestrator.
 GATE_SUBPROCESS_TIMEOUT = 60
@@ -3266,25 +3284,30 @@ class Orchestrator:
         self._preset_session_response_usage(role, session_key)
 
     def _abort_active_agent_session(self, source: str) -> None:
-        """Abort the last-invoked agent's still-running session when the orchestrator
-        gives up on a phase (escalation), so it can't keep mutating the repo
-        (``git commit``/``tag``/edits) after the hand-off to the human.
+        """Interrupt the last-invoked agent's still-running session so it can't keep
+        mutating the repo (``git commit``/``tag``/edits) or stream a zombie turn after
+        the orchestrator has moved on.
 
-        The terminal attempt that triggers escalation is otherwise never aborted — the
-        retry-start abort only stops the *prior* attempt when *launching the next* one.
+        Two callers:
+          * ``source="escalation"`` — the orchestrator gives up on a phase and hands off
+            to the human; the terminal attempt is otherwise never aborted (the retry-start
+            abort only stops the *prior* attempt when *launching the next* one).
+          * ``source="reviewer_retry"`` — the reviewer contract-shape retry handlers
+            (CONTRACT_FAILURE / *_UNVERIFIED) kill the prior reviewer run before
+            re-invoking, so the re-invoke does not reattach a still-streaming embedded run.
 
-        OpenClaw's ``sessions.abort`` is cooperative (``AbortController``; no force-kill),
-        so:
-          1. send the WS abort (best-effort, via :func:`abort_agent_session`);
-          2. if acked, ``verify_session_stopped`` (stamp settle); a still-advancing stamp
-             emits ``abort_verify_failed``;
-          3. inject :data:`_HALT_SESSION_MESSAGE` **only when NOT confirmed-stopped**
-             (abort failed, or acked-but-still-streaming) — a confirmed-stopped session
-             must not be woken just to read "do nothing". Best-effort; a webhook failure
-             is logged, never raised.
-        Emits ``abort_attempted`` (``source`` / ``result`` / ``halt_message_sent``) and
-        clears the recorded session. No-op when nothing is in-flight. Never blocks
-        escalation (soft-continue, same contract as :meth:`_handle_stall_outcome`)."""
+        Mechanism:
+          1. issue the WS interrupt (``abort_agent_session`` → ``sessions.steer``, the
+             only call that reaches a ``/hooks`` embedded run; best-effort);
+          2. if accepted, ``verify_session_stopped`` (stamp settle) confirms the run
+             actually stopped; a still-advancing stamp emits ``abort_verify_failed``.
+        There is **no** halt-message fallback: ``sessions.steer`` actually interrupts the
+        run and the gateway confirms it ended, so the former halt-message webhook — which
+        spawned a *second* /hooks run instead of interrupting the streaming one — is removed.
+        Emits ``abort_attempted`` (``source`` / ``result``) and clears the recorded
+        session (the next reviewer invoke re-records it). No-op when nothing is in-flight.
+        Never blocks the caller (soft-continue, same contract as
+        :meth:`_handle_stall_outcome`)."""
         key = self._active_agent_session_key
         role = self._active_agent_role
         if not key or not role:
@@ -3313,31 +3336,21 @@ class Orchestrator:
                     },
                 )
 
-        # Halt message is a FALLBACK: only when the session is NOT confirmed-stopped.
-        # Posting to a stopped session would wake it just to read "do nothing".
-        halt_sent = False
-        if not stopped:
-            try:
-                token = self.openclaw_config.get("hooks", {}).get("token", "")
-                invoke_agent_webhook(
-                    role, key, token, message=_HALT_SESSION_MESSAGE,
-                    url=self.openclaw_config.get("hooks_url"),
-                )
-                halt_sent = True
-            except Exception as _halt_err:  # best-effort — never block escalation
-                print(
-                    f"[ABORT][HALT_MSG_FAILED] session_key={key} source={source}: {_halt_err}"
-                )
-
+        # No halt-message fallback: sessions.steer (issued by abort_agent_session)
+        # actually interrupts the embedded run and the gateway confirms it ended, so
+        # there is nothing to "tell to wind down". The former halt-message webhook fired
+        # a *second* /hooks run rather than interrupting the streaming one — the actual
+        # cause of "two agents updating at once" — and is removed. A not-confirmed-stopped
+        # session emits abort_verify_failed above and we soft-continue.
         print(
             f"[ABORT] result={'ok' if aborted else 'FAILED'} session_key={abort_key} "
-            f"source={source} halt_message_sent={halt_sent}"
+            f"source={source}"
         )
         _write_pipeline_event(
             "abort_attempted", raw_id, role,
             {
                 "session_key": abort_key, "result": "ok" if aborted else "FAILED",
-                "agent_role": role, "source": source, "halt_message_sent": halt_sent,
+                "agent_role": role, "source": source,
             },
         )
         self._active_agent_session_key = None
@@ -3645,24 +3658,33 @@ class Orchestrator:
             _ps["provider_error_retries"] = 0
             self.write_phase_state_atomic(_ps)
 
-    def _reviewer_session_key(self, phase, raw_id, reviewer_retries, contract_retries):
+    def _reviewer_session_key(self, phase, raw_id, reviewer_retries,
+                              contract_retries, unverified_retries=0):
         """Build the reviewer session key for an attempt.
 
-        The base key encodes the code-quality pass (``reviewer-attempt-N``). A
-        CONTRACT_FAILURE soft-retry does NOT bump ``reviewer_retries``, so without a
-        discriminator successive contract retries would reuse one key. Append a
-        ``-c{N}`` suffix only when ``contract_retries > 0`` so each contract retry gets
-        a deterministic, distinct key (the common, non-contract path stays
-        byte-identical to the legacy shape).
+        The base key encodes the code-quality pass (``reviewer-attempt-N``). Neither a
+        CONTRACT_FAILURE soft-retry nor a contract-shape ``*_UNVERIFIED`` retry bumps
+        ``reviewer_retries``, so without a discriminator successive retries of either
+        kind would reuse one key. Append:
+          * ``-c{N}`` when ``contract_retries > 0`` (CONTRACT_FAILURE soft-retry), and
+          * ``-u{N}`` when ``unverified_retries > 0`` (VISUAL/BEHAVIORAL/REGRESSION_
+            UNVERIFIED retry).
+        so each retry gets a deterministic, distinct key and therefore a **fresh
+        OpenClaw session**. The common, non-retry path stays byte-identical to the
+        legacy shape.
 
-        This is hygiene, not a resume fix: the prior reviewer session has already
-        ended (its ``agent_end`` wrote the ``.done`` that brought us to the gate
-        verdict), so a re-invoke starts a fresh session regardless — the suffix just
-        keeps keys distinct and avoids ``sessions.json`` key-collision confusion.
+        Fresh-per-retry is deliberate (not just hygiene): re-using the prior session on
+        OpenClaw 2026.6.x reattaches a possibly-still-streaming embedded run and re-enters
+        the agent's prior (rejected / context-overflowed) context — both observed to
+        produce confused or repeat-failing retries. A fresh session + the enriched
+        ``reviewer_retry_directive`` (which states exactly what the gate flagged) is the
+        reliable path. Matches the CONTRACT_FAILURE ``-c{N}`` behaviour.
         """
         base = f"pipeline:phase-{phase}:{raw_id}:reviewer-attempt-{reviewer_retries + 1}"
         if contract_retries:
             base = f"{base}-c{contract_retries}"
+        if unverified_retries:
+            base = f"{base}-u{unverified_retries}"
         return base
 
     def _invoke_reviewer(self, session_key, token):
@@ -3680,7 +3702,9 @@ class Orchestrator:
         the executor's file-based ``failure_context.json``. Structured data the agent
         *analyzes* goes in a file (``failure_context.json`` / ``gate_warnings.json``); a
         one-shot directive that *frames* the invocation goes in ``message=``. (See
-        PIPELINE-SPEC.md §7.)
+        PIPELINE-SPEC.md §7.) For ``*_UNVERIFIED`` retries the directive is enriched by
+        :meth:`_compose_unverified_directive` with the gate's specific problem list so
+        the reviewer sees exactly what failed, not just the generic contract reminder.
         """
         directive = None
         try:
@@ -3695,6 +3719,29 @@ class Orchestrator:
             "reviewer", session_key, token, message=directive or None,
             url=self.openclaw_config.get("hooks_url"),
         )
+
+    def _compose_unverified_directive(self, gate_result, detail):
+        """Build the reviewer retry directive for a contract-shape verdict.
+
+        Returns the generic per-verdict instruction from :data:`_UNVERIFIED_INSTRUCTIONS`,
+        enriched with the gate's specific problem list (``detail`` — the value the gate
+        stashed in ``phase_state['reviewer_unverified_detail']``) when present, so the
+        re-invoked reviewer is told exactly what failed (e.g. "evidence must have at
+        least 3 entries"). Pure function — the inline handler that calls it lives in
+        ``run()``.
+
+        The appended specifics are bounded (first 3 problems, ~500 chars) so a
+        pathological problem list can't bloat the webhook message. ``detail`` may be
+        ``None``/empty (no enrichment) — a normal first-pass verdict carries no detail.
+        """
+        base = _UNVERIFIED_INSTRUCTIONS[gate_result]
+        if detail:
+            specifics = "; ".join(str(d) for d in detail[:3])[:500]
+            if specifics:
+                base = (
+                    f"{base} Specifically, the prior reviewer output had: {specifics}"
+                )
+        return base
 
     def _invoke_executor(self, session_key, token):
         """Invoke the executor webhook, delivering a one-shot corrective directive.
@@ -4682,6 +4729,13 @@ class Orchestrator:
         phase_state = self.read_phase_state()
         phase_state["reviewer_retries"] = 0
         phase_state["reviewer_rejected"] = False
+        # Defense-in-depth: drop any pending *_UNVERIFIED problem list so a reviewer
+        # reset cannot carry a stale directive-enrichment detail into the next pass.
+        # (reset_phase already drops it by rebuilding the dict; this path read-modify-
+        # writes, so clear it explicitly. reset_execution does not need it — the
+        # *_UNVERIFIED/CONTRACT handlers always read-and-pop the detail before any
+        # executor flow could run.)
+        phase_state.pop("reviewer_unverified_detail", None)
         phase_state["escalation_resets"] = phase_state.get("escalation_resets", 0) + 1
         new_count = phase_state["escalation_resets"]
         reason = phase_state.get("last_error_code", "unknown")
@@ -6787,11 +6841,16 @@ class Orchestrator:
                     phase = self.state.get("current_phase", 0)
                     raw_id = self.state.get("current_phase_raw_id", "unknown")
                     retries = self.state.get("reviewer_retries", 0)
-                    # A CONTRACT_FAILURE soft-retry does not bump reviewer_retries, so
-                    # mix the contract-retry count into the key for a fresh, distinct
-                    # session per contract retry (see _reviewer_session_key).
-                    _contract_retries = self.read_phase_state().get("reviewer_contract_retries", 0)
-                    session_key = self._reviewer_session_key(phase, raw_id, retries, _contract_retries) + self._provider_retry_suffix()
+                    # Neither a CONTRACT_FAILURE soft-retry nor a contract-shape
+                    # *_UNVERIFIED retry bumps reviewer_retries, so mix BOTH counters
+                    # into the key for a fresh, distinct session per retry of either
+                    # kind (see _reviewer_session_key).
+                    _ps_rk = self.read_phase_state()
+                    _contract_retries = _ps_rk.get("reviewer_contract_retries", 0)
+                    _unverified_retries = _ps_rk.get("reviewer_unverified_retries", 0)
+                    session_key = self._reviewer_session_key(
+                        phase, raw_id, retries, _contract_retries, _unverified_retries
+                    ) + self._provider_retry_suffix()
                     self._record_active_agent("reviewer", session_key)  # Phase 9 — abort-on-escalation target
 
                     sentinel_path = os.path.join(PROJECT_ARTIFACTS_DIR, "reviewer_output.done")
@@ -7501,6 +7560,10 @@ class Orchestrator:
                             time.sleep(5)
                             continue
                         _ps_if = self.read_phase_state()
+                        # No problem-list to surface (the reviewer wrote nothing
+                        # parseable); drop any stale *_UNVERIFIED detail so it cannot
+                        # bleed into an unrelated contract directive.
+                        _ps_if.pop("reviewer_unverified_detail", None)
                         _contract_soft = _ps_if.get("reviewer_contract_retries", 0) + 1
                         _ps_if["reviewer_contract_retries"] = _contract_soft
                         if _contract_soft < 3:
@@ -7528,6 +7591,13 @@ class Orchestrator:
                             )
                             time.sleep(5)
                         else:
+                            # Kill the prior reviewer run before re-invoking. A
+                            # CONTRACT_FAILURE often means the reviewer hard-errored or
+                            # was cut off — its embedded run may still be streaming, and
+                            # re-invoking (even on a fresh -c{N} key) on top of it spawns
+                            # a concurrent zombie. sessions.steer (via the helper) reaches
+                            # the embedded run; it is a no-op when the run already ended.
+                            self._abort_active_agent_session("reviewer_retry")
                             self.state["current_agent"] = "reviewer"
                             self.transition_state(
                                 "RUNNING",
@@ -7572,47 +7642,20 @@ class Orchestrator:
                         # message (overriding the default). The prior write-only field
                         # this replaced was never read or delivered — a dead write that
                         # left these retries blind.
-                        _UNVERIFIED_INSTRUCTIONS = {
-                            "VISUAL_UNVERIFIED": (
-                                "VISUAL VERIFICATION REQUIRED: Before writing "
-                                "reviewer_output.done, you MUST attach screenshot "
-                                "paths and a visual_verification block to "
-                                "reviewer_output.json per your AGENTS.md.  A "
-                                "phase that touches UI cannot pass without this."
-                            ),
-                            "BEHAVIORAL_UNVERIFIED": (
-                                "BEHAVIORAL VERIFICATION REQUIRED: Before writing "
-                                "reviewer_output.done, you MUST attach a "
-                                "``behavioral_verification`` object to "
-                                "reviewer_output.json with verdict ∈ "
-                                "{pass, fail, cannot_verify}, at least three "
-                                "evidence anchors when verdict='pass' (each with "
-                                "claim + file_or_screenshot_or_log + method), and "
-                                "how_to_check_followed as a boolean — see your "
-                                "AGENTS.md. A phase whose current_phase.json "
-                                "carries a Behavioral Verification block cannot "
-                                "pass without this."
-                            ),
-                            "REGRESSION_UNVERIFIED": (
-                                "REGRESSION VERIFICATION REQUIRED: Before writing "
-                                "reviewer_output.done, you MUST attach a "
-                                "``regression_verification`` object to "
-                                "reviewer_output.json with verdict ∈ "
-                                "{pass, fail, cannot_verify}, "
-                                "prior_phase_raw_id matching "
-                                "current_phase.prior_phase_raw_id, "
-                                "prior_phase_how_to_check_followed as a boolean, "
-                                "and at least three evidence anchors when "
-                                "verdict='pass' and followed=True (each with "
-                                "claim + file_or_screenshot_or_log + method). "
-                                "Execute current_phase.prior_phase_how_to_check "
-                                "against the artifact and report what you saw."
-                            ),
-                        }
+                        #
+                        # The directive is ENRICHED with the gate's specific problem list
+                        # (stashed by reviewer_gate.py in ``reviewer_unverified_detail``)
+                        # via ``_compose_unverified_directive`` so the reviewer is told
+                        # exactly what failed. The detail is read-and-popped here (one-shot
+                        # — it must not bleed into a later pass/phase; ``reset_phase``
+                        # rebuilds the dict and ``reset_reviewer`` also clears it).
                         _ps_uv = self.read_phase_state()
+                        _uv_detail = _ps_uv.pop("reviewer_unverified_detail", None)
                         _uv_retries = _ps_uv.get("reviewer_unverified_retries", 0) + 1
                         _ps_uv["reviewer_unverified_retries"] = _uv_retries
-                        _ps_uv["reviewer_retry_directive"] = _UNVERIFIED_INSTRUCTIONS[gate_result]
+                        _ps_uv["reviewer_retry_directive"] = self._compose_unverified_directive(
+                            gate_result, _uv_detail
+                        )
                         self.write_phase_state_atomic(_ps_uv)
                         print(
                             f"[WARN] Reviewer gate: {gate_result} "
@@ -7631,6 +7674,16 @@ class Orchestrator:
                                 f"cap reached ({_uv_retries})",
                             )
                         else:
+                            # Kill the prior reviewer run before re-invoking. The bumped
+                            # reviewer_unverified_retries gives the next invocation a fresh
+                            # -u{N} session key (see _reviewer_session_key), so the retry
+                            # never reattaches a still-streaming embedded run or re-enters
+                            # the rejected/overflowed prior context. The steer-abort
+                            # additionally stops any zombie still streaming past .done so it
+                            # can't keep writing the shared reviewer_output.* files. Fires
+                            # unconditionally on the retry path (not gated on a liveness
+                            # check); it is a no-op when the run already ended.
+                            self._abort_active_agent_session("reviewer_retry")
                             self.state["current_agent"] = "reviewer"
                             self.transition_state(
                                 "RUNNING",

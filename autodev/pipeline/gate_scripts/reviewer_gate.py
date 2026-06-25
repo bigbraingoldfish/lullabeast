@@ -481,7 +481,10 @@ def evaluate_reviewer(output_path=None):
     if _is_visual_phase(_current_phase_raw_id):
         visual_problems = _check_visual_verification(data)
         if visual_problems:
-            record_error_code_only("reviewer", ERR_VISUAL_UNVERIFIED)
+            record_error_code_only(
+                "reviewer", ERR_VISUAL_UNVERIFIED,
+                detail=visual_problems, detail_field="reviewer_unverified_detail",
+            )
             print(
                 f"[GATE] VISUAL_UNVERIFIED ({_current_phase_raw_id}): {visual_problems}",
                 file=sys.stderr,
@@ -501,7 +504,10 @@ def evaluate_reviewer(output_path=None):
     if phase_has_behavioral_block(_current_phase):
         behavioral_problems = _check_behavioral_verification(data)
         if behavioral_problems:
-            record_error_code_only("reviewer", ERR_BEHAVIORAL_UNVERIFIED)
+            record_error_code_only(
+                "reviewer", ERR_BEHAVIORAL_UNVERIFIED,
+                detail=behavioral_problems, detail_field="reviewer_unverified_detail",
+            )
             print(
                 f"[GATE] BEHAVIORAL_UNVERIFIED ({_current_phase_raw_id}): {behavioral_problems}",
                 file=sys.stderr,
@@ -522,7 +528,10 @@ def evaluate_reviewer(output_path=None):
     if requires_regression_verification(_current_phase):
         regression_problems = _check_regression_verification(data, _current_phase)
         if regression_problems:
-            record_error_code_only("reviewer", ERR_REGRESSION_UNVERIFIED)
+            record_error_code_only(
+                "reviewer", ERR_REGRESSION_UNVERIFIED,
+                detail=regression_problems, detail_field="reviewer_unverified_detail",
+            )
             print(
                 f"[GATE] REGRESSION_UNVERIFIED ({_current_phase_raw_id}): {regression_problems}",
                 file=sys.stderr,

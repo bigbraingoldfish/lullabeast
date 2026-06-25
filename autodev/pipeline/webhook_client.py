@@ -7,8 +7,9 @@ The HTTP + WebSocket layer between the orchestrator and the OpenClaw gateway:
   ``SUCCESS`` / ``AUTH_ERROR`` / ``REQUEST_ERROR`` / ``INFRA_ERROR`` so the caller
   can route any non-success outcome to escalation.
 * ``abort_agent_session`` / ``verify_session_stopped`` — the WebSocket
-  ``sessions.abort`` handshake (retried) plus the post-abort stamp-settle check that
-  confirms a prior/zombie attempt has stopped before the next one launches.
+  ``sessions.steer`` interrupt (retried; the only call that reaches a ``/hooks``
+  embedded run) plus the post-interrupt stamp-settle check that confirms a
+  prior/zombie attempt has stopped before the next one launches.
 * ``set_session_response_usage`` — seeds full response-usage on a session so token
   accounting is captured.
 
@@ -25,14 +26,15 @@ import websocket
 
 
 def verify_session_stopped(stamp_path: str, settle_seconds: float = 5.0) -> bool:
-    """Confirm a just-aborted agent session is no longer touching its activity stamp.
+    """Confirm a just-interrupted agent session is no longer touching its activity stamp.
 
-    The OpenClaw gateway can acknowledge ``sessions.abort`` with ``ok=true``
-    yet leave the underlying agent process streaming (observed live during
-    CORE-E6: attempt #2 wrote 69,152 tokens after attempt #3 had already
-    been launched).  Callers use this helper *after* a successful abort to
-    distinguish "session truly stopped" from "abort acknowledged but
-    session still active" so we can escalate to ``HALTED_SILENT`` rather
+    ``sessions.steer`` blocks server-side up to ~15s confirming the embedded run
+    ended, but it then returns regardless — if the agent takes longer to wind down,
+    the gateway has given up its wait while the process still streams (observed live
+    during CORE-E6: attempt #2 wrote 69,152 tokens after attempt #3 had already been
+    launched).  This helper is the client-side *stopped* oracle: callers use it
+    *after* a successful steer to distinguish "session truly stopped" from "interrupt
+    accepted but session still active", so we can emit ``abort_verify_failed`` rather
     than silently launch the next attempt on top of a running one.
 
     Implementation: read the stamp's mtime, sleep ``settle_seconds``, read
@@ -425,29 +427,62 @@ def _gateway_request_once(
         return None
 
 
+# The interrupt message sent with ``sessions.steer``. A NON-EMPTY message is mandatory:
+# the gateway (verified live against 2026.6.10) rejects an empty-message steer with
+# ``INVALID_REQUEST "message or attachment required"``. On an *active* embedded run the
+# steer aborts the run AND the message becomes a brief sequential turn, so the content
+# is a clear "stop / do nothing" instruction (that spawned turn is then a no-op). On an
+# *idle* session the steer is a no-op (``aborted:false, runIds:[]``) and no turn spawns.
+_STEER_INTERRUPT_MESSAGE = (
+    "PIPELINE INTERRUPT — your run was stopped by the orchestrator and your output is "
+    "no longer being read. Make no further changes, file edits, git commits, tags, or "
+    "tool calls. No further action is required; end your turn now."
+)
+
+
 def _attempt_abort_once(
     session_key: str,
     gateway_ws_url: str,
     gateway_token: str,
     timeout_seconds: int,
 ) -> bool:
-    """Single ``sessions.abort`` round-trip.  Returns True on success."""
+    """Single ``sessions.steer`` round-trip.  Returns True when the gateway accepted
+    the interrupt.
+
+    ``sessions.steer`` — not ``sessions.abort`` — is the lever: pipeline agents are
+    launched via ``POST /hooks/agent`` and tracked by OpenClaw (≥2026.6.x) as
+    *embedded agent runs* (``abortEmbeddedAgentRun`` / ``waitForEmbeddedAgentRunEnd``),
+    which ``sessions.abort`` cannot see — verified live on 2026.6.10: abort against a
+    confirmed-streaming embedded run returns ``status:"no-active-run"`` and the run
+    keeps going.  ``sessions.steer`` routes through ``interruptSessionRunIfActive`` →
+    ``abortEmbeddedAgentRun`` and **blocks server-side up to ~15s confirming the run
+    ended** (verified: ``interruptedActiveRun:true`` and the session's transcript stops
+    growing).
+
+    Success criterion: the gateway **accepted** the steer (top-level ``ok is True``).
+    We deliberately do NOT require ``payload.status``/``interruptedActiveRun`` truthy: a
+    steer of an already-finished run (the common case — the agent's ``agent_end`` wrote
+    ``.done``) is a legitimate no-op (``ok:true, aborted:false, runIds:[]``) and must
+    count as success.  Only a malformed/forbidden/session-not-found request returns
+    ``ok:false``.
+    """
     resp = _gateway_request_once(
         session_key, gateway_ws_url, gateway_token, timeout_seconds,
-        method="sessions.abort", params={"key": session_key},
+        method="sessions.steer",
+        params={"key": session_key, "message": _STEER_INTERRUPT_MESSAGE},
     )
     if resp is None:
         return False
 
-    status = resp.get("payload", {}).get("status")
-    if resp.get("ok") and status in ("aborted", "no-active-run"):
+    if resp.get("ok") is True:
         logging.info(
-            "[ABORT] sessions.abort for %s: status=%s", session_key, status
+            "[ABORT] sessions.steer accepted for %s: %s",
+            session_key, resp.get("payload", {}),
         )
         return True
 
     logging.warning(
-        "[ABORT] sessions.abort unexpected response for %s: %s", session_key, resp
+        "[ABORT] sessions.steer unexpected response for %s: %s", session_key, resp
     )
     return False
 
@@ -503,22 +538,32 @@ def abort_agent_session(
     session_key: str,
     gateway_ws_url: str,
     gateway_token: str,
-    timeout_seconds: int = 8,
+    timeout_seconds: int = 20,
 ) -> bool:
-    """Send ``sessions.abort`` to the OpenClaw gateway for the given session key.
+    """Interrupt the given OpenClaw session via ``sessions.steer`` (see
+    :func:`_attempt_abort_once` for why steer, not abort).
 
     Uses the gateway WebSocket control plane (not the ``/hooks/agent`` HTTP endpoint).
     Best-effort: any failure returns ``False`` and logs a warning; callers must not
     treat ``False`` as a hard failure that blocks retries.
 
+    Timeout
+    -------
+    Default ``timeout_seconds=20`` (was 8): ``sessions.steer`` blocks server-side up
+    to ~15s in ``waitForEmbeddedAgentRunEnd`` confirming the run ended, so an 8s
+    socket timeout would expire *before* the gateway confirms and report a false
+    FAILED.  20s leaves ~5s of handshake headroom.
+
     Retry policy
     ------------
-    A single 8-second WS handshake against a busy gateway is brittle — observed
-    in CORE-E6 where one transient handshake failure caused the orchestrator to
-    launch attempt N+1 on top of the still-streaming attempt N.  This wrapper
-    tries up to ``ABORT_MAX_ATTEMPTS`` times with ``ABORT_RETRY_BACKOFF_SECONDS``
-    between attempts, returning as soon as one succeeds.  After the ceiling we
-    return False; the caller still treats that as best-effort (does not halt).
+    A single WS handshake against a busy gateway is brittle — observed in CORE-E6
+    where one transient handshake failure caused the orchestrator to launch attempt
+    N+1 on top of the still-streaming attempt N.  This wrapper tries up to
+    ``ABORT_MAX_ATTEMPTS`` times with ``ABORT_RETRY_BACKOFF_SECONDS`` between attempts,
+    returning as soon as one succeeds.  After the ceiling we return False; the caller
+    still treats that as best-effort (does not halt).  Worst case on a fully-failing
+    abort is therefore ``ABORT_MAX_ATTEMPTS × timeout_seconds`` (~60s) — acceptable on
+    the give-up paths that call this.
 
     Returns
     -------
@@ -530,7 +575,7 @@ def abort_agent_session(
         if _attempt_abort_once(session_key, gateway_ws_url, gateway_token, timeout_seconds):
             if attempt > 1:
                 logging.info(
-                    "[ABORT] sessions.abort succeeded for %s on retry %d/%d",
+                    "[ABORT] sessions.steer succeeded for %s on retry %d/%d",
                     session_key, attempt, ABORT_MAX_ATTEMPTS,
                 )
             return True
