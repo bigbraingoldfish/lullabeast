@@ -249,7 +249,7 @@ if [ -f "$REPO_RT/pipeline.lock" ]; then
     warn "  If no pipeline is active, remove it: rm $REPO_RT/pipeline.lock"
 elif [ -f "$OPENCLAW_ROOT/pipeline.lock" ]; then
     warn "Legacy lock at $OPENCLAW_ROOT/pipeline.lock (pre repo-local runtime)"
-    warn "  If unused, remove it; see docs/RUNTIME-MIGRATION.md"
+    warn "  If unused, remove it."
 else
     ok "No stale pipeline.lock under .autodev or \$OPENCLAW_ROOT"
 fi
