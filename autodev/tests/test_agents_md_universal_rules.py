@@ -61,7 +61,7 @@ _TESTING_PHRASES = {
     "reviewer": [
         "Tests that mirror implementation logic",
         "at least one negative control",
-        "shuffled/random order run",
+        "shuffled order",
     ],
 }
 
