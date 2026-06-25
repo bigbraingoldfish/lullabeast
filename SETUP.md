@@ -4,47 +4,17 @@ Lullabeast is an autonomous development pipeline that runs on top of OpenClaw. I
 
 ---
 
-## Prerequisites
+## Host prerequisites
 
-**Python 3.11 or later.** The pipeline code uses `fcntl` for advisory file locking. `fcntl` is part of the POSIX standard and is available on Linux and macOS. Native Windows lacks `fcntl` and is not supported; WSL2 runs a real Linux kernel and works without any code changes.
+**Python 3.11 or later** (with `pip`). The orchestrator and pipeline run under this interpreter; 3.11 is the floor.
 
-**Linux, macOS, or WSL2.** Lullabeast runs on Linux (including WSL2) and macOS. Native Windows is not supported. `fcntl.flock` is how the orchestrator and heartbeat watchdog coordinate without racing — it is a POSIX advisory lock, not a Linux-only mechanism.
+**Linux, macOS, or WSL2.** Native Windows is not supported: the orchestrator and heartbeat watchdog coordinate through `fcntl.flock`, a POSIX advisory lock with no native-Windows equivalent. macOS (Darwin) provides it, and WSL2 runs a real Linux kernel, so both work without any code changes.
 
 **git.** The executor agent commits completed phases to the project repository. git must be on the PATH.
 
 **Node.js (with npm), 22+ recommended.** `install.sh` builds the `autodev-pipeline-signals` OpenClaw plugin (an esbuild bundle) and provisions the Playwright MCP used for visual review of UI phases. If `npm` is missing the installer continues but warns — and without the signals plugin, agent activity stamps never refresh and stall detection is disabled, so install Node before a real run.
 
 **OpenClaw installed and running.** Lullabeast does not bundle OpenClaw — it calls OpenClaw's webhook API to invoke agents and reads the session files OpenClaw writes. OpenClaw is also the **runtime that owns all model and provider configuration**: you pick each agent's model and supply any provider API keys in `openclaw.json`. Lullabeast is model-agnostic and never reads a provider key directly. Install OpenClaw separately and confirm its gateway is running on `localhost:18789` before running install.sh.
-
----
-
-## New User Webhook Checklist
-
-Run these checks once after install to avoid common first-run webhook failures.
-
-1. In `~/.openclaw/openclaw.json`, confirm `hooks.token` is set (this is the webhook Bearer secret; it is **not** `gateway.auth.token`).
-2. Ensure Lullabeast uses the same secret:
-   - `<repo>/.env` → `AUTODEV_HOOKS_TOKEN=...`, and/or
-   - `ui/config.json` → `hooks_token`.
-3. Start Lullabeast UI with `.env` loaded:
-
-```bash
-cd /path/to/autodev-ui
-source .env
-uvicorn ui.server:app --host 127.0.0.1 --port 18790
-```
-
-If using **systemd** for the UI service, the shipped `ui/autodev-ui.service` carries placeholder `User=`, `EnvironmentFile=<repo>/.env`, and `Environment=HOME=…` lines — **edit all three before installing.** `EnvironmentFile` is load-bearing: without the repo `.env` loaded, the service starts with fallback roots and **no `AUTODEV_UI_TOKEN`**, so the dashboard runs unauthenticated on loopback (the server logs a loud `[AUTH] WARNING`). `User`/`HOME` keep `~`-relative paths (the recent-projects file, `~/.openclaw` fallbacks) resolving to the right home instead of a literal `./~` directory under the working directory.
-
-4. Verify webhook auth with a **POST** (GET checks alone are insufficient):
-
-```bash
-curl -sS -o /dev/null -w "HTTP %{http_code}\n" -X POST http://127.0.0.1:18789/hooks/agent \
-  -H "Authorization: Bearer <hooks.token>" -H "Content-Type: application/json" \
-  -d '{"agentId":"prd-creator","sessionKey":"ideas:install-check:0","wakeMode":"now","message":"ping"}'
-```
-
-Expect `HTTP 200`. `HTTP 401` means the Bearer token does not match `hooks.token`.
 
 ---
 
@@ -208,8 +178,7 @@ Legacy names (`AUTODEV_ROOT`,
 `AUTODEV_USE_LEGACY_OPENCLAW_RUNTIME`, and the UI `use_legacy_openclaw_runtime`
 key) have been removed and are ignored if set.
 To collapse the pipeline directory onto the OpenClaw directory, set
-`AUTODEV_PIPELINE_ROOT=$OPENCLAW_ROOT` explicitly. See
-[`docs/RUNTIME-MIGRATION.md`](docs/RUNTIME-MIGRATION.md) for history.
+`AUTODEV_PIPELINE_ROOT=$OPENCLAW_ROOT` explicitly.
 
 **Optional — in-session stall timeouts (orchestrator).** Before each planner/executor/reviewer webhook, the orchestrator seeds `{agent}_activity.stamp` in the pipeline artifacts directory. The `autodev-pipeline-signals` plugin refreshes that stamp on Tier A hooks (`model_call_started`, `model_call_ended`, `after_tool_call`) and OpenClaw's live agent event stream. The orchestrator treats silence longer than these thresholds (seconds) as a failed sentinel poll and uses the normal retry path. Seeding the stamp means a missing first hook is still caught. Defaults are conservative; override only if you measure false positives or need faster recovery:
 
@@ -242,6 +211,36 @@ The Ideas chat send has **no startup-grace knob**: it waits for a definitive tim
 The companion `poll_timeout` (full-turn infra backstop, `ui/config.json` `poll_timeout`, default **900 s**) bounds the total turn — a thorough PRD turn chains several model calls and can exceed the old 180 s ceiling.
 
 `install.sh` also appends these two as commented placeholders to `.env` (separate marker; idempotent). **`.env.example`** includes the same block.
+
+---
+
+## New User Webhook Checklist
+
+Run these checks once after install to avoid common first-run webhook failures.
+
+1. In `~/.openclaw/openclaw.json`, confirm `hooks.token` is set (this is the webhook Bearer secret; it is **not** `gateway.auth.token`).
+2. Ensure Lullabeast uses the same secret:
+   - `<repo>/.env` → `AUTODEV_HOOKS_TOKEN=...`, and/or
+   - `ui/config.json` → `hooks_token`.
+3. Start Lullabeast UI with `.env` loaded:
+
+```bash
+cd /path/to/autodev-ui
+source .env
+uvicorn ui.server:app --host 127.0.0.1 --port 18790
+```
+
+If using **systemd** for the UI service, edit the placeholder `User=`, `EnvironmentFile=<repo>/.env`, and `Environment=HOME=…` lines in `ui/autodev-ui.service` before installing — `EnvironmentFile` is load-bearing for both token auth and `~`-path resolution (details under **Security and network exposure**).
+
+4. Verify webhook auth with a **POST** (GET checks alone are insufficient):
+
+```bash
+curl -sS -o /dev/null -w "HTTP %{http_code}\n" -X POST http://127.0.0.1:18789/hooks/agent \
+  -H "Authorization: Bearer <hooks.token>" -H "Content-Type: application/json" \
+  -d '{"agentId":"prd-creator","sessionKey":"ideas:install-check:0","wakeMode":"now","message":"ping"}'
+```
+
+Expect `HTTP 200`. `HTTP 401` means the Bearer token does not match `hooks.token`.
 
 ---
 
@@ -355,7 +354,7 @@ To run as a background service, see `ui/autodev-ui.service` (Linux/WSL2 systemd 
 
 ---
 
-## Prerequisites (`.env.example` only)
+## Per-project prerequisites (`.env.example`)
 
 A project's prerequisites live in its `verification.md` under a `## Prerequisites` block (the
 roadmap-converter authors it from your Project Ideas conversation; you can also hand-edit it). **Names
@@ -442,7 +441,7 @@ If `AUTODEV_ESCALATION_CHANNEL` or `AUTODEV_HOOKS_TOKEN` is unset, the plugin no
 
 ## Known Compatible OpenClaw Version
 
-Tested against OpenClaw 2026.5.18 — earlier versions may have schema differences in `pipeline_state.json`. See openclaw.json requirements below.
+Requires OpenClaw v2026.5.18 or newer. The `autodev-pipeline-signals` plugin was first built against 2026.5.18 and has run on every release since; earlier versions may have schema differences in `pipeline_state.json`. See openclaw.json requirements below.
 
 The fields Lullabeast reads from `pipeline_state.json` are: `pipeline_status`, `current_agent`, `current_phase`, `current_phase_raw_id`, `planner_retries`, `executor_retries`, `reviewer_retries`, `last_action_timestamp`, and `project_path`. Values of **`current_phase_raw_id`** (for example `INT-E1`) are the same phase identifiers used in the project’s **`roadmap.md`**. If your OpenClaw version writes different field names, the UI status endpoint will return partial data.
 
@@ -460,7 +459,7 @@ Webhook routing uses `agents.list[]`. Some OpenClaw exports include `agents.defa
 
 OpenClaw applies a **global tool profile** (`tools.profile`: `minimal` | `coding` | `messaging` | `full`) as the baseline allowlist, then per-agent `tools` can further restrict or extend depending on version and UI presets. That is why the gateway can show **Coding** for planner/executor/reviewer even when those entries do not list every tool explicitly. For Lullabeast’s pipeline, **`coding` or `full`** is appropriate; see [OpenClaw — Tools and Plugins](https://docs.openclaw.ai/tools).
 
-**`hooks.token` vs `gateway.auth.token`** — These are different secrets. **`hooks.token`** is the **Bearer** secret for **`POST /hooks/agent`**: the orchestrator and Lullabeast UI send it in the `Authorization` header when invoking agents. If it is wrong or missing, invocations return **401** and the pipeline stalls. **`gateway.auth.token`** (or similar gateway Control UI / API auth in your OpenClaw version) protects **browser or REST access to the gateway itself** — it does **not** substitute for `hooks.token`. The installer can generate `hooks.token` and suggest storing the same value as **`AUTODEV_HOOKS_TOKEN`** (or `hooks_token` in `ui/config.json`) so the UI matches the gateway. The orchestrator also uses **`gateway.auth.token`** (with **`gateway.port`**) for a best-effort WebSocket **`sessions.abort`** on the **previous** executor session before starting executor attempt N+1, so a stale run does not keep streaming after a retry.
+**`hooks.token` vs `gateway.auth.token`** — These are different secrets. **`hooks.token`** is the **Bearer** secret for **`POST /hooks/agent`**: the orchestrator and Lullabeast UI send it in the `Authorization` header when invoking agents. If it is wrong or missing, invocations return **401** and the pipeline stalls. **`gateway.auth.token`** (or similar gateway Control UI / API auth in your OpenClaw version) protects **browser or REST access to the gateway itself** — it does **not** substitute for `hooks.token`. The installer can generate `hooks.token` and suggest storing the same value as **`AUTODEV_HOOKS_TOKEN`** (or `hooks_token` in `ui/config.json`) so the UI matches the gateway. The orchestrator also uses **`gateway.auth.token`** (with **`gateway.port`**) for a best-effort WebSocket **`sessions.steer`** interrupt on the **previous** executor session before starting executor attempt N+1, so a stale run does not keep streaming after a retry.
 
 Recommended **`hooks`** shape for Lullabeast (installer converges toward this without clobbering unrelated keys):
 

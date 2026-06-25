@@ -163,7 +163,7 @@ When `_spawn_orchestrator` (called by `/api/setup/launch`) looks for `orchestrat
 ```python
 orchestrator_script = os.path.join(autodev_repo_path, "autodev", "pipeline", ORCHESTRATOR_FILENAME)
 ```
-With `autodev_repo_path` defaulting to the repo root (above), this resolves to `autodev/pipeline/orchestrator.py`. A wrong `autodev_repo_path` yields a clean `{ok: False, "orchestrator.py not found at …"}`, not a crash. (Resolved — see Unresolved Items #1/#3.)
+With `autodev_repo_path` defaulting to the repo root (above), this resolves to `autodev/pipeline/orchestrator.py`. A wrong `autodev_repo_path` yields a clean `{ok: False, "orchestrator.py not found at …"}`, not a crash. (Resolved.)
 
 ---
 
@@ -812,7 +812,7 @@ An up-front, honest read on whether the host can build/test a project, plus the 
 
 **Declaration home.** The project's `verification.md` carries a `## Prerequisites` block (`### Tools` = host tools only / `### Environment` = names+purposes), authored by the roadmap-converter and human-editable. Parsed by `autodev/pipeline/prereq_spec.py::parse_prerequisites` (deterministic, value-safe — strips any value-shaped token and warns; `block_present` distinguishes an absent block from a deliberate `none`). Absent block ⇒ behaves exactly like pre-feature.
 
-**Host probes.** `autodev/pipeline/host_probes.py::probe(name)` → `{status: found|missing|unknown, version?, detail, guidance?}`, deterministic and timeout-bounded (`PREREQ_PROBE_TIMEOUT`, default 10s; feature-scoped, no `AUTODEV_` prefix), never raises/hangs. A binary on PATH that answers `--version` → `found`; absent → `missing` (the blockable signal); timeout/uninterpretable/browser-none → `unknown` (advisory — never blocks, DEC-4).
+**Host probes — removed.** There is no host-tool probing. `host_probes.py` and its `PREREQ_PROBE_TIMEOUT` constant were deleted (2026-06-16, see the Queue System note above); `### Tools` in `verification.md` is documentation only and is never checked or gated.
 
 **Server preflight.** No tool checks. `_run_preflight_checks` calls `_emit_env_example(repo_path, spec)` once, which materializes the declared env names into a committed **`.env.example`** and gitignores the real `.env` (`_ensure_env_gitignore_hygiene`; see the Queue System subsection). It is not a check row. No `scaffold-env` endpoint, no env-presence reads, no `_prerequisite_check_rows`. The orchestrator's `_queue_preflight(project_path)` validates only dir/`.git`/`roadmap*.md`.
 
@@ -821,34 +821,6 @@ An up-front, honest read on whether the host can build/test a project, plus the 
 **Mock-first posture (PREREQ-4, DEC-6).** The universal rule lives in the three pipeline `AGENTS.md` `## Always-Apply: Testing Quality` sections (+ `api-service` skill elaboration): mock/fake/record an external/paid boundary; the reviewer **accepts** mocked/recorded/local-stub evidence for an external-API feature and does not demand a live call. `reviewer_gate.py` is shape/anchor-only and encodes no live-call assumption (locked by a regression guard). No live-paid call happens in the automated loop; final live validation is the user's.
 
 **Env-sourcing (DEC-5).** The webhook has no env channel — agents inherit the gateway env. The project's entry-point/test command must load its own `.env` (dotenv loader, or prepend `set -a; . ./.env; set +a`). Documented, not enforced.
-
----
-
-## Unresolved Items
-
-### 1. ~~`_spawn_orchestrator` path construction in `ui/server.py`~~ — **RESOLVED**
-
-`_spawn_orchestrator` now correctly constructs:
-
-```python
-orchestrator_script = os.path.join(autodev_repo_path, "autodev", "pipeline", ORCHESTRATOR_FILENAME)
-```
-
-`autodev_repo_path` should be set to the repo root (written by `install.sh` into `.env`). The workaround of pointing `autodev_repo_path` at `{repo_root}/autodev/pipeline` is no longer necessary or correct.
-
-### 2. ~~Multi-project switcher (`/api/setup/switch-project`)~~ — **RESOLVED**
-
-`POST /api/setup/switch-project` is production-ready, UI-wired, and well-tested — not scaffolding. It re-targets the **single active project** (while the pipeline is stopped) and is at parity with `/api/setup/launch`: dual liveness (409) guards, write-then-act with `_rollback_pipeline_state` on spawn failure (C3-05), `confirm_lock=True`, multi-roadmap disambiguation, and parked-escalation revival routing (`_entry_is_parked_escalation` → `revive_entry_id`, shared with `resume-orchestrator` and `queue/{id}/relaunch`). It is reachable from the dashboard: clicking the Pipeline-Monitor-header project path while stopped opens the switch modal (`postSwitchProject`, `ui/index.html`). Covered by `tests/test_api_setup_switch_project.py` plus the revival-routing, rollback, liveness, and modal test files.
-
-The endpoint is *single-active-project re-targeting*, **not** concurrent multi-project orchestration — running several projects' pipelines at once remains out of scope (the queue serializes projects rather than running them in parallel). `AUTODEV-UI-PRD.md`'s "Multi-project switcher" non-requirement was reworded to that effect, and operator docs live in `SETUP.md` (Starting Lullabeast → "Switching the active project").
-
-### 3. ~~`autodev_repo_path` DEFAULTS fallback~~ — **RESOLVED**
-
-`DEFAULTS["autodev_repo_path"]` now falls back to `_AUTODEV_UI_ROOT` (i.e.
-`os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))` — the repo root, two
-levels up from `ui/server.py`). The stale `~/.openclaw` fallback was also removed from
-`_spawn_orchestrator`. Fresh installs without `.env` sourced now correctly derive the
-repo root from file location rather than assuming `~/.openclaw`.
 
 ---
 

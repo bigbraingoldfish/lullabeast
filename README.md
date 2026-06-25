@@ -5,7 +5,7 @@
 <div align="center">
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![CI](https://img.shields.io/badge/CI-passing-brightgreen.svg)](https://github.com/bigbraingoldfish/lullabeast/actions/workflows/ci.yml)
+[![CI](https://github.com/bigbraingoldfish/lullabeast/actions/workflows/ci.yml/badge.svg)](https://github.com/bigbraingoldfish/lullabeast/actions/workflows/ci.yml)
 [![Runs on OpenClaw](https://img.shields.io/badge/runs%20on-OpenClaw-c9962e.svg)](https://docs.openclaw.ai)
 ![Status](https://img.shields.io/badge/status-beta-orange.svg)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)
@@ -51,7 +51,7 @@ Lullabeast works best for small, focused webapps. Each one below was built end t
 ### Flagship: SVG Pictionary
 
 <p align="center">
-  <img src="docs/assets/demos/pictionary.gif" alt="SVG Pictionary, a multi-screen AI drawing-and-guessing game with multiple AI players and a human, round-based" width="720">
+  <img src="docs/assets/demos/pictionary.webp" alt="SVG Pictionary, a multi-screen AI drawing-and-guessing game with multiple AI players and a human, round-based" width="720">
 </p>
 
 Multiple AI players and a human in a round-based draw-and-guess game over real SVG: multi-screen routing, persistent per-round state, and live, simultaneous LLM API calls that render elements both the models and the player act on. The hardest target on this list, an application rather than a widget.
@@ -62,7 +62,7 @@ Multiple AI players and a human in a round-based draw-and-guess game over real S
 
 | Conway (classic) | Conway (conquest) |
 | :---: | :---: |
-| <img src="docs/assets/demos/conway-classic.gif" alt="Conway classic mode" width="400"> | <img src="docs/assets/demos/conway-conquest.gif" alt="Conway conquest mode" width="400"> |
+| <img src="docs/assets/demos/conway-classic.webp" alt="Conway classic mode" width="400"> | <img src="docs/assets/demos/conway-conquest.webp" alt="Conway conquest mode" width="400"> |
 
 Every example links the exact PRD and phased roadmap that drove its build:
 
