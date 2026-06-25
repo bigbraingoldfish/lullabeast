@@ -66,6 +66,27 @@ ABORT_FAIL = {
     "error": {"type": "forbidden", "message": "missing scope"},
 }
 
+# ``sessions.steer {key, message:<non-empty>}`` is the embedded-run interrupt the abort
+# now issues (``sessions.abort`` cannot see ``/hooks``-launched embedded runs — verified
+# live on OpenClaw 2026.6.10: abort against a streaming embedded run returns
+# ``no-active-run``). The message MUST be non-empty (the gateway rejects an empty-message
+# steer). Success is keyed on the top-level ``ok`` only: an *active* run aborts
+# (``interruptedActiveRun:true``) and an already-finished run is a legitimate no-op
+# (``aborted:false, runIds:[]``) — both ``ok:true``. These payloads mirror the real
+# 2026.6.10 gateway responses.
+STEER_INTERRUPTED = {
+    "type": "res",
+    "id": "2",
+    "ok": True,
+    "payload": {"runId": "r-new", "status": "started", "interruptedActiveRun": True},
+}
+STEER_ACCEPTED_NO_RUN = {
+    "type": "res",
+    "id": "2",
+    "ok": True,
+    "payload": {"ok": True, "aborted": False, "runIds": []},
+}
+
 
 class TestAbortAgentSession:
     def test_returns_true_on_aborted(self):
@@ -369,3 +390,68 @@ class TestAbortInterleavedEventFrames:
                 "tok",
             )
         assert result is True
+
+
+class TestSteerAbort:
+    """``abort_agent_session`` must issue ``sessions.steer {key, message:""}`` — the
+    only abort that reaches a ``/hooks``-launched embedded run — and treat a
+    gateway-accepted (top-level ``ok:true``) response as success, regardless of
+    payload ``status``/``interruptedActiveRun`` (an empty-message steer of an
+    already-finished run carries neither)."""
+
+    def test_steer_method_and_params(self):
+        """The request frame (id "2") must be ``sessions.steer`` with
+        ``params={key, message:<non-empty>}`` (the gateway rejects an empty-message
+        steer), and an ``ok:true`` response must count as success. Catches a parser
+        still keyed on ``payload.status`` (→ every steer returns False = the original
+        zombie bug), a method/params left at ``sessions.abort``/``{key}``, or an empty
+        message (→ INVALID_REQUEST 'message or attachment required')."""
+        sent = []
+        ws = MagicMock()
+        ws.send.side_effect = lambda frame: sent.append(frame)
+        ws.recv.side_effect = [
+            json.dumps(CONNECT_CHALLENGE),
+            json.dumps(HELLO_OK),
+            json.dumps(STEER_INTERRUPTED),
+        ]
+        key = "agent:reviewer:pipeline:phase-1:core-e1:reviewer-attempt-1"
+        with patch.object(wc.websocket, "WebSocket", return_value=ws):
+            result = wc.abort_agent_session(
+                key, "ws://127.0.0.1:18789/__openclaw__/ws", "tok"
+            )
+        assert result is True
+        req2 = [json.loads(f) for f in sent if json.loads(f).get("id") == "2"]
+        assert req2, "the abort must send a request frame with id '2'"
+        assert req2[0]["method"] == "sessions.steer", (
+            f"abort must use sessions.steer (embedded-run interrupt), got "
+            f"{req2[0]['method']!r}"
+        )
+        assert req2[0]["params"]["key"] == key
+        assert req2[0]["params"].get("message"), (
+            "steer requires a NON-EMPTY message — the gateway rejects an empty-message "
+            "steer with INVALID_REQUEST 'message or attachment required'"
+        )
+
+    def test_steer_success_on_accepted_no_active_run(self):
+        """A steer of an already-finished run returns ``ok:true`` with
+        ``aborted:false, runIds:[]`` (a legitimate no-op — the common reviewer-retry
+        case). That must be success, so the abort path does not burn its 3× retry on
+        an idle session."""
+        ws = _make_ws_mock([CONNECT_CHALLENGE, HELLO_OK, STEER_ACCEPTED_NO_RUN])
+        with patch.object(wc.websocket, "WebSocket", return_value=ws):
+            result = wc.abort_agent_session(
+                "any:key", "ws://127.0.0.1:18789/__openclaw__/ws", "tok"
+            )
+        assert result is True
+
+    def test_steer_default_timeout_is_20s(self):
+        """The default WS timeout must be 20s, not 8s: the gateway blocks up to
+        15s on ``waitForEmbeddedAgentRunEnd`` confirming the run ended, so an 8s
+        socket timeout would time out *before* the confirm and report a false
+        FAILED."""
+        ws = _make_ws_mock([CONNECT_CHALLENGE, HELLO_OK, STEER_INTERRUPTED])
+        with patch.object(wc.websocket, "WebSocket", return_value=ws):
+            wc.abort_agent_session(
+                "any:key", "ws://127.0.0.1:18789/__openclaw__/ws", "tok"
+            )
+        ws.settimeout.assert_called_with(20)

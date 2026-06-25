@@ -160,6 +160,71 @@ def _reviewer_output(**overrides):
 
 
 # ---------------------------------------------------------------------------
+# Directive-enrichment channel: the gate persists its specific problem list to
+# phase_state["reviewer_unverified_detail"] so the orchestrator can enrich the
+# reviewer retry directive with exactly what failed (not just a generic reminder).
+# ---------------------------------------------------------------------------
+
+
+class TestUnverifiedDetailPersistedToPhaseState:
+    def test_record_error_code_only_writes_detail_field(self, tmp_workspace):
+        """The extended record_error_code_only writes the detail list alongside
+        last_error_code in a single atomic phase_state write (no two-write race)."""
+        ws = tmp_workspace
+        with _patch_workspace(ws):
+            _write_phase_state(ws)
+            utils_module.record_error_code_only(
+                "reviewer",
+                "ERR_BEHAVIORAL_UNVERIFIED",
+                detail=["p1", "p2"],
+                detail_field="reviewer_unverified_detail",
+            )
+        with open(os.path.join(ws, "phase_state.json")) as f:
+            ps = json.load(f)
+        assert ps["last_error_code"] == "ERR_BEHAVIORAL_UNVERIFIED"
+        assert ps["reviewer_unverified_detail"] == ["p1", "p2"]
+
+    def test_record_error_code_only_no_detail_writes_no_field(self, tmp_workspace):
+        """Backward-compatible: existing single-arg callers write only last_error_code,
+        never a stray detail field."""
+        ws = tmp_workspace
+        with _patch_workspace(ws):
+            _write_phase_state(ws)
+            utils_module.record_error_code_only("reviewer", "ERR_FILE_MISSING")
+        with open(os.path.join(ws, "phase_state.json")) as f:
+            ps = json.load(f)
+        assert ps["last_error_code"] == "ERR_FILE_MISSING"
+        assert "reviewer_unverified_detail" not in ps
+
+    def test_behavioral_unverified_persists_problem_list(self, tmp_workspace):
+        """End-to-end: a behavioral phase whose reviewer_output omits the
+        behavioral_verification block returns BEHAVIORAL_UNVERIFIED AND leaves the
+        gate's specific problem list in phase_state['reviewer_unverified_detail'] for
+        the orchestrator to feed back to the reviewer."""
+        ws = tmp_workspace
+        with _patch_workspace(ws):
+            _write_current_phase_with_behavioral(ws, raw_id="CORE-E1")
+            _write_phase_state(ws)
+            _write_done_artifacts(ws, "CORE-E1")
+            out = _reviewer_output()  # no behavioral_verification block at all
+            with open(os.path.join(ws, "reviewer_output.json"), "w") as f:
+                json.dump(out, f)
+            verdict = reviewer_gate_module.evaluate_reviewer(
+                os.path.join(ws, "reviewer_output.json")
+            )
+        assert verdict == "BEHAVIORAL_UNVERIFIED"
+        with open(os.path.join(ws, "phase_state.json")) as f:
+            ps = json.load(f)
+        assert ps.get("last_error_code") == "ERR_BEHAVIORAL_UNVERIFIED"
+        detail = ps.get("reviewer_unverified_detail")
+        assert isinstance(detail, list) and detail, (
+            "the gate must persist its specific problem list so the orchestrator "
+            "can enrich the reviewer retry directive"
+        )
+        assert any("behavioral_verification" in str(d) for d in detail)
+
+
+# ---------------------------------------------------------------------------
 # B1 — content-driven phase detection
 #
 # The predicate ``_requires_behavioral_verification`` was extracted to

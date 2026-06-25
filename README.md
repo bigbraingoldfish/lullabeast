@@ -2,9 +2,6 @@
   <img src="docs/assets/branding/banner-twilight.png" alt="Lullabeast" width="100%">
 </p>
 
-**From plain English to shipped MVP.**
-*A gated multi-agent pipeline that gets results from cheap open models. Run it with cloud, local, or mix and match. You choose!*
-
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://img.shields.io/badge/CI-passing-brightgreen.svg)](https://github.com/bigbraingoldfish/lullabeast/actions/workflows/ci.yml)
 [![Runs on OpenClaw](https://img.shields.io/badge/runs%20on-OpenClaw-c9962e.svg)](https://docs.openclaw.ai)

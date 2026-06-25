@@ -150,6 +150,26 @@ class TestContractFailureOrchestratorHandling:
             "the old INFRA escalation tag must be removed (removal completeness)"
         )
 
+    def test_contract_failure_aborts_prior_run_before_reinvoke(self):
+        """The CONTRACT_FAILURE handler must abort the prior reviewer run before
+        re-invoking, via ``_abort_active_agent_session("reviewer_retry")``. The
+        reviewer wrote no parseable verdict (often a hard error / cut-off), and its
+        embedded run may still be streaming — re-invoking on top of it spawns a
+        concurrent zombie. The abort targets the prior recorded key; the contract
+        retry then rotates to a fresh ``-c{N}`` session."""
+        import orchestrator as orc_module
+
+        src = open(orc_module.__file__, encoding="utf-8").read()
+        start = src.find('elif gate_result == "CONTRACT_FAILURE":')
+        assert start != -1, "CONTRACT_FAILURE handler must exist"
+        # bound the window at the next sibling branch (the pooled UNVERIFIED handler)
+        end = src.find("elif gate_result in (", start)
+        window = src[start:end] if end != -1 else src[start:start + 5000]
+        assert '_abort_active_agent_session("reviewer_retry")' in window, (
+            "the CONTRACT_FAILURE handler must abort the prior reviewer run "
+            '(_abort_active_agent_session("reviewer_retry")) before re-invoking'
+        )
+
 
 class TestCounterSeparation:
     """reviewer_contract_retries vs reviewer_retries — preserved by
@@ -392,3 +412,38 @@ class TestContractRetrySessionKey:
         assert k1.startswith(k0), (
             "the contract suffix must extend the base attempt key, not replace it"
         )
+
+    def test_unverified_retry_uses_fresh_session_key(self, tmp_workspace):
+        """A contract-shape *_UNVERIFIED retry must also get a FRESH, distinct session
+        key (``-u{N}``) — re-using the prior reviewer session reattaches a possibly-
+        streaming embedded run and re-enters the rejected/overflowed prior context
+        (observed to cause confused/repeat-failing retries). Mirrors the -c{N} contract
+        behaviour."""
+        import orchestrator as orc_module
+
+        orch, _ = _make_contract_orch(tmp_workspace, {})
+        with patch.object(orc_module, "PHASE_STATE_FILE", os.path.join(tmp_workspace, "phase_state.json")):
+            k0 = orch._reviewer_session_key(1, "CORE-1", 0, 0, 0)
+            k1 = orch._reviewer_session_key(1, "CORE-1", 0, 0, 1)
+            k2 = orch._reviewer_session_key(1, "CORE-1", 0, 0, 2)
+        assert k0 == "pipeline:phase-1:CORE-1:reviewer-attempt-1", (
+            "unverified_retries=0 must be byte-identical to the legacy shape"
+        )
+        assert k1 == "pipeline:phase-1:CORE-1:reviewer-attempt-1-u1"
+        assert k2 == "pipeline:phase-1:CORE-1:reviewer-attempt-1-u2"
+        assert k1 != k0 and k2 != k1, "each *_UNVERIFIED retry must yield a distinct key"
+
+    def test_contract_and_unverified_suffixes_compose_distinctly(self, tmp_workspace):
+        """A phase that hits both a CONTRACT_FAILURE and an *_UNVERIFIED retry must
+        still get distinct keys (the suffixes compose, never collide)."""
+        import orchestrator as orc_module
+
+        orch, _ = _make_contract_orch(tmp_workspace, {})
+        with patch.object(orc_module, "PHASE_STATE_FILE", os.path.join(tmp_workspace, "phase_state.json")):
+            keys = {
+                orch._reviewer_session_key(1, "CORE-1", 0, 0, 0),
+                orch._reviewer_session_key(1, "CORE-1", 0, 1, 0),
+                orch._reviewer_session_key(1, "CORE-1", 0, 0, 1),
+                orch._reviewer_session_key(1, "CORE-1", 0, 1, 1),
+            }
+        assert len(keys) == 4, f"all four retry combinations must be distinct keys: {keys}"

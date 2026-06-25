@@ -188,3 +188,99 @@ def test_behavioral_unverified_in_verdict_routing_table():
         "table is operator-facing and per-verdict — pooling counters does "
         "not collapse the entries."
     )
+
+
+def test_unverified_handler_aborts_prior_run_before_reinvoke():
+    """The UNVERIFIED handler must abort the prior reviewer run before re-invoking,
+    via ``_abort_active_agent_session("reviewer_retry")``. Without it, the same-session
+    re-invoke reattaches a still-streaming embedded run → concurrent "zombie" reviewer
+    sessions (the bug this fix closes). The abort must NOT be gated behind a
+    "still running" liveness check — it fires unconditionally on the retry path (it is
+    a no-op when the run already ended, and the verdict-hold acceptor means it usually
+    has), so it also catches a true zombie streaming past the accepted sentinel."""
+    window = _unverified_handler_window()
+    assert '_abort_active_agent_session("reviewer_retry")' in window, (
+        "the UNVERIFIED handler must call "
+        '_abort_active_agent_session("reviewer_retry") before re-invoking the '
+        "reviewer, so the prior (possibly still-streaming) run is killed first"
+    )
+
+
+def test_unverified_handler_reads_unverified_detail_for_enrichment():
+    """The handler must consume ``reviewer_unverified_detail`` (the gate's specific
+    problem list) so the retry directive can tell the reviewer exactly what failed,
+    not just the generic contract reminder."""
+    window = _unverified_handler_window()
+    assert "reviewer_unverified_detail" in window, (
+        "the UNVERIFIED handler must read reviewer_unverified_detail to enrich the "
+        "directive with the gate's specific problems"
+    )
+
+
+def test_reviewer_invoke_site_feeds_unverified_retries_for_fresh_session():
+    """The reviewer invocation site must feed ``reviewer_unverified_retries`` into
+    ``_reviewer_session_key`` so an *_UNVERIFIED retry gets a FRESH -u{N} session
+    (not the prior, possibly-streaming/overflowed session). Catches the key builder
+    being called without the unverified counter — which would silently revert to
+    same-session reuse."""
+    # the invoke-site reads the pooled counter ...
+    assert 'get("reviewer_unverified_retries"' in _ORCH_SRC, (
+        "the reviewer invoke site must read reviewer_unverified_retries"
+    )
+    # ... and passes 5 positional args to _reviewer_session_key (phase, raw_id,
+    # reviewer_retries, contract_retries, unverified_retries).
+    m = re.search(
+        r"_reviewer_session_key\(\s*phase,\s*raw_id,\s*retries,"
+        r"\s*_contract_retries,\s*_unverified_retries\s*\)",
+        _ORCH_SRC,
+    )
+    assert m is not None, (
+        "_reviewer_session_key must be called with the unverified_retries argument so "
+        "*_UNVERIFIED retries rotate to a fresh -u{N} session"
+    )
+
+
+def _bare_orch():
+    import orchestrator as orc_module
+
+    orch = orc_module.Orchestrator.__new__(orc_module.Orchestrator)
+    return orch
+
+
+class TestComposeUnverifiedDirective:
+    """``_compose_unverified_directive(gate_result, detail)`` builds the retry
+    directive: the generic per-verdict instruction, enriched with the gate's specific
+    problem list when present. Pure function — unit-tested directly (the handler that
+    calls it is inline in run())."""
+
+    def test_enriched_with_problem_list(self):
+        orch = _bare_orch()
+        out = orch._compose_unverified_directive(
+            "BEHAVIORAL_UNVERIFIED",
+            ["behavioral_verification missing or not an object"],
+        )
+        assert "BEHAVIORAL VERIFICATION REQUIRED" in out, "generic instruction must remain"
+        assert "Specifically" in out, "enriched directive must flag the specifics"
+        assert "behavioral_verification missing" in out, (
+            "the gate's specific problem must be appended so the reviewer knows "
+            "exactly what failed"
+        )
+
+    def test_generic_when_no_detail(self):
+        orch = _bare_orch()
+        for detail in (None, []):
+            out = orch._compose_unverified_directive("VISUAL_UNVERIFIED", detail)
+            assert "VISUAL VERIFICATION REQUIRED" in out
+            assert "Specifically" not in out, (
+                "with no detail the directive must be the plain generic instruction "
+                "(no dangling 'Specifically:' / no crash on None)"
+            )
+
+    def test_bounded(self):
+        orch = _bare_orch()
+        many = [f"problem number {i} " + ("x" * 200) for i in range(10)]
+        out = orch._compose_unverified_directive("REGRESSION_UNVERIFIED", many)
+        # at most the first 3 problems, total appended specifics capped (~500 chars)
+        assert "problem number 0" in out and "problem number 2" in out
+        assert "problem number 3" not in out, "only the first 3 problems are included"
+        assert len(out) < 1500, "the enriched directive must be length-bounded"
