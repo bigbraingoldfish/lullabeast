@@ -4,6 +4,7 @@
 
 <div align="center">
 
+[![Website: lullabeast.ai](https://img.shields.io/badge/website-lullabeast.ai-7c3aed.svg)](https://lullabeast.ai)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/bigbraingoldfish/lullabeast/actions/workflows/ci.yml/badge.svg)](https://github.com/bigbraingoldfish/lullabeast/actions/workflows/ci.yml)
 [![Runs on OpenClaw](https://img.shields.io/badge/runs%20on-OpenClaw-c9962e.svg)](https://docs.openclaw.ai)
@@ -25,6 +26,19 @@ Lullabeast runs on [OpenClaw](https://docs.openclaw.ai/) and requires it: Lullab
 
 ---
 
+## Why it exists
+
+Open-weight models like Qwen, Kimi, and MiniMax cost a fraction of frontier prices, and they fail in known, repeatable ways. Lullabeast is built around those failures:
+
+| The failure mode | How Lullabeast handles it |
+|---|---|
+| **Deleting files** under context pressure | Every deletion has to be declared up front. If a file disappears that wasn't, the gate flags it and the phase re-runs. |
+| **Drifting from the spec** as a build grows | Context is cleared between tasks and each one stays atomic, so focus stays narrow against a clear definition of done; the reviewer then confirms those principles held across the whole phase. |
+| **Declaring victory** without running the tests | A phase can't close until the gate confirms every required test exists, is structured correctly, and passes. |
+| **Disappearing mid-turn** and leaving you guessing | Each agent gets three real attempts before anything is flagged to you, and timeouts catch an agent that never starts or hangs, so one dropped turn never sinks the run. |
+
+---
+
 ## How it works
 
 <p align="center">
@@ -33,7 +47,7 @@ Lullabeast runs on [OpenClaw](https://docs.openclaw.ai/) and requires it: Lullab
 
 Queue several projects and Lullabeast works them in order, honoring dependencies between them.
 
-**The agents.** Four pipeline agents and two ideation agents, run by a single orchestrator state machine that owns the git operations, blame attribution, and recovery logic:
+**The agents.** Four pipeline agents and two ideation agents, run by a single orchestrator state machine that owns the git operations and recovery logic:
 
 - **Planner:** turns the current roadmap phase into a concrete implementation plan.
 - **Executor:** writes the code and tests, then commits to a phase branch.
@@ -72,19 +86,21 @@ Every example links the exact PRD and phased roadmap that drove its build:
 | GridBeast | [PRD](examples/gridbeast/PRD.md) | [Roadmap](examples/gridbeast/roadmap.md) | Mini spreadsheet; formula engine with precedence, ranges, cycle detection |
 | Regex Tester | [PRD](examples/regex/PRD.md) | [Roadmap](examples/regex/roadmap.md) | Live matcher; inline flags, in-place highlighting, light/dark |
 | 2048 | [PRD](examples/2048-api/PRD.md) | [Roadmap](examples/2048-api/roadmap.md) | Tile-merge game; correct merge semantics, score/best, spawn-on-move |
-| Multi-team Conway | [PRD](examples/game-of-life/PRD.md) | [Roadmap](examples/game-of-life/roadmap.md) | Two rule systems (classic + conquest) over one grid engine |
+| MultiLife (Conway) | [PRD](examples/game-of-life/PRD.md) | [Roadmap](examples/game-of-life/roadmap.md) | Two rule systems (classic + conquest) over one grid engine |
 
-*GridBeast's self-test panel was generated in a follow-up pass to surface engine correctness for users, after the formula engine itself was built and manually verified.*
+*GridBeast's functionality was manually verified, before I generated the self-test panel using the same foumulas in a follow-up pass to surface correctness at a glance.*
 
 **Built with.** No closed frontier models anywhere in the loop, just local and open-weight cloud:
 
 | Project | Planner | Executor | Reviewer |
 |---|---|---|---|
-| Multi-team Conway | `llamacpp/Qwen3.6-27B-MTP` | `llamacpp/Qwen3.6-27B-MTP` | `llamacpp/Qwen3.6-27B` |
+| MultiLife (Conway) | `llamacpp/Qwen3.6-27B-MTP` | `llamacpp/Qwen3.6-27B-MTP` | `llamacpp/Qwen3.6-27B` |
 | Regex Tester | `llamacpp/Qwen3.6-27B-MTP` | `llamacpp/Qwen3.6-27B-MTP` | `llamacpp/Qwen3.6-27B` |
 | GridBeast | `llamacpp/Qwen3.6-27B` | `llamacpp/Qwen3.6-27B` | `llamacpp/Qwen3.6-27B` |
 | 2048 | `openrouter/z-ai/glm-5.2` | `openrouter/moonshotai/kimi-k2.7-code` | `openrouter/moonshotai/kimi-k2.7-code` |
 | SVG Pictionary | `openrouter/z-ai/glm-5.2` | `openrouter/moonshotai/kimi-k2.7-code` | `openrouter/moonshotai/kimi-k2.7-code` |
+
+**Play it live.** *MultiLife (Conway)* was built twice: once locally with Qwen & again on cloud open-weight models. Both finished builds are **[embedded and playable side by side](https://lullabeast.ai/living-proof)** in your browser.
 
 ---
 
@@ -95,10 +111,12 @@ Lullabeast is model-agnostic. OpenClaw owns all model configuration, so you choo
 | Mode | What runs the agents | Trade-off |
 |---|---|---|
 | **Budget cloud** (best results so far) | Open-weight multi-modal models via your OpenRouter key (e.g. MiniMax, GLM, Kimi, Qwen) | Cheap per token; your key, your provider |
-| **Fully local** | Validated on a single RTX 4090 (48GB, modded) with `unsloth/Qwen3.6-27B-MTP-GGUF` (q8_0) | No cloud in the loop; front-end (UI) phases are the weak spot, with the most failures and retries |
+| **Fully local** | Validated on a single RTX 4090 (48GB, modded) with `unsloth/Qwen3.6-27B-MTP-GGUF` & `llamacpp/Qwen3.6-27B` (both q8_0) | No cloud in the loop; front-end (UI) phases are the weak spot, with the most failures and retries |
 | **Hybrid** | Local for **escalation + executor** (where most of the work, and the cost savings, happen), cloud for **planner and/or reviewer** (cheap to build a strong foundation and review thoroughly) | Often the best cost/quality balance; still being tuned |
 
-**Model notes.** A **multi-modal** model is **required** for the **executor** and **reviewer** (the reviewer does screenshot-based visual review for UI phases) and **recommended** for the **planner**. Use the strongest model you're comfortable running for the **roadmap-converter**: it's isolated by design, so your most expensive model is spent only on conversion. We also suggest keeping the **idea-to-PRD chat (`prd-creator`) on a cloud model**, where it produces noticeably better drafts.
+**Model notes.** A **multi-modal** model is **required** for the **executor** and **reviewer** (the reviewer does screenshot-based visual review for UI phases) and **recommended** for the **planner**. Use the strongest model you're comfortable running for the **roadmap-converter**: it's isolated by design, so your most expensive model is spent only on conversion. I also suggest keeping the **idea-to-PRD chat (`prd-creator`) on a cloud model**, where it produces noticeably better drafts.
+
+**Want the real numbers?** See the **[side-by-side runtime, tokens, and cost](https://lullabeast.ai/#a-build)** for the MultiLife builds.
 
 ---
 
@@ -152,6 +170,8 @@ curl -sS -o /dev/null -w "HTTP %{http_code}\n" -X POST http://127.0.0.1:18789/ho
   <img src="docs/assets/screenshots/pipeline-monitor.png" alt="Pipeline Monitor, the live planner, executor, reviewer loop mid-run" width="720">
   <br><em>The Pipeline Monitor mid-run: live planner, executor, reviewer loop, per-phase metrics, activity feed.</em>
 </p>
+
+**Look before you install.** **[Tour the dashboard](https://lullabeast.ai/walkthrough)**. It's a snapshot preview of the interface from the MultiLife (Conway) build.
 
 - **Project Ideas:** chat an idea into a PRD, then generate the roadmap + verification contract.
 - **Setup & Preflight:** point at a project repo, run preflight checks, launch the pipeline.
