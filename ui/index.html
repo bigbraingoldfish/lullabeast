@@ -485,6 +485,8 @@
                 "Executor Error: a required Git check could not run in the project. Action required: fix Git in the working tree (corrupt repo, lock, or permissions) — the pipeline will not get past this step until Git commands succeed. Automatic retries alone will not fix a broken repository.",
             ERR_REVIEWER_CONTRACT_FAILURE:
                 "Reviewer produced no usable review output (the session ended without a readable reviewer_output.json). Retrying in a fresh session with a corrective directive.",
+            ERR_REVIEWER_MODEL_ERROR:
+                "Reviewer model error: the reviewer's model server returned an error (e.g. a 500 / GPU contention or model eviction) rather than giving up — the implementation may well be correct. Check the model host. Retried in fresh sessions; escalated after repeated failures.",
             ERR_PROVIDER_REJECTED:
                 "Inference provider rejected the request \u2014 check your API key, credits, or rate limits, then restart the pipeline.",
             ERR_SESSION_DEAD_ON_ARRIVAL:

@@ -912,13 +912,18 @@ IF FAIL AND pass == 3                → escalation agent
 IF gate_result == "CONTRACT_FAILURE":
     IF provider-rejected (defensive re-check)  → escalation (ERR_PROVIDER_REJECTED)
     reviewer_contract_retries += 1
-    IF reviewer_contract_retries >= 3  → escalation (CONTRACT_FAILURE_SOFT_RETRY_EXHAUSTED)
+    IF reviewer_contract_retries >= 3  → escalation; _compose_contract_failure_escalation labels it
+                                         ERR_REVIEWER_MODEL_ERROR + the real inference error when the
+                                         session ended in a model hard-error (stopReason:"error"/500),
+                                         else CONTRACT_FAILURE_SOFT_RETRY_EXHAUSTED (genuine give-up)
     ELSE                               → set reviewer_retry_directive; re-invoke reviewer (fresh session)
 ```
 
 Genuine transport/provider failures (case a) are **partly** peeled off upstream — stall detection (`_handle_stall_outcome`), dead-on-arrival (`_check_session_dead_on_arrival`), and provider-rejection (`_escalate_if_provider_rejected`, also re-checked defensively at the top of this branch). Aborts/crashes that match none of those heuristics still land here and recover identically (fresh session + directive), which is why "ambiguous → default to contract" is safe. There is **no readable give-up-vs-abort signal** today (the plugin only logs `event.success`); if one is added later it should only enrich the escalation message, never gate behaviour.
 
-CONTRACT_FAILURE does NOT increment `reviewer_retries` — that counter is reserved for genuine LLM rejections. The `reviewer_contract_retries` soft-retry counter is preserved across `reset_execution()` and only zeroed by `reset_phase()`.
+CONTRACT_FAILURE does NOT increment `reviewer_retries` — that counter is reserved for genuine LLM rejections. The `reviewer_contract_retries` soft-retry counter is preserved across `reset_execution()` and zeroed by `reset_phase()` — **and (v0.1.1) also zeroed by an operator `RESET_REVIEWER` (`reset_reviewer()`)**, which restores a *fresh* reviewer budget by clearing both `reviewer_contract_retries` and the pooled `reviewer_unverified_retries` (mirroring how `reset_execution('escalation')` clears `executor_retries`). Previously both survived an operator reset, so an already-maxed counter re-escalated on the very next reviewer failure — the "fast fail, no retries" symptom (the contract counter observed climbing 3 → 4 → 5 across three resets).
+
+**Honest CONTRACT_FAILURE attribution (v0.1.1).** At the cap, `_compose_contract_failure_escalation` distinguishes the two causes conflated under CONTRACT_FAILURE by reading the session JSONL's last assistant error row (reusing `_session_jsonl_last_assistant_error_message`): a reviewer **model hard-error** (`stopReason:"error"` — a 500/server_error from GPU contention or model eviction; the reviewer did real work and the inference call failed) escalates with the real error message + `last_error_code=ERR_REVIEWER_MODEL_ERROR`, while a genuine give-up/cut-off (no error row) keeps the generic message + `ERR_REVIEWER_CONTRACT_FAILURE`. The model-error label flows through to `_compose_fallback_reason` (the deterministic dashboard advisory) and the UI `P3_LAST_ERROR_CODE_TITLES` map. Only the *terminal* escalation label changes — the soft-retry/backoff loop above is untouched (a transient contention error still self-heals on retry).
 
 There is no model-health probe and no SSH recovery. Agent/model liveness is owned by the OpenClaw activity-stamp hooks — `startup_grace` / `no_first_activity` for a cold start, `stalled` for a mid-turn death (`poll_for_sentinel`) — which fire identically for cloud and local agents, so a genuinely dead model surfaces as "no activity" and is caught there rather than by a pre-invocation probe.
 

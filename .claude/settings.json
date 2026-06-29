@@ -2,7 +2,11 @@
   "mcpServers": {
     "playwright": {
       "command": "npx",
-      "args": ["-y", "@playwright/mcp@0.0.40", "--headless"]
+      "args": [
+        "-y",
+        "@playwright/mcp@0.0.40",
+        "--headless"
+      ]
     }
   }
 }

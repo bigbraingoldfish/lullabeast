@@ -87,9 +87,18 @@ def test_contract_failure_branch_soft_retries():
         "CONTRACT_FAILURE must self-heal via the reviewer_contract_retries "
         "soft-retry counter."
     )
-    assert "CONTRACT_FAILURE_SOFT_RETRY_EXHAUSTED" in block, (
-        "CONTRACT_FAILURE must escalate with CONTRACT_FAILURE_SOFT_RETRY_EXHAUSTED "
-        "at the cap."
+    # At the cap the branch escalates via the _compose_contract_failure_escalation
+    # helper (v0.1.1), which carries the CONTRACT_FAILURE_SOFT_RETRY_EXHAUSTED tag
+    # for the genuine give-up case and ERR_REVIEWER_MODEL_ERROR for a model
+    # hard-error. The tag literal now lives in the helper, not inline in the block.
+    assert "_compose_contract_failure_escalation" in block, (
+        "CONTRACT_FAILURE must escalate at the cap via "
+        "_compose_contract_failure_escalation."
+    )
+    assert "CONTRACT_FAILURE_SOFT_RETRY_EXHAUSTED" in _ORCH_SRC, (
+        "the give-up escalation must still carry the "
+        "CONTRACT_FAILURE_SOFT_RETRY_EXHAUSTED tag (now emitted by "
+        "_compose_contract_failure_escalation)."
     )
 
 

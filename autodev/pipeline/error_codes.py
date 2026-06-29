@@ -54,6 +54,7 @@ ERR_DELETION_CHECK_CRASHED = "ERR_DELETION_CHECK_CRASHED"  # deletion check itse
 # --- Reviewer gate ------------------------------------------------------------
 ERR_MISSING_ARTIFACTS = "ERR_MISSING_ARTIFACTS"
 ERR_REVIEWER_CONTRACT_FAILURE = "ERR_REVIEWER_CONTRACT_FAILURE"  # no/unparseable verdict (also routed on in orchestrator)
+ERR_REVIEWER_MODEL_ERROR = "ERR_REVIEWER_MODEL_ERROR"  # CONTRACT_FAILURE whose cause is a reviewer model hard-error (stopReason:error / 500) — infra, not a give-up
 ERR_VISUAL_UNVERIFIED = "ERR_VISUAL_UNVERIFIED"
 ERR_BEHAVIORAL_UNVERIFIED = "ERR_BEHAVIORAL_UNVERIFIED"
 ERR_REGRESSION_UNVERIFIED = "ERR_REGRESSION_UNVERIFIED"

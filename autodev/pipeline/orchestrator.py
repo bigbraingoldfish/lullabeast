@@ -61,6 +61,7 @@ from error_codes import (
     ERR_RESET_EXECUTION_GIT_FAILED,
     ERR_RESET_PHASE_GIT_FAILED,
     ERR_REVIEWER_CONTRACT_FAILURE,
+    ERR_REVIEWER_MODEL_ERROR,
     ERR_ROADMAP_CHECKBOX_FAILED,
     ERR_SESSION_DEAD_ON_ARRIVAL,
     ERR_UNACCOUNTED_DELETION,
@@ -681,6 +682,66 @@ def _session_jsonl_last_assistant_error_message(jsonl_path: str | None) -> str:
     except OSError:
         return ""
     return last_err
+
+
+def _compose_contract_failure_escalation(jsonl_path, contract_soft):
+    """Return ``(reason, error_code)`` for a reviewer CONTRACT_FAILURE that has
+    reached the soft-retry cap.
+
+    CONTRACT_FAILURE = the reviewer session ended without a parseable
+    ``reviewer_output.json``. Several causes are conflated under that one verdict,
+    and the operator needs them distinguished:
+
+    * the reviewer genuinely **gave up / was cut off** (no error row) — keep the
+      generic message + :data:`ERR_REVIEWER_CONTRACT_FAILURE`;
+    * the reviewer's **model hard-errored** *and the session ended on it* — the
+      LAST assistant row is ``stopReason:"error"`` (e.g. a 500/server_error from
+      GPU contention or model eviction on a shared local host; the live
+      image-input-500 was this class) — the reviewer did real work and the
+      inference call failed, so surface the real error +
+      :data:`ERR_REVIEWER_MODEL_ERROR`.
+
+    Two error classes are deliberately NOT treated as a model hard-error, because
+    telling the operator to "check the model host" would be wrong remediation:
+
+    * a **recoverable context overflow** (:func:`_is_recoverable_context_overflow`)
+      — the reviewer ran out of context, a context-size problem, not a model-host
+      failure;
+    * an error the session **recovered past** — there is an error row earlier in
+      the log, but the LAST assistant row is not itself an error, so that is not
+      how the turn ended.
+
+    Both fall through to the give-up label. The shared
+    :func:`_session_jsonl_last_assistant_error_message` returns the last error row
+    *anywhere* in the session (correct for the provider-rejection path that reuses
+    it), so here it is gated on the session having *terminated* on that error
+    (:func:`_session_jsonl_last_assistant_stop_reason` ``== "error"``) and on the
+    error not being a recoverable overflow.
+
+    Provider rejections (401/402/429) never reach here — they are peeled off
+    upstream by :meth:`_escalate_if_provider_rejected`. Retry behaviour is
+    unchanged by this helper; it only labels the *terminal* escalation honestly.
+    Never raises (a missing/unreadable session reads as a give-up).
+    """
+    hard_err = _session_jsonl_last_assistant_error_message(jsonl_path)
+    # Only a GENUINE, TERMINAL model error qualifies as ERR_REVIEWER_MODEL_ERROR:
+    # the session must have ENDED on an error row (not recovered past it), and that
+    # error must not be a recoverable context overflow (a context-size issue, not a
+    # model-host failure). Anything else is a give-up.
+    terminal_error = _session_jsonl_last_assistant_stop_reason(jsonl_path) == "error"
+    if hard_err and terminal_error and not _is_recoverable_context_overflow(hard_err):
+        return (
+            f"Reviewer model hard-errored after {contract_soft} fresh-session retries "
+            f"(ERR_REVIEWER_MODEL_ERROR) — the reviewer did not give up; its inference "
+            f"call failed: {hard_err[:400]}",
+            ERR_REVIEWER_MODEL_ERROR,
+        )
+    return (
+        f"Reviewer CONTRACT_FAILURE: contract retry cap reached ({contract_soft}): "
+        f"CONTRACT_FAILURE_SOFT_RETRY_EXHAUSTED — reviewer ended without a verdict "
+        f"(gave up or was cut off)",
+        ERR_REVIEWER_CONTRACT_FAILURE,
+    )
 
 
 # Non-terminal stopReason(s): the assistant turn is still in its tool loop (it
@@ -2989,6 +3050,17 @@ class Orchestrator:
 
         tail = "Automated summary unavailable; see the pipeline log for full context."
 
+        # Reviewer MODEL hard-error (server_error/500 — GPU contention / eviction on a
+        # shared local host): the reviewer did NOT give up — its inference call failed.
+        # last_error_code is set reliably at the escalation chokepoint, and ``trigger``
+        # already carries the real inference error, so surface it verbatim.
+        if last_err == ERR_REVIEWER_MODEL_ERROR:
+            base = trigger or (
+                "The reviewer's model returned a server error (it did not give up) "
+                "across repeated fresh-session retries"
+            )
+            return f"{base}. {tail}"
+
         # CONTRACT_FAILURE: the reviewer session ended without a verdict. The trigger
         # reason is already honest (6244f3a) — surface a clean, factual version.
         if last_err == ERR_REVIEWER_CONTRACT_FAILURE or "CONTRACT_FAILURE" in trigger:
@@ -4819,6 +4891,17 @@ class Orchestrator:
         # *_UNVERIFIED/CONTRACT handlers always read-and-pop the detail before any
         # executor flow could run.)
         phase_state.pop("reviewer_unverified_detail", None)
+        # Operator-driven reset: restore a FRESH reviewer retry budget, mirroring
+        # reset_execution('escalation') for the executor. These two pooled counters
+        # are deliberately preserved by reset_execution and only otherwise cleared by
+        # reset_phase, so without this an already-maxed counter survives the operator
+        # reset and the next reviewer failure re-escalates immediately — the live
+        # "fast fail, no retries" symptom (contract counter climbing 3->4->5 across
+        # three RESET_REVIEWERs). Both are phase_state-only (the CONTRACT_FAILURE /
+        # *_UNVERIFIED handlers and _reviewer_session_key read them via
+        # read_phase_state), so no self.state mirror is needed (unlike reviewer_retries).
+        phase_state["reviewer_contract_retries"] = 0
+        phase_state["reviewer_unverified_retries"] = 0
         phase_state["escalation_resets"] = phase_state.get("escalation_resets", 0) + 1
         new_count = phase_state["escalation_resets"]
         reason = phase_state.get("last_error_code", "unknown")
@@ -7621,12 +7704,24 @@ class Orchestrator:
                         self.write_phase_state_atomic(_ps_if)
                         print(f"[WARN] Reviewer CONTRACT_FAILURE — contract retry {_contract_soft}/3.")
                         if _contract_soft >= 3:
+                            # Honest attribution: a CONTRACT_FAILURE whose underlying
+                            # cause is a reviewer MODEL hard-error (stopReason:"error" /
+                            # 500 — GPU contention, model eviction) is infrastructure,
+                            # not a give-up. The composer reads the session's last error
+                            # row and, in that case, upgrades last_error_code to
+                            # ERR_REVIEWER_MODEL_ERROR and surfaces the real inference
+                            # error. Retry behaviour above is untouched — only this
+                            # terminal escalation label changes.
+                            _reason, _err_code = _compose_contract_failure_escalation(
+                                _jsonl_path, _contract_soft
+                            )
+                            if _err_code != ERR_REVIEWER_CONTRACT_FAILURE:
+                                _ps_err = self.read_phase_state()
+                                _ps_err["last_error_code"] = _err_code
+                                self.write_phase_state_atomic(_ps_err)
                             self.state["current_agent"] = "escalation"
                             self.state["escalation_trigger_class"] = "reviewer_verification_unmet"  # P1-B
-                            self.transition_state(
-                                "RUNNING",
-                                f"Reviewer CONTRACT_FAILURE: contract retry cap reached ({_contract_soft}): CONTRACT_FAILURE_SOFT_RETRY_EXHAUSTED — reviewer ended without a verdict (gave up or was cut off)",
-                            )
+                            self.transition_state("RUNNING", _reason)
                             time.sleep(5)
                         else:
                             # Kill the prior reviewer run before re-invoking. A
