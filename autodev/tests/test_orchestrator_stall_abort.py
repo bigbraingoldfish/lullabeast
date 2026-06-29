@@ -42,6 +42,15 @@ _ORCH_SRC = open(
 ).read()
 
 
+@pytest.fixture(autouse=True)
+def _fast_settle(monkeypatch):
+    """Shrink the post-steer settle-wait ceiling so tests that stub
+    ``verify_session_stopped`` (which then returns instantly, with no real sleep)
+    don't busy-loop for the full 45 s ``_INTERRUPT_SETTLE_MAX``.  The settle-wait
+    logic itself is exercised directly in ``test_interrupt_session_liveness.py``."""
+    monkeypatch.setattr(orch_mod, "_INTERRUPT_SETTLE_MAX", 0.05, raising=False)
+
+
 def _bare_orchestrator():
     """Return an Orchestrator instance without running ``__init__``.
 

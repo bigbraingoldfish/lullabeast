@@ -64,6 +64,7 @@ AUTODEV_POSTCOMPACTION_AGENT_IDS: tuple[str, ...] = ("planner", "executor", "rev
 AUTODEV_POSTCOMPACTION_SECTIONS: tuple[str, ...] = (
     "Always-Apply: Integration Wiring",
     "Always-Apply: Testing Quality",
+    "Always-Apply: Orchestrator Control",
     "Session Startup",
     "Red Lines",
 )

@@ -921,7 +921,7 @@
             poll_start: 'Orchestrator began polling for this agent\'s completion sentinel. Detail lists the active stall threshold and startup grace.',
             poll_outcome: 'Polling ended. Detail.reason is one of succeeded / stalled / no_first_activity / stopped / timeout.',
             attempt_end: 'One agent attempt finished. Dense summary mirroring the [ATTEMPT_END] log line.',
-            abort_attempted: 'Orchestrator called abort_agent_session on the prior session. Detail.result is "ok" or "FAILED".',
+            abort_attempted: 'Orchestrator tried to interrupt the prior agent session before moving on (steer). Detail.result is "ok" (steered, then settled), "skipped_idle" (turn already ended — not steered), "FAILED" (gateway rejected the steer), or "unconfirmed" (still streaming after the settle wait).',
             abort_verify_failed: 'Gateway acknowledged the abort but the agent kept refreshing its activity stamp. The orchestrator soft-continues — it launches the next attempt anyway rather than forcing the run to stop and wait for a human.',
             reviewer_verdict: 'The reviewer-gate dispatch decision. Detail.verdict is PASS / ROUTE_EXECUTOR / ROUTE_PLANNER / ROUTE_ESCALATE / MISSING_ARTIFACTS / CONTRACT_FAILURE / VISUAL_UNVERIFIED / BEHAVIORAL_UNVERIFIED / REGRESSION_UNVERIFIED.',
             stamp_init_failed: 'Could not seed the agent activity stamp — workspace dir is missing or unwritable. Stall detection would be silently disabled; pipeline halts loudly instead.',
@@ -1104,9 +1104,17 @@
                 }
                 case 'abort_attempted': {
                     const role = d.agent_role || event.agent || 'agent';
-                    const source = d.source === 'retry_start' ? 'before next retry' : 'on stall';
-                    if (d.result === 'ok') return `Aborted prior ${role} session ${source}`;
-                    if (d.result === 'FAILED') return `Could not abort prior ${role} session ${source} — best-effort retry continues`;
+                    const sourceLabel = {
+                        retry_start: 'before next retry',
+                        inline_stall: 'on stall',
+                        escalation: 'on escalation',
+                        reviewer_retry: 'before reviewer retry',
+                    }[d.source] || '';
+                    const where = sourceLabel ? ` ${sourceLabel}` : '';
+                    if (d.result === 'skipped_idle') return `Prior ${role} session already finished${where} — no interrupt needed`;
+                    if (d.result === 'ok') return `Aborted prior ${role} session${where}`;
+                    if (d.result === 'FAILED') return `Could not abort prior ${role} session${where} — best-effort retry continues`;
+                    if (d.result === 'unconfirmed') return `${role[0].toUpperCase() + role.slice(1)} still streaming after abort${where} — soft-continuing`;
                     return `Abort attempted on ${role} session`;
                 }
                 case 'abort_verify_failed': {

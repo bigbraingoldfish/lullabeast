@@ -452,23 +452,30 @@ def test_postcompaction_sections_match_real_agents_md_headers():
 
 
 def test_postcompaction_cap_covers_largest_always_apply_block():
-    """Drift guard: postCompactionMaxChars must be >= the combined size of the two
-    Always-Apply sections in every pipeline AGENTS.md, or the cap would truncate the
-    very rules it exists to preserve. Measured max ~4.5k today; cap is 8000.
+    """Drift guard: postCompactionMaxChars must be >= the COMBINED size of ALL
+    Always-Apply sections in every pipeline AGENTS.md (the post-compaction refresh
+    re-injects every one of them), or the cap would truncate the very rules it exists to
+    preserve. Three sections now (Integration Wiring + Testing Quality + Orchestrator
+    Control), measured ~5.5k today; cap is 8000.
     """
     import re as _re
 
     repo_root = Path(__file__).resolve().parents[2]
-    iw = "## Always-Apply: Integration Wiring"
-    tq = "## Always-Apply: Testing Quality"
+    always_apply = [
+        s for s in setup_helpers.AUTODEV_POSTCOMPACTION_SECTIONS if s.startswith("Always-Apply")
+    ]
+    assert always_apply, "expected at least one Always-Apply section in the seed"
     for role in setup_helpers.AUTODEV_POSTCOMPACTION_AGENT_IDS:
         md = (repo_root / "autodev" / "agents" / role / "AGENTS.md").read_text()
-        a = md.index(iw)
-        b = md.index(tq)
-        m = _re.search(r"\n## ", md[b + len(tq):])
-        end = b + len(tq) + m.start() if m else len(md)
-        span = end - a
-        assert span <= setup_helpers.AUTODEV_POSTCOMPACTION_MAX_CHARS, (
-            f"{role}/AGENTS.md Always-Apply block is {span} chars but the cap is "
-            f"{setup_helpers.AUTODEV_POSTCOMPACTION_MAX_CHARS}; raise AUTODEV_POSTCOMPACTION_MAX_CHARS."
+        total = 0
+        for name in always_apply:
+            header = f"## {name}"
+            start = md.index(header)
+            m = _re.search(r"\n## ", md[start + len(header):])
+            end = start + len(header) + m.start() if m else len(md)
+            total += end - start
+        assert total <= setup_helpers.AUTODEV_POSTCOMPACTION_MAX_CHARS, (
+            f"{role}/AGENTS.md Always-Apply sections total {total} chars but the cap is "
+            f"{setup_helpers.AUTODEV_POSTCOMPACTION_MAX_CHARS}; raise "
+            f"AUTODEV_POSTCOMPACTION_MAX_CHARS or trim the sections."
         )

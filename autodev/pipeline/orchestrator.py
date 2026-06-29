@@ -553,6 +553,18 @@ def cleanup_stranded_temp_files(base_dir: str) -> None:
 # Bounded because _detect_base_branch runs on the reset path while pipeline.lock is held.
 _BASE_BRANCH_PROBE_TIMEOUT = 10
 
+# Session-interrupt tuning (consolidated _interrupt_agent_session helper). OpenClaw's
+# sessions.steer is interrupt+inject: it aborts the embedded run AND always enqueues a
+# follow-up turn carrying the stop message (active or idle). So on the skip_if_idle paths we
+# (1) skip the steer only when the agent's turn has PROVABLY ended — read from the session
+# transcript's last assistant row (_agent_turn_still_in_flight), the same signal the verdict-hold
+# acceptor trusts, NOT a stamp-movement window (the stamp is silent for a whole model call, so a
+# short window read a live mid-call agent as idle and skipped the abort) — and (2) wait for the
+# stamp to settle afterward, since the steer's own spawned turn refreshes the stamp and the old
+# instant verify_session_stopped() false-failed on every abort.
+_INTERRUPT_SETTLE_QUIET = 3.0      # post-steer: stamp must stay quiet this long to count as "settled"
+_INTERRUPT_SETTLE_MAX = 45.0       # post-steer: hard ceiling on the settle wait before soft-continue
+
 
 def _detect_base_branch(directory: str) -> str:
     """Return the best candidate base branch for the target repository.
@@ -2329,12 +2341,25 @@ class Orchestrator:
             reason = "mixed"
         print(f"[QUEUE] Queue exhausted — halting with reason: {reason}")
         if halt_if_no_eligible:
-            self.state["queue_halted_reason"] = reason
-            self.transition_state("QUEUE_HALTED", f"Queue halted: {reason}")
-            # Phase 2 (observability) — record WHEN/WHY the queue stalled, not just the
-            # resulting QUEUE_HALTED status. Stays inside this branch: the else path below
-            # (caller owns final status, e.g. PIPELINE_COMPLETE) is not a halt.
-            _write_pipeline_event("queue_halted", "", "queue", {"reason": reason})
+            # Re-announce the halt (transition + observability event) ONLY on a genuine
+            # transition INTO QUEUE_HALTED, or when the reason changes. A caller that
+            # re-runs selection while ALREADY halted with the SAME reason must be a no-op
+            # here: otherwise every selection cycle re-emits an identical queue_halted
+            # event and floods the activity feed (observed live: 48 consecutive identical
+            # "Queue stalled" rows over one ~7 h hold) and churns the state file / log.
+            # Safe to skip the write entirely — the halt branch is reached only when no
+            # project was activated, so no earlier self.state mutation is pending here.
+            _already_halted = (
+                self.state.get("pipeline_status") == "QUEUE_HALTED"
+                and self.state.get("queue_halted_reason") == reason
+            )
+            if not _already_halted:
+                self.state["queue_halted_reason"] = reason
+                self.transition_state("QUEUE_HALTED", f"Queue halted: {reason}")
+                # Phase 2 (observability) — record WHEN/WHY the queue stalled, not just the
+                # resulting QUEUE_HALTED status. Stays inside this branch: the else path below
+                # (caller owns final status, e.g. PIPELINE_COMPLETE) is not a halt.
+                _write_pipeline_event("queue_halted", "", "queue", {"reason": reason})
         else:
             # Caller owns final status (e.g. PIPELINE_COMPLETE). Clear stale halt metadata.
             self.state.pop("queue_halted_reason", None)
@@ -3283,75 +3308,200 @@ class Orchestrator:
         # fires so the run records a token-usage + cost line on every reply.
         self._preset_session_response_usage(role, session_key)
 
-    def _abort_active_agent_session(self, source: str) -> None:
-        """Interrupt the last-invoked agent's still-running session so it can't keep
-        mutating the repo (``git commit``/``tag``/edits) or stream a zombie turn after
-        the orchestrator has moved on.
+    def _wait_for_stamp_settle(self, stamp_path: str) -> bool:
+        """Poll an activity stamp until it stays quiet for ``_INTERRUPT_SETTLE_QUIET``
+        seconds, bounded by ``_INTERRUPT_SETTLE_MAX``.  Returns True once settled, False on
+        timeout.  Reuses :func:`verify_session_stopped` (one settle probe per iteration); a
+        missing stamp settles immediately.
 
-        Two callers:
-          * ``source="escalation"`` — the orchestrator gives up on a phase and hands off
-            to the human; the terminal attempt is otherwise never aborted (the retry-start
-            abort only stops the *prior* attempt when *launching the next* one).
-          * ``source="reviewer_retry"`` — the reviewer contract-shape retry handlers
-            (CONTRACT_FAILURE / *_UNVERIFIED) kill the prior reviewer run before
-            re-invoking, so the re-invoke does not reattach a still-streaming embedded run.
+        Replaces the old single-shot ``verify_session_stopped`` call right after a steer,
+        which **false-failed on every abort**: ``sessions.steer`` is interrupt+inject and its
+        own spawned follow-up turn refreshes the stamp, so a single 5 s probe always saw
+        movement.  Waiting for genuine quiet absorbs that expected ack-turn and only reports
+        failure on a true runaway."""
+        deadline = time.time() + _INTERRUPT_SETTLE_MAX
+        while True:
+            if verify_session_stopped(stamp_path, settle_seconds=_INTERRUPT_SETTLE_QUIET):
+                return True
+            if time.time() >= deadline:
+                return False
 
-        Mechanism:
-          1. issue the WS interrupt (``abort_agent_session`` → ``sessions.steer``, the
-             only call that reaches a ``/hooks`` embedded run; best-effort);
-          2. if accepted, ``verify_session_stopped`` (stamp settle) confirms the run
-             actually stopped; a still-advancing stamp emits ``abort_verify_failed``.
-        There is **no** halt-message fallback: ``sessions.steer`` actually interrupts the
-        run and the gateway confirms it ended, so the former halt-message webhook — which
-        spawned a *second* /hooks run instead of interrupting the streaming one — is removed.
-        Emits ``abort_attempted`` (``source`` / ``result``) and clears the recorded
-        session (the next reviewer invoke re-records it). No-op when nothing is in-flight.
-        Never blocks the caller (soft-continue, same contract as
-        :meth:`_handle_stall_outcome`)."""
-        key = self._active_agent_session_key
-        role = self._active_agent_role
-        if not key or not role:
-            return
+    def _agent_turn_still_in_flight(self, role: str, session_key: str):
+        """Tri-state liveness oracle for the ``skip_if_idle`` pre-check: is ``role``'s turn for
+        ``session_key`` still streaming?
+
+        Reuses the exact signal :meth:`_make_verdict_hold_acceptor` trusts — the session
+        transcript's last assistant row — instead of a stamp-movement window.  This is the
+        reliable oracle where the stamp is not: the activity stamp is silent for the whole
+        duration of a single model call (minutes), so a short stamp window read a live
+        mid-call agent as idle and skipped exactly the abort it exists to perform.
+
+        Returns
+        -------
+        True
+            Still in flight: the last assistant row is a non-terminal tool-loop step
+            (``stopReason`` in ``_IN_FLIGHT_STOP_REASONS``, i.e. ``"toolUse"``), OR a recoverable
+            context-overflow error (OpenClaw will auto-compact and resume the same run).
+        False
+            Provably ended: a terminal ``stopReason`` is present on the last assistant row.
+        None
+            Unresolvable: the session JSONL can't be read or has no assistant row yet.  Callers
+            treat ``None`` like in-flight (steer) — favouring killing a possible zombie over
+            skipping it.  ``sessions.json`` is populated by ``agent_end`` before any abort site
+            runs, so this is rare.
+        """
+        jsonl = _resolve_session_jsonl_path(role, session_key)
+        if not jsonl or not os.path.exists(jsonl):
+            return None
+        # Overflow first: an overflow turn ends on stopReason "error" (a terminal value), but the
+        # gateway auto-compacts and RESUMES it, so it is still effectively in flight.
+        if _is_recoverable_context_overflow(
+            _session_jsonl_last_assistant_error_message(jsonl)
+        ):
+            return True
+        sr = _session_jsonl_last_assistant_stop_reason(jsonl)
+        if sr in _IN_FLIGHT_STOP_REASONS:
+            return True
+        if not sr:
+            return None  # resolved file but no assistant row yet — terminality unknown
+        return False
+
+    def _interrupt_agent_session(
+        self,
+        *,
+        role: str,
+        session_key: str,
+        stamp_path: str,
+        source: str,
+        skip_if_idle: bool,
+        prior_attempt=None,
+        reason: str = None,
+    ) -> str:
+        """Best-effort interrupt of an agent's still-running embedded run, with a liveness
+        pre-check and a settle-wait.  The single chokepoint for every steer-abort path
+        (retry-start, escalation, reviewer_retry, stall/timeout).  Returns one of
+        ``"skipped_idle"`` / ``"ok"`` / ``"unconfirmed"`` / ``"failed"``.
+
+        Why (see the ``_INTERRUPT_*`` module constants): OpenClaw's ``sessions.steer`` is
+        *interrupt+inject* — it aborts the embedded run AND always enqueues a follow-up turn
+        carrying the stop message, whether the session was active OR idle.  So:
+
+          * ``skip_if_idle=True`` (retry-start / escalation / reviewer_retry): skip the steer
+            ONLY when the turn has PROVABLY ended (``_agent_turn_still_in_flight`` is False — the
+            transcript's last assistant row is terminal).  An already-finished session is left
+            alone — no gratuitous turn, no "poking a corpse" (an agent that ended its turn must
+            not be woken to process a stop message it may ignore or even act on).  Still-in-flight
+            OR unresolvable both steer: skipping a live zombie corrupts the repo / races the shared
+            output files, whereas steering a finished agent is a cheap no-op.
+          * ``skip_if_idle=False`` (stall / no_first_activity / timeout): the agent is wedged by
+            definition there, so we always steer to kill a presumed-wedged run.
+
+        After a steer we WAIT for the stamp to settle rather than instant-verifying — the
+        steer's own spawned turn refreshes the stamp, so the old single ``verify_session_stopped``
+        call false-failed on every abort.  Only a settle TIMEOUT (a genuine runaway) emits
+        ``abort_verify_failed``; the caller always soft-continues (a forced ``HALTED_SILENT``
+        needs a human, whereas a retry usually resolves — unchanged policy).
+
+        Emits ``abort_attempted`` with ``result`` in
+        ``{skipped_idle, ok, unconfirmed, FAILED}``.  Never raises; never blocks beyond
+        ``_INTERRUPT_SETTLE_MAX`` (+ the liveness window + ``abort_agent_session``'s retries)."""
+        if not session_key or not role:
+            return "skipped_idle"
+        stamp_path = stamp_path or ""  # defensive: getmtime("") raises OSError (handled), not TypeError
+        full_key = session_key
+        if not full_key.startswith(f"agent:{role}:"):
+            full_key = f"agent:{role}:{session_key}"
+        full_key = full_key.lower()
         raw_id = self.state.get("current_phase_raw_id", "")
+
+        def _emit_attempted(result: str) -> None:
+            detail = {
+                "session_key": full_key, "result": result,
+                "agent_role": role, "source": source,
+            }
+            if prior_attempt is not None:
+                detail["prior_attempt"] = prior_attempt
+            if reason is not None:
+                detail["reason"] = reason
+            _write_pipeline_event("abort_attempted", raw_id, role, detail)
+
+        _rsfx = f" reason={reason}" if reason else ""  # operator-facing log parity with the stall path
+
+        # 1. Liveness pre-check — skip the steer ONLY when the agent's turn has PROVABLY ended
+        #    (transcript last-row terminal). "Still in flight" (tool loop / recoverable overflow)
+        #    AND "unresolvable" both fall through to the steer below: skipping a live zombie
+        #    corrupts the repo / races the shared output files, whereas steering a finished agent
+        #    is a cheap no-op (its [ORCHESTRATOR CONTROL] turn ends cleanly per AGENTS.md). This
+        #    replaces a 3s stamp-movement probe that read a live mid-model-call agent as idle
+        #    (the stamp is silent for a whole model call) and skipped the abort it exists to do.
+        if skip_if_idle and self._agent_turn_still_in_flight(role, session_key) is False:
+            print(
+                f"[ABORT] result=skipped_idle session_key={full_key} source={source}{_rsfx} "
+                f"(turn ended — no interrupt needed)"
+            )
+            _emit_attempted("skipped_idle")
+            return "skipped_idle"
+
+        # 2. Issue the steer interrupt (best-effort; abort_agent_session retries 3x internally).
         gw_token = self.openclaw_config.get("gateway_token", "")
         gw_ws_url = self.openclaw_config.get(
             "gateway_ws_url", "ws://127.0.0.1:18789/__openclaw__/ws"
         )
-        abort_key = f"agent:{role}:{key}".lower()
-        aborted = abort_agent_session(abort_key, gw_ws_url, gw_token)
+        aborted = abort_agent_session(full_key, gw_ws_url, gw_token)
+        if not aborted:
+            print(f"[ABORT] result=FAILED session_key={full_key} source={source}{_rsfx}")
+            _emit_attempted("FAILED")
+            return "failed"
 
-        stopped = False
-        if aborted:
-            stopped = verify_session_stopped(self._active_agent_stamp, settle_seconds=5.0)
-            if not stopped:
-                print(
-                    f"[ABORT][VERIFY_FAILED] session_key={abort_key} source={source} — "
-                    f"gateway acknowledged abort but stamp is still being refreshed."
-                )
-                _write_pipeline_event(
-                    "abort_verify_failed", raw_id, role,
-                    {
-                        "session_key": abort_key, "stamp_path": self._active_agent_stamp,
-                        "agent_role": role, "source": source,
-                    },
-                )
+        # 3. Settle-wait — absorb the steer's own spawned turn instead of instant-verifying.
+        if self._wait_for_stamp_settle(stamp_path):
+            print(f"[ABORT] result=ok session_key={full_key} source={source}{_rsfx} (settled)")
+            _emit_attempted("ok")
+            return "ok"
 
-        # No halt-message fallback: sessions.steer (issued by abort_agent_session)
-        # actually interrupts the embedded run and the gateway confirms it ended, so
-        # there is nothing to "tell to wind down". The former halt-message webhook fired
-        # a *second* /hooks run rather than interrupting the streaming one — the actual
-        # cause of "two agents updating at once" — and is removed. A not-confirmed-stopped
-        # session emits abort_verify_failed above and we soft-continue.
+        # Genuine runaway: still streaming after the ceiling. Surface it; caller soft-continues.
         print(
-            f"[ABORT] result={'ok' if aborted else 'FAILED'} session_key={abort_key} "
-            f"source={source}"
+            f"[ABORT][VERIFY_FAILED] session_key={full_key} source={source}{_rsfx} — stamp still "
+            f"refreshing after {_INTERRUPT_SETTLE_MAX:.0f}s settle wait; continuing (soft-continue)."
         )
-        _write_pipeline_event(
-            "abort_attempted", raw_id, role,
-            {
-                "session_key": abort_key, "result": "ok" if aborted else "FAILED",
-                "agent_role": role, "source": source,
-            },
+        _emit_attempted("unconfirmed")
+        _vf_detail = {
+            "session_key": full_key, "stamp_path": stamp_path,
+            "agent_role": role, "source": source,
+        }
+        if prior_attempt is not None:
+            _vf_detail["prior_attempt"] = prior_attempt
+        if reason is not None:
+            _vf_detail["reason"] = reason
+        _write_pipeline_event("abort_verify_failed", raw_id, role, _vf_detail)
+        return "unconfirmed"
+
+    def _abort_active_agent_session(self, source: str) -> None:
+        """Interrupt the last-invoked agent's still-running session so it can't keep mutating
+        the repo (``git commit``/``tag``/edits) or stream a zombie turn after the orchestrator
+        has moved on.  Thin wrapper over :meth:`_interrupt_agent_session` (``skip_if_idle=True``
+        — a finished agent is left alone) that targets the ``_active_agent_*`` fields recorded by
+        :meth:`_record_active_agent`, then clears them.
+
+        Two callers:
+          * ``source="escalation"`` — the orchestrator gives up on a phase and hands off to the
+            human; the terminal attempt is otherwise never aborted (the retry-start abort only
+            stops the *prior* attempt when *launching the next* one).
+          * ``source="reviewer_retry"`` — the reviewer contract-shape retry handlers
+            (CONTRACT_FAILURE / *_UNVERIFIED) kill the prior reviewer run before re-invoking, so
+            the re-invoke does not reattach a still-streaming embedded run.
+
+        No-op when nothing is in-flight.  Never blocks the caller (soft-continue)."""
+        key = self._active_agent_session_key
+        role = self._active_agent_role
+        if not key or not role:
+            return
+        self._interrupt_agent_session(
+            role=role,
+            session_key=key,
+            stamp_path=self._active_agent_stamp,
+            source=source,
+            skip_if_idle=True,
         )
         self._active_agent_session_key = None
         self._active_agent_role = None
@@ -3364,106 +3514,39 @@ class Orchestrator:
         stamp_path: str,
         reason: str,
     ) -> bool:
-        """Abort and verify the just-detected stalled / startup-timeout session.
+        """Interrupt the just-detected stalled / startup-timeout session, then record the
+        outcome.
 
-        Called by all three pipeline-agent poll sites (planner / executor /
-        reviewer) when ``poll_for_sentinel`` returns ``PollResult`` with
-        ``reason in {"stalled", "no_first_activity", "timeout"}``.  The
-        ``"timeout"`` reason was added after the CORE-E6 cascade — the
-        45-min infrastructure backstop previously bypassed abort+verify,
-        letting attempt N+1 launch on top of the still-streaming N.
+        Called by all three pipeline-agent poll sites (planner / executor / reviewer) when
+        ``poll_for_sentinel`` returns ``PollResult`` with
+        ``reason in {"stalled", "no_first_activity", "timeout"}`` (the ``"timeout"`` reason was
+        added after the CORE-E6 cascade — the infra backstop previously bypassed abort+verify,
+        letting attempt N+1 launch on top of the still-streaming N).
 
-        Behaviour:
+        Delegates to :meth:`_interrupt_agent_session` with ``skip_if_idle=False``: on a stall the
+        activity stamp is quiet *by definition*, so we always steer to kill a presumed-wedged run
+        (the liveness pre-check would otherwise skip exactly the sessions we mean to stop).  The
+        settle-wait inside the helper replaces the old single-shot ``verify_session_stopped`` that
+        false-failed on the steer's own spawned follow-up turn.
 
-        1. Build the OpenClaw-namespaced abort key from ``agent_role`` and
-           ``session_key`` (OpenClaw normalises session keys to lowercase
-           and prefixes ``agent:{role}:``).
-        2. Call ``abort_agent_session`` (now with built-in 3x retry) and
-           log ``[ABORT] result=ok|FAILED ...``.
-        3. If abort succeeded, call ``verify_session_stopped`` to confirm
-           the agent really stopped streaming.  A False there means the
-           gateway acknowledged ``sessions.abort`` but the agent kept
-           writing tokens.  We emit ``abort_verify_failed`` so the
-           activity feed shows it in red, then **soft-continue** — the
-           orchestrator launches the next attempt anyway.  Rationale:
-           90%+ of long runs eventually resolve, and a forced
-           ``HALTED_SILENT`` state requires human intervention which is
-           worse than letting the retry run.
-        4. If abort returned False after all retries, log it and let the
-           caller proceed.  Same best-effort contract.
-
-        Returns
-        -------
-        bool
-            Always ``True`` — every outcome lets the caller continue.
-            Return value kept for backwards-compatibility with the three
-            poll-site guards that still check it.
-        """
-        # Build the OpenClaw-namespaced key.  Callers pass the
-        # pipeline-internal key (``pipeline:phase-…``); OpenClaw prefixes
-        # ``agent:{role}:`` and lowercases the whole thing internally.
-        full_key = session_key
-        if not full_key.startswith(f"agent:{agent_role}:"):
-            full_key = f"agent:{agent_role}:{session_key}"
-        full_key = full_key.lower()
-
-        gw_token = self.openclaw_config.get("gateway_token", "")
-        gw_ws_url = self.openclaw_config.get(
-            "gateway_ws_url", "ws://127.0.0.1:18789/__openclaw__/ws"
+        Always returns ``True`` — every outcome lets the caller continue (soft-continue contract,
+        kept for the three poll-site guards that still check it)."""
+        result = self._interrupt_agent_session(
+            role=agent_role,
+            session_key=session_key,
+            stamp_path=stamp_path,
+            source="inline_stall",
+            skip_if_idle=False,
+            reason=reason,
         )
-        aborted = abort_agent_session(full_key, gw_ws_url, gw_token)
-        print(
-            f"[ABORT] result={'ok' if aborted else 'FAILED'} "
-            f"session_key={full_key} reason={reason} agent={agent_role}"
+        self._record_phase_outcome(
+            last_abort_result={
+                "ok": "ok",
+                "failed": "FAILED",
+                "unconfirmed": "verify_failed",
+                "skipped_idle": "ok",
+            }.get(result, "ok")
         )
-        _phase_for_event = self.state.get("current_phase_raw_id", "")
-        _write_pipeline_event(
-            "abort_attempted",
-            _phase_for_event,
-            agent_role,
-            {
-                "session_key": full_key,
-                "result": "ok" if aborted else "FAILED",
-                "reason": reason,
-                "agent_role": agent_role,
-                "source": "inline_stall",
-            },
-        )
-        if not aborted:
-            # Best-effort contract: abort failure is logged but does not
-            # block the retry flow.  The orchestrator's pre-existing
-            # next-attempt cleanup still owns the recovery path.
-            self._record_phase_outcome(last_abort_result="FAILED")
-            return True
-
-        if not verify_session_stopped(stamp_path, settle_seconds=5.0):
-            # Soft-continue: gateway acknowledged abort but stamp is
-            # still being refreshed.  Per operator policy, do NOT halt
-            # the pipeline — emit the event so the activity feed shows
-            # the situation, then let the next attempt run.  90%+ of
-            # long runs resolve on retry, vs. a HALTED_SILENT state
-            # that always requires human intervention.
-            print(
-                f"[ABORT][VERIFY_FAILED] session_key={full_key} "
-                f"stamp_path={stamp_path} reason={reason} — gateway acknowledged "
-                f"abort but stamp is still being refreshed.  Continuing with "
-                f"next attempt (soft-continue); see activity feed for details."
-            )
-            _write_pipeline_event(
-                "abort_verify_failed",
-                _phase_for_event,
-                agent_role,
-                {
-                    "session_key": full_key,
-                    "stamp_path": stamp_path,
-                    "agent_role": agent_role,
-                    "reason": reason,
-                },
-            )
-            self._record_phase_outcome(last_abort_result="verify_failed")
-            return True
-
-        self._record_phase_outcome(last_abort_result="ok")
         return True
 
     def _make_verdict_hold_acceptor(
@@ -6519,73 +6602,28 @@ class Orchestrator:
                     sentinel_path = os.path.join(PROJECT_ARTIFACTS_DIR, "executor_output.done")
                     token = self.openclaw_config.get("hooks", {}).get("token", "")
 
-                    # Abort the previous executor session before invoking the next attempt.
-                    # Stops the prior run from consuming tokens and from refreshing
-                    # executor_activity.stamp (which can suppress stall detection).
-                    #
-                    # Observability invariant: the return value MUST be captured and
-                    # logged.  A silent fire-and-forget call was the original CORE-E6
-                    # bug — attempt #2 wrote 69,152 tokens while attempt #3 was
-                    # already running because nobody knew the abort had failed.
-                    # Equally, an acknowledged abort (ok=true) is not sufficient
-                    # proof the session stopped — verify_session_stopped confirms
-                    # the plugin is no longer touching the activity stamp.  If it
-                    # still is, we emit abort_verify_failed and soft-continue
-                    # (launch attempt N+1 anyway): a forced HALTED_SILENT always
-                    # needs a human, whereas a retry usually resolves.  See the
-                    # _handle_stall_outcome docstring for the full rationale.
+                    # Interrupt the previous executor session before launching the next attempt,
+                    # so the prior run can't keep consuming tokens, refreshing
+                    # executor_activity.stamp, or writing the shared executor_output.* files.
+                    # Routed through the consolidated _interrupt_agent_session helper: it SKIPS
+                    # the steer when the prior attempt has already finished (skip_if_idle — no
+                    # gratuitous "stop" turn on a done agent, which OpenClaw's interrupt+inject
+                    # steer would otherwise spawn) and otherwise steers + waits for the stamp to
+                    # settle before we proceed (the old single-shot verify false-failed on the
+                    # steer's own follow-up turn). Best-effort + soft-continue.
                     if retries > 0:
-                        _prev_session_key = (
-                            f"agent:executor:pipeline:phase-{phase}:{raw_id}"
-                            f":executor-attempt-{retries}"
-                        ).lower()
-                        _gw_token = self.openclaw_config.get("gateway_token", "")
-                        _gw_ws_url = self.openclaw_config.get(
-                            "gateway_ws_url", "ws://127.0.0.1:18789/__openclaw__/ws"
-                        )
-                        aborted = abort_agent_session(
-                            _prev_session_key, _gw_ws_url, _gw_token
-                        )
-                        print(
-                            f"[ABORT] result={'ok' if aborted else 'FAILED'} "
-                            f"session_key={_prev_session_key} prior_attempt={retries}"
-                        )
-                        _write_pipeline_event(
-                            "abort_attempted", raw_id, "executor",
-                            {
-                                "session_key": _prev_session_key,
-                                "result": "ok" if aborted else "FAILED",
-                                "agent_role": "executor",
-                                "source": "retry_start",
-                                "prior_attempt": retries,
-                            },
-                        )
-                        if aborted:
-                            _prev_stamp = os.path.join(
+                        self._interrupt_agent_session(
+                            role="executor",
+                            session_key=(
+                                f"pipeline:phase-{phase}:{raw_id}:executor-attempt-{retries}"
+                            ),
+                            stamp_path=os.path.join(
                                 PROJECT_ARTIFACTS_DIR, "executor_activity.stamp"
-                            )
-                            if not verify_session_stopped(_prev_stamp, settle_seconds=5.0):
-                                # Soft-continue: surface the situation to the
-                                # activity feed but launch attempt N+1 anyway.
-                                # See _handle_stall_outcome docstring for the
-                                # rationale (forced halt requires human
-                                # intervention; retries usually resolve).
-                                print(
-                                    f"[ABORT][VERIFY_FAILED] session_key={_prev_session_key} "
-                                    f"stamp_path={_prev_stamp} — gateway acknowledged abort "
-                                    f"but stamp is still being refreshed.  Continuing with "
-                                    f"attempt {retries + 1} anyway (soft-continue)."
-                                )
-                                _write_pipeline_event(
-                                    "abort_verify_failed", raw_id, "executor",
-                                    {
-                                        "session_key": _prev_session_key,
-                                        "stamp_path": _prev_stamp,
-                                        "agent_role": "executor",
-                                        "source": "retry_start",
-                                        "prior_attempt": retries,
-                                    },
-                                )
+                            ),
+                            source="retry_start",
+                            skip_if_idle=True,
+                            prior_attempt=retries,
+                        )
 
                     # Proactive branch guard: after RESET_PHASE the phase branch is deleted
                     # and HEAD lands on main. Correct before the executor runs so any git
@@ -7595,8 +7633,10 @@ class Orchestrator:
                             # CONTRACT_FAILURE often means the reviewer hard-errored or
                             # was cut off — its embedded run may still be streaming, and
                             # re-invoking (even on a fresh -c{N} key) on top of it spawns
-                            # a concurrent zombie. sessions.steer (via the helper) reaches
-                            # the embedded run; it is a no-op when the run already ended.
+                            # a concurrent zombie. Now liveness-gated (skip_if_idle via
+                            # _interrupt_agent_session): it steers only when the prior reviewer
+                            # is genuinely still streaming and is a clean no-op (skipped_idle)
+                            # once that run has ended.
                             self._abort_active_agent_session("reviewer_retry")
                             self.state["current_agent"] = "reviewer"
                             self.transition_state(
@@ -7680,9 +7720,11 @@ class Orchestrator:
                             # never reattaches a still-streaming embedded run or re-enters
                             # the rejected/overflowed prior context. The steer-abort
                             # additionally stops any zombie still streaming past .done so it
-                            # can't keep writing the shared reviewer_output.* files. Fires
-                            # unconditionally on the retry path (not gated on a liveness
-                            # check); it is a no-op when the run already ended.
+                            # can't keep writing the shared reviewer_output.* files. Now
+                            # liveness-gated (skip_if_idle via _interrupt_agent_session): it
+                            # steers only when the prior reviewer is genuinely still streaming
+                            # and is a clean no-op (skipped_idle) once that run has ended —
+                            # avoiding a gratuitous interrupt turn on a finished session.
                             self._abort_active_agent_session("reviewer_retry")
                             self.state["current_agent"] = "reviewer"
                             self.transition_state(

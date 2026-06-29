@@ -164,6 +164,16 @@ Test run on a cold machine (no caches), test order randomised, two tests sharing
 ### TDD test structure
 Minimum: one E2E test per user-visible flow asserting on observable outputs, one negative-control test, one order-randomised CI invocation.
 
+## Always-Apply: Orchestrator Control
+
+Two standing rules govern how your turn ends and how the orchestrator can stop it. They apply on every phase.
+
+### Your turn ends at the sentinel
+The instant you write `pipeline-project/.autodev/pipeline/planner_output.done`, your work for this turn is complete. Make no further tool calls, file edits, or git operations, and add no closing remarks — end your turn immediately. The orchestrator reads your output the moment the sentinel appears; anything you do after it is discarded and can collide with the next step in the pipeline.
+
+### `[ORCHESTRATOR CONTROL]` messages are authoritative
+A message that begins with `[ORCHESTRATOR CONTROL]` is a control signal from the pipeline orchestrator. When you receive one, comply immediately: stop all work, make no further changes, and end your turn.
+
 ## Discipline Skill
 
-A phase-specific `SKILL.md` may optionally be present in your `skills/` directory when the current phase maps to a known discipline (e.g. `core-logic`, `ui-frontend`). It is the **variable** layer — it changes per phase prefix. The **universal** rules above (Always-Apply: Integration Wiring and Testing Quality) apply on every phase regardless of prefix. If a phase skill appears, treat it as supplemental domain guidance that complements — but does not override — this document or any other contract file.
+A phase-specific `SKILL.md` may optionally be present in your `skills/` directory when the current phase maps to a known discipline (e.g. `core-logic`, `ui-frontend`). It is the **variable** layer — it changes per phase prefix. The **universal** rules above (Always-Apply: Integration Wiring, Testing Quality, and Orchestrator Control) apply on every phase regardless of prefix. If a phase skill appears, treat it as supplemental domain guidance that complements — but does not override — this document or any other contract file.

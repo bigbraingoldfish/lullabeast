@@ -1744,6 +1744,30 @@ class TestObservabilityPhase2Events:
         assert len(halted) == 1, "the halt transition must emit exactly one queue_halted event"
         assert halted[0].get("detail", {}).get("reason") == "all_blocked"
 
+    def test_queue_halted_not_re_emitted_while_already_halted(self, orch, tmp_path, monkeypatch):
+        """Re-running selection while ALREADY in QUEUE_HALTED with the same reason must NOT
+        re-emit queue_halted. Otherwise every selection cycle re-emits an identical event and
+        floods the dashboard activity feed (observed live: 48 consecutive identical "Queue
+        stalled" rows over one ~7 h hold). The event marks the stall *moment*, not the state."""
+        inst, queue_file, _, _ = orch
+        _write_queue(queue_file, [
+            _make_entry("a", state="BLOCKED", position=1),
+            _make_entry("b", state="BLOCKED", position=2),
+        ])
+        monkeypatch.setattr(inst, "_queue_preflight", lambda p: (True, "ok"))
+        monkeypatch.setattr(inst, "update_symlink", lambda p: True)
+
+        # Three selection cycles while the queue stays exhausted/blocked.
+        assert inst._select_next_queue_project() is False
+        assert inst._select_next_queue_project() is False
+        assert inst._select_next_queue_project() is False
+        assert inst.state["pipeline_status"] == "QUEUE_HALTED"
+        halted = [e for e in _read_events(tmp_path) if e.get("event") == "queue_halted"]
+        assert len(halted) == 1, (
+            "queue_halted must fire once on the transition into QUEUE_HALTED, not on every "
+            "selection cycle while already halted"
+        )
+
     def test_queue_halted_not_emitted_when_halt_if_no_eligible_false(self, orch, tmp_path, monkeypatch):
         """The PIPELINE_COMPLETE path calls selection with halt_if_no_eligible=False; it
         does NOT transition to QUEUE_HALTED, so it must NOT emit queue_halted. Pins the

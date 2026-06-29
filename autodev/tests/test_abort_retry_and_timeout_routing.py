@@ -220,23 +220,34 @@ def test_handle_stall_outcome_does_not_halt_on_verify_failure():
     but must NOT transition to ``HALTED_SILENT`` — letting the next
     attempt run is the better expected-value choice than a hung state
     that requires human intervention."""
-    method_idx = _ORCH_SRC.find("def _handle_stall_outcome")
-    assert method_idx != -1
-    next_def = _ORCH_SRC.find("\n    def ", method_idx + 1)
-    method_body = _ORCH_SRC[method_idx : next_def if next_def != -1 else method_idx + 5000]
-    # The event must still be emitted.
-    assert "abort_verify_failed" in method_body, (
+    # _handle_stall_outcome now delegates to the consolidated _interrupt_agent_session
+    # helper, which owns the abort_verify_failed emission. Assert the delegation, that the
+    # event lives in the helper, and that neither path halts on verify failure.
+    stall_idx = _ORCH_SRC.find("def _handle_stall_outcome")
+    assert stall_idx != -1
+    stall_next = _ORCH_SRC.find("\n    def ", stall_idx + 1)
+    stall_body = _ORCH_SRC[stall_idx : stall_next if stall_next != -1 else stall_idx + 5000]
+    assert "_interrupt_agent_session(" in stall_body, (
+        "_handle_stall_outcome must delegate to _interrupt_agent_session"
+    )
+
+    helper_idx = _ORCH_SRC.find("def _interrupt_agent_session")
+    assert helper_idx != -1
+    helper_next = _ORCH_SRC.find("\n    def ", helper_idx + 1)
+    helper_body = _ORCH_SRC[helper_idx : helper_next if helper_next != -1 else helper_idx + 6000]
+    # The event must still be emitted (now from the consolidated helper).
+    assert "abort_verify_failed" in helper_body, (
         "abort_verify_failed event must remain — it powers the activity feed"
     )
-    # But no transition_state("HALTED_SILENT", ...) call tied to verify failure.
-    # (Docstring mentions are fine; we only forbid the actual call.)
-    assert not re.search(
-        r'transition_state\(\s*["\']HALTED_SILENT["\']', method_body
-    ), (
-        "_handle_stall_outcome must no longer call "
-        "transition_state(\"HALTED_SILENT\", ...) on verify failure — "
-        "soft-continue and emit the event instead"
-    )
+    # No transition_state("HALTED_SILENT", ...) tied to verify failure in either method.
+    for body in (stall_body, helper_body):
+        assert not re.search(
+            r'transition_state\(\s*["\']HALTED_SILENT["\']', body
+        ), (
+            "neither _handle_stall_outcome nor _interrupt_agent_session may call "
+            "transition_state(\"HALTED_SILENT\", ...) on verify failure — "
+            "soft-continue and emit the event instead"
+        )
 
 
 def test_retry_start_abort_does_not_halt_on_verify_failure():

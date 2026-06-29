@@ -44,15 +44,26 @@ _ORCH_SRC = open(
 ).read()
 
 
-def _make_orch(monkeypatch, tmp_path, *, abort_ret=True, verify_ret=True):
-    """A bare Orchestrator with the module-level abort/verify/webhook/event functions
-    stubbed to record calls. Returns (orch, calls).
+def _make_orch(monkeypatch, tmp_path, *, abort_ret=True, verify_ret=True, in_flight_ret=True):
+    """A bare Orchestrator with the module-level abort/verify/webhook/event functions and the
+    transcript-based liveness oracle stubbed to record calls. Returns (orch, calls).
 
     ``invoke_agent_webhook`` is still stubbed so that any *unexpected* webhook call
     (a regression that re-introduces the removed halt fallback) is recorded and the
-    no-webhook assertions catch it."""
+    no-webhook assertions catch it.
+
+    ``_agent_turn_still_in_flight`` is stubbed to ``in_flight_ret`` (default True): the
+    consolidated ``_interrupt_agent_session`` helper liveness-gates the steer on the
+    ``skip_if_idle`` paths, so the escalation/reviewer-retry tests must declare the prior turn
+    "still in flight" for the abort to actually fire (a PROVABLY-ended turn — ``in_flight_ret``
+    False — is now a clean ``skipped_idle`` no-op). The real oracle reads the session transcript;
+    here we drive the decision directly (its real behaviour is pinned in
+    ``test_interrupt_session_liveness.py``). ``_INTERRUPT_SETTLE_MAX`` is shrunk so the
+    verify-False settle-wait does not busy-loop for the full 45 s against the (instant) verify
+    stub."""
     monkeypatch.setattr(orch_mod, "PROJECT_ARTIFACTS_DIR", str(tmp_path))
-    calls = {"abort": [], "verify": [], "webhook": [], "events": []}
+    monkeypatch.setattr(orch_mod, "_INTERRUPT_SETTLE_MAX", 0.05, raising=False)
+    calls = {"abort": [], "verify": [], "webhook": [], "events": [], "in_flight": []}
 
     def _abort(key, ws, tok, **k):
         calls["abort"].append((key, ws, tok))
@@ -81,6 +92,10 @@ def _make_orch(monkeypatch, tmp_path, *, abort_ret=True, verify_ret=True):
     orch._active_agent_session_key = None
     orch._active_agent_role = None
     orch._active_agent_stamp = None
+    # Instance-attribute stub shadows the bound method; it receives (role, session_key).
+    orch._agent_turn_still_in_flight = lambda role, session_key: (
+        calls["in_flight"].append(session_key) or in_flight_ret
+    )
     return orch, calls
 
 
@@ -186,6 +201,24 @@ def test_reviewer_retry_source_aborts_without_halt(monkeypatch, tmp_path):
     att = _event(calls, "abort_attempted")
     assert att is not None and att["source"] == "reviewer_retry"
     assert orch._active_agent_session_key is None
+
+
+def test_escalation_skips_steer_when_turn_ended(monkeypatch, tmp_path):
+    """When the terminal agent's turn has PROVABLY ended (``_agent_turn_still_in_flight`` is
+    False), the escalation abort is a clean ``skipped_idle`` no-op: NO steer (no gratuitous turn
+    on a finished agent), NO webhook, but tracking is still cleared and ``abort_attempted``
+    result=skipped_idle is emitted. Complements ``test_abort_confirmed_stopped_sends_no_webhook``
+    (the in-flight zombie IS steered), pinning both arms of the liveness gate."""
+    orch, calls = _make_orch(monkeypatch, tmp_path, in_flight_ret=False)
+    orch._record_active_agent("executor", "pipeline:phase-2:CORE-1:executor-attempt-3")
+
+    orch._abort_active_agent_session("escalation")
+
+    assert calls["abort"] == [], "a finished turn must NOT be steered on escalation"
+    assert calls["webhook"] == []
+    att = _event(calls, "abort_attempted")
+    assert att is not None and att["result"] == "skipped_idle" and att["source"] == "escalation"
+    assert orch._active_agent_session_key is None and orch._active_agent_role is None
 
 
 # ---------------------------------------------------------------------------

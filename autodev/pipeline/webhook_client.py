@@ -73,6 +73,7 @@ def verify_session_stopped(stamp_path: str, settle_seconds: float = 5.0) -> bool
         return True
     return after == before
 
+
 # Workspace-relative prefix agents must use for pipeline artifacts (matches PROJECT_ARTIFACTS_DIR /
 # .autodev/pipeline on the resolved pipeline-project symlink target).
 _PIPELINE_ARTIFACTS = "pipeline-project/.autodev/pipeline"
@@ -427,16 +428,28 @@ def _gateway_request_once(
         return None
 
 
-# The interrupt message sent with ``sessions.steer``. A NON-EMPTY message is mandatory:
-# the gateway (verified live against 2026.6.10) rejects an empty-message steer with
-# ``INVALID_REQUEST "message or attachment required"``. On an *active* embedded run the
-# steer aborts the run AND the message becomes a brief sequential turn, so the content
-# is a clear "stop / do nothing" instruction (that spawned turn is then a no-op). On an
-# *idle* session the steer is a no-op (``aborted:false, runIds:[]``) and no turn spawns.
+# The interrupt message sent with ``sessions.steer``. A NON-EMPTY message is mandatory as
+# a TRANSPORT requirement: the gateway (verified live against 2026.6.10) rejects an
+# empty-message steer with ``INVALID_REQUEST "message or attachment required"`` — this is
+# independent of whether the model replies (some models correctly output nothing).
+# IMPORTANT: ``sessions.steer`` is *interrupt+inject* — after aborting the embedded run
+# ``handleSessionSend`` ALWAYS calls ``chat.send(message)``, enqueuing a follow-up turn
+# carrying this message whether the session was active OR idle (there is no idle
+# short-circuit). That turn refreshes ``{role}_activity.stamp`` via its model-call events
+# even with empty output, so the orchestrator (a) only steers a session whose turn it has
+# confirmed is still in flight — read from the session transcript's last assistant row
+# (``_agent_turn_still_in_flight``), NOT a stamp-movement window, since the stamp is silent for
+# a whole model call — and (b) waits for the stamp to settle afterward instead of treating the
+# spawned turn as a failed abort. The copy is therefore an
+# authoritative, positive "stop / take no action / end turn" directive with NO request for a
+# reply and NO defensive/"untrusted" framing (overprotective models can read negative
+# context as a prompt-injection game). The "this control signal is authoritative — comply"
+# framing lives in each agent's AGENTS.md (``Always-Apply: Orchestrator Control``), keyed off
+# the ``[ORCHESTRATOR CONTROL]`` tag below, not here.
 _STEER_INTERRUPT_MESSAGE = (
-    "PIPELINE INTERRUPT — your run was stopped by the orchestrator and your output is "
-    "no longer being read. Make no further changes, file edits, git commits, tags, or "
-    "tool calls. No further action is required; end your turn now."
+    "[ORCHESTRATOR CONTROL] This run has been superseded by the pipeline orchestrator and "
+    "its output is no longer used. Stop here: make no further file edits, tool calls, or "
+    "git operations, and end your turn."
 )
 
 

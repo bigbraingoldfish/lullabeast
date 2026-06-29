@@ -26,6 +26,29 @@ _AGENTS_DIR = os.path.join(_REPO_ROOT, "autodev", "agents")
 
 _INTEGRATION_HEADER = "## Always-Apply: Integration Wiring"
 _TESTING_HEADER = "## Always-Apply: Testing Quality"
+_ORCH_CONTROL_HEADER = "## Always-Apply: Orchestrator Control"
+
+# Orchestrator-control rules: "your turn ends at the sentinel" (per-role sentinel
+# filename) + "[ORCHESTRATOR CONTROL] messages are authoritative". These prevent the
+# stream-past-.done trigger and the agent ignoring/continuing after an interrupt that
+# the consolidated _interrupt_agent_session helper relies on.
+_ORCH_CONTROL_PHRASES = {
+    "planner": [
+        "pipeline/planner_output.done",
+        "end your turn immediately",
+        "comply immediately: stop all work",
+    ],
+    "executor": [
+        "pipeline/executor_output.done",
+        "end your turn immediately",
+        "comply immediately: stop all work",
+    ],
+    "reviewer": [
+        "pipeline/reviewer_output.done",
+        "end your turn immediately",
+        "comply immediately: stop all work",
+    ],
+}
 
 # Per-role, per-discipline anchor phrases (verbatim substrings of the source
 # SKILL.md rule content, preserved into the AGENTS.md inline).
@@ -112,3 +135,17 @@ def test_executor_agents_md_has_testing_quality_section():
 
 def test_reviewer_agents_md_has_testing_quality_section():
     _assert_section("reviewer", _TESTING_HEADER, _TESTING_PHRASES["reviewer"])
+
+
+# --- orchestrator-control ---------------------------------------------------
+
+def test_planner_agents_md_has_orchestrator_control_section():
+    _assert_section("planner", _ORCH_CONTROL_HEADER, _ORCH_CONTROL_PHRASES["planner"])
+
+
+def test_executor_agents_md_has_orchestrator_control_section():
+    _assert_section("executor", _ORCH_CONTROL_HEADER, _ORCH_CONTROL_PHRASES["executor"])
+
+
+def test_reviewer_agents_md_has_orchestrator_control_section():
+    _assert_section("reviewer", _ORCH_CONTROL_HEADER, _ORCH_CONTROL_PHRASES["reviewer"])

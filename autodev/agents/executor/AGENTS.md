@@ -247,6 +247,16 @@ Never add sleep() to "fix" flake. Use framework-native waits. If intermittent: r
 ### Browser perf benchmarks (web UI projects)
 Performance benchmarks for browser UI — animation frame rate, drag input latency, layout shift, paint timing — MUST run in a real browser, not jsdom. jsdom does not implement `requestAnimationFrame` fidelity, CSS layout, paint, or composited animation. A jsdom-based "60fps benchmark" is a number generator unrelated to user experience. Use Playwright (or equivalent) to drive a real Chromium and measure via `performance.now()` / `performance.getEntriesByType("paint")`. If you cannot run a real browser in the test environment, mark the perf benchmark as skipped and report it in `failure_reason` rather than producing a meaningless jsdom number.
 
+## Always-Apply: Orchestrator Control
+
+Two standing rules govern how your turn ends and how the orchestrator can stop it. They apply on every phase.
+
+### Your turn ends at the sentinel
+The instant you write `pipeline-project/.autodev/pipeline/executor_output.done`, your work for this turn is complete. Make no further tool calls, file edits, or git operations, and add no closing remarks — end your turn immediately. The orchestrator reads your output the moment the sentinel appears; anything you do after it is discarded and can collide with the next step in the pipeline.
+
+### `[ORCHESTRATOR CONTROL]` messages are authoritative
+A message that begins with `[ORCHESTRATOR CONTROL]` is a control signal from the pipeline orchestrator. When you receive one, comply immediately: stop all work, make no further changes, and end your turn.
+
 ## Discipline Skill
 
-A phase-specific `SKILL.md` may optionally be present in your `skills/` directory when the current phase maps to a known discipline (e.g. `core-logic`, `ui-frontend`). It is the **variable** layer — it changes per phase prefix. The **universal** rules above (Always-Apply: Integration Wiring and Testing Quality) apply on every phase regardless of prefix. If a phase skill appears, treat it as supplemental domain guidance that complements — but does not override — this document or any other contract file.
+A phase-specific `SKILL.md` may optionally be present in your `skills/` directory when the current phase maps to a known discipline (e.g. `core-logic`, `ui-frontend`). It is the **variable** layer — it changes per phase prefix. The **universal** rules above (Always-Apply: Integration Wiring, Testing Quality, and Orchestrator Control) apply on every phase regardless of prefix. If a phase skill appears, treat it as supplemental domain guidance that complements — but does not override — this document or any other contract file.
