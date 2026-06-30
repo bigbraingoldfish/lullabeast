@@ -64,6 +64,7 @@ from error_codes import (
     ERR_REVIEWER_MODEL_ERROR,
     ERR_ROADMAP_CHECKBOX_FAILED,
     ERR_SESSION_DEAD_ON_ARRIVAL,
+    ERR_TOOL_LOOP,
     ERR_UNACCOUNTED_DELETION,
 )
 from log_utils import configure_stream_logging
@@ -165,6 +166,140 @@ def _infra_backstop_seconds(env_name: str, default_str: str) -> int:
     invalid strings fall back to ``default_str``, minimum clamped to 1 s.
     """
     return _env_int(env_name, default_str)
+
+
+# Tier 1 in-turn tool-loop catcher -------------------------------------------
+# How often the per-poll detector closure actually re-scans the session JSONL
+# (it is consulted every ~2 s poll tick but self-throttles to this interval, so
+# the tail read stays negligible). A loop worth catching runs for minutes, so a
+# ~15 s cadence catches it within ~threshold*call-interval while costing ~one
+# small file read per quarter-minute.
+_TOOL_LOOP_CHECK_INTERVAL_SECONDS = 15
+# Tools that legitimately repeat with identical args (polling a long-running
+# process) — never counted as a loop, mirroring OpenClaw's known-poll exclusion.
+_TOOL_LOOP_EXCLUDED_TOOLS = frozenset({"process", "command_status"})
+# The session-JSONL tail read scales with the threshold so it can always hold
+# `limit` rows: a fixed window can't see `limit` repetitions when each looping
+# call serializes large args (a write/apply_patch of a big file), which would
+# silently defeat detection for the executor — the role most prone to those.
+# 512 KB/row is generous headroom over a large file-write row (args + thinking),
+# bounded by a hard cap so a pathologically-high limit can't read unboundedly.
+_TOOL_LOOP_PER_ROW_TAIL_BYTES = 524288      # 512 KB per expected row
+_TOOL_LOOP_MAX_TAIL_BYTES = 67108864        # 64 MB cap on a single scan's read
+
+
+def _tool_loop_repeat_limit(env_name: str, default_str: str) -> int:
+    """Parse a per-role consecutive-identical-tool-call threshold from ``env_name``.
+
+    Returns ``0`` when the value is exactly ``"0"`` — the explicit *disable* switch
+    for that role's detector (the caller passes no ``loop_detector``). Any other
+    value is clamped to a floor of ``2`` (a single call can never be a "loop", so
+    ``1`` reads as ``2``); garbage / missing falls back to ``default_str``. Mirrors
+    the per-role :func:`_stall_timeout_seconds` knobs, unprefixed per convention.
+    """
+    raw = (os.environ.get(env_name) or "").strip()
+    if raw == "0":
+        return 0
+    try:
+        v = int(raw or default_str)
+    except ValueError:
+        v = int(default_str)
+    return 0 if v == 0 else max(2, v)
+
+
+def _detect_tool_loop_in_jsonl(jsonl_path, limit):
+    """Scan an OpenClaw session JSONL for an in-turn tool-call loop.
+
+    Returns ``{"tool_name", "args_excerpt", "repeat_count"}`` when the **trailing
+    run of consecutive identical ``(tool_name, args)`` tool calls** is at least
+    ``limit`` long, else ``None``. "Identical" is input-only — deliberately NOT the
+    (input AND output) basis OpenClaw's own block uses, which jittered command
+    output defeats (the failure this catcher exists for).
+
+    Robust to both on-disk content-block shapes: llamacpp / openai-completions
+    ``{"type":"toolCall","name","arguments"}`` (the shape observed looping live) and
+    Anthropic ``{"type":"toolUse"/"tool_use","name","input"}``. Legitimately-repeated
+    poll tools (:data:`_TOOL_LOOP_EXCLUDED_TOOLS`) never count.
+
+    Fail-safe: a missing/unreadable/odd-shaped file (or any parse error) returns
+    ``None`` — the detector must never false-abort a healthy agent. Reads only the
+    file tail (the trailing run is all that matters), so cost is bounded regardless
+    of how large the looping session has grown.
+    """
+    if not jsonl_path or not os.path.exists(jsonl_path):
+        return None
+    try:
+        tail_bytes = min(
+            _TOOL_LOOP_MAX_TAIL_BYTES,
+            max(131072, limit * _TOOL_LOOP_PER_ROW_TAIL_BYTES),
+        )
+        with open(jsonl_path, "rb") as f:
+            try:
+                f.seek(-tail_bytes, os.SEEK_END)  # limit-scaled tail (holds `limit` rows)
+                partial = True
+            except OSError:
+                f.seek(0)  # file smaller than the tail window
+                partial = False
+            blob = f.read().decode("utf-8", "replace")
+        lines = blob.split("\n")
+        if partial and lines:
+            lines = lines[1:]  # drop the possibly-truncated first line
+
+        # Ordered list of (tool_name, stable-args) across assistant tool calls.
+        calls = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if row.get("type") != "message":
+                continue
+            inner = row.get("message")
+            if not isinstance(inner, dict) or inner.get("role") != "assistant":
+                continue
+            content = inner.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") not in ("toolCall", "toolUse", "tool_use"):
+                    continue
+                name = block.get("name")
+                if not name:
+                    continue
+                args = block.get("arguments")
+                if args is None:
+                    args = block.get("input")
+                try:
+                    args_sig = json.dumps(args, sort_keys=True)
+                except (TypeError, ValueError):
+                    args_sig = str(args)
+                calls.append((name, args_sig))
+
+        if not calls:
+            return None
+        last_name, last_args = calls[-1]
+        if last_name in _TOOL_LOOP_EXCLUDED_TOOLS:
+            return None
+        run = 0
+        for name, args_sig in reversed(calls):
+            if name == last_name and args_sig == last_args:
+                run += 1
+            else:
+                break
+        if run < limit:
+            return None
+        return {
+            "tool_name": last_name,
+            "args_excerpt": last_args[:200],
+            "repeat_count": run,
+        }
+    except OSError:
+        return None
 
 
 def _escalation_summary_wait_seconds() -> int:
@@ -1441,6 +1576,9 @@ class Orchestrator:
         # Set by _record_active_agent at each agent invocation; consumed + cleared by
         # _abort_active_agent_session. Process-local (reset on restart; see callout).
         self._active_agent_session_key = None
+        # Tier 1 tool-loop catcher — the detector closure stashes the offending
+        # tool/args/count here when it trips; _note_tool_loop reads+clears it.
+        self._pending_tool_loop = None
         self._active_agent_role = None
         self._active_agent_stamp = None
         _validate_openclaw_root(OPENCLAW_ROOT)
@@ -3591,13 +3729,15 @@ class Orchestrator:
 
         Called by all three pipeline-agent poll sites (planner / executor / reviewer) when
         ``poll_for_sentinel`` returns ``PollResult`` with
-        ``reason in {"stalled", "no_first_activity", "timeout"}`` (the ``"timeout"`` reason was
-        added after the CORE-E6 cascade — the infra backstop previously bypassed abort+verify,
-        letting attempt N+1 launch on top of the still-streaming N).
+        ``reason in {"stalled", "no_first_activity", "timeout", "tool_loop"}`` (the ``"timeout"``
+        reason was added after the CORE-E6 cascade — the infra backstop previously bypassed
+        abort+verify, letting attempt N+1 launch on top of the still-streaming N; ``"tool_loop"``
+        reuses this abort to kill a live in-turn loop before the agent's self-failure retry).
 
         Delegates to :meth:`_interrupt_agent_session` with ``skip_if_idle=False``: on a stall the
-        activity stamp is quiet *by definition*, so we always steer to kill a presumed-wedged run
-        (the liveness pre-check would otherwise skip exactly the sessions we mean to stop).  The
+        activity stamp is quiet *by definition* (and on a tool_loop the session is actively
+        spinning), so we always steer to kill a presumed-wedged / looping run (the liveness
+        pre-check would otherwise skip exactly the sessions we mean to stop).  The
         settle-wait inside the helper replaces the old single-shot ``verify_session_stopped`` that
         false-failed on the steer's own spawned follow-up turn.
 
@@ -3620,6 +3760,117 @@ class Orchestrator:
             }.get(result, "ok")
         )
         return True
+
+    def _maybe_tool_loop_detector(self, agent_role, session_key, env_name, default):
+        """Build the per-role tool-loop ``loop_detector`` for ``poll_for_sentinel``,
+        or ``None`` when that role's detector is disabled.
+
+        ``env_name`` is the per-role threshold knob (e.g.
+        ``TOOL_LOOP_REPEAT_LIMIT_EXECUTOR``, default 15 for headroom on the executor's
+        varied legitimate tool use; planner / reviewer default 8).
+        ``_tool_loop_repeat_limit`` returns ``0`` for an
+        explicit ``0`` — the operator's per-role OFF switch — and clamps any other
+        value to a floor of 2; a sub-2 limit yields ``None`` so the poll runs without
+        the hook.  One chokepoint shared by all three poll sites (the inline form was
+        identical at each).
+        """
+        limit = _tool_loop_repeat_limit(env_name, default)
+        if limit < 2:
+            return None
+        return self._make_tool_loop_detector(agent_role, session_key, limit)
+
+    def _make_tool_loop_detector(self, agent_role, session_key, limit):
+        """Return a ``poll_for_sentinel`` ``loop_detector`` predicate that reports the
+        agent spinning on identical tool calls inside one turn.
+
+        Mirrors :meth:`_make_verdict_hold_acceptor`'s closure shape (zero-arg,
+        ``_resolve_session_jsonl_path`` + a mutable for cross-call state).  The poll
+        consults it every ~2 s tick; it self-throttles to
+        ``_TOOL_LOOP_CHECK_INTERVAL_SECONDS`` and caches its last verdict between
+        scans, so the JSONL tail read stays negligible.  On a trip it stashes the
+        offending ``{tool_name, args_excerpt, repeat_count}`` onto
+        ``self._pending_tool_loop`` (read+cleared by :meth:`_note_tool_loop`) and
+        returns ``True``; the orchestrator then aborts the live session and routes
+        the ``tool_loop`` outcome through the agent's self-failure retry path.
+        """
+        state = {"last_check": 0.0, "verdict": False}
+
+        def _detector() -> bool:
+            now = time.time()
+            if now - state["last_check"] < _TOOL_LOOP_CHECK_INTERVAL_SECONDS:
+                return state["verdict"]
+            state["last_check"] = now
+            detail = _detect_tool_loop_in_jsonl(
+                _resolve_session_jsonl_path(agent_role, session_key), limit
+            )
+            if detail:
+                self._pending_tool_loop = detail
+                state["verdict"] = True
+            else:
+                state["verdict"] = False
+            return state["verdict"]
+
+        return _detector
+
+    def _note_tool_loop(self, agent_role, raw_id):
+        """Record a detected in-turn tool-loop as the model self-failure it is.
+
+        Emits the ``tool_loop_detected`` event and stamps honest ``ERR_TOOL_LOOP``
+        attribution onto ``phase_state`` (``last_error_code`` +
+        ``escalation_trigger_reason``).  It does **not** abort, retry, or escalate:
+        the caller routes the falsy ``tool_loop`` poll result through the agent's
+        existing self-failure path (abort via :meth:`_handle_stall_outcome`, then the
+        site's increment-cap-escalate), which consumes one of the agent's
+        self-failure retries — a fresh session often resamples a good trajectory —
+        and escalates carrying this attribution once the budget is spent.  One-shot:
+        the stashed detail is read and cleared.
+        """
+        detail = getattr(self, "_pending_tool_loop", None) or {}
+        self._pending_tool_loop = None
+        tool_name = detail.get("tool_name", "?")
+        count = detail.get("repeat_count", 0)
+        # Make the live log point at the real cause: the self-failure path this falls
+        # through to otherwise prints "[ERROR] Sentinel timeout", which reads as a dead
+        # gateway at debug time.
+        print(
+            f"[TOOL_LOOP] {agent_role} repeated {tool_name} x{count} with identical "
+            "input — aborting the session and retrying it as a self-failure."
+        )
+        _write_pipeline_event(
+            "tool_loop_detected",
+            raw_id,
+            agent_role,
+            {
+                "tool_name": tool_name,
+                "repeat_count": count,
+                "args_excerpt": detail.get("args_excerpt", ""),
+            },
+        )
+        try:
+            ps = self.read_phase_state()
+            ps["last_error_code"] = ERR_TOOL_LOOP
+            base = (
+                f"{agent_role.capitalize()} stuck in a tool-call loop: repeated "
+                f"{tool_name} with identical input {count}x consecutively, making no "
+                "progress."
+            )
+            # The how_to_check hypothesis is only meaningful for the reviewer — it is
+            # the role that runs verification checks; a looping planner / executor has
+            # nothing to do with a roadmap how_to_check, so don't misdirect the operator.
+            if agent_role == "reviewer":
+                hint = (
+                    " The check it exercises is likely subjective/unverifiable — "
+                    "review its how_to_check."
+                )
+            else:
+                hint = (
+                    " It was aborted and retried in a fresh session; escalated after "
+                    "the loop persisted."
+                )
+            ps["escalation_trigger_reason"] = base + hint
+            self.write_phase_state_atomic(ps)
+        except Exception as e:  # phase_state write is best-effort; the event already fired
+            print(f"[WARN] _note_tool_loop: phase_state write failed: {e}")
 
     def _make_verdict_hold_acceptor(
         self, agent_role: str, session_key: str, attempt_start_time: float
@@ -6476,6 +6727,9 @@ class Orchestrator:
                         sentinel_acceptor=self._make_verdict_hold_acceptor(
                             "planner", session_key, _attempt_start_time
                         ),
+                        loop_detector=self._maybe_tool_loop_detector(
+                            "planner", session_key, "TOOL_LOOP_REPEAT_LIMIT_PLANNER", "8"
+                        ),
                     )
                     _planner_attempt_reason = getattr(sentinel_found, "reason", "unknown")
                     _planner_attempt_duration = int(time.time() - _attempt_start_time)
@@ -6515,10 +6769,13 @@ class Orchestrator:
                             f"duration={_planner_attempt_duration}s"
                         ),
                     )
+                    if getattr(sentinel_found, "reason", None) == "tool_loop":
+                        self._note_tool_loop(agent_role="planner", raw_id=raw_id)
                     if getattr(sentinel_found, "reason", None) in (
                         "stalled",
                         "no_first_activity",
                         "timeout",
+                        "tool_loop",
                     ):
                         if not self._handle_stall_outcome(
                             agent_role="planner",
@@ -6563,7 +6820,10 @@ class Orchestrator:
                         if self._escalate_if_provider_rejected(_planner_jsonl_path, "Planner"):
                             time.sleep(5)
                             continue
-                        print("[ERROR] Sentinel timeout")
+                        if getattr(sentinel_found, "reason", None) == "tool_loop":
+                            print("[TOOL_LOOP] planner poll ended in a detected tool-loop — retrying as self-failure")
+                        else:
+                            print("[ERROR] Sentinel timeout")
                         retries = self.increment_planner_retries()
                     else:
                         gate_passed = self.run_planner_output_gate()
@@ -6783,6 +7043,9 @@ class Orchestrator:
                         sentinel_acceptor=self._make_verdict_hold_acceptor(
                             "executor", session_key, _attempt_start_time
                         ),
+                        loop_detector=self._maybe_tool_loop_detector(
+                            "executor", session_key, "TOOL_LOOP_REPEAT_LIMIT_EXECUTOR", "15"
+                        ),
                     )
                     _executor_attempt_reason = getattr(sentinel_found, "reason", "unknown")
                     _executor_attempt_duration = int(time.time() - _attempt_start_time)
@@ -6822,10 +7085,13 @@ class Orchestrator:
                             f"duration={_executor_attempt_duration}s"
                         ),
                     )
+                    if getattr(sentinel_found, "reason", None) == "tool_loop":
+                        self._note_tool_loop(agent_role="executor", raw_id=raw_id)
                     if getattr(sentinel_found, "reason", None) in (
                         "stalled",
                         "no_first_activity",
                         "timeout",
+                        "tool_loop",
                     ):
                         if not self._handle_stall_outcome(
                             agent_role="executor",
@@ -6951,7 +7217,10 @@ class Orchestrator:
                             )
 
                     else:  # executor_crashed
-                        print("[ERROR] Executor sentinel timeout — classified as executor_crashed.")
+                        if getattr(sentinel_found, "reason", None) == "tool_loop":
+                            print("[TOOL_LOOP] executor poll ended in a detected tool-loop — retrying as self-failure (executor_crashed path)")
+                        else:
+                            print("[ERROR] Executor sentinel timeout — classified as executor_crashed.")
                         if self._escalate_if_provider_rejected(_jsonl_path, "Executor"):
                             time.sleep(5)
                             continue
@@ -7061,6 +7330,9 @@ class Orchestrator:
                             sentinel_acceptor=self._make_verdict_hold_acceptor(
                                 "reviewer", session_key, _attempt_start_time
                             ),
+                            loop_detector=self._maybe_tool_loop_detector(
+                                "reviewer", session_key, "TOOL_LOOP_REPEAT_LIMIT_REVIEWER", "8"
+                            ),
                         )
                         _reviewer_attempt_reason = getattr(sentinel_found, "reason", "unknown")
                         _reviewer_attempt_duration = int(time.time() - _attempt_start_time)
@@ -7104,10 +7376,13 @@ class Orchestrator:
                                 f"duration={_reviewer_attempt_duration}s"
                             ),
                         )
+                        if getattr(sentinel_found, "reason", None) == "tool_loop":
+                            self._note_tool_loop(agent_role="reviewer", raw_id=raw_id)
                         if getattr(sentinel_found, "reason", None) in (
                             "stalled",
                             "no_first_activity",
                             "timeout",
+                            "tool_loop",
                         ):
                             if not self._handle_stall_outcome(
                                 agent_role="reviewer",
@@ -7171,7 +7446,10 @@ class Orchestrator:
                         if self._escalate_if_provider_rejected(_jsonl_path, "Reviewer"):
                             time.sleep(5)
                             continue
-                        print("[ERROR] Sentinel timeout")
+                        if getattr(sentinel_found, "reason", None) == "tool_loop":
+                            print("[TOOL_LOOP] reviewer poll ended in a detected tool-loop — retrying as self-failure")
+                        else:
+                            print("[ERROR] Sentinel timeout")
                         _rv_retries = self.increment_reviewer_retries()
                         # Finding E: write failure context on every timeout so operators
                         # and the escalation agent see current state, not stale executor data.

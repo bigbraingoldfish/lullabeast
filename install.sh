@@ -410,7 +410,7 @@ for agent in planner executor reviewer escalation prd-creator roadmap-converter;
     fi
 
     if [ "$agent" = "roadmap-converter" ]; then
-        for skill in roadmap-generation alignment-check adversarial-review; do
+        for skill in roadmap-generation alignment-check adversarial-review format-correction; do
             src="$AUTODEV_REPO_PATH/autodev/skill-library/roadmap-converter/$skill/SKILL.md"
             dst="$dst_dir/skills/$skill/SKILL.md"
             if [ -f "$src" ]; then
@@ -491,7 +491,7 @@ if [ "${#MISSING_FILES[@]}" -gt 0 ]; then
             fi
 
             if [ "$agent" = "roadmap-converter" ]; then
-                for skill in roadmap-generation alignment-check adversarial-review; do
+                for skill in roadmap-generation alignment-check adversarial-review format-correction; do
                     src="$AUTODEV_REPO_PATH/autodev/skill-library/roadmap-converter/$skill/SKILL.md"
                     dst="$dst_dir/skills/$skill/SKILL.md"
                     if [ -f "$src" ]; then

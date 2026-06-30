@@ -68,6 +68,7 @@ ERR_RESET_EXECUTION_GIT_FAILED = "ERR_RESET_EXECUTION_GIT_FAILED"
 ERR_ROADMAP_CHECKBOX_FAILED = "ERR_ROADMAP_CHECKBOX_FAILED"
 ERR_PHASE_RESOLVER_FAILED = "ERR_PHASE_RESOLVER_FAILED"
 ERR_MERGE_FAILED = "ERR_MERGE_FAILED"
+ERR_TOOL_LOOP = "ERR_TOOL_LOOP"  # agent spun on identical tool calls in one turn (deterministic in-turn loop catch)
 
 
 # Derived from the constants above so it can never drift from them: every

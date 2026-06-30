@@ -513,6 +513,8 @@
                 "Reviewer Error: the prior-phase regression check could not be verified. Re-running the reviewer.",
             ERR_REGRESSION_PRIOR_PHASE:
                 "Reviewer Error: this phase broke a feature from an earlier phase (regression is the only failing check). Sending back to the executor.",
+            ERR_TOOL_LOOP:
+                "Agent got stuck repeating the same action with no progress (a tool-call loop). The session was stopped and retried fresh; escalated after repeated loops — often the phase's verification check is subjective and can't be confirmed automatically. Review its how_to_check.",
         };
 
         function getLastErrorCodeTitle(errorCode, currentAgent) {
@@ -853,6 +855,7 @@
                 case 'escalation_command_invalid':
                 case 'queue_halted':
                 case 'queue_parked':
+                case 'tool_loop_detected':
                     return '#e8893e';
                 // secondary-info — lifecycle / relational (periwinkle)
                 case 'operator_action':
@@ -893,6 +896,7 @@
             abort_verify_failed: 'Verify Fail',
             reviewer_verdict: 'Verdict',
             stamp_init_failed: 'Setup Fail',
+            tool_loop_detected: 'Tool Loop',
             escalation_command_invalid: 'Invalid Command',
             // P1 Stage F — advisory reachability events.
             reachability_warning: 'Reach Warn',
@@ -927,6 +931,7 @@
             abort_verify_failed: 'Gateway acknowledged the abort but the agent kept refreshing its activity stamp. The orchestrator soft-continues — it launches the next attempt anyway rather than forcing the run to stop and wait for a human.',
             reviewer_verdict: 'The reviewer-gate dispatch decision. Detail.verdict is PASS / ROUTE_EXECUTOR / ROUTE_PLANNER / ROUTE_ESCALATE / MISSING_ARTIFACTS / CONTRACT_FAILURE / VISUAL_UNVERIFIED / BEHAVIORAL_UNVERIFIED / REGRESSION_UNVERIFIED.',
             stamp_init_failed: 'Could not seed the agent activity stamp — workspace dir is missing or unwritable. Stall detection would be silently disabled; pipeline halts loudly instead.',
+            tool_loop_detected: 'The agent spun on the same tool call with identical input and no progress (a tool-call loop OpenClaw’s own block misses because the command output jitters). The looping session was stopped and retried fresh; it consumes one of the agent’s self-failure retries and escalates if it keeps looping — usually a sign the phase’s verification check is subjective and can’t be confirmed automatically.',
             escalation_command_invalid: 'The escalation agent returned an empty or unrecognized resume command. The orchestrator defaulted to STOP (recoverable) instead of a silent dead-end — resume from the escalation panel to continue.',
             // P1 Stage F — advisory reachability events. Hedged copy: operators
             // must not infer "broken" from "unreachable" — it could just be
@@ -1141,6 +1146,12 @@
                 case 'stamp_init_failed': {
                     const role = d.agent_role || event.agent || 'agent';
                     return `Could not initialize ${role} activity stamp — workspace dir missing or unwritable`;
+                }
+                case 'tool_loop_detected': {
+                    const role = event.agent || 'agent';
+                    const t = d.tool_name || 'a tool';
+                    const n = typeof d.repeat_count === 'number' ? d.repeat_count : '?';
+                    return `${role} stuck repeating ${t} (${n}x, identical input) — stopped the loop and retrying fresh; likely a subjective/unverifiable check`;
                 }
                 // P1 Stage F — advisory reachability events. Hedged copy
                 // prevents the operator reading "unreachable" as "broken."
