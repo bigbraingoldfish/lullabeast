@@ -4967,7 +4967,11 @@ class Orchestrator:
         caller='escalation' — from RESET_EXECUTION resume command. Increments escalation_resets.
                               Resets executor_retries to 0 (fresh budget) but does NOT touch the
                               lifetime self-failure / rejection counters (operator visibility into
-                              prior failures is preserved across escalation resets).
+                              prior failures is preserved across escalation resets). Also restores
+                              a fresh reviewer pooled budget (reviewer_contract_retries /
+                              reviewer_unverified_retries / reviewer_artifacts_retries → 0),
+                              mirroring reset_reviewer — the reviewer reviews brand-new executor
+                              output, so a stale maxed pool must not re-escalate it on first verdict.
         Never increments both legacy counters in one call. The lifetime counters are independent
         of the legacy counter and tracked alongside it for the metrics-row invariant
         ``executor_attempts == executor_self_failures + executor_reviewer_rejections + 1``.
@@ -5050,10 +5054,14 @@ class Orchestrator:
                 pass
 
         # RR-4 (Phase 2): reset_execution zeros reviewer_retries and reviewer_rejected so
-        # the next reviewer invocation starts at pass 1.  reviewer_contract_retries is NOT
-        # zeroed — it survives auto retries and only resets on a full phase reset
-        # (reset_phase).  executor_succeeded is cleared because we are re-running
-        # execution from scratch.
+        # the next reviewer invocation starts at pass 1.  The reviewer POOLED counters
+        # (reviewer_contract_retries / reviewer_unverified_retries / reviewer_artifacts_retries)
+        # are preserved on the 'auto' path (per-phase auto budget — a flapping executor must
+        # not farm the reviewer an infinite budget) but ZEROED in the 'escalation' branch
+        # below: an operator RESET_EXECUTION is an explicit decision to re-run from scratch,
+        # so the reviewer (reviewing brand-new output) gets a fresh pooled budget, mirroring
+        # reset_reviewer. (Both also reset on a full phase reset / reset_phase.)
+        # executor_succeeded is cleared because we are re-running execution from scratch.
         phase_state = self.read_phase_state()
         phase_state["reviewer_retries"] = 0
         phase_state["reviewer_rejected"] = False
@@ -5096,9 +5104,23 @@ class Orchestrator:
             # remain red instead of resetting to a fresh 3-slot budget.
             phase_state["executor_retries"] = 0
             self.state["executor_retries"] = 0
+            # Restore a FRESH reviewer pooled budget (mirrors reset_reviewer). Without
+            # this, an already-maxed reviewer_contract_retries (cap 3) /
+            # reviewer_unverified_retries (cap 2) / reviewer_artifacts_retries (cap 2)
+            # survives the operator reset, so the reviewer — re-invoked against the
+            # fresh executor output — re-escalates on its FIRST verdict with zero real
+            # retries (the "fast fail, no retries" symptom) and the attempt dots render
+            # 3 red the instant review begins. These are phase_state-only (read via
+            # read_phase_state by the gate handlers and _reviewer_session_key), so no
+            # self.state mirror is needed (unlike reviewer_retries above).
+            phase_state["reviewer_contract_retries"] = 0
+            phase_state["reviewer_unverified_retries"] = 0
+            phase_state["reviewer_artifacts_retries"] = 0
+            # One-shot *_UNVERIFIED problem list must not bleed into the fresh cycle.
+            phase_state.pop("reviewer_unverified_detail", None)
             phase_state["escalation_resets"] = phase_state.get("escalation_resets", 0) + 1
             new_count = phase_state["escalation_resets"]
-            print(f"[INFO] reset_execution(escalation): executor_retries reset to 0, escalation_resets now {new_count}.")
+            print(f"[INFO] reset_execution(escalation): executor_retries reset to 0, reviewer pooled budget reset, escalation_resets now {new_count}.")
             # FIND-ESCALATION-CAP: log reason per reset so infra vs logic failures are
             # distinguishable when the cap is reached.
             reason = phase_state.get("last_error_code", "unknown")
@@ -5143,16 +5165,20 @@ class Orchestrator:
         # executor flow could run.)
         phase_state.pop("reviewer_unverified_detail", None)
         # Operator-driven reset: restore a FRESH reviewer retry budget, mirroring
-        # reset_execution('escalation') for the executor. These two pooled counters
-        # are deliberately preserved by reset_execution and only otherwise cleared by
-        # reset_phase, so without this an already-maxed counter survives the operator
-        # reset and the next reviewer failure re-escalates immediately — the live
-        # "fast fail, no retries" symptom (contract counter climbing 3->4->5 across
-        # three RESET_REVIEWERs). Both are phase_state-only (the CONTRACT_FAILURE /
-        # *_UNVERIFIED handlers and _reviewer_session_key read them via
-        # read_phase_state), so no self.state mirror is needed (unlike reviewer_retries).
+        # reset_execution('escalation') for the executor (which zeros the same three pools).
+        # These pooled counters are deliberately preserved by reset_execution('auto') and
+        # only otherwise cleared by reset_phase, so without this an already-maxed counter
+        # survives the operator reset and the next reviewer failure re-escalates immediately
+        # (the live "fast fail, no retries" symptom: the contract counter climbing 3->4->5
+        # across three RESET_REVIEWERs). reviewer_artifacts_retries (cap 2) matters here too:
+        # left maxed, the next MISSING_ARTIFACTS escalates instantly; zeroed, it drops back
+        # under cap so the handler re-invokes the executor to actually produce the missing
+        # artifacts. All three are phase_state-only (the CONTRACT_FAILURE / *_UNVERIFIED /
+        # MISSING_ARTIFACTS handlers and _reviewer_session_key read them via read_phase_state),
+        # so no self.state mirror is needed (unlike reviewer_retries).
         phase_state["reviewer_contract_retries"] = 0
         phase_state["reviewer_unverified_retries"] = 0
+        phase_state["reviewer_artifacts_retries"] = 0
         phase_state["escalation_resets"] = phase_state.get("escalation_resets", 0) + 1
         new_count = phase_state["escalation_resets"]
         reason = phase_state.get("last_error_code", "unknown")
@@ -7148,6 +7174,16 @@ class Orchestrator:
                     # executor_output_path is .json counterpart to sentinel_path (.done).
                     executor_output_path = os.path.join(PROJECT_ARTIFACTS_DIR, "executor_output.json")
                     outcome = self.classify_executor_outcome(sentinel_found, executor_output_path)
+                    # A detected tool_loop is an agent malfunction, not an external preemption.
+                    # The executor writes executor_output.json (step 11) BEFORE the archive /
+                    # metrics / .done finalization steps, so a loop in that window leaves
+                    # executor_output.json on disk and classify_executor_outcome would label it
+                    # "executor_preempted": on a failing gate that escalates WITHOUT consuming a
+                    # retry, and on a passing gate it advances incomplete work to the reviewer.
+                    # Force the self-failure path so the loop gets the documented fresh-session
+                    # retry (reset_execution("auto")), exactly like the no-output crash case.
+                    if getattr(sentinel_found, "reason", None) == "tool_loop":
+                        outcome = "executor_crashed"
                     print(f"[INFO] [EXECUTOR] Outcome classified: {outcome}")
 
                     if outcome == "executor_succeeded":
