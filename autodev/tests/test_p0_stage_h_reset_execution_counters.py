@@ -195,6 +195,87 @@ def test_escalation_caller_does_not_touch_new_counters(tmp_path, monkeypatch):
     assert ps.get("escalation_resets") == 1
 
 
+def test_escalation_caller_zeros_reviewer_pools(tmp_path, monkeypatch):
+    """Operator-driven RESET_EXECUTION must restore a FRESH reviewer pooled budget.
+
+    The executor reruns from scratch and control returns to the reviewer, which
+    reviews brand-new output. If the maxed pooled counters survived, the reviewer
+    would re-escalate on its first verdict with zero real retries (the "fast fail,
+    no retries" symptom) and the attempt dots would render 3 red immediately. This
+    mirrors the v0.1.1 reset_reviewer fix (test_reset_reviewer_budget.py)."""
+    orch = _bare_orch_with_state(
+        tmp_path, monkeypatch,
+        {
+            "executor_retries": 3,
+            "executor_self_failure_retries": 5,
+            "executor_reviewer_rejection_retries": 3,
+            "reviewer_retries": 3,
+            "reviewer_rejected": True,
+            "reviewer_contract_retries": 3,
+            "reviewer_unverified_retries": 2,
+            "reviewer_artifacts_retries": 2,
+            "reviewer_unverified_detail": {"stale": "must not bleed into the fresh cycle"},
+            "escalation_resets": 1,
+        },
+    )
+
+    orch.reset_execution("escalation")
+
+    ps = json.loads((tmp_path / "phase_state.json").read_text())
+    assert ps.get("reviewer_contract_retries") == 0, (
+        "RESET_EXECUTION must zero reviewer_contract_retries (cap 3) — otherwise the "
+        "next CONTRACT_FAILURE re-escalates immediately with no real retry."
+    )
+    assert ps.get("reviewer_unverified_retries") == 0, (
+        "RESET_EXECUTION must zero reviewer_unverified_retries (cap 2)."
+    )
+    assert ps.get("reviewer_artifacts_retries") == 0, (
+        "RESET_EXECUTION must zero reviewer_artifacts_retries (cap 2)."
+    )
+    assert "reviewer_unverified_detail" not in ps, (
+        "the one-shot *_UNVERIFIED problem list must be dropped on reset."
+    )
+    # Pre-existing escalation-reset behaviour preserved.
+    assert ps.get("reviewer_retries") == 0
+    assert ps.get("reviewer_rejected") is False
+    assert ps.get("escalation_resets") == 2, "operator reset still counts toward the cap"
+    assert orch.state.get("current_agent") == "executor", "must route back to the executor"
+    # Executor lifetime counters remain untouched (asserted by the sibling test above).
+    assert ps.get("executor_self_failure_retries") == 5
+    assert ps.get("executor_reviewer_rejection_retries") == 3
+
+
+def test_auto_caller_preserves_reviewer_pools(tmp_path, monkeypatch):
+    """The automatic self-failure retry path must NOT reset the reviewer pooled
+    budget. A flapping executor (repeated auto retries) must not farm the reviewer
+    an unbounded pooled budget — the pools survive auto retries and reset only on a
+    full phase reset or an explicit operator RESET_EXECUTION. Locks the asymmetry."""
+    orch = _bare_orch_with_state(
+        tmp_path, monkeypatch,
+        {
+            "executor_retries": 0,
+            "executor_self_failure_retries": 0,
+            "executor_reviewer_rejection_retries": 0,
+            "reviewer_retries": 0,
+            "reviewer_rejected": False,
+            "reviewer_contract_retries": 1,
+            "reviewer_unverified_retries": 1,
+            "reviewer_artifacts_retries": 1,
+            "escalation_resets": 0,
+        },
+    )
+
+    orch.reset_execution("auto")
+
+    ps = json.loads((tmp_path / "phase_state.json").read_text())
+    assert ps.get("reviewer_contract_retries") == 1, (
+        "reviewer_contract_retries must be PRESERVED by reset_execution('auto') — "
+        "the per-phase auto budget survives self-failure retries."
+    )
+    assert ps.get("reviewer_unverified_retries") == 1
+    assert ps.get("reviewer_artifacts_retries") == 1
+
+
 def test_auto_caller_does_not_touch_rejection_counter(tmp_path, monkeypatch):
     """Guard against accidental double-increment: ``reset_execution('auto')``
     is fired by executor self-failures, not reviewer rejections. The

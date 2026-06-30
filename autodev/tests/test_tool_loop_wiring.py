@@ -53,3 +53,28 @@ def test_tool_loop_in_stall_abort_reason_tuple_at_each_site():
     src = _src()
     # tuple entries carry a trailing comma; the detection-branch comparisons do not.
     assert src.count('"tool_loop",') >= _N_SITES
+
+
+def test_executor_tool_loop_forces_crashed_not_preempted():
+    """An executor tool_loop must route to the self-failure retry, NOT executor_preempted.
+
+    The executor writes executor_output.json BEFORE its .done sentinel (archive/metrics
+    sit in between), so a finalization-window loop leaves output on disk and
+    classify_executor_outcome would return 'executor_preempted' -- which escalates WITHOUT
+    consuming a retry on gate-fail and advances incomplete work to the reviewer on gate-pass,
+    bypassing the fresh-session retry the tool-loop catcher promises. The executor site must
+    override the classification to 'executor_crashed' when the poll reason is tool_loop."""
+    src = _src()
+    idx = src.find("outcome = self.classify_executor_outcome(")
+    assert idx != -1, "executor classify_executor_outcome call site not found"
+    # Window spans the classify call + the override block (the explanatory comment runs
+    # ~600 chars before the guard); it stops well short of the executor_crashed print
+    # branch ~70 lines below, so the assertions pin THIS override, not that branch.
+    window = src[idx : idx + 1200]
+    assert '== "tool_loop"' in window, (
+        "the executor site must check the tool_loop poll reason at classify time"
+    )
+    assert 'outcome = "executor_crashed"' in window, (
+        "an executor tool_loop must be forced to executor_crashed (the self-failure retry "
+        "path), not left as executor_preempted"
+    )

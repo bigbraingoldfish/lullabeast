@@ -3,11 +3,11 @@
 ``reset_reviewer()`` is the operator-driven reviewer reset. Like
 ``reset_execution('escalation')`` does for the executor, it must restore a FRESH
 reviewer retry budget — otherwise the already-maxed ``reviewer_contract_retries``
-(cap 3) and ``reviewer_unverified_retries`` (cap 2) survive the reset, and the
-very next reviewer failure re-escalates immediately. That is the "fast fail, no
-retries" symptom observed live: the contract counter climbing 3 -> 4 -> 5 across
-three operator resets, each granting only one attempt before bouncing back to
-escalation.
+(cap 3), ``reviewer_unverified_retries`` (cap 2), and ``reviewer_artifacts_retries``
+(cap 2) survive the reset, and the very next reviewer failure re-escalates
+immediately. That is the "fast fail, no retries" symptom observed live: the
+contract counter climbing 3 -> 4 -> 5 across three operator resets, each granting
+only one attempt before bouncing back to escalation.
 
 These counters are deliberately PRESERVED by ``reset_execution`` (per-phase auto
 budget) and zeroed by ``reset_phase`` — see test_contract_failure_orchestrator.py.
@@ -76,6 +76,7 @@ def test_reset_reviewer_zeros_contract_and_unverified_counters(tmp_workspace):
             "reviewer_rejected": True,
             "reviewer_contract_retries": 2,
             "reviewer_unverified_retries": 1,
+            "reviewer_artifacts_retries": 2,
             "escalation_resets": 1,
             "last_error_code": "ERR_REVIEWER_CONTRACT_FAILURE",
         },
@@ -98,6 +99,10 @@ def test_reset_reviewer_zeros_contract_and_unverified_counters(tmp_workspace):
     )
     assert state.get("reviewer_unverified_retries") == 0, (
         "RESET_REVIEWER must zero reviewer_unverified_retries (fresh operator budget)"
+    )
+    assert state.get("reviewer_artifacts_retries") == 0, (
+        "RESET_REVIEWER must zero reviewer_artifacts_retries (cap 2) too, since otherwise "
+        "the next MISSING_ARTIFACTS escalates instantly instead of re-invoking the executor"
     )
     # Pre-existing reset_reviewer behaviour must be preserved.
     assert state.get("reviewer_retries") == 0
@@ -132,3 +137,4 @@ def test_reset_reviewer_handles_absent_counters(tmp_workspace):
         state = json.load(f)
     assert state.get("reviewer_contract_retries") == 0
     assert state.get("reviewer_unverified_retries") == 0
+    assert state.get("reviewer_artifacts_retries") == 0
