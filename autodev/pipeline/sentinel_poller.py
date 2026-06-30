@@ -30,7 +30,7 @@ OPENCLAW_ROOT = resolve_openclaw_root()
 # than a Literal so we can validate at construction time on older Pythons
 # without sacrificing readability.
 POLL_REASONS = frozenset(
-    {"succeeded", "stalled", "no_first_activity", "stopped", "timeout"}
+    {"succeeded", "stalled", "no_first_activity", "stopped", "timeout", "tool_loop"}
 )
 
 
@@ -61,6 +61,8 @@ class PollResult:
         * ``"stopped"``         — operator wrote the stop sentinel.
         * ``"timeout"``         — infrastructure backstop ``timeout_seconds``
           elapsed (gateway unreachable etc.).
+        * ``"tool_loop"``       — the optional ``loop_detector`` reported the agent
+          spinning on identical tool calls (a turn that never writes ``.done``).
     stamp_mtime:
         Last observed activity-stamp mtime when the result was produced,
         or ``None`` if no activity was ever recorded.  Used by the
@@ -140,6 +142,7 @@ def poll_for_sentinel(
     startup_grace_seconds: int | None = None,
     heartbeat_interval_seconds: float | None = None,
     sentinel_acceptor: Optional[Callable[[], bool]] = None,
+    loop_detector: Optional[Callable[[], bool]] = None,
 ) -> PollResult:
     """Poll for a sentinel file using a time.sleep loop, strictly avoiding inotify.
 
@@ -235,6 +238,17 @@ def poll_for_sentinel(
         the activity stamp goes silent (``stalled`` / ``no_first_activity``), or
         ``timeout_seconds`` fires.  A predicate that raises is treated as
         ``True`` (fail-open) so a buggy acceptor can never hang the poll.
+    loop_detector:
+        Optional zero-arg predicate consulted on **every poll cycle** (unlike
+        ``sentinel_acceptor``, which only fires once a ``.done`` exists).  An agent
+        stuck re-running the same tool call never writes ``.done`` and keeps its
+        activity stamp fresh, so neither the sentinel path nor stall detection sees
+        it; this hook lets the caller catch that deterministically.  A truthy
+        verdict short-circuits the poll to ``PollResult(False, "tool_loop")`` so the
+        orchestrator can abort the looping session and route it through the agent's
+        self-failure retry path.  A predicate that raises is treated as ``False``
+        (fail-safe) — a buggy detector can never false-abort a healthy agent.  The
+        caller is expected to self-throttle (this is consulted every ~2 s tick).
 
     Returns
     -------
@@ -287,6 +301,21 @@ def poll_for_sentinel(
                     f"checked_in={_agent_has_checked_in}"
                 )
                 _last_heartbeat = _now
+
+        # Tool-loop catch — consulted every cycle (the detector self-throttles).
+        # A truthy verdict means the agent is spinning on identical tool calls
+        # (a turn that never writes ``.done`` and keeps its stamp fresh, so the
+        # sentinel/stall paths are both blind).  A raising detector fails SAFE
+        # (treated as no loop) so it can never false-abort a healthy agent.
+        if loop_detector is not None:
+            try:
+                _looping = loop_detector()
+            except Exception as _ld_err:
+                print(f"[POLL][LOOP_DETECTOR_ERROR] {_ld_err!r} — ignoring (no loop).")
+                _looping = False
+            if _looping:
+                return PollResult(False, "tool_loop", _last_stamp_mtime)
+
         if stall_detection_path is not None and stall_threshold_seconds is not None:
             if os.path.exists(stall_detection_path):
                 try:

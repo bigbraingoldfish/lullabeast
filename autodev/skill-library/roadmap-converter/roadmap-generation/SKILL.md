@@ -103,12 +103,15 @@ Each phase entry must include all of the following. Do not omit any field.
   - **User-observable:** {One sentence in plain English describing what a
     human can do and see after this phase. No code-language terms — the
     sentence should make sense to the person who wrote the PRD.}
-  - **How we'll check:** {Concrete procedure the reviewer follows to exercise
-    the artifact. Be specific enough to execute without ambiguity — name the
-    command, route, file, or interaction. Examples:
-    "navigate to /tasks, POST body {title:'x'}, assert response 201 and
-    body.id is non-empty"; "run `mycli add 'buy milk'`, expect exit 0 and
-    `mycli list` to show 'buy milk'".}
+  - **How we'll check:** {Concrete procedure the reviewer runs **headlessly** to a
+    programmatic pass/fail — name the command/route/file AND the assertion. **Never a
+    human-perception verb** ("visually confirm", "looks right", "appears"): the reviewer
+    has no eyes and will loop forever trying to satisfy one. Turn every visual/UX claim
+    into a DOM/state assertion. Examples: API — "POST /tasks {title:'x'}, assert 201 and
+    body.id non-empty"; CLI — "run `mycli add 'buy milk'`, expect exit 0 and `mycli list`
+    shows it"; Web/visual — "load index.html in headless chromium, assert #cube exists,
+    its box is 50×50, getComputedStyle background-color is rgb(0,0,0)" — NOT "open it and
+    visually confirm the square is black".}
   - **If this fails, the user sees:** {One sentence in plain English that
     the executor's retry feedback and the escalation advisory surface when
     this verification cannot be completed. Phrased as the user would read
@@ -128,6 +131,9 @@ Anchor every claim:
   with no manual setup beyond what prior phases produced. If the procedure
   requires a database to be pre-seeded, the seed step belongs in a prior
   phase or in this phase's Entry Criteria.
+- Every **How we'll check** is re-run as a *regression* by every later phase, so it
+  must be deterministic and headless-repeatable — a check needing a human to look
+  blocks all later phases, not just this one.
 - The **If this fails** sentence must describe the user-facing symptom, not
   the technical fault. "The task list page does not load and shows a blank
   area where the table should be" is correct; "GET /api/tasks returns 500"

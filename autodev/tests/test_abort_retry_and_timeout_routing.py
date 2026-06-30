@@ -196,7 +196,12 @@ def test_timeout_reason_routes_through_stall_outcome(agent):
     idx = _ORCH_SRC.find(marker)
     assert idx != -1, f"Could not locate {agent} poll site"
     # Look at the post-poll window where the stall-outcome guard lives.
-    window = _ORCH_SRC[idx : idx + 3500]
+    # Window sized to clear the most-nested (reviewer) site: the Tier-1 tool-loop
+    # wiring added a loop_detector arg + a _note_tool_loop branch between the poll
+    # call and the stall guard (~250 chars), pushing the reviewer guard to ~3.6 KB
+    # past the marker. The invariant under test (timeout ∈ the _handle_stall_outcome
+    # reason tuple) is unchanged — only this proximity bound grew.
+    window = _ORCH_SRC[idx : idx + 4200]
     # Find the stall_outcome call and check the reason tuple just above it
     # includes "timeout".
     call_idx = window.find("_handle_stall_outcome")
