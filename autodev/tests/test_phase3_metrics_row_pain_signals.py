@@ -160,6 +160,29 @@ def test_row_reset_log_empty_when_absent(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# v0.2.1 — planner scope_warning surfaced in the row (last_scope_warning stash)
+# ---------------------------------------------------------------------------
+
+
+def test_row_includes_scope_warning(tmp_path, monkeypatch):
+    """The planner's descope signal, stashed onto phase_state as
+    ``last_scope_warning`` by ``_emit_scope_warning`` on the planner-PASS path,
+    must surface in the durable row so the history records that a phase was too
+    big for one executor pass and the planner narrowed it."""
+    warn = "Phase spans two subsystems; descoped to the API layer only."
+    row, _, _ = _drive_writer(tmp_path, monkeypatch, {"last_scope_warning": warn})
+    assert row.get("scope_warning") == warn
+
+
+def test_row_scope_warning_null_when_absent(tmp_path, monkeypatch):
+    """A phase whose passing plan raised no scope_warning must carry the key
+    with a null value (present, stable type) — additive schema, safe default."""
+    row, _, _ = _drive_writer(tmp_path, monkeypatch)
+    assert "scope_warning" in row
+    assert row["scope_warning"] is None
+
+
+# ---------------------------------------------------------------------------
 # Change #3 (read side) — reachability_summary surfaced from the stash
 # ---------------------------------------------------------------------------
 

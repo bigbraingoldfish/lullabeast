@@ -431,20 +431,33 @@ def test_ensure_context_limits_missing_file(tmp_path):
     assert setup_helpers.ensure_openclaw_context_limits(str(tmp_path / "nope.json")).startswith("error:")
 
 
+# The seeded sections every pipeline AGENTS.md must carry as a literal ``## <name>``
+# header. "Session Startup" is deliberately absent — it is an OpenClaw default kept in
+# the seed for future agents, not a header our AGENTS.md files carry.
+_REQUIRED_POSTCOMPACTION_HEADERS = (
+    "Always-Apply: Integration Wiring",
+    "Always-Apply: Testing Quality",
+    "Always-Apply: Orchestrator Control",
+    "Red Lines",
+)
+
+
 def test_postcompaction_sections_match_real_agents_md_headers():
-    """Drift guard: every ``Always-Apply: *`` name we seed into postCompactionSections
-    must exist as a literal ``## <name>`` header in all three pipeline AGENTS.md files.
-    If a header is renamed without updating the seed, the post-compaction refresh
-    silently stops re-injecting the Stage A rules — the exact failure this audit fixes.
+    """Drift guard: every seeded section our AGENTS.md files rely on for the
+    post-compaction refresh (the three ``Always-Apply: *`` rules plus ``Red Lines``,
+    the compact output-contract restatement) must exist as a literal ``## <name>``
+    header in all three pipeline AGENTS.md files. If a header is renamed without
+    updating the seed, the refresh silently stops re-injecting it — the exact
+    failure this audit fixes.
     """
     repo_root = Path(__file__).resolve().parents[2]
-    always_apply = [
-        s for s in setup_helpers.AUTODEV_POSTCOMPACTION_SECTIONS if s.startswith("Always-Apply")
-    ]
-    assert always_apply, "expected at least one Always-Apply section in the seed"
+    for name in _REQUIRED_POSTCOMPACTION_HEADERS:
+        assert name in setup_helpers.AUTODEV_POSTCOMPACTION_SECTIONS, (
+            f"'{name}' missing from AUTODEV_POSTCOMPACTION_SECTIONS seed"
+        )
     for role in setup_helpers.AUTODEV_POSTCOMPACTION_AGENT_IDS:
         md = (repo_root / "autodev" / "agents" / role / "AGENTS.md").read_text()
-        for name in always_apply:
+        for name in _REQUIRED_POSTCOMPACTION_HEADERS:
             assert f"## {name}" in md, (
                 f"{role}/AGENTS.md missing '## {name}' — postCompactionSections drift; "
                 f"keep the seed and the AGENTS.md header in sync."
@@ -453,29 +466,27 @@ def test_postcompaction_sections_match_real_agents_md_headers():
 
 def test_postcompaction_cap_covers_largest_always_apply_block():
     """Drift guard: postCompactionMaxChars must be >= the COMBINED size of ALL
-    Always-Apply sections in every pipeline AGENTS.md (the post-compaction refresh
-    re-injects every one of them), or the cap would truncate the very rules it exists to
-    preserve. Three sections now (Integration Wiring + Testing Quality + Orchestrator
-    Control), measured ~5.5k today; cap is 8000.
+    seeded sections present in every pipeline AGENTS.md (the post-compaction refresh
+    re-injects every one it finds), or the cap would truncate the very rules it exists
+    to preserve. Four sections now (Integration Wiring + Testing Quality + Orchestrator
+    Control + Red Lines); cap is 8000.
     """
     import re as _re
 
     repo_root = Path(__file__).resolve().parents[2]
-    always_apply = [
-        s for s in setup_helpers.AUTODEV_POSTCOMPACTION_SECTIONS if s.startswith("Always-Apply")
-    ]
-    assert always_apply, "expected at least one Always-Apply section in the seed"
     for role in setup_helpers.AUTODEV_POSTCOMPACTION_AGENT_IDS:
         md = (repo_root / "autodev" / "agents" / role / "AGENTS.md").read_text()
         total = 0
-        for name in always_apply:
+        for name in setup_helpers.AUTODEV_POSTCOMPACTION_SECTIONS:
             header = f"## {name}"
-            start = md.index(header)
+            start = md.find(header)
+            if start == -1:
+                continue  # e.g. "Session Startup" — seeded for OpenClaw defaults, not present here
             m = _re.search(r"\n## ", md[start + len(header):])
             end = start + len(header) + m.start() if m else len(md)
             total += end - start
         assert total <= setup_helpers.AUTODEV_POSTCOMPACTION_MAX_CHARS, (
-            f"{role}/AGENTS.md Always-Apply sections total {total} chars but the cap is "
-            f"{setup_helpers.AUTODEV_POSTCOMPACTION_MAX_CHARS}; raise "
+            f"{role}/AGENTS.md seeded post-compaction sections total {total} chars but the "
+            f"cap is {setup_helpers.AUTODEV_POSTCOMPACTION_MAX_CHARS}; raise "
             f"AUTODEV_POSTCOMPACTION_MAX_CHARS or trim the sections."
         )

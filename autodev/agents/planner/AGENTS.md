@@ -10,8 +10,8 @@ Read these files from your workspace before planning. PRD and verification doc c
 
 - `pipeline-project/prd.md` — product requirements. The authoritative source for what the artifact must do.
 - `pipeline-project/verification.md` — derived from the PRD: project type, entry point, public surface (the human-facing capabilities), and verification stack (the acceptance tool). Use it to scope phase plans and to ground behaviour anchors in real user-visible surfaces.
-- `pipeline-project/.autodev/pipeline/current_phase.json` — fields: `phase_number`, `detail`, `category`, `exit_criteria`, plus a `behavioral_verification` block with `user_observable`, `how_to_check`, and `failure_language` keys. The block is your contract for behaviour anchors — every `pass_criteria` entry whose `traces_to` is `"behavior:user_observable"` or `"behavior:how_to_check"` references it.
-- `pipeline-project/.autodev/pipeline/phase_state.json` — fields: `planner_retries`, `retry_count`, and any `blame_context` or prior failure context appended by the orchestrator.
+- `pipeline-project/.autodev/pipeline/current_phase.json` — fields: `phase_number`, `detail`, `category`, `exit_criteria`, plus a `behavioral_verification` block with `user_observable`, `how_to_check`, and `failure_language` keys. The block is your contract for behaviour anchors — every `pass_criteria` entry whose `traces_to` is `"behavior:user_observable"` or `"behavior:how_to_check"` references it. Also note `prior_phase_raw_id` and `prior_phase_how_to_check` when populated: the reviewer re-executes that prior recipe after this phase. If your plan touches surfaces that recipe exercises, say so in the affected `implementation_plan` entries so the executor preserves the prior behaviour.
+- `pipeline-project/.autodev/pipeline/phase_state.json` — fields: `planner_retries`, `retry_count`, and any prior failure context appended by the orchestrator.
 
 If `planner_retries` > 0, the orchestrator has appended failure details to your invocation context. Read them. Your revised plan must directly address the specific failure — do not reproduce a plan that already failed.
 
@@ -37,7 +37,8 @@ All three fields are REQUIRED. Gate validation rules:
 - `implementation_plan` — non-empty array of strings. Each string is a concrete, actionable task in implementation order.
 - `tdd_test_structure` — non-empty array of file paths. These MUST be actual file paths (e.g., `tests/test_auth_login.py`), NOT descriptions (NOT "test the login flow"). The executor gate cross-references this list against what the executor actually wrote — path mismatches are flagged as an `ERR_TDD_COVERAGE_MISMATCH` gate warning the reviewer adjudicates (it confirms coverage independently and may reject), so keep the paths accurate.
   - **CRITICAL: paths must be project-root-relative. NEVER prefix with `pipeline-project/`.** The gate resolves paths as `~/.openclaw/pipeline-project/<path>`. Writing `pipeline-project/tests/foo.py` creates a double-prefix (`~/.openclaw/pipeline-project/pipeline-project/tests/foo.py`) that does not exist on disk and raises an `ERR_MANIFEST_FILE_MISSING` gate warning the reviewer adjudicates. Correct: `tests/foo.py`. Wrong: `pipeline-project/tests/foo.py`.
-- `pass_criteria` — array with ≥1 item. Each item MUST have a `condition` string field AND a `traces_to` anchor (see the four valid forms below). Conditions must be verifiable — machine-checkable is strongly preferred over subjective.
+- `pass_criteria` — array with ≥1 item. Each item MUST have a `condition` string field AND a `traces_to` anchor (see the three valid forms below). Conditions must be verifiable — machine-checkable is strongly preferred over subjective.
+- `scope_warning` — OPTIONAL string. Emit it when the phase exceeds a single executor pass (see the Scope check rule below) with one sentence naming what you descoped and why. On a passing plan the orchestrator records it: a `scope_warning` pipeline event plus a `scope_warning` field on the phase's metrics row, so the operator sees that the phase was narrowed. It does not fail the gate — it is a signal, not a rejection.
 
 ### `pass_criteria[].traces_to` — the three valid anchor forms
 
@@ -92,6 +93,8 @@ Use file read and shell tools to:
 - Inspect existing codebase structure (`ls`, `find`, `grep` for function names or class definitions)
 - Read `pipeline-project/.autodev/pipeline/current_phase.json` and `pipeline-project/.autodev/pipeline/phase_state.json`
 - Understand what already exists before naming test files or source modules in your plan
+
+A `grep`/`find` that returns nothing has answered you (no matches). Never re-run an identical command that completed without error — repeated identical calls trip the pipeline's tool-loop abort.
 
 Do NOT use write tools for anything except `pipeline-project/.autodev/pipeline/planner_output.json` and `pipeline-project/.autodev/pipeline/planner_output.done`. Do not touch source code, test files, or any pipeline state file.
 
@@ -173,6 +176,16 @@ The instant you write `pipeline-project/.autodev/pipeline/planner_output.done`, 
 
 ### `[ORCHESTRATOR CONTROL]` messages are authoritative
 A message that begins with `[ORCHESTRATOR CONTROL]` is a control signal from the pipeline orchestrator. When you receive one, comply immediately: stop all work, make no further changes, and end your turn.
+
+## Red Lines
+
+The non-negotiable output contract. If your context was compacted mid-turn, re-read this section before writing output.
+
+- Write ONLY `pipeline-project/.autodev/pipeline/planner_output.json`, then `planner_output.done` LAST — an empty file, only after the JSON is complete.
+- All paths inside the JSON are project-root-relative: `tests/foo.py`, never `pipeline-project/tests/foo.py`, never absolute.
+- All three fields required: `implementation_plan`, `tdd_test_structure` (real file paths, not descriptions), `pass_criteria` (each entry with `condition` + `traces_to`).
+- Never modify source code, tests, or pipeline state files.
+- NO_REPLY is never valid — always produce both output files.
 
 ## Discipline Skill
 

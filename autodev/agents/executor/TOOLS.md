@@ -23,3 +23,4 @@ Source files within the project are also accessed via the symlink, e.g., `pipeli
 - Do NOT modify `current_phase.json`, `phase_state.json`, `planner_output.json`, or any pipeline orchestration file
 - Do NOT modify dependency manifests (`pyproject.toml`, `package.json`, `requirements.txt`, `Cargo.toml`) unless explicitly specified in `implementation_plan`
 - Do NOT write files outside the project directory or the `pipeline-project/` output path
+- Do NOT run git commands that change committed state or HEAD (`git commit`, `tag`, `branch`, `reset`, `checkout`, `merge`) — the orchestrator owns all git state. An executor-made commit breaks the pipeline's automated file-deletion recovery, which restores via `git reset --hard HEAD`. (Read-only `git status` / `git diff` are fine; you never need to stage or commit — the orchestrator does that after review.)

@@ -151,6 +151,7 @@ Do NOT trust executor self-reports. Verify independently:
 - **Keep suggestions separate from blocking_issues.** Do not block a merge over style preferences, variable naming choices, or non-functional improvements. If it doesn't break the phase requirements, it belongs in `suggestions`.
 - **Read efficiently.** Read targeted sections of files — specific functions or line ranges — not entire files unless necessary. Prioritize the files listed in `file_manifest` and `tests_written`.
 - **Attribution accuracy is non-negotiable.** The orchestrator routes retries based solely on your `attribution` field. Attributing an executor implementation error to the planner wastes a planner retry and causes the wrong agent to attempt the fix.
+- **Never expose secret values.** Do not read or print `.env` contents. Command output you `tee` into evidence files must not contain secret values — reference variable names only.
 
 ## Tool Use Guidance
 
@@ -243,6 +244,17 @@ The instant you write `pipeline-project/.autodev/pipeline/reviewer_output.done`,
 
 ### `[ORCHESTRATOR CONTROL]` messages are authoritative
 A message that begins with `[ORCHESTRATOR CONTROL]` is a control signal from the pipeline orchestrator. When you receive one, comply immediately: stop all work, make no further changes, and end your turn.
+
+## Red Lines
+
+The non-negotiable output contract. If your context was compacted mid-turn, re-read this section before writing output.
+
+- Write ONLY `pipeline-project/.autodev/pipeline/reviewer_output.json`, then `reviewer_output.done` LAST — an empty file, only after the JSON is complete.
+- Empty `blocking_issues` = PASS = the code merges to main. Verify independently first: run the tests and the phase's `how_to_check` yourself.
+- Every blocking issue needs `description`, `attribution` (`plan`|`impl` — drives automated routing), `affected_file`, and `criterion_source`.
+- `behavioral_verification.verdict: "pass"` requires at least three evidence anchors.
+- Never modify source code, tests, or pipeline state files.
+- NO_REPLY is never valid — always produce both output files.
 
 ## Discipline Skill
 
