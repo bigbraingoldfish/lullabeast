@@ -4560,6 +4560,9 @@ def _build_project_metrics_summary(project_dir_path, config):
                 "reviewer_unverified_retries": p.get("reviewer_unverified_retries", 0),
                 "gate_warnings": p.get("gate_warnings"),
                 "reachability_summary": p.get("reachability_summary"),
+                # v0.2.1 — planner descope signal (compact string, null default),
+                # passed through from the canonical row for the same read-side parity.
+                "scope_warning": p.get("scope_warning"),
             }
             for p in phases
         ],

@@ -4618,6 +4618,69 @@ class Orchestrator:
         except Exception as _gw_err:
             print(f"[WARN] _emit_gate_warnings: stash failed: {_gw_err}")
 
+    # Max characters of planner scope_warning text carried into the event /
+    # phase_state stash. The planner contract is "one sentence"; this is a
+    # defensive bound so a runaway string can't bloat the event log or the row.
+    _SCOPE_WARNING_MAX_CHARS = 500
+
+    def _emit_scope_warning(self, raw_id):
+        """Drain a ``scope_warning`` string from ``planner_output.json`` into one
+        ``scope_warning`` event and a compact ``last_scope_warning`` stash on
+        phase_state — the read-side consumer for the planner's descope signal.
+
+        The planner emits an OPTIONAL top-level ``scope_warning`` string when a
+        phase exceeds a single executor pass and it descoped rather than produce
+        an over-broad plan (see planner AGENTS.md). The verdict gate tolerates the
+        field but does not surface it; without this the one signal that says "this
+        phase was too big and I shrank it" evaporated. Called on every planner-PASS
+        (mirrors ``_emit_gate_warnings`` on executor-PASS): the stash is picked up
+        by ``_write_canonical_metrics_row`` (``scope_warning`` field) so the
+        durable per-phase history records it.
+
+        On the clean common case (no field) this clears any stale
+        ``last_scope_warning`` so the metrics row never reports a prior attempt's
+        warning. Best-effort + read-modify-write throughout so a phase_state
+        hiccup never breaks the PASS path or clobbers sibling keys. Unlike
+        ``gate_warnings.json`` there is no separate file to preserve — the signal
+        lives inside ``planner_output.json``, which the executor reads next."""
+        planner_path = os.path.join(PROJECT_ARTIFACTS_DIR, "planner_output.json")
+        warning = None
+        try:
+            with open(planner_path, "r") as f:
+                doc = json.load(f)
+            if isinstance(doc, dict):
+                _w = doc.get("scope_warning")
+                if isinstance(_w, str) and _w.strip():
+                    warning = _w.strip()[: self._SCOPE_WARNING_MAX_CHARS]
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            print(f"[WARN] _emit_scope_warning: could not read planner_output: {e}")
+            return
+
+        if warning is None:
+            # Clean pass — drop any stale stash so the row's scope_warning is null.
+            try:
+                _ps = self.read_phase_state()
+                if _ps.pop("last_scope_warning", None) is not None:
+                    self.write_phase_state_atomic(_ps)
+            except Exception as _sw_err:
+                print(f"[WARN] _emit_scope_warning: stale-stash clear failed: {_sw_err}")
+            return
+
+        _write_pipeline_event(
+            "scope_warning",
+            raw_id,
+            "planner",
+            {"warning": warning},
+        )
+        try:
+            _ps = self.read_phase_state()
+            _ps["last_scope_warning"] = warning
+            self.write_phase_state_atomic(_ps)
+        except Exception as _sw_err:
+            print(f"[WARN] _emit_scope_warning: stash failed: {_sw_err}")
+
     def _record_injected_skill(self, agent_role: str) -> None:
         """Write skill_injected and skill_agent to phase_state.json after inject_skill().
 
@@ -6135,6 +6198,11 @@ class Orchestrator:
             # the executor-PASS path (null when the attempt that passed raised no
             # warnings). Durable record of "what the gate flagged for the reviewer."
             "gate_warnings": ps_m.get("last_gate_warnings"),
+            # v0.2.1 — the planner's descope signal, stashed onto phase_state by
+            # _emit_scope_warning on the planner-PASS path (null when the passing
+            # plan raised none). Durable record that a phase was too big for one
+            # executor pass and the planner narrowed it.
+            "scope_warning": ps_m.get("last_scope_warning"),
             "reset_log": ps_m.get("reset_log", []),
             # P1-B — structured cause of this phase's escalation(s), resolved at the
             # escalation dispatch and persisted to phase_state. null when the phase
@@ -6854,6 +6922,13 @@ class Orchestrator:
                     else:
                         gate_passed = self.run_planner_output_gate()
                         if gate_passed:
+                            # Drain an optional planner scope_warning into a
+                            # scope_warning event + last_scope_warning stash (the
+                            # read-side consumer for the descope signal; surfaces
+                            # in the canonical metrics row). Mirrors
+                            # _emit_gate_warnings on the executor-PASS path. Best-
+                            # effort: never blocks the PASS.
+                            self._emit_scope_warning(raw_id)
                             # RR-2 (Phase 4): Record that planner output is valid and preserved.
                             # Written atomically BEFORE transition_state so crash-recovery on
                             # restart can distinguish this state from an intentional ROUTE_PLANNER.

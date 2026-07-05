@@ -12,7 +12,9 @@ All writes are scoped to `~/.openclaw/ideas/{id}/` only.
 
 **Base conversion mode:**
 - `~/.openclaw/ideas/{id}/roadmap_draft.md` — the generated roadmap (written first)
-- `~/.openclaw/ideas/{id}/roadmap_draft.done` — sentinel (written last)
+- `~/.openclaw/ideas/{id}/verification_draft.md` — the project-level verification doc (written second)
+- `~/.openclaw/ideas/{id}/verification_draft.done` — verification sentinel (written third)
+- `~/.openclaw/ideas/{id}/roadmap_draft.done` — roadmap sentinel (written LAST — the server polls both sentinels; both artifacts must be ready when it appears)
 
 **Alignment check mode:**
 - `~/.openclaw/ideas/{id}/alignment_report.md` — the gap analysis report (written first)

@@ -8,10 +8,13 @@
   - `~/.openclaw/ideas/{id}/turns/{n}.done` — sentinel file, content: `done` (written last)
   - `~/.openclaw/ideas/{id}/clarity_result.json` — JSON clarity result (when invoked for clarity check)
   - `~/.openclaw/ideas/{id}/clarity_result.done` — clarity sentinel (when invoked for clarity check)
+  - `~/.openclaw/ideas/{id}/readiness.json` — readiness assessment (readiness sessions only, written first)
+  - `~/.openclaw/ideas/{id}/readiness.done` — readiness sentinel (readiness sessions only, written last)
 
 - **File read** — Read your own prior output for continuity:
   - `~/.openclaw/ideas/{id}/turns/*.md` — prior turn responses
   - `~/.openclaw/ideas/{id}/prd_draft.md` — current PRD state
+  - `~/.openclaw/ideas/{id}/conversation_log.md` — server-maintained full turn history (read-only; the server is the sole writer)
 
 ## Path Convention
 

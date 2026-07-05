@@ -8,6 +8,22 @@ This project follows [Semantic Versioning](https://semver.org/). The first publi
 
 _No unreleased changes._
 
+## [0.2.1] - 2026-07-03
+
+A pass over the per-agent guidance documents (the instructions each pipeline agent runs under) to fix contradictions and stale references, harden them against context compaction, and close two silent-signal gaps, plus a new read-side consumer for the planner's descope signal.
+
+### Added
+- **The planner's `scope_warning` is now recorded instead of discarded.** When the planner decides a phase is too large for one executor pass and narrows its scope, it emits a `scope_warning`. That signal previously had no consumer: nothing read it, so the operator never learned a phase had been quietly shrunk. The orchestrator now surfaces it on the planner-pass path as a `scope_warning` activity-feed event and a `scope_warning` field on the phase's metrics row (also passed through `GET /api/metrics-summary`). It stays advisory and never fails a gate.
+- **A compact "Red Lines" section in each pipeline agent's guidance, re-injected after compaction.** The planner, executor, and reviewer each carry a short restatement of their non-negotiable output contract (permitted write targets, sentinel-written-last ordering, the project-root-relative path rule, never-`NO_REPLY`, and the role's highest-stakes rule). Because these sections are named in the post-compaction refresh set, they survive a mid-turn context compaction, the moment an agent is most likely to have lost the original contract from its window.
+- **Secret-hygiene rules for the executor and reviewer.** Both agents, the ones that actually run project code with a populated `.env` in the tree, are now told never to read or print `.env` contents and never to let secret values reach smoke artifacts, captured logs, test fixtures, or output JSON. The executor also gained an "empty command output means success" rule (mirroring the reviewer's) to stop needless re-runs that can trip the tool-loop catcher.
+
+### Fixed
+- **Roadmap conversion could stall on a documentation mismatch.** The roadmap-converter's tool reference listed only two of the four files a base conversion must write, omitting the verification document and its sentinel, which the server waits for. An agent following that list would hang the conversion until timeout. The reference now matches the actual write contract.
+- **The executor is now explicitly barred from git commands that change committed state.** Nothing previously told the executor not to commit, tag, or reset, yet the orchestrator owns all git state, and an executor-made commit defeats the automated recovery from the MiniMax file-deletion bug (which restores via a hard reset to `HEAD`). Added as an explicit denial with the reason.
+- **The executor now knows what to do when the plan and the PRD disagree.** It was told to read the PRD and spot where the plan diverges, but never what to do about it. It is now instructed to implement to the PRD, matching the standard the reviewer already judges against.
+- **Stale and contradictory references removed from the guidance.** The planner no longer references a removed `blame_context` field or an "anchor forms" count that disagreed with its own list; the executor's output schema no longer carries an unused `lessons_appended` field, and its description of the missing-test-path consequence now matches the gate's actual behaviour (a warning the reviewer adjudicates, not a hard failure). The reviewer's tool description no longer calls shell execution "read-only" while requiring it to run tests, servers, and verification recipes.
+- **The planner now carries the same `NO_REPLY` guard as the other agents**, closing a gap where a planner non-response (no output, no sentinel) would burn a full retry cycle. The planner also now sees the prior-phase regression recipe, so it can flag plan steps that risk breaking already-shipped behaviour.
+
 ## [0.2.0] - 2026-06-29
 
 Adds a deterministic in-turn tool-loop catcher and tightens roadmap verification, on top of a reliability pass on how the orchestrator stops in-flight agent sessions and recovers from reviewer failures. See **[`docs/archive/CHANGELOG-full.md`](docs/archive/CHANGELOG-full.md)** for the full engineering history.
