@@ -46,6 +46,8 @@ cd autodev-ui
 
 **Installer modes.** The default is **guest mode**: non-destructive, prompt-driven, warn-and-continue; correct etiquette on a shared host where OpenClaw also serves non-Lullabeast agents. `--non-interactive` answers every prompt with its documented default (each call site in install.sh carries a `# ci-default:` comment recording that decision; the one deliberate "no" is the global `tools.profile` flip, which the doctor flags instead of the installer changing gateway behavior unattended). `--strict` (implies `--non-interactive`) additionally exits 1 if the final doctor run reports any failing check. `--owned-openclaw` (implies `--non-interactive`; the container default from the deploy roadmap) makes the script the OWNER of the OpenClaw tree: agent files overwrite unconditionally with no mtime skip, the `openclaw.json` hooks block is validated rather than patched, there are zero prompts, and ANY warning is a fatal exit 1. Owned mode is not for shared hosts; hand edits inside an owned tree are overwritten by design (customize by replacing files, never by editing the tree in place). Every mode ends by running the doctor (below).
 
+**Container install.** A Docker Compose path now exists: one container running the OpenClaw gateway, the dashboard, and the maintenance loops, with all state on a volume. Its entrypoint runs this same `install.sh` in owned mode on every boot. Quickstart, environment contract, volume layout, and the upgrade procedure live in [deploy/README.md](deploy/README.md). The bare-metal walkthrough on this page remains the development-mode setup.
+
 What the script does (summary):
 
 1. OS check (Linux, macOS, and WSL2 supported; native Windows is rejected).

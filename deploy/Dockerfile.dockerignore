@@ -1,0 +1,17 @@
+# Build-context excludes for deploy/Dockerfile (BuildKit per-Dockerfile
+# ignore file; BuildKit is the default builder since Docker 23). The build
+# context is the repo root (see deploy/docker-compose.yml).
+.git
+.env
+.venv
+venv
+.pytest_cache
+.ruff_cache
+**/__pycache__
+**/node_modules
+.autodev
+plans
+projects
+deploy/.env
+deploy/projects
+docs/archive

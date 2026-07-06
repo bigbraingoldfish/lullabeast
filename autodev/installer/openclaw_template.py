@@ -15,6 +15,11 @@ one shared implementation:
     against the template's requirements. The doctor's ``template_conformance``
     check (owned mode only) uses it so config drift inside a container is
     loudly visible.
+  * Reconciliation: ``reconcile_config_to_template`` is the write-side inverse
+    of conformance. The DS-3 entrypoint reconciles the persisted config toward
+    the current image's template on every boot, so a template change shipped in
+    a new image self-heals instead of dead-ending at the (now-failing)
+    conformance check.
 
 Placeholder contract (whole-string ``${VAR}`` values only, so the raw template
 file always parses as strict JSON):
@@ -23,7 +28,8 @@ file always parses as strict JSON):
     entrypoint generates them via ``secrets.token_urlsafe`` on first boot and
     persists them under ``/data``).
   * ``PLANNER_MODEL`` / ``EXECUTOR_MODEL`` / ``REVIEWER_MODEL`` / ``PRD_MODEL``
-    default to the audit-picked models below when unset. The executor and
+    / ``ROADMAP_MODEL`` / ``ESCALATION_MODEL`` default to the audit-picked
+    models below when unset (one knob per agent role). The executor and
     reviewer defaults must stay multimodal (image input) because the reviewer
     gate demands visual verification on UI/INT phases.
 
@@ -33,6 +39,7 @@ run even when FastAPI/uvicorn are missing (python_deps is one of its checks).
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -43,14 +50,19 @@ TEMPLATE_RELPATH = os.path.join("deploy", "openclaw.template.json")
 # Whole-value placeholder shape: ``${UPPER_SNAKE}`` inside a JSON string.
 TEMPLATE_PLACEHOLDER_RE = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
 
-# Audit-picked model defaults (deploy/CONFIG-AUDIT.md, DS-2b task 5). The
-# executor and reviewer picks are multimodal by requirement; PRD_MODEL also
-# serves the escalation and roadmap-converter agents (four knobs, six agents).
+# Audit-picked model defaults (deploy/CONFIG-AUDIT.md, DS-2b task 5). One knob
+# per agent role; the executor and reviewer picks are multimodal by
+# requirement. PLANNER_MODEL also backs agents.defaults.model. Every default
+# must be one of the shipped, fully priced OpenRouter models in
+# deploy/openclaw.template.json (tests enforce that the referenced set and the
+# shipped set are identical).
 TEMPLATE_MODEL_DEFAULTS: dict[str, str] = {
     "PLANNER_MODEL": "openrouter/minimax/minimax-m3",
     "EXECUTOR_MODEL": "openrouter/moonshotai/kimi-k2.7-code",
     "REVIEWER_MODEL": "openrouter/z-ai/glm-5.2",
-    "PRD_MODEL": "openrouter/qwen/qwen3.6-35b-a3b",
+    "PRD_MODEL": "openrouter/moonshotai/kimi-k2.7-code",
+    "ROADMAP_MODEL": "openrouter/z-ai/glm-5.2",
+    "ESCALATION_MODEL": "openrouter/qwen/qwen3.6-27b",
 }
 
 # Secrets with no sane default: rendering fails loud when these are unset.
@@ -203,3 +215,76 @@ def template_conformance_issues(template, live, path: str = "") -> list[str]:
     if template != live:
         issues.append(f"{label}: expected {_fmt(template)}, found {_fmt(live)}")
     return issues
+
+
+def reconcile_config_to_template(template, live):
+    """Return ``live`` with every requirement the ``template`` declares enforced.
+
+    The write-side inverse of :func:`template_conformance_issues`: the result is
+    guaranteed conformant (``template_conformance_issues(template, result)`` is
+    empty for the same template) while keys and entries the template does *not*
+    declare survive untouched. The DS-3 entrypoint uses this to heal a persisted
+    ``openclaw.json`` toward a new image's template on boot, instead of leaving
+    the drift to dead-end at install.sh's owned-mode validation or the doctor's
+    ``template_conformance`` check.
+
+    Pass a **rendered** template (``${VAR}`` placeholders already substituted) so
+    no placeholder literal is ever written into the live config; the matching
+    rules mirror the conformance ones exactly:
+
+      * dict: every template key is enforced (recurse); live-only keys preserved.
+      * list of dicts with a string ``id``: matched by ``id`` (recurse into the
+        match, append a template entry that has no live counterpart); extra live
+        entries preserved.
+      * list of id-less dicts: a template entry with no deep-conformant live
+        counterpart is appended.
+      * list of scalars: template members ensured present (appended if missing);
+        order and extra live items preserved.
+      * scalar leaf: the template value wins.
+
+    ``live`` is never mutated; a fresh structure is returned.
+    """
+    if isinstance(template, dict):
+        if not isinstance(live, dict):
+            return copy.deepcopy(template)
+        result = copy.deepcopy(live)
+        for key, t_val in template.items():
+            if key in result:
+                result[key] = reconcile_config_to_template(t_val, result[key])
+            else:
+                result[key] = copy.deepcopy(t_val)
+        return result
+
+    if isinstance(template, list):
+        if not isinstance(live, list):
+            return copy.deepcopy(template)
+        result = copy.deepcopy(live)
+        for t_item in template:
+            if isinstance(t_item, dict) and isinstance(t_item.get("id"), str):
+                t_id = t_item["id"]
+                idx = next(
+                    (
+                        i
+                        for i, e in enumerate(result)
+                        if isinstance(e, dict) and e.get("id") == t_id
+                    ),
+                    None,
+                )
+                if idx is None:
+                    result.append(copy.deepcopy(t_item))
+                else:
+                    result[idx] = reconcile_config_to_template(t_item, result[idx])
+            elif isinstance(t_item, dict):
+                if not any(
+                    isinstance(e, dict)
+                    and not template_conformance_issues(t_item, e, "")
+                    for e in result
+                ):
+                    result.append(copy.deepcopy(t_item))
+            else:
+                if t_item not in result:
+                    result.append(copy.deepcopy(t_item))
+        return result
+
+    # Scalar leaf (including bool): the template value wins.
+    return copy.deepcopy(template)

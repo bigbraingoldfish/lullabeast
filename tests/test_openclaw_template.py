@@ -28,6 +28,7 @@ from autodev.installer.openclaw_template import (
     TEMPLATE_PLACEHOLDER_RE,
     TEMPLATE_REQUIRED_VARS,
     load_template,
+    reconcile_config_to_template,
     render_template_text,
     template_conformance_issues,
     template_path,
@@ -396,3 +397,92 @@ class TestDoctorAgainstRenderedTemplate:
         result = doctor.check_template_conformance(config)
         assert result.status == "fail"
         assert "not found" in result.detail
+
+
+# ── reconcile: the write-side inverse of conformance (DS-3 boot self-heal) ───
+
+class TestReconcile:
+    def test_noop_on_already_conformant_config(self):
+        rendered = _rendered()
+        assert reconcile_config_to_template(rendered, _rendered()) == rendered
+
+    def test_round_trip_invariant_heals_drifted_config(self):
+        """The core guarantee: whatever the drift, the reconciled config
+        conforms against the (raw) template exactly as the doctor checks it."""
+        live = _rendered()
+        live["tools"]["profile"] = "hacked"          # drifted pinned scalar
+        del live["models"]["pricing"]                # missing pinned subtree
+        live["agents"]["list"] = [                   # a dropped pinned agent
+            e for e in live["agents"]["list"] if e["id"] != "reviewer"
+        ]
+        live["hooks"]["enabled"] = 1                 # bool/int drift
+        reconciled = reconcile_config_to_template(_rendered(), live)
+        assert template_conformance_issues(_template(), reconciled) == []
+
+    def test_heals_drifted_scalar(self):
+        live = _rendered()
+        live["tools"]["profile"] = "minimal"
+        reconciled = reconcile_config_to_template(_rendered(), live)
+        assert reconciled["tools"]["profile"] == _rendered()["tools"]["profile"]
+
+    def test_restores_missing_key(self):
+        live = _rendered()
+        del live["models"]["pricing"]
+        reconciled = reconcile_config_to_template(_rendered(), live)
+        assert reconciled["models"]["pricing"] == _rendered()["models"]["pricing"]
+
+    def test_restores_missing_agent_by_id(self):
+        live = _rendered()
+        live["agents"]["list"] = [
+            e for e in live["agents"]["list"] if e["id"] != "escalation"
+        ]
+        reconciled = reconcile_config_to_template(_rendered(), live)
+        assert any(e["id"] == "escalation" for e in reconciled["agents"]["list"])
+
+    def test_preserves_operator_extras(self):
+        """Keys/entries the template does not declare survive untouched: extra
+        providers, extra agents, extra scalar-list members, bookkeeping blocks."""
+        live = _rendered()
+        live["meta"] = {"wizard": True}                              # bookkeeping
+        live["models"]["providers"]["custom"] = {"baseUrl": "x"}     # extra provider
+        live["agents"]["list"].append({"id": "assistant"})           # extra agent
+        live["plugins"]["allow"].append("my-plugin")                 # extra list member
+        reconciled = reconcile_config_to_template(_rendered(), live)
+        assert reconciled["meta"] == {"wizard": True}
+        assert reconciled["models"]["providers"]["custom"] == {"baseUrl": "x"}
+        assert any(e["id"] == "assistant" for e in reconciled["agents"]["list"])
+        assert reconciled["plugins"]["allow"].count("my-plugin") == 1
+
+    def test_scalar_list_member_added_once_not_duplicated(self):
+        live = _rendered()
+        # Drop a required plugins.allow member; reconcile must re-add exactly one.
+        live["plugins"]["allow"] = [
+            p for p in live["plugins"]["allow"] if p != "autodev-pipeline-signals"
+        ]
+        reconciled = reconcile_config_to_template(_rendered(), live)
+        assert reconciled["plugins"]["allow"].count("autodev-pipeline-signals") == 1
+
+    def test_reapplies_changed_model_env(self):
+        """A changed *_MODEL env value takes effect on reconcile (first-boot-only
+        rendering ignored it), because the model.primary leaf is template-owned."""
+        env = dict(_TEST_ENV, EXECUTOR_MODEL="openrouter/z-ai/glm-5.2")
+        rendered = json.loads(render_template_text(_raw_text(), env))
+        reconciled = reconcile_config_to_template(rendered, _rendered())
+        ex = _agents_by_id(reconciled)["executor"]
+        assert ex["model"]["primary"] == "openrouter/z-ai/glm-5.2"
+
+    def test_does_not_mutate_live(self):
+        live = _rendered()
+        live["tools"]["profile"] = "drifted"
+        before = json.loads(json.dumps(live))
+        reconcile_config_to_template(_rendered(), live)
+        assert live == before
+
+    def test_no_placeholder_literal_leaks_when_rendered(self):
+        """Reconcile is fed a rendered template, so no ${VAR} literal is ever
+        written into the live config even when a whole subtree is restored."""
+        live = _rendered()
+        del live["hooks"]["token"]  # drop a placeholder-sourced leaf
+        reconciled = reconcile_config_to_template(_rendered(), live)
+        assert "${" not in json.dumps(reconciled)
+        assert reconciled["hooks"]["token"] == _TEST_ENV["HOOKS_TOKEN"]
