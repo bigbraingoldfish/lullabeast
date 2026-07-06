@@ -137,6 +137,44 @@ def requires_regression_verification(current_phase):
     )
 
 
+def read_phase_state_for_rewrite():
+    """Read ``PHASE_STATE_FILE`` ahead of a gate-side merge-and-rewrite.
+
+    Returns ``{}`` when the file is absent (a legitimate fresh start) and
+    ``None`` when the file exists but is unreadable or not a JSON dict —
+    callers MUST skip their rewrite on ``None``. Rebuilding from ``{}`` and
+    atomically writing it back would replace a corrupt file with a *valid*
+    one that has lost every governance counter (``executor_retries``, the
+    cap-governed ``escalation_resets`` / ``nuclear_resets``,
+    ``reviewer_unverified_retries``, ``reset_log``, the ``phase_merged``
+    marker), silently resetting budgets the orchestrator enforces. The
+    orchestrator's own ``read_phase_state`` quarantines-and-raises on the
+    same corruption; the gates must leave the corrupt file in place for
+    that recovery path to find, not heal it into empty state.
+    """
+    if not os.path.exists(PHASE_STATE_FILE):
+        return {}
+    try:
+        with open(PHASE_STATE_FILE, "r") as f:
+            loaded = json.load(f)
+    except Exception as e:
+        print(
+            f"[GATE WARN] phase_state.json exists but is unreadable ({e!r}) — "
+            "skipping the rewrite so governance counters are not wiped; the "
+            "orchestrator quarantines corrupt phase_state on its next read.",
+            file=sys.stderr,
+        )
+        return None
+    if not isinstance(loaded, dict):
+        print(
+            f"[GATE WARN] phase_state.json parsed as {type(loaded).__name__}, "
+            "not a dict — treating as corrupt and skipping the rewrite.",
+            file=sys.stderr,
+        )
+        return None
+    return loaded
+
+
 def record_error_code_only(agent_type, error_code, detail=None, detail_field=None):
     """Writes last_error_code to phase_state.json without incrementing retry counters.
 
@@ -148,14 +186,15 @@ def record_error_code_only(agent_type, error_code, detail=None, detail_field=Non
     reviewer gate uses this to stash its specific problem list under
     ``reviewer_unverified_detail`` so the orchestrator can enrich the reviewer retry
     directive with exactly what failed. Single-arg callers are unaffected.
+
+    On a present-but-corrupt phase_state.json the write is SKIPPED (see
+    ``read_phase_state_for_rewrite``) — the error code is lost for this call,
+    but the orchestrator's quarantine-and-raise path owns corrupt-state
+    recovery and the gate's verdict still flows via stdout.
     """
-    state = {}
-    if os.path.exists(PHASE_STATE_FILE):
-        try:
-            with open(PHASE_STATE_FILE, "r") as f:
-                state = json.load(f)
-        except Exception:
-            pass
+    state = read_phase_state_for_rewrite()
+    if state is None:
+        return
     state["last_error_code"] = error_code
     if detail_field:
         state[detail_field] = detail
@@ -179,14 +218,15 @@ def load_json_safe(filepath, agent_type):
 
 
 def update_phase_state_error(agent_type, error_code):
-    """Safely updates phase_state.json with retry bumps and error codes using atomic writes."""
-    state = {}
-    if os.path.exists(PHASE_STATE_FILE):
-        try:
-            with open(PHASE_STATE_FILE, "r") as f:
-                state = json.load(f)
-        except Exception:
-            pass
+    """Safely updates phase_state.json with retry bumps and error codes using atomic writes.
+
+    Returns the bumped retry count, or ``None`` when phase_state.json is
+    present but corrupt — the rewrite is skipped so the governance counters
+    are not wiped (see ``read_phase_state_for_rewrite``).
+    """
+    state = read_phase_state_for_rewrite()
+    if state is None:
+        return None
 
     retry_key = f"{agent_type}_retries"
     state[retry_key] = state.get(retry_key, 0) + 1

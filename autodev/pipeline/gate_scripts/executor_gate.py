@@ -19,6 +19,7 @@ from utils import (
     ARTIFACTS_DIR,
     load_json_safe,
     phase_has_behavioral_block,
+    read_phase_state_for_rewrite,
     record_error_code_only,
     PHASE_STATE_FILE,
     WORKSPACE_DIR,
@@ -616,16 +617,14 @@ def evaluate_executor(output_path=None):
 
     # FIND-DONE-FILE: Record executor_succeeded = True so the orchestrator can distinguish
     # "executor OK, reviewer failed" from "executor failed" on restart.
-    _state = {}
-    if os.path.exists(PHASE_STATE_FILE):
-        try:
-            with open(PHASE_STATE_FILE, "r") as _f:
-                _state = json.load(_f)
-        except Exception:
-            pass
-    _state["executor_succeeded"] = True
-    os.makedirs(os.path.dirname(PHASE_STATE_FILE) or ".", exist_ok=True)
-    write_json_atomic(PHASE_STATE_FILE, _state, indent=2, raise_on_error=False)
+    # A present-but-corrupt phase_state.json skips the write (returns None) so
+    # the governance counters aren't wiped by a rebuild-from-{} — the
+    # orchestrator's quarantine path owns corrupt-state recovery.
+    _state = read_phase_state_for_rewrite()
+    if _state is not None:
+        _state["executor_succeeded"] = True
+        os.makedirs(os.path.dirname(PHASE_STATE_FILE) or ".", exist_ok=True)
+        write_json_atomic(PHASE_STATE_FILE, _state, indent=2, raise_on_error=False)
 
     _clear_executor_gate_detail()
 
