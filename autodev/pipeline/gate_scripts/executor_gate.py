@@ -514,6 +514,18 @@ def evaluate_executor(output_path=None):
                     _deleted_at_base += [
                         p.strip() for p in _wt_result.stdout.splitlines() if p.strip()
                     ]
+                else:
+                    # Fail closed like the committed-diff sibling above: silently
+                    # omitting the working-tree half would let an executor that
+                    # deleted files without committing pass the guard undetected.
+                    print(
+                        f"[GATE FAIL] git ls-files --deleted for deletion check failed "
+                        f"(rc={_wt_result.returncode}) — failing closed to protect "
+                        f"deletion guard.",
+                        file=sys.stderr,
+                    )
+                    record_error_code_only("executor", ERR_GIT_DIFF_FAILED)
+                    return "FAIL"
 
                 _file_manifest_set = set(data.get("file_manifest", []))
                 # files_deleted is an optional array; absent/null treated as empty.
