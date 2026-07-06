@@ -192,6 +192,12 @@ curl -sS -o /dev/null -w "HTTP %{http_code}\n" -X POST http://127.0.0.1:18789/ho
 
 ## Troubleshooting
 
+Start with the doctor: it checks every known silent-failure mode in one pass and prints a fix hint for each red item.
+
+```bash
+source .env && python -m autodev.installer.doctor
+```
+
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | UI says `RUNNING` but no agents ever fire | OpenClaw gateway is down | `curl -s http://localhost:18789/v1/models`; connection refused means start the gateway |

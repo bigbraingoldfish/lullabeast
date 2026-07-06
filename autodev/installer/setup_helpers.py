@@ -734,6 +734,67 @@ def _merge_sections(existing: Any, required: tuple[str, ...]) -> list[str]:
     return out
 
 
+def audit_openclaw_context_limits(openclaw_json_path: str) -> list[str]:
+    """Read-only audit of the truncation keys ``ensure_openclaw_context_limits`` seeds.
+
+    Returns issue codes; an empty list means the config is conformant. Codes:
+      * ``no_file`` / ``invalid_json`` / ``invalid_root`` / ``agents_shape``
+      * ``{agent_id}:bootstrapMaxChars`` when a present Lullabeast agent entry is
+        missing the cap or carries a value below ``AUTODEV_BOOTSTRAP_MAX_CHARS``
+      * ``{agent_id}:postCompactionMaxChars`` when a present pipeline-role entry
+        is missing the cap or carries a value below
+        ``AUTODEV_POSTCOMPACTION_MAX_CHARS``
+      * ``missing_section:{name}`` for each required Always-Apply header absent
+        from ``agents.defaults.compaction.postCompactionSections``
+
+    Absent agent entries are deliberately NOT reported here (that is the
+    agents-registered check's job); only entries that exist are audited. This is
+    the audit-only sibling of the mutating ``ensure_openclaw_context_limits``,
+    used by the doctor (DS-1), which must never write.
+    """
+    path = os.path.abspath(openclaw_json_path)
+    if not os.path.isfile(path):
+        return ["no_file"]
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return ["invalid_json"]
+    if not isinstance(data, dict):
+        return ["invalid_root"]
+    agents = data.get("agents")
+    if not isinstance(agents, dict) or not isinstance(agents.get("list"), list):
+        return ["agents_shape"]
+
+    issues: list[str] = []
+    bootstrap_ids = set(AUTODEV_BOOTSTRAP_AGENT_IDS)
+    postcompaction_ids = set(AUTODEV_POSTCOMPACTION_AGENT_IDS)
+    for entry in agents["list"]:
+        if not isinstance(entry, dict):
+            continue
+        aid = entry.get("id")
+        if aid in bootstrap_ids:
+            bmc = entry.get("bootstrapMaxChars")
+            if not isinstance(bmc, (int, float)) or isinstance(bmc, bool) or bmc < AUTODEV_BOOTSTRAP_MAX_CHARS:
+                issues.append(f"{aid}:bootstrapMaxChars")
+        if aid in postcompaction_ids:
+            cl = entry.get("contextLimits")
+            pcm = cl.get("postCompactionMaxChars") if isinstance(cl, dict) else None
+            if not isinstance(pcm, (int, float)) or isinstance(pcm, bool) or pcm < AUTODEV_POSTCOMPACTION_MAX_CHARS:
+                issues.append(f"{aid}:postCompactionMaxChars")
+
+    defaults = agents.get("defaults")
+    compaction = defaults.get("compaction") if isinstance(defaults, dict) else None
+    sections = compaction.get("postCompactionSections") if isinstance(compaction, dict) else None
+    present = {s for s in sections if isinstance(s, str)} if isinstance(sections, list) else set()
+    for name in AUTODEV_POSTCOMPACTION_SECTIONS:
+        if not name.startswith("Always-Apply:"):
+            continue
+        if name not in present:
+            issues.append(f"missing_section:{name}")
+    return issues
+
+
 def ensure_openclaw_context_limits(openclaw_json_path: str) -> str:
     """Seed Lullabeast bootstrap/compaction truncation keys in openclaw.json (atomic).
 

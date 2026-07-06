@@ -8,6 +8,23 @@ This project follows [Semantic Versioning](https://semver.org/). The first publi
 
 _No unreleased changes._
 
+## [1.0.0] - planned
+
+The Deploy Simplification release. Entries accumulate here as each DS phase lands; the date replaces "planned" when 1.0.0 ships. Landed so far: DS-1 (doctor) and DS-2 (installer modes).
+
+### Added
+- **The doctor: one command that tells you whether your install will actually work.** `python -m autodev.installer.doctor` checks every documented silent-failure mode (paths, dependencies, `openclaw.json` health, OpenClaw version floor and known-bad releases, gateway reachability, plugin bundle freshness, webhook secret sync, project-symlink agreement, stale locks, Playwright, tokens, ports) and prints a green/red checklist with a one-line fix per red item. Strictly read-only. Flags: `--json` for a machine-readable report, `--quiet` to print only problems, `--live` to add the webhook ping (opt-in because it creates a real agent session). Exit codes: 0 all ok, 1 any failure, 2 warnings only. The same report is served at `GET /api/doctor`, and `install.sh` now ends every run with the doctor as its authoritative final verdict.
+- **Installer modes.** `install.sh --owned-openclaw` (for containers and other trees the installer fully owns): overwrites agent files unconditionally, validates `openclaw.json` against the expected baseline instead of patching it, never prompts, and treats any warning as a fatal error; two runs converge to byte-identical trees. `install.sh --strict` (for unattended dev installs): non-interactive, and a failing doctor makes the installer exit 1. The default guest mode keeps its non-destructive, prompt-driven behavior for shared hosts.
+
+### Changed
+- **Non-interactive installs now converge the webhook secret instead of warning about it.** A mismatched `hooks_token` in `ui/config.json` or `.env` is synced to `openclaw.json`'s `hooks.token` (the source of truth) rather than left broken with a warning. Every installer prompt now documents its non-interactive default at the call site; the one deliberate "no" is the global `tools.profile` change, which the doctor flags instead.
+- **The installer waits for the gateway to come back after restarting it** (bounded, 20 s), so the final health checks no longer probe a gateway that is still booting from the restart the installer itself issued.
+
+### Fixed
+- **A concurrent-unsafe config write in the plugin install step.** The `allowConversationAccess` patch wrote `openclaw.json` through a fixed temp filename; it now uses a unique temp file with an atomic replace, and skips the write entirely when the value is already set.
+- **Repeat installs no longer touch files that did not change.** Workspace `pipeline-project` symlinks are re-created only when their target differs, so a second non-interactive run changes no file under the OpenClaw root.
+- **Plugin validation no longer false-fails on OpenClaw 2026.6.x.** The static plugin inspection in that release reports no typed hooks for plugins that register at runtime; both the installer's validator and the doctor now fall back to verifying the hook names inside the deployed bundle.
+
 ## [0.2.2] - 2026-07-06
 
 A correctness and durability pass resolving a static code audit. Five fixes that harden the pipeline's write, recovery, and file-deletion-guard paths against crashes, transient git failures, and state-file corruption. All are internal reliability improvements with no change to the operator workflow.
