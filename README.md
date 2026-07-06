@@ -135,6 +135,8 @@ Running on non-default ports, or hitting setup snags? [SETUP.md](SETUP.md) cover
 
 ### Install & run
 
+> **Prefer a container?** A Docker Compose path now exists: one container, one API key, no host prerequisites beyond Docker. See [deploy/README.md](deploy/README.md). The steps below are the bare-metal install.
+
 ```bash
 # 1. Install and start OpenClaw first.
 #    https://docs.openclaw.ai/start/getting-started

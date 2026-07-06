@@ -1,0 +1,39 @@
+# Lullabeast single-container deploy (DS-3). Quickstart and the full env /
+# volume / upgrade contract live in deploy/README.md.
+#
+# One service on purpose: the orchestrator, gateway, agents, and gate scripts
+# coordinate through shared filesystem paths (the pipeline-project symlink
+# hub, session JSONL reads, activity stamps). Splitting them across containers
+# would require identical absolute mount paths in every container or the
+# symlinks break; a single container removes that whole risk class.
+services:
+  lullabeast:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: lullabeast:local
+    env_file: .env
+    ports:
+      # Loopback publish only: the dashboard is token-authed single-operator
+      # tooling. Exposing it on a LAN is a conscious edit; read the "Security
+      # and network exposure" section of SETUP.md first.
+      - "127.0.0.1:${UI_PORT:-18790}:${UI_PORT:-18790}"
+    # The OpenClaw gateway port (18789) is deliberately NOT published; it is
+    # container-internal.
+    volumes:
+      # All state (OpenClaw tree, pipeline state, secrets) lives here and
+      # survives image upgrades. Must be a local volume driver: fcntl.flock
+      # on NFS-backed volumes is unsupported (see deploy/README.md).
+      - lullabeast-data:/data
+      # Bind mount: generated project code is visible on the host so you can
+      # open it with your own tools.
+      - ./projects:/data/projects
+    extra_hosts:
+      # Lets agents reach a model server running on the docker host via
+      # http://host.docker.internal:<port> (the local-model bridge, DS-7).
+      - "host.docker.internal:host-gateway"
+    init: true
+    restart: unless-stopped
+
+volumes:
+  lullabeast-data:

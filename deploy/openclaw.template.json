@@ -10,22 +10,21 @@
         "api": "openai-completions",
         "models": [
           {
-            "id": "qwen/qwen3.6-35b-a3b",
-            "name": "Qwen3.6 35B A3B",
+            "id": "qwen/qwen3.6-27b",
+            "name": "Qwen3.6 27B",
             "reasoning": true,
             "input": [
               "text",
-              "image",
-              "video"
+              "image"
             ],
             "cost": {
-              "input": 0.15,
-              "output": 1,
-              "cacheRead": 0.05,
+              "input": 0.285,
+              "output": 2.4,
+              "cacheRead": 0,
               "cacheWrite": 0
             },
             "contextWindow": 262144,
-            "maxTokens": 16384
+            "maxTokens": 32768
           },
           {
             "id": "minimax/minimax-m3",
@@ -98,12 +97,6 @@
         "fallbacks": []
       },
       "models": {
-        "openrouter/qwen/qwen3.6-35b-a3b": {
-          "params": {
-            "temperature": 0.6,
-            "top_p": 0.95
-          }
-        },
         "openrouter/minimax/minimax-m3": {
           "params": {
             "temperature": 0.7,
@@ -117,6 +110,12 @@
           }
         },
         "openrouter/moonshotai/kimi-k2.7-code": {
+          "params": {
+            "temperature": 0.6,
+            "top_p": 0.95
+          }
+        },
+        "openrouter/qwen/qwen3.6-27b": {
           "params": {
             "temperature": 0.6,
             "top_p": 0.95
@@ -238,7 +237,7 @@
         "default": true,
         "workspace": "~/.openclaw/workspace-escalation",
         "model": {
-          "primary": "${PRD_MODEL}",
+          "primary": "${ESCALATION_MODEL}",
           "fallbacks": []
         },
         "tools": {
@@ -262,7 +261,7 @@
         "id": "roadmap-converter",
         "workspace": "~/.openclaw/workspace-roadmap-converter",
         "model": {
-          "primary": "${PRD_MODEL}",
+          "primary": "${ROADMAP_MODEL}",
           "fallbacks": []
         },
         "tools": {
