@@ -132,19 +132,31 @@ class TestT44RoadmapCheckboxFlip:
         rm.write_text(f"# Roadmap\n- [ ] `{raw_id}` | Do the thing\n")
         return rm
 
-    def test_readonly_roadmap_escalates_fail_closed(self, orch, monkeypatch):
-        """A non-git failure flipping the checkbox (read-only roadmap) must route
-        to escalation with the Decision #5 message — never silently proceed."""
+    def test_unwritable_roadmap_escalates_fail_closed(self, orch, monkeypatch):
+        """A non-git failure flipping the checkbox (unwritable roadmap dir) must
+        route to escalation with the Decision #5 message — never silently proceed.
+
+        The flip writes via ``write_text_atomic`` (mkstemp + os.replace), which a
+        read-only *file* cannot block — rename permission lives on the directory —
+        so the realistic failure is an unwritable directory (or full disk)."""
         if os.geteuid() == 0:
             pytest.skip("chmod read-only does not block the root user")
         inst, mod, tmp_path = orch
         inst.state["current_phase_raw_id"] = "CORE-1"
-        rm = self._make_roadmap(tmp_path)
-        rm.chmod(0o444)  # read ok, write → PermissionError
+        # Own subdir so the escalation path's state writes (which live in
+        # tmp_path / the artifacts dir) stay writable while the roadmap's
+        # directory rejects the atomic write's mkstemp.
+        rm_dir = tmp_path / "ro-roadmap"
+        rm_dir.mkdir()
+        rm = self._make_roadmap(rm_dir)
         # git add/commit are after the write; stub them so a stray call can't pass.
         monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: MagicMock(returncode=0))
 
-        ok = inst._flip_roadmap_checkbox_or_escalate(str(rm), 2)
+        rm_dir.chmod(0o555)  # read/traverse ok, mkstemp → PermissionError
+        try:
+            ok = inst._flip_roadmap_checkbox_or_escalate(str(rm), 2)
+        finally:
+            rm_dir.chmod(0o755)
 
         assert ok is False
         assert inst.state["current_agent"] == "escalation"
