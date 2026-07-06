@@ -1,13 +1,16 @@
-"""Static lints for the DS-3/DS-4 container deploy files.
+"""Static lints for the DS-3/DS-4/DS-5 container deploy files.
 
 Hermetic by construction: every test reads repo files (or runs `bash -n` /
-`git check-ignore` against them read-only); nothing touches ~/.openclaw, the
-live .autodev tree, or the network. Real `docker build` / `docker compose up`
-runs are manual acceptance (and DS-5 CI); do not fake them here.
+`git check-ignore` / `python deploy/smoke_assert.py` against tmp fixtures);
+nothing touches ~/.openclaw, the live .autodev tree, or the network. Real
+`docker build` / `docker compose up` runs are manual acceptance (and DS-5 CI);
+do not fake them here.
 """
 
+import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import yaml
@@ -21,6 +24,9 @@ DOCKERFILE = (DEPLOY / "Dockerfile").read_text(encoding="utf-8")
 ENTRYPOINT = (DEPLOY / "entrypoint.sh").read_text(encoding="utf-8")
 COMPOSE_PATH = DEPLOY / "docker-compose.yml"
 ENV_EXAMPLE = (DEPLOY / ".env.example").read_text(encoding="utf-8")
+WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "deploy-image.yml"
+WORKFLOW_TEXT = WORKFLOW_PATH.read_text(encoding="utf-8")
+SMOKE_ASSERT = DEPLOY / "smoke_assert.py"
 
 
 class TestDockerfile:
@@ -305,6 +311,221 @@ class TestHardening:
             assert needle in text, f"deploy/README.md is missing: {needle}"
 
 
+class TestOfflineMode:
+    """DS-5: OFFLINE=1 boots the full stack keyless for CI smoke runs."""
+
+    def test_offline_default_off(self):
+        assert 'OFFLINE="${OFFLINE:-0}"' in ENTRYPOINT
+
+    def test_offline_skips_api_key_requirement(self):
+        # The key die must sit in the elif behind the OFFLINE gate, so
+        # OFFLINE=1 boots keyless and every other boot still fails fast.
+        m = re.search(
+            r'if \[ "\$OFFLINE" = "1" \];.*?elif \[ -z "\$\{ANTHROPIC_API_KEY:-\}" \]',
+            ENTRYPOINT,
+            re.DOTALL,
+        )
+        assert m, "API-key die must be the elif branch of the OFFLINE gate"
+
+    def test_offline_banner_is_loud_and_honest(self):
+        # The roadmap requires a loud banner naming this as CI/smoke only.
+        assert "OFFLINE=1: CI/smoke mode." in ENTRYPOINT
+        assert "CI image smoke tests only" in ENTRYPOINT
+
+    def test_offline_skips_live_probe_and_preserves_first_boot_marker(self):
+        # OFFLINE must never fire the billable --live ping AND must leave the
+        # first-boot marker unwritten so a later real boot still gets its one
+        # ping: the OFFLINE no-op branch must guard the marker branch.
+        m = re.search(
+            r'if \[ "\$OFFLINE" = "1" \];.*?elif \[ ! -f "\$FIRST_BOOT_MARKER" \];'
+            r'.*?--live.*?touch "\$FIRST_BOOT_MARKER"',
+            ENTRYPOINT,
+            re.DOTALL,
+        )
+        assert m, "--live/marker branch must be gated behind the OFFLINE no-op"
+
+
+def _load_smoke_assert_module():
+    # deploy/ is not a package (no __init__.py, and it must stay importable by
+    # nothing at runtime); load the script by file path for the tests.
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("deploy_smoke_assert", SMOKE_ASSERT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestSmokeAssert:
+    """DS-5: functional tests for deploy/smoke_assert.py against tmp fixtures."""
+
+    def _run(self, tmp_path, checks):
+        path = tmp_path / "doctor.json"
+        path.write_text(json.dumps({"checks": checks}), encoding="utf-8")
+        return subprocess.run(
+            [sys.executable, str(SMOKE_ASSERT), str(path)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    def _green_checks(self):
+        mod = _load_smoke_assert_module()
+        REQUIRED_OK, REQUIRED_SKIPPED = mod.REQUIRED_OK, mod.REQUIRED_SKIPPED
+
+        checks = [
+            {"id": cid, "status": "ok", "detail": "", "fix_hint": ""}
+            for cid in REQUIRED_OK
+        ]
+        checks += [
+            {"id": cid, "status": "skipped", "detail": "", "fix_hint": ""}
+            for cid in REQUIRED_SKIPPED
+        ]
+        checks.append(
+            {"id": "python_deps", "status": "ok", "detail": "", "fix_hint": ""}
+        )
+        return checks
+
+    def test_all_green_exits_zero(self, tmp_path):
+        proc = self._run(tmp_path, self._green_checks())
+        assert proc.returncode == 0, proc.stderr
+        assert "SMOKE OK" in proc.stdout
+
+    def test_any_fail_exits_nonzero_naming_the_check(self, tmp_path):
+        checks = self._green_checks()
+        checks.append(
+            {
+                "id": "plugin_deployed",
+                "status": "fail",
+                "detail": "marker missing",
+                "fix_hint": "re-run install.sh",
+            }
+        )
+        proc = self._run(tmp_path, checks)
+        assert proc.returncode == 1
+        # Acceptance: the doctor check is NAMED in the failure output.
+        assert "plugin_deployed" in proc.stderr
+        assert "marker missing" in proc.stderr
+
+    def test_required_check_warn_is_not_good_enough(self, tmp_path):
+        checks = self._green_checks()
+        for c in checks:
+            if c["id"] == "secret_sync":
+                c["status"] = "warn"
+        proc = self._run(tmp_path, checks)
+        assert proc.returncode == 1
+        assert "secret_sync" in proc.stderr
+
+    def test_required_check_missing_is_flagged(self, tmp_path):
+        checks = [c for c in self._green_checks() if c["id"] != "gateway_up"]
+        proc = self._run(tmp_path, checks)
+        assert proc.returncode == 1
+        assert "gateway_up" in proc.stderr
+
+    def test_webhook_ping_must_be_skipped_not_ok_or_fail(self, tmp_path):
+        checks = self._green_checks()
+        for c in checks:
+            if c["id"] == "webhook_ping":
+                c["status"] = "fail"
+        proc = self._run(tmp_path, checks)
+        assert proc.returncode == 1
+        assert "webhook_ping" in proc.stderr
+
+    def test_unparseable_report_exits_nonzero(self, tmp_path):
+        path = tmp_path / "doctor.json"
+        path.write_text("{not json", encoding="utf-8")
+        proc = subprocess.run(
+            [sys.executable, str(SMOKE_ASSERT), str(path)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert proc.returncode == 1
+        assert "unreadable/unparseable" in proc.stderr
+
+    def test_required_ids_exist_in_the_doctor_catalogue(self):
+        # Drift guard: every id smoke_assert requires must be a real doctor
+        # check (check_<id> function), or a doctor rename silently turns the
+        # CI assertion into a guaranteed "missing check" failure.
+        from autodev.installer import doctor
+
+        mod = _load_smoke_assert_module()
+        for cid in (*mod.REQUIRED_OK, *mod.REQUIRED_SKIPPED):
+            assert hasattr(doctor, f"check_{cid}"), (
+                f"smoke_assert requires unknown doctor check id: {cid}"
+            )
+
+
+class TestDeployImageWorkflow:
+    """DS-5: static lints on .github/workflows/deploy-image.yml."""
+
+    def _load(self):
+        return yaml.safe_load(WORKFLOW_TEXT)
+
+    def _triggers(self):
+        data = self._load()
+        # YAML 1.1 parses the bare key `on` as boolean True.
+        return data.get("on") or data[True]
+
+    ROADMAP_PATHS = (
+        "deploy/**",
+        "install.sh",
+        "requirements*.txt",
+        "ui/requirements.txt",
+        "autodev/plugin/**",
+        "autodev/installer/**",
+    )
+
+    def test_workflow_exists_and_parses(self):
+        assert WORKFLOW_PATH.is_file()
+        assert isinstance(self._load(), dict)
+
+    def test_push_and_pr_path_filters_cover_the_deploy_surface(self):
+        trig = self._triggers()
+        for event in ("push", "pull_request"):
+            paths = trig[event]["paths"]
+            for p in self.ROADMAP_PATHS:
+                assert p in paths, f"{event} paths filter is missing {p}"
+            # The workflow must rebuild when it itself changes.
+            assert ".github/workflows/deploy-image.yml" in paths
+
+    def test_push_covers_main_and_version_tags(self):
+        push = self._triggers()["push"]
+        assert "main" in push["branches"]
+        assert "v*" in push["tags"]
+
+    def test_both_task0_variants_built(self):
+        # Baked default (no build-arg override) plus the no-bake variant
+        # (empty OPENCLAW_VERSION build arg).
+        assert "docker build -f deploy/Dockerfile -t lullabeast:ci ." in WORKFLOW_TEXT
+        assert "--build-arg OPENCLAW_VERSION=" in WORKFLOW_TEXT
+
+    def test_smoke_boots_offline_and_asserts_doctor_json(self):
+        assert "OFFLINE=1" in WORKFLOW_TEXT
+        assert "autodev.installer.doctor --json" in WORKFLOW_TEXT
+        assert "deploy/smoke_assert.py" in WORKFLOW_TEXT
+
+    def test_publish_gated_on_version_tags_with_packages_permission(self):
+        jobs = self._load()["jobs"]
+        publish = jobs["publish"]
+        assert "startsWith(github.ref, 'refs/tags/v')" in publish["if"]
+        assert publish["permissions"]["packages"] == "write"
+        assert set(publish["needs"]) == {"build-smoke", "build-no-bake"}
+
+    def test_publish_pushes_ghcr_lullabeast_tag_and_latest(self):
+        assert "ghcr.io" in WORKFLOW_TEXT
+        assert "/lullabeast" in WORKFLOW_TEXT
+        assert re.search(r"docker push .*:\$\{GITHUB_REF_NAME\}", WORKFLOW_TEXT)
+        assert re.search(r'docker push .*:latest', WORKFLOW_TEXT)
+
+    def test_no_floating_openclaw_version(self):
+        # Cross-cutting risk 1: never float "latest" for OpenClaw anywhere.
+        assert "openclaw@latest" not in WORKFLOW_TEXT
+
+    def test_no_em_or_en_dashes(self):
+        assert "—" not in WORKFLOW_TEXT and "–" not in WORKFLOW_TEXT
+
+
 class TestDocs:
     def test_eval_migration_doc_covers_required_contract(self):
         text = (DEPLOY / "EVAL-MIGRATION.md").read_text(encoding="utf-8")
@@ -352,6 +573,7 @@ class TestDocs:
             ".gitignore",
             "README.md",
             "EVAL-MIGRATION.md",
+            "smoke_assert.py",
         ):
             text = (DEPLOY / name).read_text(encoding="utf-8")
             assert "—" not in text and "–" not in text, (

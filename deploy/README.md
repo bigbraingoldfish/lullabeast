@@ -85,6 +85,37 @@ rather than dead-ending at the conformance check; keys the template does not
 pin are preserved. Nothing re-provisions from scratch: tokens, sessions, and
 pipeline state are kept.
 
+## CI, published images, and OFFLINE mode (DS-5)
+
+The GitHub Actions workflow
+[.github/workflows/deploy-image.yml](../.github/workflows/deploy-image.yml)
+keeps this deploy path from rotting: every PR or push that touches
+`deploy/`, `install.sh`, the requirements files, the signals plugin, or the
+installer modules rebuilds both image variants (baked and no-bake) and
+smoke-tests the baked one. The smoke boots the container with `OFFLINE=1`,
+waits for the supervisor, then runs the doctor with `--json` inside the
+container and asserts the result via [smoke_assert.py](smoke_assert.py): no
+check may fail, every keyless-runnable check must be green, and the live-only
+`webhook_ping` must report skipped.
+
+`OFFLINE=1` is the entrypoint's CI/smoke mode: it skips the provider API key
+requirement and the one-time billable `--live` doctor probe (leaving the
+first-boot marker unwritten, so a later real boot still performs its one live
+ping). Everything else provisions for real. Agents cannot run without a key;
+the boot log prints a loud banner saying so. Never use it for a real
+deployment.
+
+On version tags (`v*`) the workflow publishes the baked image to
+`ghcr.io/bigbraingoldfish/lullabeast:<tag>` and `:latest` (OpenClaw is MIT
+licensed, so publishing with it baked is permitted; see the Task 0 note
+above). To use a published image instead of building locally, replace the
+service's `build:` block and `image:` line in
+[docker-compose.yml](docker-compose.yml) with:
+
+```yaml
+    image: ghcr.io/bigbraingoldfish/lullabeast:latest
+```
+
 ## Customization contract (mounts, not edits)
 
 The installer OWNS the OpenClaw tree inside the container. Hand-edits under
@@ -234,3 +265,6 @@ for your own model, follow the walkthrough in [SETUP.md](../SETUP.md) under
   the template, including the minimum-hardware statement.
 - [EVAL-MIGRATION.md](EVAL-MIGRATION.md): the before/after contract diff for
   the `lullabeast-eval` sister repo (which stays on bare-metal guest mode).
+- [smoke_assert.py](smoke_assert.py): the DS-5 CI assertion script; validates
+  the doctor's `--json` report from an `OFFLINE=1` smoke boot (run by
+  [.github/workflows/deploy-image.yml](../.github/workflows/deploy-image.yml)).

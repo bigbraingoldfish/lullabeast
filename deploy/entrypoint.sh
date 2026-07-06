@@ -43,7 +43,20 @@ cd "$APP"
 # ── 1. Env contract ──────────────────────────────────────────────────────────
 # Fail before starting anything: a keyless container boots into a pipeline
 # that stalls silently at the first agent invocation.
-if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${OPENROUTER_API_KEY:-}" ]; then
+#
+# OFFLINE=1 (DS-5, CI/smoke only) is the one exception: it boots the full
+# stack with no provider key and no billable probes so CI can build the image
+# and doctor it on every deploy-file change. Provisioning is otherwise
+# unchanged; agents cannot run in this mode.
+OFFLINE="${OFFLINE:-0}"
+if [ "$OFFLINE" = "1" ]; then
+    echo "=================================================================="
+    echo "  OFFLINE=1: CI/smoke mode."
+    echo "  The provider API key requirement and the one-time --live doctor"
+    echo "  probe are skipped. Agents CANNOT run without a key; this mode is"
+    echo "  for CI image smoke tests only, never for a real deployment."
+    echo "=================================================================="
+elif [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${OPENROUTER_API_KEY:-}" ]; then
     die "no provider API key set. Put ANTHROPIC_API_KEY or OPENROUTER_API_KEY in deploy/.env (the shipped model defaults use OpenRouter, so OPENROUTER_API_KEY is the golden path; with an Anthropic key, also set the *_MODEL variables)."
 fi
 
@@ -233,7 +246,12 @@ wait_for_gateway
 
 FIRST_BOOT_MARKER="$DATA/.first-boot-doctor-done"
 DOCTOR_FLAGS=()
-if [ ! -f "$FIRST_BOOT_MARKER" ]; then
+if [ "$OFFLINE" = "1" ]; then
+    # CI/smoke mode: never fire the live (billable) probe, and leave the
+    # first-boot marker unwritten so a later real boot still gets its one
+    # --live ping. The non-live doctor below still gates the boot.
+    :
+elif [ ! -f "$FIRST_BOOT_MARKER" ]; then
     # --live adds the webhook ping, which creates one real (tiny, billable)
     # agent session; that validates the provider API key end to end exactly
     # once. Mark the ping spent BEFORE running the doctor: otherwise a doctor

@@ -1,0 +1,155 @@
+# Deploy image CI (DS-5): build the container image and smoke-test it with
+# the doctor so the deploy path cannot silently rot.
+#
+# 1. build-smoke: build the default (OpenClaw-baked) image, boot it with
+#    OFFLINE=1 (the entrypoint's CI/smoke mode: no provider API key, no
+#    billable --live probe, everything else provisions for real), wait for the
+#    boot to reach the supervisor, then run the doctor with --json inside the
+#    container and assert the DS-5 contract via deploy/smoke_assert.py:
+#    report parses, no check fails, every keyless-runnable check is green,
+#    and the model-dependent webhook_ping reports skipped (never fail).
+#    A final step re-runs the hermetic doctor/template pytest modules inside
+#    the image (the optional smoke deepener; drop it first if runtime creep
+#    ever matters).
+# 2. build-no-bake: build the second Task-0 variant (--build-arg
+#    OPENCLAW_VERSION= empty, entrypoint installs the pin into /data on first
+#    boot). Build-only: its first boot needs the npm registry and duplicates
+#    the baked variant's smoke coverage.
+# 3. publish: on version tags only, push the baked image to GHCR. OpenClaw is
+#    MIT-licensed (DS-3 Task 0 decision, recorded in deploy/README.md), so
+#    publishing with OpenClaw baked is permitted.
+#
+# Trigger note: GitHub does not evaluate `paths` filters for tag pushes, so a
+# version tag always builds and publishes even when the tagged commit touched
+# no deploy file. Branch pushes and PRs are path-filtered to the deploy
+# surface.
+name: Deploy image
+
+# Keep the two paths lists identical (duplicated because GitHub's workflow
+# parser has not historically supported YAML anchors).
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths:
+      - "deploy/**"
+      - "install.sh"
+      - "requirements*.txt"
+      - "ui/requirements.txt"
+      - "autodev/plugin/**"
+      - "autodev/installer/**"
+      - ".github/workflows/deploy-image.yml"
+  pull_request:
+    paths:
+      - "deploy/**"
+      - "install.sh"
+      - "requirements*.txt"
+      - "ui/requirements.txt"
+      - "autodev/plugin/**"
+      - "autodev/installer/**"
+      - ".github/workflows/deploy-image.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-smoke:
+    name: build (baked) + offline doctor smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build context is the repo root (deploy/Dockerfile.dockerignore is the
+      # per-Dockerfile context filter). No --build-arg: the Dockerfile's
+      # pinned OPENCLAW_VERSION default is the variant users get.
+      - name: Build image (OpenClaw baked, the default variant)
+        run: docker build -f deploy/Dockerfile -t lullabeast:ci .
+
+      - name: Boot container in OFFLINE smoke mode
+        run: docker run -d --name lullabeast-smoke -e OFFLINE=1 lullabeast:ci
+
+      # The "Lullabeast is up." banner prints only after the entrypoint's own
+      # doctor gate passed, so reaching it proves the boot sequence (config
+      # render, owned-mode install.sh, gateway restart, doctor) completed.
+      - name: Wait for boot to reach the supervisor
+        run: |
+          for i in $(seq 1 120); do
+            if docker logs lullabeast-smoke 2>&1 | grep -q "Lullabeast is up."; then
+              exit 0
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' lullabeast-smoke)" != "true" ]; then
+              echo "::error::container exited during boot"
+              docker logs lullabeast-smoke
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "::error::boot did not complete within 600s"
+          docker logs lullabeast-smoke
+          exit 1
+
+      - name: Assert the entrypoint reached the doctor and announced OFFLINE mode
+        run: |
+          docker logs lullabeast-smoke 2>&1 | grep -q "running doctor"
+          docker logs lullabeast-smoke 2>&1 | grep -q "OFFLINE=1: CI/smoke mode."
+
+      # `|| true`: the doctor exits nonzero on fail/warn, but the assertion
+      # step below must still see the JSON so the failing check is NAMED in
+      # the CI output instead of a bare exit code.
+      - name: Doctor JSON report from inside the container
+        run: |
+          docker exec lullabeast-smoke bash -c \
+            'set -a; . /app/.env; set +a; cd /app && OWNED_OPENCLAW=1 python3 -m autodev.installer.doctor --json' \
+            > doctor.json || true
+          python3 deploy/smoke_assert.py doctor.json
+
+      # Optional smoke deepener (roadmap "job 3"): the hermetic doctor and
+      # template test modules, run against the image's own Python + layout.
+      - name: Hermetic doctor test suite inside the image
+        run: |
+          docker run --rm --entrypoint bash lullabeast:ci -c '
+            pip install -q pytest==9.0.2 httpx==0.28.1 &&
+            cd /app &&
+            python -m pytest tests/test_doctor_checks.py tests/test_doctor_endpoint.py tests/test_openclaw_template.py -q -p no:cacheprovider
+          '
+
+      - name: Dump boot log on failure
+        if: failure()
+        run: docker logs lullabeast-smoke 2>&1 || true
+
+      - name: Teardown
+        if: always()
+        run: docker rm -f lullabeast-smoke 2>/dev/null || true
+
+  build-no-bake:
+    name: build (no-bake variant)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image (empty OPENCLAW_VERSION, entrypoint installs on first boot)
+        run: docker build -f deploy/Dockerfile --build-arg OPENCLAW_VERSION= -t lullabeast:ci-no-bake .
+
+  publish:
+    name: publish to GHCR (version tags)
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [build-smoke, build-no-bake]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      # Publish the baked variant (MIT license permits it; Task 0). GHCR
+      # image names must be lowercase, hence the tr on the owner.
+      - name: Build and push
+        run: |
+          owner="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${owner}/lullabeast"
+          docker build -f deploy/Dockerfile -t "$image:${GITHUB_REF_NAME}" -t "$image:latest" .
+          docker push "$image:${GITHUB_REF_NAME}"
+          docker push "$image:latest"
