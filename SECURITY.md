@@ -10,6 +10,10 @@ The UI and API are designed to run on loopback (`127.0.0.1`, port **18790**) and
 
 The agent pipeline (planner → executor → reviewer) executes code on the host machine. The trust boundary is the **local user account**: anyone who can invoke the pipeline API can cause code to run under the account that owns the Lullabeast process. Treat this as operator tooling for a trusted machine, not a multi-tenant service.
 
+### Container deployment
+
+The Docker deployment in `deploy/` moves the trust boundary from the local user account to the container: generated code runs as an unprivileged user with all Linux capabilities dropped, `no-new-privileges` set, Lullabeast's own code mounted read-only to that user, and the dashboard published to the host loopback only. The sandbox contains filesystem damage and host process access; it does **not** contain network exfiltration or package-install supply-chain risk, because model APIs and legitimate package installs need the internet. The full posture, the read-only rootfs assessment, and the secrets handling are documented in [deploy/README.md, "Security hardening"](deploy/README.md#security-hardening).
+
 ## Reporting vulnerabilities
 
 **Non-sensitive findings** (documentation gaps, missing headers, hardening suggestions): open a [GitHub issue](../../issues) with the title prefix `[SECURITY]`.

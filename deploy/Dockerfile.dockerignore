@@ -15,3 +15,7 @@ projects
 deploy/.env
 deploy/projects
 docs/archive
+# DS-4 secrets posture: a dev tree's local ui/config.json carries the real
+# hooks_token; baking it would embed that secret in a published image. The
+# container writes its own ui/config.json on boot.
+ui/config.json

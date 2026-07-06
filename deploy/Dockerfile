@@ -21,10 +21,14 @@ FROM mcr.microsoft.com/playwright:v1.56.0-noble
 ARG OPENCLAW_VERSION=2026.6.11
 ENV OPENCLAW_VERSION=${OPENCLAW_VERSION}
 
+# DS-4: no sudo in the image (nothing needs it; the runtime user is non-root
+# and compose sets no-new-privileges, so a leftover setuid sudo would be inert
+# anyway, but it does not belong in the blast-radius boundary at all).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         python3 python3-venv python3-pip git \
-    && rm -rf /var/lib/apt/lists/*
+    && (apt-get purge -y --auto-remove sudo || true) \
+    && rm -rf /var/lib/apt/lists/* /etc/sudoers /etc/sudoers.d
 
 RUN if [ -n "$OPENCLAW_VERSION" ]; then \
         npm install -g "openclaw@${OPENCLAW_VERSION}"; \
@@ -37,18 +41,31 @@ RUN if [ -n "$OPENCLAW_VERSION" ]; then \
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN npx -y --package=@playwright/mcp@0.0.40 -- playwright-core install chromium
 
-# Non-root user. Hardening is finalized in DS-4, but the user exists from the
-# start so nothing in the image assumes root. uid 1000 by default so files in
-# the ./projects bind mount come out owned by the typical host user; the base
-# image's pwuser (also uid 1000) is removed to free the uid.
+# Non-root user (DS-4: every runtime process runs as it). uid 1000 by default
+# so files in the ./projects bind mount come out owned by the typical host
+# user; the base image's pwuser (also uid 1000) is removed to free the uid.
 ARG LULLABEAST_UID=1000
 RUN (userdel -r pwuser 2>/dev/null || true) \
     && useradd --create-home --shell /bin/bash --uid "${LULLABEAST_UID}" lullabeast \
     && mkdir -p /data \
     && chown lullabeast:lullabeast /data
 
-COPY --chown=lullabeast:lullabeast . /app
+# DS-4: /app is root-owned and read-only to the runtime user. The pipeline
+# executes LLM-generated code as lullabeast (the executor has exec, and there
+# is a documented model bug that deletes files), so the orchestrator, gate
+# scripts, UI server, installer, and agent identity sources must not be
+# writable by that user. Three narrow write islands are the per-boot contract
+# install.sh (the single provisioning brain) and the entrypoint depend on:
+#   /app and /app/ui   group-writable with the sticky bit (like /tmp):
+#     lullabeast can create .env, .autodev/, ui/config.json and their
+#     atomic-write temp files, but cannot remove or replace root-owned code.
+#   /app/autodev/plugin   fully lullabeast-owned: install.sh rebuilds the
+#     signals plugin bundle here on every boot.
+COPY . /app
 WORKDIR /app
+RUN chown -R lullabeast:lullabeast /app/autodev/plugin \
+    && chgrp lullabeast /app /app/ui \
+    && chmod 1775 /app /app/ui
 USER lullabeast
 
 # Python deps live in a user-owned venv (noble's system Python is externally
@@ -82,6 +99,12 @@ ENV OPENCLAW_ROOT=/data/openclaw \
     AUTODEV_REPO_PATH=/app \
     AUTODEV_PIPELINE_ROOT=/data/pipeline-state \
     UI_PORT=18790
+
+# Python bytecode caches would otherwise try to land next to the root-owned
+# sources in /app (Python silently skips caching when the directory is not
+# writable); keep them under /tmp instead, where writes are allowed by the
+# DS-4 posture.
+ENV PYTHONPYCACHEPREFIX=/tmp/pycache
 
 EXPOSE 18790
 ENTRYPOINT ["/app/deploy/entrypoint.sh"]

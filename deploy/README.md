@@ -120,6 +120,89 @@ contract.
   a model server running on the host is reachable from inside the container
   (the local-model bridge, documented in DS-7).
 
+## Security hardening
+
+The container is the blast-radius boundary for LLM-generated code: the
+executor agent runs generated code with exec, and there is a documented model
+bug that deletes files. The default posture:
+
+- **Non-root everywhere.** Every process (gateway, dashboard, maintenance
+  loops, the orchestrator and the agents it spawns) runs as the unprivileged
+  `lullabeast` user. There is no sudo in the image.
+- **No capabilities, no privilege escalation.** The compose file ships
+  `cap_drop: [ALL]` and `no-new-privileges:true`. Nothing in the container
+  needs a capability: all ports are unprivileged, and Playwright launches
+  Chromium with Chromium's own sandbox disabled by default, so no
+  `SYS_ADMIN` add-back is needed. Any future add-back must be justified by a
+  real probe, documented inline in [docker-compose.yml](docker-compose.yml).
+- **Lullabeast's code is read-only to the runtime user.** `/app` is
+  root-owned, so the orchestrator, gate scripts, UI server, installer, and
+  agent identity sources cannot be modified or replaced by anything running
+  as `lullabeast`. Three narrow write islands exist because install.sh runs
+  on every boot: `.env` and `.autodev/` (created inside the sticky,
+  group-writable `/app`), `ui/config.json` (same mechanism in `/app/ui`),
+  and `/app/autodev/plugin` (the per-boot signals-plugin rebuild). The
+  sticky bit means root-owned entries in those two directories cannot be
+  removed or renamed either.
+- **Everything else writes to `/data`, `/tmp`, and the home directory.**
+  All state lives under `/data`; `/tmp` holds scratch files and Python
+  bytecode caches; `/home/lullabeast` holds the baked Python venv and the
+  per-boot npm/pip caches.
+- **Resource ceilings** (`pids_limit`, `mem_limit`) ship commented in the
+  compose file with sizing guidance; uncomment them to keep a runaway
+  process tree from starving the host.
+
+### Read-only rootfs: assessed, deliberately off
+
+`read_only: true` (plus tmpfs mounts) was assessed and not shipped:
+install.sh is the single provisioning brain and runs on every boot, writing
+inside `/app` by contract (the `.env` merge, `ui/config.json`, the plugin
+rebuild), and `/home/lullabeast` carries the baked Python venv that a tmpfs
+mount would shadow. A read-only rootfs breaks boot outright, and relocating
+those writes would fork provisioning logic out of install.sh (a rule this
+roadmap treats as load-bearing). The protection it would have bought is
+shipped through image file ownership instead: the read-only `/app` described
+above.
+
+### Secrets posture
+
+The provider API key exists only in your `deploy/.env` (gitignored, and
+excluded from the image build context) and in the container environment.
+Generated tokens persist under `/data/secrets` (directory mode 700, files
+600). Neither the entrypoint nor install.sh ever prints the API key or the
+hooks/gateway tokens. One deliberate exception: the boot banner prints the
+dashboard URL including `AUTODEV_UI_TOKEN`, so `docker compose logs` can
+always recover dashboard access; treat container logs as sensitive. A dev
+tree's local `ui/config.json` (which carries a real webhook token) is
+excluded from the build context so it can never be baked into an image.
+
+### What the sandbox does and does not contain
+
+Contained:
+
+- **Filesystem damage.** Generated code writes only to `/data` (its own
+  project tree and the OpenClaw state), `/tmp`, and the container home; the
+  host filesystem is reachable only through the `./projects` bind mount, and
+  Lullabeast's own code and gates are read-only to it.
+- **Host process access.** Code runs as an unprivileged user inside the
+  container, with no capabilities and no privilege escalation; it cannot see
+  or signal host processes.
+
+Not contained (residual risk, documented honestly; out of scope for this
+release):
+
+- **Network exfiltration.** Cloud model APIs need the internet, so there is
+  no egress lockdown. Generated code can reach the network and could send
+  data out, including anything in its project tree or environment.
+- **Package-install supply chain.** The executor legitimately installs
+  packages (pip, npm) while building projects. A malicious or typosquatted
+  dependency executes inside the container with exactly the access described
+  above, network included.
+
+If those residual risks are unacceptable for your environment, run the
+container on an isolated host or behind your own egress controls; Lullabeast
+does not provide them.
+
 ## Cost tracking and the $0 case
 
 The golden config ships `models.pricing.enabled: true` and complete pricing

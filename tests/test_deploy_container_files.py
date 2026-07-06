@@ -1,4 +1,4 @@
-"""Static lints for the DS-3 container deploy files.
+"""Static lints for the DS-3/DS-4 container deploy files.
 
 Hermetic by construction: every test reads repo files (or runs `bash -n` /
 `git check-ignore` against them read-only); nothing touches ~/.openclaw, the
@@ -194,6 +194,117 @@ class TestEnvExample:
         assert proc.returncode == 0, "deploy/.env must be gitignored"
 
 
+class TestHardening:
+    """DS-4 container-security posture lints (static; runtime acceptance is
+    the operator's docker run)."""
+
+    def test_app_copy_is_root_owned(self):
+        # /app must be root-owned so the runtime user cannot modify the
+        # orchestrator, gate scripts, server, or installer. A --chown on the
+        # repo COPY would hand the whole tree to lullabeast.
+        assert re.search(r"^COPY \. /app$", DOCKERFILE, re.MULTILINE)
+        assert "COPY --chown" not in DOCKERFILE
+
+    def test_app_write_islands(self):
+        # The three per-boot write islands install.sh and the entrypoint
+        # depend on: the plugin rebuild tree, plus sticky group-writable
+        # /app and /app/ui for .env, .autodev/ and ui/config.json.
+        assert "chown -R lullabeast:lullabeast /app/autodev/plugin" in DOCKERFILE
+        assert "chgrp lullabeast /app /app/ui" in DOCKERFILE
+        assert "chmod 1775 /app /app/ui" in DOCKERFILE
+
+    def test_no_sudo_in_image(self):
+        assert re.search(r"apt-get purge -y --auto-remove sudo", DOCKERFILE)
+        assert "/etc/sudoers" in DOCKERFILE
+
+    def test_pycache_redirected_off_app(self):
+        # Python skips bytecode caching silently when the source dir is
+        # unwritable; the prefix keeps caches working under /tmp.
+        assert re.search(
+            r"^ENV PYTHONPYCACHEPREFIX=/tmp/\S+$", DOCKERFILE, re.MULTILINE
+        )
+
+    def test_compose_no_new_privileges(self):
+        data = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
+        assert "no-new-privileges:true" in data["services"]["lullabeast"]["security_opt"]
+
+    def test_compose_drops_all_caps_and_adds_none_back(self):
+        data = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
+        svc = data["services"]["lullabeast"]
+        assert svc["cap_drop"] == ["ALL"]
+        # Any add-back requires a documented probe (see the inline compose
+        # comment); none is the shipped default.
+        assert "cap_add" not in svc
+
+    def test_read_only_rootfs_stays_off(self):
+        # Assessed and deliberately OFF (DS-4 task 3): install.sh writes
+        # inside /app on every boot by contract, so read_only: true breaks
+        # boot. If that contract ever changes, remove this test deliberately
+        # along with the compose comment.
+        data = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
+        assert not data["services"]["lullabeast"].get("read_only", False)
+
+    def test_deploy_gitignore_covers_env_and_projects(self):
+        lines = [
+            ln.strip()
+            for ln in (DEPLOY / ".gitignore").read_text(encoding="utf-8").splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        ]
+        assert ".env" in lines
+        assert "projects/" in lines
+        # And git actually honors it for the projects dir (deploy/.env is
+        # asserted in TestEnvExample).
+        proc = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "check-ignore", "-q", "deploy/projects/x"],
+            capture_output=True,
+            timeout=30,
+        )
+        assert proc.returncode == 0, "deploy/projects/ must be gitignored"
+
+    def test_ui_config_json_excluded_from_build_context(self):
+        # A dev tree's ui/config.json carries a real hooks_token; baking it
+        # would embed the secret in a published image.
+        lines = [
+            ln.strip()
+            for ln in (DEPLOY / "Dockerfile.dockerignore")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        ]
+        assert "ui/config.json" in lines
+
+    def test_no_secret_values_echoed(self):
+        # The only secret the boot log may carry is the dashboard URL with
+        # AUTODEV_UI_TOKEN (deliberate: docker compose logs must be able to
+        # recover dashboard access). The API key and the hooks/gateway
+        # tokens must never be interpolated into an echo/say/die line.
+        for line in ENTRYPOINT.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if re.match(r"(echo|say|die)\b", stripped):
+                assert not re.search(
+                    r"\$\{?(ANTHROPIC_API_KEY|OPENROUTER_API_KEY|HOOKS_TOKEN|GATEWAY_TOKEN|AUTODEV_HOOKS_TOKEN)\b",
+                    stripped,
+                ), f"secret value interpolated into a log line: {line}"
+
+    def test_security_md_container_subsection(self):
+        text = (REPO_ROOT / "SECURITY.md").read_text(encoding="utf-8")
+        assert "### Container deployment" in text
+        assert "deploy/README.md" in text
+
+    def test_deploy_readme_hardening_sections(self):
+        text = (DEPLOY / "README.md").read_text(encoding="utf-8")
+        for needle in (
+            "Security hardening",
+            "What the sandbox does and does not contain",
+            "Read-only rootfs",
+            "Secrets posture",
+            "no-new-privileges",
+        ):
+            assert needle in text, f"deploy/README.md is missing: {needle}"
+
+
 class TestDocs:
     def test_eval_migration_doc_covers_required_contract(self):
         text = (DEPLOY / "EVAL-MIGRATION.md").read_text(encoding="utf-8")
@@ -238,6 +349,7 @@ class TestDocs:
             "docker-compose.yml",
             ".env.example",
             "Dockerfile.dockerignore",
+            ".gitignore",
             "README.md",
             "EVAL-MIGRATION.md",
         ):

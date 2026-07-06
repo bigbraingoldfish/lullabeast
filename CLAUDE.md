@@ -71,15 +71,16 @@ autodev-ui/
 │   └── com.autodev.ui.plist        # macOS LaunchAgent — mirrors the systemd unit
 ├── tests/                          # UI server tests (~50 pytest files)
 ├── deploy/
-│   ├── Dockerfile                  # DS-3 single-container image (Playwright base; pinned OpenClaw baked, MIT-licensed)
-│   ├── Dockerfile.dockerignore     # Build-context excludes (BuildKit per-Dockerfile ignore; context is the repo root)
+│   ├── Dockerfile                  # DS-3 single-container image (Playwright base; pinned OpenClaw baked, MIT-licensed); DS-4: no sudo, /app root-owned read-only with narrow write islands
+│   ├── Dockerfile.dockerignore     # Build-context excludes (BuildKit per-Dockerfile ignore; context is the repo root); DS-4 adds ui/config.json (carries a real hooks_token on a dev tree)
+│   ├── .gitignore                  # DS-4: deploy/.env (secrets) and deploy/projects/ (bind-mount dir) never committed
 │   ├── entrypoint.sh               # First-boot provisioning + per-boot owned-mode install + process supervisor
-│   ├── docker-compose.yml          # One service; 18790 published to host loopback; lullabeast-data volume + ./projects bind
+│   ├── docker-compose.yml          # One service; 18790 published to host loopback; lullabeast-data volume + ./projects bind; DS-4: cap_drop ALL + no-new-privileges + commented resource ceilings
 │   ├── .env.example                # Container env contract (provider key, *_MODEL knobs, UI_PORT), every var commented
 │   ├── openclaw.template.json      # DS-2b golden OpenClaw config (rendered by entrypoint.sh on first boot)
 │   ├── CONFIG-AUDIT.md             # Key-by-key decision record behind the template
 │   ├── EVAL-MIGRATION.md           # Before/after contract diff for the lullabeast-eval sister repo (stays bare-metal guest)
-│   └── README.md                   # Container quickstart, env/volume/upgrade contract, Task-0 licensing note
+│   └── README.md                   # Container quickstart, env/volume/upgrade contract, Task-0 licensing note, DS-4 hardening + sandbox-boundary docs
 ├── install.sh                      # Deployment script (14 steps + doctor gate; guest/strict/owned modes, see SETUP.md)
 ├── SETUP.md                        # Human-facing setup guide
 └── .env                            # Local path config (gitignored, written by install.sh)
@@ -774,6 +775,8 @@ Tests: `tests/test_doctor_checks.py` (per-check tmp_path fixtures + the SETUP.md
 **Config ownership (DS-3 reconcile).** `reconcile_config_to_template(rendered_template, live)` in `openclaw_template.py` is the write-side inverse of `template_conformance_issues` and uses the identical matching rules (dict keys forced, list-of-dicts matched by `id`, scalar-list membership, scalar leaves forced), so its output is guaranteed conformant while keys the template does **not** declare (operator-added providers/models, extra `plugins.allow` entries, OpenClaw's own runtime bookkeeping) survive untouched. Pass it a *rendered* template so no `${VAR}` literal is ever written. Every pinned key (`tools.profile`, `heartbeat.every`, the agent `model.primary` values, `gateway.bind`, …) is reverted to the template on boot — a hand-edit to a pinned key does not survive; set models via the `*_MODEL` env knobs, not by editing `openclaw.json`.
 
 **Exposure:** 18790 published to host loopback only; uvicorn binds `0.0.0.0` *inside* the container because docker-proxy connections carry non-loopback source addresses — safe because `AUTODEV_UI_TOKEN` is always set there. 18789 is never published. `host.docker.internal:host-gateway` is wired for the DS-7 local-model bridge. `/data` requires a local volume driver (`fcntl.flock` is unreliable on NFS). Static lints: `tests/test_deploy_container_files.py`; real build/boot acceptance is manual + DS-5 CI. Contract diff for the eval sister repo: `deploy/EVAL-MIGRATION.md`.
+
+**Hardening (DS-4).** The container is the blast-radius boundary for LLM-generated code (the executor has `exec`; the MiniMax deletion bug is documented above). Posture: every process runs as the non-root `lullabeast` user (sudo is purged from the image); compose ships `cap_drop: [ALL]` + `no-new-privileges:true` (nothing needs a capability — unprivileged ports, and Playwright launches Chromium with `chromiumSandbox: false` by default; any add-back must be probe-justified and documented inline in the compose file) plus commented `pids_limit`/`mem_limit` placeholders. `/app` is **root-owned read-only** to the runtime user with exactly three write islands for install.sh's per-boot contract: sticky group-writable `/app` (for the `.env` merge and `.autodev/`), sticky group-writable `/app/ui` (for the atomic `ui/config.json` write — mkstemp needs the dir), and lullabeast-owned `/app/autodev/plugin` (the per-boot npm rebuild); the sticky bit keeps root-owned entries un-removable. `PYTHONPYCACHEPREFIX=/tmp/pycache` keeps bytecode caches off the read-only tree. **A read-only rootfs (`read_only: true`) was assessed and deliberately left off** — install.sh writes inside `/app` on every boot by contract and `$HOME` carries the baked venv + npm/pip caches; the reasoning lives as a comment in `docker-compose.yml` and in `deploy/README.md`, and `test_read_only_rootfs_stays_off` pins the decision. Secrets: `deploy/.gitignore` ignores `deploy/.env`; `Dockerfile.dockerignore` excludes `ui/config.json` so a dev tree's real `hooks_token` is never baked into an image; the only secret in boot logs is the dashboard URL's `AUTODEV_UI_TOKEN` (deliberate — `docker compose logs` must recover dashboard access), enforced by `test_no_secret_values_echoed`. Residual risk (egress/supply-chain, deliberately uncontained) is documented in `deploy/README.md` "What the sandbox does and does not contain" + SECURITY.md's "Container deployment" subsection.
 
 ### Service file drift guard
 

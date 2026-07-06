@@ -13,11 +13,15 @@ and is what `lullabeast-eval` should keep targeting. The "after" column
 exists so the eval repo can reason about container deployments if it ever
 inspects one.
 
-**Freeze status:** the "after" column reflects the DS-3 implementation as
-written. The roadmap freezes this doc against the final DS-3/DS-4 acceptance
-state; DS-4 (container hardening) has not run yet, so expect one re-freeze
-pass after DS-4 lands (likely changes: `/app` write permissions, compose
-hardening keys; none of the paths below are expected to move).
+**Freeze status:** the "after" column reflects the DS-3 plus DS-4
+implementation (re-frozen 2026-07-06, the one-pass update DS-3 anticipated).
+DS-4 changed no paths or ports; the hardening deltas an eval harness could
+notice inside a container are: `/app` is now root-owned and read-only to the
+runtime user except the `.env` / `.autodev` / `ui/config.json` /
+`autodev/plugin` write islands, and the compose service runs with
+`cap_drop: [ALL]` plus `no-new-privileges`. The DS-3 manual compose
+acceptance runs are still pending operator execution; if they force changes,
+this doc gets one further pass.
 
 ## Path and layout contract
 
