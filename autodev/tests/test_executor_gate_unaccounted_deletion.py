@@ -236,3 +236,80 @@ def test_deletion_check_crash_returns_fail_not_skip(tmp_path):
     assert os.path.exists(ps_path), "the gate must record an error code on crash"
     ps = json.loads(Path(ps_path).read_text(encoding="utf-8"))
     assert ps.get("last_error_code") == "ERR_DELETION_CHECK_CRASHED"
+
+
+def test_ls_files_deleted_failure_returns_fail_not_skip(tmp_path):
+    """Audit M4: when the committed-diff probe succeeds but the working-tree
+    probe (`git ls-files --deleted`) exits non-zero, the gate must fail CLOSED —
+    not silently omit uncommitted deletions from the guard.
+
+    Previously only `if _wt_result.returncode == 0:` guarded the second probe
+    (no else): git succeeding for the diff call but failing for ls-files (repo
+    lock acquired between the two, transient OOM kill) let an executor that
+    deleted project files without committing pass the gate undetected.
+    """
+    root = tmp_path
+    workspace = root / "pipeline-project"
+    workspace.mkdir()
+    ws_str = str(workspace) + os.sep
+
+    (root / "pipeline_state.json").write_text(
+        json.dumps({"phase_base_commit": "deadbeef0000000000000000000000000000000000"}),
+        encoding="utf-8",
+    )
+
+    art = workspace / ".autodev" / "pipeline"
+    art.mkdir(parents=True)
+    art_str = str(art) + os.sep
+
+    planner = {"implementation_plan": [], "tdd_test_structure": [], "pass_criteria": []}
+    (art / "planner_output.json").write_text(json.dumps(planner), encoding="utf-8")
+
+    executor_payload = {
+        "status": "complete",
+        "tests_written": [],
+        "test_results": {"all_passing": True},
+        "file_manifest": [],
+        "files_deleted": [],
+    }
+    exec_path = art / "executor_output.json"
+    exec_path.write_text(json.dumps(executor_payload), encoding="utf-8")
+
+    ps_path = str(art / "phase_state.json")
+
+    import subprocess as _subprocess
+
+    class _OkResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    class _FailResult:
+        returncode = 128
+        stdout = ""
+        stderr = "fatal: index locked"
+
+    def _dispatch(cmd, *args, **kwargs):
+        if isinstance(cmd, list) and cmd[:2] == ["git", "ls-files"]:
+            return _FailResult()
+        return _OkResult()
+
+    stack = ExitStack()
+    stack.enter_context(patch.object(utils_module, "WORKSPACE_DIR", ws_str))
+    stack.enter_context(patch.object(utils_module, "ARTIFACTS_DIR", art_str))
+    stack.enter_context(patch.object(utils_module, "PHASE_STATE_FILE", ps_path))
+    stack.enter_context(patch.object(executor_gate_module, "WORKSPACE_DIR", ws_str))
+    stack.enter_context(patch.object(executor_gate_module, "ARTIFACTS_DIR", art_str))
+    stack.enter_context(patch.object(executor_gate_module, "PHASE_STATE_FILE", ps_path))
+    stack.enter_context(patch.object(_subprocess, "run", side_effect=_dispatch))
+
+    with stack:
+        result = executor_gate_module.evaluate_executor(str(exec_path))
+
+    assert result == "FAIL", (
+        "a failed working-tree deletion probe must fail closed, not silently "
+        "drop uncommitted deletions from the guard"
+    )
+    assert os.path.exists(ps_path), "the gate must record an error code"
+    ps = json.loads(Path(ps_path).read_text(encoding="utf-8"))
+    assert ps.get("last_error_code") == "ERR_GIT_DIFF_FAILED"
