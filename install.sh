@@ -1813,7 +1813,10 @@ fi
 echo
 echo "${BOLD}Doctor (final health check)${RESET}"
 DOCTOR_EXIT=0
-( cd "$AUTODEV_REPO_PATH" && "$PYTHON" -m autodev.installer.doctor ) || DOCTOR_EXIT=$?
+# OWNED_OPENCLAW rides into the doctor's environment so the template_conformance
+# check (DS-2b, owned mode only) runs when this install owns the tree; in guest
+# mode the value is 0 and the check reports skipped.
+( cd "$AUTODEV_REPO_PATH" && OWNED_OPENCLAW="$OWNED_OPENCLAW" "$PYTHON" -m autodev.installer.doctor ) || DOCTOR_EXIT=$?
 case "$DOCTOR_EXIT" in
     0) echo "${GREEN}${BOLD}✓ Doctor: all checks green.${RESET}" ;;
     2) echo "${YELLOW}${BOLD}⚠ Doctor: passing with warnings (fix hints above).${RESET}" ;;

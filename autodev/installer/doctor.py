@@ -37,6 +37,11 @@ import urllib.request
 from dataclasses import asdict, dataclass, field
 
 from autodev.installer import setup_helpers
+from autodev.installer.openclaw_template import (
+    load_template,
+    template_conformance_issues,
+    template_path,
+)
 from autodev.installer.register_agent import AUTODEV_AGENT_IDS
 from autodev.pipeline.env_resolvers import resolve_openclaw_root, resolve_pipeline_root
 
@@ -860,6 +865,59 @@ def check_ports(config: dict) -> CheckResult:
     return CheckResult("ports", "Ports 18789/18790 sane", "ok", "; ".join(details))
 
 
+def check_template_conformance(config: dict) -> CheckResult:
+    # Owned-OpenClaw mode only (DS-2b): the container's openclaw.json is
+    # rendered from deploy/openclaw.template.json, so any divergence from the
+    # template's requirements is drift (a hand-edit inside /data, or an
+    # OpenClaw upgrade rewriting a key). Guest installs are never
+    # template-rendered, so the check is meaningless there and skips.
+    # install.sh exports OWNED_OPENCLAW=1 into the doctor run in owned mode.
+    if (os.environ.get("OWNED_OPENCLAW") or "").strip() != "1":
+        return CheckResult(
+            "template_conformance", "Config matches golden template", "skipped",
+            "owned-OpenClaw mode only (OWNED_OPENCLAW=1); guest installs are not template-rendered",
+        )
+    repo = config.get("autodev_repo_path") or ""
+    tpath = template_path(repo)
+    try:
+        template = load_template(repo)
+    except FileNotFoundError:
+        return CheckResult(
+            "template_conformance", "Config matches golden template", "fail",
+            f"golden template not found: {tpath}",
+            "restore deploy/openclaw.template.json from the repo (the image ships it)",
+        )
+    except (ValueError, OSError) as e:
+        return CheckResult(
+            "template_conformance", "Config matches golden template", "fail",
+            f"golden template unreadable/invalid: {e}",
+            "restore deploy/openclaw.template.json from the repo (the image ships it)",
+        )
+    live_path = os.path.join(config.get("openclaw_root") or "", "openclaw.json")
+    live, err = _load_openclaw_json(live_path)
+    if live is None:
+        return CheckResult(
+            "template_conformance", "Config matches golden template", "fail",
+            f"cannot read openclaw.json ({err})",
+            "fix openclaw.json first (see openclaw_json check)",
+        )
+    issues = template_conformance_issues(template, live)
+    if issues:
+        shown = "; ".join(issues[:6])
+        if len(issues) > 6:
+            shown += f"; ... {len(issues) - 6} more"
+        return CheckResult(
+            "template_conformance", "Config matches golden template", "fail",
+            f"{len(issues)} audited key(s) drifted from the template: {shown}",
+            "hand-edits inside an owned tree are overwritten by design; re-render "
+            "openclaw.json from deploy/openclaw.template.json or mount a replacement template",
+        )
+    return CheckResult(
+        "template_conformance", "Config matches golden template", "ok",
+        f"live config satisfies every requirement in {tpath}",
+    )
+
+
 # Catalogue order matters only for display; keep it aligned with the DS-1 table.
 def run_doctor(config: dict, *, live: bool = False) -> DoctorReport:
     """Run every check against ``config`` (the ui/server.py load_config() shape).
@@ -889,6 +947,7 @@ def run_doctor(config: dict, *, live: bool = False) -> DoctorReport:
         check_playwright(config),
         check_ui_token(config),
         check_ports(config),
+        check_template_conformance(config),
     ]
     return DoctorReport(checks=checks)
 

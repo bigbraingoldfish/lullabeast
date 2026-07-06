@@ -53,6 +53,7 @@ autodev-ui/
 │   ├── installer/
 │   │   ├── doctor.py               # DS-1 doctor: read-only health checks (CLI + /api/doctor + install.sh gate)
 │   │   ├── setup_helpers.py        # Installer audit/patch helpers (hooks, secrets, context limits)
+│   │   ├── openclaw_template.py    # DS-2b golden-template render + conformance helpers (stdlib-only)
 │   │   └── register_agent.py       # Registers the 6 Lullabeast agents in openclaw.json
 │   ├── tests/                      # Pipeline-level tests (orchestration, sentinel, skills)
 │   └── docs/
@@ -69,6 +70,10 @@ autodev-ui/
 │   ├── autodev-ui.service          # systemd unit file (Linux / WSL2)
 │   └── com.autodev.ui.plist        # macOS LaunchAgent — mirrors the systemd unit
 ├── tests/                          # UI server tests (~50 pytest files)
+├── deploy/
+│   ├── openclaw.template.json      # DS-2b golden OpenClaw config (rendered by the DS-3 entrypoint)
+│   ├── CONFIG-AUDIT.md             # Key-by-key decision record behind the template
+│   └── README.md                   # Container deploy docs (grows through DS-3+)
 ├── install.sh                      # Deployment script (14 steps + doctor gate; guest/strict/owned modes, see SETUP.md)
 ├── SETUP.md                        # Human-facing setup guide
 └── .env                            # Local path config (gitignored, written by install.sh)
@@ -737,15 +742,20 @@ All modes end by running the **doctor** as the final gate; owned/strict exit 1 w
 
 ### The doctor (DS-1)
 
-`autodev/installer/doctor.py` is the shared health-check module: `run_doctor(config, *, live=False) -> DoctorReport` (`checks: list[CheckResult]`, each `{id, title, status: ok|warn|fail|skipped, detail, fix_hint}`). Three consumers, one source of truth: the CLI (`python -m autodev.installer.doctor [--json] [--live] [--quiet]`; exit 0 all ok, 1 any fail, 2 warns only; warns allowed with `--quiet`), the server (`GET /api/doctor`, runs `run_doctor(load_config(), live=False)`, token-guarded like every `/api/*` route), and install.sh's final gate. The doctor **never mutates anything**: read-only probes with per-item fix hints; the lock probe opens `pipeline.lock` read-only so it cannot create the file. Where a helper existed only in ensure/patch form, an audit-only sibling was added (`setup_helpers.audit_openclaw_context_limits`). The 21-check catalogue (ids): `env_paths, python_deps, git_identity, openclaw_json, openclaw_version, hooks_baseline, secret_sync, agents_registered, context_limits, tools_profile, heartbeat_disabled, gateway_up, webhook_ping (live-only), plugin_deployed, plugin_hooks_registered, exec_approvals, symlink_consistency, stale_lock, playwright, ui_token, ports`. Notes:
+`autodev/installer/doctor.py` is the shared health-check module: `run_doctor(config, *, live=False) -> DoctorReport` (`checks: list[CheckResult]`, each `{id, title, status: ok|warn|fail|skipped, detail, fix_hint}`). Three consumers, one source of truth: the CLI (`python -m autodev.installer.doctor [--json] [--live] [--quiet]`; exit 0 all ok, 1 any fail, 2 warns only; warns allowed with `--quiet`), the server (`GET /api/doctor`, runs `run_doctor(load_config(), live=False)`, token-guarded like every `/api/*` route), and install.sh's final gate. The doctor **never mutates anything**: read-only probes with per-item fix hints; the lock probe opens `pipeline.lock` read-only so it cannot create the file. Where a helper existed only in ensure/patch form, an audit-only sibling was added (`setup_helpers.audit_openclaw_context_limits`). The 22-check catalogue (ids): `env_paths, python_deps, git_identity, openclaw_json, openclaw_version, hooks_baseline, secret_sync, agents_registered, context_limits, tools_profile, heartbeat_disabled, gateway_up, webhook_ping (live-only), plugin_deployed, plugin_hooks_registered, exec_approvals, symlink_consistency, stale_lock, playwright, ui_token, ports, template_conformance (owned-mode-only)`. Notes:
 
 - **`openclaw_version`** reads `openclaw --version` (the gateway exposes no HTTP version endpoint; verified on 2026.6.11) and compares against `MIN_OPENCLAW_VERSION` (floor `2026.5.18`, drift-guarded against SETUP.md's documented floor by a test) and the `KNOWN_BAD_OPENCLAW_VERSIONS` table (seeded with `2026.6.8`, the release that stripped planner exec). Grow the table as incidents accumulate.
 - **`plugin_hooks_registered`**: OpenClaw 2026.6.x static `plugins inspect --json` reports `typedHooks: []` for plugins registering via `api.on(...)` at runtime, so when the typed-hook list is empty (but status is `loaded`) the check falls back to verifying the five hook names inside the deployed bundle. install.sh step 11's validator carries the identical fallback; change them together.
 - **`plugin_deployed`** greps the deployed bundle for the current-source marker (`agent:[a-z0-9_-]+:ideas:`). The marker lives in three sites that must change together: `doctor.PLUGIN_BUNDLE_MARKER`, install.sh step 11, `tests/test_install_sh_plugin_deploy.py` (drift-guarded).
 - **`webhook_ping`** is `--live`-only because it creates a real OpenClaw session (never fired by `GET /api/doctor`).
 - Every network/subprocess probe is bounded by **`DOCTOR_PROBE_TIMEOUT`** seconds (default 5; feature-scoped unprefixed name per repo convention).
+- **`template_conformance`** (DS-2b) runs only when env `OWNED_OPENCLAW=1` (exported into the doctor run by install.sh's final gate in owned mode; every other consumer sees `skipped`). It diffs the live `openclaw.json` against `deploy/openclaw.template.json`'s requirements via `openclaw_template.template_conformance_issues`: every template key must be present with a matching value (scalar lists by membership, dict lists matched by `id`, `${VAR}` placeholders as non-empty-string presence checks); extra live keys are tolerated because OpenClaw writes its own bookkeeping blocks at runtime. Guest installs are never template-rendered, so the check is meaningless outside owned mode.
 
-Tests: `tests/test_doctor_checks.py` (per-check tmp_path fixtures + the SETUP.md floor drift guard), `tests/test_doctor_endpoint.py`, `tests/test_install_noninteractive_contract.py` (static install.sh mode lints).
+Tests: `tests/test_doctor_checks.py` (per-check tmp_path fixtures + the SETUP.md floor drift guard), `tests/test_doctor_endpoint.py`, `tests/test_install_noninteractive_contract.py` (static install.sh mode lints), `tests/test_openclaw_template.py` (DS-2b template + conformance).
+
+### The golden OpenClaw template (DS-2b)
+
+`deploy/openclaw.template.json` is the canonical OpenClaw config for owned-OpenClaw installs (the DS-3 container renders it into `/data/openclaw/openclaw.json` on first boot). It encodes the full known-required baseline (hooks block, `heartbeat.every: "0m"`, `tools.profile: "coding"`, the context-limit caps and post-compaction sections on the six agents, the signals-plugin entry with `allowConversationAccess`, `mcp.servers.playwright`) plus `models.pricing.enabled: true` and 4 fully priced OpenRouter model entries (cost schema verified on the pinned 2026.6.11: `cost.{input, output, cacheRead, cacheWrite}`, USD per million tokens). The key-by-key decision record, including what stays operator-only and the hardware-defaults reset, is `deploy/CONFIG-AUDIT.md`. Helpers live in `autodev/installer/openclaw_template.py` (stdlib-only, importable by the doctor): `render_template_text` substitutes the `${VAR}` placeholders (`HOOKS_TOKEN` / `GATEWAY_TOKEN` required, raises when unset; `PLANNER_MODEL` / `EXECUTOR_MODEL` / `REVIEWER_MODEL` / `PRD_MODEL` default to `TEMPLATE_MODEL_DEFAULTS`, whose executor/reviewer picks must stay multimodal for visual review), and `template_conformance_issues` backs the doctor check above. Placeholders are whole-string values only, so the raw template always parses as strict JSON.
 
 ### Service file drift guard
 
