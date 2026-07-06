@@ -3238,38 +3238,62 @@ def _write_pending_escalation_files(project_dir_path, command, source="ui"):
     return True
 
 
+# Bounded because _detect_base_branch runs on the GET /api/state hot path (the
+# dashboard's frequent poll): an unbounded probe against a wedged git or a dead
+# network-mounted project dir would stack blocked requests until the FastAPI
+# threadpool is exhausted. Mirrors the orchestrator's T4.6 hardening.
+_BASE_BRANCH_PROBE_TIMEOUT = 10
+
+
 def _detect_base_branch(project_dir: str, configured_base_branch: str = "") -> str:
-    """Resolve the best base branch for git recovery operations."""
+    """Resolve the best base branch for git recovery operations.
+
+    Every git probe is bounded by ``_BASE_BRANCH_PROBE_TIMEOUT``; a missing git
+    binary, a dangling/unreadable ``project_dir``, or a probe timeout falls back
+    to "main" instead of raising (an uncaught error here would 500 every
+    /api/state poll). Same contract as the orchestrator twin (T4.6).
+    """
     candidate = (configured_base_branch or "").strip()
     if candidate:
         return candidate
 
     for branch in ("main", "master", "develop", "trunk"):
-        if subprocess.run(
-            ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
-            cwd=project_dir,
-        ).returncode == 0:
+        try:
+            result = subprocess.run(
+                ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+                cwd=project_dir,
+                timeout=_BASE_BRANCH_PROBE_TIMEOUT,
+            )
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as e:
+            print(f"[WARN] _detect_base_branch: git probe failed ({e}); falling back to 'main'.")
+            return "main"
+        if result.returncode == 0:
             return branch
 
-    remote_head = subprocess.run(
-        ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
-        cwd=project_dir,
-        capture_output=True,
-        text=True,
-    )
-    remote_ref = (remote_head.stdout or "").strip()
-    if remote_head.returncode == 0 and remote_ref.startswith("refs/remotes/origin/"):
-        return remote_ref[len("refs/remotes/origin/") :]
+    try:
+        remote_head = subprocess.run(
+            ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            timeout=_BASE_BRANCH_PROBE_TIMEOUT,
+        )
+        remote_ref = (remote_head.stdout or "").strip()
+        if remote_head.returncode == 0 and remote_ref.startswith("refs/remotes/origin/"):
+            return remote_ref[len("refs/remotes/origin/") :]
 
-    init_branch = subprocess.run(
-        ["git", "config", "--get", "init.defaultBranch"],
-        cwd=project_dir,
-        capture_output=True,
-        text=True,
-    )
-    configured = (init_branch.stdout or "").strip()
-    if init_branch.returncode == 0 and configured:
-        return configured
+        init_branch = subprocess.run(
+            ["git", "config", "--get", "init.defaultBranch"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            timeout=_BASE_BRANCH_PROBE_TIMEOUT,
+        )
+        configured = (init_branch.stdout or "").strip()
+        if init_branch.returncode == 0 and configured:
+            return configured
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as e:
+        print(f"[WARN] _detect_base_branch: git probe failed ({e}); falling back to 'main'.")
 
     return "main"
 
