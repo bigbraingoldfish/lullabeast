@@ -5380,8 +5380,8 @@ class Orchestrator:
         """Flip the just-completed phase's roadmap checkbox ``[ ]``→``[x]`` and fold
         it into the merge commit. Returns ``True`` on success.
 
-        T4.4 — on a NON-git failure (read-only roadmap, encoding error) this routes
-        to escalation (``ERR_ROADMAP_CHECKBOX_FAILED``, Decision #5 operator
+        T4.4 — on a NON-git failure (unwritable roadmap dir, encoding error) this
+        routes to escalation (``ERR_ROADMAP_CHECKBOX_FAILED``, Decision #5 operator
         message) and returns ``False`` rather than swallowing the error and letting
         the caller tag + advance: the merge commit has already landed, but the
         roadmap still shows the phase incomplete, so the resolver would re-return it
@@ -5424,8 +5424,7 @@ class Orchestrator:
             if not _flipped:
                 print(f"[INFO] Roadmap checkbox for {_chk_raw_id or phase} already set; no amend needed.")
                 return True
-            with open(roadmap_path, 'w') as f:
-                f.writelines(rmap_lines)
+            write_text_atomic(roadmap_path, "".join(rmap_lines))
             # Fold checkbox update into the merge commit atomically.
             subprocess.run(["git", "add", roadmap_path], cwd=SYMLINK_TARGET, check=True)
             subprocess.run(["git", "commit", "--amend", "--no-edit"], cwd=SYMLINK_TARGET, check=True)
