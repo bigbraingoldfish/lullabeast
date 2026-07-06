@@ -2892,6 +2892,21 @@ def _resolve_entry_raw_id(project_path):
     return None
 
 
+@app.get("/api/doctor")
+def get_doctor():
+    """Run the read-only doctor health checks and return the report (DS-1).
+
+    Same report the CLI (``python -m autodev.installer.doctor``) prints, fed by
+    ``load_config()`` so ui/config.json overrides apply. Never ``live`` from
+    the server: the webhook ping creates a real OpenClaw session and stays
+    CLI-opt-in only. Probes are bounded (DOCTOR_PROBE_TIMEOUT, default 5 s),
+    so worst case is a few seconds when the gateway is down.
+    """
+    from autodev.installer.doctor import run_doctor
+
+    return run_doctor(load_config(), live=False).to_dict()
+
+
 @app.get("/api/state")
 def get_state():
     """Get the current pipeline state.

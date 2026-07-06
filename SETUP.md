@@ -44,6 +44,8 @@ cd autodev-ui
 
 `install.sh` works through **14** steps in order. You will see colored output for each step. Early steps exit on failure when prerequisites are missing; later steps often warn and continue, collecting issues for the final summary.
 
+**Installer modes.** The default is **guest mode**: non-destructive, prompt-driven, warn-and-continue; correct etiquette on a shared host where OpenClaw also serves non-Lullabeast agents. `--non-interactive` answers every prompt with its documented default (each call site in install.sh carries a `# ci-default:` comment recording that decision; the one deliberate "no" is the global `tools.profile` flip, which the doctor flags instead of the installer changing gateway behavior unattended). `--strict` (implies `--non-interactive`) additionally exits 1 if the final doctor run reports any failing check. `--owned-openclaw` (implies `--non-interactive`; the container default from the deploy roadmap) makes the script the OWNER of the OpenClaw tree: agent files overwrite unconditionally with no mtime skip, the `openclaw.json` hooks block is validated rather than patched, there are zero prompts, and ANY warning is a fatal exit 1. Owned mode is not for shared hosts; hand edits inside an owned tree are overwritten by design (customize by replacing files, never by editing the tree in place). Every mode ends by running the doctor (below).
+
 What the script does (summary):
 
 1. OS check (Linux, macOS, and WSL2 supported; native Windows is rejected).
@@ -59,9 +61,11 @@ What the script does (summary):
 11. Installs the **`autodev-pipeline-signals`** OpenClaw plugin and sets `plugins.entries.autodev-pipeline-signals.hooks.allowConversationAccess=true` when the `openclaw` CLI is available.
 12. Installs **Playwright MCP** and Chromium — **required for UI/INT visual review** (executors screenshot UI/INT phases and the reviewer reads them; without it every UI/INT phase is rejected at the reviewer gate with `ERR_VISUAL_UNVERIFIED`). Opt out with `--skip-playwright` (or by declining the prompt) only for runs that will not touch UI/INT phases.
 13. Writes the setup-complete marker (`~/.autodev_setup_complete`).
-14. Prints summary.
+14. Prints summary, then runs the **doctor** as the authoritative final verdict.
 
 If install.sh exits cleanly with no warnings, the system is ready. If it exits with warnings, read each warning — most require a one-line manual fix.
+
+**The doctor.** `python -m autodev.installer.doctor` (from the repo root, with `.env` sourced) checks every documented silent-failure mode in one pass: paths, Python deps, git identity, `openclaw.json` health (hooks, agents, context limits, `tools.profile`, heartbeat), the OpenClaw version floor and known-bad releases, gateway reachability, plugin bundle freshness and hook registration, exec-approvals paths, `pipeline-project` symlink agreement, stale locks, Playwright, tokens, and ports. It is strictly read-only, and every red line carries a one-line fix hint. Flags: `--json` (machine-readable report), `--quiet` (print only problems; warnings stop affecting the exit code), `--live` (also POSTs the webhook ping, which creates a real OpenClaw session, so it is opt-in). Exit codes: 0 all ok, 1 any failure, 2 warnings only. The dashboard server exposes the same report at `GET /api/doctor`. Network and subprocess probes are bounded by `DOCTOR_PROBE_TIMEOUT` seconds (default 5).
 
 ### Installing on macOS
 

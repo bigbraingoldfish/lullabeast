@@ -1,6 +1,20 @@
 #!/usr/bin/env bash
 # install.sh — Lullabeast interactive setup (14 steps)
-# Usage: ./install.sh [--force] [--non-interactive] [--skip-playwright]
+# Usage: ./install.sh [--force] [--non-interactive] [--strict] [--owned-openclaw] [--skip-playwright]
+#
+# Modes (DS-2):
+#   guest mode (default)      non-destructive, prompt-driven, warn-and-continue.
+#                             Correct etiquette on a shared host where OpenClaw
+#                             also serves non-Lullabeast agents.
+#   --strict                  guest mode, implies --non-interactive; any doctor
+#                             FAIL at the end exits 1.
+#   --owned-openclaw          the script OWNS the OpenClaw tree (the container
+#                             default, DS-3). Implies --non-interactive. Agent
+#                             files overwrite unconditionally, openclaw.json is
+#                             validated (not incrementally patched) against the
+#                             golden-template expectations, zero prompts, and
+#                             ANY warning is fatal (exit 1). Two runs converge
+#                             to byte-identical trees.
 set -euo pipefail
 
 # ── Colour helpers ────────────────────────────────────────────────────────────
@@ -14,7 +28,15 @@ fi
 
 WARNINGS=()
 ok()   { echo "${GREEN}  ✓${RESET} $*"; }
-warn() { echo "${YELLOW}  ⚠${RESET} $*"; WARNINGS+=("$*"); }
+# Owned-mode failure policy: in an owned tree a warning is a bug, so warn()
+# escalates to a fatal exit 1. Guest mode keeps warn-and-continue.
+warn() {
+    if [ "${OWNED_OPENCLAW:-0}" -eq 1 ]; then
+        echo "${RED}  ✗ FATAL (owned mode treats warnings as failures):${RESET} $*" >&2
+        exit 1
+    fi
+    echo "${YELLOW}  ⚠${RESET} $*"; WARNINGS+=("$*")
+}
 fail() { echo "${RED}  ✗ FATAL:${RESET} $*" >&2; exit 1; }
 info() { echo "  · $*"; }
 hdr()  { echo; echo "${BOLD}$*${RESET}"; }
@@ -22,10 +44,14 @@ hdr()  { echo; echo "${BOLD}$*${RESET}"; }
 FORCE=0
 NON_INTERACTIVE=0
 SKIP_PLAYWRIGHT=0
+STRICT=0
+OWNED_OPENCLAW=0
 for arg in "$@"; do
     [ "$arg" = "--force" ] && FORCE=1
     [ "$arg" = "--non-interactive" ] || [ "$arg" = "--ci" ] && NON_INTERACTIVE=1
     [ "$arg" = "--skip-playwright" ] && SKIP_PLAYWRIGHT=1
+    [ "$arg" = "--strict" ] && { STRICT=1; NON_INTERACTIVE=1; }
+    [ "$arg" = "--owned-openclaw" ] && { OWNED_OPENCLAW=1; NON_INTERACTIVE=1; }
 done
 
 # Helper: prompt with default answer (skipped in non-interactive mode)
@@ -161,6 +187,8 @@ info "Previewing packages to install:"
 "$PYTHON" -m pip install --dry-run -r "$REQUIREMENTS" 2>&1 \
     | grep -E "^(Would install|Requirement already)" | head -20 || true
 
+# ci-default: Y - installing the declared requirements is the whole point of a
+# non-interactive install; skipping would leave the server unable to start.
 if prompt_yn "Install / confirm these packages? [Y/n]" "Y"; then
     if "$PYTHON" -m pip install -r "$REQUIREMENTS"; then
         ok "pip install succeeded"
@@ -215,6 +243,8 @@ if [ -z "$OPENCLAW_ROOT" ]; then
         else
             echo "  ${RED}✗${RESET} Directory not found: $user_path"
             echo "    To install OpenClaw: https://docs.openclaw.ai/start/getting-started"
+            # ci-default: unreachable - non-interactive mode already failed fast
+            # above when OpenClaw was not found (this retry loop is interactive-only).
             if ! prompt_yn "Try another path? [Y/n]" "Y"; then
                 fail "OpenClaw not found. Install OpenClaw and re-run install.sh."
             fi
@@ -236,15 +266,30 @@ mkdir -p "$AUTODEV_REPO_PATH/.autodev/ideas"
 ok "Repo-local runtime dir: $AUTODEV_REPO_PATH/.autodev"
 
 if [ -f "$OPENCLAW_ROOT/orchestrator.py" ]; then
-    warn "Pre-migration orchestrator still present: $OPENCLAW_ROOT/orchestrator.py"
-    warn "  This file is superseded by $AUTODEV_REPO_PATH/autodev/pipeline/orchestrator.py"
-    warn "  Remove it: rm $OPENCLAW_ROOT/orchestrator.py"
+    if [ "$OWNED_OPENCLAW" -eq 1 ]; then
+        # Owned tree: the script owns the tree, so stale legacy files are
+        # fixed without prompting rather than warned about.
+        rm -f "$OPENCLAW_ROOT/orchestrator.py"
+        ok "Removed pre-migration orchestrator.py from owned \$OPENCLAW_ROOT"
+    else
+        warn "Pre-migration orchestrator still present: $OPENCLAW_ROOT/orchestrator.py"
+        warn "  This file is superseded by $AUTODEV_REPO_PATH/autodev/pipeline/orchestrator.py"
+        warn "  Remove it: rm $OPENCLAW_ROOT/orchestrator.py"
+    fi
 else
     ok "No stale orchestrator.py in \$OPENCLAW_ROOT"
 fi
 
 REPO_RT="$AUTODEV_REPO_PATH/.autodev"
-if [ -f "$REPO_RT/pipeline.lock" ]; then
+if [ "$OWNED_OPENCLAW" -eq 1 ]; then
+    # A leftover lock FILE is normal after a crash (flock is advisory; the file
+    # persists) and owned mode re-runs on every container boot, so this is an
+    # informational note there, never a warning. The doctor's stale_lock check
+    # is the authoritative liveness probe.
+    if [ -f "$REPO_RT/pipeline.lock" ]; then
+        info "pipeline.lock present at $REPO_RT (doctor will probe liveness)"
+    fi
+elif [ -f "$REPO_RT/pipeline.lock" ]; then
     warn "$REPO_RT/pipeline.lock exists — a pipeline may already be running"
     warn "  If no pipeline is active, remove it: rm $REPO_RT/pipeline.lock"
 elif [ -f "$OPENCLAW_ROOT/pipeline.lock" ]; then
@@ -307,6 +352,11 @@ ensure_workspace_pipeline_project_symlinks() {
             warn "$link exists but is not a symlink — skipping (remove or convert manually)"
             continue
         fi
+        # Idempotent: leave a correct link untouched so re-runs change no
+        # mtimes under $OPENCLAW_ROOT (the guest-mode idempotency contract).
+        if [ -L "$link" ] && [ "$(readlink "$link")" = "$hub" ]; then
+            continue
+        fi
         if ! ln -sfn "$hub" "$link"; then
             warn "Could not create symlink $link → $hub"
         fi
@@ -314,6 +364,19 @@ ensure_workspace_pipeline_project_symlinks() {
     if [ "$any" -eq 1 ]; then
         ok "workspace pipeline-project symlinks → $hub"
     fi
+}
+
+# Copy predicate shared by the preview and deploy loops below. Guest mode
+# keeps the non-destructive mtime-newer skip; owned mode copies EVERY file
+# unconditionally: the repo is the source of truth, full stop (DS-2). Hand
+# edits inside an owned tree are overwritten by design; customize by mounting
+# replacement files instead.
+_should_copy() {
+    local src="$1" dst="$2"
+    if [ "$OWNED_OPENCLAW" -eq 1 ]; then
+        return 0
+    fi
+    [ ! -f "$dst" ] || [ "$src" -nt "$dst" ]
 }
 
 TOTAL_DEPLOYED=0
@@ -362,8 +425,9 @@ for agent in planner executor reviewer escalation prd-creator roadmap-converter;
         src="$src_dir/$doc"
         dst="$dst_dir/$doc"
         [ -f "$src" ] || continue
-        # cp -u: only copies if source is newer than dest (or dest missing)
-        if [ ! -f "$dst" ] || [ "$src" -nt "$dst" ]; then
+        # Guest: copy only if source is newer than dest (or dest missing).
+        # Owned: unconditional (see _should_copy).
+        if _should_copy "$src" "$dst"; then
             MISSING_FILES+=("  $agent/$doc")
         fi
     done
@@ -371,7 +435,7 @@ for agent in planner executor reviewer escalation prd-creator roadmap-converter;
     case "$agent" in planner|executor|reviewer)
         src="$src_dir/HEARTBEAT.md"
         dst="$dst_dir/HEARTBEAT.md"
-        if [ -f "$src" ] && { [ ! -f "$dst" ] || [ "$src" -nt "$dst" ]; }; then
+        if [ -f "$src" ] && { _should_copy "$src" "$dst"; }; then
             MISSING_FILES+=("  $agent/HEARTBEAT.md")
         fi
         ;;
@@ -389,7 +453,7 @@ for agent in planner executor reviewer escalation prd-creator roadmap-converter;
         src="$AUTODEV_REPO_PATH/autodev/skill-library/prd-creator/readiness-reviewer/SKILL.md"
         dst="$dst_dir/skills/readiness-reviewer/SKILL.md"
         if [ -f "$src" ]; then
-            if [ ! -f "$dst" ] || [ "$src" -nt "$dst" ]; then
+            if _should_copy "$src" "$dst"; then
                 MISSING_FILES+=("  $agent/skills/readiness-reviewer/SKILL.md")
             fi
         else
@@ -401,7 +465,7 @@ for agent in planner executor reviewer escalation prd-creator roadmap-converter;
         src="$AUTODEV_REPO_PATH/autodev/agents/escalation/skills/escalation-summary/SKILL.md"
         dst="$dst_dir/skills/escalation-summary/SKILL.md"
         if [ -f "$src" ]; then
-            if [ ! -f "$dst" ] || [ "$src" -nt "$dst" ]; then
+            if _should_copy "$src" "$dst"; then
                 MISSING_FILES+=("  $agent/skills/escalation-summary/SKILL.md")
             fi
         else
@@ -414,7 +478,7 @@ for agent in planner executor reviewer escalation prd-creator roadmap-converter;
             src="$AUTODEV_REPO_PATH/autodev/skill-library/roadmap-converter/$skill/SKILL.md"
             dst="$dst_dir/skills/$skill/SKILL.md"
             if [ -f "$src" ]; then
-                if [ ! -f "$dst" ] || [ "$src" -nt "$dst" ]; then
+                if _should_copy "$src" "$dst"; then
                     MISSING_FILES+=("  $agent/skills/$skill/SKILL.md")
                 fi
             else
@@ -429,6 +493,8 @@ if [ "${#MISSING_FILES[@]}" -gt 0 ]; then
     for f in "${MISSING_FILES[@]}"; do
         info "$f"
     done
+    # ci-default: Y - deploying the repo's agent identity files is required for
+    # the pipeline to run; guest mode still respects the mtime-newer skip.
     if prompt_yn "Deploy agent files? [Y/n]" "Y"; then
         for agent in planner executor reviewer escalation prd-creator roadmap-converter; do
             src_dir="$AUTODEV_REPO_PATH/autodev/agents/$agent"
@@ -440,9 +506,9 @@ if [ "${#MISSING_FILES[@]}" -gt 0 ]; then
                 src="$src_dir/$doc"
                 dst="$dst_dir/$doc"
                 [ -f "$src" ] || continue
-                # Same "newer-than" predicate the dry-run preview block uses
-                # (above, ~line 371). BSD `cp` lacks `-u`; this is portable.
-                if [ ! -f "$dst" ] || [ "$src" -nt "$dst" ]; then
+                # Same predicate the dry-run preview block uses (above).
+                # BSD `cp` lacks `-u`; this is portable.
+                if _should_copy "$src" "$dst"; then
                     cp "$src" "$dst"
                     count=$((count + 1))
                 fi
@@ -450,7 +516,7 @@ if [ "${#MISSING_FILES[@]}" -gt 0 ]; then
             case "$agent" in planner|executor|reviewer)
                 src="$src_dir/HEARTBEAT.md"
                 dst="$dst_dir/HEARTBEAT.md"
-                if [ -f "$src" ] && { [ ! -f "$dst" ] || [ "$src" -nt "$dst" ]; }; then
+                if [ -f "$src" ] && { _should_copy "$src" "$dst"; }; then
                     cp "$src" "$dst"
                     count=$((count + 1))
                 fi
@@ -467,7 +533,7 @@ if [ "${#MISSING_FILES[@]}" -gt 0 ]; then
                 dst="$dst_dir/skills/readiness-reviewer/SKILL.md"
                 if [ -f "$src" ]; then
                     mkdir -p "$dst_dir/skills/readiness-reviewer"
-                    if [ ! -f "$dst" ] || [ "$src" -nt "$dst" ]; then
+                    if _should_copy "$src" "$dst"; then
                         cp "$src" "$dst"
                         count=$((count + 1))
                     fi
@@ -481,7 +547,7 @@ if [ "${#MISSING_FILES[@]}" -gt 0 ]; then
                 dst="$dst_dir/skills/escalation-summary/SKILL.md"
                 if [ -f "$src" ]; then
                     mkdir -p "$dst_dir/skills/escalation-summary"
-                    if [ ! -f "$dst" ] || [ "$src" -nt "$dst" ]; then
+                    if _should_copy "$src" "$dst"; then
                         cp "$src" "$dst"
                         count=$((count + 1))
                     fi
@@ -496,7 +562,7 @@ if [ "${#MISSING_FILES[@]}" -gt 0 ]; then
                     dst="$dst_dir/skills/$skill/SKILL.md"
                     if [ -f "$src" ]; then
                         mkdir -p "$dst_dir/skills/$skill"
-                        if [ ! -f "$dst" ] || [ "$src" -nt "$dst" ]; then
+                        if _should_copy "$src" "$dst"; then
                             cp "$src" "$dst"
                             count=$((count + 1))
                         fi
@@ -533,7 +599,37 @@ hdr "6/14  Exec-approvals validation"
 EXEC_APPROVALS="$OPENCLAW_ROOT/exec-approvals.json"
 APPROVALS_STATUS="missing"
 
-if [ ! -f "$EXEC_APPROVALS" ]; then
+# owned-mode-begin: step 6
+# A fresh owned tree has nothing legacy to migrate; if stale gate paths are
+# somehow present, fix them without prompting (the tree is ours). No warns.
+if [ "$OWNED_OPENCLAW" -eq 1 ]; then
+    if [ ! -f "$EXEC_APPROVALS" ]; then
+        info "exec-approvals.json absent: fresh owned tree, nothing to migrate"
+        APPROVALS_STATUS="absent (fresh owned tree)"
+    else
+        APPROVALS_FIX=$(
+            cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import refresh_exec_approvals_gate_paths
+import sys
+print(refresh_exec_approvals_gate_paths(sys.argv[1], sys.argv[2]))
+" "$EXEC_APPROVALS" "$AUTODEV_REPO_PATH" 2>/dev/null || echo "error:helper"
+        )
+        case "$APPROVALS_FIX" in
+            unchanged|skipped_no_file)
+                ok "exec-approvals.json gate paths current"
+                APPROVALS_STATUS="ok"
+                ;;
+            updated)
+                ok "exec-approvals.json stale gate paths rewritten to $AUTODEV_REPO_PATH"
+                APPROVALS_STATUS="updated"
+                ;;
+            *)
+                fail "Could not refresh exec-approvals gate paths: $APPROVALS_FIX"
+                ;;
+        esac
+    fi
+# owned-mode-end: step 6
+elif [ ! -f "$EXEC_APPROVALS" ]; then
     warn "exec-approvals.json not found at $EXEC_APPROVALS"
     warn "  Gate scripts will not execute until approved via the OpenClaw UI"
 else
@@ -562,7 +658,18 @@ hdr "7/14  Cron paths (jobs.json + user crontab)"
 
 CRON_FILE="$OPENCLAW_ROOT/cron/jobs.json"
 CRON_STATUS="not found"
+USER_CRON_STATUS="not checked"
 
+# owned-mode-begin: step 7
+# Owned trees (containers) have no user crontab and nothing legacy to migrate;
+# the DS-3 entrypoint supervises heartbeat/session-cleanup as loops instead.
+if [ "$OWNED_OPENCLAW" -eq 1 ]; then
+    info "Cron path migration skipped (owned mode: fresh tree, supervised loops instead of crontab)"
+    CRON_STATUS="skipped (owned mode)"
+    USER_CRON_STATUS="skipped (owned mode)"
+# owned-mode-end: step 7
+else
+# Guest mode: original step 7 body (indentation preserved).
 if [ ! -f "$CRON_FILE" ]; then
     warn "cron/jobs.json not found at $CRON_FILE — skipping"
 else
@@ -583,6 +690,9 @@ except Exception:
         info "Heartbeat path needs updating:"
         info "  Was: $OLD_CRON_SCRIPT"
         info "  Now: $NEW_CRON_SCRIPT"
+        # ci-default: Y - repointing an EXISTING legacy heartbeat path to the repo
+        # copy is safe (never installs new entries); leaving it would keep the
+        # watchdog firing a removed script.
         if prompt_yn "Update cron/jobs.json? [Y/n]" "Y"; then
             CRON_RESULT=$("$PYTHON" - \
                 "$CRON_FILE" "$OLD_CRON_SCRIPT" "$NEW_CRON_SCRIPT" <<'PYEOF'
@@ -638,7 +748,6 @@ fi
 # $OPENCLAW_ROOT/{heartbeat_cron,session_cleanup}.py to the repo's copies.
 # Only migrates EXISTING lines — never installs new entries on machines that
 # don't already have them (avoids surprise scheduled tasks for fresh users).
-USER_CRON_STATUS="not checked"
 
 if ! command -v crontab >/dev/null 2>&1; then
     info "User crontab: 'crontab' not available — skipping"
@@ -688,6 +797,8 @@ PYEOF
             info "User crontab references legacy OpenClaw cron scripts:"
             [[ "$CRON_MIGRATE_RESULT" == *"hb"* ]] && info "  - heartbeat_cron.py → $AUTODEV_REPO_PATH/autodev/pipeline/heartbeat_cron.py"
             [[ "$CRON_MIGRATE_RESULT" == *"sc"* ]] && info "  - session_cleanup.py → $AUTODEV_REPO_PATH/autodev/pipeline/session_cleanup.py"
+            # ci-default: Y - same rationale as cron/jobs.json above: only EXISTING
+            # legacy lines are rewritten (a backup is saved first); no new entries.
             if prompt_yn "Repoint user crontab to the repo copies? [Y/n]" "Y"; then
                 CRON_BACKUP="/tmp/crontab.backup.$(date +%s)"
                 crontab -l > "$CRON_BACKUP" 2>/dev/null || true
@@ -752,6 +863,7 @@ PYEOF
             ;;
     esac
 fi
+fi  # end guest-mode step 7
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 8/14  REGISTER AUTODEV AGENTS (OPENCLAW)
@@ -773,6 +885,98 @@ if [ ! -f "$REGISTER_AGENT" ]; then
 elif [ ! -f "$OPENCLAW_ROOT/openclaw.json" ]; then
     warn "openclaw.json not found — cannot register pipeline agents"
     REGISTER_STATUS_STEP="skipped (no openclaw.json)"
+elif [ "$OWNED_OPENCLAW" -eq 1 ]; then
+    # owned-mode-begin: step 8
+    # Owned mode assumes openclaw.json was rendered from the golden template
+    # (DS-2b; the DS-3 entrypoint renders it on first boot). The hooks block is
+    # VALIDATED via the audit helper, never incrementally patched, and any
+    # mismatch is fatal: a wrong template output must fail the boot, not be
+    # papered over. The remaining seeds (tools.profile, agent entries, context
+    # limits) are applied unconditionally; on a conformant template they are
+    # no-ops, so repeat runs converge to byte-identical trees.
+    HOOK_ISSUES=$(
+        cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import openclaw_hooks_issues
+import sys
+print(','.join(openclaw_hooks_issues(sys.argv[1])))
+" "$OPENCLAW_ROOT/openclaw.json" 2>/dev/null || echo "audit_error"
+    )
+    if [ "$HOOK_ISSUES" = "audit_error" ]; then
+        fail "Could not audit hooks block in openclaw.json (owned mode)"
+    elif [ -n "$HOOK_ISSUES" ]; then
+        fail "openclaw.json hooks block not conformant (owned mode validates, never patches): $HOOK_ISSUES"
+    fi
+    ok "openclaw.json hooks baseline validated (owned mode)"
+    HOOKS_STEP="ok (validated, owned)"
+
+    # hooks.token is the source of truth; converge .env and ui/config.json to
+    # it unconditionally (deterministic, no prompts).
+    CURRENT_HOOK_TOKEN=$(
+        cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import read_openclaw_hooks_token
+import sys
+print(read_openclaw_hooks_token(sys.argv[1]) or '')
+" "$OPENCLAW_ROOT/openclaw.json" 2>/dev/null || echo ""
+    )
+    [ -n "$CURRENT_HOOK_TOKEN" ] || fail "hooks.token unreadable despite passing audit (owned mode)"
+    ENV_SYNC_RESULT=$(
+        cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import set_dotenv_key
+import sys
+print(set_dotenv_key(sys.argv[1], 'AUTODEV_HOOKS_TOKEN', sys.argv[2]))
+" "$ENV_FILE" "$CURRENT_HOOK_TOKEN" 2>/dev/null || echo "error:env"
+    )
+    case "$ENV_SYNC_RESULT" in
+        created|updated|unchanged) ok ".env AUTODEV_HOOKS_TOKEN converged to hooks.token ($ENV_SYNC_RESULT)" ;;
+        *) fail "Could not converge .env AUTODEV_HOOKS_TOKEN: $ENV_SYNC_RESULT" ;;
+    esac
+    UI_SYNC_RESULT=$(
+        cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import set_ui_config_hooks_token
+import sys
+print(set_ui_config_hooks_token(sys.argv[1], sys.argv[2]))
+" "$UI_CONFIG_PATH" "$CURRENT_HOOK_TOKEN" 2>/dev/null || echo "error:ui"
+    )
+    case "$UI_SYNC_RESULT" in
+        updated|unchanged) ok "ui/config.json hooks_token converged to hooks.token ($UI_SYNC_RESULT)" ;;
+        *) fail "Could not converge ui/config.json hooks_token: $UI_SYNC_RESULT" ;;
+    esac
+    WEBHOOK_SYNC_STEP="ok (owned, converged)"
+
+    TP_R=$(
+        cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import set_openclaw_global_tools_profile
+import sys
+print(set_openclaw_global_tools_profile(sys.argv[1], 'coding'))
+" "$OPENCLAW_ROOT/openclaw.json" 2>/dev/null || echo "error:helper"
+    )
+    case "$TP_R" in
+        updated)   ok "tools.profile set to coding (owned mode: unconditional)"; TOOLS_PROFILE_STEP="updated to coding" ;;
+        unchanged) ok "tools.profile already coding"; TOOLS_PROFILE_STEP="ok (coding)" ;;
+        *)         fail "Could not set tools.profile: $TP_R" ;;
+    esac
+
+    APPLY_RESULT=$("$PYTHON" "$REGISTER_AGENT" \
+        "$OPENCLAW_ROOT/openclaw.json" "$OPENCLAW_ROOT" --apply)
+    case "$APPLY_RESULT" in
+        registered)         ok "Lullabeast agents registered in openclaw.json"; REGISTER_STATUS_STEP="registered" ;;
+        already_registered) ok "All Lullabeast agents already registered"; REGISTER_STATUS_STEP="already registered" ;;
+        *)                  fail "Agent registration failed (owned mode): $APPLY_RESULT" ;;
+    esac
+
+    CTX_LIMITS_RESULT=$(
+        cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import ensure_openclaw_context_limits
+import sys
+print(ensure_openclaw_context_limits(sys.argv[1]))
+" "$OPENCLAW_ROOT/openclaw.json" 2>/dev/null || echo "error:helper"
+    )
+    case "$CTX_LIMITS_RESULT" in
+        updated)   ok "Context limits seeded (owned mode)"; CTX_LIMITS_STEP="updated" ;;
+        unchanged) ok "Context limits already in place"; CTX_LIMITS_STEP="ok (unchanged)" ;;
+        *)         fail "Could not seed context limits (owned mode): $CTX_LIMITS_RESULT" ;;
+    esac
+    # owned-mode-end: step 8
 else
     # Webhook hooks baseline (orchestrator/UI → gateway) before agent registration
     HOOK_ISSUES=$(
@@ -803,6 +1007,9 @@ print(','.join(openclaw_hooks_issues(sys.argv[1])))
         case ",$HOOK_ISSUES," in *,invalid_root,*) warn "  · openclaw.json root must be an object" ;; esac
         case ",$HOOK_ISSUES," in *,no_file,*) warn "  · openclaw.json not found (unexpected)" ;; esac
         HOOKS_STEP="issues: ${HOOK_ISSUES}"
+        # ci-default: Y - the hooks baseline (enabled, allowRequestSessionKey,
+        # pipeline:/ideas: prefixes) is required for every webhook call and the
+        # patch preserves an existing token, so auto-applying cannot lose data.
         if prompt_yn "Patch hooks now (atomic write; keeps your existing hooks.token if set)? [Y/n]" "Y"; then
             HP=$(
                 cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
@@ -829,6 +1036,9 @@ print(','.join(openclaw_hooks_issues(sys.argv[1])))
         if [ "$HOOK_ISSUES_AFTER" = "audit_error" ]; then
             warn "Could not re-audit hooks after patch"
         elif echo ",$HOOK_ISSUES_AFTER," | grep -q ",token,"; then
+            # ci-default: Y - only fires when hooks.token is EMPTY, so generating
+            # one cannot clobber an existing secret, and without it every
+            # POST /hooks/agent returns 401.
             if prompt_yn "hooks.token is still empty. Generate a random token and set it (atomic)? [Y/n]" "Y"; then
                 GEN_TOKEN=$("$PYTHON" -c "import secrets; print(secrets.token_urlsafe(32))")
                 HT=$(
@@ -929,9 +1139,12 @@ print(merge_dotenv_missing_keys(sys.argv[1], {'AUTODEV_HOOKS_TOKEN': sys.argv[2]
         IFS='|' read -r SYNC_CODE SYNC_HAS_TOKEN SYNC_UI_NEEDS SYNC_ENV_MISSING SYNC_ENV_WRONG SYNC_UI_EXISTS <<< "$SYNC_STATE"
 
         if [ "$SYNC_UI_NEEDS" = "1" ]; then
-            if [ "$NON_INTERACTIVE" -eq 1 ]; then
-                warn "ui/config.json hooks_token is empty or does not match hooks.token (non-interactive mode: no overwrite)"
-            elif [ "$SYNC_UI_EXISTS" = "1" ]; then
+            if [ "$SYNC_UI_EXISTS" = "1" ]; then
+                # ci-default: Y - hooks.token is the single source of truth for the
+                # webhook Bearer; a mismatched ui/config.json hooks_token means 401s
+                # on every agent call, so syncing is safe to auto-apply. (Previously
+                # non-interactive mode warned without overwriting, leaving the
+                # install broken until a manual fix.)
                 if prompt_yn "Sync ui/config.json hooks_token to match openclaw.json hooks.token? [Y/n]" "Y"; then
                     UI_SYNC_RESULT=$(
                         cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
@@ -954,9 +1167,11 @@ print(set_ui_config_hooks_token(sys.argv[2], tok) if tok else 'error:empty token
         fi
 
         if [ "$SYNC_ENV_WRONG" = "1" ]; then
-            if [ "$NON_INTERACTIVE" -eq 1 ]; then
-                warn ".env AUTODEV_HOOKS_TOKEN does not match hooks.token (non-interactive mode: no overwrite)"
-            else
+            {
+                # ci-default: Y - same rationale as the ui/config.json sync above:
+                # hooks.token is the source of truth and a mismatched
+                # AUTODEV_HOOKS_TOKEN means 401s, so converging is safe to
+                # auto-apply. (Previously non-interactive warned, no overwrite.)
                 if prompt_yn "Update .env AUTODEV_HOOKS_TOKEN to match openclaw.json hooks.token? [Y/n]" "Y"; then
                     ENV_SYNC_RESULT=$(
                         cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
@@ -973,7 +1188,7 @@ print(set_dotenv_key(sys.argv[2], 'AUTODEV_HOOKS_TOKEN', tok) if tok else 'error
                 else
                     warn ".env AUTODEV_HOOKS_TOKEN sync skipped by user"
                 fi
-            fi
+            }
         fi
 
         SYNC_STATE=$(read_sync_state)
@@ -1017,6 +1232,10 @@ print((t.get('profile') or '').strip())
             warn "  Planner/executor/reviewer need Coding-profile tools (fs, exec, web, sessions, memory)."
             warn "  Reference: https://docs.openclaw.ai/tools"
             TOOLS_PROFILE_STEP="warn ($TOOLS_PROFILE)"
+            # ci-default: N (deliberate) - tools.profile is a GLOBAL gateway setting
+            # that also affects non-Lullabeast agents on a shared host, so guest
+            # mode never flips it unattended; the doctor flags a wrong profile as
+            # a failing check instead. Owned mode sets it unconditionally above.
             if prompt_yn "Set global tools.profile to \"coding\" now? (atomic write; no other keys changed) [y/N]" "N"; then
                 TP_R=$(
                     cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
@@ -1057,6 +1276,9 @@ print(set_openclaw_global_tools_profile(sys.argv[1], 'coding'))
             # `head -n -1` is GNU-only; `sed '$d'` (delete last line) is BSD/GNU portable.
             echo "$REGISTER_DRY_OUTPUT" | sed '$d'
             info "The above changes would be applied to $OPENCLAW_ROOT/openclaw.json"
+            # ci-default: Y - registration only APPENDS missing agent entries and
+            # allowlist ids (existing entries are never touched); without it the
+            # webhook invocations for the pipeline roles are denied.
             if prompt_yn "Register missing Lullabeast agents (planner, executor, reviewer, escalation, prd-creator, roadmap-converter)? [Y/n]" "Y"; then
                 APPLY_RESULT=$("$PYTHON" "$REGISTER_AGENT" \
                     "$OPENCLAW_ROOT/openclaw.json" "$OPENCLAW_ROOT" --apply)
@@ -1266,21 +1488,43 @@ with open(cfg_path) as f:
 plugins = cfg.setdefault("plugins", {}).setdefault("entries", {})
 entry = plugins.setdefault("autodev-pipeline-signals", {})
 entry["hooks"] = entry.get("hooks", {})
+if entry["hooks"].get("allowConversationAccess") is True:
+    sys.exit(0)  # already set: no write, so re-runs change no mtimes
 entry["hooks"]["allowConversationAccess"] = True
-tmp = cfg_path + ".tmp"
-with open(tmp, "w") as f:
-    json.dump(cfg, f, indent=2)
-    f.write("\n")
-os.replace(tmp, cfg_path)
+# Unique-temp atomic write (mkstemp + os.replace). This replicates
+# autodev/pipeline/atomic_io.write_json_atomic rather than importing it:
+# install.sh heredocs must run before/without the repo's Python deps and
+# PYTHONPATH being guaranteed. A fixed <path>.tmp name is concurrent-unsafe
+# (two writers collide on the one temp name and corrupt the file).
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(cfg_path), prefix="openclaw_plugins_", suffix=".json")
+try:
+    with os.fdopen(fd, "w") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, cfg_path)
+except BaseException:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
 PYEOF
         fi
+        # OpenClaw 2026.6.x static inspection reports typedHooks=[] for plugins
+        # that register via api.on(...) at runtime (verified live on 2026.6.11
+        # with a working plugin), so when the typed-hook list is empty the
+        # validator falls back to a content check of the deployed bundle: it
+        # must name every required hook. Same fallback as the doctor's
+        # plugin_hooks_registered check (autodev/installer/doctor.py).
         if openclaw plugins inspect autodev-pipeline-signals --json 2>/dev/null | python3 -c '
-import json, sys
+import json, os, sys
 try:
     data = json.load(sys.stdin)
 except Exception:
     raise SystemExit(2)
 plugin = data.get("plugin") or {}
+if plugin.get("status") != "loaded":
+    raise SystemExit(1)
 hooks = {h.get("name") for h in data.get("typedHooks") or [] if isinstance(h, dict)}
 required = {
     "agent_end",
@@ -1289,10 +1533,21 @@ required = {
     "model_call_ended",
     "after_tool_call",
 }
-if plugin.get("status") == "loaded" and required.issubset(hooks):
+if required.issubset(hooks):
     raise SystemExit(0)
+if not hooks:
+    bundle = os.path.join(
+        sys.argv[1], "extensions", "autodev-pipeline-signals", "dist", "index.js"
+    )
+    try:
+        with open(bundle, encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except OSError:
+        raise SystemExit(1)
+    if all(("\"%s\"" % h) in content for h in required):
+        raise SystemExit(0)
 raise SystemExit(1)
-'; then
+' "$OPENCLAW_ROOT"; then
             ok "Plugin validation: required typed hooks are registered"
             PLUGIN_INSTALL_STEP="ok (validated hooks)"
         else
@@ -1328,6 +1583,42 @@ raise SystemExit(1)
         if systemctl --user is-active openclaw-gateway >/dev/null 2>&1; then
             if systemctl --user restart openclaw-gateway 2>/dev/null; then
                 ok "Gateway restarted (systemctl --user) — new plugin bundle loaded"
+                # Wait (bounded) for the gateway to listen again so the doctor's
+                # final gateway_up/ports probes do not false-fail on a gateway
+                # that is still booting from the restart we just issued.
+                GW_PORT=$("$PYTHON" -c "
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        cfg = json.load(f)
+    print(int((cfg.get('gateway') or {}).get('port') or 18789))
+except Exception:
+    print(18789)
+" "$OPENCLAW_ROOT/openclaw.json" 2>/dev/null || echo 18789)
+                GW_READY=0
+                for _i in $(seq 1 40); do
+                    if "$PYTHON" -c "
+import socket, sys
+s = socket.socket()
+s.settimeout(0.5)
+try:
+    s.connect(('127.0.0.1', int(sys.argv[1])))
+    sys.exit(0)
+except OSError:
+    sys.exit(1)
+finally:
+    s.close()
+" "$GW_PORT" 2>/dev/null; then
+                        GW_READY=1
+                        break
+                    fi
+                    sleep 0.5
+                done
+                if [ "$GW_READY" -eq 1 ]; then
+                    ok "Gateway listening again on port $GW_PORT"
+                else
+                    warn "Gateway not listening on port $GW_PORT within 20s of restart; doctor may report it down"
+                fi
             else
                 warn "Could not restart gateway — run manually: systemctl --user restart openclaw-gateway"
             fi
@@ -1357,10 +1648,21 @@ PLAYWRIGHT_STEP="not attempted"
 # no time is wasted on dependency install.
 
 if [ "$SKIP_PLAYWRIGHT" -eq 1 ]; then
-    warn "Playwright install skipped (--skip-playwright flag)"
-    warn "  UI/INT phases will fail at the reviewer gate (ERR_VISUAL_UNVERIFIED)"
-    warn "  Re-run without --skip-playwright to enable visual review"
+    # An explicit operator flag is a documented choice, not a defect, so it
+    # must not trip owned mode's warnings-are-fatal policy. The doctor's
+    # playwright check still reports the resulting gap.
+    if [ "$OWNED_OPENCLAW" -eq 1 ]; then
+        info "Playwright install skipped (--skip-playwright flag)"
+        info "  UI/INT phases will fail at the reviewer gate (ERR_VISUAL_UNVERIFIED)"
+    else
+        warn "Playwright install skipped (--skip-playwright flag)"
+        warn "  UI/INT phases will fail at the reviewer gate (ERR_VISUAL_UNVERIFIED)"
+        warn "  Re-run without --skip-playwright to enable visual review"
+    fi
     PLAYWRIGHT_STEP="skipped (--skip-playwright)"
+# ci-default: Y - UI/INT phases hard-fail at the reviewer gate without the
+# Playwright stack; opting out non-interactively is the explicit
+# --skip-playwright flag, not a prompt default.
 elif ! prompt_yn "Install Playwright MCP for screenshot-based visual review on UI phases? [Y/n]" "Y"; then
     warn "Playwright install declined by user"
     warn "  UI/INT phases will fail at the reviewer gate (ERR_VISUAL_UNVERIFIED)"
@@ -1503,6 +1805,27 @@ else
     echo
     echo "${GREEN}${BOLD}✓ Setup complete.${RESET}"
 fi
+
+# ── Doctor: the authoritative "is this actually going to work" verdict ──────
+# Runs in every mode as the installer's final gate (DS-1/DS-2). The per-step
+# summary above reports what THIS RUN did; the doctor probes the resulting
+# system end to end (gateway, plugin bundle, secrets, symlinks, versions).
+echo
+echo "${BOLD}Doctor (final health check)${RESET}"
+DOCTOR_EXIT=0
+( cd "$AUTODEV_REPO_PATH" && "$PYTHON" -m autodev.installer.doctor ) || DOCTOR_EXIT=$?
+case "$DOCTOR_EXIT" in
+    0) echo "${GREEN}${BOLD}✓ Doctor: all checks green.${RESET}" ;;
+    2) echo "${YELLOW}${BOLD}⚠ Doctor: passing with warnings (fix hints above).${RESET}" ;;
+    *)
+        if [ "$OWNED_OPENCLAW" -eq 1 ] || [ "$STRICT" -eq 1 ]; then
+            fail "Doctor reports failing checks (exit $DOCTOR_EXIT); see the FAIL lines and fix hints above."
+        fi
+        echo "${RED}${BOLD}✗ Doctor: failing checks detected (see FAIL lines above).${RESET}"
+        echo "  The install completed, but the system will not work until these are fixed."
+        echo "  Re-check any time with: cd \"$AUTODEV_REPO_PATH\" && $PYTHON -m autodev.installer.doctor"
+        ;;
+esac
 
 echo
 echo "  Start with: cd \"$AUTODEV_REPO_PATH\" && source .env && uvicorn ui.server:app --host 127.0.0.1 --port 18790 (change to 0.0.0.0 only if serving trusted LAN)"

@@ -9,6 +9,10 @@ FastAPI server (`server.py`) and a single-file React app (`index.html`) for the 
 | `server.py` | API routes, OpenClaw webhook helpers, setup/preflight/launch; on startup, optional **auto sync** of `autodev/agents/*` into `OPENCLAW_ROOT/workspace-*` (see `auto_sync_agent_workspaces` in `config.json` / `DEFAULTS` in `server.py`, same mtime rules as `install.sh` step 5) |
 | `index.html` | Inline Babel/React UI (all screens in one file) — hand-maintained source of truth (no build/generate step) |
 
+### Doctor endpoint
+
+- **`GET /api/doctor`** runs the read-only DS-1 health checks (`autodev/installer/doctor.py`, `run_doctor(load_config(), live=False)`) and returns `{status, counts, checks: [{id, title, status, detail, fix_hint}]}`. Never live from the server (the webhook ping is CLI-opt-in only, since it creates a real OpenClaw session). Token-guarded like every other `/api/*` route. Probes are bounded by `DOCTOR_PROBE_TIMEOUT` (default 5 s), so the response can take a few seconds when the gateway is down. No UI panel yet (that lands with the deploy roadmap's DS-6 phase).
+
 ### Layout notes (Project Ideas)
 
 - **Main nav** (`Sidebar`): collapses to an icon-only abbreviated state (wider than a thin strip) and uses a centered divider toggle (`‹` / `›`) shared with the chats rail.
