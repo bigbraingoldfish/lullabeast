@@ -1,0 +1,7 @@
+# The operator's real environment file (API key, model overrides). The repo
+# root .gitignore also matches .env at any depth; this explicit entry keeps
+# the deploy directory self-contained (DS-4 secrets posture).
+.env
+# The bind-mounted projects directory the quickstart creates next to the
+# compose file (generated project code, not repo content).
+projects/

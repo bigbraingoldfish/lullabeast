@@ -34,6 +34,39 @@ services:
       - "host.docker.internal:host-gateway"
     init: true
     restart: unless-stopped
+    # ── DS-4 hardening ──────────────────────────────────────────────────────
+    # The container is the blast-radius boundary for LLM-generated code (the
+    # executor has exec). What this posture does and does not contain is
+    # documented in deploy/README.md ("What the sandbox does and does not
+    # contain").
+    security_opt:
+      # Child processes can never gain privileges; any setuid/setgid binary
+      # left in the image is inert.
+      - no-new-privileges:true
+    # Drop every Linux capability. Nothing in the container needs one: all
+    # processes run as the non-root lullabeast user on unprivileged ports,
+    # and Playwright launches Chromium with Chromium's own sandbox disabled
+    # by default (chromiumSandbox: false), so no SYS_ADMIN add-back is
+    # expected. Add a capability back only when a real probe proves the need,
+    # and document the probe inline here.
+    cap_drop:
+      - ALL
+    # Resource ceilings (uncomment and size to your host; both keys are
+    # honored by docker compose v2). A runaway executor process tree or
+    # Chromium then cannot starve the host. Guidance: Chromium is the
+    # heaviest resident, so 4g matches the documented minimum-hardware
+    # target; a normal boot uses well under 200 PIDs, and 2048 leaves
+    # generous headroom for npm/pip bursts and Chromium's process swarm.
+    # pids_limit: 2048
+    # mem_limit: 4g
+    # Read-only rootfs was assessed (DS-4 task 3) and deliberately left OFF:
+    # install.sh runs on every boot as the single provisioning brain and by
+    # contract writes inside /app (the .env merge, ui/config.json, the
+    # signals-plugin rebuild), and /home/lullabeast carries the baked Python
+    # venv plus the per-boot npm/pip caches, so read_only: true breaks boot
+    # outright. The equivalent protection ships via image file ownership
+    # instead: /app is root-owned with three narrow write islands (see
+    # deploy/Dockerfile).
 
 volumes:
   lullabeast-data:
