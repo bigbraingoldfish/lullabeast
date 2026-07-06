@@ -5571,6 +5571,17 @@ class Orchestrator:
                     _base_result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=SYMLINK_TARGET, capture_output=True, text=True)
                     if _base_result.returncode == 0:
                         self.state["phase_base_commit"] = _base_result.stdout.strip()
+                    else:
+                        # Carrying the PREVIOUS phase's base would make the executor
+                        # gate's deletion guard diff a range spanning that whole phase
+                        # (false ERR_UNACCOUNTED_DELETION). Clear it so the guard
+                        # fails closed with the honest ERR_MISSING_BASE_COMMIT.
+                        print(f"[ERROR] git rev-parse HEAD failed at phase advance "
+                              f"(rc={_base_result.returncode}): "
+                              f"{(_base_result.stderr or '').strip()} — clearing "
+                              f"phase_base_commit; deletion guard will fail closed.",
+                              file=sys.stderr)
+                        self.state["phase_base_commit"] = ""
 
                     # Checkout new phase branch — use raw_id to avoid int-suffix collisions
                     _next_raw = self.state.get("current_phase_raw_id", "")

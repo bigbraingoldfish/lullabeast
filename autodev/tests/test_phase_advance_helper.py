@@ -201,6 +201,36 @@ def test_advance_pending_starts_next_phase_and_returns_continue(tmp_path, monkey
     assert orch.state["pipeline_status"] == "RUNNING"
 
 
+def test_advance_pending_rev_parse_failure_clears_stale_base(tmp_path, monkeypatch, capsys):
+    """PENDING with a failing `git rev-parse HEAD`: the helper must CLEAR
+    phase_base_commit rather than silently carry the previous phase's base.
+    A stale base makes the executor gate's deletion guard diff a range spanning
+    the whole previous phase (false ERR_UNACCOUNTED_DELETION, burned retries);
+    an empty base instead fails closed with the honest ERR_MISSING_BASE_COMMIT."""
+    inner = _ResolverRun(
+        rc=0, stdout="PENDING: Phase CORE-E2 identified.", artifacts_dir=str(tmp_path),
+        current_phase_json={"phase_number": 2, "raw_id": "CORE-E2"},
+    )
+
+    def run(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args")
+        if isinstance(cmd, list) and cmd[:2] == ["git", "rev-parse"]:
+            inner.calls.append(cmd)
+            return _R(128, "", "fatal: not a git repository")
+        return inner(*args, **kwargs)
+
+    orch = _make_advance_orch(tmp_path, monkeypatch, run=run)
+
+    sig = orch._advance_to_next_pending_phase(trigger="skip")
+
+    assert sig == "continue"
+    assert orch.state["phase_base_commit"] == "", (
+        "a failed rev-parse must clear the stale base, not carry 'oldbase'"
+    )
+    err = capsys.readouterr().err
+    assert "rev-parse" in err and "clearing" in err
+
+
 def test_advance_pipeline_complete_no_queue_returns_break(tmp_path, monkeypatch):
     """PIPELINE_COMPLETE with no queue: current_agent cleared to None, the active
     entry marked COMPLETED, and 'break' returned (nothing left to advance to)."""
