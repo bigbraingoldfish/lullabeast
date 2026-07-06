@@ -49,7 +49,7 @@ EXPECTED_CHECK_IDS = [
     "context_limits", "tools_profile", "heartbeat_disabled", "gateway_up",
     "webhook_ping", "plugin_deployed", "plugin_hooks_registered",
     "exec_approvals", "symlink_consistency", "stale_lock", "playwright",
-    "ui_token", "ports",
+    "ui_token", "ports", "template_conformance",
 ]
 
 
@@ -157,6 +157,9 @@ def env(tmp_path, monkeypatch):
     (home / ".cache" / "ms-playwright" / "chromium-1000").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
 
+    # Guest posture by default: template_conformance (owned mode only) skips.
+    monkeypatch.delenv("OWNED_OPENCLAW", raising=False)
+
     # A live listener standing in for the gateway.
     gw = socket.socket()
     gw.bind(("127.0.0.1", 0))
@@ -204,8 +207,10 @@ class TestAllGreen:
             if c.status not in ("ok", "skipped")
         }
         assert bad == {}, f"non-green checks in the green fixture: {bad}"
-        # webhook_ping is the only skipped check without --live
-        assert by_id["webhook_ping"].status == "skipped"
+        # Exactly two checks skip here: webhook_ping without --live, and
+        # template_conformance outside owned-OpenClaw mode.
+        skipped = {cid for cid, c in by_id.items() if c.status == "skipped"}
+        assert skipped == {"webhook_ping", "template_conformance"}
         assert report.overall() == "ok"
         assert report.exit_code() == 0
 
