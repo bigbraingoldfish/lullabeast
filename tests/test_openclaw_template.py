@@ -192,8 +192,15 @@ class TestModelPricing:
             assert cost["input"] > 0 and cost["output"] > 0, mid
 
     def test_every_shipped_model_is_referenced(self):
-        # No dead pricing entries: the shipped set is exactly the recommended set.
-        assert set(self._openrouter_models()) == self._referenced_model_ids()
+        # Every model an agent points its `model.primary` at must be shipped and
+        # priced. The reverse is NOT required: a shipped model may be a
+        # non-default, env-selectable option (e.g. minimax/minimax-m3 stays
+        # shipped and priced after the 2026-07-07 planner-default move to
+        # kimi-k2.7-code, still selectable via PLANNER_MODEL). See
+        # deploy/CONFIG-AUDIT.md agents.list[planner].
+        shipped = set(self._openrouter_models())
+        referenced = self._referenced_model_ids()
+        assert referenced <= shipped, referenced - shipped
 
     def test_executor_and_reviewer_defaults_are_multimodal(self):
         models = self._openrouter_models()

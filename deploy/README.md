@@ -46,6 +46,35 @@ For your first pipeline run, the repo bundles a known-good sample project
 Snake game): copy it into `./projects/` and follow "Your first run" in the
 [main README](../README.md).
 
+## Troubleshooting first boot
+
+- **`Bind for 0.0.0.0:18790 failed: port is already allocated` (or similar
+  "ports are not available ... 18790").** Another process on the host already
+  holds the dashboard port. Set `UI_PORT` to a free port in `deploy/.env` and
+  re-run. Note that `docker compose up -d` swallows this error and the
+  container looks like it started; the foreground `docker compose up` the
+  quickstart uses prints it in the boot log, which is why the quickstart runs
+  in the foreground.
+- **Pulling `ghcr.io/bigbraingoldfish/lullabeast` is denied.** There is no
+  published image to pull yet: images are published only from the first tagged
+  release onward (see "CI, published images, and OFFLINE mode" below for the
+  `v*` tag publish). You do not need one. The compose default builds the image
+  locally as `lullabeast:local` and never touches the registry, so the
+  quickstart works with no pull.
+- **Windows: `bash\r: No such file or directory` (or scripts failing on a
+  `\r`).** Windows git checked the shell scripts out with CRLF line endings,
+  which the container's Linux shell cannot run. The repo's `.gitattributes`
+  forces LF for the affected files, so a fresh clone is correct. If you cloned
+  before that fix existed, re-clone the repo (or delete and re-checkout the
+  deploy scripts) so git rewrites them with LF.
+- **A model fails with "404 No endpoints found" (or another provider
+  rejection) on the first run.** Model availability on OpenRouter shifts over
+  time, so a shipped default can stop resolving for a given key. Override that
+  role's `*_MODEL` variable in `deploy/.env` with a model your key can reach
+  and restart the container. The defaults are chosen from models verified
+  working, and the per-agent variables are listed in the environment contract
+  table below.
+
 ## Environment contract (`deploy/.env`)
 
 Every variable is documented inline in [.env.example](.env.example).

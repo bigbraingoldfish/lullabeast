@@ -85,4 +85,3 @@ autodev/plugin/node_modules/
 scripts/queue-e2e-reset-test-projects.sh
 scripts/queue-e2e-strict-freeze.sh
 tests/test_freeze_script_portable.py
-deploy/CONFIG-AUDIT.md
