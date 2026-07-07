@@ -44,7 +44,8 @@ ALWAYS_APPLY = (
 )
 
 EXPECTED_CHECK_IDS = [
-    "env_paths", "python_deps", "git_identity", "openclaw_json",
+    "env_paths", "python_deps", "git_identity", "conversion_prompt",
+    "openclaw_json",
     "openclaw_version", "hooks_baseline", "secret_sync", "agents_registered",
     "context_limits", "tools_profile", "heartbeat_disabled", "gateway_up",
     "webhook_ping", "plugin_deployed", "plugin_hooks_registered",
@@ -128,6 +129,10 @@ def env(tmp_path, monkeypatch):
         d.mkdir(parents=True)
 
     (repo / "autodev" / "pipeline" / "orchestrator.py").write_text("# stub\n")
+    (repo / "autodev" / "prompts").mkdir(parents=True)
+    (repo / "autodev" / "prompts" / "prd-to-roadmap-conversion.txt").write_text(
+        "Convert the PRD into a canonical roadmap.\n"
+    )
     (oc / "openclaw.json").write_text(json.dumps(_good_openclaw_json()))
     bundle = oc / "extensions" / "autodev-pipeline-signals" / "dist"
     bundle.mkdir(parents=True)
@@ -239,6 +244,65 @@ class TestGitIdentity:
         c = doctor.check_git_identity(env)
         assert c.status == "fail"
         assert "user.name" in c.fix_hint
+
+
+class TestConversionPrompt:
+    _BUNDLED = "autodev/prompts/prd-to-roadmap-conversion.txt"
+
+    def test_bundled_ok(self, env):
+        c = doctor.check_conversion_prompt(env)
+        assert c.status == "ok"
+        assert self._BUNDLED in c.detail
+
+    def test_bundled_missing_fails(self, env):
+        os.remove(os.path.join(env["autodev_repo_path"], self._BUNDLED))
+        c = doctor.check_conversion_prompt(env)
+        assert c.status == "fail"
+        assert "prd-to-roadmap-conversion.txt" in c.detail
+        assert c.fix_hint
+
+    def test_override_readable_ok(self, env, tmp_path):
+        custom = tmp_path / "my-prompt.txt"
+        custom.write_text("custom instructions\n")
+        env["conversion_prompt_path"] = str(custom)
+        c = doctor.check_conversion_prompt(env)
+        assert c.status == "ok"
+        assert str(custom) in c.detail
+
+    def test_override_missing_warns(self, env, tmp_path):
+        env["conversion_prompt_path"] = str(tmp_path / "gone.txt")
+        c = doctor.check_conversion_prompt(env)
+        assert c.status == "warn"
+        assert "conversion_prompt_path" in c.detail
+
+    def test_override_missing_and_no_bundled_fails(self, env, tmp_path):
+        os.remove(os.path.join(env["autodev_repo_path"], self._BUNDLED))
+        env["conversion_prompt_path"] = str(tmp_path / "gone.txt")
+        c = doctor.check_conversion_prompt(env)
+        assert c.status == "fail"
+
+    def test_whitespace_padded_override_warns_like_the_server_ignores_it(self, env, tmp_path):
+        """load_config never strips, so the server treats a padded path as
+        not-a-file and falls back. The doctor must not strip either, or it
+        would greenlight an override the server silently ignores."""
+        custom = tmp_path / "my-prompt.txt"
+        custom.write_text("custom instructions\n")
+        env["conversion_prompt_path"] = f"  {custom}  "
+        c = doctor.check_conversion_prompt(env)
+        assert c.status == "warn"
+
+    def test_tilde_override_resolves_like_load_config_expands_it(self, env, monkeypatch, tmp_path):
+        """load_config expands ~ on every string value before the server probes
+        the path, so a ~ override IS honored at runtime; the doctor's own
+        expanduser keeps the CLI's raw ui/config.json read consistent."""
+        home = tmp_path / "home2"
+        home.mkdir()
+        (home / "my-prompt.txt").write_text("custom instructions\n")
+        monkeypatch.setenv("HOME", str(home))
+        env["conversion_prompt_path"] = "~/my-prompt.txt"
+        c = doctor.check_conversion_prompt(env)
+        assert c.status == "ok"
+        assert str(home / "my-prompt.txt") in c.detail
 
 
 class TestOpenclawJson:

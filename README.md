@@ -16,7 +16,7 @@
 
 Lullabeast is an open-source, local-capable, autonomous development pipeline. Describe what you want to build in plain English, and your team of agents (planner, executor, reviewer) implements it phase by phase against a real git repository, with deterministic gate scripts checking every step and an escalation path back to you when they get stuck.
 
-Lullabeast runs on [OpenClaw](https://docs.openclaw.ai/) and requires it: Lullabeast is the pipeline and dashboard, while the agents themselves run inside OpenClaw's runtime environment, which you install and run separately.
+Lullabeast runs on [OpenClaw](https://docs.openclaw.ai/) and requires it: Lullabeast is the pipeline and dashboard, while the agents themselves run inside OpenClaw's runtime environment. The Docker image bundles a pinned, pre-configured OpenClaw, so the install path below needs nothing but Docker and an API key.
 
 <p align="center">
   <img src="docs/assets/diagrams/demo-cycle.gif" alt="One full Lullabeast run, from idea to finished app" width="720">
@@ -124,45 +124,44 @@ Lullabeast is model-agnostic. OpenClaw owns all model configuration, so you choo
 
 ### Requirements
 
-Read this before running anything. The first item is a separate install:
+- **Docker** with the Compose plugin.
+- **An API key**: `OPENROUTER_API_KEY` (the shipped model defaults use OpenRouter) or `ANTHROPIC_API_KEY`.
+- **Hardware**: 2 CPU cores, 2-4 GB RAM (Playwright/Chromium is the heaviest resident), and a few GB of disk for the image, state, and generated project repos. No GPU: inference is cloud-side.
 
-- **A running [OpenClaw](https://docs.openclaw.ai) gateway.** Install it first ([install guide](https://docs.openclaw.ai/start/getting-started)) and have it listening on its default port, `localhost:18789`. Requires OpenClaw v2026.5.18 or newer.
-- **Linux, macOS, or WSL2.** Native Windows is unsupported (the pipeline uses POSIX `fcntl` locking).
-- **Python 3.11+** and `git` with a configured identity (`user.name` / `user.email`). The pipeline commits to your repos, and `install.sh` checks this.
-- **Node.js 22+** with `npm`. Builds the signals plugin and the Playwright visual-review MCP, which is required for UI phases (`install.sh` adds it by default; `--skip-playwright` to opt out).
-
-Running on non-default ports, or hitting setup snags? [SETUP.md](SETUP.md) covers configuration, version notes, and silent-failure modes in full.
+Everything else (OpenClaw, Python, Node, Chromium) ships inside the image, pinned and pre-configured.
 
 ### Install & run
 
-> **Prefer a container?** A Docker Compose path now exists: one container, one API key, no host prerequisites beyond Docker. See [deploy/README.md](deploy/README.md). The steps below are the bare-metal install.
-
 ```bash
-# 1. Install and start OpenClaw first.
-#    https://docs.openclaw.ai/start/getting-started
-curl -s http://localhost:18789/v1/models   # should respond; "connection refused" = gateway not up
-
-# 2. Install Lullabeast.
-git clone https://github.com/bigbraingoldfish/lullabeast.git autodev-ui
-cd autodev-ui
-./install.sh            # interactive; registers agents with OpenClaw, generates your dashboard access token; safe to re-run
-
-# 3. Run the dashboard from the repo root; the -m module form is required.
-source .env
-python -m ui.server
+git clone https://github.com/bigbraingoldfish/lullabeast.git && cd lullabeast/deploy
+cp .env.example .env    # then edit: set OPENROUTER_API_KEY (or ANTHROPIC_API_KEY)
+mkdir -p projects && docker compose up
 ```
 
-> **Launch command:** run `python -m ui.server` from the repo root (it binds `127.0.0.1` on the configured port, default `18790`). The script form `python ui/server.py` fails with `ModuleNotFoundError: No module named 'ui'`; use the module form above, or the equivalent `uvicorn ui.server:app --host 127.0.0.1 --port 18790` for CLI control of host/port.
+Wait for the boot log to end with the doctor verdict (the built-in health check) and a banner containing your dashboard URL, then open that URL on the machine running Docker. It includes your access token and authorizes your browser via a cookie (30 days); scripts can send the same token as a `Bearer` header instead. First boot is slower: it provisions state and validates your API key end to end with a one-time live webhook ping.
 
-The server prints your access URL at startup; open it (**`http://127.0.0.1:18790/?token=<AUTODEV_UI_TOKEN>`**). That authorizes your browser via a cookie (30 days); scripts can send the same token as a `Bearer` header instead. Then verify the webhook wiring once (use POST; a GET check can miss token mismatches):
+The full container contract (environment variables, volumes, upgrades, customization, hardening) is in **[deploy/README.md](deploy/README.md)**.
 
-```bash
-curl -sS -o /dev/null -w "HTTP %{http_code}\n" -X POST http://127.0.0.1:18789/hooks/agent \
-  -H "Authorization: Bearer <hooks.token>" -H "Content-Type: application/json" \
-  -d '{"agentId":"prd-creator","sessionKey":"ideas:install-check:0","wakeMode":"now","message":"ping"}'
-```
+> **Spend warning:** agent pipelines are token-hungry. Cache reads dominate and bill at a fraction of fresh input, but bills are real; watch the Monitor's cost strip on your first runs.
 
-`HTTP 200` means you're wired up; `401` means the Bearer token doesn't match `hooks.token` in `openclaw.json`. The full walkthrough, including macOS LaunchAgent and Linux/WSL2 systemd units, is in **[SETUP.md](SETUP.md)**.
+### Your first run
+
+The repo bundles a known-good sample project, a deliberately tiny single-file Snake game ([examples/first-run-snake](examples/first-run-snake)), so your first pipeline run needs no authoring at all:
+
+1. **Copy the sample into your projects directory** (the `./projects` folder next to `docker-compose.yml`):
+
+   ```bash
+   cp -r ../examples/first-run-snake projects/snake
+   ```
+
+2. **Open the dashboard** at the tokenized URL from the boot log. The **Setup & Preflight** screen's **Health** card shows the same checklist the boot log printed; everything should be green.
+3. **Add the project**: go to **Queue**, click **+ Add Project**, and enter the project path `/data/projects/snake` (the container-side path of `./projects/snake`). Adding validates the project with the full preflight (it also initializes git in the project for you) and, in the default automatic queue mode, starts the pipeline immediately. (The Setup & Preflight screen is the flow for projects authored in **Project Ideas**; on-disk projects like this one go through the Queue.)
+4. **Watch it build.** The pipeline plans, builds, and reviews the game phase by phase; follow the live loop in the **Pipeline Monitor**.
+5. When the run completes, the finished game is on your host at `projects/snake/index.html`; open it in a browser and play.
+
+### Developing Lullabeast
+
+Contributors (and anyone who wants to hack on the pipeline itself) run bare-metal in development mode against their own OpenClaw install. That walkthrough, including the guest-mode installer, systemd/LaunchAgent units, and non-default ports, lives in **[SETUP.md](SETUP.md)**.
 
 ---
 
@@ -176,7 +175,7 @@ curl -sS -o /dev/null -w "HTTP %{http_code}\n" -X POST http://127.0.0.1:18789/ho
 **Look before you install.** **[Tour the dashboard](https://lullabeast.ai/walkthrough)**. It's a snapshot preview of the interface from the MultiLife (Conway) build.
 
 - **Project Ideas:** chat an idea into a PRD, then generate the roadmap + verification contract.
-- **Setup & Preflight:** point at a project repo, run preflight checks, launch the pipeline.
+- **Setup & Preflight:** point at a project repo, run preflight checks, launch the pipeline. A **Health** card runs the doctor's full checklist against your install and shows a fix hint for anything red.
 - **Pipeline Monitor:** watch the live planner, executor, reviewer loop, per-phase metrics, and a real-time activity feed; recover from git errors or answer escalations.
 - **Queue:** line up multiple projects with dependency ordering; Lullabeast runs them sequentially.
 - **Cost & token visibility:** per-phase and per-agent cost/token breakdowns, live during a run and recallable after, in both the Monitor and the Queue (shown when your models report usage).
@@ -194,9 +193,13 @@ curl -sS -o /dev/null -w "HTTP %{http_code}\n" -X POST http://127.0.0.1:18789/ho
 
 ## Troubleshooting
 
-Start with the doctor: it checks every known silent-failure mode in one pass and prints a fix hint for each red item.
+Start with the doctor: it checks every known silent-failure mode in one pass and prints a fix hint for each red item. It renders as the **Health** card on the dashboard's Setup & Preflight screen, or run it from a shell:
 
 ```bash
+# container install
+docker compose exec lullabeast python -m autodev.installer.doctor
+
+# development install (bare-metal, from the repo root)
 source .env && python -m autodev.installer.doctor
 ```
 
@@ -225,7 +228,9 @@ autodev/
   docs/             # PIPELINE-SPEC, PIPELINE-CONSTRAINTS, assumptions
 ui/                 # FastAPI server + single-file React dashboard (no build step)
 tests/              # UI server tests
-install.sh          # interactive installer
+deploy/             # Docker image, compose file, golden OpenClaw config (the user install path)
+examples/           # demo PRDs/roadmaps + the launchable first-run sample project
+install.sh          # provisioning script (run by the container on every boot; guest mode for dev installs)
 ```
 
 Pipeline state (lock, queue, event log, ideas) lives in `<repo>/.autodev/`; OpenClaw's own config and agent workspaces live under `~/.openclaw`. `ui/server.py` (all API routes) and `autodev/pipeline/orchestrator.py` (the whole state machine) are intentionally single-file to keep control flow auditable; read [CLAUDE.md](CLAUDE.md) before refactoring either. The full spec is [autodev/docs/PIPELINE-SPEC.md](autodev/docs/PIPELINE-SPEC.md).
@@ -236,7 +241,8 @@ Pipeline state (lock, queue, event log, ideas) lives in `<repo>/.autodev/`; Open
 
 | Doc | What it covers |
 |---|---|
-| [SETUP.md](SETUP.md) | Full install, openclaw.json requirements, silent-failure modes, cost metrics |
+| [deploy/README.md](deploy/README.md) | The Docker install: env contract, volumes, upgrades, customization, hardening |
+| [SETUP.md](SETUP.md) | Development-mode (bare-metal) setup, openclaw.json requirements, doctor reference, cost metrics |
 | [GLOSSARY.md](GLOSSARY.md) | Dashboard terminology (pipeline/queue states, skills, metrics) |
 | [CLAUDE.md](CLAUDE.md) | Complete contributor orientation and architecture deep-dive |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup, PR conventions, adding skills |
