@@ -1,27 +1,26 @@
-# Lullabeast eval-harness migration notes (DS-3)
+# Lullabeast eval-harness migration notes
 
 Audience: the `lullabeast-eval` sister repo (`../lullabeast-eval`), which
 drives Lullabeast through its host-native setup path and depends on the
 symlink structure, state-file locations, and ports documented here.
 
 **Bottom line first: no eval-repo change is required.** The eval harness
-stays on bare-metal guest mode (operator decision, 2026-07-06), and the
-container work is purely additive: nothing in DS-3 changed the host-native
+stays on bare-metal guest mode (a deliberate decision), and the
+container work is purely additive: nothing in it changed the host-native
 paths, the guest-mode installer behavior, the state-file formats, or the
 ports. The "before" column below is still the supported dev configuration
 and is what `lullabeast-eval` should keep targeting. The "after" column
 exists so the eval repo can reason about container deployments if it ever
 inspects one.
 
-**Freeze status:** the "after" column reflects the DS-3 plus DS-4
-implementation (re-frozen 2026-07-06, the one-pass update DS-3 anticipated).
-DS-4 changed no paths or ports; the hardening deltas an eval harness could
+**Freeze status:** the "after" column reflects the container image plus its
+hardening pass. The hardening changed no paths or ports; the deltas an eval
+harness could
 notice inside a container are: `/app` is now root-owned and read-only to the
 runtime user except the `.env` / `.autodev` / `ui/config.json` /
 `autodev/plugin` write islands, and the compose service runs with
-`cap_drop: [ALL]` plus `no-new-privileges`. The DS-3 manual compose
-acceptance runs are still pending operator execution; if they force changes,
-this doc gets one further pass.
+`cap_drop: [ALL]` plus `no-new-privileges`. If future container acceptance
+runs force changes, this doc gets one further pass.
 
 ## Path and layout contract
 
@@ -64,12 +63,12 @@ configuration remains the supported one for `lullabeast-eval`.
 
 Everything. Running bare-metal guest mode (the supported dev configuration):
 
-- install path: `./install.sh` guest mode, unchanged by DS-1..DS-3;
+- install path: `./install.sh` guest mode, unchanged by the container work;
 - all "before"-column paths, formats, and ports;
 - the doctor CLI (`python -m autodev.installer.doctor`), which works
   identically in both worlds;
 - the state-file schemas (`pipeline_state.json`, queue, events, metrics),
   which are world-independent.
 
-The only new host-side artifact DS-3 adds to the repo is the `deploy/`
-directory itself; nothing in the eval harness's dependency surface moved.
+The only new host-side artifact the container work adds to the repo is the
+`deploy/` directory itself; nothing in the eval harness's dependency surface moved.

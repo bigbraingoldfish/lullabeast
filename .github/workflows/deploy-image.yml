@@ -1,11 +1,11 @@
-# Deploy image CI (DS-5): build the container image and smoke-test it with
+# Deploy image CI: build the container image and smoke-test it with
 # the doctor so the deploy path cannot silently rot.
 #
 # 1. build-smoke: build the default (OpenClaw-baked) image, boot it with
 #    OFFLINE=1 (the entrypoint's CI/smoke mode: no provider API key, no
 #    billable --live probe, everything else provisions for real), wait for the
 #    boot to reach the supervisor, then run the doctor with --json inside the
-#    container and assert the DS-5 contract via deploy/smoke_assert.py:
+#    container and assert the smoke contract via deploy/smoke_assert.py:
 #    report parses, no check fails, every keyless-runnable check is green,
 #    and the model-dependent webhook_ping reports skipped (never fail).
 #    A final step re-runs the hermetic doctor/template pytest modules inside
@@ -16,7 +16,7 @@
 #    boot). Build-only: its first boot needs the npm registry and duplicates
 #    the baked variant's smoke coverage.
 # 3. publish: on version tags only, push the baked image to GHCR. OpenClaw is
-#    MIT-licensed (DS-3 Task 0 decision, recorded in deploy/README.md), so
+#    MIT-licensed (decision recorded in deploy/README.md), so
 #    publishing with OpenClaw baked is permitted.
 #
 # Trigger note: GitHub does not evaluate `paths` filters for tag pushes, so a
@@ -144,7 +144,7 @@ jobs:
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      # Publish the baked variant (MIT license permits it; Task 0). GHCR
+      # Publish the baked variant (MIT license permits it). GHCR
       # image names must be lowercase, hence the tr on the owner.
       - name: Build and push
         run: |

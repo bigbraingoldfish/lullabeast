@@ -3,7 +3,7 @@
 
 Read-only by design. The doctor never mutates anything; each red item carries a
 ``fix_hint`` telling the human (or the installer) what to run. Three consumers
-share this module (DS-1):
+share this module:
 
   * CLI:      ``python -m autodev.installer.doctor [--json] [--live] [--quiet]``
   * Server:   ``GET /api/doctor`` in ``ui/server.py`` (``run_doctor(load_config())``)
@@ -253,7 +253,7 @@ def _http_get_json(url: str):
 
 # ---------------------------------------------------------------------------
 # The check catalogue. Each check maps to a documented failure mode; see the
-# DS-1 table in plans/Active/Cosidered-fable-tasks/deploy-simplification-roadmap.md.
+# check catalogue below.
 # ---------------------------------------------------------------------------
 
 def check_env_paths(config: dict) -> CheckResult:
@@ -907,7 +907,7 @@ def check_ports(config: dict) -> CheckResult:
 
 
 def check_template_conformance(config: dict) -> CheckResult:
-    # Owned-OpenClaw mode only (DS-2b): the container's openclaw.json is
+    # Owned-OpenClaw mode only: the container's openclaw.json is
     # rendered from deploy/openclaw.template.json, so any divergence from the
     # template's requirements is drift (a hand-edit inside /data, or an
     # OpenClaw upgrade rewriting a key). Guest installs are never
@@ -959,7 +959,7 @@ def check_template_conformance(config: dict) -> CheckResult:
     )
 
 
-# Catalogue order matters only for display; keep it aligned with the DS-1 table.
+# Catalogue order matters only for display.
 def run_doctor(config: dict, *, live: bool = False) -> DoctorReport:
     """Run every check against ``config`` (the ui/server.py load_config() shape).
 

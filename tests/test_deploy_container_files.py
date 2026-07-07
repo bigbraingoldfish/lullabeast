@@ -1,9 +1,9 @@
-"""Static lints for the DS-3/DS-4/DS-5 container deploy files.
+"""Static lints for the container deploy files.
 
 Hermetic by construction: every test reads repo files (or runs `bash -n` /
 `git check-ignore` / `python deploy/smoke_assert.py` against tmp fixtures);
 nothing touches ~/.openclaw, the live .autodev tree, or the network. Real
-`docker build` / `docker compose up` runs are manual acceptance (and DS-5 CI);
+`docker build` / `docker compose up` runs are manual acceptance (and CI);
 do not fake them here.
 """
 
@@ -51,7 +51,7 @@ class TestDockerfile:
         assert re.search(r"^USER lullabeast$", DOCKERFILE, re.MULTILINE)
 
     def test_base_default_users_removed_before_useradd(self):
-        # FINDING-001: the Playwright base ships both pwuser (uid 1001) and
+        # The Playwright base ships both pwuser (uid 1001) and
         # ubuntu (uid 1000); both must be freed before useradd --uid 1000, or
         # the build dies with "UID already in use".
         pwuser_idx = DOCKERFILE.find("userdel -r pwuser")
@@ -65,7 +65,7 @@ class TestDockerfile:
         )
 
     def test_system_safe_directory_configured(self):
-        # FINDING-006/008: Docker Desktop bind mounts arrive root-owned; a
+        # Docker Desktop bind mounts arrive root-owned; a
         # system-level safe.directory disables the dubious-ownership guard so
         # pipeline git work survives container recreation.
         assert re.search(
@@ -104,7 +104,7 @@ class TestEntrypoint:
 
     def test_template_rendered_via_shared_helper(self):
         # First-boot config render must go through openclaw_template's
-        # render_template_text (DS-2b contract), never a hand-rolled sed.
+        # render_template_text, never a hand-rolled sed.
         assert "render_template_text" in ENTRYPOINT
 
     def test_config_reconciled_toward_template_on_boot(self):
@@ -187,14 +187,14 @@ class TestCompose:
         assert data["services"]["lullabeast"]["env_file"] == ".env"
 
     def test_pull_policy_build(self):
-        # FINDING-002 adjacent: the default path always builds locally and
+        # The default path always builds locally and
         # never pulls from a registry.
         data = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
         assert data["services"]["lullabeast"]["pull_policy"] == "build"
 
 
 class TestGitAttributes:
-    """FINDING-003: without .gitattributes, Windows checkout (autocrlf=true)
+    """Without .gitattributes, a Windows checkout (autocrlf=true)
     writes CRLF into shell scripts and .env.example, breaking the shebang and
     value parsing in-container."""
 
@@ -245,7 +245,7 @@ class TestEnvExample:
 
 
 class TestHardening:
-    """DS-4 container-security posture lints (static; runtime acceptance is
+    """Container-security posture lints (static; runtime acceptance is
     the operator's docker run)."""
 
     def test_app_copy_is_root_owned(self):
@@ -287,7 +287,7 @@ class TestHardening:
         assert "cap_add" not in svc
 
     def test_read_only_rootfs_stays_off(self):
-        # Assessed and deliberately OFF (DS-4 task 3): install.sh writes
+        # Assessed and deliberately OFF: install.sh writes
         # inside /app on every boot by contract, so read_only: true breaks
         # boot. If that contract ever changes, remove this test deliberately
         # along with the compose comment.
@@ -356,7 +356,7 @@ class TestHardening:
 
 
 class TestOfflineMode:
-    """DS-5: OFFLINE=1 boots the full stack keyless for CI smoke runs."""
+    """OFFLINE=1 boots the full stack keyless for CI smoke runs."""
 
     def test_offline_default_off(self):
         assert 'OFFLINE="${OFFLINE:-0}"' in ENTRYPOINT
@@ -401,7 +401,7 @@ def _load_smoke_assert_module():
 
 
 class TestSmokeAssert:
-    """DS-5: functional tests for deploy/smoke_assert.py against tmp fixtures."""
+    """Functional tests for deploy/smoke_assert.py against tmp fixtures."""
 
     def _run(self, tmp_path, checks):
         path = tmp_path / "doctor.json"
@@ -501,7 +501,7 @@ class TestSmokeAssert:
 
 
 class TestDeployImageWorkflow:
-    """DS-5: static lints on .github/workflows/deploy-image.yml."""
+    """Static lints on .github/workflows/deploy-image.yml."""
 
     def _load(self):
         return yaml.safe_load(WORKFLOW_TEXT)
@@ -596,12 +596,12 @@ class TestDocs:
     def test_deploy_readme_covers_required_sections(self):
         text = (DEPLOY / "README.md").read_text(encoding="utf-8")
         for needle in (
-            "MIT",  # Task 0 licensing note
+            "MIT",  # licensing note
             "Quickstart",
             "Upgrade procedure",
             "NFS",  # flock caveat
             "Spend warning",
-            "$0",  # cost note (DS-2b)
+            "$0",  # cost note
             "Customization",
         ):
             assert needle in text, f"deploy/README.md is missing: {needle}"

@@ -6,7 +6,7 @@ yields a running system with agents registered, the signals plugin loaded, a
 green doctor, and the dashboard URL (with its access token) printed in the
 boot log.
 
-## OpenClaw redistribution (Task 0 decision, 2026-07-06)
+## OpenClaw redistribution and the version pin
 
 OpenClaw is MIT-licensed (verified against the `openclaw` npm package,
 version 2026.6.11: `npm view openclaw license` reports MIT, and the package
@@ -18,7 +18,7 @@ install uses). The decision is reversible: build with
 the entrypoint then installs the same pin into the `/data` volume on first
 boot.
 
-The pin starts at **2026.6.11** (operator-verified working). Never float
+The pin starts at **2026.6.11** (verified working end to end). Never float
 `latest`; bump the pin deliberately and re-run the doctor's version check,
 which knows the documented floor (2026.5.18) and the known-bad releases.
 
@@ -119,7 +119,7 @@ rather than dead-ending at the conformance check; keys the template does not
 pin are preserved. Nothing re-provisions from scratch: tokens, sessions, and
 pipeline state are kept.
 
-## CI, published images, and OFFLINE mode (DS-5)
+## CI, published images, and OFFLINE mode
 
 The GitHub Actions workflow
 [.github/workflows/deploy-image.yml](../.github/workflows/deploy-image.yml)
@@ -141,7 +141,8 @@ deployment.
 
 On version tags (`v*`) the workflow publishes the baked image to
 `ghcr.io/bigbraingoldfish/lullabeast:<tag>` and `:latest` (OpenClaw is MIT
-licensed, so publishing with it baked is permitted; see the Task 0 note
+licensed, so publishing with it baked is permitted; see the redistribution
+note
 above). To use a published image instead of building locally, replace the
 service's `build:` block and `image:` line in
 [docker-compose.yml](docker-compose.yml) with:
@@ -353,6 +354,6 @@ unchanged.
   the template, including the minimum-hardware statement.
 - [EVAL-MIGRATION.md](EVAL-MIGRATION.md): the before/after contract diff for
   the `lullabeast-eval` sister repo (which stays on bare-metal guest mode).
-- [smoke_assert.py](smoke_assert.py): the DS-5 CI assertion script; validates
+- [smoke_assert.py](smoke_assert.py): the CI assertion script; validates
   the doctor's `--json` report from an `OFFLINE=1` smoke boot (run by
   [.github/workflows/deploy-image.yml](../.github/workflows/deploy-image.yml)).

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deploy/entrypoint.sh - Lullabeast single-container boot (DS-3).
+# deploy/entrypoint.sh - Lullabeast single-container boot.
 #
 # Boot sequence:
 #   1. Validate the env contract (a provider API key is mandatory).
@@ -44,7 +44,7 @@ cd "$APP"
 # Fail before starting anything: a keyless container boots into a pipeline
 # that stalls silently at the first agent invocation.
 #
-# OFFLINE=1 (DS-5, CI/smoke only) is the one exception: it boots the full
+# OFFLINE=1 (CI/smoke only) is the one exception: it boots the full
 # stack with no provider key and no billable probes so CI can build the image
 # and doctor it on every deploy-file change. Provisioning is otherwise
 # unchanged; agents cannot run in this mode.

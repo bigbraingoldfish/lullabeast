@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""DS-5 CI smoke assertions against a doctor --json report.
+"""CI smoke assertions against a doctor --json report.
 
 Usage: python3 deploy/smoke_assert.py <doctor.json>
 
 Run by .github/workflows/deploy-image.yml after booting the image with
 OFFLINE=1 and capturing `python -m autodev.installer.doctor --json` from
-inside the container. Asserts, per the DS-5 contract:
+inside the container. Asserts:
 
   1. The report parses as JSON and has the DoctorReport shape.
   2. No check reports status "fail".
@@ -24,7 +24,7 @@ import json
 import sys
 
 # Checks that must be green in an OFFLINE=1 container boot (no provider key,
-# no live probes). From the DS-5 task list, plus template_conformance: the
+# no live probes). Includes template_conformance: the
 # smoke exec sets OWNED_OPENCLAW=1, and config drift inside the image is
 # exactly what this workflow exists to catch.
 REQUIRED_OK = (

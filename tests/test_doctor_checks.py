@@ -1,4 +1,4 @@
-"""Hermetic unit tests for the DS-1 doctor (autodev/installer/doctor.py).
+"""Hermetic unit tests for the doctor (autodev/installer/doctor.py).
 
 Everything runs against tmp_path fixtures: a fake OpenClaw root with
 good/bad openclaw.json variants, a fake extensions dir with/without the

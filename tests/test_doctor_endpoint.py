@@ -1,4 +1,4 @@
-"""Tests for GET /api/doctor (DS-1 server consumer of the doctor module)."""
+"""Tests for GET /api/doctor (the server consumer of the doctor module)."""
 
 from __future__ import annotations
 
@@ -84,7 +84,7 @@ def test_doctor_endpoint_requires_token(monkeypatch, hermetic_config):
 
 
 class TestDoctorHealthPanel:
-    """DS-6 Health card on the Setup & Preflight screen. The frontend is an
+    """Health card on the Setup & Preflight screen. The frontend is an
     in-browser Babel block with no transpiler in CI, so these pin the render
     gates by marker (the repo's UI-test idiom); they deliberately do not
     re-test the report content, which the endpoint tests above own."""

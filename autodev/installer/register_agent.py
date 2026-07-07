@@ -49,8 +49,7 @@ AUTODEV_AGENT_IDS = (
     "roadmap-converter",
 )
 
-# Truncation seeds for newly created entries (audit:
-# plans/Active/metaprompt-2-truncation-settings-audit.md). These MUST match the
+# Truncation seeds for newly created entries. These MUST match the
 # canonical values in setup_helpers.py — this module runs as a standalone script
 # (no package import at runtime), so the values are duplicated here and kept in
 # sync by test_register_agent.py::test_register_agent_seed_matches_setup_helpers_constants.

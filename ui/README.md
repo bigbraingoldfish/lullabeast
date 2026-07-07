@@ -11,7 +11,7 @@ FastAPI server (`server.py`) and a single-file React app (`index.html`) for the 
 
 ### Doctor endpoint
 
-- **`GET /api/doctor`** runs the read-only DS-1 health checks (`autodev/installer/doctor.py`, `run_doctor(load_config(), live=False)`) and returns `{status, counts, checks: [{id, title, status, detail, fix_hint}]}`. Never live from the server (the webhook ping is CLI-opt-in only, since it creates a real OpenClaw session). Token-guarded like every other `/api/*` route. Probes are bounded by `DOCTOR_PROBE_TIMEOUT` (default 5 s), so the response can take a few seconds when the gateway is down. Rendered in the dashboard as the read-only **Health** card on the Setup & Preflight screen (DS-6): `DoctorHealthCard` in `index.html` fetches the report once on mount and shows the checklist with per-check fix hints on warn/fail rows; no re-run button, never live.
+- **`GET /api/doctor`** runs the read-only doctor health checks (`autodev/installer/doctor.py`, `run_doctor(load_config(), live=False)`) and returns `{status, counts, checks: [{id, title, status, detail, fix_hint}]}`. Never live from the server (the webhook ping is CLI-opt-in only, since it creates a real OpenClaw session). Token-guarded like every other `/api/*` route. Probes are bounded by `DOCTOR_PROBE_TIMEOUT` (default 5 s), so the response can take a few seconds when the gateway is down. Rendered in the dashboard as the read-only **Health** card on the Setup & Preflight screen: `DoctorHealthCard` in `index.html` fetches the report once on mount and shows the checklist with per-check fix hints on warn/fail rows; no re-run button, never live.
 
 ### Layout notes (Project Ideas)
 

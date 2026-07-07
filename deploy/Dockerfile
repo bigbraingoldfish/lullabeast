@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# Lullabeast single-container image (DS-3).
+# Lullabeast single-container image.
 #
 # One container, multiple supervised processes (OpenClaw gateway, UI server,
 # heartbeat loop, session-cleanup loop); see deploy/entrypoint.sh. The
@@ -14,14 +14,14 @@
 FROM mcr.microsoft.com/playwright:v1.56.0-noble
 
 # OpenClaw pin (exact version, never "latest"). OpenClaw is MIT-licensed
-# (Task 0 decision, recorded in deploy/README.md), so the default image bakes
+# (decision recorded in deploy/README.md), so the default image bakes
 # it at build. Build with --build-arg OPENCLAW_VERSION= (empty) for the
 # no-bake variant: the entrypoint then installs this same pin into the /data
 # volume on first boot (slower first start, no OpenClaw bits in the image).
 ARG OPENCLAW_VERSION=2026.6.11
 ENV OPENCLAW_VERSION=${OPENCLAW_VERSION}
 
-# DS-4: no sudo in the image (nothing needs it; the runtime user is non-root
+# No sudo in the image (nothing needs it; the runtime user is non-root
 # and compose sets no-new-privileges, so a leftover setuid sudo would be inert
 # anyway, but it does not belong in the blast-radius boundary at all).
 RUN apt-get update \
@@ -41,7 +41,7 @@ RUN if [ -n "$OPENCLAW_VERSION" ]; then \
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN npx -y --package=@playwright/mcp@0.0.40 -- playwright-core install chromium
 
-# Non-root user (DS-4: every runtime process runs as it). uid 1000 by default
+# Non-root user (every runtime process runs as it). uid 1000 by default
 # so files in the ./projects bind mount come out owned by the typical host
 # user; the base image's default users (pwuser and ubuntu) are removed to free
 # the uid.
@@ -52,7 +52,7 @@ RUN (userdel -r pwuser 2>/dev/null || true) \
     && mkdir -p /data \
     && chown lullabeast:lullabeast /data
 
-# FINDING-006/008: the container is a single-user appliance. On Windows/macOS
+# The container is a single-user appliance. On Windows/macOS
 # Docker Desktop the ./projects bind mount arrives root-owned inside the
 # container while every process runs as lullabeast, so git's dubious-ownership
 # guard (CVE-2022-24765) fires on every project repo and breaks legitimate
@@ -61,7 +61,7 @@ RUN (userdel -r pwuser 2>/dev/null || true) \
 # per-user global config baked at boot would die with the container layer.
 RUN git config --system --add safe.directory '*'
 
-# DS-4: /app is root-owned and read-only to the runtime user. The pipeline
+# /app is root-owned and read-only to the runtime user. The pipeline
 # executes LLM-generated code as lullabeast (the executor has exec, and there
 # is a documented model bug that deletes files), so the orchestrator, gate
 # scripts, UI server, installer, and agent identity sources must not be
@@ -113,8 +113,7 @@ ENV OPENCLAW_ROOT=/data/openclaw \
 
 # Python bytecode caches would otherwise try to land next to the root-owned
 # sources in /app (Python silently skips caching when the directory is not
-# writable); keep them under /tmp instead, where writes are allowed by the
-# DS-4 posture.
+# writable); keep them under /tmp instead, where writes are allowed.
 ENV PYTHONPYCACHEPREFIX=/tmp/pycache
 
 EXPOSE 18790
