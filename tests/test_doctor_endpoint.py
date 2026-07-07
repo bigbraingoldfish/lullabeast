@@ -81,3 +81,41 @@ def test_doctor_endpoint_requires_token(monkeypatch, hermetic_config):
         )
     assert denied.status_code == 401
     assert granted.status_code == 200
+
+
+class TestDoctorHealthPanel:
+    """DS-6 Health card on the Setup & Preflight screen. The frontend is an
+    in-browser Babel block with no transpiler in CI, so these pin the render
+    gates by marker (the repo's UI-test idiom); they deliberately do not
+    re-test the report content, which the endpoint tests above own."""
+
+    @pytest.fixture(scope="class")
+    def html(self):
+        path = os.path.join(os.path.dirname(__file__), "..", "ui", "index.html")
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    def test_health_card_component_present(self, html):
+        assert "function DoctorHealthCard()" in html
+        assert 'data-testid="doctor-health-card"' in html
+
+    def test_card_fetches_the_doctor_endpoint_on_mount(self, html):
+        assert 'fetch("/api/doctor")' in html
+
+    def test_card_mounted_on_the_preflight_screen(self, html):
+        preflight = html.index("function PreflightScreen(")
+        assert "<DoctorHealthCard />" in html[preflight:]
+
+    def test_card_renders_statuses_and_fix_hints(self, html):
+        # One glyph per doctor status, plus the fix-hint line for warn/fail rows.
+        assert "DOCTOR_STATUS_ICON" in html
+        for status in ("ok:", "warn:", "fail:", "skipped:"):
+            assert status in html.split("DOCTOR_STATUS_ICON")[1][:400]
+        assert "Fix: {c.fix_hint}" in html
+
+    def test_card_is_read_only(self, html):
+        """No re-run / live button in this phase: the card block contains no
+        button element between its start and the following component."""
+        start = html.index('data-testid="doctor-health-card"')
+        end = html.index("function PreflightScreen(")
+        assert "<button" not in html[start:end]

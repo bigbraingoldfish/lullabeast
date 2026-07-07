@@ -41,6 +41,11 @@ Spend warning: agent pipelines are token-hungry. Cache reads dominate and
 bill at a fraction of fresh input, but bills are real; watch the Monitor's
 cost strip on your first runs.
 
+For your first pipeline run, the repo bundles a known-good sample project
+([examples/first-run-snake](../examples/first-run-snake), a tiny single-file
+Snake game): copy it into `./projects/` and follow "Your first run" in the
+[main README](../README.md).
+
 ## Environment contract (`deploy/.env`)
 
 Every variable is documented inline in [.env.example](.env.example).

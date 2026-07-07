@@ -8304,6 +8304,100 @@
             );
         }
 
+        /* DS-6 Health card: renders the doctor report (GET /api/doctor) on the
+         * Setup & Preflight screen. Read-only: fetches once on mount, no re-run
+         * button and never the live webhook ping (that stays CLI-opt-in). Same
+         * report the CLI prints; per-check fix hints show on warn/fail rows. */
+        const DOCTOR_STATUS_ICON = {
+            ok: { glyph: "✓", cls: "text-emerald-500" },
+            warn: { glyph: "⚠", cls: "text-amber-400" },
+            fail: { glyph: "✗", cls: "text-red-400" },
+            skipped: { glyph: "○", cls: "text-slate-600" },
+        };
+
+        function DoctorHealthCard() {
+            const [report, setReport] = useState(null);
+            const [error, setError] = useState(null);
+
+            useEffect(() => {
+                let cancelled = false;
+                fetch("/api/doctor")
+                    .then((r) => {
+                        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                        return r.json();
+                    })
+                    .then((data) => { if (!cancelled) setReport(data); })
+                    .catch((e) => { if (!cancelled) setError(String(e && e.message ? e.message : e)); });
+                return () => { cancelled = true; };
+            }, []);
+
+            const overall = report ? report.status : null;
+            const headerTone =
+                overall === "fail" ? "text-red-400"
+                : overall === "warn" ? "text-amber-400"
+                : overall === "ok" ? "text-emerald-500"
+                : "text-slate-500";
+            const counts = (report && report.counts) || {};
+            const summary = report
+                ? [
+                      counts.ok ? `${counts.ok} ok` : null,
+                      counts.warn ? `${counts.warn} warn` : null,
+                      counts.fail ? `${counts.fail} fail` : null,
+                      counts.skipped ? `${counts.skipped} skipped` : null,
+                  ].filter(Boolean).join(" · ")
+                : null;
+
+            return (
+                <div
+                    data-testid="doctor-health-card"
+                    className="rounded border border-[#2a2540] bg-[#15121f] p-3 space-y-2"
+                >
+                    <div className="flex flex-wrap justify-between items-start gap-2">
+                        <div className="min-w-0 flex-1 space-y-1">
+                            <p className="header-text text-sm font-semibold text-slate-400">Health</p>
+                            <p className="text-xs text-slate-500 leading-relaxed max-w-prose">
+                                The doctor's install-wide checks: gateway, agents, plugin, tokens, symlinks.
+                                Fix hints appear on anything amber or red.
+                            </p>
+                        </div>
+                        {report && (
+                            <span className={`header-text text-xs shrink-0 self-start ${headerTone}`} data-testid="doctor-health-summary">
+                                {summary || "no checks"}
+                            </span>
+                        )}
+                    </div>
+                    {!report && !error && (
+                        <p className="text-xs text-slate-500" data-testid="doctor-health-loading">Running health checks&hellip;</p>
+                    )}
+                    {error && (
+                        <p className="text-xs text-red-400" data-testid="doctor-health-error">
+                            Could not load the health report ({error}). The CLI form works too: <code>python -m autodev.installer.doctor</code>
+                        </p>
+                    )}
+                    {report && (
+                        <ul className="space-y-1" data-testid="doctor-health-checks">
+                            {(report.checks || []).map((c) => {
+                                const icon = DOCTOR_STATUS_ICON[c.status] || DOCTOR_STATUS_ICON.skipped;
+                                const showHint = (c.status === "warn" || c.status === "fail") && c.fix_hint;
+                                return (
+                                    <li key={c.id} className="text-xs leading-relaxed">
+                                        <span className={`inline-block w-4 ${icon.cls}`}>{icon.glyph}</span>
+                                        <span className="text-slate-300">{c.title}</span>
+                                        {c.detail && <span className="text-slate-500"> &middot; {c.detail}</span>}
+                                        {showHint && (
+                                            <p className={`pl-4 ${c.status === "fail" ? "text-red-400" : "text-amber-400"}`}>
+                                                Fix: {c.fix_hint}
+                                            </p>
+                                        )}
+                                    </li>
+                                );
+                            })}
+                        </ul>
+                    )}
+                </div>
+            );
+        }
+
         function PreflightScreen(props) {
             const {
                 repoPath,
@@ -8693,6 +8787,7 @@
                             <p className="text-amber-400 text-xs mt-1">A project is currently running. Launching now will insert your project at the top of the queue to run next.</p>
                         )}
                         {launchError && <p className="text-red-400 text-sm whitespace-pre-wrap">{launchError}</p>}
+                        <DoctorHealthCard />
                     </div>
                 </div>
             );

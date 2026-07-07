@@ -322,6 +322,47 @@ def check_git_identity(config: dict) -> CheckResult:
     return CheckResult("git_identity", "Git present with identity", "ok", f"{name} <{email}>")
 
 
+def check_conversion_prompt(config: dict) -> CheckResult:
+    """Silent-failure #3 (SETUP.md): the Ideas convert flow needs the
+    PRD-to-roadmap conversion prompt. Resolution mirrors what the server does
+    at runtime: ``load_config()`` expands ``~`` on every string config value,
+    then ``_read_conversion_prompt_text`` probes the ``conversion_prompt_path``
+    value first and the repo-bundled default second. The ``expanduser`` below
+    reproduces load_config's expansion for the doctor CLI's raw ui/config.json
+    read (a no-op on the server path, which is already expanded); nothing else
+    is normalized — load_config does not strip whitespace, so neither do we.
+    A configured override that does not exist is silently ignored at runtime
+    (the server falls back), so it warns here; a missing bundled file fails
+    (the inline last-resort fallback loses the full instruction set)."""
+    repo = config.get("autodev_repo_path") or ""
+    bundled = os.path.join(repo, "autodev", "prompts", "prd-to-roadmap-conversion.txt")
+    override = config.get("conversion_prompt_path") or ""
+    override = os.path.expanduser(override) if override else ""
+    if override and os.path.isfile(override):
+        return CheckResult(
+            "conversion_prompt", "PRD conversion prompt resolves", "ok", override,
+        )
+    if override and os.path.realpath(override) != os.path.realpath(bundled):
+        if os.path.isfile(bundled):
+            return CheckResult(
+                "conversion_prompt", "PRD conversion prompt resolves", "warn",
+                f"conversion_prompt_path is set but not a readable file: {override} "
+                "(the server silently falls back to the bundled prompt)",
+                "fix or clear conversion_prompt_path in ui/config.json",
+            )
+    if os.path.isfile(bundled):
+        return CheckResult(
+            "conversion_prompt", "PRD conversion prompt resolves", "ok", bundled,
+        )
+    return CheckResult(
+        "conversion_prompt", "PRD conversion prompt resolves", "fail",
+        f"bundled prompt missing: {bundled}"
+        + (f" (and conversion_prompt_path override missing: {override})" if override else ""),
+        "restore autodev/prompts/prd-to-roadmap-conversion.txt (ships with the repo) "
+        "or point conversion_prompt_path at a readable file",
+    )
+
+
 def check_openclaw_json(config: dict) -> CheckResult:
     path = os.path.join(config.get("openclaw_root") or "", "openclaw.json")
     data, err = _load_openclaw_json(path)
@@ -929,6 +970,7 @@ def run_doctor(config: dict, *, live: bool = False) -> DoctorReport:
         check_env_paths(config),
         check_python_deps(config),
         check_git_identity(config),
+        check_conversion_prompt(config),
         check_openclaw_json(config),
         check_openclaw_version(config),
         check_hooks_baseline(config),
@@ -971,6 +1013,7 @@ _CLI_CONFIG_KEYS = (
     "project_dir_path",
     "pipeline_state_path",
     "lock_path",
+    "conversion_prompt_path",
 )
 
 
