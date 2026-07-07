@@ -154,7 +154,7 @@ contract.
 - **18789** (OpenClaw gateway): container-internal, never published.
 - `host.docker.internal` resolves to the docker host (via `extra_hosts`), so
   a model server running on the host is reachable from inside the container
-  (the local-model bridge, documented in DS-7).
+  (see "Local models on the host" below).
 
 ## Security hardening
 
@@ -248,6 +248,60 @@ model is meter-it-yourself: **if a run's cost shows $0, OpenClaw has no
 pricing for the model that ran**, not that the run was free. To add pricing
 for your own model, follow the walkthrough in [SETUP.md](../SETUP.md) under
 "Cost metrics: configuring OpenClaw so Lullabeast can report run cost".
+
+## Local models on the host (the bridge, experimental)
+
+The container does not run models, but it can talk to a model server running
+on the docker host. From inside the container, `host.docker.internal`
+resolves to the host (wired via `extra_hosts` in the compose file), so a
+llama.cpp `llama-server`, llama-swap, or Ollama instance on the host is
+reachable with no compose changes. To wire it up:
+
+1. **Run the model server on the host**, listening on an interface the
+   docker bridge can reach. `host.docker.internal` points at the host's
+   bridge address, not the host's loopback, so a server bound only to
+   `127.0.0.1` is invisible to the container. Bind it to `0.0.0.0` (or the
+   docker bridge interface) and firewall it from everything else.
+2. **Add a provider entry** under `models.providers` in
+   `/data/openclaw/openclaw.json`, next to the shipped `openrouter` entry:
+   `"baseUrl": "http://host.docker.internal:<port>/v1"`, your model entries,
+   and `"apiKey": "no-key"`. The golden template does not declare your
+   provider's key, so the edit survives boots (the customization contract
+   above).
+3. **`"apiKey": "no-key"` is mandatory on every local provider entry.**
+   Without it OpenClaw inherits the cloud auth profile and silently falls
+   back to a cloud model, with no error shown; the only signal is
+   `fallbackNoticeReason: auth` in the agent's `sessions.json`.
+4. **Point roles at the local models through the `*_MODEL` variables** in
+   `deploy/.env` (for example `ESCALATION_MODEL=llama-local/qwen3.5-27b`,
+   where `llama-local` is your provider name from step 2), then restart the
+   container. Do not edit an agent's `model.primary` in the file: it is a
+   template-pinned key and the per-boot reconcile reverts it. The executor
+   and reviewer must stay on models that accept image input (the reviewer
+   does screenshot-based visual review on UI phases).
+5. **Raise the reviewer's infrastructure backstop** for slow local
+   reviewers: add `AUTODEV_INFRA_BACKSTOP_REVIEWER=10800` to `deploy/.env`.
+   Compose passes it into the container environment and the orchestrator
+   inherits it there. A thorough long-context reviewer pass on local
+   hardware can need minutes per model call, which the default 75 minute
+   backstop misreads as a dead gateway.
+
+Local models have no shipped pricing entries, so their runs report $0 in the
+dashboard (see the cost section above; that is correct, not a bug). The
+model-side notes in [SETUP.md](../SETUP.md) under "Running with local models
+(experimental)" apply unchanged in the container: Qwen think-token
+suppression flags, which roles do well locally, and the quality trade-offs.
+This section only adds the container networking on top of them.
+
+### Local-model non-goals for this release
+
+GPU passthrough into the container, model weights in docker volumes, and an
+all-local turnkey compose file are explicitly out of scope for this release;
+do not burn time trying to make this sandbox do them. The host bridge above
+is the supported local-model path. If you want the model server itself
+containerized, run and manage it as your own separate container that
+publishes its port on the host; the bridge instructions then apply
+unchanged.
 
 ## Contents of this directory
 

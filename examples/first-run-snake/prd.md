@@ -164,7 +164,7 @@ None. Pure browser APIs only: no external libraries, no CDN links, no environmen
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
 | Food spawn re-roll loops forever when the snake is almost full | Low | Medium | Cap retries at 2000; if exceeded, trigger EC-3 (win condition) |
-| Keyboard input feels laggy at fast tick rates | Medium | Low | Keep the minimum tick at 50 ms; buffer only the most recent input per tick |
+| Keyboard input feels laggy at fast tick rates | Medium | Low | Keep the minimum tick at 50 ms; buffer only the first valid input per tick |
 | Learners find compressed single-file code hard to follow | Low | Medium | Generous inline comments; one function per major behavior |
 
 ---

@@ -81,7 +81,7 @@ autodev-ui/
 │   ├── CONFIG-AUDIT.md             # Key-by-key decision record behind the template
 │   ├── EVAL-MIGRATION.md           # Before/after contract diff for the lullabeast-eval sister repo (stays bare-metal guest)
 │   ├── smoke_assert.py             # DS-5 CI assertion script: validates the doctor --json report from an OFFLINE=1 smoke boot (stdlib-only)
-│   └── README.md                   # Container quickstart, env/volume/upgrade contract, Task-0 licensing note, DS-4 hardening + sandbox-boundary docs, DS-5 CI/GHCR + OFFLINE docs
+│   └── README.md                   # Container quickstart, env/volume/upgrade contract, Task-0 licensing note, DS-4 hardening + sandbox-boundary docs, DS-5 CI/GHCR + OFFLINE docs, DS-7 host local-model bridge (host.docker.internal + *_MODEL wiring)
 ├── .github/workflows/
 │   ├── ci.yml                      # Clean-install gate + full pytest suite + advisory ruff lint
 │   └── deploy-image.yml            # DS-5: builds both image variants on deploy-surface changes, OFFLINE=1 doctor smoke, GHCR publish on v* tags
