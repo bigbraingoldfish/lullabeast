@@ -616,6 +616,12 @@ Things worth knowing before you try it:
 Qwen-style models need llama-server flags to suppress inline `<think>` tokens (they corrupt JSON
 tool-call parsing) — see the Qwen notes in [CLAUDE.md](CLAUDE.md) under *Agent LLM Configuration*.
 
+Running the Docker deployment instead of bare metal? The container-side wiring (reaching a host
+model server through `host.docker.internal`, pointing roles at it via the `*_MODEL` variables,
+raising the reviewer backstop from `deploy/.env`) is documented in
+[deploy/README.md](deploy/README.md) under "Local models on the host". The notes above apply
+unchanged there.
+
 ---
 
 ## Re-approving Gate Scripts

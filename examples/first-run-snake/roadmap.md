@@ -43,7 +43,7 @@
   Game loop runs via `setInterval` at 200ms default tick interval, snake moves one cell per tick in the current direction (right initially), Arrow keys change direction with 180 degree reversal prevention, full canvas clear and redraw occurs each tick, snake tail is removed each tick (length stays constant at 3 since no food exists yet), only first valid directional input per tick is processed.
 
   **TDD Requirements:**
-  - `test/core-e2-movement-input.spec.js`: Loads index.html, waits 250ms (one tick), uses page.evaluate to assert snake head moved from (16,15) to (17,15) (moving right), presses ArrowUp, waits 250ms, asserts head y decreased by 1, presses ArrowLeft (reversal of right), waits 250ms, asserts head x still increasing (reversal blocked), presses ArrowDown then ArrowLeft in rapid succession within one tick, asserts only first valid direction applied (EC-5).
+  - `test/core-e2-movement-input.spec.js`: Loads index.html, waits 250ms (one tick), uses page.evaluate to assert snake head moved from (16,15) to (17,15) (moving right), presses ArrowLeft while still moving right (a 180 degree reversal), waits 250ms, asserts head x still increasing (reversal blocked), presses ArrowUp, waits 250ms, asserts head y decreased by 1, then (now moving up) presses ArrowLeft and ArrowRight in rapid succession within one tick, waits 250ms, asserts head x decreased by 1 (only the first valid input, ArrowLeft, was applied; EC-5).
 
   **Done Criteria:**
   - [ ] `setInterval` game loop running at 200ms default tick interval
@@ -54,13 +54,13 @@
   - [ ] Tail removed each tick (snake length constant at 3 when no food)
   - [ ] Full canvas cleared and redrawn each tick
   - [ ] Only first valid directional input per tick processed (EC-5)
-  - [ ] Input buffer stores latest buffered direction, applied on next tick
+  - [ ] Input buffer stores the first valid direction received during a tick, applied on the next tick
   - [ ] All tests in TDD Requirements pass
   - [ ] Reviewer agent has approved the phase output
 
   **Behavioral Verification:**
   - **User-observable:** A player can press Arrow keys to steer the snake around the board, and the snake won't reverse direction instantly.
-  - **How we'll check:** run `npx playwright test test/core-e2-movement-input.spec.js`, expect exit code 0; the test loads index.html, waits 250ms, uses page.evaluate to assert snake head x increased by 1 (moving right from initial position), presses ArrowUp, waits 250ms, asserts head y decreased by 1, presses ArrowLeft (reversal), waits 250ms, asserts head x still increasing (reversal blocked), presses ArrowDown+ArrowLeft within same tick window, asserts only first direction applied.
+  - **How we'll check:** run `npx playwright test test/core-e2-movement-input.spec.js`, expect exit code 0; the test loads index.html, waits 250ms, uses page.evaluate to assert snake head x increased by 1 (moving right from initial position), presses ArrowLeft while still moving right (a reversal), waits 250ms, asserts head x still increasing (reversal blocked), presses ArrowUp, waits 250ms, asserts head y decreased by 1, then presses ArrowLeft+ArrowRight within the same tick window, waits 250ms, asserts head x decreased by 1 (only the first valid input applied).
   - **If this fails, the user sees:** The snake doesn't move, doesn't respond to Arrow keys, or it reverses into itself when pressing the opposite direction.
 
 - [ ] `CORE-E3` | HIGH | Food, eating, growth & speed (branch: `phase/core-e3`)
