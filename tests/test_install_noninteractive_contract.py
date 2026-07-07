@@ -1,4 +1,4 @@
-"""Static contract lints for install.sh's DS-2 mode split.
+"""Static contract lints for install.sh's installer-mode split.
 
 Reads install.sh as text (no execution), same approach as
 test_install_sh_portable.py. Full end-to-end installer runs need a real
@@ -58,7 +58,7 @@ def test_every_prompt_site_has_ci_default_comment(lines):
             missing.append(f"line {i + 1}: {lines[i].strip()}")
     assert not missing, (
         "prompt_yn call sites without an adjacent '# ci-default:' decision "
-        "comment (DS-2 task 2):\n" + "\n".join(missing)
+        "comment:\n" + "\n".join(missing)
     )
 
 
@@ -137,7 +137,7 @@ def test_doctor_runs_as_final_gate(text):
 def test_no_fixed_tmp_path_config_writes(text):
     assert 'cfg_path + ".tmp"' not in text, (
         "fixed <path>.tmp writes are concurrent-unsafe; use the mkstemp "
-        "unique-temp pattern (DS-2 task 5)"
+        "unique-temp pattern"
     )
 
 

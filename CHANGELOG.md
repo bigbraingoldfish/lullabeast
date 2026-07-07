@@ -10,7 +10,7 @@ _No unreleased changes._
 
 ## [1.0.0] - planned
 
-The Deploy Simplification release. Entries accumulate here as each DS phase lands; the date replaces "planned" when 1.0.0 ships. Landed so far: DS-1 (doctor), DS-2 (installer modes), DS-2b (golden OpenClaw config), DS-3 (single-container Docker deploy), DS-4 (container security hardening), DS-5 (CI image build + doctor smoke), DS-6 (golden-path docs, bundled sample project, doctor Health card), and DS-7 (local-model bridge docs).
+The deploy simplification release: a one-command Docker install, a health-check doctor, a hardened container sandbox, CI coverage for the deploy path, and a bundled first-run sample project. Entries accumulate here as the work lands; the date replaces "planned" when 1.0.0 ships.
 
 ### Added
 - **A first-boot troubleshooting section in the deploy README.** `deploy/README.md` gained a "Troubleshooting first boot" section covering the four issues a first Docker install is most likely to hit: the dashboard port already in use, a denied registry pull (there is no image to pull until the first tagged release; the compose default builds locally), Windows CRLF-corrupted scripts, and a shipped model returning a provider "404 No endpoints found" (override the role's `*_MODEL` variable).

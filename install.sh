@@ -2,14 +2,14 @@
 # install.sh — Lullabeast interactive setup (14 steps)
 # Usage: ./install.sh [--force] [--non-interactive] [--strict] [--owned-openclaw] [--skip-playwright]
 #
-# Modes (DS-2):
+# Modes:
 #   guest mode (default)      non-destructive, prompt-driven, warn-and-continue.
 #                             Correct etiquette on a shared host where OpenClaw
 #                             also serves non-Lullabeast agents.
 #   --strict                  guest mode, implies --non-interactive; any doctor
 #                             FAIL at the end exits 1.
 #   --owned-openclaw          the script OWNS the OpenClaw tree (the container
-#                             default, DS-3). Implies --non-interactive. Agent
+#                             default). Implies --non-interactive. Agent
 #                             files overwrite unconditionally, openclaw.json is
 #                             validated (not incrementally patched) against the
 #                             golden-template expectations, zero prompts, and
@@ -368,7 +368,7 @@ ensure_workspace_pipeline_project_symlinks() {
 
 # Copy predicate shared by the preview and deploy loops below. Guest mode
 # keeps the non-destructive mtime-newer skip; owned mode copies EVERY file
-# unconditionally: the repo is the source of truth, full stop (DS-2). Hand
+# unconditionally: the repo is the source of truth, full stop. Hand
 # edits inside an owned tree are overwritten by design; customize by mounting
 # replacement files instead.
 _should_copy() {
@@ -662,7 +662,7 @@ USER_CRON_STATUS="not checked"
 
 # owned-mode-begin: step 7
 # Owned trees (containers) have no user crontab and nothing legacy to migrate;
-# the DS-3 entrypoint supervises heartbeat/session-cleanup as loops instead.
+# the container entrypoint supervises heartbeat/session-cleanup as loops instead.
 if [ "$OWNED_OPENCLAW" -eq 1 ]; then
     info "Cron path migration skipped (owned mode: fresh tree, supervised loops instead of crontab)"
     CRON_STATUS="skipped (owned mode)"
@@ -888,7 +888,7 @@ elif [ ! -f "$OPENCLAW_ROOT/openclaw.json" ]; then
 elif [ "$OWNED_OPENCLAW" -eq 1 ]; then
     # owned-mode-begin: step 8
     # Owned mode assumes openclaw.json was rendered from the golden template
-    # (DS-2b; the DS-3 entrypoint renders it on first boot). The hooks block is
+    # (the container entrypoint renders it on first boot). The hooks block is
     # VALIDATED via the audit helper, never incrementally patched, and any
     # mismatch is fatal: a wrong template output must fail the boot, not be
     # papered over. The remaining seeds (tools.profile, agent entries, context
@@ -1807,14 +1807,14 @@ else
 fi
 
 # ── Doctor: the authoritative "is this actually going to work" verdict ──────
-# Runs in every mode as the installer's final gate (DS-1/DS-2). The per-step
+# Runs in every mode as the installer's final gate. The per-step
 # summary above reports what THIS RUN did; the doctor probes the resulting
 # system end to end (gateway, plugin bundle, secrets, symlinks, versions).
 echo
 echo "${BOLD}Doctor (final health check)${RESET}"
 DOCTOR_EXIT=0
 # OWNED_OPENCLAW rides into the doctor's environment so the template_conformance
-# check (DS-2b, owned mode only) runs when this install owns the tree; in guest
+# check (owned mode only) runs when this install owns the tree; in guest
 # mode the value is 0 and the check reports skipped.
 ( cd "$AUTODEV_REPO_PATH" && OWNED_OPENCLAW="$OWNED_OPENCLAW" "$PYTHON" -m autodev.installer.doctor ) || DOCTOR_EXIT=$?
 case "$DOCTOR_EXIT" in

@@ -1,10 +1,10 @@
-"""Tests for the DS-2b golden openclaw.json template and its helpers.
+"""Tests for the golden openclaw.json template and its helpers.
 
 Covers the roadmap's test contract: the template parses; every known-required
 baseline key is present with the required value; every model entry referenced
 by an agent has a complete 4-field pricing block (and the executor/reviewer
 picks are multimodal); no secret-shaped values; env-substitution placeholders
-well-formed. Plus the DS-2b acceptance run: rendering the template with test
+well-formed. Plus the acceptance run: rendering the template with test
 env values and pointing the doctor's config-level checks at it comes back all
 green, including the new template_conformance check.
 
@@ -90,7 +90,7 @@ class TestTemplateParses:
         assert isinstance(_template(), dict)
 
 
-# ── known-required baseline (DS-2b task 2) ───────────────────────────────────
+# ── known-required baseline ──────────────────────────────────────────────────
 
 class TestRequiredBaseline:
     def test_hooks_block_shape(self):
@@ -155,7 +155,7 @@ class TestRequiredBaseline:
             assert absent not in data, absent
 
 
-# ── agent-referenced models carry complete pricing (DS-2b task 3) ────────────
+# ── agent-referenced models carry complete pricing ───────────────────────────
 
 class TestModelPricing:
     def _openrouter_models(self) -> dict:
@@ -215,7 +215,7 @@ class TestModelPricing:
         assert 3 <= len(self._openrouter_models()) <= 4
 
 
-# ── no secret-shaped values (DS-2b tests bullet) ─────────────────────────────
+# ── no secret-shaped values ──────────────────────────────────────────────────
 
 _SECRET_PATTERNS = (
     re.compile(r"\b[0-9a-fA-F]{32,}\b"),          # hex tokens (hooks/gateway style)
@@ -406,7 +406,7 @@ class TestDoctorAgainstRenderedTemplate:
         assert "not found" in result.detail
 
 
-# ── reconcile: the write-side inverse of conformance (DS-3 boot self-heal) ───
+# ── reconcile: the write-side inverse of conformance (boot self-heal) ────────
 
 class TestReconcile:
     def test_noop_on_already_conformant_config(self):

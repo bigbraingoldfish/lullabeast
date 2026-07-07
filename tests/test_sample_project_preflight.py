@@ -1,4 +1,4 @@
-"""DS-6: the bundled first-run sample project must pass preflight as-is.
+"""The bundled first-run sample project must pass preflight as-is.
 
 ``examples/first-run-snake/`` is the "hello world" project the README's
 "Your first run" walkthrough tells new users to copy and launch. These tests

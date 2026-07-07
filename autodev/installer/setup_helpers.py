@@ -23,8 +23,7 @@ from typing import Any
 _REQUIRED_SESSION_KEY_PREFIXES: tuple[str, ...] = ("pipeline:", "ideas:")
 
 # --- Lullabeast context-limit / truncation seeds -------------------------------
-# Canonical source of truth for the openclaw.json truncation keys Lullabeast tunes
-# (audit: plans/Active/metaprompt-2-truncation-settings-audit.md).
+# Canonical source of truth for the openclaw.json truncation keys Lullabeast tunes.
 #
 # Why these values:
 #   * bootstrapMaxChars=32000 — OpenClaw truncates each injected bootstrap file
@@ -750,7 +749,7 @@ def audit_openclaw_context_limits(openclaw_json_path: str) -> list[str]:
     Absent agent entries are deliberately NOT reported here (that is the
     agents-registered check's job); only entries that exist are audited. This is
     the audit-only sibling of the mutating ``ensure_openclaw_context_limits``,
-    used by the doctor (DS-1), which must never write.
+    used by the doctor, which must never write.
     """
     path = os.path.abspath(openclaw_json_path)
     if not os.path.isfile(path):

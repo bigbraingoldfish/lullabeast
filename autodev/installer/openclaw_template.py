@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Golden openclaw.json template helpers (DS-2b).
+"""Golden openclaw.json template helpers.
 
 ``deploy/openclaw.template.json`` is the one canonical, deliberately audited
-OpenClaw config for owned-OpenClaw installs (the DS-3 container). The full
+OpenClaw config for owned-OpenClaw installs (the container). The full
 key-by-key decision record for what it does and does not carry lives in
 ``deploy/CONFIG-AUDIT.md``. This module gives the template's three consumers
 one shared implementation:
 
   * Rendering: ``render_template_text`` substitutes the ``${VAR}`` env
-    placeholders (the DS-3 entrypoint renders the template into
+    placeholders (the container entrypoint renders the template into
     ``/data/openclaw/openclaw.json`` on first boot; tests render it against
     test values).
   * Conformance: ``template_conformance_issues`` diffs a live openclaw.json
@@ -16,7 +16,7 @@ one shared implementation:
     check (owned mode only) uses it so config drift inside a container is
     loudly visible.
   * Reconciliation: ``reconcile_config_to_template`` is the write-side inverse
-    of conformance. The DS-3 entrypoint reconciles the persisted config toward
+    of conformance. The container entrypoint reconciles the persisted config toward
     the current image's template on every boot, so a template change shipped in
     a new image self-heals instead of dead-ending at the (now-failing)
     conformance check.
@@ -24,7 +24,7 @@ one shared implementation:
 Placeholder contract (whole-string ``${VAR}`` values only, so the raw template
 file always parses as strict JSON):
 
-  * ``HOOKS_TOKEN`` / ``GATEWAY_TOKEN`` are required at render time (the DS-3
+  * ``HOOKS_TOKEN`` / ``GATEWAY_TOKEN`` are required at render time (the
     entrypoint generates them via ``secrets.token_urlsafe`` on first boot and
     persists them under ``/data``).
   * ``PLANNER_MODEL`` / ``EXECUTOR_MODEL`` / ``REVIEWER_MODEL`` / ``PRD_MODEL``
@@ -50,7 +50,7 @@ TEMPLATE_RELPATH = os.path.join("deploy", "openclaw.template.json")
 # Whole-value placeholder shape: ``${UPPER_SNAKE}`` inside a JSON string.
 TEMPLATE_PLACEHOLDER_RE = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
 
-# Audit-picked model defaults (deploy/CONFIG-AUDIT.md, DS-2b task 5). One knob
+# Audit-picked model defaults (deploy/CONFIG-AUDIT.md). One knob
 # per agent role; the executor and reviewer picks are multimodal by
 # requirement. PLANNER_MODEL also backs agents.defaults.model. Every default
 # must be one of the shipped, fully priced OpenRouter models in
@@ -224,7 +224,7 @@ def reconcile_config_to_template(template, live):
     The write-side inverse of :func:`template_conformance_issues`: the result is
     guaranteed conformant (``template_conformance_issues(template, result)`` is
     empty for the same template) while keys and entries the template does *not*
-    declare survive untouched. The DS-3 entrypoint uses this to heal a persisted
+    declare survive untouched. The container entrypoint uses this to heal a persisted
     ``openclaw.json`` toward a new image's template on boot, instead of leaving
     the drift to dead-end at install.sh's owned-mode validation or the doctor's
     ``template_conformance`` check.

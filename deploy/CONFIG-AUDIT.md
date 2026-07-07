@@ -1,117 +1,96 @@
-# OpenClaw golden-config audit (DS-2b)
+# OpenClaw golden config: decision record
 
-**What this is.** End-to-end pass over the live runtime `~/.openclaw/openclaw.json`
-(as of 2026-07-06, OpenClaw 2026.6.11), asking for every key: is this what a 
-standard user should get, and is it optimal for the pipeline? The output is
-[openclaw.template.json](openclaw.template.json), the canonical config that the DS-3
-container entrypoint renders into `/data/openclaw/openclaw.json` on first boot. Every
-prior config audit was incident-driven; this one is the full walk.
+**What this is.** The rationale behind every key in
+[openclaw.template.json](openclaw.template.json), the canonical OpenClaw config
+that the container entrypoint renders into `/data/openclaw/openclaw.json` on
+first boot and reconciles on every later boot. The template came out of an
+end-to-end audit of a working install (OpenClaw 2026.6.11): every key was asked
+"is this what a standard user should get, and is it optimal for the pipeline?"
+This document records the answers, so a future change to any pinned value can
+be weighed against the reason it was pinned.
 
-**How to read the table.** One row per key path of the live config; every key of the
-live file appears exactly once, under these conventions:
+**Secrets:** the template carries only `${HOOKS_TOKEN}` / `${GATEWAY_TOKEN}`
+placeholders; real values are generated at first boot and persisted under
+`/data/secrets`. The tests reject secret-shaped strings in the template.
 
-- A row for a block (for example `meta`) covers all of its children when the decision
-  is uniform for the whole block.
-- A `*` wildcard row covers all children of a homogeneous map (for example
-  `skills.entries.*`).
-- Secrets are redacted as `[REDACTED]`. No secret value appears in this document or
-  in the template (the template carries `${HOOKS_TOKEN}` / `${GATEWAY_TOKEN}`
-  placeholders instead; the tests reject secret-shaped strings).
+## What ships, and why
 
-**Decision categories** (from the roadmap):
-
-1. **ship-as-is**: same key, same value in the template.
-2. **ship-different-default**: key ships, value changed for a standard cloud-key user
-   (the "template value" column says what).
-3. **operator-only**: personal or hardware-specific; not shipped.
-4. **fix-everywhere**: the live config is wrong or incomplete; the template ships the
-   corrected form and host installs get the same fix through install.sh.
-
-## Decision table
-
-| Live key | Decision | Template value / notes |
+| Template key | Value | Why |
 |---|---|---|
-| `meta` (`lastTouchedVersion`, `lastTouchedAt`) | operator-only | Gateway-owned bookkeeping; OpenClaw rewrites it at runtime. Never templated. |
-| `wizard` (`lastRunAt`, `lastRunVersion`, `lastRunCommand`, `lastRunMode`) | operator-only | Gateway-owned onboarding record. |
-| `update.channel` | operator-only | `"stable"` on the host. The container pins the OpenClaw version via the image build arg, so a self-update channel has no place in the template. |
-| `auth.profiles` (`anthropic:default`) | operator-only | API-key auth is provisioned at first boot by the DS-3 entrypoint (from `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY`), never baked into a template. DS-3 must verify the exact provisioning mechanism against the pinned OpenClaw version. |
-| `models.mode` | ship-as-is | `"merge"`: custom provider entries merge with OpenClaw's built-ins. |
-| `models.pricing.enabled` | ship-as-is | `true`. Required for cost tracking (decided compromise, see "Cost tracking" below). |
-| `models.providers.openrouter.baseUrl` / `.api` | ship-as-is | Standard OpenRouter endpoint, `openai-completions` API. |
-| `models.providers.openrouter.models[]` | ship-different-default | Live carries 9 entries; the template ships the 4 recommended, cheap, pipeline-capable ones, each with a complete 4-field `cost` block: `qwen/qwen3.6-27b` (escalation default), `minimax/minimax-m3`, `moonshotai/kimi-k2.7-code`, `z-ai/glm-5.2`. Dropped: the live `qwen/qwen3.6-35b-a3b` (replaced by 27B), `minimax/minimax-m2.7` and `deepseek/deepseek-v4-pro` (text-only; the recommended set favors multimodal), `moonshotai/kimi-k2.6` (superseded by k2.7-code), `anthropic/claude-sonnet-4.6` and `anthropic/claude-opus-4.8` via OpenRouter (premium tier; meter-it-yourself). |
-| `models.providers.anthropic` | operator-only | Direct-Anthropic model entry for personal use. The shipped pricing set is OpenRouter-only by decision; any other provider is meter-it-yourself. |
-| `models.providers.llamacpp` | operator-only | Local-model hardware artifact (LAN llama-server URL, `timeoutSeconds: 600`, placeholder pricing). Local-model guidance lives in SETUP.md and DS-7. |
-| `models.providers.google` | operator-only | Personal provider; contains a live API key `[REDACTED]` inline. Not shipped. |
-| `agents.defaults.model` | ship-different-default | `${PLANNER_MODEL}` (was `openrouter/minimax/minimax-m2.7`). A safe fallback for any agent without an explicit model. |
-| `agents.defaults.models.*` | ship-different-default | Live has 12 per-model param entries (sampling params, cache retention). The template keeps only the 4 entries for the shipped models, verbatim from the live validated values (qwen 0.6/0.95; minimax-m3 0.7/0.95 plus the `provider.ignore: ["morph"]` + `require_parameters` routing fix; kimi-k2.7-code 0.6/0.95; glm-5.2 0.6/0.95). The llamacpp/* and Anthropic-alias entries are operator-only. |
-| `agents.defaults.skipBootstrap` | ship-as-is | `true`. Stops OpenClaw from seeding its own starter workspace files over the Lullabeast agent identity docs. |
-| `agents.defaults.compaction` (`mode`, `postCompactionSections`) | ship-as-is | Required baseline: `safeguard` mode plus the three `Always-Apply:` headers and OpenClaw's own two defaults. Without the section names, the standing rules are dropped on every compaction. |
-| `agents.defaults.heartbeat.every` | ship-as-is | `"0m"`. Required: a non-zero heartbeat interrupts pipeline runs mid-phase. |
-| `agents.defaults.maxConcurrent` | ship-as-is | `3`. The pipeline runs one agent at a time; headroom covers Ideas flows running beside a phase. |
-| `agents.defaults.subagents.maxConcurrent` | ship-as-is | `1`. Originally a single-GPU protection, kept deliberately as a cost bound: pipeline agents do not rely on subagent fan-out, and an uncapped cloud fan-out only multiplies spend. |
-| `agents.defaults.imageGenerationModel` | operator-only | Points at the personal Google provider. |
-| `agents.list[planner]` | ship-different-default | `model.primary` was `llamacpp/qwen3.6-27b` (operator hardware); ships as `${PLANNER_MODEL}` (default `openrouter/moonshotai/kimi-k2.7-code`). The acceptance run on 2026-07-07 with a fresh OpenRouter key got "404 No endpoints found for the following models: minimax/minimax-m3" from the planner three times (the `require_parameters` routing left no tool-capable endpoint for OpenClaw's tool-bearing requests), so the planner default moved to the proven kimi-k2.7-code; the `minimax/minimax-m3` entry stays shipped, priced, and selectable via `PLANNER_MODEL`. Workspace path, explicit `tools.allow: [read, write, exec]` (the OpenClaw 2026.6.8 planner-exec incident fix), and both context caps ship as-is. |
-| `agents.list[executor]` | ship-different-default | Model ships as `${EXECUTOR_MODEL}` (default `openrouter/moonshotai/kimi-k2.7-code`, multimodal, required for screenshot capture on UI/INT phases). Tools (`read, write, edit, exec, process, browser`) and caps as-is. |
-| `agents.list[reviewer]` | ship-different-default | Model ships as `${REVIEWER_MODEL}` (default `openrouter/z-ai/glm-5.2`, multimodal, required for visual review). Tools (`read, write, exec, process, browser`) and caps as-is. |
-| `agents.list[prd-creator]` | ship-different-default | Model ships as `${PRD_MODEL}` (default `openrouter/moonshotai/kimi-k2.7-code`; was `openrouter/moonshotai/kimi-k2.6`). Read/write-only tool policy ships as-is. |
-| `agents.list[escalation]` | ship-different-default | Model ships as `${ESCALATION_MODEL}` (default `openrouter/qwen/qwen3.6-27b` at $0.285 input / $2.40 output per M, in the standard `{primary, fallbacks}` dict shape; live used a bare string pointing at a local model). The notify-only tool policy (`profile: minimal`, `alsoAllow: read/write/message`, deny `edit/apply_patch/exec/process/browser`) and the `default: true` flag ship as-is; this is the reviewed security posture and must not be weakened. |
-| `agents.list[roadmap-converter]` | ship-different-default | Model ships as `${ROADMAP_MODEL}` (default `openrouter/z-ai/glm-5.2`, matching the live pick). Read/write-only tool policy as-is. |
-| `agents.list[personal-assistant]` | operator-only | Personal Signal advisor agent; also removed from `hooks.allowedAgentIds` in the template. |
-| `tools.profile` | ship-as-is | `"coding"`. Required baseline. |
-| `tools.agentToAgent.enabled` | operator-only | Pipeline agents never message each other (only escalation messages the human, via the gateway connector); a smaller default surface for a standard user. |
-| `tools.exec` (`ask`, `safeBins`, `safeBinProfiles`) | ship-as-is | The unattended-exec whitelist the pipeline was validated with; without it, gate scripts and test runs stall on exec approval prompts. |
-| `tools.loopDetection` | ship-as-is | OpenClaw's own in-turn loop guard, tuned values live-validated. (Lullabeast's Tier 1 catcher is independent of this.) |
-| `bindings[]` | operator-only | Signal channel routing; contains a personal group id `[REDACTED]`. |
-| `messages` (`ackReactionScope`, `tts`) | operator-only | Signal/TTS personalization. |
-| `commands` (`native`, `nativeSkills`, `restart`, `ownerDisplay`) | operator-only | Chat-command settings for messaging channels; the container has no channels. |
-| `session.dmScope` | operator-only | Messaging-channel session scoping. |
-| `hooks.enabled` | ship-as-is | `true`. Required. |
-| `hooks.token` | ship-different-default | Live value `[REDACTED]`; ships as the `${HOOKS_TOKEN}` placeholder, generated per install at first boot. |
-| `hooks.defaultSessionKey` | ship-as-is | `"pipeline:default"`. |
-| `hooks.allowRequestSessionKey` | ship-as-is | `true`. Required. |
-| `hooks.allowedSessionKeyPrefixes` | ship-as-is | `["pipeline:", "ideas:"]`. Required. |
-| `hooks.allowedAgentIds` | ship-different-default | The 6 Lullabeast agents only; live also allowed `personal-assistant`. |
-| `hooks.internal` | ship-as-is | Internal hooks on, `session-memory` entry disabled (keeps per-session memory writes out of pipeline sessions). |
-| `channels.signal` | operator-only | Personal Signal account: phone numbers and allowlists `[REDACTED]`. |
-| `gateway.port` | ship-as-is | `18789`. |
-| `gateway.mode` | ship-as-is | `"local"`. |
-| `gateway.bind` | ship-as-is | `"lan"`, with a caveat: inside the container this is unexposed anyway because compose does not publish 18789. DS-3 may tighten to a loopback bind after verifying the accepted enum values on the pinned version; "lan" is kept here because it is the only live-validated value. |
-| `gateway.controlUi` | operator-only | Personal Tailscale origins plus `allowInsecureAuth` for a LAN setup. |
-| `gateway.auth` | ship-different-default | Token mode ships; the value `[REDACTED]` becomes the `${GATEWAY_TOKEN}` placeholder. The orchestrator reads this token for the `sessions.steer` abort lever. |
-| `gateway.tailscale` | operator-only | Personal network config. |
-| `skills.install.nodeManager` | ship-as-is | `"npm"`; the signals-plugin build uses npm. |
-| `skills.entries.*` | ship-as-is | All 42 bundled OpenClaw skills disabled: pipeline agents get skills only via Lullabeast's per-phase workspace injection, and bundled-skill listings are context noise. Known limitation: a future OpenClaw release adding new bundled skills defaults them on until they are added here. |
-| `plugins.allow` | ship-different-default | Drops `signal`, `google`, `microsoft` (operator channels/providers); keeps `anthropic`, `autodev-pipeline-signals`, `browser`, `memory-core`, `openrouter`. |
-| `plugins.entries.signal` | operator-only | Personal messaging channel. |
-| `plugins.entries.openrouter` | ship-as-is | `enabled: true`; the recommended provider path. |
-| `plugins.entries.anthropic` | ship-as-is | `enabled: true`; supported first-party alternative. |
-| `plugins.entries.memory-core` | ship-as-is | Enabled with `dreaming` disabled, matching the live validated posture. |
-| `plugins.entries.google` | operator-only | Personal provider plugin. |
-| `plugins.entries.autodev-pipeline-signals` | ship-as-is | `enabled: true` with `hooks.allowConversationAccess: true`. Required: without conversation access the activity-stamp hooks never fire and stall detection is blind. |
-| `plugins.entries.browser` | ship-as-is | `enabled: true`; the executor/reviewer browser tool depends on it. |
-| `plugins.entries.microsoft` | operator-only | TTS provider for the personal assistant. |
-| `plugins.bundledDiscovery` | ship-as-is | `"compat"`. |
-| `browser` (`enabled`, `headless`, `noSandbox`) | ship-as-is | `noSandbox` is required for containerized Chromium; headless is the only mode that makes sense in the image. |
-| `mcp.servers.playwright` | fix-everywhere | Absent from the live config (the doctor's standing `playwright` warn on this machine). The template ships the registration install.sh step 12 writes (`npx -y @playwright/mcp@0.0.40 --headless`); host installs get it from install.sh. This is the one "actively wrong, fix everywhere" finding of the audit. |
+| `models.mode` | `"merge"` | Custom provider entries merge with OpenClaw's built-ins. |
+| `models.pricing.enabled` | `true` | Required for cost tracking (see "Cost tracking" below). |
+| `models.providers.openrouter` | standard endpoint, `openai-completions` API | The recommended provider path; the shipped defaults use it. |
+| `models.providers.openrouter.models[]` | 4 entries: `qwen/qwen3.6-27b`, `minimax/minimax-m3`, `moonshotai/kimi-k2.7-code`, `z-ai/glm-5.2` | The recommended, cheap, pipeline-capable set, each with a complete 4-field `cost` block so runs report real dollar costs. The set favors multimodal models because the reviewer does screenshot-based visual review. Premium models (Claude via OpenRouter, etc.) work but are meter-it-yourself. |
+| `agents.defaults.model` | `${PLANNER_MODEL}` | A safe fallback for any agent without an explicit model. |
+| `agents.defaults.models.*` | per-model params for the 4 shipped models | Sampling and cache-retention values validated in real pipeline runs. The minimax entry carries `provider.ignore: ["morph"]` plus `require_parameters` routing. |
+| `agents.defaults.skipBootstrap` | `true` | Stops OpenClaw from seeding its own starter workspace files over the Lullabeast agent identity docs. |
+| `agents.defaults.compaction` | `safeguard` mode + the three `Always-Apply:` section names | Without the section names, the agents' standing rules are dropped from context on every compaction. |
+| `agents.defaults.heartbeat.every` | `"0m"` | Required: a non-zero heartbeat interrupts pipeline runs mid-phase. |
+| `agents.defaults.maxConcurrent` | `3` | The pipeline runs one agent at a time; headroom covers Ideas flows running beside a phase. |
+| `agents.defaults.subagents.maxConcurrent` | `1` | Pipeline agents do not rely on subagent fan-out; an uncapped fan-out only multiplies spend. |
+| `agents.list[planner]` | `${PLANNER_MODEL}`, tools `read, write, exec` | Explicit `exec` is load-bearing (a past OpenClaw release stripped it and broke planning). The default moved from `minimax/minimax-m3` to `kimi-k2.7-code` after a first-run test with a fresh OpenRouter key hit "404 No endpoints found" (the `require_parameters` routing left no tool-capable endpoint); the minimax entry stays shipped, priced, and selectable via `PLANNER_MODEL`. |
+| `agents.list[executor]` | `${EXECUTOR_MODEL}`, tools `read, write, edit, exec, process, browser` | Must be multimodal: it captures screenshots on UI/INT phases. |
+| `agents.list[reviewer]` | `${REVIEWER_MODEL}`, tools `read, write, exec, process, browser` | Must be multimodal: it performs visual review. |
+| `agents.list[prd-creator]` | `${PRD_MODEL}`, read/write only | Drafting agent; needs no execution surface. |
+| `agents.list[escalation]` | `${ESCALATION_MODEL}`, notify-only policy (`profile: minimal`, allow `read/write/message`, deny `edit/apply_patch/exec/process/browser`), `default: true` | The reviewed security posture: the escalation agent reads diagnostics and notifies the human, nothing else. Must not be weakened. Its default model is the cheapest shipped entry. |
+| `agents.list[roadmap-converter]` | `${ROADMAP_MODEL}`, read/write only | Conversion agent; needs no execution surface. |
+| all six agents | `bootstrapMaxChars: 32000`, `postCompactionMaxChars: 8000` (pipeline roles) | OpenClaw's default caps truncate the agents' instruction files and silently drop their standing rules. |
+| `tools.profile` | `"coding"` | Required baseline for the pipeline's tool surface. |
+| `tools.exec` | unattended-exec whitelist (`ask`, `safeBins`, `safeBinProfiles`) | Without it, gate scripts and test runs stall on interactive exec-approval prompts. |
+| `tools.loopDetection` | tuned values | OpenClaw's own in-turn loop guard; validated in real runs. (Lullabeast's own tool-loop catcher is independent of it.) |
+| `hooks` | `enabled: true`, `${HOOKS_TOKEN}`, `defaultSessionKey: "pipeline:default"`, `allowRequestSessionKey: true`, prefixes `["pipeline:", "ideas:"]`, the 6 Lullabeast agent ids, internal hooks on with `session-memory` disabled | The webhook contract the whole pipeline runs on. The `session-memory` exception keeps per-session memory writes out of pipeline sessions. |
+| `gateway.port` / `gateway.mode` | `18789` / `"local"` | Standard gateway wiring; the port is never published outside the container. |
+| `gateway.bind` | `"lan"` | Unexposed in practice (compose does not publish 18789). Could be tightened to a loopback bind after verifying the accepted enum values on the pinned version; `"lan"` is the validated value. |
+| `gateway.auth` | token mode, `${GATEWAY_TOKEN}` | The orchestrator authenticates with this token for the `sessions.steer` abort lever. |
+| `skills.install.nodeManager` | `"npm"` | The signals-plugin build uses npm. |
+| `skills.entries.*` | all bundled OpenClaw skills disabled | Pipeline agents get skills only via Lullabeast's per-phase workspace injection; bundled-skill listings are context noise. Known limitation: an OpenClaw release adding new bundled skills defaults them on until they are added here. |
+| `plugins.allow` | `anthropic`, `autodev-pipeline-signals`, `browser`, `memory-core`, `openrouter` | The minimal plugin surface the pipeline needs. |
+| `plugins.entries.autodev-pipeline-signals` | `enabled: true`, `hooks.allowConversationAccess: true` | Required: without conversation access the activity-stamp hooks never fire and stall detection is blind. |
+| `plugins.entries.openrouter` / `.anthropic` | enabled | The recommended provider path and the supported first-party alternative. |
+| `plugins.entries.memory-core` | enabled, `dreaming` disabled | The validated posture. |
+| `plugins.entries.browser` | enabled | The executor/reviewer browser tool depends on it. |
+| `plugins.bundledDiscovery` | `"compat"` | Matches the pinned OpenClaw version's discovery behavior. |
+| `browser` | `enabled`, `headless`, `noSandbox` | `noSandbox` is required for containerized Chromium; headless is the only mode that makes sense in the image. |
+| `mcp.servers.playwright` | `npx -y @playwright/mcp@0.0.40 --headless` | The visual-review MCP. The audit found this registration missing from an otherwise-working install (the one "actively wrong, fix it everywhere" finding), so the template ships it and `install.sh` writes it on host installs. |
 
-## Cost tracking (decided compromise)
+## What is deliberately not in the template
 
-The template ships `models.pricing.enabled: true` plus the 4 recommended OpenRouter
-model entries above, each with a complete pricing block. **Field names verified
-against the pinned OpenClaw version (2026.6.11):** a model entry carries
-`cost: {input, output, cacheRead, cacheWrite}` in USD per million tokens. (The
-roadmap sketched `inputPerMillion`-style names; the live pinned config proves the
-actual schema, and the template and its tests use the verified names.)
+Keys that are personal or install-specific are not templated, and because the
+boot-time reconcile only enforces keys the template declares, anything you add
+in these areas survives upgrades (see the customization contract in the
+[deploy README](README.md)):
 
-Anything outside the shipped set is meter-it-yourself: if the dashboard shows $0
-for a run, OpenClaw has no pricing for the model that ran. See the pointer in
-[deploy/README.md](README.md) and the full walkthrough in SETUP.md under "Cost
-metrics: configuring OpenClaw so Lullabeast can report run cost".
+- **Provider auth**: API keys are provisioned at first boot from
+  `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY`, never baked into a config file.
+- **Extra providers and models**: direct-provider entries, local model servers,
+  image-generation models. Add your own; pricing outside the shipped set is
+  meter-it-yourself.
+- **Messaging channels**: Signal/chat channel config, bindings, chat-command
+  settings, TTS. The container has no messaging channels by default.
+- **Gateway network config**: control-UI origins, VPN/tailnet settings.
+- **OpenClaw's own runtime bookkeeping** (`meta`, `wizard`, `update`): the
+  gateway rewrites these at runtime; the container pins its OpenClaw version
+  via the image build arg, so no self-update channel applies.
+- **Agent-to-agent messaging**: off. Pipeline agents never message each other;
+  only the escalation agent messages the human.
+
+## Cost tracking
+
+The template ships `models.pricing.enabled: true` plus the 4 recommended
+OpenRouter model entries, each with a complete pricing block. **Field names
+verified against the pinned OpenClaw version (2026.6.11):** a model entry
+carries `cost: {input, output, cacheRead, cacheWrite}` in USD per million
+tokens.
+
+Anything outside the shipped set is meter-it-yourself: if the dashboard shows
+$0 for a run, OpenClaw has no pricing for the model that ran. See the pointer
+in the [deploy README](README.md) and the full walkthrough in SETUP.md under
+"Cost metrics: configuring OpenClaw so Lullabeast can report run cost".
 
 ## Per-agent model wiring (env substitution contract)
 
-One knob per agent role; defaults are the audit picks (encoded in
-`autodev/installer/openclaw_template.py::TEMPLATE_MODEL_DEFAULTS`):
+One knob per agent role; defaults are encoded in
+`autodev/installer/openclaw_template.py::TEMPLATE_MODEL_DEFAULTS`:
 
 | Env var | Default | Used by |
 |---|---|---|
@@ -123,39 +102,33 @@ One knob per agent role; defaults are the audit picks (encoded in
 | `ESCALATION_MODEL` | `openrouter/qwen/qwen3.6-27b` | escalation (notify-only) |
 
 `HOOKS_TOKEN` and `GATEWAY_TOKEN` are the two required render-time secrets; the
-DS-3 entrypoint generates them on first boot and persists them under `/data`.
-Rendering fails loud (naming the variable) if either is missing.
+container entrypoint generates them on first boot and persists them under
+`/data`. Rendering fails loud (naming the variable) if either is missing.
 
-## Hardware-defaults reset
+## Cloud-first timing defaults
 
-Everything below was tuned for the operator's local-model hardware (Pi-era, then a
-shared llama-server host) and is deliberately NOT shipped. With cloud inference the
-built-in code defaults are correct:
+Lullabeast's stall-detection and backstop knobs (`AUTODEV_STALL_TIMEOUT_*`,
+`AUTODEV_INFRA_BACKSTOP_*`) are left unset in the container, so the code
+defaults apply (300 s stall, 4500 s backstop). Those defaults assume
+cloud-model latency. Local-model installs typically need them raised; that
+guidance lives in SETUP.md's local-models section and the deploy README's
+"Local models on the host" section, not in the template.
 
-| Knob | Operator value (live `.env`) | Cloud default (shipped) |
-|---|---|---|
-| `AUTODEV_STALL_TIMEOUT_{PLANNER,EXECUTOR,REVIEWER}` | 1200 / 1800 / 1200 | unset (code default 300 s) |
-| `AUTODEV_INFRA_BACKSTOP_{PLANNER,EXECUTOR,REVIEWER}` | 10800 | unset (code default 4500 s) |
-| Agent `model.primary` on `llamacpp/*` | local models | `${*_MODEL}` cloud placeholders |
-| `models.providers.llamacpp` (incl. `timeoutSeconds: 600`) | present | not shipped |
+One `.env` setting is recommended for cloud users and carries into
+[.env.example](.env.example): `PROVIDER_ERROR_RETRY=3` (transient 429 and
+rate-limit responses are a cloud-provider phenomenon, exactly what the knob
+exists for).
 
-Kept on purpose despite their local-hardware origin: `agents.defaults.subagents.maxConcurrent: 1`
-(now a cost bound) and `tools.loopDetection` (model-agnostic guard). One operator
-`.env` setting is recommended for cloud users too and should carry into DS-3's
-`.env.example`: `PROVIDER_ERROR_RETRY=3` (transient 429/rate-limit retries are a
-cloud-provider phenomenon, exactly what the knob exists for).
+## Minimum hardware
 
-Local-model tuning guidance stays in SETUP.md's local-models section (DS-7 links
-it); none of it belongs in the template.
-
-## Minimum hardware statement
-
-With cloud inference the container is light. Target minimums (DS-6 puts this in the
-README):
+With cloud inference the container is light. Target minimums (also stated in
+the main README):
 
 - **2 CPU cores**
 - **2-4 GB RAM** (Playwright/Chromium is the heaviest resident; the gateway, UI
   server, and orchestrator are small Python/Node processes)
-- **A few GB of disk** for the image, `/data` state, and generated project repos
+- **A few GB of disk** for the image, `/data` state, and generated project
+  repos
 
-No GPU. GPU-in-container local models are explicitly out of scope for this release.
+No GPU. GPU-in-container local models are explicitly out of scope for this
+release.

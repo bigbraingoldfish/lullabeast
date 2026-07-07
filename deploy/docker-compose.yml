@@ -1,4 +1,4 @@
-# Lullabeast single-container deploy (DS-3). Quickstart and the full env /
+# Lullabeast single-container deploy. Quickstart and the full env /
 # volume / upgrade contract live in deploy/README.md.
 #
 # One service on purpose: the orchestrator, gateway, agents, and gate scripts
@@ -33,11 +33,12 @@ services:
       - ./projects:/data/projects
     extra_hosts:
       # Lets agents reach a model server running on the docker host via
-      # http://host.docker.internal:<port> (the local-model bridge, DS-7).
+      # http://host.docker.internal:<port> (see "Local models on the host" in
+      # deploy/README.md).
       - "host.docker.internal:host-gateway"
     init: true
     restart: unless-stopped
-    # ── DS-4 hardening ──────────────────────────────────────────────────────
+    # ── Hardening ─────────────────────────────────────────────────────────
     # The container is the blast-radius boundary for LLM-generated code (the
     # executor has exec). What this posture does and does not contain is
     # documented in deploy/README.md ("What the sandbox does and does not
@@ -62,7 +63,7 @@ services:
     # generous headroom for npm/pip bursts and Chromium's process swarm.
     # pids_limit: 2048
     # mem_limit: 4g
-    # Read-only rootfs was assessed (DS-4 task 3) and deliberately left OFF:
+    # Read-only rootfs was assessed and deliberately left OFF:
     # install.sh runs on every boot as the single provisioning brain and by
     # contract writes inside /app (the .env merge, ui/config.json, the
     # signals-plugin rebuild), and /home/lullabeast carries the baked Python

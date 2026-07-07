@@ -2894,7 +2894,7 @@ def _resolve_entry_raw_id(project_path):
 
 @app.get("/api/doctor")
 def get_doctor():
-    """Run the read-only doctor health checks and return the report (DS-1).
+    """Run the read-only doctor health checks and return the report.
 
     Same report the CLI (``python -m autodev.installer.doctor``) prints, fed by
     ``load_config()`` so ui/config.json overrides apply. Never ``live`` from
