@@ -43,12 +43,23 @@ RUN npx -y --package=@playwright/mcp@0.0.40 -- playwright-core install chromium
 
 # Non-root user (DS-4: every runtime process runs as it). uid 1000 by default
 # so files in the ./projects bind mount come out owned by the typical host
-# user; the base image's pwuser (also uid 1000) is removed to free the uid.
+# user; the base image's default users (pwuser and ubuntu) are removed to free
+# the uid.
 ARG LULLABEAST_UID=1000
 RUN (userdel -r pwuser 2>/dev/null || true) \
+    && (userdel -r ubuntu 2>/dev/null || true) \
     && useradd --create-home --shell /bin/bash --uid "${LULLABEAST_UID}" lullabeast \
     && mkdir -p /data \
     && chown lullabeast:lullabeast /data
+
+# FINDING-006/008: the container is a single-user appliance. On Windows/macOS
+# Docker Desktop the ./projects bind mount arrives root-owned inside the
+# container while every process runs as lullabeast, so git's dubious-ownership
+# guard (CVE-2022-24765) fires on every project repo and breaks legitimate
+# pipeline work; that guard buys nothing here. System-level config
+# (/etc/gitconfig, root-owned) persists across container recreation, where a
+# per-user global config baked at boot would die with the container layer.
+RUN git config --system --add safe.directory '*'
 
 # DS-4: /app is root-owned and read-only to the runtime user. The pipeline
 # executes LLM-generated code as lullabeast (the executor has exec, and there

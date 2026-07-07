@@ -1,0 +1,4 @@
+# Shell scripts are executed in-container; CRLF breaks the shebang and every line.
+*.sh text eol=lf
+# Copied to deploy/.env and parsed for values; a trailing CR corrupts every value.
+.env.example text eol=lf

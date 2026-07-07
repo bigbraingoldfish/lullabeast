@@ -1,0 +1,4 @@
+# Playwright test dependencies and artifacts (generated during phase runs, never committed)
+node_modules/
+test-results/
+playwright-report/

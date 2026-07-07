@@ -12,6 +12,9 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     image: lullabeast:local
+    # The default path always builds locally and never consults a registry;
+    # published GHCR images exist only from the first tagged release.
+    pull_policy: build
     env_file: .env
     ports:
       # Loopback publish only: the dashboard is token-authed single-operator

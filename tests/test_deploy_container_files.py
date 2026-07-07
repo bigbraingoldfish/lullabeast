@@ -50,6 +50,28 @@ class TestDockerfile:
         assert "useradd" in DOCKERFILE
         assert re.search(r"^USER lullabeast$", DOCKERFILE, re.MULTILINE)
 
+    def test_base_default_users_removed_before_useradd(self):
+        # FINDING-001: the Playwright base ships both pwuser (uid 1001) and
+        # ubuntu (uid 1000); both must be freed before useradd --uid 1000, or
+        # the build dies with "UID already in use".
+        pwuser_idx = DOCKERFILE.find("userdel -r pwuser")
+        ubuntu_idx = DOCKERFILE.find("userdel -r ubuntu")
+        useradd_idx = DOCKERFILE.find("useradd --create-home")
+        assert pwuser_idx != -1, "must remove pwuser"
+        assert ubuntu_idx != -1, "must remove ubuntu"
+        assert useradd_idx != -1
+        assert pwuser_idx < useradd_idx and ubuntu_idx < useradd_idx, (
+            "both default users must be removed before useradd"
+        )
+
+    def test_system_safe_directory_configured(self):
+        # FINDING-006/008: Docker Desktop bind mounts arrive root-owned; a
+        # system-level safe.directory disables the dubious-ownership guard so
+        # pipeline git work survives container recreation.
+        assert re.search(
+            r"git config --system --add safe\.directory '\*'", DOCKERFILE
+        ), "Dockerfile must bake a system-level safe.directory git config"
+
     def test_entrypoint_wired(self):
         assert 'ENTRYPOINT ["/app/deploy/entrypoint.sh"]' in DOCKERFILE
 
@@ -163,6 +185,28 @@ class TestCompose:
     def test_env_file_wired(self):
         data = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
         assert data["services"]["lullabeast"]["env_file"] == ".env"
+
+    def test_pull_policy_build(self):
+        # FINDING-002 adjacent: the default path always builds locally and
+        # never pulls from a registry.
+        data = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
+        assert data["services"]["lullabeast"]["pull_policy"] == "build"
+
+
+class TestGitAttributes:
+    """FINDING-003: without .gitattributes, Windows checkout (autocrlf=true)
+    writes CRLF into shell scripts and .env.example, breaking the shebang and
+    value parsing in-container."""
+
+    GITATTRIBUTES = REPO_ROOT / ".gitattributes"
+
+    def test_gitattributes_exists(self):
+        assert self.GITATTRIBUTES.is_file()
+
+    def test_forces_lf_for_shell_scripts_and_env_example(self):
+        text = self.GITATTRIBUTES.read_text(encoding="utf-8")
+        assert re.search(r"^\*\.sh text eol=lf$", text, re.MULTILINE)
+        assert re.search(r"^\.env\.example text eol=lf$", text, re.MULTILINE)
 
 
 class TestEnvExample:

@@ -54,10 +54,11 @@ TEMPLATE_PLACEHOLDER_RE = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
 # per agent role; the executor and reviewer picks are multimodal by
 # requirement. PLANNER_MODEL also backs agents.defaults.model. Every default
 # must be one of the shipped, fully priced OpenRouter models in
-# deploy/openclaw.template.json (tests enforce that the referenced set and the
-# shipped set are identical).
+# deploy/openclaw.template.json (tests enforce that every referenced model is
+# shipped and priced; a shipped model may be a non-default, env-selectable
+# option, e.g. minimax/minimax-m3 after the 2026-07-07 planner-default move).
 TEMPLATE_MODEL_DEFAULTS: dict[str, str] = {
-    "PLANNER_MODEL": "openrouter/minimax/minimax-m3",
+    "PLANNER_MODEL": "openrouter/moonshotai/kimi-k2.7-code",
     "EXECUTOR_MODEL": "openrouter/moonshotai/kimi-k2.7-code",
     "REVIEWER_MODEL": "openrouter/z-ai/glm-5.2",
     "PRD_MODEL": "openrouter/moonshotai/kimi-k2.7-code",
