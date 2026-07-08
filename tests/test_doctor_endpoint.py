@@ -112,13 +112,17 @@ class TestDoctorHealthPanel:
         assert '"settings" && (' in html or "'settings')" in html
 
     def test_settings_gateway_card_present(self, html):
-        # Model/provider management lives in OpenClaw; Settings opens its UI and
-        # copies the token from the token-guarded endpoint (no shell needed).
+        # Model/provider management lives in OpenClaw; Settings opens its UI
+        # signed in via one button. The token rides the URL hash fragment
+        # (never sent to the server, absent from logs) from the token-guarded
+        # gateway-access endpoint.
         assert 'data-testid="settings-gateway-card"' in html
         assert 'data-testid="gateway-open-link"' in html
-        assert 'data-testid="gateway-copy-token"' in html
         assert "/api/setup/gateway-access" in html
+        assert "#token=" in html
         assert ":18789" in html
+        # The two-button copy-token flow is gone.
+        assert 'data-testid="gateway-copy-token"' not in html
 
     def test_card_renders_statuses_and_fix_hints(self, html):
         # One glyph per doctor status, plus the fix-hint line for warn/fail rows.

@@ -135,12 +135,12 @@ Everything else (OpenClaw, Python, Node, Chromium) ships inside the image, pinne
 ```bash
 git clone https://github.com/bigbraingoldfish/lullabeast.git && cd lullabeast/deploy
 cp .env.example .env    # optional: the dashboard asks for the key if you skip it
-mkdir -p projects && docker compose up
+mkdir -p projects && docker compose up -d && docker compose logs -f
 ```
 
 On Windows, run these lines in Git Bash with Docker Desktop running ([Windows notes](deploy/README.md#windows-notes)).
 
-Wait for the boot log to end with the doctor verdict (the built-in health check) and a banner containing your dashboard URL, then open that URL on the machine running Docker. It includes your access token and authorizes your browser via a cookie (30 days); scripts can send the same token as a `Bearer` header instead. First boot is slower: it provisions state and validates your API key end to end with a one-time live webhook ping.
+The container runs detached, so it survives closing the terminal; the `logs -f` view is just a window into it, and Ctrl+C there detaches without stopping anything. Wait for the boot log to end with the doctor verdict (the built-in health check) and a banner containing your dashboard URL, then open that URL on the machine running Docker. It includes your access token and authorizes your browser via a cookie (30 days); scripts can send the same token as a `Bearer` header instead. First boot is slower: it provisions state and validates your API key end to end with a one-time live webhook ping.
 
 The full container contract (environment variables, volumes, upgrades, customization, hardening) is in **[deploy/README.md](deploy/README.md)**.
 

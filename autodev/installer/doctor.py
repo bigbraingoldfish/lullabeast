@@ -934,6 +934,7 @@ def check_provider_key(config: dict) -> CheckResult:
         or (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
     )
     env_local = bool((os.environ.get("LOCAL_MODEL_URL") or "").strip())
+    skipped = bool((os.environ.get("PROVIDER_SETUP_SKIPPED") or "").strip())
     file_cloud = False
     file_local = False
     if key_path:
@@ -951,6 +952,8 @@ def check_provider_key(config: dict) -> CheckResult:
                                 file_local = True
                             else:
                                 file_cloud = True
+                    if line.startswith("PROVIDER_SETUP_SKIPPED=") and line[len("PROVIDER_SETUP_SKIPPED="):].strip():
+                        skipped = True
         except OSError:
             pass
     if env_cloud or env_local or file_cloud or file_local:
@@ -966,6 +969,17 @@ def check_provider_key(config: dict) -> CheckResult:
         return CheckResult(
             "provider_key", "Provider API key available", "ok", detail,
         )
+    if skipped:
+        # Deliberate operator choice, but the doctor cannot verify a
+        # hand-managed OpenClaw provider: honest warn, never ok.
+        return CheckResult(
+            "provider_key", "Provider API key available", "warn",
+            "provider setup was skipped: models and providers are managed "
+            "manually in OpenClaw; agents cannot run until one is configured there",
+            "configure a provider in the OpenClaw gateway UI (linked from the "
+            "dashboard Settings screen), or set OPENROUTER_API_KEY / "
+            "LOCAL_MODEL_URL to let Lullabeast manage it",
+        )
     marker_present = bool(marker_path) and os.path.exists(marker_path)
     if marker_present:
         return CheckResult(
@@ -980,6 +994,64 @@ def check_provider_key(config: dict) -> CheckResult:
         "marker (keyless boot, e.g. OFFLINE CI); agents cannot run",
         "enter a provider key in the dashboard setup screen, or set "
         "OPENROUTER_API_KEY / ANTHROPIC_API_KEY / LOCAL_MODEL_URL in deploy/.env",
+    )
+
+
+# Model-entry fields a role-assigned local model needs to run well. A bare
+# {id, name} entry falls back to OpenClaw's 8192-token output budget and an
+# undeclared reasoning channel — both truncate real pipeline turns (observed
+# live: an executor burning its whole turn thinking, ending with no output) —
+# and a missing input type degrades the vision-dependent executor/reviewer.
+_LOCAL_MODEL_REQUIRED_FIELDS = ("maxTokens", "contextWindow", "input")
+
+
+def check_local_model_completeness(config: dict) -> CheckResult:
+    """Warn when a role-assigned local model entry is under-specified."""
+    cid, title = "local_model_completeness", "Local model entries complete"
+    path = os.path.join(config.get("openclaw_root") or "", "openclaw.json")
+    data, _err = _load_openclaw_json(path)
+    if data is None:
+        return CheckResult(
+            cid, title, "skipped", "openclaw.json unavailable (see openclaw_json)",
+        )
+    # Which local/<id> models do the registered agents actually run on?
+    refs: dict = {}
+    for agent in ((data.get("agents") or {}).get("list") or []):
+        if not isinstance(agent, dict):
+            continue
+        primary = (agent.get("model") or {}).get("primary")
+        if isinstance(primary, str) and primary.startswith("local/"):
+            refs.setdefault(primary[len("local/"):], []).append(agent.get("id") or "?")
+    if not refs:
+        return CheckResult(cid, title, "skipped", "no agent role uses a local/ model")
+    local_entry = (((data.get("models") or {}).get("providers") or {}).get("local") or {})
+    by_id = {
+        m.get("id"): m
+        for m in (local_entry.get("models") or [])
+        if isinstance(m, dict)
+    }
+    problems = []
+    for mid, roles in sorted(refs.items()):
+        model = by_id.get(mid)
+        role_s = ",".join(sorted(set(roles)))
+        if model is None:
+            problems.append(f"local/{mid} ({role_s}) is not in models.providers.local")
+            continue
+        missing = [f for f in _LOCAL_MODEL_REQUIRED_FIELDS if not model.get(f)]
+        if "reasoning" not in model:
+            missing.append("reasoning (unset)")
+        if missing:
+            problems.append(f"local/{mid} ({role_s}) missing {', '.join(missing)}")
+    if problems:
+        return CheckResult(
+            cid, title, "warn", "; ".join(problems),
+            "re-run the dashboard local-model setup, or set LOCAL_MODEL_MAX_TOKENS / "
+            "LOCAL_MODEL_REASONING in deploy/.env (=0 for a non-reasoning model) and "
+            "restart; an under-specified entry truncates agent turns",
+        )
+    return CheckResult(
+        cid, title, "ok",
+        f"{len(refs)} role-assigned local model(s) fully specified",
     )
 
 
@@ -1067,6 +1139,7 @@ def run_doctor(config: dict, *, live: bool = False) -> DoctorReport:
         check_ui_token(config),
         check_ports(config),
         check_provider_key(config),
+        check_local_model_completeness(config),
         check_template_conformance(config),
     ]
     return DoctorReport(checks=checks)

@@ -8362,6 +8362,7 @@
             ui_token: "The dashboard access token is configured.",
             ports: "The gateway and dashboard ports are reachable and not conflicting.",
             provider_key: "A model provider is configured: a cloud API key or a local model server.",
+            local_model_completeness: "Every role-assigned local model entry declares maxTokens, contextWindow, and reasoning; an under-specified entry truncates agent turns.",
             template_conformance: "The live OpenClaw config still matches the shipped golden template (container installs).",
         };
 
@@ -12052,8 +12053,18 @@
              * same restarting/startPolling unlock path as the cloud key form above. */
             const [localInfo, setLocalInfo] = React.useState(null);
             const [selectedModels, setSelectedModels] = React.useState({});
+            /* Per server+model tuning confirm fields, keyed "url::model" so a
+             * model switch re-prefills from that model's probed details. */
+            const [localTuning, setLocalTuning] = React.useState({});
             const [localError, setLocalError] = React.useState("");
             const [localSubmitting, setLocalSubmitting] = React.useState(false);
+
+            /* Skip path: models managed manually in OpenClaw. Confirmed via a
+             * modal because it is one-way (the welcome screen never reappears). */
+            const [skipConfirmOpen, setSkipConfirmOpen] = React.useState(false);
+            const [skipping, setSkipping] = React.useState(false);
+            const [skipped, setSkipped] = React.useState(false);
+            const [skipError, setSkipError] = React.useState("");
 
             const loadLocalModels = React.useCallback(() => {
                 fetch("/api/setup/local-models")
@@ -12111,16 +12122,57 @@
                 }
             };
 
+            const onSkipConfirm = async () => {
+                setSkipError("");
+                setSkipping(true);
+                try {
+                    const r = await fetch("/api/setup/skip-provider", { method: "POST" });
+                    const d = await r.json().catch(() => ({}));
+                    if (!r.ok) {
+                        setSkipError(d.detail || "Could not skip provider setup. Try again.");
+                        return;
+                    }
+                    setSkipConfirmOpen(false);
+                    setSkipped(true);
+                    setRestarting(true);
+                    startPolling();
+                } catch (_e) {
+                    setSkipError("Network error while skipping provider setup. Try again.");
+                } finally {
+                    setSkipping(false);
+                }
+            };
+
             const onLocalSubmit = async (server) => {
                 const model = selectedModels[server.url] || (server.models && server.models[0]) || "";
                 if (!model) return;
+                const detail = (server.details || {})[model] || {};
+                const tuning = localTuning[server.url + "::" + model] || {};
+                const payload = { url: server.url, model };
+                /* Max output tokens: the typed value, else the probe-derived
+                 * suggestion. Explicit in the payload so the wired entry never
+                 * falls back to a truncating default. */
+                const mt = parseInt(tuning.maxTokens != null ? tuning.maxTokens : detail.suggested_max_tokens, 10);
+                if (Number.isFinite(mt) && mt > 0) payload.max_tokens = mt;
+                /* Context window: the typed value, else the probed one. */
+                const cw = parseInt(tuning.contextWindow != null ? tuning.contextWindow : detail.context_window, 10);
+                if (Number.isFinite(cw) && cw > 0) payload.context_window = cw;
+                /* Reasoning: only an explicit On/Off choice is sent; Auto defers
+                 * to the boot-time probe (which knows when the server exposes it). */
+                if (tuning.reasoning === "on") payload.reasoning = true;
+                if (tuning.reasoning === "off") payload.reasoning = false;
+                /* Image input: submission is blocked while "no", so this is
+                 * always true here; explicit so the wired entry always carries
+                 * the input type the executor and reviewer depend on. */
+                const vision = tuning.vision || (detail.vision === false ? "no" : "yes");
+                payload.vision = vision === "yes";
                 setLocalError("");
                 setLocalSubmitting(true);
                 try {
                     const r = await fetch("/api/setup/local-model", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ url: server.url, model }),
+                        body: JSON.stringify(payload),
                     });
                     const d = await r.json().catch(() => ({}));
                     if (!r.ok) {
@@ -12203,7 +12255,23 @@
                                         </div>
                                         {localInfo.servers && localInfo.servers.length > 0 ? (
                                             <div className="space-y-2">
-                                                {localInfo.servers.map((server) => (
+                                                {localInfo.servers.map((server) => {
+                                                    /* Confirm fields: prefilled from the probe; what the model
+                                                     * server can't report (reasoning / vision on llama.cpp and
+                                                     * LM Studio) is the user's one-line call. */
+                                                    const model = selectedModels[server.url] || (server.models && server.models[0]) || "";
+                                                    const detail = model ? ((server.details || {})[model] || {}) : {};
+                                                    const tKey = server.url + "::" + model;
+                                                    const tuning = localTuning[tKey] || {};
+                                                    const setTune = (k, v) =>
+                                                        setLocalTuning((prev) => ({ ...prev, [tKey]: { ...prev[tKey], [k]: v } }));
+                                                    const detectedReasoning = detail.reasoning === true ? "on" : detail.reasoning === false ? "off" : "not detected";
+                                                    /* Image support defaults to yes: the executor and reviewer
+                                                     * need a multimodal model. A probed text-only model prefills
+                                                     * no; overriding it back to yes is the user's call. */
+                                                    const vision = tuning.vision || (detail.vision === false ? "no" : "yes");
+                                                    const inputCls = "w-full text-sm bg-[#15121f] border border-[#2a2540] rounded px-3 py-2 text-slate-200";
+                                                    return (
                                                     <div
                                                         key={server.url}
                                                         className="rounded border border-[#2a2540] bg-[#221b36] p-3 space-y-2"
@@ -12213,12 +12281,12 @@
                                                             <span className="text-xs font-mono text-slate-500 truncate">{server.url}</span>
                                                         </div>
                                                         <select
-                                                            value={selectedModels[server.url] || (server.models && server.models[0]) || ""}
+                                                            value={model}
                                                             onChange={(e) =>
                                                                 setSelectedModels((prev) => ({ ...prev, [server.url]: e.target.value }))
                                                             }
                                                             disabled={!server.models || server.models.length === 0}
-                                                            className="w-full text-sm bg-[#15121f] border border-[#2a2540] rounded px-3 py-2 text-slate-200 disabled:opacity-50"
+                                                            className={inputCls + " disabled:opacity-50"}
                                                         >
                                                             {(server.models && server.models.length > 0
                                                                 ? server.models
@@ -12230,19 +12298,81 @@
                                                                 <option value="">no models loaded</option>
                                                             )}
                                                         </select>
+                                                        {model && (
+                                                            <div className="grid grid-cols-2 gap-3">
+                                                                <label className="space-y-1">
+                                                                    <span className="header-text text-[11px] text-slate-500 block">Max output tokens</span>
+                                                                    <input
+                                                                        type="number"
+                                                                        data-testid="setup-local-max-tokens"
+                                                                        min="1"
+                                                                        value={tuning.maxTokens != null ? tuning.maxTokens : (detail.suggested_max_tokens || 16384)}
+                                                                        onChange={(e) => setTune("maxTokens", e.target.value)}
+                                                                        className={inputCls}
+                                                                    />
+                                                                </label>
+                                                                <label className="space-y-1">
+                                                                    <span className="header-text text-[11px] text-slate-500 block">Context window</span>
+                                                                    <input
+                                                                        type="number"
+                                                                        data-testid="setup-local-context-window"
+                                                                        min="1"
+                                                                        placeholder="unknown"
+                                                                        value={tuning.contextWindow != null ? tuning.contextWindow : (detail.context_window || "")}
+                                                                        onChange={(e) => setTune("contextWindow", e.target.value)}
+                                                                        className={inputCls}
+                                                                    />
+                                                                </label>
+                                                                <label className="space-y-1">
+                                                                    <span className="header-text text-[11px] text-slate-500 block">Reasoning model</span>
+                                                                    <select
+                                                                        data-testid="setup-local-reasoning"
+                                                                        value={tuning.reasoning || "auto"}
+                                                                        onChange={(e) => setTune("reasoning", e.target.value)}
+                                                                        className={inputCls}
+                                                                    >
+                                                                        <option value="auto">Auto ({detectedReasoning})</option>
+                                                                        <option value="on">On (emits thinking)</option>
+                                                                        <option value="off">Off</option>
+                                                                    </select>
+                                                                </label>
+                                                                <label className="space-y-1">
+                                                                    <span className="header-text text-[11px] text-slate-500 block">Supports image input</span>
+                                                                    <select
+                                                                        data-testid="setup-local-vision"
+                                                                        value={vision}
+                                                                        onChange={(e) => setTune("vision", e.target.value)}
+                                                                        className={inputCls}
+                                                                    >
+                                                                        <option value="yes">Yes</option>
+                                                                        <option value="no">No</option>
+                                                                    </select>
+                                                                </label>
+                                                            </div>
+                                                        )}
+                                                        {model && vision === "no" && (
+                                                            <p className="text-xs text-amber-400" data-testid="setup-local-vision-warning">
+                                                                The executor and reviewer require a model that accepts image
+                                                                input (screenshot-based visual review). Pick a multimodal
+                                                                model, or flip this to Yes if you are sure this one takes
+                                                                images.
+                                                            </p>
+                                                        )}
                                                         <button
                                                             type="button"
                                                             onClick={() => onLocalSubmit(server)}
                                                             disabled={
                                                                 localSubmitting ||
-                                                                !(server.models && server.models.length > 0)
+                                                                !(server.models && server.models.length > 0) ||
+                                                                vision === "no"
                                                             }
                                                             className="header-text text-sm px-4 py-2 rounded bg-[#e2b14c] text-[#100d1a] font-semibold disabled:opacity-50"
                                                         >
                                                             {localSubmitting ? "Wiring…" : "Use this model for all roles"}
                                                         </button>
                                                     </div>
-                                                ))}
+                                                    );
+                                                })}
                                                 {localError && (
                                                     <p className="text-xs text-red-400" data-testid="setup-local-error">{localError}</p>
                                                 )}
@@ -12263,16 +12393,85 @@
                                         )}
                                     </div>
                                 )}
+                                <div className="border-t border-[#2a2540] pt-3">
+                                    <button
+                                        type="button"
+                                        data-testid="setup-skip-provider"
+                                        onClick={() => { setSkipError(""); setSkipConfirmOpen(true); }}
+                                        className="text-xs text-slate-500 hover:text-slate-300 underline decoration-dotted"
+                                    >
+                                        Skip model setup: I'll manage models and providers in OpenClaw myself
+                                    </button>
+                                </div>
                             </React.Fragment>
                         )}
                         {restarting && (
                             <div className="space-y-2" data-testid="setup-key-restarting">
-                                <p className="text-sm text-slate-300">
-                                    Key saved. The model gateway is restarting and validating your key…
-                                </p>
-                                <p className="text-xs text-slate-500">
-                                    This takes a few moments on the first key. The dashboard will unlock automatically.
-                                </p>
+                                {skipped ? (
+                                    <React.Fragment>
+                                        <p className="text-sm text-slate-300">
+                                            Model setup skipped. The dashboard is unlocking…
+                                        </p>
+                                        <p className="text-xs text-slate-500">
+                                            Configure a provider in the OpenClaw gateway (linked from the
+                                            Settings screen) before running the pipeline.
+                                        </p>
+                                    </React.Fragment>
+                                ) : (
+                                    <React.Fragment>
+                                        <p className="text-sm text-slate-300">
+                                            Key saved. The model gateway is restarting and validating your key…
+                                        </p>
+                                        <p className="text-xs text-slate-500">
+                                            This takes a few moments on the first key. The dashboard will unlock automatically.
+                                        </p>
+                                    </React.Fragment>
+                                )}
+                            </div>
+                        )}
+                        {skipConfirmOpen && (
+                            <div
+                                className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
+                                data-testid="setup-skip-confirm-modal"
+                            >
+                                <div className="max-w-md w-full rounded-lg border border-[#2a2540] bg-[#15121f] p-5 space-y-3">
+                                    <h2 className="header-text text-base font-semibold text-slate-200">Skip model setup?</h2>
+                                    <p className="text-sm text-slate-400 leading-relaxed">
+                                        Agents cannot run until you configure a model provider manually in
+                                        OpenClaw. This welcome screen will not be shown again; the Settings
+                                        screen keeps the OpenClaw gateway link and the{" "}
+                                        <a
+                                            href="https://github.com/bigbraingoldfish/lullabeast/blob/main/deploy/README.md#looking-at-the-openclaw-gateway"
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="text-[#e2b14c] hover:underline"
+                                        >
+                                            setup notes
+                                        </a>{" "}
+                                        for doing this by hand.
+                                    </p>
+                                    {skipError && (
+                                        <p className="text-xs text-red-400" data-testid="setup-skip-error">{skipError}</p>
+                                    )}
+                                    <div className="flex gap-2 justify-end">
+                                        <button
+                                            type="button"
+                                            onClick={() => setSkipConfirmOpen(false)}
+                                            className="header-text text-xs px-3 py-1.5 rounded border border-[#2a2540] text-slate-300 hover:bg-[#221b36]"
+                                        >
+                                            Cancel
+                                        </button>
+                                        <button
+                                            type="button"
+                                            data-testid="setup-skip-confirm"
+                                            onClick={onSkipConfirm}
+                                            disabled={skipping}
+                                            className="header-text text-xs px-3 py-1.5 rounded bg-[#e2b14c] text-[#100d1a] font-semibold disabled:opacity-50"
+                                        >
+                                            {skipping ? "Skipping…" : "Skip setup"}
+                                        </button>
+                                    </div>
+                                </div>
                             </div>
                         )}
                     </div>
@@ -12286,28 +12485,24 @@
             // Browse the gateway on the dashboard's host; 18789 is the standard
             // published port (a remapped host port must be opened manually).
             const gatewayUrl = `${window.location.protocol}//${window.location.hostname}:18789`;
-            const [tokenAvailable, setTokenAvailable] = React.useState(null);
-            const [copied, setCopied] = React.useState(false);
+            const [gatewayToken, setGatewayToken] = React.useState("");
 
             React.useEffect(() => {
                 let cancelled = false;
                 fetch("/api/setup/gateway-access")
                     .then((r) => r.json())
-                    .then((d) => { if (!cancelled) setTokenAvailable(!!(d && d.available)); })
-                    .catch(() => { if (!cancelled) setTokenAvailable(false); });
+                    .then((d) => { if (!cancelled) setGatewayToken((d && d.available && d.token) || ""); })
+                    .catch(() => { if (!cancelled) setGatewayToken(""); });
                 return () => { cancelled = true; };
             }, []);
 
-            // Fetch the token on demand (kept out of the initial DOM) and copy it.
-            const copyToken = async () => {
-                try {
-                    const d = await fetch("/api/setup/gateway-access").then((r) => r.json());
-                    if (!d || !d.token) return;
-                    await navigator.clipboard.writeText(d.token);
-                    setCopied(true);
-                    setTimeout(() => setCopied(false), 2000);
-                } catch (_e) { /* clipboard blocked — the gateway UI still accepts a manual paste */ }
-            };
+            /* One-click sign-in: the Control UI reads the token from the URL
+             * hash fragment, which never leaves the browser (not sent in the
+             * request, absent from server logs) — safer than ?token=. Without
+             * a resolvable token the plain URL still opens (manual paste). */
+            const gatewayHref = gatewayToken
+                ? `${gatewayUrl}/#token=${encodeURIComponent(gatewayToken)}`
+                : gatewayUrl;
 
             return (
                 <div className="flex-1 overflow-y-auto bg-transparent p-6">
@@ -12320,7 +12515,7 @@
                             <p className="header-text text-sm font-semibold text-slate-400">OpenClaw gateway</p>
                             <p className="text-xs text-slate-500 leading-relaxed max-w-prose">
                                 Adding or removing models and providers is managed in OpenClaw, not here.
-                                Open its dashboard, then paste the gateway token when it asks. Setup and
+                                The button below opens its dashboard signed in. Setup and
                                 inspection notes:{" "}
                                 <a
                                     href="https://github.com/bigbraingoldfish/lullabeast/blob/main/deploy/README.md#looking-at-the-openclaw-gateway"
@@ -12333,7 +12528,7 @@
                             </p>
                             <div className="flex flex-wrap gap-2 items-center">
                                 <a
-                                    href={gatewayUrl}
+                                    href={gatewayHref}
                                     target="_blank"
                                     rel="noopener noreferrer"
                                     data-testid="gateway-open-link"
@@ -12341,16 +12536,6 @@
                                 >
                                     Open OpenClaw gateway
                                 </a>
-                                {tokenAvailable && (
-                                    <button
-                                        type="button"
-                                        data-testid="gateway-copy-token"
-                                        onClick={copyToken}
-                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-400 border border-[#2a2540] hover:text-slate-200"
-                                    >
-                                        {copied ? "Token copied" : "Copy gateway token"}
-                                    </button>
-                                )}
                             </div>
                         </div>
                         {welcomeAvailable && (

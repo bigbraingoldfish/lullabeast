@@ -84,6 +84,15 @@ if [ "$OFFLINE" = "1" ]; then
     echo "  skipped. Agents CANNOT run without a provider; this mode is for"
     echo "  CI image smoke tests only, never for a real deployment."
     echo "=================================================================="
+elif [ -n "${PROVIDER_SETUP_SKIPPED:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ] \
+    && [ -z "${OPENROUTER_API_KEY:-}" ] && [ -z "${LOCAL_MODEL_URL:-}" ]; then
+    # The operator explicitly skipped provider setup from the welcome screen
+    # (persisted in provider.env, sourced above): models and providers are
+    # managed by hand in OpenClaw. Not setup mode (the welcome screen must
+    # never reappear), but agents cannot run until OpenClaw carries a provider.
+    echo "[lullabeast] provider setup was skipped: models are managed manually"
+    echo "[lullabeast] in OpenClaw. Agents cannot run until a provider is"
+    echo "[lullabeast] configured there (gateway UI, linked from Settings)."
 elif [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${OPENROUTER_API_KEY:-}" ] \
     && [ -z "${LOCAL_MODEL_URL:-}" ]; then
     SETUP_MODE=1
@@ -202,13 +211,19 @@ PY
 
 # Local-model wiring / detection. Two behaviors, both idempotent and both safe
 # to re-run in the setup-watch loop:
-#   (a) LOCAL_MODEL_URL set: normalize it, best-effort probe its /v1/models,
-#       build the models.providers.local entry, and merge it into openclaw.json
-#       (via the shared local_models + atomic_io helpers). We print each
-#       discovered model in the exact "local/<id>" form the *_MODEL knobs need.
-#       A failed probe still writes the provider entry (empty models) with a
-#       loud bind-hint warning; a malformed URL is a loud warning and a skip,
-#       never a boot crash.
+#   (a) LOCAL_MODEL_URL set: normalize it, best-effort probe its /v1/models plus
+#       the server's family metadata endpoint (context window, reasoning,
+#       vision), build an enriched models.providers.local entry, and merge it
+#       into openclaw.json (via the shared local_models + atomic_io helpers).
+#       The merge preserves same-id fields a prior boot or a hand-edit already
+#       set; LOCAL_MODEL_MAX_TOKENS / LOCAL_MODEL_REASONING (applied to the
+#       *_MODEL-referenced local models, or all when no knob is local) have the
+#       last word. We print each discovered model in the exact "local/<id>"
+#       form the *_MODEL knobs need, with the values it was wired with: every
+#       assumption is loud, because a silently under-specified entry truncates
+#       real pipeline turns. A failed probe still writes the provider entry
+#       (empty models) with a loud bind-hint warning; a malformed URL is a loud
+#       warning and a skip, never a boot crash.
 #   (b) LOCAL_MODEL_URL unset and setup mode: probe the known local-server ports
 #       on the docker bridge and, for anything that answers, print the exact
 #       LOCAL_MODEL_URL line to add (or note the dashboard's one-click wiring).
@@ -246,15 +261,50 @@ if url:
         print(f"[lullabeast] LOCAL_MODEL_URL is malformed ({exc}); skipping local-model wiring")
     else:
         models = local_models.probe_openai_models(base)
-        entry = local_models.build_local_provider_entry(base, models or [])
+        metadata = local_models.probe_model_metadata(base, models or [])
+        entry = local_models.build_local_provider_entry(base, models or [], metadata)
         merged = local_models.merge_local_provider(_load_config(), entry)
+        # Explicit overrides win over probes and prior edits; scope them to the
+        # role-referenced local models when any *_MODEL knob points at local/.
+        from autodev.installer.openclaw_template import TEMPLATE_MODEL_DEFAULTS
+        max_tokens = local_models.parse_positive_int(os.environ.get("LOCAL_MODEL_MAX_TOKENS"))
+        reasoning = local_models.parse_bool_flag(os.environ.get("LOCAL_MODEL_REASONING"))
+        context_window = local_models.parse_positive_int(os.environ.get("LOCAL_MODEL_CONTEXT_WINDOW"))
+        vision = local_models.parse_bool_flag(os.environ.get("LOCAL_MODEL_VISION"))
+        targets = [
+            v[len("local/"):]
+            for v in ((os.environ.get(k) or "").strip() for k in TEMPLATE_MODEL_DEFAULTS)
+            if v.startswith("local/")
+        ]
+        if any(o is not None for o in (max_tokens, reasoning, context_window, vision)):
+            prov = merged["models"]["providers"][local_models.LOCAL_PROVIDER_ID]
+            merged["models"]["providers"][local_models.LOCAL_PROVIDER_ID] = (
+                local_models.apply_local_model_overrides(
+                    prov,
+                    max_tokens=max_tokens,
+                    reasoning=reasoning,
+                    context_window=context_window,
+                    vision=vision,
+                    target_ids=targets,
+                )
+            )
         write_json_atomic(target, merged)
         if models:
+            final = merged["models"]["providers"][local_models.LOCAL_PROVIDER_ID]["models"]
             print(f"[lullabeast] local model provider wired from LOCAL_MODEL_URL ({base}):")
-            for mid in models:
-                print(f"[lullabeast]   local/{mid}")
+            unconfirmed = []
+            for m in final:
+                print(f"[lullabeast]   local/{m['id']}  ({local_models.summarize_model_entry(m)})")
+                if "reasoning" not in m:
+                    unconfirmed.append(m["id"])
             print("[lullabeast] point a role at one with its *_MODEL knob, e.g. "
                   f"ESCALATION_MODEL=local/{models[0]}")
+            if unconfirmed:
+                print("[lullabeast] reasoning could not be detected for: "
+                      + ", ".join(unconfirmed))
+                print("[lullabeast] if one of these is a reasoning model, set "
+                      "LOCAL_MODEL_REASONING=1 in deploy/.env (or confirm it in the "
+                      "dashboard setup screen); leaving it unset degrades its output.")
         else:
             print(f"[lullabeast] local model provider wired from LOCAL_MODEL_URL ({base}), "
                   "but its /v1/models probe returned no models.")
@@ -553,18 +603,26 @@ while :; do
         stop_gateway
         start_gateway
         wait_for_gateway
-        # Deferred first-boot --live doctor: the key exists now, so run the one
-        # billable webhook ping. Mark it spent BEFORE running (same crash-loop
-        # guard as the first-boot block above): a doctor die must not re-fire
-        # the paid ping on the next boot.
-        touch "$FIRST_BOOT_MARKER"
-        say "running deferred first-boot doctor --live to validate the key"
-        DOCTOR_EXIT=0
-        (cd "$APP" && OWNED_OPENCLAW=1 python3 -m autodev.installer.doctor --live) || DOCTOR_EXIT=$?
-        case "$DOCTOR_EXIT" in
-            0|2) : ;;
-            *) die "deferred live doctor reports failing checks (exit $DOCTOR_EXIT); see the FAIL lines above" ;;
-        esac
+        if [ -n "${PROVIDER_SETUP_SKIPPED:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ] \
+            && [ -z "${OPENROUTER_API_KEY:-}" ] && [ -z "${LOCAL_MODEL_URL:-}" ]; then
+            # Skip-provider unlock: no key to validate, so no --live doctor and
+            # the first-boot marker stays unwritten, so a later real key still
+            # gets its one billable ping (same contract as OFFLINE).
+            say "provider setup skipped from the dashboard; models are managed manually in OpenClaw"
+        else
+            # Deferred first-boot --live doctor: the key exists now, so run the
+            # one billable webhook ping. Mark it spent BEFORE running (same
+            # crash-loop guard as the first-boot block above): a doctor die
+            # must not re-fire the paid ping on the next boot.
+            touch "$FIRST_BOOT_MARKER"
+            say "running deferred first-boot doctor --live to validate the key"
+            DOCTOR_EXIT=0
+            (cd "$APP" && OWNED_OPENCLAW=1 python3 -m autodev.installer.doctor --live) || DOCTOR_EXIT=$?
+            case "$DOCTOR_EXIT" in
+                0|2) : ;;
+                *) die "deferred live doctor reports failing checks (exit $DOCTOR_EXIT); see the FAIL lines above" ;;
+            esac
+        fi
         rm -f "$SETUP_MARKER"
         banner_unlocked
         break

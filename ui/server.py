@@ -7668,21 +7668,32 @@ async def post_setup_provider_key(request: Request):
 # decision as the provider key). Slashes and colons are legal: an Ollama id looks
 # like "llama3:8b" and an OpenRouter-style id like "vendor/model".
 _LOCAL_MODEL_ID_MAX_LEN = 256
+# Sanity ceilings for the numeric confirm fields (2^20 / 2^24 — far above any
+# real local model's output budget / context window, low enough to reject
+# nonsense).
+_LOCAL_MODEL_MAX_TOKENS_CEILING = 1_048_576
+_LOCAL_MODEL_CONTEXT_CEILING = 16_777_216
 
 
 @app.get("/api/setup/local-models")
 def get_setup_local_models():
     """Probe the docker bridge host for local OpenAI-compatible model servers (B4).
 
-    Returns {"supported": bool, "servers": [{"name","url","models"}], "hint": str|None}.
-    ``supported`` is false (and servers empty, hint None) on bare-metal installs
-    where local_model_probe_host is unset — the frontend hides the surface. When a
-    host is configured, the three known ports are probed (bounded by
-    local_models.DEFAULT_PROBE_TIMEOUT each); ``hint`` is None when any server
-    answered, otherwise a user-facing sentence built from local_models.BIND_HINT.
+    Returns {"supported": bool, "servers": [{"name","url","models","details"}],
+    "hint": str|None}. ``supported`` is false (and servers empty, hint None) on
+    bare-metal installs where local_model_probe_host is unset — the frontend hides
+    the surface. When a host is configured, the three known ports are probed
+    (bounded by local_models.DEFAULT_PROBE_TIMEOUT each); ``hint`` is None when
+    any server answered, otherwise a user-facing sentence built from
+    local_models.BIND_HINT.
 
-    Sync def is fine — FastAPI runs it on the threadpool and the probe is bounded
-    (3 ports x DEFAULT_PROBE_TIMEOUT).
+    ``details`` maps model id → {context_window, reasoning, suggested_max_tokens}
+    from the server's family metadata endpoint (null = unknown) — it prefills the
+    confirm fields so the wired entry is complete, not a bare {id, name}.
+
+    Sync def is fine — FastAPI runs it on the threadpool and every probe is
+    bounded (3 ports + per-server metadata, DEFAULT_PROBE_TIMEOUT each,
+    Ollama per-model shows capped at METADATA_PROBE_MAX_MODELS).
     """
     config = load_config()
     host = (config.get("local_model_probe_host") or "").strip()
@@ -7692,10 +7703,22 @@ def get_setup_local_models():
     servers = _local_models.discover_local_servers(host)
     # Drop base_url (the normalized /v1 form) — the client only needs the origin
     # url it would put in LOCAL_MODEL_URL, plus the model list for the picker.
-    out = [
-        {"name": s.get("name"), "url": s.get("url"), "models": s.get("models") or []}
-        for s in servers
-    ]
+    out = []
+    for s in servers:
+        models = s.get("models") or []
+        metadata = _local_models.probe_model_metadata(s.get("base_url") or "", models)
+        details = {}
+        for mid in models:
+            md = metadata.get(mid) or {}
+            details[mid] = {
+                "context_window": md.get("context_window"),
+                "reasoning": md.get("reasoning"),
+                "vision": md.get("vision"),
+                "suggested_max_tokens": _local_models.derive_max_tokens(md.get("context_window")),
+            }
+        out.append(
+            {"name": s.get("name"), "url": s.get("url"), "models": models, "details": details}
+        )
     if out:
         hint = None
     else:
@@ -7713,9 +7736,17 @@ def get_setup_local_models():
 async def post_setup_local_model(request: Request):
     """Wire a discovered local model server as the provider (B4 unlock).
 
-    Body: {"url": str, "model": str}. Merges a ``LOCAL_MODEL_URL=`` line plus the
-    six per-role ``*_MODEL=local/<model>`` knobs into provider_key_path, preserving
-    every other line already in the file (a mixed install's cloud key stays intact).
+    Body: {"url": str, "model": str, "max_tokens"?: int, "reasoning"?: bool,
+    "context_window"?: int, "vision"?: bool}. Merges a ``LOCAL_MODEL_URL=``
+    line plus the six per-role ``*_MODEL=local/<model>`` knobs into
+    provider_key_path, preserving every other line already in the file (a
+    mixed install's cloud key stays intact). The optional confirm fields
+    persist as ``LOCAL_MODEL_MAX_TOKENS`` / ``LOCAL_MODEL_REASONING`` /
+    ``LOCAL_MODEL_CONTEXT_WINDOW`` / ``LOCAL_MODEL_VISION`` lines, which the
+    boot-time entry builder applies as the last word over probed metadata (an
+    under-specified local model runs on truncating defaults; a missing input
+    type degrades the vision-dependent executor and reviewer). Omitting one
+    drops any stale line for it.
     The write is atomic, mode 0600, parent dir 0700 — the same secret-file handling
     as post_setup_provider_key.
 
@@ -7796,12 +7827,56 @@ async def post_setup_local_model(request: Request):
             detail=f"model id must be at most {_LOCAL_MODEL_ID_MAX_LEN} characters",
         )
 
-    # The lines this write owns — LOCAL_MODEL_URL plus the six role knobs. Any
-    # existing line with one of these keys is replaced; every other line is kept
+    # Optional confirm fields. Only int/bool JSON types are accepted (the values
+    # are written into the entrypoint-sourced file, so they must render as bare
+    # digits — never client-controlled text).
+    max_tokens = body.get("max_tokens")
+    if max_tokens is not None and (
+        isinstance(max_tokens, bool) or not isinstance(max_tokens, int)
+        or not (1 <= max_tokens <= _LOCAL_MODEL_MAX_TOKENS_CEILING)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"max_tokens must be an integer between 1 and {_LOCAL_MODEL_MAX_TOKENS_CEILING}",
+        )
+    context_window = body.get("context_window")
+    if context_window is not None and (
+        isinstance(context_window, bool) or not isinstance(context_window, int)
+        or not (1 <= context_window <= _LOCAL_MODEL_CONTEXT_CEILING)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"context_window must be an integer between 1 and {_LOCAL_MODEL_CONTEXT_CEILING}",
+        )
+    reasoning = body.get("reasoning")
+    if reasoning is not None and not isinstance(reasoning, bool):
+        raise HTTPException(status_code=400, detail="reasoning must be a boolean")
+    vision = body.get("vision")
+    if vision is not None and not isinstance(vision, bool):
+        raise HTTPException(status_code=400, detail="vision must be a boolean")
+
+    # The lines this write owns — LOCAL_MODEL_URL, the six role knobs, and the
+    # model-tuning overrides. Any existing line with one of these keys is
+    # replaced (or dropped when its field was omitted); every other line is kept
     # verbatim (a co-tenant cloud key is preserved).
-    owned_keys = {"LOCAL_MODEL_URL", *TEMPLATE_MODEL_DEFAULTS.keys()}
+    owned_keys = {
+        "LOCAL_MODEL_URL",
+        "LOCAL_MODEL_MAX_TOKENS",
+        "LOCAL_MODEL_REASONING",
+        "LOCAL_MODEL_CONTEXT_WINDOW",
+        "LOCAL_MODEL_VISION",
+        *TEMPLATE_MODEL_DEFAULTS.keys(),
+    }
     new_lines = [f"LOCAL_MODEL_URL={url}"]
     new_lines += [f"{knob}=local/{model}" for knob in TEMPLATE_MODEL_DEFAULTS.keys()]
+    if max_tokens is not None:
+        new_lines.append(f"LOCAL_MODEL_MAX_TOKENS={max_tokens}")
+    if reasoning is not None:
+        new_lines.append(f"LOCAL_MODEL_REASONING={1 if reasoning else 0}")
+    if context_window is not None:
+        new_lines.append(f"LOCAL_MODEL_CONTEXT_WINDOW={context_window}")
+    if vision is not None:
+        new_lines.append(f"LOCAL_MODEL_VISION={1 if vision else 0}")
 
     dest = os.path.expanduser(key_path)
     preserved: list[str] = []
@@ -7825,6 +7900,56 @@ async def post_setup_local_model(request: Request):
         os.makedirs(parent, mode=0o700, exist_ok=True)
         # Atomic write via the shared helper (mkstemp in the dest dir + os.replace).
         # Never log `content` — it may carry a preserved cloud provider key.
+        write_text_atomic(dest, content)
+        os.chmod(dest, 0o600)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not write the provider key file at {dest} ({exc.strerror or exc})",
+        ) from None
+
+    return {"ok": True, "restarting": True}
+
+
+@app.post("/api/setup/skip-provider")
+def post_setup_skip_provider():
+    """Skip provider setup: the operator manages models manually in OpenClaw.
+
+    Persists ``PROVIDER_SETUP_SKIPPED=1`` to provider_key_path. The entrypoint's
+    watch loop treats that as an unlock (no --live doctor fires and the
+    first-boot marker stays unwritten, so a later real key still gets its one
+    validation ping), and later boots see the sourced flag and skip setup mode,
+    so the welcome screen never reappears. Existing lines in the file are
+    preserved. Agents cannot run until a provider is configured in OpenClaw;
+    the doctor's provider_key check keeps reporting that honestly.
+
+    409 when provider_key_path is unset (bare metal — there is no setup screen
+    to skip). On success: {"ok": true, "restarting": true}.
+    """
+    config = load_config()
+    key_path = (config.get("provider_key_path") or "").strip()
+    if not key_path:
+        raise HTTPException(
+            status_code=409,
+            detail="Skipping provider setup is only available on container installs.",
+        )
+
+    dest = os.path.expanduser(key_path)
+    preserved: list[str] = []
+    try:
+        with open(dest, "r", encoding="utf-8", errors="replace") as f:
+            existing = f.read()
+    except OSError:
+        existing = ""
+    for line in existing.splitlines():
+        if line.partition("=")[0].strip() != "PROVIDER_SETUP_SKIPPED":
+            preserved.append(line)
+    content = "\n".join(preserved + ["PROVIDER_SETUP_SKIPPED=1"]) + "\n"
+
+    parent = os.path.dirname(dest) or "."
+    try:
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+        # Never log `content` — preserved lines may carry a cloud provider key.
         write_text_atomic(dest, content)
         os.chmod(dest, 0o600)
     except OSError as exc:
