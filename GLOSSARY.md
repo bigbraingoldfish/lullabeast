@@ -28,7 +28,7 @@ env / external dependency — not competing names for the same thing.
 
 The one-command health check for a Lullabeast install (`python -m autodev.installer.doctor`, also served at `GET /api/doctor` and run automatically as `install.sh`'s final gate). It probes every documented silent-failure mode (paths, the PRD conversion prompt, `openclaw.json` health, OpenClaw version floor, gateway, plugin bundle freshness, webhook secrets, `pipeline-project` symlink agreement, stale locks, Playwright, tokens, ports) and prints a green/red checklist with a one-line fix per red item. Strictly read-only. Exit codes: 0 all ok, 1 any failure, 2 warnings only. `--live` adds the webhook ping (creates a real OpenClaw session, so it is opt-in). See SETUP **Installation** for the full description.
 
-**Health card**: the dashboard rendering of the same report, on the **Setup & Preflight** screen. It loads once when the screen opens and shows each check with its status and, for anything amber or red, the fix hint. Read-only: it has no re-run button and never triggers the live webhook ping.
+**Health card**: the dashboard rendering of the same report, on the **Settings** screen. It loads once when the screen opens and shows each check with its status and, for anything amber or red, the fix hint. Read-only: it has no re-run button and never triggers the live webhook ping.
 
 **Installer modes** (`install.sh`): **guest** (default; non-destructive, prompt-driven, shared-host etiquette), **`--strict`** (non-interactive; a failing doctor exits 1), **`--owned-openclaw`** (the container mode: the script owns the OpenClaw tree, overwrites unconditionally, never prompts, and treats any warning as a fatal error).
 

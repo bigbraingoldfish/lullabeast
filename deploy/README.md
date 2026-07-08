@@ -1,10 +1,12 @@
 # Lullabeast container deploy
 
 One container runs everything: the OpenClaw gateway, the Lullabeast dashboard,
-and the two maintenance loops. `docker compose up` with an API key in `.env`
-yields a running system with agents registered, the signals plugin loaded, a
-green doctor, and the dashboard URL (with its access token) printed in the
-boot log.
+and the two maintenance loops. `docker compose up` yields a running system with
+agents registered, the signals plugin loaded, a green doctor, and the dashboard
+URL (with its access token) printed in the boot log. A provider API key is not
+required at boot: if none is set, the container boots into setup mode and the
+dashboard collects the key. If you put a key in `.env`, that headless path is
+unchanged and takes precedence.
 
 ## OpenClaw redistribution and the version pin
 
@@ -26,7 +28,7 @@ which knows the documented floor (2026.5.18) and the known-bad releases.
 
 ```bash
 git clone <this repo> && cd <repo>/deploy
-cp .env.example .env        # then edit: set OPENROUTER_API_KEY
+cp .env.example .env        # optional: set OPENROUTER_API_KEY, or enter it in the dashboard later
 mkdir -p projects
 docker compose up
 ```
@@ -37,6 +39,28 @@ machine running docker. First boot is slower: it provisions `/data`, runs the
 owned-mode installer, and performs a one-time live webhook ping that creates
 one tiny agent session to validate your API key end to end.
 
+### First boot without a key (setup mode)
+
+You do not have to edit `.env` before the first boot. With no provider set (no
+`OPENROUTER_API_KEY` and no `LOCAL_MODEL_URL`), `docker compose up` boots
+into setup mode: it provisions everything except agent capability, prints a
+loud SETUP MODE banner with the dashboard URL, and waits. Open the dashboard,
+enter your provider key in the setup screen, and the container wires it,
+restarts the gateway, validates it with the one-time live webhook ping, and
+unlocks the pipeline automatically. No terminal, no file editing.
+
+A key in `deploy/.env` still works exactly as before and takes precedence: if
+it is set, the container boots straight to a running system and never enters
+setup mode. The persisted key from the dashboard lives at
+`/data/secrets/provider.env` (mode 600, never logged), so it survives
+container recreation.
+
+A local model server is an alternative to a cloud key: either set
+`LOCAL_MODEL_URL` in `deploy/.env` (which satisfies the provider gate on its
+own, no cloud key needed) or, on a keyless boot, use the setup screen's
+detected-server card to wire a server running on the host. See "Local models
+on the host" below.
+
 Spend warning: agent pipelines are token-hungry. Cache reads dominate and
 bill at a fraction of fresh input, but bills are real; watch the Monitor's
 cost strip on your first runs.
@@ -46,6 +70,17 @@ For your first pipeline run, the repo bundles a known-good sample project
 Snake game): copy it into `./projects/` and follow "Your first run" in the
 [main README](../README.md).
 
+### Windows notes
+
+- Install **Docker Desktop** and make sure it is running (steady whale icon)
+  before `docker compose up`.
+- Install **Git for Windows** and run the quickstart in its **Git Bash**
+  shell, not PowerShell or Command Prompt, so `cp` and `mkdir -p` work
+  verbatim.
+- If scripts fail on a stray `\r`, or the port bind fails with nothing in
+  netstat, see the CRLF and reserved-port items under "Troubleshooting first
+  boot" below.
+
 ## Troubleshooting first boot
 
 - **`Bind for 0.0.0.0:18790 failed: port is already allocated` (or similar
@@ -54,7 +89,11 @@ Snake game): copy it into `./projects/` and follow "Your first run" in the
   re-run. Note that `docker compose up -d` swallows this error and the
   container looks like it started; the foreground `docker compose up` the
   quickstart uses prints it in the boot log, which is why the quickstart runs
-  in the foreground.
+  in the foreground. On Windows, Hyper-V and WSL2 reserve blocks of ports that
+  produce this bind error while nothing shows up in `netstat`. List the
+  reserved ranges with `netsh interface ipv4 show excludedportrange
+  protocol=tcp` from an elevated (Run as administrator) prompt; the fix is the
+  same `UI_PORT` change to a port outside those ranges.
 - **Pulling `ghcr.io/bigbraingoldfish/lullabeast` is denied.** There is no
   published image to pull yet: images are published only from the first tagged
   release onward (see "CI, published images, and OFFLINE mode" below for the
@@ -81,10 +120,92 @@ Every variable is documented inline in [.env.example](.env.example).
 
 | Variable | Required | Meaning |
 |----------|----------|---------|
-| `OPENROUTER_API_KEY` or `ANTHROPIC_API_KEY` | one of them | Provider key for the agents' models. Missing both: the container exits immediately, naming the variables. The shipped model defaults use OpenRouter. |
+| `OPENROUTER_API_KEY` | no (optional) | Provider key for the agents' models; the golden path, since the shipped model defaults are OpenRouter models. Optional at boot: with no provider key set, the container boots into setup mode and the dashboard collects the key (see "First boot without a key" above). A key here takes precedence and skips setup mode. |
+| `LOCAL_MODEL_URL` | no (optional) | Points the container at a model server on the docker host (for example `http://host.docker.internal:11434`). Setting it satisfies the boot's provider gate exactly like a cloud key and auto-wires a local provider. See "Local models on the host" below. |
 | `PLANNER_MODEL`, `EXECUTOR_MODEL`, `REVIEWER_MODEL`, `PRD_MODEL`, `ROADMAP_MODEL`, `ESCALATION_MODEL` | no | Per-agent model overrides; audited defaults in [CONFIG-AUDIT.md](CONFIG-AUDIT.md). Executor and reviewer picks must accept image input. |
 | `UI_PORT` | no | Dashboard port, default 18790, published to the host loopback only. |
 | `GIT_USER_NAME`, `GIT_USER_EMAIL` | no | Identity for the commits the pipeline makes inside project repos. |
+
+## Local models on the host
+
+The container does not run models, but it can talk to a model server running
+on the docker host. From inside the container, `host.docker.internal`
+resolves to the host (wired via `extra_hosts` in the compose file), so a
+llama.cpp `llama-server`, llama-swap, Ollama, or LM Studio instance on the
+host is reachable with no compose changes. Pointing `LOCAL_MODEL_URL` at it
+satisfies the boot's provider gate, so a local-only install needs no cloud
+key. To wire it up:
+
+1. **Run the model server on the host**, listening on an interface the
+   docker bridge can reach. `host.docker.internal` points at the host's
+   bridge address, not the host's loopback, so a server bound only to
+   `127.0.0.1` is invisible to the container. Bind it to `0.0.0.0` (or the
+   docker bridge interface) and firewall it from everything else.
+2. **Set `LOCAL_MODEL_URL` in `deploy/.env`** (for example
+   `LOCAL_MODEL_URL=http://host.docker.internal:11434`), then start the
+   container. At boot it normalizes the URL, probes `<url>/v1/models`, and
+   auto-generates the `models.providers.local` entry in `openclaw.json` with
+   the mandatory `apiKey: "no-key"`, logging each discovered model in the
+   `local/<model-id>` form. Detection requires the server to answer
+   `/v1/models`.
+3. **`"apiKey": "no-key"` is mandatory on every local provider entry.** The
+   `LOCAL_MODEL_URL` path sets it for you; the advanced hand-edit path below
+   makes it your responsibility. Without it OpenClaw inherits the cloud auth
+   profile and silently falls back to a cloud model, with no error shown; the
+   only signal is `fallbackNoticeReason: auth` in the agent's `sessions.json`.
+   This is the classic local-model silent failure.
+4. **Point roles at the local models through the `*_MODEL` variables** in
+   `deploy/.env` (for example `ESCALATION_MODEL=local/qwen3.5-27b`, where
+   `local` is the provider name `LOCAL_MODEL_URL` generates and
+   `qwen3.5-27b` is one of the discovered model ids from the boot log), then
+   restart the container. Do not edit an agent's `model.primary` in the file:
+   it is a template-pinned key and the per-boot reconcile reverts it. The
+   executor and reviewer must stay on models that accept image input (the
+   reviewer does screenshot-based visual review on UI phases).
+5. **Raise the reviewer's infrastructure backstop** for slow local
+   reviewers: add `AUTODEV_INFRA_BACKSTOP_REVIEWER=10800` to `deploy/.env`.
+   Compose passes it into the container environment and the orchestrator
+   inherits it there. A thorough long-context reviewer pass on local
+   hardware can need minutes per model call, which the default 75 minute
+   backstop misreads as a dead gateway.
+
+**Boot without a key: the setup screen auto-detects local servers.** On a
+keyless boot (setup mode, see "First boot without a key" above), the
+container best-effort probes `host.docker.internal` on the known ports
+(Ollama 11434, llama.cpp 8080, LM Studio 1234) and the dashboard setup screen
+shows any detected server with one-click wiring. Detection still requires the
+server to answer `/v1/models`. One click picks a single model for all roles;
+per-role tuning stays in `deploy/.env` through the `*_MODEL` variables. If no
+server answers, re-check the bind requirement in step 1: a `127.0.0.1`-bound
+server is invisible to the container.
+
+**Advanced: hand-edit `openclaw.json` for multiple providers or per-model
+metadata.** `LOCAL_MODEL_URL` covers the single-provider case. For multiple
+local providers, custom base URLs, or per-model pricing, add a provider entry
+by hand under `models.providers` in `/data/openclaw/openclaw.json`, next to
+the shipped `openrouter` entry: `"baseUrl":
+"http://host.docker.internal:<port>/v1"`, your model entries, and
+`"apiKey": "no-key"` (mandatory, see step 3). The golden template does not
+declare your provider's key, so the edit survives boots (the customization
+contract below). Reference the models as `<your-provider-name>/<model-id>` in
+the `*_MODEL` variables.
+
+Local models have no shipped pricing entries, so their runs report $0 in the
+dashboard (see the cost section below; that is correct, not a bug). The
+model-side notes in [SETUP.md](../SETUP.md) under "Running with local models"
+apply unchanged in the container: Qwen think-token suppression flags, which
+roles do well locally, and the quality trade-offs. This section only adds the
+container networking on top of them.
+
+### Local-model non-goals for this release
+
+GPU passthrough into the container, model weights in docker volumes, and an
+all-local turnkey compose file are explicitly out of scope for this release;
+do not burn time trying to make this sandbox do them. The host bridge above
+is the supported local-model path. If you want the model server itself
+containerized, run and manage it as your own separate container that
+publishes its port on the host; the bridge instructions then apply
+unchanged.
 
 ## Volume layout
 
@@ -181,10 +302,42 @@ contract.
   `AUTODEV_UI_TOKEN` and the compose file publishes to loopback. Exposing the
   dashboard beyond loopback is a conscious edit; read "Security and network
   exposure" in [SETUP.md](../SETUP.md) first.
-- **18789** (OpenClaw gateway): container-internal, never published.
+- **18789** (OpenClaw gateway): published to `127.0.0.1` on the host only,
+  token-authenticated. Model and provider management and the one-time
+  gate-script approvals happen in OpenClaw's own UI, so the dashboard's
+  Settings screen links here. Same rule as the dashboard: exposing it beyond
+  loopback is a conscious edit.
 - `host.docker.internal` resolves to the docker host (via `extra_hosts`), so
   a model server running on the host is reachable from inside the container
-  (see "Local models on the host" below).
+  (see "Local models on the host" above).
+
+## Looking at the OpenClaw gateway
+
+The gateway runs inside the container on 18789 and is published to the host's
+loopback, so OpenClaw's own UI is at `http://127.0.0.1:18789`. That is where
+model and provider management lives, and where you approve the pipeline's gate
+scripts the first time they run. The dashboard's **Settings** screen opens it
+and copies the gateway token it asks for (the golden config already allow-lists
+the loopback origin, so there is no origin prompt on the default port). If you
+prefer the shell, the token is at:
+
+```bash
+docker compose exec lullabeast cat /data/secrets/gateway_token
+```
+
+Two shell-side ways to inspect it:
+
+```bash
+docker compose exec lullabeast curl -s http://localhost:18789/v1/models
+docker compose exec lullabeast bash
+```
+
+The first lists the models the gateway can serve; the second drops you into an
+interactive shell inside the container to poke around.
+
+The gateway is the agents' control plane, so the same exposure rule as the
+dashboard applies: it is published to `127.0.0.1` only, and widening that is a
+conscious edit. See the "Ports and exposure" bullets above.
 
 ## Security hardening
 
@@ -233,9 +386,10 @@ above.
 ### Secrets posture
 
 The provider API key exists only in your `deploy/.env` (gitignored, and
-excluded from the image build context) and in the container environment.
-Generated tokens persist under `/data/secrets` (directory mode 700, files
-600). Neither the entrypoint nor install.sh ever prints the API key or the
+excluded from the image build context), in the container environment, and (when
+you enter it in the dashboard setup screen instead of `.env`) in the persisted
+key file `/data/secrets/provider.env` (mode 600, never logged). Generated
+tokens persist under `/data/secrets` (directory mode 700, files 600). Neither the entrypoint nor install.sh ever prints the API key or the
 hooks/gateway tokens. One deliberate exception: the boot banner prints the
 dashboard URL including `AUTODEV_UI_TOKEN`, so `docker compose logs` can
 always recover dashboard access; treat container logs as sensitive. A dev
@@ -279,60 +433,6 @@ pricing for the model that ran**, not that the run was free. To add pricing
 for your own model, follow the walkthrough in [SETUP.md](../SETUP.md) under
 "Cost metrics: configuring OpenClaw so Lullabeast can report run cost".
 
-## Local models on the host (the bridge, experimental)
-
-The container does not run models, but it can talk to a model server running
-on the docker host. From inside the container, `host.docker.internal`
-resolves to the host (wired via `extra_hosts` in the compose file), so a
-llama.cpp `llama-server`, llama-swap, or Ollama instance on the host is
-reachable with no compose changes. To wire it up:
-
-1. **Run the model server on the host**, listening on an interface the
-   docker bridge can reach. `host.docker.internal` points at the host's
-   bridge address, not the host's loopback, so a server bound only to
-   `127.0.0.1` is invisible to the container. Bind it to `0.0.0.0` (or the
-   docker bridge interface) and firewall it from everything else.
-2. **Add a provider entry** under `models.providers` in
-   `/data/openclaw/openclaw.json`, next to the shipped `openrouter` entry:
-   `"baseUrl": "http://host.docker.internal:<port>/v1"`, your model entries,
-   and `"apiKey": "no-key"`. The golden template does not declare your
-   provider's key, so the edit survives boots (the customization contract
-   above).
-3. **`"apiKey": "no-key"` is mandatory on every local provider entry.**
-   Without it OpenClaw inherits the cloud auth profile and silently falls
-   back to a cloud model, with no error shown; the only signal is
-   `fallbackNoticeReason: auth` in the agent's `sessions.json`.
-4. **Point roles at the local models through the `*_MODEL` variables** in
-   `deploy/.env` (for example `ESCALATION_MODEL=llama-local/qwen3.5-27b`,
-   where `llama-local` is your provider name from step 2), then restart the
-   container. Do not edit an agent's `model.primary` in the file: it is a
-   template-pinned key and the per-boot reconcile reverts it. The executor
-   and reviewer must stay on models that accept image input (the reviewer
-   does screenshot-based visual review on UI phases).
-5. **Raise the reviewer's infrastructure backstop** for slow local
-   reviewers: add `AUTODEV_INFRA_BACKSTOP_REVIEWER=10800` to `deploy/.env`.
-   Compose passes it into the container environment and the orchestrator
-   inherits it there. A thorough long-context reviewer pass on local
-   hardware can need minutes per model call, which the default 75 minute
-   backstop misreads as a dead gateway.
-
-Local models have no shipped pricing entries, so their runs report $0 in the
-dashboard (see the cost section above; that is correct, not a bug). The
-model-side notes in [SETUP.md](../SETUP.md) under "Running with local models
-(experimental)" apply unchanged in the container: Qwen think-token
-suppression flags, which roles do well locally, and the quality trade-offs.
-This section only adds the container networking on top of them.
-
-### Local-model non-goals for this release
-
-GPU passthrough into the container, model weights in docker volumes, and an
-all-local turnkey compose file are explicitly out of scope for this release;
-do not burn time trying to make this sandbox do them. The host bridge above
-is the supported local-model path. If you want the model server itself
-containerized, run and manage it as your own separate container that
-publishes its port on the host; the bridge instructions then apply
-unchanged.
-
 ## Contents of this directory
 
 - [Dockerfile](Dockerfile): the single-container image. Base is the official
@@ -341,7 +441,9 @@ unchanged.
 - [entrypoint.sh](entrypoint.sh): first-boot provisioning + per-boot config
   reconcile + per-boot owned-mode install + the process supervisor (gateway,
   UI server, heartbeat loop, session-cleanup loop). The orchestrator is not
-  supervised; the UI server spawns it per run.
+  supervised; the UI server spawns it per run. With no provider key it boots
+  into setup mode and runs a watch loop that unlocks the pipeline once the
+  dashboard supplies the key.
 - [docker-compose.yml](docker-compose.yml): the one-service deployment.
 - [.env.example](.env.example): the environment contract, every variable
   commented.
