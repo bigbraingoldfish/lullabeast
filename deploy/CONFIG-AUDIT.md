@@ -20,7 +20,7 @@ placeholders; real values are generated at first boot and persisted under
 | `models.mode` | `"merge"` | Custom provider entries merge with OpenClaw's built-ins. |
 | `models.pricing.enabled` | `true` | Required for cost tracking (see "Cost tracking" below). |
 | `models.providers.openrouter` | standard endpoint, `openai-completions` API | The recommended provider path; the shipped defaults use it. |
-| `models.providers.openrouter.models[]` | 4 entries: `qwen/qwen3.6-27b`, `minimax/minimax-m3`, `moonshotai/kimi-k2.7-code`, `z-ai/glm-5.2` | The recommended, cheap, pipeline-capable set, each with a complete 4-field `cost` block so runs report real dollar costs. The set favors multimodal models because the reviewer does screenshot-based visual review. Premium models (Claude via OpenRouter, etc.) work but are meter-it-yourself. |
+| `models.providers.openrouter.models[]` | 4 entries: `qwen/qwen3.6-27b`, `minimax/minimax-m3`, `moonshotai/kimi-k2.7-code`, `z-ai/glm-5.2` | The recommended, cheap, pipeline-capable set, each with a complete 4-field `cost` block so runs report real dollar costs. Three are multimodal because the reviewer does screenshot-based visual review; `z-ai/glm-5.2` is text-only (`input: ["text"]`) and backs the text-only planner/roadmap roles. Premium models (Claude via OpenRouter, etc.) work but are meter-it-yourself. |
 | `agents.defaults.model` | `${PLANNER_MODEL}` | A safe fallback for any agent without an explicit model. |
 | `agents.defaults.models.*` | per-model params for the 4 shipped models | Sampling and cache-retention values validated in real pipeline runs. The minimax entry carries `provider.ignore: ["morph"]` plus `require_parameters` routing. |
 | `agents.defaults.skipBootstrap` | `true` | Stops OpenClaw from seeding its own starter workspace files over the Lullabeast agent identity docs. |
@@ -28,7 +28,7 @@ placeholders; real values are generated at first boot and persisted under
 | `agents.defaults.heartbeat.every` | `"0m"` | Required: a non-zero heartbeat interrupts pipeline runs mid-phase. |
 | `agents.defaults.maxConcurrent` | `3` | The pipeline runs one agent at a time; headroom covers Ideas flows running beside a phase. |
 | `agents.defaults.subagents.maxConcurrent` | `1` | Pipeline agents do not rely on subagent fan-out; an uncapped fan-out only multiplies spend. |
-| `agents.list[planner]` | `${PLANNER_MODEL}`, tools `read, write, exec` | Explicit `exec` is load-bearing (a past OpenClaw release stripped it and broke planning). The default moved from `minimax/minimax-m3` to `kimi-k2.7-code` after a first-run test with a fresh OpenRouter key hit "404 No endpoints found" (the `require_parameters` routing left no tool-capable endpoint); the minimax entry stays shipped, priced, and selectable via `PLANNER_MODEL`. |
+| `agents.list[planner]` | `${PLANNER_MODEL}`, tools `read, write, exec` | Explicit `exec` is load-bearing (a past OpenClaw release stripped it and broke planning). The planner default is `z-ai/glm-5.2` (text-only; planning needs no vision). `minimax/minimax-m3` and `kimi-k2.7-code` stay shipped, priced, and selectable via `PLANNER_MODEL` — `minimax/minimax-m3` was dropped as the planner default after a first-run test with a fresh OpenRouter key hit "404 No endpoints found" (its `require_parameters` routing left no tool-capable endpoint). |
 | `agents.list[executor]` | `${EXECUTOR_MODEL}`, tools `read, write, edit, exec, process, browser` | Must be multimodal: it captures screenshots on UI/INT phases. |
 | `agents.list[reviewer]` | `${REVIEWER_MODEL}`, tools `read, write, exec, process, browser` | Must be multimodal: it performs visual review. |
 | `agents.list[prd-creator]` | `${PRD_MODEL}`, read/write only | Drafting agent; needs no execution surface. |
@@ -39,9 +39,10 @@ placeholders; real values are generated at first boot and persisted under
 | `tools.exec` | unattended-exec whitelist (`ask`, `safeBins`, `safeBinProfiles`) | Without it, gate scripts and test runs stall on interactive exec-approval prompts. |
 | `tools.loopDetection` | tuned values | OpenClaw's own in-turn loop guard; validated in real runs. (Lullabeast's own tool-loop catcher is independent of it.) |
 | `hooks` | `enabled: true`, `${HOOKS_TOKEN}`, `defaultSessionKey: "pipeline:default"`, `allowRequestSessionKey: true`, prefixes `["pipeline:", "ideas:"]`, the 6 Lullabeast agent ids, internal hooks on with `session-memory` disabled | The webhook contract the whole pipeline runs on. The `session-memory` exception keeps per-session memory writes out of pipeline sessions. |
-| `gateway.port` / `gateway.mode` | `18789` / `"local"` | Standard gateway wiring; the port is never published outside the container. |
-| `gateway.bind` | `"lan"` | Unexposed in practice (compose does not publish 18789). Could be tightened to a loopback bind after verifying the accepted enum values on the pinned version; `"lan"` is the validated value. |
-| `gateway.auth` | token mode, `${GATEWAY_TOKEN}` | The orchestrator authenticates with this token for the `sessions.steer` abort lever. |
+| `gateway.port` / `gateway.mode` | `18789` / `"local"` | Standard gateway wiring; compose publishes 18789 to the host loopback so OpenClaw's own Control UI (model/provider management) is reachable. |
+| `gateway.bind` | `"lan"` | The gateway must accept the docker-proxied connection (non-loopback source), so it binds beyond loopback inside the container; host exposure stays loopback-only via the compose publish. `"lan"` is the validated enum value on the pinned version. |
+| `gateway.auth` | token mode, `${GATEWAY_TOKEN}` | The orchestrator authenticates with this token for the `sessions.steer` abort lever, and the Control UI requires it to connect. The dashboard's Settings screen surfaces it (token-guarded). |
+| `gateway.controlUi.allowedOrigins` | loopback origins for 18789 | The Control UI rejects any browser origin not on this list. Listing `http://127.0.0.1:18789` + `http://localhost:18789` lets the operator open it from the host without a manual origin edit. Port-coupled: matches the shipped `18789:18789` publish. |
 | `skills.install.nodeManager` | `"npm"` | The signals-plugin build uses npm. |
 | `skills.entries.*` | all bundled OpenClaw skills disabled | Pipeline agents get skills only via Lullabeast's per-phase workspace injection; bundled-skill listings are context noise. Known limitation: an OpenClaw release adding new bundled skills defaults them on until they are added here. |
 | `plugins.allow` | `anthropic`, `autodev-pipeline-signals`, `browser`, `memory-core`, `openrouter` | The minimal plugin surface the pipeline needs. |
@@ -94,9 +95,9 @@ One knob per agent role; defaults are encoded in
 
 | Env var | Default | Used by |
 |---|---|---|
-| `PLANNER_MODEL` | `openrouter/moonshotai/kimi-k2.7-code` | planner, `agents.defaults.model` |
+| `PLANNER_MODEL` | `openrouter/z-ai/glm-5.2` | planner, `agents.defaults.model` (text-only) |
 | `EXECUTOR_MODEL` | `openrouter/moonshotai/kimi-k2.7-code` | executor (multimodal, required) |
-| `REVIEWER_MODEL` | `openrouter/z-ai/glm-5.2` | reviewer (multimodal, required) |
+| `REVIEWER_MODEL` | `openrouter/moonshotai/kimi-k2.7-code` | reviewer (multimodal, required) |
 | `PRD_MODEL` | `openrouter/moonshotai/kimi-k2.7-code` | prd-creator |
 | `ROADMAP_MODEL` | `openrouter/z-ai/glm-5.2` | roadmap-converter |
 | `ESCALATION_MODEL` | `openrouter/qwen/qwen3.6-27b` | escalation (notify-only) |

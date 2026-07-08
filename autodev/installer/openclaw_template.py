@@ -50,17 +50,20 @@ TEMPLATE_RELPATH = os.path.join("deploy", "openclaw.template.json")
 # Whole-value placeholder shape: ``${UPPER_SNAKE}`` inside a JSON string.
 TEMPLATE_PLACEHOLDER_RE = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
 
-# Audit-picked model defaults (deploy/CONFIG-AUDIT.md). One knob
-# per agent role; the executor and reviewer picks are multimodal by
-# requirement. PLANNER_MODEL also backs agents.defaults.model. Every default
-# must be one of the shipped, fully priced OpenRouter models in
+# Audit-picked model defaults (deploy/CONFIG-AUDIT.md). One knob per agent
+# role. The executor and reviewer picks are multimodal by requirement — both
+# default to kimi-k2.7-code (image input) because the reviewer does
+# screenshot-based visual verification. PLANNER_MODEL also backs
+# agents.defaults.model; the planner and roadmap-converter default to glm-5.2,
+# which is text-only in the shipped template (neither needs vision). Every
+# default must be one of the shipped, fully priced OpenRouter models in
 # deploy/openclaw.template.json (tests enforce that every referenced model is
 # shipped and priced; a shipped model may be a non-default, env-selectable
-# option, e.g. minimax/minimax-m3 after the 2026-07-07 planner-default move).
+# option, e.g. minimax/minimax-m3, which no default references).
 TEMPLATE_MODEL_DEFAULTS: dict[str, str] = {
-    "PLANNER_MODEL": "openrouter/moonshotai/kimi-k2.7-code",
+    "PLANNER_MODEL": "openrouter/z-ai/glm-5.2",
     "EXECUTOR_MODEL": "openrouter/moonshotai/kimi-k2.7-code",
-    "REVIEWER_MODEL": "openrouter/z-ai/glm-5.2",
+    "REVIEWER_MODEL": "openrouter/moonshotai/kimi-k2.7-code",
     "PRD_MODEL": "openrouter/moonshotai/kimi-k2.7-code",
     "ROADMAP_MODEL": "openrouter/z-ai/glm-5.2",
     "ESCALATION_MODEL": "openrouter/qwen/qwen3.6-27b",

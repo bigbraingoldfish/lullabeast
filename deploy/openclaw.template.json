@@ -74,8 +74,7 @@
             "name": "GLM 5.2",
             "reasoning": true,
             "input": [
-              "text",
-              "image"
+              "text"
             ],
             "cost": {
               "input": 0.95,
@@ -386,6 +385,12 @@
     "auth": {
       "mode": "token",
       "token": "${GATEWAY_TOKEN}"
+    },
+    "controlUi": {
+      "allowedOrigins": [
+        "http://127.0.0.1:18789",
+        "http://localhost:18789"
+      ]
     }
   },
   "skills": {
