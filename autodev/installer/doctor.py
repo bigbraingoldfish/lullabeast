@@ -906,6 +906,83 @@ def check_ports(config: dict) -> CheckResult:
     return CheckResult("ports", "Ports 18789/18790 sane", "ok", "; ".join(details))
 
 
+def check_provider_key(config: dict) -> CheckResult:
+    # Container/setup-mode only. The entrypoint seeds provider_key_path
+    # (/data/secrets/provider.env) and setup_marker_path (/data/.setup-mode)
+    # into ui/config.json; a bare-metal install leaves both unset. When neither
+    # is configured the check does not apply and skips.
+    #
+    # A provider counts as available when ANY of four signals is present: a
+    # cloud key or a LOCAL_MODEL_URL, from the environment or the persisted key
+    # file. A configured local model server satisfies the gate exactly like a
+    # cloud key (B2). Presence wins over the setup marker: during the
+    # watch-loop unlock window the key file exists while the marker is not yet
+    # cleared, and "a provider is available" is the honest read.
+    #
+    # Never read a value into any string below: report presence only, never the
+    # value or its length.
+    key_path = config.get("provider_key_path") or ""
+    marker_path = config.get("setup_marker_path") or ""
+    if not key_path and not marker_path:
+        return CheckResult(
+            "provider_key", "Provider API key available", "skipped",
+            "only applies to container / setup-mode deployments "
+            "(provider_key_path / setup_marker_path unconfigured)",
+        )
+    env_cloud = bool(
+        (os.environ.get("OPENROUTER_API_KEY") or "").strip()
+        or (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+    )
+    env_local = bool((os.environ.get("LOCAL_MODEL_URL") or "").strip())
+    file_cloud = False
+    file_local = False
+    if key_path:
+        try:
+            with open(key_path, encoding="utf-8", errors="replace") as f:
+                for raw in f:
+                    line = raw.strip()
+                    for prefix, is_local in (
+                        ("OPENROUTER_API_KEY=", False),
+                        ("ANTHROPIC_API_KEY=", False),
+                        ("LOCAL_MODEL_URL=", True),
+                    ):
+                        if line.startswith(prefix) and line[len(prefix):].strip():
+                            if is_local:
+                                file_local = True
+                            else:
+                                file_cloud = True
+        except OSError:
+            pass
+    if env_cloud or env_local or file_cloud or file_local:
+        # Cloud wins the label when both a cloud and a local signal are present.
+        if env_cloud:
+            detail = "provider key present (environment)"
+        elif file_cloud:
+            detail = "provider key present (persisted key file)"
+        elif env_local:
+            detail = "local model provider configured (LOCAL_MODEL_URL, environment)"
+        else:
+            detail = "local model provider configured (LOCAL_MODEL_URL, persisted key file)"
+        return CheckResult(
+            "provider_key", "Provider API key available", "ok", detail,
+        )
+    marker_present = bool(marker_path) and os.path.exists(marker_path)
+    if marker_present:
+        return CheckResult(
+            "provider_key", "Provider API key available", "warn",
+            "setup mode: no provider key yet; enter it in the dashboard",
+            "open the dashboard setup screen and enter your provider key, "
+            "or wire a local model server (LOCAL_MODEL_URL)",
+        )
+    return CheckResult(
+        "provider_key", "Provider API key available", "warn",
+        "no provider key in the environment or the key file, and no setup "
+        "marker (keyless boot, e.g. OFFLINE CI); agents cannot run",
+        "enter a provider key in the dashboard setup screen, or set "
+        "OPENROUTER_API_KEY / ANTHROPIC_API_KEY / LOCAL_MODEL_URL in deploy/.env",
+    )
+
+
 def check_template_conformance(config: dict) -> CheckResult:
     # Owned-OpenClaw mode only: the container's openclaw.json is
     # rendered from deploy/openclaw.template.json, so any divergence from the
@@ -989,6 +1066,7 @@ def run_doctor(config: dict, *, live: bool = False) -> DoctorReport:
         check_playwright(config),
         check_ui_token(config),
         check_ports(config),
+        check_provider_key(config),
         check_template_conformance(config),
     ]
     return DoctorReport(checks=checks)
@@ -1014,6 +1092,8 @@ _CLI_CONFIG_KEYS = (
     "pipeline_state_path",
     "lock_path",
     "conversion_prompt_path",
+    "provider_key_path",
+    "setup_marker_path",
 )
 
 
