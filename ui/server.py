@@ -83,6 +83,12 @@ from autodev.pipeline.queue_semantics import (
 )
 from autodev.pipeline.sentinel_poller import PollResult  # noqa: E402
 from autodev.pipeline.event_log import append_pipeline_event  # noqa: E402
+# Local-model discovery/wiring contract (v1.0.0 Phase 3 B4). Imported as a module
+# alias so the local-models endpoint's probe can be monkeypatched in tests
+# (_local_models.discover_local_servers); TEMPLATE_MODEL_DEFAULTS is the single
+# source of truth for the six per-role *_MODEL knob names the setup screen writes.
+from autodev.installer import local_models as _local_models  # noqa: E402
+from autodev.installer.openclaw_template import TEMPLATE_MODEL_DEFAULTS  # noqa: E402
 from autodev.pipeline.prereq_spec import parse_prerequisites  # noqa: E402  (PREREQ-3)
 from autodev.pipeline.atomic_io import write_json_atomic, write_text_atomic  # noqa: E402
 from autodev.pipeline.log_utils import configure_stream_logging, resolve_log_level, set_level, tagged  # noqa: E402
@@ -629,6 +635,20 @@ DEFAULTS = {
     "autodev_pipeline_root": "",
     "roadmap_converter_workspace": "~/.openclaw/workspace-roadmap-converter",
     "pipeline_queue_path": "",
+    # First-run setup surfaces (v1.0.0 onboarding, WP-App). Seeded by the
+    # container entrypoint into ui/config.json; unset on bare metal, where every
+    # setup surface degrades to "unsupported/absent". provider_key_path is the
+    # dotenv secret the entrypoint watches; setup_marker_path is the file whose
+    # existence means "keyless boot / setup mode"; projects_dir is the demo
+    # import destination root (the ./projects bind mount).
+    "provider_key_path": "",   # container: /data/secrets/provider.env
+    "setup_marker_path": "",   # container: /data/.setup-mode
+    "projects_dir": "",        # container: /data/projects
+    # v1.0.0 Phase 3 B4 — host to probe for local model servers from the setup
+    # screen. The container entrypoint seeds it to "host.docker.internal" (the
+    # docker bridge host); bare metal leaves it "", which makes the local-model
+    # surfaces report unsupported and hide, mirroring provider_key_path above.
+    "local_model_probe_host": "",  # container: host.docker.internal
     "poll_timeout": 900,  # ideas-message full-turn backstop. MUST equal the POLL_TIMEOUT constant below — load_config merges DEFAULTS so this value wins in production; the constant is only the fallback for tests that omit the key. 900 (not 180) because a thorough multi-call PRD turn exceeds 180s. Guarded by tests/test_config_defaults_consistency.py
     "poll_interval": 2,
     "ideas_idle_threshold": 300,  # max stamp silence after first activity → "stalled". 300s (not 120) because a single opaque model call (PRD draft) ran 118s silent live; matches pipeline stall philosophy
@@ -7444,6 +7464,486 @@ def post_stop():
         status_code=409,
         detail=f"Pipeline is not in a stoppable state (current: {status})",
     )
+
+
+# ─── First-run onboarding (provider key + welcome-tour demo) ───────────────────
+#
+# These endpoints back the setup-mode key screen and the welcome walkthrough.
+# The container entrypoint owns "setup mode" and watches provider_key_path; the
+# server's ONLY unlock responsibility is writing that dotenv file correctly.
+# Every surface degrades to "unsupported/absent" when the config keys are unset
+# (bare-metal dev installs), and no key material is ever returned or logged.
+
+# Key shape bounds (shape-only validation — no live call).
+_PROVIDER_KEY_MIN_LEN = 8
+_PROVIDER_KEY_MAX_LEN = 512
+_PROVIDER_ENV_VAR = {
+    "openrouter": "OPENROUTER_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+}
+# Cap each artifact read so a hand-edited demo file cannot blow up the response.
+_DEMO_ARTIFACT_MAX_BYTES = 64 * 1024
+_DEMO_PROJECT_NAME = "first-run-snake"
+
+# Characters that trigger command substitution when a KEY=value line is loaded
+# by the container entrypoint with `source` ($(...) and `...`). Every value the
+# setup endpoints write into provider_key_path is validated against these (in
+# addition to the whitespace/printable checks, which block newline-injecting a
+# second dotenv line). Legitimate API keys, base URLs, and model ids never
+# contain them, so rejecting them is safe and closes the shell-eval vector at
+# the point of write regardless of how the entrypoint consumes the file.
+_SHELL_EVAL_CHARS = ("$", "`")
+
+
+def _reject_shell_eval_chars(value: str, field: str) -> None:
+    """Raise 400 if ``value`` carries a shell command-substitution character.
+
+    ``field`` names the offending input in the surfaced (non-secret) message.
+    """
+    if any(ch in value for ch in _SHELL_EVAL_CHARS):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field} must not contain '$' or backtick characters",
+        )
+
+
+def _local_model_url_line_present(path: str) -> bool:
+    """True when ``path`` is a readable dotenv file with a non-empty LOCAL_MODEL_URL line.
+
+    Reads only the KEY=value shape (splits on the first ``=``); never logs any line
+    (the file also carries the cloud provider key on a mixed install). OSError -> False.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                key, sep, value = line.partition("=")
+                if sep and key.strip() == "LOCAL_MODEL_URL" and value.strip():
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _provider_status(config: dict) -> dict:
+    """Compute {supported, setup_mode, key_present, local_configured} without exposing key material."""
+    key_path = (config.get("provider_key_path") or "").strip()
+    marker_path = (config.get("setup_marker_path") or "").strip()
+    supported = bool(key_path or marker_path)
+
+    setup_mode = bool(marker_path) and os.path.exists(os.path.expanduser(marker_path))
+
+    # key_present: an env var carries a key, OR the persisted secret file is non-empty.
+    env_present = any(
+        os.environ.get(v, "").strip() for v in _PROVIDER_ENV_VAR.values()
+    )
+    file_present = False
+    if key_path:
+        p = os.path.expanduser(key_path)
+        try:
+            file_present = os.path.isfile(p) and os.path.getsize(p) > 0
+        except OSError:
+            file_present = False
+
+    # local_configured (B4): a local model server is wired when LOCAL_MODEL_URL is
+    # set in the env, OR the persisted secret file carries a non-empty
+    # LOCAL_MODEL_URL= line. This unlocks the pipeline exactly like a cloud key.
+    local_configured = bool(os.environ.get("LOCAL_MODEL_URL", "").strip())
+    if not local_configured and key_path:
+        local_configured = _local_model_url_line_present(os.path.expanduser(key_path))
+
+    return {
+        "supported": supported,
+        "setup_mode": setup_mode,
+        "key_present": bool(env_present or file_present),
+        "local_configured": local_configured,
+    }
+
+
+@app.get("/api/setup/provider-status")
+def get_setup_provider_status():
+    """Report first-run provider-key status for the setup-mode screen (A2).
+
+    Returns {"supported": bool, "setup_mode": bool, "key_present": bool}. Never
+    returns key material. ``supported`` is false on bare-metal installs (neither
+    provider_key_path nor setup_marker_path configured); the frontend hides the
+    setup surface entirely in that case.
+    """
+    return _provider_status(load_config())
+
+
+@app.post("/api/setup/provider-key")
+async def post_setup_provider_key(request: Request):
+    """Persist the provider API key the entrypoint watches for (A2 unlock).
+
+    Body: {"provider": "openrouter", "key": "<str>"}. Writes a single dotenv line
+    (``OPENROUTER_API_KEY=...``) to provider_key_path atomically, mode 0600,
+    creating the parent dir 0700. Shape check only — no live validation; the
+    deferred ``--live`` doctor validates end to end. The key value never
+    appears in a log line, exception detail, or the response.
+
+    409 when provider_key_path is unset (bare metal). 400 on unknown provider or
+    bad key shape. On success: {"ok": true, "restarting": true}.
+    """
+    config = load_config()
+    key_path = (config.get("provider_key_path") or "").strip()
+    if not key_path:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "In-dashboard key entry is not available on this install "
+                "(no provider key store is configured). Set the provider key in "
+                "deploy/.env (headless path) instead."
+            ),
+        )
+
+    body = await request.json()
+    provider = str(body.get("provider", "")).strip().lower()
+    # Intentionally do NOT bind the raw key to a named local we might log; read it
+    # once, validate its shape, and use it only for the atomic write below.
+    raw_key = body.get("key", "")
+    if not isinstance(raw_key, str):
+        raise HTTPException(status_code=400, detail="key must be a string")
+    key = raw_key.strip()
+
+    if provider != "openrouter":
+        raise HTTPException(
+            status_code=400,
+            detail="provider must be 'openrouter'",
+        )
+    # Shape checks: non-empty, no internal whitespace/newlines, printable, bounded.
+    if not key:
+        raise HTTPException(status_code=400, detail="key is required")
+    if any(ch.isspace() for ch in key):
+        raise HTTPException(
+            status_code=400,
+            detail="key must not contain spaces or newlines",
+        )
+    if not key.isprintable():
+        raise HTTPException(
+            status_code=400,
+            detail="key must contain only printable characters",
+        )
+    # The key is written into provider_key_path, which the entrypoint `source`s;
+    # $/backtick would command-substitute even without whitespace.
+    _reject_shell_eval_chars(key, "key")
+    if not (_PROVIDER_KEY_MIN_LEN <= len(key) <= _PROVIDER_KEY_MAX_LEN):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"key length must be between {_PROVIDER_KEY_MIN_LEN} and "
+                f"{_PROVIDER_KEY_MAX_LEN} characters"
+            ),
+        )
+
+    env_var = _PROVIDER_ENV_VAR[provider]
+    dest = os.path.expanduser(key_path)
+    parent = os.path.dirname(dest) or "."
+    try:
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+        # Atomic write via the shared helper (mkstemp in the dest dir + os.replace).
+        write_text_atomic(dest, f"{env_var}={key}\n")
+        os.chmod(dest, 0o600)
+    except OSError as exc:
+        # Name the path, never the key content, in the surfaced error.
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not write the provider key file at {dest} ({exc.strerror or exc})",
+        ) from None
+
+    return {"ok": True, "restarting": True}
+
+
+# ─── First-run onboarding (v1.0.0 B4 — local model server discovery + wiring) ──
+#
+# The subordinate "or use a local model server" alternative on the setup screen.
+# The container entrypoint watches the same provider_key_path secret file: writing
+# a LOCAL_MODEL_URL= line (plus the six *_MODEL role knobs) satisfies the provider
+# gate exactly like a cloud key, and the boot then merges a models.providers.local
+# entry into openclaw.json. Discovery/normalisation math is the shared
+# autodev.installer.local_models contract (imported as _local_models above); this
+# server never re-implements it. Every surface degrades to unsupported/absent when
+# local_model_probe_host is unset (bare metal), mirroring the A2 key surfaces.
+
+# Model-id shape bounds (shape-only validation — no live probe, per the same design
+# decision as the provider key). Slashes and colons are legal: an Ollama id looks
+# like "llama3:8b" and an OpenRouter-style id like "vendor/model".
+_LOCAL_MODEL_ID_MAX_LEN = 256
+
+
+@app.get("/api/setup/local-models")
+def get_setup_local_models():
+    """Probe the docker bridge host for local OpenAI-compatible model servers (B4).
+
+    Returns {"supported": bool, "servers": [{"name","url","models"}], "hint": str|None}.
+    ``supported`` is false (and servers empty, hint None) on bare-metal installs
+    where local_model_probe_host is unset — the frontend hides the surface. When a
+    host is configured, the three known ports are probed (bounded by
+    local_models.DEFAULT_PROBE_TIMEOUT each); ``hint`` is None when any server
+    answered, otherwise a user-facing sentence built from local_models.BIND_HINT.
+
+    Sync def is fine — FastAPI runs it on the threadpool and the probe is bounded
+    (3 ports x DEFAULT_PROBE_TIMEOUT).
+    """
+    config = load_config()
+    host = (config.get("local_model_probe_host") or "").strip()
+    if not host:
+        return {"supported": False, "servers": [], "hint": None}
+
+    servers = _local_models.discover_local_servers(host)
+    # Drop base_url (the normalized /v1 form) — the client only needs the origin
+    # url it would put in LOCAL_MODEL_URL, plus the model list for the picker.
+    out = [
+        {"name": s.get("name"), "url": s.get("url"), "models": s.get("models") or []}
+        for s in servers
+    ]
+    if out:
+        hint = None
+    else:
+        probed = ", ".join(
+            f"{name} on port {port}" for port, name in _local_models.KNOWN_LOCAL_SERVERS
+        )
+        hint = (
+            f"No local model server answered on {host} ({probed}). "
+            f"Remember, {_local_models.BIND_HINT}."
+        )
+    return {"supported": True, "servers": out, "hint": hint}
+
+
+@app.post("/api/setup/local-model")
+async def post_setup_local_model(request: Request):
+    """Wire a discovered local model server as the provider (B4 unlock).
+
+    Body: {"url": str, "model": str}. Merges a ``LOCAL_MODEL_URL=`` line plus the
+    six per-role ``*_MODEL=local/<model>`` knobs into provider_key_path, preserving
+    every other line already in the file (a mixed install's cloud key stays intact).
+    The write is atomic, mode 0600, parent dir 0700 — the same secret-file handling
+    as post_setup_provider_key.
+
+    Simplification: one model is assigned to all six roles here; per-role tuning
+    stays in deploy/.env. Validation is shape-only (no live probe), mirroring the
+    provider-key design decision. Neither the URL nor the file contents are logged
+    (the preserved lines may hold a cloud provider key; the URL itself is not a
+    secret and can appear in a 400 detail).
+
+    409 when provider_key_path is unset (bare metal). 400 on a malformed url or a
+    bad model id. On success: {"ok": true, "restarting": true}.
+    """
+    config = load_config()
+    key_path = (config.get("provider_key_path") or "").strip()
+    if not key_path:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "In-dashboard local-model wiring is not available on this install "
+                "(no provider key store is configured). Set LOCAL_MODEL_URL and the "
+                "*_MODEL knobs in deploy/.env (headless path) instead."
+            ),
+        )
+
+    body = await request.json()
+
+    raw_url = body.get("url", "")
+    if not isinstance(raw_url, str):
+        raise HTTPException(status_code=400, detail="url must be a string")
+    url = raw_url.strip()
+    # This value is written into provider_key_path, which the container
+    # entrypoint loads with `. "$file"` (shell source). Any embedded whitespace
+    # or newline would inject an extra dotenv line (arbitrary env var) or a shell
+    # metacharacter that `source` evaluates. normalize_local_base_url validates
+    # the scheme/host shape but does NOT reject internal whitespace/newlines, so
+    # guard here exactly as the model field below does — a URL with a space or
+    # newline is never a legitimate origin.
+    if any(ch.isspace() for ch in url):
+        raise HTTPException(
+            status_code=400,
+            detail="url must not contain spaces or newlines",
+        )
+    if not url.isprintable():
+        raise HTTPException(
+            status_code=400,
+            detail="url must contain only printable characters",
+        )
+    _reject_shell_eval_chars(url, "url")
+    # Validate the URL is a usable local base; the client-given origin (not the
+    # /v1-normalized form) is what we persist, so the entrypoint can normalize it.
+    try:
+        _local_models.normalize_local_base_url(url)
+    except ValueError as exc:
+        # The URL is not a secret — surfacing the parser message is safe.
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    raw_model = body.get("model", "")
+    if not isinstance(raw_model, str):
+        raise HTTPException(status_code=400, detail="model must be a string")
+    model = raw_model.strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="model is required")
+    if any(ch.isspace() for ch in model):
+        raise HTTPException(
+            status_code=400,
+            detail="model must not contain spaces or newlines",
+        )
+    if not model.isprintable():
+        raise HTTPException(
+            status_code=400,
+            detail="model must contain only printable characters",
+        )
+    # Written as `<KNOB>=local/<model>` into the entrypoint-sourced file.
+    _reject_shell_eval_chars(model, "model")
+    if len(model) > _LOCAL_MODEL_ID_MAX_LEN:
+        raise HTTPException(
+            status_code=400,
+            detail=f"model id must be at most {_LOCAL_MODEL_ID_MAX_LEN} characters",
+        )
+
+    # The lines this write owns — LOCAL_MODEL_URL plus the six role knobs. Any
+    # existing line with one of these keys is replaced; every other line is kept
+    # verbatim (a co-tenant cloud key is preserved).
+    owned_keys = {"LOCAL_MODEL_URL", *TEMPLATE_MODEL_DEFAULTS.keys()}
+    new_lines = [f"LOCAL_MODEL_URL={url}"]
+    new_lines += [f"{knob}=local/{model}" for knob in TEMPLATE_MODEL_DEFAULTS.keys()]
+
+    dest = os.path.expanduser(key_path)
+    preserved: list[str] = []
+    try:
+        with open(dest, "r", encoding="utf-8", errors="replace") as f:
+            existing = f.read()
+    except OSError:
+        existing = ""
+    for line in existing.splitlines():
+        key = line.partition("=")[0].strip()
+        # Keep blank lines and comments; drop only lines whose KEY we are rewriting.
+        if key in owned_keys:
+            continue
+        preserved.append(line)
+
+    # Preserved lines first, then our owned lines, one trailing newline.
+    content = "\n".join(preserved + new_lines) + "\n"
+
+    parent = os.path.dirname(dest) or "."
+    try:
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+        # Atomic write via the shared helper (mkstemp in the dest dir + os.replace).
+        # Never log `content` — it may carry a preserved cloud provider key.
+        write_text_atomic(dest, content)
+        os.chmod(dest, 0o600)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not write the provider key file at {dest} ({exc.strerror or exc})",
+        ) from None
+
+    return {"ok": True, "restarting": True}
+
+
+@app.get("/api/setup/gateway-access")
+def get_setup_gateway_access():
+    """Surface the OpenClaw Control UI URL + token for the Settings screen.
+
+    Model and provider management live in OpenClaw's own gateway UI, which needs
+    the gateway token to connect. Reading it from ``<openclaw_root>/openclaw.json``
+    (``gateway.auth.token`` / ``gateway.port``) and returning it here (behind the
+    same token auth as every ``/api/*`` route) lets the operator open the UI and
+    copy the token without a shell. ``available`` is false (no token) when the
+    config is unresolvable, e.g. a bare-metal dev tree. The token is never logged.
+
+    The URL uses the standard 18789 port; a container that remaps the published
+    gateway port must open the UI at that port instead (the origin allow-list is
+    shipped for 18789).
+    """
+    config = load_config()
+    port = 18789
+    token = ""
+    try:
+        oc_root = os.path.expanduser(str(config.get("openclaw_root") or resolve_openclaw_root()))
+        with open(os.path.join(oc_root, "openclaw.json"), encoding="utf-8") as f:
+            gw = (json.load(f).get("gateway") or {})
+        port = gw.get("port", 18789)
+        token = ((gw.get("auth") or {}).get("token") or "").strip()
+    except (OSError, ValueError):
+        pass
+    return {
+        "available": bool(token),
+        "url": f"http://127.0.0.1:{port}",
+        "token": token,
+    }
+
+
+def _demo_source_dir(config: dict) -> str:
+    repo = config.get("autodev_repo_path") or _AUTODEV_UI_ROOT
+    return os.path.join(os.path.expanduser(repo), "examples", _DEMO_PROJECT_NAME)
+
+
+def _demo_default_dest(config: dict) -> Optional[str]:
+    projects_dir = (config.get("projects_dir") or "").strip()
+    if not projects_dir:
+        return None
+    return os.path.join(os.path.expanduser(projects_dir), _DEMO_PROJECT_NAME)
+
+
+def _demo_suggested_dest(config: dict, pristine_roadmap: str) -> Optional[str]:
+    """Destination the tour should draft: the default path while it is free or
+    still carries the pristine demo roadmap, else the first free numbered
+    sibling. A built demo's roadmap has its phase checkboxes flipped, so
+    re-seeding the same folder would dead-end preflight on the roadmap-conflict
+    check; a fresh sibling keeps the finished build untouched and the flow
+    non-blocking.
+    """
+    base = _demo_default_dest(config)
+    if not base:
+        return None
+    if not os.path.exists(base):
+        return base
+    try:
+        with open(os.path.join(base, "roadmap.md"), "r", encoding="utf-8", errors="replace") as f:
+            disk = f.read(_DEMO_ARTIFACT_MAX_BYTES)
+        if _normalize_doc_text_for_compare(disk) == _normalize_doc_text_for_compare(pristine_roadmap):
+            return base
+    except OSError:
+        pass
+    for i in range(2, 100):
+        cand = f"{base}-{i}"
+        if not os.path.exists(cand):
+            return cand
+    return base
+
+
+@app.get("/api/setup/demo-info")
+def get_setup_demo_info():
+    """Describe the bundled demo project for the welcome walkthrough (A1).
+
+    Returns the three artifact contents (prd/roadmap/verification, each capped)
+    plus the default destination and the ``suggested_dest`` the tour should
+    draft (see :func:`_demo_suggested_dest`). The tour stages the artifacts as
+    seeds through the normal Setup & Preflight flow, so there is no separate
+    import step. Works keyless; available=false on bare-metal installs with no
+    examples dir so the walkthrough stays hidden.
+    """
+    config = load_config()
+    src = _demo_source_dir(config)
+    available = os.path.isdir(src)
+
+    def _read_capped(name: str) -> str:
+        if not available:
+            return ""
+        p = os.path.join(src, name)
+        try:
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
+                return f.read(_DEMO_ARTIFACT_MAX_BYTES)
+        except OSError:
+            return ""
+
+    artifacts = {
+        "prd": _read_capped("prd.md"),
+        "roadmap": _read_capped("roadmap.md"),
+        "verification": _read_capped("verification.md"),
+    }
+    return {
+        "available": available,
+        "artifacts": artifacts,
+        "default_dest": _demo_default_dest(config),
+        "suggested_dest": _demo_suggested_dest(config, artifacts["roadmap"]),
+    }
 
 
 @app.post("/api/setup/roadmap-seed")

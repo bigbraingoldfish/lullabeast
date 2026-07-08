@@ -21,7 +21,16 @@ def test_load_config_default_returns_seven_keys():
     )
     
     # Path-like string values should have ~ expanded to absolute paths (skip URLs and secrets)
-    non_path_keys = {"port", "hooks_url", "hooks_token", "ui_token", "base_branch", "log_level"}
+    # provider_key_path / setup_marker_path / projects_dir default to "" (unset on bare
+    # metal, container-seeded via ui/config.json), same as base_branch — they are only
+    # absolute when configured, so an empty default is not a "~ not expanded" bug.
+    # local_model_probe_host is a bare hostname (container: host.docker.internal),
+    # never a path or URL.
+    non_path_keys = {
+        "port", "hooks_url", "hooks_token", "ui_token", "base_branch", "log_level",
+        "provider_key_path", "setup_marker_path", "projects_dir",
+        "local_model_probe_host",
+    }
     path_keys = [k for k in result.keys() if k not in non_path_keys]
     for key in path_keys:
         val = result[key]
