@@ -50,7 +50,7 @@ EXPECTED_CHECK_IDS = [
     "context_limits", "tools_profile", "heartbeat_disabled", "gateway_up",
     "webhook_ping", "plugin_deployed", "plugin_hooks_registered",
     "exec_approvals", "symlink_consistency", "stale_lock", "playwright",
-    "ui_token", "ports", "template_conformance",
+    "ui_token", "ports", "provider_key", "template_conformance",
 ]
 
 
@@ -212,10 +212,12 @@ class TestAllGreen:
             if c.status not in ("ok", "skipped")
         }
         assert bad == {}, f"non-green checks in the green fixture: {bad}"
-        # Exactly two checks skip here: webhook_ping without --live, and
-        # template_conformance outside owned-OpenClaw mode.
+        # Exactly three checks skip in the bare-metal green fixture:
+        # webhook_ping without --live, template_conformance outside
+        # owned-OpenClaw mode, and provider_key with no container setup paths
+        # configured.
         skipped = {cid for cid, c in by_id.items() if c.status == "skipped"}
-        assert skipped == {"webhook_ping", "template_conformance"}
+        assert skipped == {"webhook_ping", "template_conformance", "provider_key"}
         assert report.overall() == "ok"
         assert report.exit_code() == 0
 
@@ -690,6 +692,140 @@ class TestUiToken:
         env["ui_token"] = ""
         c = doctor.check_ui_token(env)  # .env still carries AUTODEV_UI_TOKEN
         assert c.status == "ok"
+
+
+class TestProviderKey:
+    """The container/setup-mode provider_key check.
+
+    The check applies only when the entrypoint-seeded container paths are
+    configured; a bare-metal install (neither path set) skips it.
+    """
+
+    @pytest.fixture
+    def paths(self, env, tmp_path, monkeypatch):
+        # A clean container-shaped config: key file + marker paths set, and no
+        # provider key inherited from the test runner's own environment.
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("LOCAL_MODEL_URL", raising=False)
+        secrets = tmp_path / "secrets"
+        secrets.mkdir()
+        env["provider_key_path"] = str(secrets / "provider.env")
+        env["setup_marker_path"] = str(tmp_path / ".setup-mode")
+        return env
+
+    def test_unconfigured_skips(self, env, monkeypatch):
+        # Bare metal: neither container path present.
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("LOCAL_MODEL_URL", raising=False)
+        env.pop("provider_key_path", None)
+        env.pop("setup_marker_path", None)
+        c = doctor.check_provider_key(env)
+        assert c.status == "skipped"
+        assert "container" in c.detail
+
+    def test_setup_marker_warns(self, paths):
+        Path(paths["setup_marker_path"]).write_text("")
+        c = doctor.check_provider_key(paths)
+        assert c.status == "warn"
+        assert "setup mode" in c.detail
+        assert "dashboard" in c.fix_hint
+
+    def test_presence_wins_over_marker(self, paths):
+        # DELIBERATE reorder (v1.0.0 Phase 3): a present key file now wins over a
+        # stale setup marker. During the watch-loop unlock window the file exists
+        # while the marker is not yet cleared, and "a provider is available" is
+        # the honest read (the old behaviour let the marker win here).
+        Path(paths["setup_marker_path"]).write_text("")
+        Path(paths["provider_key_path"]).write_text("OPENROUTER_API_KEY=sk-abc\n")
+        c = doctor.check_provider_key(paths)
+        assert c.status == "ok"
+        assert "key file" in c.detail
+
+    def test_env_key_ok(self, paths, monkeypatch):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-secret-value")
+        c = doctor.check_provider_key(paths)
+        assert c.status == "ok"
+        assert c.detail  # reports presence
+        assert "environment" in c.detail
+
+    def test_anthropic_env_key_ok(self, paths, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret-value")
+        c = doctor.check_provider_key(paths)
+        assert c.status == "ok"
+
+    def test_env_local_model_url_ok(self, paths, monkeypatch):
+        # A LOCAL_MODEL_URL in the environment satisfies the gate like a key.
+        monkeypatch.setenv("LOCAL_MODEL_URL", "http://host.docker.internal:11434")
+        c = doctor.check_provider_key(paths)
+        assert c.status == "ok"
+        assert "local model provider" in c.detail
+        assert "environment" in c.detail
+
+    def test_key_file_ok(self, paths):
+        Path(paths["provider_key_path"]).write_text("OPENROUTER_API_KEY=sk-secret-value\n")
+        c = doctor.check_provider_key(paths)
+        assert c.status == "ok"
+        assert "key file" in c.detail
+
+    def test_file_local_model_url_ok(self, paths):
+        # A persisted provider.env carrying only a LOCAL_MODEL_URL reads healthy
+        # with the local label.
+        Path(paths["provider_key_path"]).write_text(
+            "LOCAL_MODEL_URL=http://host.docker.internal:1234\n"
+        )
+        c = doctor.check_provider_key(paths)
+        assert c.status == "ok"
+        assert "local model provider" in c.detail
+        assert "persisted key file" in c.detail
+
+    def test_cloud_wins_label_when_both_present(self, paths):
+        # A file with both a cloud key and a local URL: cloud wins the label.
+        Path(paths["provider_key_path"]).write_text(
+            "OPENROUTER_API_KEY=sk-abc\nLOCAL_MODEL_URL=http://h:11434\n"
+        )
+        c = doctor.check_provider_key(paths)
+        assert c.status == "ok"
+        assert "provider key present" in c.detail
+        assert "local model provider" not in c.detail
+
+    def test_blank_valued_lines_are_not_a_provider(self, paths):
+        # A file with the keys present but blank (the .env.example shape) is not
+        # a provider: warn, not ok.
+        Path(paths["provider_key_path"]).write_text(
+            "OPENROUTER_API_KEY=\nLOCAL_MODEL_URL=\n"
+        )
+        c = doctor.check_provider_key(paths)
+        assert c.status == "warn"
+
+    def test_empty_key_file_is_not_a_key(self, paths):
+        # An empty file (0 bytes) is not a key: same as no file.
+        Path(paths["provider_key_path"]).write_text("")
+        c = doctor.check_provider_key(paths)
+        assert c.status == "warn"
+
+    def test_neither_warns(self, paths):
+        # Configured container, no marker, no env key, no key file: keyless
+        # boot (OFFLINE CI). Honest warn, not ok, not fail.
+        c = doctor.check_provider_key(paths)
+        assert c.status == "warn"
+        assert "keyless boot" in c.detail
+        assert "LOCAL_MODEL_URL" in c.fix_hint
+
+    def test_key_value_never_in_detail(self, paths, monkeypatch):
+        # The check must report presence only, never the value or its length.
+        secret = "sk-super-secret-0123456789abcdef"
+        monkeypatch.setenv("OPENROUTER_API_KEY", secret)
+        env_c = doctor.check_provider_key(paths)
+        assert secret not in env_c.detail and secret not in env_c.fix_hint
+        # And the same for the key-file path.
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        Path(paths["provider_key_path"]).write_text(f"OPENROUTER_API_KEY={secret}\n")
+        file_c = doctor.check_provider_key(paths)
+        assert secret not in file_c.detail and secret not in file_c.fix_hint
+        # The length must not leak either.
+        assert str(len(secret)) not in file_c.detail
 
 
 # ── report / CLI surface ─────────────────────────────────────────────────────
