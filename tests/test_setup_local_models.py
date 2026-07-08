@@ -64,9 +64,15 @@ class TestLocalModelsDiscovery:
                 "models": ["llama3:8b", "qwen2.5:14b"],
             },
         ]
+        metadata = {
+            "llama3:8b": {"context_window": 8192, "reasoning": False, "vision": False},
+            # qwen2.5:14b deliberately absent — unknown metadata must read as nulls.
+        }
         with patch("ui.server.load_config", return_value=cfg), patch(
             "ui.server._local_models.discover_local_servers", return_value=discovered
-        ) as probe:
+        ) as probe, patch(
+            "ui.server._local_models.probe_model_metadata", return_value=metadata
+        ) as meta_probe:
             r = client.get("/api/setup/local-models")
         assert r.status_code == 200
         data = r.json()
@@ -74,16 +80,33 @@ class TestLocalModelsDiscovery:
         assert data["hint"] is None
         assert len(data["servers"]) == 1
         srv = data["servers"][0]
-        # Only name/url/models pass through; base_url is dropped.
+        # name/url/models pass through with per-model details; base_url is dropped.
         assert srv == {
             "name": "Ollama",
             "url": "http://host.docker.internal:11434",
             "models": ["llama3:8b", "qwen2.5:14b"],
+            "details": {
+                "llama3:8b": {
+                    "context_window": 8192,
+                    "reasoning": False,
+                    "vision": False,
+                    "suggested_max_tokens": 4096,
+                },
+                "qwen2.5:14b": {
+                    "context_window": None,
+                    "reasoning": None,
+                    "vision": None,
+                    "suggested_max_tokens": 16384,
+                },
+            },
         }
         assert "base_url" not in srv
-        # The host from config is what gets probed.
+        # The host from config is what gets probed; metadata rides the /v1 base.
         probe.assert_called_once()
         assert probe.call_args.args[0] == "host.docker.internal"
+        meta_probe.assert_called_once_with(
+            "http://host.docker.internal:11434/v1", ["llama3:8b", "qwen2.5:14b"]
+        )
 
     def test_supported_no_servers_returns_hint(self, tmp_path):
         cfg = _cfg(tmp_path, probe_host="host.docker.internal")
@@ -284,6 +307,98 @@ class TestLocalModelSuccess:
         # No duplicate LOCAL_MODEL_URL lines.
         assert sum(1 for l in lines if l.startswith("LOCAL_MODEL_URL=")) == 1
 
+    def test_confirm_fields_written_as_override_lines(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        with patch("ui.server.load_config", return_value=cfg):
+            r = client.post(
+                "/api/setup/local-model",
+                json={
+                    "url": "http://host:11434",
+                    "model": "qwen3.5:27b",
+                    "max_tokens": 16384,
+                    "reasoning": True,
+                },
+            )
+        assert r.status_code == 200
+        content = Path(cfg["provider_key_path"]).read_text()
+        assert "LOCAL_MODEL_MAX_TOKENS=16384\n" in content
+        assert "LOCAL_MODEL_REASONING=1\n" in content
+
+    def test_reasoning_false_written_as_zero(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        with patch("ui.server.load_config", return_value=cfg):
+            client.post(
+                "/api/setup/local-model",
+                json={"url": "http://host:11434", "model": "llama3:8b", "reasoning": False},
+            )
+        content = Path(cfg["provider_key_path"]).read_text()
+        assert "LOCAL_MODEL_REASONING=0\n" in content
+        assert "LOCAL_MODEL_MAX_TOKENS=" not in content
+
+    def test_omitted_confirm_fields_drop_stale_lines(self, tmp_path):
+        # Re-wiring without the fields must not leave a prior submission's
+        # overrides pinned to the newly chosen model.
+        cfg = _cfg(tmp_path)
+        p = Path(cfg["provider_key_path"])
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            "LOCAL_MODEL_MAX_TOKENS=4096\nLOCAL_MODEL_REASONING=1\n"
+            "LOCAL_MODEL_CONTEXT_WINDOW=8192\nLOCAL_MODEL_VISION=0\n"
+        )
+        with patch("ui.server.load_config", return_value=cfg):
+            r = client.post(
+                "/api/setup/local-model",
+                json={"url": "http://host:11434", "model": "llama3:8b"},
+            )
+        assert r.status_code == 200
+        content = p.read_text()
+        for key in (
+            "LOCAL_MODEL_MAX_TOKENS",
+            "LOCAL_MODEL_REASONING",
+            "LOCAL_MODEL_CONTEXT_WINDOW",
+            "LOCAL_MODEL_VISION",
+        ):
+            assert key not in content
+
+    def test_context_window_and_vision_written(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        with patch("ui.server.load_config", return_value=cfg):
+            r = client.post(
+                "/api/setup/local-model",
+                json={
+                    "url": "http://host:11434",
+                    "model": "qwen3.5:27b",
+                    "context_window": 131072,
+                    "vision": True,
+                },
+            )
+        assert r.status_code == 200
+        content = Path(cfg["provider_key_path"]).read_text()
+        assert "LOCAL_MODEL_CONTEXT_WINDOW=131072\n" in content
+        assert "LOCAL_MODEL_VISION=1\n" in content
+
+    def test_400_bad_confirm_fields(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        base = {"url": "http://host:11434", "model": "llama3:8b"}
+        for bad in (
+            {"max_tokens": 0},
+            {"max_tokens": -1},
+            {"max_tokens": "16384"},
+            {"max_tokens": True},
+            {"max_tokens": 2_000_000},
+            {"reasoning": "yes"},
+            {"reasoning": 1},
+            {"context_window": 0},
+            {"context_window": "128k"},
+            {"context_window": True},
+            {"context_window": 100_000_000},
+            {"vision": "yes"},
+            {"vision": 1},
+        ):
+            with patch("ui.server.load_config", return_value=cfg):
+                r = client.post("/api/setup/local-model", json={**base, **bad})
+            assert r.status_code == 400, bad
+
     def test_url_absent_is_not_a_secret_but_key_content_not_echoed(self, tmp_path):
         cfg = _cfg(tmp_path)
         p = Path(cfg["provider_key_path"])
@@ -296,6 +411,40 @@ class TestLocalModelSuccess:
             )
         # Preserved cloud key value never appears in the response.
         assert "sk-or-topsecret-xyz" not in r.text
+
+
+# ── skip-provider: models managed manually in OpenClaw ──────────────────────
+
+class TestSkipProvider:
+    def test_409_when_key_path_unconfigured(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        cfg["provider_key_path"] = ""
+        with patch("ui.server.load_config", return_value=cfg):
+            r = client.post("/api/setup/skip-provider")
+        assert r.status_code == 409
+
+    def test_writes_skip_marker(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        with patch("ui.server.load_config", return_value=cfg):
+            r = client.post("/api/setup/skip-provider")
+        assert r.status_code == 200
+        assert r.json() == {"ok": True, "restarting": True}
+        content = Path(cfg["provider_key_path"]).read_text()
+        assert "PROVIDER_SETUP_SKIPPED=1\n" in content
+        mode = stat.S_IMODE(os.stat(cfg["provider_key_path"]).st_mode)
+        assert mode == 0o600
+
+    def test_preserves_existing_lines_and_is_idempotent(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        p = Path(cfg["provider_key_path"])
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("OPENROUTER_API_KEY=sk-abc\n")
+        with patch("ui.server.load_config", return_value=cfg):
+            client.post("/api/setup/skip-provider")
+            client.post("/api/setup/skip-provider")
+        lines = p.read_text().splitlines()
+        assert "OPENROUTER_API_KEY=sk-abc" in lines
+        assert lines.count("PROVIDER_SETUP_SKIPPED=1") == 1
 
 
 # ── provider-status: local_configured ────────────────────────────────────────
@@ -361,3 +510,30 @@ class TestLocalModelUiMarkers:
     def test_local_models_surface_testid(self):
         html = self._html()
         assert 'data-testid="setup-local-models"' in html
+
+    def test_tuning_confirm_fields_present(self):
+        # The four confirm fields and their payload keys.
+        html = self._html()
+        assert 'data-testid="setup-local-max-tokens"' in html
+        assert 'data-testid="setup-local-reasoning"' in html
+        assert 'data-testid="setup-local-context-window"' in html
+        assert 'data-testid="setup-local-vision"' in html
+        assert "max_tokens" in html
+        assert "context_window" in html
+        assert "suggested_max_tokens" in html
+
+    def test_vision_no_blocks_submit_with_warning(self):
+        # A "No" on image support disables the wire button and shows the
+        # multimodal-requirement warning.
+        html = self._html()
+        assert 'data-testid="setup-local-vision-warning"' in html
+        assert 'vision === "no"' in html
+
+    def test_skip_provider_surface_present(self):
+        # The third welcome option: skip and manage models in OpenClaw, behind
+        # a one-way confirm modal.
+        html = self._html()
+        assert "/api/setup/skip-provider" in html
+        assert 'data-testid="setup-skip-provider"' in html
+        assert 'data-testid="setup-skip-confirm-modal"' in html
+        assert 'data-testid="setup-skip-confirm"' in html

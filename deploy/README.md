@@ -30,12 +30,16 @@ which knows the documented floor (2026.5.18) and the known-bad releases.
 git clone <this repo> && cd <repo>/deploy
 cp .env.example .env        # optional: set OPENROUTER_API_KEY, or enter it in the dashboard later
 mkdir -p projects
-docker compose up
+docker compose up -d
+docker compose logs -f
 ```
 
-Wait for the boot log to end with the doctor verdict and a banner containing
-the dashboard URL, then open that URL (it includes the access token) on the
-machine running docker. First boot is slower: it provisions `/data`, runs the
+The container runs detached (`-d`) so it survives closing the terminal; the
+`logs -f` view is a window into it, and Ctrl+C there detaches without
+stopping the container (a foreground `docker compose up` stops the whole
+container on Ctrl+C or when the shell closes). Wait for the boot log to end
+with the doctor verdict and a banner containing the dashboard URL, then open
+that URL (it includes the access token) on the machine running docker. First boot is slower: it provisions `/data`, runs the
 owned-mode installer, and performs a one-time live webhook ping that creates
 one tiny agent session to validate your API key end to end.
 
@@ -54,6 +58,15 @@ it is set, the container boots straight to a running system and never enters
 setup mode. The persisted key from the dashboard lives at
 `/data/secrets/provider.env` (mode 600, never logged), so it survives
 container recreation.
+
+The setup screen also offers a third path: **skip model setup** and manage
+models and providers by hand in OpenClaw. It is confirmed via a modal because
+it is one-way (the welcome screen never reappears; the Settings screen keeps
+the OpenClaw gateway link). The skip persists as a
+`PROVIDER_SETUP_SKIPPED=1` line in the same provider file; agents cannot run
+until a provider actually exists in OpenClaw, and the doctor's
+`provider_key` check keeps saying so. The one-time live validation ping stays
+unspent, so a real key added later still gets it.
 
 A local model server is an alternative to a cloud key: either set
 `LOCAL_MODEL_URL` in `deploy/.env` (which satisfies the provider gate on its
@@ -86,10 +99,10 @@ Snake game): copy it into `./projects/` and follow "Your first run" in the
 - **`Bind for 0.0.0.0:18790 failed: port is already allocated` (or similar
   "ports are not available ... 18790").** Another process on the host already
   holds the dashboard port. Set `UI_PORT` to a free port in `deploy/.env` and
-  re-run. Note that `docker compose up -d` swallows this error and the
-  container looks like it started; the foreground `docker compose up` the
-  quickstart uses prints it in the boot log, which is why the quickstart runs
-  in the foreground. On Windows, Hyper-V and WSL2 reserve blocks of ports that
+  re-run. Note that `docker compose up -d` can swallow this error and the
+  container looks like it started; if the dashboard never answers, run a
+  one-off foreground `docker compose up` to see the bind error in the boot
+  log. On Windows, Hyper-V and WSL2 reserve blocks of ports that
   produce this bind error while nothing shows up in `netstat`. List the
   reserved ranges with `netsh interface ipv4 show excludedportrange
   protocol=tcp` from an elevated (Run as administrator) prompt; the fix is the
@@ -143,18 +156,37 @@ key. To wire it up:
    docker bridge interface) and firewall it from everything else.
 2. **Set `LOCAL_MODEL_URL` in `deploy/.env`** (for example
    `LOCAL_MODEL_URL=http://host.docker.internal:11434`), then start the
-   container. At boot it normalizes the URL, probes `<url>/v1/models`, and
-   auto-generates the `models.providers.local` entry in `openclaw.json` with
-   the mandatory `apiKey: "no-key"`, logging each discovered model in the
-   `local/<model-id>` form. Detection requires the server to answer
-   `/v1/models`.
-3. **`"apiKey": "no-key"` is mandatory on every local provider entry.** The
+   container. At boot it normalizes the URL, probes `<url>/v1/models` plus the
+   server's own metadata endpoint (Ollama `/api/show`, llama.cpp `/props`,
+   LM Studio `/api/v0/models`), and auto-generates the
+   `models.providers.local` entry in `openclaw.json` with the mandatory
+   `apiKey: "no-key"`. Each model entry is written complete, not bare: the
+   probed context window, reasoning, and vision support where the server
+   reports them, and always a working `maxTokens` (half the context window,
+   capped at 16384; never OpenClaw's 8192 fallback, which truncates real
+   pipeline turns). The boot log prints each model in the `local/<model-id>`
+   form with the values it was wired with. Same-id fields already in the
+   entry survive restarts, so a hand-tuned model is never regressed by a
+   reboot. Detection requires the server to answer `/v1/models`.
+3. **Confirm what the probe cannot know.** llama.cpp and LM Studio do not
+   report whether a model is a reasoning model; an undeclared reasoning model
+   burns its output budget thinking and ends its turn with nothing. If yours
+   is one (Qwen3.x, DeepSeek-R1 and kin), set `LOCAL_MODEL_REASONING=1` in
+   `deploy/.env` (`0` pins it off). `LOCAL_MODEL_MAX_TOKENS` (output budget),
+   `LOCAL_MODEL_CONTEXT_WINDOW` (also re-derives the budget when MAX_TOKENS
+   is unset), and `LOCAL_MODEL_VISION` (image input; the executor and
+   reviewer require a multimodal model, so unprobed models default to
+   text+image) work the same way. All apply to the `*_MODEL`-assigned local
+   models and win over probed values and hand-edits. The doctor's
+   `local_model_completeness` check warns while any role-assigned local model
+   entry is missing `maxTokens`, `contextWindow`, `input`, or `reasoning`.
+4. **`"apiKey": "no-key"` is mandatory on every local provider entry.** The
    `LOCAL_MODEL_URL` path sets it for you; the advanced hand-edit path below
    makes it your responsibility. Without it OpenClaw inherits the cloud auth
    profile and silently falls back to a cloud model, with no error shown; the
    only signal is `fallbackNoticeReason: auth` in the agent's `sessions.json`.
    This is the classic local-model silent failure.
-4. **Point roles at the local models through the `*_MODEL` variables** in
+5. **Point roles at the local models through the `*_MODEL` variables** in
    `deploy/.env` (for example `ESCALATION_MODEL=local/qwen3.5-27b`, where
    `local` is the provider name `LOCAL_MODEL_URL` generates and
    `qwen3.5-27b` is one of the discovered model ids from the boot log), then
@@ -162,7 +194,7 @@ key. To wire it up:
    it is a template-pinned key and the per-boot reconcile reverts it. The
    executor and reviewer must stay on models that accept image input (the
    reviewer does screenshot-based visual review on UI phases).
-5. **Raise the reviewer's infrastructure backstop** for slow local
+6. **Raise the reviewer's infrastructure backstop** for slow local
    reviewers: add `AUTODEV_INFRA_BACKSTOP_REVIEWER=10800` to `deploy/.env`.
    Compose passes it into the container environment and the orchestrator
    inherits it there. A thorough long-context reviewer pass on local
@@ -174,10 +206,15 @@ keyless boot (setup mode, see "First boot without a key" above), the
 container best-effort probes `host.docker.internal` on the known ports
 (Ollama 11434, llama.cpp 8080, LM Studio 1234) and the dashboard setup screen
 shows any detected server with one-click wiring. Detection still requires the
-server to answer `/v1/models`. One click picks a single model for all roles;
-per-role tuning stays in `deploy/.env` through the `*_MODEL` variables. If no
-server answers, re-check the bind requirement in step 1: a `127.0.0.1`-bound
-server is invisible to the container.
+server to answer `/v1/models`. One click picks a single model for all roles,
+with the max output tokens, context window, reasoning, and image-input fields
+prefilled from the probe for you to confirm (they persist as the
+`LOCAL_MODEL_*` overrides from step 3). Answering No on image input blocks
+the wiring with a warning: the executor and reviewer require a multimodal
+model, and flipping it back to Yes on a model you know better than the probe
+is your call. Per-role tuning stays in `deploy/.env` through the `*_MODEL`
+variables. If no server answers, re-check the bind requirement in step 1: a
+`127.0.0.1`-bound server is invisible to the container.
 
 **Advanced: hand-edit `openclaw.json` for multiple providers or per-model
 metadata.** `LOCAL_MODEL_URL` covers the single-provider case. For multiple
@@ -185,7 +222,7 @@ local providers, custom base URLs, or per-model pricing, add a provider entry
 by hand under `models.providers` in `/data/openclaw/openclaw.json`, next to
 the shipped `openrouter` entry: `"baseUrl":
 "http://host.docker.internal:<port>/v1"`, your model entries, and
-`"apiKey": "no-key"` (mandatory, see step 3). The golden template does not
+`"apiKey": "no-key"` (mandatory, see step 4). The golden template does not
 declare your provider's key, so the edit survives boots (the customization
 contract below). Reference the models as `<your-provider-name>/<model-id>` in
 the `*_MODEL` variables.
@@ -317,9 +354,11 @@ The gateway runs inside the container on 18789 and is published to the host's
 loopback, so OpenClaw's own UI is at `http://127.0.0.1:18789`. That is where
 model and provider management lives, and where you approve the pipeline's gate
 scripts the first time they run. The dashboard's **Settings** screen opens it
-and copies the gateway token it asks for (the golden config already allow-lists
-the loopback origin, so there is no origin prompt on the default port). If you
-prefer the shell, the token is at:
+signed in: the button carries the gateway token in the URL hash fragment,
+which stays in the browser (never sent in the request, absent from server
+logs). The golden config already allow-lists the loopback origin, so there is
+no origin prompt on the default port. If you prefer the shell, the token is
+at:
 
 ```bash
 docker compose exec lullabeast cat /data/secrets/gateway_token

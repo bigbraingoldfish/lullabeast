@@ -50,7 +50,8 @@ EXPECTED_CHECK_IDS = [
     "context_limits", "tools_profile", "heartbeat_disabled", "gateway_up",
     "webhook_ping", "plugin_deployed", "plugin_hooks_registered",
     "exec_approvals", "symlink_consistency", "stale_lock", "playwright",
-    "ui_token", "ports", "provider_key", "template_conformance",
+    "ui_token", "ports", "provider_key", "local_model_completeness",
+    "template_conformance",
 ]
 
 
@@ -212,12 +213,15 @@ class TestAllGreen:
             if c.status not in ("ok", "skipped")
         }
         assert bad == {}, f"non-green checks in the green fixture: {bad}"
-        # Exactly three checks skip in the bare-metal green fixture:
+        # Exactly four checks skip in the bare-metal green fixture:
         # webhook_ping without --live, template_conformance outside
-        # owned-OpenClaw mode, and provider_key with no container setup paths
-        # configured.
+        # owned-OpenClaw mode, provider_key with no container setup paths
+        # configured, and local_model_completeness with no local/ role model.
         skipped = {cid for cid, c in by_id.items() if c.status == "skipped"}
-        assert skipped == {"webhook_ping", "template_conformance", "provider_key"}
+        assert skipped == {
+            "webhook_ping", "template_conformance", "provider_key",
+            "local_model_completeness",
+        }
         assert report.overall() == "ok"
         assert report.exit_code() == 0
 
@@ -708,6 +712,7 @@ class TestProviderKey:
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         monkeypatch.delenv("LOCAL_MODEL_URL", raising=False)
+        monkeypatch.delenv("PROVIDER_SETUP_SKIPPED", raising=False)
         secrets = tmp_path / "secrets"
         secrets.mkdir()
         env["provider_key_path"] = str(secrets / "provider.env")
@@ -813,6 +818,29 @@ class TestProviderKey:
         assert "keyless boot" in c.detail
         assert "LOCAL_MODEL_URL" in c.fix_hint
 
+    def test_skip_marker_in_file_warns_with_openclaw_pointer(self, paths):
+        # A deliberate skip (welcome-screen "manage models in OpenClaw myself")
+        # is an honest warn: the doctor cannot verify a hand-managed provider.
+        Path(paths["provider_key_path"]).write_text("PROVIDER_SETUP_SKIPPED=1\n")
+        c = doctor.check_provider_key(paths)
+        assert c.status == "warn"
+        assert "skipped" in c.detail and "OpenClaw" in c.detail
+        assert "gateway" in c.fix_hint
+
+    def test_skip_marker_in_env_warns(self, paths, monkeypatch):
+        monkeypatch.setenv("PROVIDER_SETUP_SKIPPED", "1")
+        c = doctor.check_provider_key(paths)
+        assert c.status == "warn"
+        assert "skipped" in c.detail
+
+    def test_real_provider_wins_over_skip_marker(self, paths):
+        # A key added later (mixed file) upgrades the skip to ok.
+        Path(paths["provider_key_path"]).write_text(
+            "PROVIDER_SETUP_SKIPPED=1\nOPENROUTER_API_KEY=sk-abc\n"
+        )
+        c = doctor.check_provider_key(paths)
+        assert c.status == "ok"
+
     def test_key_value_never_in_detail(self, paths, monkeypatch):
         # The check must report presence only, never the value or its length.
         secret = "sk-super-secret-0123456789abcdef"
@@ -826,6 +854,117 @@ class TestProviderKey:
         assert secret not in file_c.detail and secret not in file_c.fix_hint
         # The length must not leak either.
         assert str(len(secret)) not in file_c.detail
+
+
+class TestLocalModelCompleteness:
+    """A role-assigned local/ model whose provider entry is under-specified
+    (bare {id, name}) runs on truncating defaults; the check warns."""
+
+    def _write(self, env, *, agents=None, local_models_list=None):
+        data = _good_openclaw_json()
+        if agents is not None:
+            for entry in data["agents"]["list"]:
+                if entry["id"] in agents:
+                    entry["model"] = {"primary": agents[entry["id"]]}
+        if local_models_list is not None:
+            data["models"] = {"providers": {"local": {"models": local_models_list}}}
+        with open(os.path.join(env["openclaw_root"], "openclaw.json"), "w") as f:
+            json.dump(data, f)
+
+    def test_no_local_roles_skips(self, env):
+        self._write(env, agents={"planner": "openrouter/some/model"})
+        c = doctor.check_local_model_completeness(env)
+        assert c.status == "skipped"
+        assert "no agent role" in c.detail
+
+    def test_missing_openclaw_json_skips(self, env):
+        os.remove(os.path.join(env["openclaw_root"], "openclaw.json"))
+        c = doctor.check_local_model_completeness(env)
+        assert c.status == "skipped"
+
+    def test_bare_entry_warns_with_fields(self, env):
+        self._write(
+            env,
+            agents={"executor": "local/qwen3.5", "reviewer": "local/qwen3.5"},
+            local_models_list=[{"id": "qwen3.5", "name": "qwen3.5"}],
+        )
+        c = doctor.check_local_model_completeness(env)
+        assert c.status == "warn"
+        for field in ("maxTokens", "contextWindow", "reasoning"):
+            assert field in c.detail
+        assert "executor" in c.detail and "reviewer" in c.detail
+        assert "LOCAL_MODEL_MAX_TOKENS" in c.fix_hint
+
+    def test_unlisted_model_warns(self, env):
+        self._write(
+            env,
+            agents={"executor": "local/ghost"},
+            local_models_list=[{"id": "other", "name": "other"}],
+        )
+        c = doctor.check_local_model_completeness(env)
+        assert c.status == "warn"
+        assert "not in models.providers.local" in c.detail
+
+    def test_complete_entry_ok(self, env):
+        self._write(
+            env,
+            agents={"executor": "local/qwen3.5"},
+            local_models_list=[
+                {
+                    "id": "qwen3.5",
+                    "name": "qwen3.5",
+                    "maxTokens": 16384,
+                    "contextWindow": 131072,
+                    "reasoning": True,
+                    "input": ["text", "image"],
+                }
+            ],
+        )
+        c = doctor.check_local_model_completeness(env)
+        assert c.status == "ok"
+
+    def test_reasoning_false_is_complete(self, env):
+        # An explicit reasoning:false (non-reasoning model) is a valid answer;
+        # only an ABSENT reasoning key warns.
+        self._write(
+            env,
+            agents={"executor": "local/llama3"},
+            local_models_list=[
+                {
+                    "id": "llama3",
+                    "name": "llama3",
+                    "maxTokens": 8192,
+                    "contextWindow": 16384,
+                    "reasoning": False,
+                    "input": ["text"],
+                }
+            ],
+        )
+        c = doctor.check_local_model_completeness(env)
+        assert c.status == "ok"
+
+    def test_non_local_roles_ignored(self, env):
+        # Cloud roles never drag the check in; only the local/ ref is validated.
+        self._write(
+            env,
+            agents={
+                "planner": "openrouter/vendor/model",
+                "executor": "local/qwen3.5",
+            },
+            local_models_list=[
+                {
+                    "id": "qwen3.5",
+                    "name": "qwen3.5",
+                    "maxTokens": 16384,
+                    "contextWindow": 131072,
+                    "reasoning": True,
+                    "input": ["text", "image"],
+                }
+            ],
+        )
+        c = doctor.check_local_model_completeness(env)
+        assert c.status == "ok"
+        assert "1 role-assigned" in c.detail
 
 
 # ── report / CLI surface ─────────────────────────────────────────────────────
