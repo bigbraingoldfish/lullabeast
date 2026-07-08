@@ -84,10 +84,10 @@ def test_doctor_endpoint_requires_token(monkeypatch, hermetic_config):
 
 
 class TestDoctorHealthPanel:
-    """Health card on the Setup & Preflight screen. The frontend is an
-    in-browser Babel block with no transpiler in CI, so these pin the render
-    gates by marker (the repo's UI-test idiom); they deliberately do not
-    re-test the report content, which the endpoint tests above own."""
+    """Health card on the Settings screen. The frontend is an in-browser
+    Babel block with no transpiler in CI, so these pin the render gates by
+    marker (the repo's UI-test idiom); they deliberately do not re-test the
+    report content, which the endpoint tests above own."""
 
     @pytest.fixture(scope="class")
     def html(self):
@@ -102,9 +102,23 @@ class TestDoctorHealthPanel:
     def test_card_fetches_the_doctor_endpoint_on_mount(self, html):
         assert 'fetch("/api/doctor")' in html
 
-    def test_card_mounted_on_the_preflight_screen(self, html):
-        preflight = html.index("function PreflightScreen(")
-        assert "<DoctorHealthCard />" in html[preflight:]
+    def test_card_mounted_on_the_settings_screen_only(self, html):
+        settings = html.index("function SettingsScreen(")
+        assert "<DoctorHealthCard />" in html[settings:]
+        assert html.count("<DoctorHealthCard />") == 1
+
+    def test_settings_screen_reachable_from_sidebar(self, html):
+        assert 'data-testid="nav-settings"' in html
+        assert '"settings" && (' in html or "'settings')" in html
+
+    def test_settings_gateway_card_present(self, html):
+        # Model/provider management lives in OpenClaw; Settings opens its UI and
+        # copies the token from the token-guarded endpoint (no shell needed).
+        assert 'data-testid="settings-gateway-card"' in html
+        assert 'data-testid="gateway-open-link"' in html
+        assert 'data-testid="gateway-copy-token"' in html
+        assert "/api/setup/gateway-access" in html
+        assert ":18789" in html
 
     def test_card_renders_statuses_and_fix_hints(self, html):
         # One glyph per doctor status, plus the fix-hint line for warn/fail rows.
@@ -113,9 +127,14 @@ class TestDoctorHealthPanel:
             assert status in html.split("DOCTOR_STATUS_ICON")[1][:400]
         assert "Fix: {c.fix_hint}" in html
 
+    def test_per_check_hover_explanations(self, html):
+        # Every row carries a plain-language hover title from the explain map.
+        assert "DOCTOR_CHECK_EXPLAIN" in html
+        assert "title={DOCTOR_CHECK_EXPLAIN[c.id] || c.title}" in html
+
     def test_card_is_read_only(self, html):
-        """No re-run / live button in this phase: the card block contains no
-        button element between its start and the following component."""
+        """No re-run / live button: the card component contains no button
+        element between its start and the following component."""
         start = html.index('data-testid="doctor-health-card"')
         end = html.index("function PreflightScreen(")
         assert "<button" not in html[start:end]
