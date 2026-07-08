@@ -195,9 +195,8 @@ class TestModelPricing:
         # Every model an agent points its `model.primary` at must be shipped and
         # priced. The reverse is NOT required: a shipped model may be a
         # non-default, env-selectable option (e.g. minimax/minimax-m3 stays
-        # shipped and priced after the 2026-07-07 planner-default move to
-        # kimi-k2.7-code, still selectable via PLANNER_MODEL). See
-        # deploy/CONFIG-AUDIT.md agents.list[planner].
+        # shipped and priced while no default references it, still selectable via
+        # PLANNER_MODEL). See deploy/CONFIG-AUDIT.md agents.list[planner].
         shipped = set(self._openrouter_models())
         referenced = self._referenced_model_ids()
         assert referenced <= shipped, referenced - shipped
@@ -251,6 +250,14 @@ class TestNoSecrets:
         data = _template()
         assert data["hooks"]["token"] == "${HOOKS_TOKEN}"
         assert data["gateway"]["auth"]["token"] == "${GATEWAY_TOKEN}"
+
+    def test_control_ui_allows_loopback_origins(self):
+        # The Control UI rejects any browser origin not on this list; the
+        # loopback origins let the operator open it from the host loopback
+        # publish (18789) with no manual origin edit.
+        origins = _template()["gateway"]["controlUi"]["allowedOrigins"]
+        assert "http://127.0.0.1:18789" in origins
+        assert "http://localhost:18789" in origins
 
 
 # ── placeholder well-formedness + rendering ──────────────────────────────────

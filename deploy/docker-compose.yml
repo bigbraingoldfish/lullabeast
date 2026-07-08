@@ -15,14 +15,23 @@ services:
     # The default path always builds locally and never consults a registry;
     # published GHCR images exist only from the first tagged release.
     pull_policy: build
-    env_file: .env
+    # env_file is optional so `docker compose up` with no .env file boots into
+    # setup mode instead of erroring (the dashboard then collects the key).
+    # The long-form path/required:false shape needs Docker Compose v2.24+.
+    env_file:
+      - path: .env
+        required: false
     ports:
-      # Loopback publish only: the dashboard is token-authed single-operator
-      # tooling. Exposing it on a LAN is a conscious edit; read the "Security
-      # and network exposure" section of SETUP.md first.
+      # Loopback publish only: both surfaces are token-authed single-operator
+      # tooling. Exposing either on a LAN is a conscious edit; read the
+      # "Security and network exposure" section of SETUP.md first.
       - "127.0.0.1:${UI_PORT:-18790}:${UI_PORT:-18790}"
-    # The OpenClaw gateway port (18789) is deliberately NOT published; it is
-    # container-internal.
+      # OpenClaw gateway: model/provider management and one-time gate-script
+      # approvals happen in OpenClaw's own UI, so it is reachable from the
+      # host at http://127.0.0.1:18789 (also linked from the dashboard's
+      # Settings screen). Token-authenticated; see "Looking at the OpenClaw
+      # gateway" in deploy/README.md.
+      - "127.0.0.1:18789:18789"
     volumes:
       # All state (OpenClaw tree, pipeline state, secrets) lives here and
       # survives image upgrades. Must be a local volume driver: fcntl.flock

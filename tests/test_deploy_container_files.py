@@ -139,6 +139,24 @@ class TestEntrypoint:
         assert "AUTODEV_UI_TOKEN" in ENTRYPOINT
         assert re.search(r"http://127\.0\.0\.1:\$\{UI_PORT\}/\?token=", ENTRYPOINT)
 
+    def test_dashboard_url_is_colorized_last(self):
+        # The Dashboard URL must be the blazing final output of boot: it is
+        # printed in bold-green ANSI (\033[1;32m ... \033[0m) via a printf so it
+        # stands out. All three banners route through the shared helper.
+        assert re.search(
+            r"printf '\\033\[1;32m  Dashboard:  %s\\033\[0m\\n'", ENTRYPOINT
+        ), "the Dashboard line must be printed in bold-green ANSI via printf"
+        # Each banner function must emit the colorized Dashboard line.
+        for fn in ("banner_up", "banner_setup_mode", "banner_unlocked"):
+            m = re.search(rf"{fn}\(\)\s*\{{(.*?)\n\}}", ENTRYPOINT, re.DOTALL)
+            assert m, f"could not locate {fn} body"
+            assert "banner_dashboard_line" in m.group(1), (
+                f"{fn} must print the colorized Dashboard line"
+            )
+        # The CI log-grep needle must stay a plain, un-colorized literal (the
+        # deploy workflow greps docker logs for exactly this byte sequence).
+        assert 'echo "  Lullabeast is up."' in ENTRYPOINT
+
     def test_supervised_loops_present(self):
         # Cron jobs become supervised sleep loops in-container; the scripts
         # themselves are unchanged.
@@ -153,22 +171,79 @@ class TestEntrypoint:
         assert "OPENCLAW_STATE_DIR" in ENTRYPOINT
         assert re.search(r"ln -sfn .*\$HOME/\.openclaw", ENTRYPOINT)
 
+    def test_seeds_setup_paths_into_ui_config(self):
+        # The UI-port seeding block also seeds the container-only setup keys the
+        # server and doctor read (WP-App + provider_key check + local models).
+        assert 'cfg["provider_key_path"]' in ENTRYPOINT
+        assert 'cfg["setup_marker_path"]' in ENTRYPOINT
+        assert 'cfg["projects_dir"]' in ENTRYPOINT
+        assert 'cfg["local_model_probe_host"]' in ENTRYPOINT
+
+    def test_config_render_reconcile_is_a_function(self):
+        # v1.0.0 Phase 3: the render/reconcile heredoc is wrapped in a function
+        # so the setup-watch loop can re-run it, and called in the boot path.
+        assert "render_reconcile_config() {" in ENTRYPOINT
+        # Called at least twice: the boot path and the watch loop.
+        assert ENTRYPOINT.count("render_reconcile_config\n") + ENTRYPOINT.count(
+            "        render_reconcile_config\n"
+        ) >= 2
+
+    def test_local_model_wiring_function_defined_and_called(self):
+        # v1.0.0 Phase 3, B4: wire_or_probe_local_models is defined and called
+        # right after render_reconcile_config in the boot path.
+        assert "wire_or_probe_local_models() {" in ENTRYPOINT
+        def_idx = ENTRYPOINT.find("wire_or_probe_local_models() {")
+        # The boot-path call comes after the definition.
+        boot_call = ENTRYPOINT.find("\nrender_reconcile_config\nwire_or_probe_local_models")
+        assert boot_call > def_idx, "boot must call the two wiring functions in order"
+
+    def test_local_model_url_gate_and_probe(self):
+        # The function wires LOCAL_MODEL_URL when set (normalize + probe + merge
+        # + atomic write) and probes known local servers in setup mode.
+        assert "LOCAL_MODEL_URL" in ENTRYPOINT
+        assert "normalize_local_base_url" in ENTRYPOINT
+        assert "build_local_provider_entry" in ENTRYPOINT
+        assert "merge_local_provider" in ENTRYPOINT
+        assert "discover_local_servers" in ENTRYPOINT
+
+    def test_both_first_boot_marker_touches_precede_their_doctor(self):
+        # The billable --live ping must be marked spent BEFORE the doctor runs
+        # at BOTH sites: the first-boot block and the setup-watch unlock. A
+        # regression that moves either touch after its doctor re-fires the paid
+        # ping on a crash loop. (test_live_doctor_ping_marked_once only checks
+        # the first site via .find(); this covers both.)
+        touch_idxs = [
+            m.start() for m in re.finditer(r'touch "\$FIRST_BOOT_MARKER"', ENTRYPOINT)
+        ]
+        doctor_idxs = [
+            m.start()
+            for m in re.finditer(r"python3 -m autodev\.installer\.doctor", ENTRYPOINT)
+        ]
+        assert len(touch_idxs) == 2, "expected exactly two FIRST_BOOT_MARKER touches"
+        # Each touch must be followed by a doctor invocation, and no doctor
+        # invocation may sit between a touch and be un-paired: pair them in order.
+        for touch in touch_idxs:
+            following = [d for d in doctor_idxs if d > touch]
+            assert following, f"no doctor invocation follows the touch at {touch}"
+
 
 class TestCompose:
     def test_parses_and_single_service(self):
         data = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
         assert list(data["services"].keys()) == ["lullabeast"]
 
-    def test_ui_port_published_loopback_only(self):
+    def test_both_ports_published_loopback_only(self):
         data = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
         ports = data["services"]["lullabeast"]["ports"]
-        assert len(ports) == 1
-        assert str(ports[0]).startswith("127.0.0.1:")
+        assert len(ports) == 2
+        assert all(str(p).startswith("127.0.0.1:") for p in ports)
 
-    def test_gateway_port_not_published(self):
+    def test_gateway_port_published_loopback(self):
+        # The OpenClaw UI owns model/provider management and the one-time
+        # gate-script approvals, so 18789 is reachable from the host loopback.
         data = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
         ports = data["services"]["lullabeast"]["ports"]
-        assert not any("18789" in str(p) for p in ports)
+        assert "127.0.0.1:18789:18789" in [str(p) for p in ports]
 
     def test_volumes_and_bind_mount(self):
         data = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
@@ -182,9 +257,14 @@ class TestCompose:
         extra = data["services"]["lullabeast"]["extra_hosts"]
         assert "host.docker.internal:host-gateway" in extra
 
-    def test_env_file_wired(self):
+    def test_env_file_wired_optional(self):
+        # DELIBERATE change (v1.0.0 Phase 3, B2): env_file is the long-form
+        # optional shape so `docker compose up` with no .env file boots into
+        # setup mode instead of erroring. Needs Docker Compose v2.24+.
         data = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
-        assert data["services"]["lullabeast"]["env_file"] == ".env"
+        env_file = data["services"]["lullabeast"]["env_file"]
+        assert env_file == [{"path": ".env", "required": False}]
+        assert "v2.24" in COMPOSE_PATH.read_text(encoding="utf-8")
 
     def test_pull_policy_build(self):
         # The default path always builds locally and
@@ -212,8 +292,8 @@ class TestGitAttributes:
 class TestEnvExample:
     def test_every_contract_variable_documented(self):
         for name in (
-            "ANTHROPIC_API_KEY",
             "OPENROUTER_API_KEY",
+            "LOCAL_MODEL_URL",
             "UI_PORT",
             "GIT_USER_NAME",
             "GIT_USER_EMAIL",
@@ -221,19 +301,43 @@ class TestEnvExample:
         ):
             assert name in ENV_EXAMPLE, f".env.example is missing {name}"
 
+    def test_anthropic_not_offered_in_env_example(self):
+        assert "ANTHROPIC_API_KEY" not in ENV_EXAMPLE
+
     def test_model_defaults_match_template_module(self):
         # The commented defaults shown to users must be the audited picks.
         for name, default in TEMPLATE_MODEL_DEFAULTS.items():
             assert f"#{name}={default}" in ENV_EXAMPLE
 
+    def test_local_model_url_documented(self):
+        # v1.0.0 Phase 3, B4: the local-model knob is documented as a commented
+        # example in the host.docker.internal form, with the local/<id> role
+        # wiring hint and a pointer to the deploy README.
+        assert "#LOCAL_MODEL_URL=http://host.docker.internal:11434" in ENV_EXAMPLE
+        assert "Local models on the host" in ENV_EXAMPLE
+        assert "local/" in ENV_EXAMPLE
+
+    def test_no_dashes_in_new_local_model_prose(self):
+        # Repo style: no em/en dashes in .env.example prose (the box-drawing
+        # section rulers are the pre-existing style and are exempt).
+        for line in ENV_EXAMPLE.splitlines():
+            if "─" in line:  # box-drawing ruler, exempt
+                continue
+            assert "–" not in line and "—" not in line, (
+                f"em/en dash in .env.example prose: {line}"
+            )
+
     def test_no_committed_values(self):
-        # Every non-comment line must be blank; a real value in the example
-        # would be a committed secret.
+        # No committed secret VALUES. A bare "NAME=" line (empty value, so key
+        # entry is paste-only) is allowed; a non-comment line carrying a
+        # non-empty value after "=" would be a committed secret and fails.
         for line in ENV_EXAMPLE.splitlines():
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
-            raise AssertionError(f"uncommented assignment in .env.example: {line}")
+            assert "=" in stripped, f"non-comment, non-assignment line: {line}"
+            value = stripped.split("=", 1)[1].strip()
+            assert value == "", f"committed value in .env.example: {line}"
 
     def test_deploy_env_is_gitignored(self):
         proc = subprocess.run(
@@ -387,6 +491,142 @@ class TestOfflineMode:
             re.DOTALL,
         )
         assert m, "--live/marker branch must be gated behind the OFFLINE no-op"
+
+
+class TestSetupMode:
+    """Keyless boot (not OFFLINE) becomes SETUP MODE instead of die."""
+
+    def test_no_die_on_missing_key(self):
+        # The old hard-exit is gone: a keyless, non-OFFLINE boot must never
+        # `die` on the provider key. Setup mode replaces it.
+        assert 'die "no provider' not in ENTRYPOINT
+        assert not re.search(r"die .*no provider API key set", ENTRYPOINT)
+
+    def test_setup_mode_branch_sets_flag_and_loud_banner(self):
+        # The keyless branch (behind the OFFLINE gate) sets SETUP_MODE=1 and
+        # prints a loud, honest banner naming the dashboard as the key surface.
+        assert "SETUP_MODE=1" in ENTRYPOINT
+        assert "SETUP MODE" in ENTRYPOINT
+        m = re.search(
+            r'if \[ "\$OFFLINE" = "1" \];.*?'
+            r'elif \[ -z "\$\{ANTHROPIC_API_KEY:-\}" \].*?SETUP_MODE=1',
+            ENTRYPOINT,
+            re.DOTALL,
+        )
+        assert m, "keyless setup-mode branch must be the elif of the OFFLINE gate"
+
+    def test_provider_env_sourced_when_env_absent(self):
+        # /data/secrets/provider.env is sourced only when both key env vars are
+        # unset, so deploy/.env always wins.
+        assert 'PROVIDER_KEY_FILE="$DATA/secrets/provider.env"' in ENTRYPOINT
+        m = re.search(
+            r'if \[ -z "\$\{ANTHROPIC_API_KEY:-\}" \] && \[ -z "\$\{OPENROUTER_API_KEY:-\}" \]'
+            r'.*?\[ -s "\$PROVIDER_KEY_FILE" \].*?\. "\$PROVIDER_KEY_FILE"',
+            ENTRYPOINT,
+            re.DOTALL,
+        )
+        assert m, "provider.env must be sourced only when the key env vars are absent"
+
+    def test_setup_marker_written_and_cleared(self):
+        # The marker is written after the /data mkdirs when in setup mode, and
+        # removed when a key is present (clearing a stale marker on a keyed boot).
+        assert 'SETUP_MARKER="$DATA/.setup-mode"' in ENTRYPOINT
+        assert 'touch "$SETUP_MARKER"' in ENTRYPOINT
+        assert 'rm -f "$SETUP_MARKER"' in ENTRYPOINT
+        # Marker write must come after the /data mkdir (the dir must exist).
+        mkdir_idx = ENTRYPOINT.find('mkdir -p "$DATA/secrets"')
+        marker_idx = ENTRYPOINT.find('SETUP_MARKER="$DATA/.setup-mode"')
+        assert mkdir_idx != -1 and marker_idx != -1
+        assert mkdir_idx < marker_idx
+
+    def test_setup_mode_defers_live_doctor(self):
+        # In setup mode the first-boot --live doctor is deferred exactly like
+        # OFFLINE: the OFFLINE-or-SETUP no-op branch guards the --live/marker
+        # branch, so the marker stays unwritten until the key arrives.
+        m = re.search(
+            r'if \[ "\$OFFLINE" = "1" \] \|\| \[ "\$SETUP_MODE" = "1" \];'
+            r'.*?elif \[ ! -f "\$FIRST_BOOT_MARKER" \];.*?--live.*?touch "\$FIRST_BOOT_MARKER"',
+            ENTRYPOINT,
+            re.DOTALL,
+        )
+        assert m, "setup mode must defer the --live ping like OFFLINE"
+
+    def test_setup_watch_loop_restarts_gateway(self):
+        # The setup-watch loop must restart the gateway when the key lands so
+        # OpenClaw reads it from its process environment (the unlock mechanism).
+        # It runs behind the SETUP_MODE gate.
+        assert re.search(r'if \[ "\$SETUP_MODE" != "1" \]', ENTRYPOINT), (
+            "normal supervision must be gated so setup mode takes the watch loop"
+        )
+        # The watch loop sources the key, then stop+start+wait the gateway.
+        m = re.search(
+            r'if \[ -s "\$PROVIDER_KEY_FILE" \];.*?'
+            r'\. "\$PROVIDER_KEY_FILE".*?stop_gateway.*?start_gateway.*?wait_for_gateway',
+            ENTRYPOINT,
+            re.DOTALL,
+        )
+        assert m, "setup-watch loop must source the key and restart the gateway"
+
+    def test_local_model_url_in_setup_gate(self):
+        # v1.0.0 Phase 3, B2: setup mode is entered only when there is no cloud
+        # key AND no LOCAL_MODEL_URL. Both the sourcing guard and the
+        # setup-mode elif must include the LOCAL_MODEL_URL check.
+        assert re.search(
+            r'\[ -z "\$\{LOCAL_MODEL_URL:-\}" \] && \[ -s "\$PROVIDER_KEY_FILE" \]',
+            ENTRYPOINT,
+        ), "provider.env sourcing guard must include the LOCAL_MODEL_URL check"
+        m = re.search(
+            r'elif \[ -z "\$\{ANTHROPIC_API_KEY:-\}" \] && '
+            r'\[ -z "\$\{OPENROUTER_API_KEY:-\}" \] \\?\s*'
+            r'&& \[ -z "\$\{LOCAL_MODEL_URL:-\}" \];.*?SETUP_MODE=1',
+            ENTRYPOINT,
+            re.DOTALL,
+        )
+        assert m, "the setup-mode elif must gate on LOCAL_MODEL_URL too"
+
+    def test_setup_banner_mentions_local_model_alternative(self):
+        # The setup banner must name a local model server as an alternative to a
+        # cloud key (dashboard or LOCAL_MODEL_URL in deploy/.env).
+        assert "local model server is an alternative" in ENTRYPOINT
+        assert "LOCAL_MODEL_URL" in ENTRYPOINT
+
+    def test_watch_loop_reruns_config_wiring_before_gateway_restart(self):
+        # A dashboard-wired *_MODEL / LOCAL_MODEL_URL must land in openclaw.json
+        # before the gateway restarts, so the watch loop re-runs both wiring
+        # functions after sourcing the key.
+        m = re.search(
+            r'if \[ -s "\$PROVIDER_KEY_FILE" \];.*?\. "\$PROVIDER_KEY_FILE".*?'
+            r'render_reconcile_config.*?wire_or_probe_local_models.*?'
+            r'stop_gateway.*?start_gateway',
+            ENTRYPOINT,
+            re.DOTALL,
+        )
+        assert m, "watch loop must re-run config wiring before the gateway restart"
+
+    def test_api_key_silently_accepted_comment(self):
+        # B1-enforcement: ANTHROPIC_API_KEY is deliberately still accepted but
+        # never promoted; the entrypoint carries that decision as a comment.
+        assert re.search(
+            r"#.*ANTHROPIC_API_KEY.*(accepted|B1-enforcement)", ENTRYPOINT
+        ), "entrypoint must comment that ANTHROPIC_API_KEY is silently accepted"
+
+    def test_setup_watch_loop_checks_supervised_pids(self):
+        # The watch loop must fail the same way `wait -n` would if a supervised
+        # child dies during setup mode: kill -0 liveness on each pid.
+        m = re.search(
+            r'while :; do.*?kill -0 "\$pid".*?shutdown.*?exit 1',
+            ENTRYPOINT,
+            re.DOTALL,
+        )
+        assert m, "setup-watch loop must monitor supervised pids with kill -0"
+
+    def test_setup_watch_loop_clears_marker_on_unlock(self):
+        # After the deferred doctor passes, the loop clears the setup marker and
+        # falls through to normal supervision.
+        unlock_idx = ENTRYPOINT.find('say "provider key received from the dashboard')
+        assert unlock_idx != -1
+        rm_idx = ENTRYPOINT.find('rm -f "$SETUP_MARKER"', unlock_idx)
+        assert rm_idx != -1, "the unlock path must clear the setup marker"
 
 
 def _load_smoke_assert_module():
