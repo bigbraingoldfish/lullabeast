@@ -111,7 +111,7 @@ Lullabeast is model-agnostic. OpenClaw owns all model configuration, so you choo
 | Mode | What runs the agents | Trade-off |
 |---|---|---|
 | **Budget cloud** (best results so far) | Open-weight multi-modal models via your OpenRouter key (e.g. MiniMax, GLM, Kimi, Qwen) | Cheap per token; your key, your provider |
-| **Fully local** | Validated on a single RTX 4090 (48GB, modded) with `unsloth/Qwen3.6-27B-MTP-GGUF` & `llamacpp/Qwen3.6-27B` (both q8_0) | No cloud in the loop; front-end (UI) phases are the weak spot, with the most failures and retries |
+| **Fully local** | Validated on a single RTX 4090 (48GB, modded) with `unsloth/Qwen3.6-27B-MTP-GGUF` & `llamacpp/Qwen3.6-27B` (both q8_0); [wiring guide](deploy/README.md#local-models-on-the-host) | No cloud in the loop; front-end (UI) phases are the weak spot, with the most failures and retries |
 | **Hybrid** | Local for **escalation + executor** (where most of the work, and the cost savings, happen), cloud for **planner and/or reviewer** (cheap to build a strong foundation and review thoroughly) | Often the best cost/quality balance; still being tuned |
 
 **Model notes.** A **multi-modal** model is **required** for the **executor** and **reviewer** (the reviewer does screenshot-based visual review for UI phases) and **recommended** for the **planner**. Use the strongest model you're comfortable running for the **roadmap-converter**: it's isolated by design, so your most expensive model is spent only on conversion. I also suggest keeping the **idea-to-PRD chat (`prd-creator`) on a cloud model**, where it produces noticeably better drafts.
@@ -124,9 +124,9 @@ Lullabeast is model-agnostic. OpenClaw owns all model configuration, so you choo
 
 ### Requirements
 
-- **Docker** with the Compose plugin.
-- **An API key**: `OPENROUTER_API_KEY` (the shipped model defaults use OpenRouter) or `ANTHROPIC_API_KEY`.
-- **Hardware**: 2 CPU cores, 2-4 GB RAM (Playwright/Chromium is the heaviest resident), and a few GB of disk for the image, state, and generated project repos. No GPU: inference is cloud-side.
+- **Docker** with the Compose plugin, v2.24 or newer (`docker compose version`).
+- **A model provider**: an [OpenRouter key](https://openrouter.ai/keys) (the shipped defaults; a few dollars of credit is enough) or a [local model server](deploy/README.md#local-models-on-the-host). No file editing needed: the dashboard asks on first boot.
+- **Hardware**: 2 CPU cores, 2-4 GB RAM (Playwright/Chromium is the heaviest resident), and a few GB of disk for the image, state, and generated project repos. No GPU unless you run models locally.
 
 Everything else (OpenClaw, Python, Node, Chromium) ships inside the image, pinned and pre-configured.
 
@@ -134,9 +134,11 @@ Everything else (OpenClaw, Python, Node, Chromium) ships inside the image, pinne
 
 ```bash
 git clone https://github.com/bigbraingoldfish/lullabeast.git && cd lullabeast/deploy
-cp .env.example .env    # then edit: set OPENROUTER_API_KEY (or ANTHROPIC_API_KEY)
+cp .env.example .env    # optional: the dashboard asks for the key if you skip it
 mkdir -p projects && docker compose up
 ```
+
+On Windows, run these lines in Git Bash with Docker Desktop running ([Windows notes](deploy/README.md#windows-notes)).
 
 Wait for the boot log to end with the doctor verdict (the built-in health check) and a banner containing your dashboard URL, then open that URL on the machine running Docker. It includes your access token and authorizes your browser via a cookie (30 days); scripts can send the same token as a `Bearer` header instead. First boot is slower: it provisions state and validates your API key end to end with a one-time live webhook ping.
 
@@ -146,22 +148,17 @@ The full container contract (environment variables, volumes, upgrades, customiza
 
 ### Your first run
 
-The repo bundles a known-good sample project, a deliberately tiny single-file Snake game ([examples/first-run-snake](examples/first-run-snake)), so your first pipeline run needs no authoring at all:
+The repo bundles a known-good sample project, a deliberately tiny single-file Snake game ([examples/first-run-snake](examples/first-run-snake)), and the dashboard loads it for you with one click. No terminal, no file authoring:
 
-1. **Copy the sample into your projects directory** (the `./projects` folder next to `docker-compose.yml`):
-
-   ```bash
-   cp -r ../examples/first-run-snake projects/snake
-   ```
-
-2. **Open the dashboard** at the tokenized URL from the boot log. The **Setup & Preflight** screen's **Health** card shows the same checklist the boot log printed; everything should be green.
-3. **Add the project**: go to **Queue**, click **+ Add Project**, and enter the project path `/data/projects/snake` (the container-side path of `./projects/snake`). Adding validates the project with the full preflight (it also initializes git in the project for you) and, in the default automatic queue mode, starts the pipeline immediately. (The Setup & Preflight screen is the flow for projects authored in **Project Ideas**; on-disk projects like this one go through the Queue.)
+1. **Open the dashboard** at the tokenized URL from the boot log.
+2. **Enter your key if asked.** If you did not put a provider key in `deploy/.env`, the dashboard opens straight into a setup screen and asks for it. Paste an OpenRouter key (there is a direct link to create one; your account needs a small credit balance), submit, and the model gateway restarts and unlocks the pipeline on its own.
+3. **Take the welcome tour.** On your first visit a welcome panel explains the demo and shows the Snake project's three documents: the PRD (what to build), the roadmap (the phased plan), and the verification contract (how success is checked). Click **Load the demo project**: the documents are staged like any project idea and you land on Setup & Preflight with the path drafted. Confirm the repository, run preflight, and add it to the queue; the default automatic queue mode starts the build. The tour stops appearing after your first run (replay it from **Settings**).
 4. **Watch it build.** The pipeline plans, builds, and reviews the game phase by phase; follow the live loop in the **Pipeline Monitor**.
-5. When the run completes, the finished game is on your host at `projects/snake/index.html`; open it in a browser and play.
+5. When the run completes, the finished game lands on your host at `projects/first-run-snake/index.html` (the `./projects` folder next to `docker-compose.yml` is bind-mounted into the container); open it in a browser and play.
 
 ### Developing Lullabeast
 
-Contributors (and anyone who wants to hack on the pipeline itself) run bare-metal in development mode against their own OpenClaw install. That walkthrough, including the guest-mode installer, systemd/LaunchAgent units, and non-default ports, lives in **[SETUP.md](SETUP.md)**.
+Contributors who want to work on the pipeline itself run bare-metal in development mode against their own OpenClaw install. That walkthrough, including the guest-mode installer, systemd/LaunchAgent units, and non-default ports, lives in **[SETUP.md](SETUP.md)**.
 
 ---
 
@@ -175,7 +172,8 @@ Contributors (and anyone who wants to hack on the pipeline itself) run bare-meta
 **Look before you install.** **[Tour the dashboard](https://lullabeast.ai/walkthrough)**. It's a snapshot preview of the interface from the MultiLife (Conway) build.
 
 - **Project Ideas:** chat an idea into a PRD, then generate the roadmap + verification contract.
-- **Setup & Preflight:** point at a project repo, run preflight checks, launch the pipeline. A **Health** card runs the doctor's full checklist against your install and shows a fix hint for anything red.
+- **Setup & Preflight:** point at a project repo, run preflight checks, launch the pipeline.
+- **Settings:** a **Health** card runs the doctor's full checklist against your install with a fix hint for anything red, and the welcome tour can be replayed from here.
 - **Pipeline Monitor:** watch the live planner, executor, reviewer loop, per-phase metrics, and a real-time activity feed; recover from git errors or answer escalations.
 - **Queue:** line up multiple projects with dependency ordering; Lullabeast runs them sequentially.
 - **Cost & token visibility:** per-phase and per-agent cost/token breakdowns, live during a run and recallable after, in both the Monitor and the Queue (shown when your models report usage).
@@ -193,24 +191,21 @@ Contributors (and anyone who wants to hack on the pipeline itself) run bare-meta
 
 ## Troubleshooting
 
-Start with the doctor: it checks every known silent-failure mode in one pass and prints a fix hint for each red item. It renders as the **Health** card on the dashboard's Setup & Preflight screen, or run it from a shell:
+Start with the doctor: it checks every known silent-failure mode in one pass and prints a fix hint for each red item. It renders as the **Health** card on the dashboard's Settings screen, or run it from a shell:
 
 ```bash
-# container install
 docker compose exec lullabeast python -m autodev.installer.doctor
-
-# development install (bare-metal, from the repo root)
-source .env && python -m autodev.installer.doctor
 ```
+
+Developing bare-metal? The development-install equivalents live in [SETUP.md](SETUP.md).
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| UI says `RUNNING` but no agents ever fire | OpenClaw gateway is down | `curl -s http://localhost:18789/v1/models`; connection refused means start the gateway |
+| UI says `RUNNING` but no agents ever fire | OpenClaw gateway is down | `docker compose exec lullabeast curl -s http://localhost:18789/v1/models`; connection refused means the gateway is not up |
 | Webhook returns **401** | `hooks.token` ≠ `AUTODEV_HOOKS_TOKEN` | Sync the Bearer secret (install.sh step 8 does this) |
 | Dashboard or `/api/*` returns **401** | browser not authorized / wrong `AUTODEV_UI_TOKEN` | Open the tokenized URL printed at server startup |
-| `orchestrator.py not found` on launch | `.env` not sourced | `source .env` before starting uvicorn |
-| Every **UI/INT** phase fails at the reviewer | Playwright MCP not installed | Re-run `./install.sh` without `--skip-playwright` |
 | Header shows **Queue stalled** | all queued projects blocked / in dependency hold | Clear a parent or resume a banked escalation answer |
+| `docker compose up` fails with `Bind for 0.0.0.0:18790 failed` / ports are not available | another process, or a Windows reserved port range, holds the dashboard port | Set `UI_PORT` to a free port in `deploy/.env` and re-run (details in [deploy troubleshooting](deploy/README.md#troubleshooting-first-boot)) |
 
 A deeper **"Silent failure modes"** walkthrough lives in [SETUP.md](SETUP.md#silent-failure-modes-four-cases).
 

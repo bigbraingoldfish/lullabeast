@@ -2,7 +2,7 @@
 
 Lullabeast is an autonomous development pipeline that runs on top of OpenClaw. It manages a planner → executor → reviewer loop against your project repository, with a web dashboard for monitoring and a PRD ideation system. For dashboard terminology (pipeline and queue states, skills, metrics), see [GLOSSARY.md](GLOSSARY.md).
 
-**Installing Lullabeast to use it? Use Docker.** The supported user install is the compose path in [deploy/README.md](deploy/README.md) (and the README quickstart): one container, one API key, no host prerequisites beyond Docker. This page is the **development-mode setup**: the bare-metal, guest-mode install used by contributors, the dev machine, CI, and the lullabeast-eval harness. Everything here still works and is maintained (the container itself runs this same `install.sh` on every boot), but it is not the path new users should start from.
+**Installing Lullabeast to use it? Use Docker.** The supported user install is the compose path in [deploy/README.md](deploy/README.md) (and the README quickstart): one container, no host prerequisites beyond Docker, and either an OpenRouter key or a local model server (the dashboard collects the key on first boot). This page is the **development-mode setup**: the bare-metal, guest-mode install used by contributors, the dev machine, CI, and the lullabeast-eval harness. Everything here still works and is maintained (the container itself runs this same `install.sh` on every boot), but it is not the path new users should start from.
 
 ---
 
@@ -69,7 +69,7 @@ What the script does (summary):
 
 If install.sh exits cleanly with no warnings, the system is ready. If it exits with warnings, read each warning — most require a one-line manual fix.
 
-**The doctor.** `python -m autodev.installer.doctor` (from the repo root, with `.env` sourced) checks every documented silent-failure mode in one pass: paths, Python deps, git identity, the PRD conversion prompt, `openclaw.json` health (hooks, agents, context limits, `tools.profile`, heartbeat), the OpenClaw version floor and known-bad releases, gateway reachability, plugin bundle freshness and hook registration, exec-approvals paths, `pipeline-project` symlink agreement, stale locks, Playwright, tokens, and ports. It is strictly read-only, and every red line carries a one-line fix hint. Flags: `--json` (machine-readable report), `--quiet` (print only problems; warnings stop affecting the exit code), `--live` (also POSTs the webhook ping, which creates a real OpenClaw session, so it is opt-in). Exit codes: 0 all ok, 1 any failure, 2 warnings only. The dashboard server exposes the same report at `GET /api/doctor` and renders it as the **Health** card on the Setup & Preflight screen. Network and subprocess probes are bounded by `DOCTOR_PROBE_TIMEOUT` seconds (default 5). One check is mode-gated: `template_conformance` diffs the live `openclaw.json` against the golden template at `deploy/openclaw.template.json` and runs only in owned-OpenClaw installs (env `OWNED_OPENCLAW=1`, which install.sh exports for its final doctor run in owned mode); on guest installs, whose config the installer never generates, it reports skipped. The decision record behind that template is `deploy/CONFIG-AUDIT.md`.
+**The doctor.** `python -m autodev.installer.doctor` (from the repo root, with `.env` sourced) checks every documented silent-failure mode in one pass: paths, Python deps, git identity, the PRD conversion prompt, `openclaw.json` health (hooks, agents, context limits, `tools.profile`, heartbeat), the OpenClaw version floor and known-bad releases, gateway reachability, plugin bundle freshness and hook registration, exec-approvals paths, `pipeline-project` symlink agreement, stale locks, Playwright, tokens, and ports. It is strictly read-only, and every red line carries a one-line fix hint. Flags: `--json` (machine-readable report), `--quiet` (print only problems; warnings stop affecting the exit code), `--live` (also POSTs the webhook ping, which creates a real OpenClaw session, so it is opt-in). Exit codes: 0 all ok, 1 any failure, 2 warnings only. The dashboard server exposes the same report at `GET /api/doctor` and renders it as the **Health** card on the Settings screen. Network and subprocess probes are bounded by `DOCTOR_PROBE_TIMEOUT` seconds (default 5). One check is mode-gated: `template_conformance` diffs the live `openclaw.json` against the golden template at `deploy/openclaw.template.json` and runs only in owned-OpenClaw installs (env `OWNED_OPENCLAW=1`, which install.sh exports for its final doctor run in owned mode); on guest installs, whose config the installer never generates, it reports skipped. The decision record behind that template is `deploy/CONFIG-AUDIT.md`.
 
 ### Installing on macOS
 
@@ -254,7 +254,7 @@ Expect `HTTP 200`. `HTTP 401` means the Bearer token does not match `hooks.token
 
 ## Silent failure modes (four cases)
 
-**Run the doctor first; it checks all four.** `python -m autodev.installer.doctor` (or the Health card on the dashboard's Setup & Preflight screen) covers each case with a named check and a fix hint: case 1 is `gateway_up` (plus the opt-in `--live` webhook ping), case 2 is `env_paths`, case 3 is `conversion_prompt`, and case 4 is `symlink_consistency`. The prose below is the reference documentation behind those checks: what each failure looks like, why it happens, and how to verify a fix by hand.
+**Run the doctor first; it checks all four.** `python -m autodev.installer.doctor` (or the Health card on the dashboard's Settings screen) covers each case with a named check and a fix hint: case 1 is `gateway_up` (plus the opt-in `--live` webhook ping), case 2 is `env_paths`, case 3 is `conversion_prompt`, and case 4 is `symlink_consistency`. The prose below is the reference documentation behind those checks: what each failure looks like, why it happens, and how to verify a fix by hand.
 
 ### 1. Orchestrator webhook server not running
 
@@ -616,10 +616,10 @@ Things worth knowing before you try it:
 Qwen-style models need llama-server flags to suppress inline `<think>` tokens (they corrupt JSON
 tool-call parsing) — see the Qwen notes in [CLAUDE.md](CLAUDE.md) under *Agent LLM Configuration*.
 
-Running the Docker deployment instead of bare metal? The container-side wiring (reaching a host
-model server through `host.docker.internal`, pointing roles at it via the `*_MODEL` variables,
-raising the reviewer backstop from `deploy/.env`) is documented in
-[deploy/README.md](deploy/README.md) under "Local models on the host". The notes above apply
+Running the Docker deployment instead of bare metal? The container wires the provider for you:
+one `LOCAL_MODEL_URL` line in `deploy/.env` (or the setup screen's detected-server card on a
+keyless boot) generates the provider entry, and roles point at it via the `*_MODEL` variables.
+See [deploy/README.md](deploy/README.md) under "Local models on the host". The notes above apply
 unchanged there.
 
 ---
