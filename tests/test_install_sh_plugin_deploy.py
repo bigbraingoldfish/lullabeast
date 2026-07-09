@@ -80,6 +80,17 @@ def test_deployed_plugin_perms_normalized(install_sh_code):
     )
 
 
+def test_plugin_build_uses_npm_ci(install_sh_code):
+    """The plugin build must prefer `npm ci`: `npm install` can rewrite the
+    tracked package-lock.json, which dirties a bind-mounted working tree
+    (dev container) and then blocks every later `git pull` there — the user
+    keeps running stale code with no visible error."""
+    assert "npm ci --silent" in install_sh_code, (
+        "install.sh must run `npm ci` for the plugin build; `npm install` "
+        "rewrites the tracked package-lock.json and wedges bind-mounted trees"
+    )
+
+
 def test_plugin_validation_failure_prints_diagnostics_before_fatal_warn(install_sh_code):
     """Owned mode exits on the first warn, so the inspect/perms diagnostics
     must precede it or a validation failure dies mute (the original Windows
