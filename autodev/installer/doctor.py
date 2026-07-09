@@ -88,6 +88,22 @@ _REPO_ROOT_DEFAULT = os.path.dirname(
 )
 
 
+def _agent_primary_model(agent: dict) -> str | None:
+    """The agent's primary model string, tolerating both schemas.
+
+    OpenClaw accepts ``model: "provider/id"`` (plain string, common in older
+    or hand-written configs) as well as ``model: {primary: ...}``. A migrated
+    config can carry either; assuming the dict form crashes the doctor on the
+    string form (observed live on a migrated config, 2026-07-09)."""
+    model = agent.get("model")
+    if isinstance(model, str):
+        return model
+    if isinstance(model, dict):
+        primary = model.get("primary")
+        return primary if isinstance(primary, str) else None
+    return None
+
+
 def probe_timeout() -> float:
     """Bounded-probe timeout in seconds. Env DOCTOR_PROBE_TIMEOUT, default 5."""
     raw = (os.environ.get("DOCTOR_PROBE_TIMEOUT") or "").strip()
@@ -1019,7 +1035,7 @@ def check_local_model_completeness(config: dict) -> CheckResult:
     for agent in ((data.get("agents") or {}).get("list") or []):
         if not isinstance(agent, dict):
             continue
-        primary = (agent.get("model") or {}).get("primary")
+        primary = _agent_primary_model(agent)
         if isinstance(primary, str) and primary.startswith("local/"):
             refs.setdefault(primary[len("local/"):], []).append(agent.get("id") or "?")
     if not refs:
@@ -1098,7 +1114,7 @@ def check_model_modality(config: dict) -> CheckResult:
     primaries: dict = {}
     for agent in ((data.get("agents") or {}).get("list") or []):
         if isinstance(agent, dict) and agent.get("id") in _VISION_ROLES:
-            primary = (agent.get("model") or {}).get("primary")
+            primary = _agent_primary_model(agent)
             if isinstance(primary, str) and "/" in primary:
                 primaries[agent["id"]] = primary
     if not primaries:
