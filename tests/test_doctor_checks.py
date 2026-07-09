@@ -51,7 +51,7 @@ EXPECTED_CHECK_IDS = [
     "webhook_ping", "plugin_deployed", "plugin_hooks_registered",
     "exec_approvals", "symlink_consistency", "stale_lock", "playwright",
     "ui_token", "ports", "provider_key", "local_model_completeness",
-    "template_conformance",
+    "model_modality", "template_conformance",
 ]
 
 
@@ -213,14 +213,15 @@ class TestAllGreen:
             if c.status not in ("ok", "skipped")
         }
         assert bad == {}, f"non-green checks in the green fixture: {bad}"
-        # Exactly four checks skip in the bare-metal green fixture:
+        # Exactly five checks skip in the bare-metal green fixture:
         # webhook_ping without --live, template_conformance outside
         # owned-OpenClaw mode, provider_key with no container setup paths
-        # configured, and local_model_completeness with no local/ role model.
+        # configured, local_model_completeness with no local/ role model, and
+        # model_modality with no reviewer/executor model.primary configured.
         skipped = {cid for cid, c in by_id.items() if c.status == "skipped"}
         assert skipped == {
             "webhook_ping", "template_conformance", "provider_key",
-            "local_model_completeness",
+            "local_model_completeness", "model_modality",
         }
         assert report.overall() == "ok"
         assert report.exit_code() == 0
@@ -965,6 +966,167 @@ class TestLocalModelCompleteness:
         c = doctor.check_local_model_completeness(env)
         assert c.status == "ok"
         assert "1 role-assigned" in c.detail
+
+
+class TestModelModality:
+    """A text-only model on a vision-dependent role (reviewer/executor) rejects
+    every screenshot-bearing turn with HTTP 400 — at the LAST phase of a first
+    run, after real spend. The check resolves modality from the config-local
+    provider entry first and only falls back to the live OpenRouter probe."""
+
+    def _write(self, env, *, agents=None, openrouter_models=None):
+        data = _good_openclaw_json()
+        if agents is not None:
+            for entry in data["agents"]["list"]:
+                if entry["id"] in agents:
+                    entry["model"] = {"primary": agents[entry["id"]]}
+        if openrouter_models is not None:
+            data["models"] = {"providers": {"openrouter": {"models": openrouter_models}}}
+        with open(os.path.join(env["openclaw_root"], "openclaw.json"), "w") as f:
+            json.dump(data, f)
+
+    def _no_probe(self, monkeypatch):
+        def _boom(model_id):
+            raise AssertionError(f"unexpected live OpenRouter probe for {model_id}")
+        monkeypatch.setattr(doctor, "_openrouter_input_modalities", _boom)
+
+    def test_no_models_configured_skips(self, env):
+        c = doctor.check_model_modality(env)
+        assert c.status == "skipped"
+        assert "no reviewer/executor model" in c.detail
+
+    def test_missing_openclaw_json_skips(self, env):
+        os.remove(os.path.join(env["openclaw_root"], "openclaw.json"))
+        c = doctor.check_model_modality(env)
+        assert c.status == "skipped"
+
+    def test_text_only_reviewer_fails_config_local(self, env, monkeypatch):
+        # The likely misconfiguration path: REVIEWER_MODEL pointed at a shipped
+        # text-only model. The provider entry declares input, so no network probe.
+        self._no_probe(monkeypatch)
+        self._write(
+            env,
+            agents={
+                "reviewer": "openrouter/z-ai/glm-5.2",
+                "executor": "openrouter/moonshotai/kimi-k2.7-code",
+            },
+            openrouter_models=[
+                {"id": "z-ai/glm-5.2", "input": ["text"]},
+                {"id": "moonshotai/kimi-k2.7-code", "input": ["text", "image"]},
+            ],
+        )
+        c = doctor.check_model_modality(env)
+        assert c.status == "fail"
+        assert "reviewer=openrouter/z-ai/glm-5.2" in c.detail
+        assert "REVIEWER_MODEL" in c.fix_hint
+
+    def test_text_only_executor_warns(self, env, monkeypatch):
+        self._no_probe(monkeypatch)
+        self._write(
+            env,
+            agents={
+                "reviewer": "openrouter/moonshotai/kimi-k2.7-code",
+                "executor": "openrouter/z-ai/glm-5.2",
+            },
+            openrouter_models=[
+                {"id": "z-ai/glm-5.2", "input": ["text"]},
+                {"id": "moonshotai/kimi-k2.7-code", "input": ["text", "image"]},
+            ],
+        )
+        c = doctor.check_model_modality(env)
+        assert c.status == "warn"
+        assert "executor=openrouter/z-ai/glm-5.2" in c.detail
+
+    def test_both_multimodal_ok_without_probe(self, env, monkeypatch):
+        self._no_probe(monkeypatch)
+        self._write(
+            env,
+            agents={
+                "reviewer": "openrouter/moonshotai/kimi-k2.7-code",
+                "executor": "openrouter/minimax/minimax-m3",
+            },
+            openrouter_models=[
+                {"id": "moonshotai/kimi-k2.7-code", "input": ["text", "image"]},
+                {"id": "minimax/minimax-m3", "input": ["text", "image", "video"]},
+            ],
+        )
+        c = doctor.check_model_modality(env)
+        assert c.status == "ok"
+        assert "reviewer" in c.detail and "executor" in c.detail
+
+    def test_probe_fallback_confirms_text_only(self, env, monkeypatch):
+        # No provider entry for the reviewer's model → live probe decides.
+        self._write(
+            env,
+            agents={"reviewer": "openrouter/vendor/textmodel"},
+            openrouter_models=[],
+        )
+        probed = []
+        monkeypatch.setattr(
+            doctor, "_openrouter_input_modalities",
+            lambda mid: probed.append(mid) or ["text"],
+        )
+        c = doctor.check_model_modality(env)
+        assert c.status == "fail"
+        assert probed == ["vendor/textmodel"]
+
+    def test_probe_unreachable_skips(self, env, monkeypatch):
+        self._write(
+            env,
+            agents={"reviewer": "openrouter/vendor/mystery"},
+            openrouter_models=[],
+        )
+        monkeypatch.setattr(doctor, "_openrouter_input_modalities", lambda mid: None)
+        c = doctor.check_model_modality(env)
+        assert c.status == "skipped"
+        assert "could not verify" in c.detail
+        assert "reviewer=openrouter/vendor/mystery" in c.detail
+
+    def test_offline_never_probes(self, env, monkeypatch):
+        # OFFLINE=1 (CI/smoke): the network fallback must not fire; an
+        # undeclared model reads unverified → skipped, never fail.
+        monkeypatch.setenv("OFFLINE", "1")
+        self._no_probe(monkeypatch)
+        self._write(
+            env,
+            agents={"reviewer": "openrouter/vendor/mystery"},
+            openrouter_models=[],
+        )
+        c = doctor.check_model_modality(env)
+        assert c.status == "skipped"
+
+    def test_local_provider_entry_is_honored(self, env, monkeypatch):
+        # A local/ model with a declared text-only input on the reviewer is the
+        # same contract violation; no network involved.
+        self._no_probe(monkeypatch)
+        data = _good_openclaw_json()
+        for entry in data["agents"]["list"]:
+            if entry["id"] == "reviewer":
+                entry["model"] = {"primary": "local/qwen3.5"}
+        data["models"] = {"providers": {"local": {"models": [
+            {"id": "qwen3.5", "input": ["text"]},
+        ]}}}
+        with open(os.path.join(env["openclaw_root"], "openclaw.json"), "w") as f:
+            json.dump(data, f)
+        c = doctor.check_model_modality(env)
+        assert c.status == "fail"
+        assert "reviewer=local/qwen3.5" in c.detail
+
+    def test_local_without_input_defers(self, env, monkeypatch):
+        # A local/ entry with no input declaration belongs to
+        # local_model_completeness; this check reports unverified, not a guess.
+        self._no_probe(monkeypatch)
+        data = _good_openclaw_json()
+        for entry in data["agents"]["list"]:
+            if entry["id"] == "reviewer":
+                entry["model"] = {"primary": "local/qwen3.5"}
+        data["models"] = {"providers": {"local": {"models": [
+            {"id": "qwen3.5", "name": "qwen3.5"},
+        ]}}}
+        with open(os.path.join(env["openclaw_root"], "openclaw.json"), "w") as f:
+            json.dump(data, f)
+        c = doctor.check_model_modality(env)
+        assert c.status == "skipped"
 
 
 # ── report / CLI surface ─────────────────────────────────────────────────────

@@ -3693,13 +3693,15 @@ class Orchestrator:
         — a finished agent is left alone) that targets the ``_active_agent_*`` fields recorded by
         :meth:`_record_active_agent`, then clears them.
 
-        Two callers:
+        Three callers:
           * ``source="escalation"`` — the orchestrator gives up on a phase and hands off to the
             human; the terminal attempt is otherwise never aborted (the retry-start abort only
             stops the *prior* attempt when *launching the next* one).
           * ``source="reviewer_retry"`` — the reviewer contract-shape retry handlers
             (CONTRACT_FAILURE / *_UNVERIFIED) kill the prior reviewer run before re-invoking, so
             the re-invoke does not reattach a still-streaming embedded run.
+          * ``source="verdict_reap"`` — via :meth:`_reap_agent_session_after_verdict` at every
+            verdict-consumption point where the pipeline advances past the producing role.
 
         No-op when nothing is in-flight.  Never blocks the caller (soft-continue)."""
         key = self._active_agent_session_key
@@ -3716,6 +3718,71 @@ class Orchestrator:
         self._active_agent_session_key = None
         self._active_agent_role = None
         self._active_agent_stamp = None
+
+    def _reap_agent_session_after_verdict(self, role: str) -> None:
+        """Interrupt ``role``'s recorded session once its verdict is consumed and the
+        pipeline advances past it.
+
+        A model can write ``.done`` + a valid verdict and keep streaming (the verdict-hold
+        acceptor rightly accepts the verdict the instant it lands — see
+        ``_make_verdict_hold_acceptor``).  Nothing polls that session again, so a runaway
+        turn — e.g. an exec loop OpenClaw's own input+output-keyed block never trips —
+        burns provider spend unwatched until the key dies (observed live 2026-07-07: a
+        phase-1 planner streamed ~45 min past its PASS while the run finished).  The
+        ``skip_if_idle`` liveness gate inside :meth:`_abort_active_agent_session` keeps the
+        common already-ended turn a steer-free ``skipped_idle`` no-op.  Role-guarded so a
+        stale recording from another role is left to its own reap point."""
+        if not self._active_agent_session_key or self._active_agent_role != role:
+            return
+        self._abort_active_agent_session("verdict_reap")
+
+    def _sweep_inflight_pipeline_sessions(self, source: str = "run_exit") -> None:
+        """Terminal-exit backstop: steer-abort every pipeline agent session whose
+        transcript still shows a streaming turn when ``run()`` exits (complete /
+        stopped / halted / unhandled exception).
+
+        The per-advance reap covers the live loop; this sweep catches what it cannot
+        see — sessions recorded before a restart (the ``_active_agent_*`` tracking is
+        process-local) and attempts orphaned by crash recovery.  Scans each phase
+        role's sessions.json for ``pipeline:``-namespaced keys and steers only
+        PROVABLY in-flight turns (``_agent_turn_still_in_flight`` is True); unlike
+        the targeted aborts, an unresolvable transcript is left alone — a broad scan
+        must not inject turns into sessions it cannot read.  A steered stale session
+        terminates on its injected turn, so later sweeps see it as ended (each
+        crashed-mid-turn historical session costs at most one steer, ever).  Runs
+        while ``pipeline.lock`` is still held, so no successor orchestrator can be
+        resuming these sessions concurrently.  Best-effort: never raises."""
+        for role in ("planner", "executor", "reviewer"):
+            try:
+                sessions_json = os.path.join(
+                    OPENCLAW_ROOT, "agents", role, "sessions", "sessions.json"
+                )
+                with open(sessions_json) as f:
+                    entries = json.load(f)
+                if not isinstance(entries, dict):
+                    continue
+                role_prefix = f"agent:{role}:"
+                stamp = os.path.join(PROJECT_ARTIFACTS_DIR, f"{role}_activity.stamp")
+                for full_key in entries:
+                    if not isinstance(full_key, str) or not full_key.startswith(
+                        role_prefix + "pipeline:"
+                    ):
+                        continue
+                    bare_key = full_key[len(role_prefix):]
+                    if self._agent_turn_still_in_flight(role, bare_key) is not True:
+                        continue
+                    print(f"[SWEEP] in-flight {role} session at run exit: {full_key}")
+                    self._interrupt_agent_session(
+                        role=role,
+                        session_key=bare_key,
+                        stamp_path=stamp,
+                        source=source,
+                        skip_if_idle=True,
+                    )
+            except (OSError, ValueError):
+                continue  # no sessions.json / unreadable — nothing to sweep for this role
+            except Exception as e:
+                print(f"[WARN] run-exit session sweep failed for {role}: {e}")
 
     def _handle_stall_outcome(
         self,
@@ -6932,6 +6999,10 @@ class Orchestrator:
                     else:
                         gate_passed = self.run_planner_output_gate()
                         if gate_passed:
+                            # Verdict consumed — stop the planner session if its turn
+                            # is still streaming past the verdict (skipped_idle no-op
+                            # when the turn already ended).
+                            self._reap_agent_session_after_verdict("planner")
                             # Drain an optional planner scope_warning into a
                             # scope_warning event + last_scope_warning stash (the
                             # read-side consumer for the descope signal; surfaces
@@ -6971,7 +7042,12 @@ class Orchestrator:
                             )  # W1-F
                             self.write_failure_context("planner", self.state.get("planner_retries", 0) + 1)
                             retries = self.increment_planner_retries()
-                            
+                            # FAIL consumed — the retry gets a fresh session, so a
+                            # still-streaming rejected turn must not race it. (After
+                            # the provider check above: the steer's injected turn
+                            # would overwrite the transcript row that check reads.)
+                            self._reap_agent_session_after_verdict("planner")
+
                     if retries >= 3:
                         self.state["current_agent"] = "escalation"
                         self.state["escalation_trigger_class"] = "planner_retries_exhausted"  # P1-B
@@ -6999,6 +7075,9 @@ class Orchestrator:
                             print("[INFO] [EX-RR] Surviving executor output found — running gate before escalating.")
                             if self.run_executor_output_gate():
                                 print("[INFO] [EX-RR] Gate passed — advancing to reviewer instead of escalating.")
+                                # The surviving output came from an orphaned session that may
+                                # still be streaming — reap it before the reviewer starts.
+                                self._reap_agent_session_after_verdict("executor")
                                 _ps_rr = self.read_phase_state()
                                 _ps_rr.pop("last_error_code", None)
                                 _ps_rr["executor_succeeded"] = True
@@ -7274,6 +7353,10 @@ class Orchestrator:
                     if outcome == "executor_succeeded":
                         gate_passed = self.run_executor_output_gate()
                         if gate_passed:
+                            # Verdict consumed — reap a turn still streaming past it.
+                            # (The gate-FAIL arm needs no reap: the retry-start abort
+                            # stops the prior attempt before invoking the next one.)
+                            self._reap_agent_session_after_verdict("executor")
                             # P1 Stage F — advisory; never affects gate verdict.
                             # Drains executor_advisory_detail.json into pipeline
                             # events so the UI shows reachability findings.
@@ -7320,6 +7403,7 @@ class Orchestrator:
                         gate_passed = self.run_executor_output_gate()
                         if gate_passed:
                             print("[INFO] [EXECUTOR] Preempted executor output passed gate — treating as succeeded.")
+                            self._reap_agent_session_after_verdict("executor")
                             _ps_ep = self.read_phase_state()
                             _ps_ep.pop("last_error_code", None)
                             self.write_phase_state_atomic(_ps_ep)
@@ -7656,6 +7740,9 @@ class Orchestrator:
 
                     if gate_result == "PASS":
                         _write_pipeline_event("gate_pass", raw_id, "reviewer", {})  # W1-F
+                        # Verdict consumed — reap BEFORE the git block below: a reviewer
+                        # still streaming past its PASS could mutate the tree mid-merge.
+                        self._reap_agent_session_after_verdict("reviewer")
                         _ps_rv = self.read_phase_state()
                         _ps_rv.pop("last_error_code", None)
                         self.write_phase_state_atomic(_ps_rv)
@@ -7928,6 +8015,9 @@ class Orchestrator:
                             continue
                         break
                     elif gate_result == "ROUTE_EXECUTOR":
+                        # Rejection consumed — a reviewer still streaming past its
+                        # verdict must not race the executor re-run it triggered.
+                        self._reap_agent_session_after_verdict("reviewer")
                         self.set_reviewer_rejected()
                         # Augment failure_context.json with reviewer-handoff
                         # metadata so the next executor pass can distinguish
@@ -7992,6 +8082,7 @@ class Orchestrator:
                         continue
 
                     elif gate_result == "ROUTE_PLANNER":
+                        self._reap_agent_session_after_verdict("reviewer")
                         self.increment_reviewer_retries()
                         # RR-2 (Phase 4): Clear planner_output_preserved so crash-recovery skip
                         # does not fire on this intentional re-run (ROUTE_PLANNER explicitly
@@ -8033,6 +8124,10 @@ class Orchestrator:
                                 f"Reviewer MISSING_ARTIFACTS: artifact retry cap reached ({_ma_retries})",
                             )
                         else:
+                            # Verdict consumed and the executor re-runs next — reap a
+                            # reviewer turn still streaming past it. (The cap arm above
+                            # escalates; the escalation dispatch owns that abort.)
+                            self._reap_agent_session_after_verdict("reviewer")
                             # Re-invoke executor; the directive is delivered as the
                             # webhook message= by _invoke_executor (one-shot). It must be
                             # self-contained because message= replaces the executor's
@@ -8580,6 +8675,10 @@ class Orchestrator:
                     {"failed_at": datetime.now(timezone.utc).isoformat()},
                 )
         finally:
+            # Terminal-exit backstop: no pipeline agent session may keep streaming
+            # (burning provider spend) after the orchestrator stops watching. Runs
+            # while the lock is still held; never raises.
+            self._sweep_inflight_pipeline_sessions()
             self.release_lock()
 
 
