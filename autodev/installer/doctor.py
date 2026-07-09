@@ -234,12 +234,12 @@ def _hooks_host_port(hooks_url: str) -> tuple[str, int]:
     return host, port
 
 
-def _http_get_json(url: str):
+def _http_get_json(url: str, max_bytes: int = 65536):
     """GET url, return (status_code, parsed_json_or_None). Raises nothing."""
     req = urllib.request.Request(url, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=probe_timeout()) as resp:
-            body = resp.read(65536)
+            body = resp.read(max_bytes)
             code = resp.status
     except urllib.error.HTTPError as e:
         return e.code, None
@@ -1055,6 +1055,103 @@ def check_local_model_completeness(config: dict) -> CheckResult:
     )
 
 
+# Vision-dependent roles: the executor captures screenshots and the reviewer performs
+# screenshot-based visual review (deploy/CONFIG-AUDIT.md). A text-only model on either
+# role rejects every image-bearing turn (HTTP 400) — a failure that surfaces at the
+# LAST phase of a first run, after real spend, instead of at boot.
+_VISION_ROLES = ("reviewer", "executor")
+OPENROUTER_ENDPOINTS_URL = "https://openrouter.ai/api/v1/models/{model_id}/endpoints"
+
+
+def _openrouter_input_modalities(model_id: str):
+    """Live-probe fallback: a model's input_modalities from OpenRouter's public
+    per-model endpoints record, or None when unverifiable (network, 404, shape)."""
+    code, data = _http_get_json(
+        OPENROUTER_ENDPOINTS_URL.format(model_id=model_id), max_bytes=524288
+    )
+    if code != 200 or not isinstance(data, dict):
+        return None
+    mods = ((data.get("data") or {}).get("architecture") or {}).get("input_modalities")
+    return mods if isinstance(mods, list) else None
+
+
+def check_model_modality(config: dict) -> CheckResult:
+    """Fail before first spend when a vision-dependent role runs a text-only model.
+
+    Config-local first: a role's ``provider/<id>`` primary is resolved against the
+    matching ``models.providers.<provider>.models[]`` entry's ``input`` list (the
+    golden template declares it for every shipped model, and the local-model boot
+    probe writes it). Only an openrouter/ model with no local declaration falls back
+    to the live OpenRouter probe — skipped under OFFLINE=1 so CI stays hermetic.
+    Confirmed text-only reviewer → fail (visual review cannot run at all); confirmed
+    text-only executor → warn (degraded on UI/INT phases). Unverifiable → skipped,
+    never a guessed verdict.
+    """
+    cid, title = "model_modality", "Reviewer/executor models accept images"
+    path = os.path.join(config.get("openclaw_root") or "", "openclaw.json")
+    data, _err = _load_openclaw_json(path)
+    if data is None:
+        return CheckResult(
+            cid, title, "skipped", "openclaw.json unavailable (see openclaw_json)",
+        )
+    providers = (data.get("models") or {}).get("providers") or {}
+    primaries: dict = {}
+    for agent in ((data.get("agents") or {}).get("list") or []):
+        if isinstance(agent, dict) and agent.get("id") in _VISION_ROLES:
+            primary = (agent.get("model") or {}).get("primary")
+            if isinstance(primary, str) and "/" in primary:
+                primaries[agent["id"]] = primary
+    if not primaries:
+        return CheckResult(cid, title, "skipped", "no reviewer/executor model configured")
+    offline = (os.environ.get("OFFLINE") or "").strip() == "1"
+    text_only, unverified, verified = [], [], []
+    for role in _VISION_ROLES:
+        primary = primaries.get(role)
+        if not primary:
+            continue
+        provider_name, _, model_id = primary.partition("/")
+        entry = None
+        provider = providers.get(provider_name)
+        if isinstance(provider, dict):
+            for m in provider.get("models") or []:
+                if isinstance(m, dict) and m.get("id") == model_id:
+                    entry = m
+                    break
+        mods = entry.get("input") if isinstance(entry, dict) else None
+        if not (isinstance(mods, list) and mods):
+            mods = (
+                _openrouter_input_modalities(model_id)
+                if provider_name == "openrouter" and not offline
+                else None
+            )
+        if not mods:
+            # None (unreachable/undeclared) or an empty list (a defensively
+            # empty probe record) both read as unverified — never a guessed
+            # text-only verdict from absent data.
+            unverified.append(f"{role}={primary}")
+        elif "image" not in mods:
+            text_only.append(f"{role}={primary}")
+        else:
+            verified.append(role)
+    if text_only:
+        status = "fail" if any(s.startswith("reviewer=") for s in text_only) else "warn"
+        return CheckResult(
+            cid, title, status,
+            "text-only model on a vision-dependent role: " + "; ".join(text_only),
+            "visual review attaches screenshots, which a text-only model rejects "
+            "(HTTP 400) on every review turn; set REVIEWER_MODEL / EXECUTOR_MODEL "
+            "(deploy/.env for the container) to a multimodal model and restart",
+        )
+    if unverified:
+        return CheckResult(
+            cid, title, "skipped",
+            "could not verify image input for " + "; ".join(unverified),
+        )
+    return CheckResult(
+        cid, title, "ok", f"image input confirmed for {', '.join(verified)}",
+    )
+
+
 def check_template_conformance(config: dict) -> CheckResult:
     # Owned-OpenClaw mode only: the container's openclaw.json is
     # rendered from deploy/openclaw.template.json, so any divergence from the
@@ -1140,6 +1237,7 @@ def run_doctor(config: dict, *, live: bool = False) -> DoctorReport:
         check_ports(config),
         check_provider_key(config),
         check_local_model_completeness(config),
+        check_model_modality(config),
         check_template_conformance(config),
     ]
     return DoctorReport(checks=checks)

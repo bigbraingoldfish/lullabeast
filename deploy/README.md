@@ -193,7 +193,10 @@ key. To wire it up:
    restart the container. Do not edit an agent's `model.primary` in the file:
    it is a template-pinned key and the per-boot reconcile reverts it. The
    executor and reviewer must stay on models that accept image input (the
-   reviewer does screenshot-based visual review on UI phases).
+   reviewer does screenshot-based visual review on UI phases). The doctor's
+   `model_modality` check enforces this at boot: a confirmed text-only
+   reviewer fails the boot with the offending `*_MODEL` named, instead of
+   surfacing as HTTP 400s at the last phase of a run.
 6. **Raise the reviewer's infrastructure backstop** for slow local
    reviewers: add `AUTODEV_INFRA_BACKSTOP_REVIEWER=10800` to `deploy/.env`.
    Compose passes it into the container environment and the orchestrator
