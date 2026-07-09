@@ -52,15 +52,42 @@ def test_plugin_install_uses_force(install_sh_code):
 
 
 def test_deployed_plugin_perms_normalized(install_sh_code):
-    """The deployed extension copy must have group/other write stripped after
-    install. A bind-mounted repo (Windows/macOS Docker) reports mode 777; the
-    install copy preserves it, OpenClaw blocks world-writable plugin paths,
-    and an owned-mode boot then crash-loops (observed live on the first
-    Windows dev-container boot, 2026-07-09)."""
-    assert 'chmod -R go-w "$OPENCLAW_ROOT/extensions/autodev-pipeline-signals"' in install_sh_code, (
-        "install.sh must chmod -R go-w the deployed plugin after "
-        "`plugins install` — bind-mounted repos deploy world-writable copies "
-        "that OpenClaw blocks, crash-looping owned-mode boots"
+    """The deployed extension copy must never be world-writable. A
+    bind-mounted repo (Windows/macOS Docker) reports mode 777; the install
+    copy preserves it, OpenClaw blocks world-writable plugin paths, and an
+    owned-mode boot then crash-loops (observed live on the first Windows
+    dev-container boot, 2026-07-09). Three layers guard it: install from a
+    sane-permission staging copy, chmod the deployed tree post-install, and
+    the entrypoint heals prior boots' trees before the gateway scans them."""
+    # Layer 1: staged install (fixes the mode at the source).
+    assert "PLUGIN_STAGE=$(mktemp -d)" in install_sh_code
+    stage_chmod = install_sh_code.find('chmod -R go-w "$PLUGIN_STAGE"')
+    stage_install = install_sh_code.find('plugins install --force "$PLUGIN_STAGE"')
+    assert stage_chmod != -1 and stage_install != -1 and stage_chmod < stage_install, (
+        "install.sh must chmod the staging copy BEFORE `plugins install` runs on it"
+    )
+    # Layer 2: post-install chmod on the deployed tree.
+    assert 'chmod -R go-w "$OPENCLAW_ROOT/extensions/autodev-pipeline-signals"' in install_sh_code
+    # Layer 3: the container entrypoint heals previously-deployed trees
+    # before the bootstrap gateway start.
+    entrypoint = _strip_shell_comments(
+        (_REPO_ROOT / "deploy" / "entrypoint.sh").read_text()
+    )
+    heal = entrypoint.find('chmod -R go-w "$OPENCLAW_ROOT/extensions"')
+    gateway_start = entrypoint.find('say "starting OpenClaw gateway (bootstrap)"')
+    assert heal != -1 and gateway_start != -1 and heal < gateway_start, (
+        "entrypoint.sh must normalize extension perms before the bootstrap gateway start"
+    )
+
+
+def test_plugin_validation_failure_prints_diagnostics_before_fatal_warn(install_sh_code):
+    """Owned mode exits on the first warn, so the inspect/perms diagnostics
+    must precede it or a validation failure dies mute (the original Windows
+    crash-loop gave no usable output)."""
+    diag = install_sh_code.find("Plugin validation diagnostics")
+    fatal = install_sh_code.find('warn "Plugin validation failed')
+    assert diag != -1 and fatal != -1 and diag < fatal, (
+        "validation diagnostics must print before the owned-mode-fatal warn"
     )
 
 

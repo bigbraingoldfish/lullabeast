@@ -478,6 +478,17 @@ finally:
     die "gateway did not listen on port $GATEWAY_PORT within 60s"
 }
 
+# Heal permissions on any previously-deployed extensions before the gateway
+# scans them: copies installed from a bind-mounted repo (Windows/macOS
+# Docker) arrived world-writable and OpenClaw blocks such plugins, which
+# fails owned-mode validation and crash-loops the boot. install.sh now
+# stages installs with sane permissions; this covers trees deployed by
+# earlier boots.
+if [ -d "$OPENCLAW_ROOT/extensions" ]; then
+    chmod -R go-w "$OPENCLAW_ROOT/extensions" 2>/dev/null \
+        || say "WARNING: could not normalize permissions under $OPENCLAW_ROOT/extensions"
+fi
+
 say "starting OpenClaw gateway (bootstrap)"
 start_gateway
 wait_for_gateway

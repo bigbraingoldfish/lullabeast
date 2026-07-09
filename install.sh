@@ -1471,15 +1471,23 @@ if command -v npm >/dev/null 2>&1; then
         || warn "Could not build plugin bundle — old OpenClaw versions may still load TS source, newer versions will refuse to load it"
 fi
 if command -v openclaw >/dev/null 2>&1; then
-    if openclaw plugins install --force "$PLUGIN_DIR" >/dev/null 2>&1; then
+    # Stage the plugin into a clean temp dir before install. A bind-mounted
+    # repo (Windows/macOS Docker) reports every file as mode 777; `plugins
+    # install` preserves the source mode on the deployed copy, and OpenClaw
+    # blocks world-writable plugin paths — which crash-loops an owned-mode
+    # boot. Installing from a sane-permission staging copy fixes the deployed
+    # mode at the source; the post-install chmod below is the second belt for
+    # filesystems where the copy still lands writable.
+    PLUGIN_STAGE=$(mktemp -d)
+    cp -a "$PLUGIN_DIR/." "$PLUGIN_STAGE/"
+    chmod -R go-w "$PLUGIN_STAGE" 2>/dev/null || true
+    PLUGIN_INSTALL_OK=0
+    openclaw plugins install --force "$PLUGIN_STAGE" >/dev/null 2>&1 && PLUGIN_INSTALL_OK=1
+    rm -rf "$PLUGIN_STAGE"
+    if [ "$PLUGIN_INSTALL_OK" = "1" ]; then
         # --force so a re-run (git pull && ./install.sh) REPLACES the existing
         # extension. Without it the CLI errors "plugin already exists" and the
         # stale bundle stays deployed while the repo source moves on.
-        # Normalize permissions on the deployed copy: a bind-mounted repo
-        # (Windows/macOS Docker) reports mode 777, the install copy preserves
-        # it, and OpenClaw blocks world-writable plugin paths — which crash-
-        # loops an owned-mode boot. The extensions tree lives on a real
-        # filesystem, so stripping group/other write sticks.
         chmod -R go-w "$OPENCLAW_ROOT/extensions/autodev-pipeline-signals" 2>/dev/null || true
         ok "Plugin installed: autodev-pipeline-signals (--force replaces any prior bundle)"
         # Ensure allowConversationAccess is set in the installed plugin entry.
@@ -1557,8 +1565,14 @@ raise SystemExit(1)
             ok "Plugin validation: required typed hooks are registered"
             PLUGIN_INSTALL_STEP="ok (validated hooks)"
         else
+            # Print diagnostics BEFORE warn: owned mode exits on the first
+            # warn, so anything after it never reaches the log.
+            info "Plugin validation diagnostics (inspect output + deployed perms):"
+            openclaw plugins inspect autodev-pipeline-signals --json 2>&1 | head -c 1500 || true
+            echo
+            ls -la "$OPENCLAW_ROOT/extensions/autodev-pipeline-signals/dist" 2>&1 || true
+            info "Expected typed hooks: agent_end, before_agent_finalize, model_call_started, model_call_ended, after_tool_call"
             warn "Plugin validation failed — run: openclaw plugins inspect autodev-pipeline-signals --json"
-            warn "Expected typed hooks: agent_end, before_agent_finalize, model_call_started, model_call_ended, after_tool_call"
             PLUGIN_INSTALL_STEP="warn (installed; inspect hooks)"
         fi
 
