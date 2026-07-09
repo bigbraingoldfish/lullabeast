@@ -23,6 +23,7 @@ DEPLOY = REPO_ROOT / "deploy"
 DOCKERFILE = (DEPLOY / "Dockerfile").read_text(encoding="utf-8")
 ENTRYPOINT = (DEPLOY / "entrypoint.sh").read_text(encoding="utf-8")
 COMPOSE_PATH = DEPLOY / "docker-compose.yml"
+DEV_COMPOSE_PATH = DEPLOY / "docker-compose.dev.yml"
 ENV_EXAMPLE = (DEPLOY / ".env.example").read_text(encoding="utf-8")
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "deploy-image.yml"
 WORKFLOW_TEXT = WORKFLOW_PATH.read_text(encoding="utf-8")
@@ -271,6 +272,142 @@ class TestCompose:
         # never pulls from a registry.
         data = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
         assert data["services"]["lullabeast"]["pull_policy"] == "build"
+
+
+class TestDevCompose:
+    """docker-compose.dev.yml: the development stack. Same image and boot
+    contract as the user stack; the deltas are the writable /app bind mount,
+    separate state/ports, and DEV_MODE=1. Hardening must stay at parity."""
+
+    def _svc(self):
+        data = yaml.safe_load(DEV_COMPOSE_PATH.read_text(encoding="utf-8"))
+        return data, data["services"]["lullabeast"]
+
+    def test_parses_single_service_distinct_project(self):
+        data, _ = self._svc()
+        assert list(data["services"].keys()) == ["lullabeast"]
+        # A distinct compose project name keeps containers/networks separate
+        # from the user stack, so both run side by side.
+        assert data["name"] == "lullabeast-dev"
+
+    def test_repo_bind_mounted_writable_at_app(self):
+        # The whole point of the dev stack: the working tree IS /app.
+        _, svc = self._svc()
+        assert "..:/app" in svc["volumes"]
+
+    def test_separate_state_volume_and_projects_dir(self):
+        data, svc = self._svc()
+        assert "lullabeast-dev-data:/data" in svc["volumes"]
+        assert "./projects-dev:/data/projects" in svc["volumes"]
+        # Volume name pinned (no compose project prefix) so migration/backup
+        # commands can address it directly.
+        assert data["volumes"]["lullabeast-dev-data"]["name"] == "lullabeast-dev-data"
+
+    def test_ports_loopback_only_and_disjoint_from_user_stack(self):
+        _, svc = self._svc()
+        ports = [str(p) for p in svc["ports"]]
+        assert len(ports) == 2
+        assert all(p.startswith("127.0.0.1:") for p in ports)
+        # Defaults 28790/28789 cannot collide with the user stack's
+        # 18790/18789; the gateway maps onto the fixed in-container 18789.
+        assert any("28790" in p for p in ports)
+        assert any(p.endswith(":18789") and "28789" in p for p in ports)
+
+    def test_dev_mode_and_port_env_wired(self):
+        _, svc = self._svc()
+        env = svc["environment"]
+        assert env["DEV_MODE"] == "1"
+        assert "DEV_UI_PORT" in str(env["UI_PORT"])
+        assert "DEV_GATEWAY_PORT" in str(env["GATEWAY_PUBLISHED_PORT"])
+
+    def test_hardening_parity_with_user_stack(self):
+        _, svc = self._svc()
+        assert svc["cap_drop"] == ["ALL"]
+        assert "cap_add" not in svc
+        assert "no-new-privileges:true" in svc["security_opt"]
+        assert not svc.get("read_only", False)
+
+    def test_env_file_shared_and_optional(self):
+        _, svc = self._svc()
+        assert svc["env_file"] == [{"path": ".env", "required": False}]
+
+    def test_host_gateway_bridge_and_init(self):
+        _, svc = self._svc()
+        assert "host.docker.internal:host-gateway" in svc["extra_hosts"]
+        assert svc["init"] is True
+
+    def test_distinct_image_tag(self):
+        # A distinct tag keeps a stale dev build from masquerading as the
+        # user image (and vice versa); both build from the same Dockerfile.
+        _, svc = self._svc()
+        assert svc["image"] == "lullabeast:dev"
+        assert svc["pull_policy"] == "build"
+        assert svc["build"]["dockerfile"] == "deploy/Dockerfile"
+
+    def test_projects_dev_gitignored(self):
+        proc = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "check-ignore", "-q", "deploy/projects-dev/x"],
+            capture_output=True,
+            timeout=30,
+        )
+        assert proc.returncode == 0, "deploy/projects-dev/ must be gitignored"
+
+
+class TestDevMode:
+    """Entrypoint DEV_MODE behavior + the container-owned config keys that
+    make a bind-mounted working tree safe to boot."""
+
+    def test_dev_mode_defaults_off(self):
+        assert 'DEV_MODE="${DEV_MODE:-0}"' in ENTRYPOINT
+
+    def test_env_keys_forced_not_merged(self):
+        # A dev bind mount brings the working tree's gitignored .env into the
+        # container carrying bare-metal paths and stale tokens; merge-only
+        # seeding would keep them and poison every derived path. The
+        # container-owned keys must be overwritten every boot.
+        assert "force_dotenv_keys" in ENTRYPOINT
+        assert "merge_dotenv_missing_keys" not in ENTRYPOINT
+
+    def test_ui_config_container_structural_keys_forced(self):
+        # Same reasoning for ui/config.json: these keys are container truth.
+        for needle in (
+            'cfg["autodev_repo_path"]',
+            'cfg["openclaw_root"]',
+            'cfg["autodev_pipeline_root"]',
+            'cfg["hooks_url"]',
+            'cfg["gateway_published_port"]',
+        ):
+            assert needle in ENTRYPOINT, f"entrypoint must seed {needle}"
+
+    def test_uvicorn_reload_only_in_dev_mode(self):
+        assert 'UVICORN_ARGS=(--host 0.0.0.0 --port "$UI_PORT")' in ENTRYPOINT
+        m = re.search(
+            r'if \[ "\$DEV_MODE" = "1" \];.*?UVICORN_ARGS\+=\(--reload',
+            ENTRYPOINT,
+            re.DOTALL,
+        )
+        assert m, "--reload must be added only behind the DEV_MODE gate"
+
+    def test_dev_deps_installed_only_in_dev_mode(self):
+        m = re.search(
+            r'if \[ "\$DEV_MODE" = "1" \];.*?requirements-dev\.txt',
+            ENTRYPOINT,
+            re.DOTALL,
+        )
+        assert m, "requirements-dev.txt install must be behind the DEV_MODE gate"
+
+    def test_gateway_link_follows_published_port(self):
+        # The banner and Settings link must point at the host-published
+        # gateway port; inside the container the gateway stays on 18789.
+        assert 'GATEWAY_LINK_PORT="${GATEWAY_PUBLISHED_PORT:-$GATEWAY_PORT}"' in ENTRYPOINT
+        assert "http://127.0.0.1:${GATEWAY_LINK_PORT}" in ENTRYPOINT
+
+    def test_control_ui_origins_extended_for_published_port(self):
+        # A remapped gateway port needs its origin allow-listed or the
+        # Control UI session hits an origin prompt. Guarded so the default
+        # port adds nothing.
+        assert "allowedOrigins" in ENTRYPOINT
+        assert 'published != "18789"' in ENTRYPOINT
 
 
 class TestGitAttributes:
@@ -852,6 +989,7 @@ class TestDocs:
             "Dockerfile",
             "entrypoint.sh",
             "docker-compose.yml",
+            "docker-compose.dev.yml",
             ".env.example",
             "Dockerfile.dockerignore",
             ".gitignore",

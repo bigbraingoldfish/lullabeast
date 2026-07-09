@@ -1,0 +1,72 @@
+# Lullabeast development container.
+#
+#   docker compose -f docker-compose.dev.yml up -d
+#
+# Same image, entrypoint, per-boot owned-mode install, and hardening posture
+# as the user deploy (docker-compose.yml), so what you develop in is what
+# users run. Three deltas make it a dev environment:
+#
+#   1. The repo working tree is bind-mounted read-write at /app: code edits on
+#      the host are live inside the container. The UI server hot-reloads;
+#      pipeline processes (orchestrator, gate scripts) are spawned fresh per
+#      run anyway, and agent identity/skill edits redeploy on the next boot.
+#      This waives the user image's read-only-code guarantee: agent-run code
+#      can write to your working tree, so your git diff is the tamper
+#      evidence. Review it before committing.
+#   2. Separate state and ports (own volume, own projects dir, UI 28790 and
+#      gateway 28789 on the host loopback), so the dev stack runs alongside a
+#      user-parity stack from docker-compose.yml with no conflicts.
+#   3. DEV_MODE=1: the entrypoint installs test deps, runs uvicorn --reload,
+#      and force-owns the gitignored .env / ui/config.json in the working
+#      tree (container paths and tokens overwrite bare-metal values; see
+#      "Development container" in README.md before your first boot).
+#
+# If your host user is not uid 1000, rebuild with
+#   --build-arg LULLABEAST_UID=$(id -u)
+# so the container user can write the bind-mounted tree.
+name: lullabeast-dev
+services:
+  lullabeast:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: lullabeast:dev
+    pull_policy: build
+    # Shares deploy/.env with the user stack (provider key, model knobs);
+    # the environment block below wins where they overlap.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DEV_MODE: "1"
+      UI_PORT: ${DEV_UI_PORT:-28790}
+      GATEWAY_PUBLISHED_PORT: ${DEV_GATEWAY_PORT:-28789}
+    ports:
+      # Loopback publish only, same rule as the user stack.
+      - "127.0.0.1:${DEV_UI_PORT:-28790}:${DEV_UI_PORT:-28790}"
+      # Inside the container the gateway always listens on 18789; the host
+      # sees it on the dev port (Settings link and banner follow it via
+      # GATEWAY_PUBLISHED_PORT).
+      - "127.0.0.1:${DEV_GATEWAY_PORT:-28789}:18789"
+    volumes:
+      # The working tree, live. Everything else matches the user stack.
+      - ..:/app
+      - lullabeast-dev-data:/data
+      - ./projects-dev:/data/projects
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    init: true
+    restart: unless-stopped
+    # Hardening parity with docker-compose.yml: the container is still the
+    # blast-radius boundary for agent-run code. The only loosening is the
+    # writable /app mount above.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  lullabeast-dev-data:
+    # Pinned so migration/backup commands can name the volume without the
+    # compose project prefix.
+    name: lullabeast-dev-data

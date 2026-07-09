@@ -5,3 +5,5 @@
 # The bind-mounted projects directory the quickstart creates next to the
 # compose file (generated project code, not repo content).
 projects/
+# Same, for the development stack (docker-compose.dev.yml).
+projects-dev/

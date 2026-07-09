@@ -158,7 +158,7 @@ The repo bundles a known-good sample project, a deliberately tiny single-file Sn
 
 ### Developing Lullabeast
 
-Contributors who want to work on the pipeline itself run bare-metal in development mode against their own OpenClaw install. That walkthrough, including the guest-mode installer, systemd/LaunchAgent units, and non-default ports, lives in **[SETUP.md](SETUP.md)**.
+Contributors develop in the **[development container](deploy/README.md#development-container)**: the same sandboxed environment users run, with the working tree bind-mounted live, on separate ports and state so it coexists with a user-parity deploy. Reference material that applies to any running instance (the project contract, failure playbooks, OpenClaw configuration, cost metrics) lives in **[SETUP.md](SETUP.md)**.
 
 ---
 
@@ -197,8 +197,6 @@ Start with the doctor: it checks every known silent-failure mode in one pass and
 docker compose exec lullabeast python -m autodev.installer.doctor
 ```
 
-Developing bare-metal? The development-install equivalents live in [SETUP.md](SETUP.md).
-
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | UI says `RUNNING` but no agents ever fire | OpenClaw gateway is down | `docker compose exec lullabeast curl -s http://localhost:18789/v1/models`; connection refused means the gateway is not up |
@@ -236,8 +234,8 @@ Pipeline state (lock, queue, event log, ideas) lives in `<repo>/.autodev/`; Open
 
 | Doc | What it covers |
 |---|---|
-| [deploy/README.md](deploy/README.md) | The Docker install: env contract, volumes, upgrades, customization, hardening |
-| [SETUP.md](SETUP.md) | Development-mode (bare-metal) setup, openclaw.json requirements, doctor reference, cost metrics |
+| [deploy/README.md](deploy/README.md) | The Docker install: env contract, volumes, upgrades, customization, hardening, the development container |
+| [SETUP.md](SETUP.md) | Reference: project contract, failure playbooks, openclaw.json requirements, doctor, cost metrics |
 | [GLOSSARY.md](GLOSSARY.md) | Dashboard terminology (pipeline/queue states, skills, metrics) |
 | [CLAUDE.md](CLAUDE.md) | Complete contributor orientation and architecture deep-dive |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup, PR conventions, adding skills |

@@ -44,6 +44,10 @@ the simplest possible form.
 - Render a square grid of 32x32 cells.
 - Each cell is 20x20 screen pixels.
 - Canvas size: 640x640 px, black background (#000000).
+- **The play area must be clearly bordered.** The page background *behind and around*
+  the canvas must be a distinct dark gray (#1A1A1A), and the canvas must carry a thin 1px
+  solid border (#333333). The black play area must never blend into the page: a player must
+  always be able to see exactly where the play boundary is.
 
 ### FR-2: Snake
 - Snake is a list of `{x, y}` grid coordinates.
@@ -86,12 +90,16 @@ the simplest possible form.
   - Occupies any existing snake segment (self-collision).
 - On game over: stop the game loop and render, centered on the canvas: "GAME OVER",
   "Score: {n}", and "Try again? (Y/N)".
-- Y restarts (full reset of snake, score, tick interval, and food). N renders
-  "Thanks for playing!" for 2 seconds, then the final frame freezes.
+- Y restarts (full reset of snake, score, tick interval, and food). N renders a two-line
+  farewell centered on the canvas: "Thank you for playing." above "What you build next is
+  completely up to you!", shown for 2 seconds, then the final frame freezes. Both lines must
+  fit fully within the canvas width (reduce the font size if needed); neither line may be clipped.
 
 ### FR-8: Score Display
 - During play, show the live score as "Score: {n}" in the top-left corner of the canvas,
-  white (#FFFFFF), monospace font.
+  white (#FFFFFF), monospace font. Draw it with `textAlign = 'left'` and
+  `textBaseline = 'top'`, inset at least 10 px from the top and left edges, so the **full**
+  label (starting with the "S") is always fully on-canvas and is never clipped by the edge.
 - **No high-score persistence**: score resets every session (shortest code path).
 
 ---
@@ -107,7 +115,7 @@ the simplest possible form.
 | EC-5 | Multiple keys pressed in one tick | Only the first valid directional input per tick is processed |
 | EC-6 | Canvas resize / unsupported browser | Static 640x640 canvas; no dynamic scaling required |
 | EC-7 | Y or N pressed during active gameplay | Ignored (Y/N only act on the game-over and win screens) |
-| EC-8 | N pressed at game over | "Thanks for playing!" shows for 2 seconds, then the final frame freezes |
+| EC-8 | N pressed at game over | The two-line farewell ("Thank you for playing." / "What you build next is completely up to you!") shows for 2 seconds, then the final frame freezes |
 
 ---
 

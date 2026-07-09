@@ -7972,9 +7972,10 @@ def get_setup_gateway_access():
     copy the token without a shell. ``available`` is false (no token) when the
     config is unresolvable, e.g. a bare-metal dev tree. The token is never logged.
 
-    The URL uses the standard 18789 port; a container that remaps the published
-    gateway port must open the UI at that port instead (the origin allow-list is
-    shipped for 18789).
+    The URL uses ``gateway.port`` unless the ``gateway_published_port`` config
+    key is set (seeded by the container entrypoint when compose publishes the
+    gateway on a different host port, e.g. the dev stack): the link must point
+    where the host browser can actually reach the gateway.
     """
     config = load_config()
     port = 18789
@@ -7986,6 +7987,12 @@ def get_setup_gateway_access():
         port = gw.get("port", 18789)
         token = ((gw.get("auth") or {}).get("token") or "").strip()
     except (OSError, ValueError):
+        pass
+    try:
+        published = int(config.get("gateway_published_port"))
+        if published > 0:
+            port = published
+    except (TypeError, ValueError):
         pass
     return {
         "available": bool(token),

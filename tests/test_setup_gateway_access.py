@@ -41,6 +41,26 @@ class TestGatewayAccess:
             data = client.get("/api/setup/gateway-access").json()
         assert data["url"] == "http://127.0.0.1:12345"
 
+    def test_url_prefers_published_port(self, tmp_path):
+        # The container entrypoint seeds gateway_published_port when compose
+        # publishes the gateway on a different host port (the dev stack); the
+        # link must point where the host browser can reach it, not at the
+        # in-container gateway.port.
+        cfg = _cfg(tmp_path, {"port": 18789, "auth": {"token": "t"}})
+        cfg["gateway_published_port"] = 28789
+        with patch("ui.server.load_config", return_value=cfg):
+            data = client.get("/api/setup/gateway-access").json()
+        assert data["url"] == "http://127.0.0.1:28789"
+        assert data["available"] is True
+
+    def test_garbage_published_port_falls_back_to_gateway_port(self, tmp_path):
+        cfg = _cfg(tmp_path, {"port": 18789, "auth": {"token": "t"}})
+        for garbage in ("not-a-port", None, -1, 0):
+            cfg["gateway_published_port"] = garbage
+            with patch("ui.server.load_config", return_value=cfg):
+                data = client.get("/api/setup/gateway-access").json()
+            assert data["url"] == "http://127.0.0.1:18789", garbage
+
     def test_unavailable_without_token(self, tmp_path):
         cfg = _cfg(tmp_path, {"port": 18789, "auth": {"mode": "token", "token": ""}})
         with patch("ui.server.load_config", return_value=cfg):

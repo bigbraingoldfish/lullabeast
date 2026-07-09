@@ -1,6 +1,6 @@
 # Lullabeast / Lullabeast UI glossary
 
-Short reference for operators and contributors. Install and networking details stay in [SETUP.md](SETUP.md). Deep pipeline rules are in `autodev/docs/PIPELINE-SPEC.md`.
+Short reference for operators and contributors. Install lives in [deploy/README.md](deploy/README.md); networking and OpenClaw configuration reference in [SETUP.md](SETUP.md). Deep pipeline rules are in `autodev/docs/PIPELINE-SPEC.md`.
 
 **UI labels vs enums.** The dashboard maps internal enums to pill labels in `ui/index.html` (`PIPELINE_LIVE_PILL` for live `pipeline_status`, `queueOnlyRowPill` / `queueRowDisplay` for queue rows). This document lists both where they differ.
 

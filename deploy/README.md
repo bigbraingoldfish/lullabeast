@@ -334,6 +334,107 @@ the `*_MODEL` variables (which the reconcile re-applies on restart), not by
 editing the file. The doctor's `template_conformance` check backs the same
 contract.
 
+## Development container
+
+`docker-compose.dev.yml` runs the same image, entrypoint, per-boot owned-mode
+install, and hardening posture as the user stack, with the repo working tree
+bind-mounted read-write at `/app`: what you develop in is exactly what users
+run, inside the same sandbox.
+
+```bash
+cd deploy
+docker compose -f docker-compose.dev.yml up -d
+```
+
+What differs from `docker-compose.yml`:
+
+- **Live code.** Host edits are live inside the container. The UI server
+  hot-reloads (`uvicorn --reload`); the orchestrator and gate scripts are
+  spawned fresh per run, so pipeline edits apply on the next run. Agent
+  identity files, skills, and the signals plugin redeploy on the next boot
+  (`docker compose -f docker-compose.dev.yml restart`).
+- **Separate everything.** Own compose project (`lullabeast-dev`), state
+  volume (`lullabeast-dev-data`), projects dir (`./projects-dev`), and ports:
+  dashboard `127.0.0.1:28790`, gateway `127.0.0.1:28789` (override with
+  `DEV_UI_PORT` / `DEV_GATEWAY_PORT`). It runs alongside a user-parity stack
+  from `docker-compose.yml` with no conflicts, so you can deploy and test the
+  user experience at any time. Both stacks share `deploy/.env` (provider key,
+  model knobs).
+- **The container owns your tree's gitignored config.** Every boot rewrites
+  the container-owned keys in the working tree's `.env` and `ui/config.json`
+  (paths, tokens, port). Tuning knobs (`AUTODEV_STALL_TIMEOUT_*`,
+  `PROVIDER_ERROR_RETRY`, ...) are preserved, but a bare-metal install in the
+  same checkout will need its config regenerated (re-run `./install.sh`) if
+  you switch back.
+- **Test deps at boot.** `requirements-dev.txt` is installed, so the suites
+  run in-container:
+
+  ```bash
+  docker compose -f docker-compose.dev.yml exec lullabeast pytest autodev/tests tests -q
+  ```
+
+- **A weaker sandbox, deliberately.** The writable `/app` mount waives the
+  user image's read-only-code guarantee: agent-run code can modify your
+  working tree. Everything else holds (non-root, no capabilities,
+  no-new-privileges, loopback publish), and your git diff is the tamper
+  evidence. Review it before committing.
+
+If your host user is not uid 1000, rebuild so the container user can write
+the bind mount: `docker compose -f docker-compose.dev.yml build
+--build-arg LULLABEAST_UID=$(id -u)`.
+
+## Migrating a bare-metal install into the container
+
+Projects, chat history (pipeline + Ideas agent sessions), and run history all
+move. Paths below are the bare-metal defaults (`OPENCLAW_ROOT=~/.openclaw`,
+`AUTODEV_PIPELINE_ROOT=<repo>/.autodev`); substitute yours from `.env`. The
+same steps fit the user stack: swap the compose file, volume name
+(`lullabeast-data` with its compose prefix), and projects dir.
+
+1. Stop the bare-metal pipeline and UI server. Boot the dev container once so
+   it provisions `/data`, then stop it:
+
+   ```bash
+   docker compose -f docker-compose.dev.yml up -d   # wait for the banner
+   docker compose -f docker-compose.dev.yml stop
+   ```
+
+2. Copy your projects into the bind mount (each carries its own git history
+   and per-project run metrics):
+
+   ```bash
+   cp -a ~/projects/<project> deploy/projects-dev/
+   ```
+
+3. Copy agent sessions, the ideas tree, and the pipeline history files into
+   the volume:
+
+   ```bash
+   docker run --rm \
+     -v lullabeast-dev-data:/data \
+     -v "$HOME/.openclaw:/src-oc:ro" \
+     -v "<repo>/.autodev:/src-ps:ro" \
+     alpine sh -c '
+       for a in planner executor reviewer escalation prd-creator roadmap-converter; do
+         mkdir -p "/data/openclaw/agents/$a"
+         cp -a "/src-oc/agents/$a/sessions" "/data/openclaw/agents/$a/" 2>/dev/null
+       done
+       cp -a /src-oc/ideas /data/openclaw/ 2>/dev/null
+       cp -a /src-ps/metrics_history /data/pipeline-state/ 2>/dev/null
+       cp /src-ps/pipeline_events*.jsonl /src-ps/runs_index.jsonl /data/pipeline-state/ 2>/dev/null
+       chown -R 1000:1000 /data/openclaw/agents /data/openclaw/ideas /data/pipeline-state'
+   ```
+
+   Copy only the Lullabeast agents' sessions (as above), not the whole
+   OpenClaw tree: do not copy `openclaw.json` (the container renders its own
+   from the golden template), `pipeline_state.json`, `pipeline.lock`, or the
+   `pipeline-project` symlink; host paths are meaningless in the container.
+
+4. Start the stack and re-add the migrated projects to the queue from the
+   dashboard (queue entries store absolute project paths, which changed).
+   Completed projects keep their run history: it lives in each project's own
+   metrics file and the history files copied above.
+
 ## Ports and exposure
 
 - **18790** (dashboard): published to `127.0.0.1` on the host only. The UI
@@ -487,6 +588,9 @@ for your own model, follow the walkthrough in [SETUP.md](../SETUP.md) under
   into setup mode and runs a watch loop that unlocks the pipeline once the
   dashboard supplies the key.
 - [docker-compose.yml](docker-compose.yml): the one-service deployment.
+- [docker-compose.dev.yml](docker-compose.dev.yml): the development stack;
+  same image and boot contract with the working tree bind-mounted at `/app`
+  (see "Development container" above).
 - [.env.example](.env.example): the environment contract, every variable
   commented.
 - [openclaw.template.json](openclaw.template.json): the canonical OpenClaw
@@ -497,7 +601,7 @@ for your own model, follow the walkthrough in [SETUP.md](../SETUP.md) under
 - [CONFIG-AUDIT.md](CONFIG-AUDIT.md): the key-by-key decision record behind
   the template, including the minimum-hardware statement.
 - [EVAL-MIGRATION.md](EVAL-MIGRATION.md): the before/after contract diff for
-  the `lullabeast-eval` sister repo (which stays on bare-metal guest mode).
+  the `lullabeast-eval` sister repo (currently a bare-metal guest install).
 - [smoke_assert.py](smoke_assert.py): the CI assertion script; validates
   the doctor's `--json` report from an `OFFLINE=1` smoke boot (run by
   [.github/workflows/deploy-image.yml](../.github/workflows/deploy-image.yml)).
