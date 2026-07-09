@@ -878,6 +878,25 @@ class TestLocalModelCompleteness:
         assert c.status == "skipped"
         assert "no agent role" in c.detail
 
+    def test_string_model_agent_does_not_crash(self, env):
+        # OpenClaw also accepts model: "provider/id" as a plain string (older
+        # or hand-written configs). A migrated openclaw.json carrying that
+        # shape crashed this check with AttributeError and failed the whole
+        # container boot (observed live 2026-07-09). Both this check and
+        # model_modality must tolerate it.
+        data = _good_openclaw_json()
+        data["agents"]["list"].append({"id": "legacy-agent", "model": "llamacpp/qwen3.6-27b"})
+        for entry in data["agents"]["list"]:
+            if entry["id"] == "executor":
+                entry["model"] = "local/qwen3.5"  # string form on a local role
+        data["models"] = {"providers": {"local": {"models": [{"id": "qwen3.5", "name": "q"}]}}}
+        with open(os.path.join(env["openclaw_root"], "openclaw.json"), "w") as f:
+            json.dump(data, f)
+        c = doctor.check_local_model_completeness(env)
+        assert c.status in ("warn", "ok")  # no crash; string local role is seen
+        m = doctor.check_model_modality(env)
+        assert m.status in ("ok", "warn", "fail", "skipped")  # no crash
+
     def test_missing_openclaw_json_skips(self, env):
         os.remove(os.path.join(env["openclaw_root"], "openclaw.json"))
         c = doctor.check_local_model_completeness(env)
