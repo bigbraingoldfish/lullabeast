@@ -1475,6 +1475,12 @@ if command -v openclaw >/dev/null 2>&1; then
         # --force so a re-run (git pull && ./install.sh) REPLACES the existing
         # extension. Without it the CLI errors "plugin already exists" and the
         # stale bundle stays deployed while the repo source moves on.
+        # Normalize permissions on the deployed copy: a bind-mounted repo
+        # (Windows/macOS Docker) reports mode 777, the install copy preserves
+        # it, and OpenClaw blocks world-writable plugin paths — which crash-
+        # loops an owned-mode boot. The extensions tree lives on a real
+        # filesystem, so stripping group/other write sticks.
+        chmod -R go-w "$OPENCLAW_ROOT/extensions/autodev-pipeline-signals" 2>/dev/null || true
         ok "Plugin installed: autodev-pipeline-signals (--force replaces any prior bundle)"
         # Ensure allowConversationAccess is set in the installed plugin entry.
         OC_CFG="$OPENCLAW_ROOT/openclaw.json"

@@ -51,6 +51,19 @@ def test_plugin_install_uses_force(install_sh_code):
     )
 
 
+def test_deployed_plugin_perms_normalized(install_sh_code):
+    """The deployed extension copy must have group/other write stripped after
+    install. A bind-mounted repo (Windows/macOS Docker) reports mode 777; the
+    install copy preserves it, OpenClaw blocks world-writable plugin paths,
+    and an owned-mode boot then crash-loops (observed live on the first
+    Windows dev-container boot, 2026-07-09)."""
+    assert 'chmod -R go-w "$OPENCLAW_ROOT/extensions/autodev-pipeline-signals"' in install_sh_code, (
+        "install.sh must chmod -R go-w the deployed plugin after "
+        "`plugins install` — bind-mounted repos deploy world-writable copies "
+        "that OpenClaw blocks, crash-looping owned-mode boots"
+    )
+
+
 def test_no_bare_plugins_install_without_force(install_sh_code):
     """There must be no active ``plugins install \"$PLUGIN_DIR\"`` lacking
     --force (the bare form is the regression we are guarding)."""
