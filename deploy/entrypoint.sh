@@ -44,11 +44,27 @@ export AUTODEV_PIPELINE_ROOT="$DATA/pipeline-state"
 export OPENCLAW_STATE_DIR="$DATA/openclaw"
 UI_PORT="${UI_PORT:-18790}"
 GATEWAY_PORT=18789
+# Host-published gateway port. The gateway always listens on 18789 inside the
+# container; the dev compose file publishes it on a different host port and
+# sets GATEWAY_PUBLISHED_PORT so the boot banner and the dashboard's Settings
+# link point where the host can actually reach it.
+GATEWAY_LINK_PORT="${GATEWAY_PUBLISHED_PORT:-$GATEWAY_PORT}"
+# DEV_MODE=1 (set by deploy/docker-compose.dev.yml): the repo at /app is a
+# bind-mounted working tree, the UI server hot-reloads, and test dependencies
+# are installed at boot. Everything else (provisioning, install, doctor,
+# supervision) is identical to a user deploy on purpose.
+DEV_MODE="${DEV_MODE:-0}"
 
 say() { echo "[lullabeast] $*"; }
 die() { echo "[lullabeast] FATAL: $*" >&2; exit 1; }
 
 cd "$APP"
+
+if [ "$DEV_MODE" = "1" ]; then
+    say "DEV MODE: /app is a bind-mounted working tree. The gitignored .env and"
+    say "ui/config.json in it are container-owned from here on (path and token"
+    say "keys are rewritten every boot); see deploy/README.md, Development container."
+fi
 
 # ── 1. Env contract ──────────────────────────────────────────────────────────
 # A provider can arrive several ways, checked in precedence order:
@@ -206,6 +222,25 @@ else:
     else:
         write_json_atomic(target, reconciled)
         print("[lullabeast] openclaw.json reconciled toward the current template")
+
+# A remapped host gateway port (dev stack) needs its origin in the Control UI
+# allow-list or the browser session hits an origin prompt. Additive and
+# reconcile-safe: the template matches scalar lists by membership, so extra
+# origins survive every later boot.
+published = (os.environ.get("GATEWAY_PUBLISHED_PORT") or "").strip()
+if published.isdigit() and published != "18789":
+    with open(target, encoding="utf-8") as f:
+        cfg = json.load(f)
+    origins = (
+        cfg.setdefault("gateway", {})
+        .setdefault("controlUi", {})
+        .setdefault("allowedOrigins", [])
+    )
+    wanted = [f"http://127.0.0.1:{published}", f"http://localhost:{published}"]
+    if any(o not in origins for o in wanted):
+        origins.extend(o for o in wanted if o not in origins)
+        write_json_atomic(target, cfg)
+        print(f"[lullabeast] Control UI origins extended for published gateway port {published}")
 PY
 }
 
@@ -324,13 +359,15 @@ PY
 render_reconcile_config
 wire_or_probe_local_models
 
-# Pre-seed /app/.env before install.sh runs so its merge (which never
-# overwrites an existing key) adopts the container paths and the persisted
-# tokens instead of generating bare-metal defaults.
+# Assert the container-owned keys in /app/.env before install.sh runs, so its
+# merge (which never overwrites an existing key) adopts the container paths
+# and the persisted tokens. Forced, not merged: on a dev bind mount the
+# working tree's .env carries bare-metal paths and stale tokens that would
+# otherwise poison config. Every other line (tuning knobs) is preserved.
 python3 - <<'PY'
 import os
-from autodev.installer.setup_helpers import merge_dotenv_missing_keys
-merge_dotenv_missing_keys(
+from autodev.installer.setup_helpers import force_dotenv_keys
+result = force_dotenv_keys(
     os.path.join(os.environ["AUTODEV_REPO_PATH"], ".env"),
     {
         "OPENCLAW_ROOT": os.environ["OPENCLAW_ROOT"],
@@ -340,6 +377,12 @@ merge_dotenv_missing_keys(
         "AUTODEV_UI_TOKEN": os.environ["AUTODEV_UI_TOKEN"],
     },
 )
+if result.startswith("error:"):
+    # Unwritable /app (dev bind mount with a mismatched uid): the working
+    # tree's bare-metal .env would poison every derived path. Fail the boot
+    # here, where the cause is legible, not downstream.
+    raise SystemExit(f"[lullabeast] FATAL: cannot write /app/.env ({result}); "
+                     "on a dev bind mount rebuild with --build-arg LULLABEAST_UID=$(id -u)")
 PY
 
 # Seed the UI port and the container-only setup paths into ui/config.json.
@@ -350,6 +393,9 @@ PY
 # host to probe for a local model server; bare-metal installs leave them unset
 # and those surfaces degrade to "unsupported". install.sh preserves every key
 # it does not own, so all of this survives the owned-mode run below.
+# The container-structural keys (repo path, roots, hooks_url) are asserted
+# too: on a dev bind mount the working tree's ui/config.json carries
+# bare-metal values that would otherwise poison every path the server derives.
 UI_PORT="$UI_PORT" \
 PROVIDER_KEY_FILE="$PROVIDER_KEY_FILE" \
 SETUP_MARKER="$SETUP_MARKER" \
@@ -370,6 +416,18 @@ cfg["port"] = int(os.environ["UI_PORT"])
 cfg["provider_key_path"] = os.environ["PROVIDER_KEY_FILE"]
 cfg["setup_marker_path"] = os.environ["SETUP_MARKER"]
 cfg["projects_dir"] = os.environ["DATA_PROJECTS"]
+cfg["autodev_repo_path"] = os.environ["AUTODEV_REPO_PATH"]
+cfg["openclaw_root"] = os.environ["OPENCLAW_ROOT"]
+cfg["autodev_pipeline_root"] = os.environ["AUTODEV_PIPELINE_ROOT"]
+# The gateway always listens on 18789 inside the container.
+cfg["hooks_url"] = "http://localhost:18789/hooks/agent"
+# Host-published gateway port, when remapped (dev stack): the Settings
+# screen's gateway link must point where the host can reach it.
+published = (os.environ.get("GATEWAY_PUBLISHED_PORT") or "").strip()
+if published.isdigit():
+    cfg["gateway_published_port"] = int(published)
+else:
+    cfg.pop("gateway_published_port", None)
 # The docker bridge host the UI server's local-model setup surface probes; its
 # presence is what gates that surface (bare metal leaves it unset).
 cfg["local_model_probe_host"] = DEFAULT_BRIDGE_HOST
@@ -431,6 +489,13 @@ wait_for_gateway
 say "running install.sh --owned-openclaw (every boot; the image repo is the source of truth)"
 bash "$APP/install.sh" --owned-openclaw --skip-playwright
 
+# Dev stacks run the test suites in-container; the user image stays lean.
+if [ "$DEV_MODE" = "1" ]; then
+    say "DEV MODE: installing test dependencies (requirements-dev.txt)"
+    pip install -q -r "$APP/requirements-dev.txt" \
+        || say "WARNING: requirements-dev.txt install failed; pytest may be unavailable"
+fi
+
 # ── 4. Gateway restart + doctor ──────────────────────────────────────────────
 # The gateway reads the plugin bundle and agent registrations at start, so the
 # bundle install.sh just deployed needs a restart to actually load.
@@ -485,7 +550,15 @@ trap 'shutdown; exit 0' TERM INT
 # port to the host's loopback only, and connections arriving through docker's
 # proxy carry a non-loopback source address, which the server refuses unless
 # AUTODEV_UI_TOKEN is set (it always is here; exported above).
-python3 -m uvicorn ui.server:app --host 0.0.0.0 --port "$UI_PORT" &
+UVICORN_ARGS=(--host 0.0.0.0 --port "$UI_PORT")
+if [ "$DEV_MODE" = "1" ]; then
+    # Hot-reload the UI server on working-tree edits. Only the server needs
+    # it: the orchestrator and gate scripts are spawned fresh per run, agent
+    # files redeploy on the next boot's install.
+    UVICORN_ARGS+=(--reload --reload-dir "$APP/ui" --reload-dir "$APP/autodev"
+        --reload-exclude "*/node_modules/*")
+fi
+python3 -m uvicorn ui.server:app "${UVICORN_ARGS[@]}" &
 UI_PID=$!
 
 # Host installs run these from cron; a container has no crontab, so they run
@@ -513,7 +586,10 @@ dashboard_url() { echo "http://127.0.0.1:${UI_PORT}/?token=${AUTODEV_UI_TOKEN}";
 # echo/say/die secret-echo lint (printf is not matched anyway).
 banner_dashboard_line() {
     printf '\033[1;32m  Dashboard:  %s\033[0m\n' "$(dashboard_url)"
-    echo "  OpenClaw gateway (model management): http://127.0.0.1:${GATEWAY_PORT}"
+    echo "  OpenClaw gateway (model management): http://127.0.0.1:${GATEWAY_LINK_PORT}"
+    if [ "$DEV_MODE" = "1" ]; then
+        echo "  DEV MODE: /app is your working tree; the UI server hot-reloads."
+    fi
 }
 
 banner_up() {

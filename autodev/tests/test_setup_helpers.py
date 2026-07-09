@@ -298,6 +298,50 @@ def test_set_dotenv_key_replaces_existing_value(tmp_path):
     assert "AUTODEV_HOOKS_TOKEN=old" not in text
 
 
+def test_force_dotenv_keys_overwrites_and_preserves_other_lines(tmp_path):
+    # The container entrypoint's seeding path: a dev bind mount carries a
+    # bare-metal .env whose path/token keys must be overwritten while tuning
+    # knobs and comments survive verbatim.
+    envp = tmp_path / ".env"
+    envp.write_text(
+        "# host file\n"
+        "OPENCLAW_ROOT=~/.openclaw\n"
+        "AUTODEV_STALL_TIMEOUT_EXECUTOR=1800\n"
+        "AUTODEV_UI_TOKEN=stale\n"
+    )
+    r = setup_helpers.force_dotenv_keys(
+        str(envp),
+        {"OPENCLAW_ROOT": "/data/openclaw", "AUTODEV_UI_TOKEN": "fresh", "NEW_KEY": "v"},
+    )
+    assert r == "updated"
+    text = envp.read_text()
+    assert "OPENCLAW_ROOT=/data/openclaw" in text
+    assert "~/.openclaw" not in text
+    assert "AUTODEV_UI_TOKEN=fresh" in text
+    assert "stale" not in text
+    assert "AUTODEV_STALL_TIMEOUT_EXECUTOR=1800" in text
+    assert "# host file" in text
+    assert "NEW_KEY=v" in text
+
+
+def test_force_dotenv_keys_creates_missing_file_and_is_idempotent(tmp_path):
+    envp = tmp_path / ".env"
+    pairs = {"A": "1", "B": "2"}
+    assert setup_helpers.force_dotenv_keys(str(envp), pairs) == "created"
+    assert setup_helpers.force_dotenv_keys(str(envp), pairs) == "unchanged"
+    text = envp.read_text()
+    assert text.count("A=1") == 1 and text.count("B=2") == 1
+
+
+def test_force_dotenv_keys_dedupes_repeated_key(tmp_path):
+    envp = tmp_path / ".env"
+    envp.write_text("K=one\nK=two\n")
+    assert setup_helpers.force_dotenv_keys(str(envp), {"K": "three"}) == "updated"
+    text = envp.read_text()
+    assert text.count("K=") == 1
+    assert "K=three" in text
+
+
 # ---------------------------------------------------------------------------
 # Context-limit truncation seeding (bootstrapMaxChars / postCompaction*).
 #

@@ -438,6 +438,69 @@ def merge_dotenv_missing_keys(env_path: str, pairs: dict[str, str]) -> str:
     return "unchanged"
 
 
+def force_dotenv_keys(env_path: str, pairs: dict[str, str]) -> str:
+    """Set or replace each ``KEY=value`` in ``.env`` (single atomic write).
+
+    The overwrite counterpart of :func:`merge_dotenv_missing_keys`, for keys
+    whose value is environment-owned truth (the container's path and token
+    keys) rather than operator-tunable knobs. Existing values for the given
+    keys are replaced in place; every other line is preserved verbatim.
+
+    Returns: created | updated | unchanged | error:<msg>
+    """
+    path = os.path.abspath(env_path)
+    clean = {k.strip(): str(v) for k, v in pairs.items() if k.strip()}
+    if not clean:
+        return "error:no keys"
+    existed = os.path.isfile(path)
+    lines: list[str] = []
+    if existed:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except OSError as e:
+            return f"error:{e}"
+    out: list[str] = []
+    replaced: set[str] = set()
+    for line in lines:
+        s = line.lstrip()
+        if s and not s.startswith("#") and "=" in s:
+            key = s.split("=", 1)[0].strip()
+            if key in clean:
+                if key not in replaced:
+                    out.append(f"{key}={clean[key]}\n")
+                    replaced.add(key)
+                continue
+        out.append(line)
+    missing = [k for k in clean if k not in replaced]
+    if missing:
+        if out and not out[-1].endswith("\n"):
+            out[-1] += "\n"
+        if not out:
+            out.append("# Lullabeast environment (written by the container entrypoint)\n")
+        for k in missing:
+            out.append(f"{k}={clean[k]}\n")
+    body = "".join(out)
+    if existed and body == "".join(lines):
+        return "unchanged"
+    parent = os.path.dirname(path) or "."
+    tmp = None
+    try:
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=parent, prefix="env_", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(body)
+        os.replace(tmp, path)
+        return "created" if not existed else "updated"
+    except Exception as e:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        return f"error:{e}"
+
+
 def read_openclaw_hooks_token(openclaw_json_path: str) -> str | None:
     """Return ``hooks.token`` from openclaw.json, or None if missing/invalid/empty."""
     path = os.path.abspath(openclaw_json_path)

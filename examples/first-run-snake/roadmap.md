@@ -8,7 +8,7 @@
   No prior phases required. Empty project directory ready for file creation.
 
   **Exit Criteria:**
-  `index.html` exists as a single file under 15 KB, contains a `<canvas>` element with width=640 height=640, initializes a snake array of 3 `{x,y}` coordinate objects at positions (14,15),(15,15),(16,15), renders the snake as green filled rectangles on a black background, and contains no external dependencies (no CDN links, no external CSS/JS files).
+  `index.html` exists as a single file under 15 KB, contains a `<canvas>` element with width=640 height=640, initializes a snake array of 3 `{x,y}` coordinate objects at positions (14,15),(15,15),(16,15), renders the snake as green filled rectangles on a black canvas background that is visually set apart from the page (dark-gray #1A1A1A page backdrop behind/around the canvas plus a thin 1px #333333 canvas border, so the play boundary is always visible), and contains no external dependencies (no CDN links, no external CSS/JS files).
 
   **TDD Requirements:**
   - `test/core-e1-canvas-render.spec.js`: Loads index.html in headless chromium, asserts `<canvas>` element exists with width=640 and height=640 attributes, reads canvas pixel data at positions corresponding to grid cells (14,15),(15,15),(16,15) and asserts green channel is dominant (snake rendered), asserts pixel at (0,0) is rgb(0,0,0) (black background).
@@ -17,6 +17,7 @@
   - [ ] `index.html` is a single file with inline CSS and JS, under 15 KB
   - [ ] Canvas element has width=640, height=640 attributes
   - [ ] Canvas background is black (#000000)
+  - [ ] Play boundary is clearly visible: dark-gray (#1A1A1A) page background behind/around the canvas and a thin 1px (#333333) canvas border, so the black play area does not blend into the page
   - [ ] Snake array initialized with 3 segments at positions (14,15),(15,15),(16,15)
   - [ ] Snake segments rendered as green (#00FF41) filled rectangles, 18x18 px centered in 20x20 cells (1px gap)
   - [ ] Snake head may use slightly brighter green (#00FF66) for optional visual distinction
@@ -28,7 +29,7 @@
   <!-- Assumed: instant start/restart with no countdown, per PRD Resolved Decision 3 -->
 
   **Behavioral Verification:**
-  - **User-observable:** A player can open the HTML file and see a black game board with a short green snake in the center.
+  - **User-observable:** A player can open the HTML file and see a black game board, clearly bordered against a slightly lighter page backdrop, with a short green snake in the center.
   - **How we'll check:** run `npx playwright test test/core-e1-canvas-render.spec.js`, expect exit code 0; the test loads index.html in headless chromium, asserts `<canvas>` width=640 height=640, reads pixel data at canvas positions corresponding to grid cells (14,15),(15,15),(16,15) and asserts green channel dominant (snake rendered), asserts pixel at (0,0) is rgb(0,0,0) (black background).
   - **If this fails, the user sees:** The game board doesn't appear or the snake isn't visible when opening the file.
 
@@ -71,7 +72,7 @@
   `CORE-E2` complete. Snake movement and input handling work. Game loop, snake array, direction state, and tick interval accessible via global scope for test inspection.
 
   **Exit Criteria:**
-  One food item rendered on canvas at a random unoccupied cell, food is red (#FF0044), eating detection works (head cell equals food cell), on eat: snake grows by 1 (tail not removed), score increments by 1, new food spawns at random unoccupied cell, tick interval reduces by 5% per food eaten (floor 50ms), score displayed on canvas in top-left corner as "Score: {n}" in white (#FFFFFF) monospace font, food respawns until empty cell found (EC-1).
+  One food item rendered on canvas at a random unoccupied cell, food is red (#FF0044), eating detection works (head cell equals food cell), on eat: snake grows by 1 (tail not removed), score increments by 1, new food spawns at random unoccupied cell, tick interval reduces by 5% per food eaten (floor 50ms), score displayed on canvas in top-left corner as "Score: {n}" in white (#FFFFFF) monospace font (drawn with textAlign='left', textBaseline='top', inset at least 10px from the top and left edges so the full label is never clipped by the canvas edge), food respawns until empty cell found (EC-1).
 
   **TDD Requirements:**
   - `test/core-e3-food-eating.spec.js`: Loads index.html, uses page.evaluate to get food position and assert it is not on any snake segment, uses page.evaluate to get score and assert 0, sends Arrow keys to navigate snake toward food position, waits for eat event, asserts snake array length increased by 1, asserts score === 1, asserts new food position differs from previous, asserts tick interval reduced from 200 to approximately 190ms (5% reduction).
@@ -84,12 +85,12 @@
   - [ ] Score increments by 1 per food eaten
   - [ ] New food spawns at random unoccupied cell after eating
   - [ ] Tick interval reduced by 5% per food (floor at 50ms minimum)
-  - [ ] Score displayed as "Score: {n}" in top-left corner, white (#FFFFFF), monospace font
+  - [ ] Score displayed as "Score: {n}" in top-left corner, white (#FFFFFF), monospace font, drawn with textAlign='left' and textBaseline='top', inset at least 10px from the top and left edges so the full label (starting with the "S") is always fully visible and never clipped
   - [ ] All tests in TDD Requirements pass
   - [ ] Reviewer agent has approved the phase output
 
   **Behavioral Verification:**
-  - **User-observable:** A player can see a red food item on the board, steer the snake to eat it, watch the snake grow and the score increase, and notice the game getting slightly faster.
+  - **User-observable:** A player can see a red food item on the board, steer the snake to eat it, watch the snake grow and the score increase, and notice the game getting slightly faster. The full "Score: {n}" label is visible in the top-left corner and is not clipped by the canvas edge.
   - **How we'll check:** run `npx playwright test test/core-e3-food-eating.spec.js`, expect exit code 0; the test loads index.html, uses page.evaluate to read food position and assert it is not on any snake segment, reads score and asserts 0, sends Arrow keys to navigate snake to food position, waits for eat, asserts snake array length increased by 1, asserts score === 1, asserts new food position differs from old, asserts tick interval reduced from 200 to ~190ms.
   - **If this fails, the user sees:** Food doesn't appear, the snake doesn't grow when passing over food, or the score doesn't update.
 
@@ -101,7 +102,7 @@
   `CORE-E3` complete. Food, eating, growth, speed, and gameplay score display all work. Game state (snake, score, tick interval, food, game mode) accessible via global scope for test inspection.
 
   **Exit Criteria:**
-  Start screen renders on page load with "SNAKE" title, "Controls: Arrow Keys" subtitle, "Press ENTER to start" prompt (all canvas text, green on black), ENTER starts game, wall collision detected (x/y out of 0-31 bounds), self-collision detected (head in body array excluding head), on collision: clearInterval and render "GAME OVER" + "Score: {n}" + "Try again? (Y/N)" centered on canvas, Y key resets and restarts game, N key shows "Thanks for playing!" for 2 seconds then freezes, win condition (snake length 1024) shows "YOU WIN!" with "Play again? (Y/N)", Y/N keys ignored during active gameplay (EC-7), keys before start ignored except ENTER (EC-4), food spawn capped at 2000 retries before triggering win condition (EC-3 mitigation).
+  Start screen renders on page load with "SNAKE" title, "Controls: Arrow Keys" subtitle, "Press ENTER to start" prompt (all canvas text, green on black), ENTER starts game, wall collision detected (x/y out of 0-31 bounds), self-collision detected (head in body array excluding head), on collision: clearInterval and render "GAME OVER" + "Score: {n}" + "Try again? (Y/N)" centered on canvas, Y key resets and restarts game, N key shows a two-line centered farewell ("Thank you for playing." above "What you build next is completely up to you!", both lines fully within the canvas width, font reduced if needed so neither is clipped) for 2 seconds then freezes, win condition (snake length 1024) shows "YOU WIN!" with "Play again? (Y/N)", Y/N keys ignored during active gameplay (EC-7), keys before start ignored except ENTER (EC-4), food spawn capped at 2000 retries before triggering win condition (EC-3 mitigation).
 
   <!-- Assumed: no localStorage high score persistence, per PRD Resolved Decision 4 -->
 
@@ -115,7 +116,7 @@
   - [ ] Self-collision detected (head coordinate exists in body array excluding head)
   - [ ] On collision: clearInterval, render "GAME OVER" (large, centered), "Score: {n}" (below), "Try again? (Y/N)" (below score)
   - [ ] Y key: full reset (snake, score, tick interval, food) and restart game loop
-  - [ ] N key: show "Thanks for playing!" for 2 seconds, then freeze on final frame (EC-8)
+  - [ ] N key: show a two-line centered farewell ("Thank you for playing." / "What you build next is completely up to you!", both lines fully within the canvas width so neither is clipped) for 2 seconds, then freeze on final frame (EC-8)
   - [ ] Win condition: snake length 1024 triggers "YOU WIN!" with "Play again? (Y/N)" (EC-3)
   - [ ] Food spawn capped at 2000 retries before triggering win condition
   - [ ] Y/N keys ignored during gameplay (EC-7)

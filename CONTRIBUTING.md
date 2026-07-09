@@ -4,57 +4,35 @@ This project follows a [Code of Conduct](CODE_OF_CONDUCT.md) (the Contributor Co
 
 ## Development setup
 
+Development happens in the **development container** ([deploy/README.md, "Development container"](deploy/README.md#development-container)): the exact sandbox users run, with your working tree bind-mounted live, the UI server hot-reloading, and the test suites runnable in-container.
+
 ```bash
 git clone <this-repo> autodev-ui
-cd autodev-ui
-cp .env.example .env          # fill in AUTODEV_REPO_PATH and optionally AUTODEV_HOOKS_TOKEN
-source .env
-pip install -r ui/requirements.txt
+cd autodev-ui/deploy
+docker compose -f docker-compose.dev.yml up -d
 ```
 
-Start the server:
-
-```bash
-source .env
-uvicorn ui.server:app --host 127.0.0.1 --port 18790
-```
-
-The UI is available at `http://127.0.0.1:18790`. For full pipeline functionality you also need a running OpenClaw instance on `localhost:18789`. The UI server can be started and tested independently.
+The boot log prints the dashboard URL (default `http://127.0.0.1:28790`, tokenized). Edits to `ui/` and `autodev/` are live; pipeline processes spawn fresh per run, and agent files, skills, and the plugin redeploy on a container restart.
 
 ## Running tests
 
-There are two test suites. Both must pass before any PR is merged.
-
-**Pipeline tests** (orchestration, sentinel, skill injection — no running OpenClaw required):
+Two suites; both must pass before any PR is merged. Run them inside the dev container (`requirements-dev.txt` is installed at boot):
 
 ```bash
-source .env
-pytest autodev/tests/ -q
+docker compose -f docker-compose.dev.yml exec lullabeast pytest autodev/tests -q   # pipeline (no running OpenClaw needed)
+docker compose -f docker-compose.dev.yml exec lullabeast pytest tests -q           # UI server + frontend
 ```
 
-**UI server tests** (FastAPI routes + frontend):
+**Browser end-to-end tests** (`tests/test_browser_path_selector.py`) drive a real Chromium through Playwright's *Python* bindings against the live server. The dev container has all three prerequisites (the `playwright` package from `requirements-dev.txt`, the baked Chromium, the running server); authentication is a deliberate explicit opt-in via `AUTODEV_UI_E2E_TOKEN` (these tests add/delete queue rows and touch recents):
 
 ```bash
-source .env
-pytest tests/ -q
+docker compose -f docker-compose.dev.yml exec lullabeast bash -c \
+  'AUTODEV_UI_E2E_URL=http://127.0.0.1:$UI_PORT \
+   AUTODEV_UI_E2E_TOKEN=$(cat /data/secrets/ui_token) \
+   pytest tests/test_browser_path_selector.py -q'
 ```
 
-If you run without `.env` loaded, set the path explicitly:
-
-```bash
-AUTODEV_REPO_PATH=$(pwd) pytest tests/ -q
-```
-
-**Browser end-to-end tests** (`tests/test_browser_path_selector.py`) drive a real Chromium through Playwright's *Python* bindings — an optional dev dependency pinned in `requirements-dev.txt`. They need the package, the browser binary, **and** a running UI server:
-
-```bash
-pip install -r requirements-dev.txt              # installs the `playwright` package
-playwright install chromium                       # one-time: fetches the browser binary
-source .env && uvicorn ui.server:app --host 127.0.0.1 --port 18790   # in another shell
-AUTODEV_UI_E2E_TOKEN=$AUTODEV_UI_TOKEN pytest tests/test_browser_path_selector.py -q
-```
-
-On a token-protected dashboard (`AUTODEV_UI_TOKEN` set — the default for `install.sh` installs), `AUTODEV_UI_E2E_TOKEN` is how the tests authenticate; it is a deliberate explicit opt-in (these tests add/delete queue rows and touch recents), so they never pick up `AUTODEV_UI_TOKEN` from a sourced `.env` on their own. A wrong token **fails** loudly; a token-protected server without the opt-in **skips** with a hint. If the package, the Chromium binary, or the server is absent, the module likewise **skips loudly** with an actionable reason instead of erroring — but a skip is not a pass, so set up all three before relying on these tests.
+A wrong token **fails** loudly; a token-protected server without the opt-in **skips** with a hint. If the package, the Chromium binary, or the server is absent, the module likewise **skips loudly** with an actionable reason instead of erroring — but a skip is not a pass.
 
 **Path fixture rule:** `/home/pi/` paths are not acceptable in test fixtures. Use `tmp_path` (pytest's built-in fixture) for all temporary directories. Tests that hard-code machine-specific paths will be rejected.
 
