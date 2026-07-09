@@ -1464,8 +1464,13 @@ PLUGIN_INSTALL_STEP="not attempted"
 # TS if the build tools are missing — older OpenClaw versions still accept
 # the source path.
 if command -v npm >/dev/null 2>&1; then
+    # npm ci, not npm install: install can rewrite the TRACKED
+    # package-lock.json, which dirties a bind-mounted working tree and then
+    # blocks every later `git pull` there (stale code forever). ci installs
+    # the exact lockfile and never modifies it; fall back to install only
+    # when there is no lockfile to honor.
     ( cd "$PLUGIN_DIR" \
-        && npm install --silent >/dev/null 2>&1 \
+        && { npm ci --silent >/dev/null 2>&1 || npm install --silent >/dev/null 2>&1; } \
         && npm run --silent build >/dev/null 2>&1 ) \
         && info "Plugin compiled to $PLUGIN_DIR/dist/index.js" \
         || warn "Could not build plugin bundle — old OpenClaw versions may still load TS source, newer versions will refuse to load it"
