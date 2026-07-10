@@ -6,6 +6,13 @@ This project follows [Semantic Versioning](https://semver.org/). The first publi
 
 ## [Unreleased]
 
+### Changed
+- **The activity feed no longer calls a failing attempt "succeeded."** When an agent finished its turn but the work then failed its gate check, the feed printed "attempt N succeeded" twice directly above the failure row — "succeeded" only ever meant "the agent finished writing output," but it read as a pass reversed moments later. The finished-turn row now reads "finished, gate check next," and rows that repeated an adjacent row or recorded a no-op (the duplicate poll summary, the reviewer verdict the pass/fail row restates, skipped no-op session interrupts, the reachability not-applicable notice) no longer render in the feed — they remain in the event log and the Pipeline log tab. The gate-failure row now spells out every reviewer routing decision in plain English and names the agent whose output was rejected, so a failure, retry, or escalation reads as one clear story at a glance.
+
+### Fixed
+- **Live feed events landing in the same second no longer vanish.** The feed's duplicate guard compared timestamps alone (1-second resolution), so when two events shared a second — which the attempt-finished pair always does — the second one was silently dropped from the live view until a page refresh. Deduplication now keys on the full event identity.
+- **Every pipeline event now renders with a curated label and plain-English summary.** Five diagnostic events (sentinel holds, degraded token capture, planner scope notes, failed queue revivals) fell through to raw snake-case labels with raw detail — and they fire during exactly the moments an operator is squinting at the feed. Each now gets the same label, category dot, hover description, and prose as the rest.
+
 ### Added
 - **Ideas chat and roadmap-generation hiccups now leave a paper trail.** Turn timeouts and stalls, late-arriving replies the server heals, rescued stranded replies, and the roadmap converter's timeouts, empty outputs, and late salvages each append one event to the same log the activity feed already reads. A "the chat felt flaky yesterday" report is now diagnosable from data instead of requiring a live reproduction.
 - **The Ideas chat now shows whether the agent is actually working.** While a reply is pending, the bubble reports the agent's last activity live — a working pulse, an amber shift as silence approaches the stall threshold, and an honest "quiet" state past it — the same liveness signal the pipeline Monitor gives. Backed by a new read-only `turn-status` endpoint watching the same activity stamp the server's stall detection already uses.
