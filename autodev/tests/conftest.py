@@ -37,6 +37,10 @@ for _p in [GATE_SCRIPTS_DIR, PIPELINE_DIR, OPENCLAW_DIR]:
 _ENV_KEYS_TO_SCRUB = (
     "OPENCLAW_ROOT",
     "AUTODEV_PIPELINE_ROOT",
+    # session_cleanup / heartbeat_cron self-load the repo .env at import
+    # (AUTODEV_REPO_PATH=/app in a deploy checkout); scrub so a later
+    # orchestrator reload resolves the real repo root, not the leaked value.
+    "AUTODEV_REPO_PATH",
     "AUTODEV_HOOKS_TOKEN",
     # Opt-in provider-error retry flag. Scrub so a developer's real `.env`
     # (PROVIDER_ERROR_RETRY=1, sourced into the shell) cannot flip the
