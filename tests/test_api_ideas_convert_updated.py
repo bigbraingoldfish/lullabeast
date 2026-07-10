@@ -173,9 +173,9 @@ class TestApiIdeasConvertUpdated:
              patch("ui.server.CONVERT_TIMEOUT", 1), \
              patch("ui.server.CONVERT_POLL_INTERVAL", 0.1):
             r = client.post("/api/ideas/5/convert")
-        assert r.status_code == 408
+        assert r.status_code == 504
 
-    def test_returns_408_on_timeout(self):
+    def test_returns_504_on_timeout(self):
         client = load_server()
         self._write_session("6", prd_content="## Problem\nContent.")
         mock_cls, _ = self._make_mock_aiohttp()
@@ -185,7 +185,7 @@ class TestApiIdeasConvertUpdated:
              patch("ui.server.CONVERT_TIMEOUT", 1), \
              patch("ui.server.CONVERT_POLL_INTERVAL", 0.1):
             r = client.post("/api/ideas/6/convert")
-        assert r.status_code == 408
+        assert r.status_code == 504
 
     def test_session_key_contains_idea_id(self):
         """Session key format: ideas:{id}:convert-{ts}."""

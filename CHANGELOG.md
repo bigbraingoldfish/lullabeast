@@ -13,6 +13,7 @@ This project follows [Semantic Versioning](https://semver.org/). The first publi
 - **Retrying a chat turn can no longer collide with the previous attempt.** Each retry now runs in a fresh agent session (per-attempt session keys, the same lesson the pipeline learned), so a still-streaming prior attempt cannot poison or interleave with the new one.
 - **A turn that finishes without writing a reply now says so.** When the agent signals completion but the reply is missing or empty, the chat shows an honest "finished without writing a reply" error instead of a blank bubble; the live send and the late-recovery path give the same verdict, and the empty completion signal is consumed so an immediate retry starts clean.
 - **A failed chat turn no longer triggers phantom browser retries.** Turn timeouts were reported with HTTP 408, whose transport semantics tell browsers to silently re-send the request — a failed turn could re-fire the agent several times with no user action (observed live as three ghost attempts). Definitive turn verdicts now ride HTTP 504, which browsers never auto-retry.
+- **Roadmap conversion and format correction can no longer be phantom-retried either.** The same 408-to-504 fix now covers the two remaining Ideas endpoints that reported timeouts with HTTP 408 (`/convert` and `/fix-roadmap-format`), where a silent browser re-send would have launched a duplicate converter run behind the page's back. The dashboard accepts both codes, so responses already in flight during an upgrade still resolve correctly.
 
 ## [1.0.0] - planned
 

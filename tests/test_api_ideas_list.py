@@ -353,7 +353,7 @@ class TestGetIdeasListDocFlags:
         assert response.json()[0]["has_roadmap"] is False
 
     def test_has_roadmap_true_when_draft_done_but_session_roadmap_empty(self, client, monkeypatch):
-        """Listed idea: roadmap on disk + done sentinel heals session for has_roadmap (convert 408)."""
+        """Listed idea: roadmap on disk + done sentinel heals session for has_roadmap (convert 504)."""
         client_obj, ideas_dir = client
         idea_path = self._create_listed_idea(
             ideas_dir,

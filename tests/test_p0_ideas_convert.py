@@ -152,7 +152,7 @@ class TestConvertBothSentinels:
              patch("ui.server.asyncio.sleep", new=write_only_roadmap):
             r = client.post("/api/ideas/idea-c/convert")
 
-        assert r.status_code == 408, (
+        assert r.status_code == 504, (
             "Convert must time out when verification_draft.done never lands — "
             "the contract now requires both artefacts."
         )

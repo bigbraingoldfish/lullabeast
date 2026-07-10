@@ -114,7 +114,7 @@ class TestC202ClarityCheck:
 
 class TestC202Convert:
     def test_401_from_webhook_raises_502_not_timeout(self, tmp_path):
-        """401 from gateway must return 502, not eventually return 408 (convert timeout)."""
+        """401 from gateway must return 502, not eventually return a convert timeout (504)."""
         idea_id = "idea-convert"
         _make_idea(tmp_path, idea_id)
 
@@ -126,8 +126,8 @@ class TestC202Convert:
              patch("aiohttp.ClientSession.post", new=_mock_post_401):
             resp = client.post(f"/api/ideas/{idea_id}/convert")
 
-        assert resp.status_code != 408, (
-            "Got convert timeout (408) — webhook 401 was not caught before poll loop (C2-02 unfixed)"
+        assert resp.status_code not in (408, 504), (
+            "Got convert timeout — webhook 401 was not caught before poll loop (C2-02 unfixed)"
         )
         assert resp.status_code == 502, f"Expected 502, got {resp.status_code}: {resp.text}"
 
@@ -138,7 +138,7 @@ class TestC202Convert:
 
 class TestC202FormatCorrection:
     def test_401_from_webhook_raises_502_not_timeout(self, tmp_path):
-        """401 from gateway must return 502, not eventually return 408."""
+        """401 from gateway must return 502, not eventually return a format timeout (504)."""
         idea_id = "idea-format"
         idea_path = _make_idea(tmp_path, idea_id)
         # fix-roadmap-format reads roadmap_content from session.json
@@ -154,7 +154,7 @@ class TestC202FormatCorrection:
              patch("aiohttp.ClientSession.post", new=_mock_post_401):
             resp = client.post(f"/api/ideas/{idea_id}/fix-roadmap-format")
 
-        assert resp.status_code != 408, (
-            "Got format timeout (408) — webhook 401 was not caught before poll loop (C2-02 unfixed)"
+        assert resp.status_code not in (408, 504), (
+            "Got format timeout — webhook 401 was not caught before poll loop (C2-02 unfixed)"
         )
         assert resp.status_code == 502, f"Expected 502, got {resp.status_code}: {resp.text}"
