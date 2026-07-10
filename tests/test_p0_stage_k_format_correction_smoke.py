@@ -193,12 +193,15 @@ class TestFormatCorrectionEndpointSmoke:
         validation = _validate_roadmap_content(body["roadmap_content"])
         assert validation["valid"] is False
 
-    def test_fix_roadmap_format_408_on_stall_does_not_surface_prewritten_malformed(self):
-        """A genuine stall returns 408 and does NOT surface the pre-written malformed roadmap.
+    def test_fix_roadmap_format_504_on_stall_does_not_surface_prewritten_malformed(self):
+        """A genuine stall returns 504 and does NOT surface the pre-written malformed roadmap.
+
+        504, not 408: browsers transparently re-POST a request that gets a
+        408, which would silently launch a duplicate correction run.
 
         The endpoint pre-writes the malformed input to ``roadmap_draft.md``
         before invoking the agent. If the idle-detection poll stalls (agent
-        active then silent, no ``.done``), the endpoint must 408 — NOT read
+        active then silent, no ``.done``), the endpoint must 504 — NOT read
         ``roadmap_draft.md`` back as a "corrected" result, and must not mutate
         ``session.json``. Regression guard for the ``rescue_stranded_reply_md``
         opt-out: without it the helper's sibling-``.md`` rescue would surface the
@@ -219,8 +222,8 @@ class TestFormatCorrectionEndpointSmoke:
              ):
             r = client.post("/api/ideas/fix-stall/fix-roadmap-format")
 
-        assert r.status_code == 408, f"a stall must 408; got {r.status_code} body={r.text}"
-        assert "stalled" in r.text, "the 408 detail should carry the poll reason"
+        assert r.status_code == 504, f"a stall must 504; got {r.status_code} body={r.text}"
+        assert "stalled" in r.text, "the 504 detail should carry the poll reason"
         # session.json roadmap_content must NOT have been overwritten with the
         # pre-written malformed input as if it were a successful correction.
         session = json.loads((idea_dir / "session.json").read_text())

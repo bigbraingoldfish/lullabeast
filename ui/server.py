@@ -7124,7 +7124,7 @@ async def post_ideas_convert(idea_id: str):
 
     Returns 404 if the idea is not found.
     Returns 422 if prd_content is empty.
-    Returns 408 if polling times out (either sentinel missing).
+    Returns 504 if polling times out (either sentinel missing).
     Returns 200 with {"roadmap_content": str, "verification_content": str} on success.
     """
     config = load_config()
@@ -7213,8 +7213,11 @@ async def post_ideas_convert(idea_id: str):
         extra_done_paths=(verification_done_path,),
     )
     if not poll_result:
+        # 504, not 408: browsers transparently re-POST on 408, which would
+        # silently launch a duplicate converter run — see the chat-send
+        # timeout above for the full rationale.
         raise HTTPException(
-            status_code=408,
+            status_code=504,
             detail=f"Conversion timed out after {CONVERT_TIMEOUT}s"
         )
 
@@ -7272,13 +7275,13 @@ async def post_ideas_fix_roadmap_format(idea_id: str, body: FixRoadmapFormatRequ
     backstop. The malformed input is pre-written to ``roadmap_draft.md``, so the
     stranded-``.md`` rescue is disabled (``rescue_stranded_reply_md=False``) —
     completion hinges on ``roadmap_draft.done``. On success it reads the corrected
-    content and stores it in session.json. On a 408 the corrected roadmap is
+    content and stores it in session.json. On a 504 the corrected roadmap is
     salvaged on the next ``GET /session`` and the frontend recovery poll picks it
     up, so a slow correction's output is never lost.
 
     Returns 404 if the idea is not found or session.json is missing.
     Returns 422 if no roadmap content is available to correct.
-    Returns 408 on a stall or the infra backstop (the frontend then recovers).
+    Returns 504 on a stall or the infra backstop (the frontend then recovers).
     Returns 200 with {"roadmap_content": str} on success.
     """
     config = load_config()
@@ -7377,8 +7380,11 @@ async def post_ideas_fix_roadmap_format(idea_id: str, body: FixRoadmapFormatRequ
     )
     if not poll_result:
         _reason = getattr(poll_result, "reason", None) or "timeout"
+        # 504, not 408: browsers transparently re-POST on 408, which would
+        # silently launch a duplicate correction run — see the chat-send
+        # timeout above for the full rationale.
         raise HTTPException(
-            status_code=408,
+            status_code=504,
             detail=f"Format correction {_reason} after {FORMAT_CORRECTION_TIMEOUT}s",
         )
 

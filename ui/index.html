@@ -6806,7 +6806,11 @@
                         const msg = String(e.message || e);
                         setConvertError(msg);
                         setConvertLoading(false);
+                        // 504 today; 408 kept for old in-flight responses —
+                        // browsers transparently re-POST on 408, which is why
+                        // the backend moved off it.
                         if (
+                            e.status === 504 ||
                             e.status === 408 ||
                             msg.includes("Conversion timed out") ||
                             msg.includes("timed out") ||
@@ -6994,12 +6998,13 @@
                     })
                     .catch((e) => {
                         setFixFormatLoading(false);
-                        // 408 = the correction is slow but still running (the agent
-                        // is a different, slower model than the chat). Keep the modal
-                        // open with a non-blocking notice and pick up the corrected
-                        // roadmap when it lands (mirrors convert's recovery), then
-                        // continue with the FRESH content. Output is never stranded.
-                        if (e && e.status === 408) {
+                        // 504 (408 kept for old in-flight responses) = the correction
+                        // is slow but still running (the agent is a different, slower
+                        // model than the chat). Keep the modal open with a non-blocking
+                        // notice and pick up the corrected roadmap when it lands
+                        // (mirrors convert's recovery), then continue with the FRESH
+                        // content. Output is never stranded.
+                        if (e && (e.status === 504 || e.status === 408)) {
                             setFormatInvalidDetail(
                                 "Format correction is taking longer than usual — it's still finishing in the background. We'll continue automatically as soon as it's ready.",
                             );

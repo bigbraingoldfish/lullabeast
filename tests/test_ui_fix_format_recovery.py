@@ -2,9 +2,11 @@
 
 ``doFixRoadmapFormat`` previously dropped the corrected roadmap on a backend
 timeout — it only showed "Fix Format failed", stranding the corrected roadmap
-that the agent finished writing a moment later. It now mirrors convert: on an
-HTTP 408 it starts ``startRoadmapRecoverPoll`` to pick up the corrected roadmap
-that lands late, and continues setup with the FRESH content rather than the
+that the agent finished writing a moment later. It now mirrors convert: on a
+timeout verdict (HTTP 504 today; 408 kept for old in-flight responses —
+browsers transparently re-POST on 408, which is why the backend moved off it)
+it starts ``startRoadmapRecoverPoll`` to pick up the corrected roadmap that
+lands late, and continues setup with the FRESH content rather than the
 not-yet-flushed ``roadmapContent`` state.
 
 The shared ``startRoadmapRecoverPoll`` gained an optional
@@ -26,7 +28,7 @@ def load_index_html():
 
 def test_fix_format_preserves_http_status_into_catch():
     """doFixRoadmapFormat must carry the HTTP status into the catch so it can
-    distinguish a 408 (slow-but-running → recover) from a hard failure."""
+    distinguish a 504/408 (slow-but-running → recover) from a hard failure."""
     html = load_index_html()
     assert re.search(
         r"const e\s*=\s*new Error\(t\);\s*e\.status\s*=\s*r\.status;\s*throw e;",
@@ -34,15 +36,16 @@ def test_fix_format_preserves_http_status_into_catch():
     ), "Expected doFixRoadmapFormat to attach r.status to the thrown error"
 
 
-def test_fix_format_starts_recover_poll_on_408():
-    """On a 408, doFixRoadmapFormat starts startRoadmapRecoverPoll (not a hard
-    'Fix Format failed') and wires continueSetup as the onRecovered callback."""
+def test_fix_format_starts_recover_poll_on_timeout_status():
+    """On a 504 (or a legacy in-flight 408), doFixRoadmapFormat starts
+    startRoadmapRecoverPoll (not a hard 'Fix Format failed') and wires
+    continueSetup as the onRecovered callback."""
     html = load_index_html()
     assert re.search(
-        r"e\.status\s*===\s*408[\s\S]{0,500}?"
+        r"e\.status\s*===\s*504\s*\|\|\s*e\.status\s*===\s*408[\s\S]{0,500}?"
         r"startRoadmapRecoverPoll\(\s*ideaId\s*,\s*\(rm\)\s*=>\s*continueSetup\(rm\)\s*\)",
         html,
-    ), "Expected a 408 to start the roadmap recovery poll with continueSetup as onRecovered"
+    ), "Expected a 504 (with 408 back-compat) to start the roadmap recovery poll with continueSetup as onRecovered"
 
 
 def test_start_roadmap_recover_poll_accepts_and_invokes_onRecovered():
@@ -104,19 +107,20 @@ def test_continue_to_setup_button_is_event_safe():
     ), "continueSetup must guard contentOverride with typeof === 'string' (event-safe)"
 
 
-def test_convert_triggers_recover_poll_on_408_status():
-    """_runConvert must trigger startRoadmapRecoverPoll on an HTTP 408 status
-    (robust), not only on a brittle message-string match. Both convert and
-    fix-format attach r.status to the thrown error for this."""
+def test_convert_triggers_recover_poll_on_timeout_status():
+    """_runConvert must trigger startRoadmapRecoverPoll on an HTTP 504 status
+    (408 kept for old in-flight responses), not only on a brittle
+    message-string match. Both convert and fix-format attach r.status to the
+    thrown error for this."""
     html = load_index_html()
     assert html.count(
         "const e = new Error(t); e.status = r.status; throw e;"
     ) >= 2, "both convert and fix-format should attach r.status to the thrown error"
     assert re.search(
-        r"if\s*\(\s*e\.status\s*===\s*408\s*\|\|[\s\S]{0,400}?"
+        r"if\s*\(\s*e\.status\s*===\s*504\s*\|\|\s*e\.status\s*===\s*408\s*\|\|[\s\S]{0,400}?"
         r"startRoadmapRecoverPoll\(ideaId\)",
         html,
-    ), "Expected _runConvert to start recovery on a 408 status (with string fallback)"
+    ), "Expected _runConvert to start recovery on a 504/408 status (with string fallback)"
 
 
 def test_fix_format_success_path_passes_fresh_content():

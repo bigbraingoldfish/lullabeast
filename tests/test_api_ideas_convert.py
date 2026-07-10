@@ -69,7 +69,7 @@ class TestApiIdeasConvert:
         assert r.status_code == 422
 
     def test_missing_prompt_file_uses_fallback_then_may_timeout(self):
-        """No 503: bundled/inline prompt; without sentinel, conversion times out (408)."""
+        """No 503: bundled/inline prompt; without sentinel, conversion times out (504)."""
         client = load_server()
         self._write_session("2", prd_content="## Problem Statement\nSome content.")
         config = self._mock_config()
@@ -90,10 +90,14 @@ class TestApiIdeasConvert:
              patch("ui.server.CONVERT_TIMEOUT", 1), \
              patch("ui.server.CONVERT_POLL_INTERVAL", 0.1):
             r = client.post("/api/ideas/2/convert")
-        assert r.status_code == 408
+        assert r.status_code == 504
 
-    def test_returns_408_on_timeout(self):
-        """Returns 408 when roadmap_draft.done is never written within timeout."""
+    def test_returns_504_on_timeout(self):
+        """Returns 504 when roadmap_draft.done is never written within timeout.
+
+        504, not 408: browsers transparently re-POST a request that gets a
+        408, which would silently launch a duplicate converter run.
+        """
         client = load_server()
         self._write_session("3", prd_content="## Problem Statement\nContent.")
         mock_cls, _ = self._make_mock_aiohttp()
@@ -104,7 +108,7 @@ class TestApiIdeasConvert:
              patch("ui.server.CONVERT_TIMEOUT", 1), \
              patch("ui.server.CONVERT_POLL_INTERVAL", 0.1):
             r = client.post("/api/ideas/3/convert")
-        assert r.status_code == 408
+        assert r.status_code == 504
 
     def test_returns_200_with_roadmap_content_on_success(self):
         """Returns 200 with roadmap_content when sentinels are found.
