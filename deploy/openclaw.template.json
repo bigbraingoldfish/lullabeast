@@ -31,9 +31,6 @@
             "name": "MiniMax M3",
             "params": {
               "provider": {
-                "ignore": [
-                  "morph"
-                ],
                 "require_parameters": true
               }
             },
@@ -101,9 +98,6 @@
             "temperature": 0.7,
             "top_p": 0.95,
             "provider": {
-              "ignore": [
-                "morph"
-              ],
               "require_parameters": true
             }
           }

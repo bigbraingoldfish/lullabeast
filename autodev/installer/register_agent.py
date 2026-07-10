@@ -19,8 +19,8 @@ Warnings go to stderr so install.sh can use stdout | tail -1 for status.
 Model selection (shared for new coding agents; escalation uses the same default but
 gets PIPELINE-SPEC tool policy: read/write only):
     1) Copy from prd-creator entry in agents.list if present with model.
-    2) Else if OpenRouter appears configured, use openrouter/minimax/minimax-m2.7.
-    3) Else use agents.defaults.model if present, else MiniMax id with warning.
+    2) Else if OpenRouter appears configured, use openrouter/moonshotai/kimi-k2.7-code.
+    3) Else use agents.defaults.model if present, else the recommended id with warning.
 
 roadmap-converter copies per-agent ``tools`` from prd-creator when that entry defines
 them; other coding agents omit ``tools`` so global ``tools.profile`` applies.
@@ -37,7 +37,9 @@ import os
 import sys
 import tempfile
 
-MINIMAX_RECOMMENDED = "openrouter/minimax/minimax-m2.7"
+# The audited pipeline default (multimodal, coding-strong); must stay one of
+# the shipped, priced models in deploy/openclaw.template.json.
+RECOMMENDED_MODEL = "openrouter/moonshotai/kimi-k2.7-code"
 
 # Canonical order for appending newly created entries (existing order preserved).
 AUTODEV_AGENT_IDS = (
@@ -151,11 +153,11 @@ def _resolve_shared_model(agents_list: list, data: dict, stderr) -> tuple[dict, 
     if _openrouter_configured(data):
         notes.append(
             f"[register_agent] No prd-creator model to copy; OpenRouter appears configured. "
-            f"Using recommended pipeline model: {MINIMAX_RECOMMENDED}"
+            f"Using recommended pipeline model: {RECOMMENDED_MODEL}"
         )
         for line in notes:
             _eprint(line, stderr)
-        return {"primary": MINIMAX_RECOMMENDED, "fallbacks": []}, notes
+        return {"primary": RECOMMENDED_MODEL, "fallbacks": []}, notes
 
     defaults = (data.get("agents") or {}).get("defaults") or {}
     dm = defaults.get("model")
@@ -164,7 +166,7 @@ def _resolve_shared_model(agents_list: list, data: dict, stderr) -> tuple[dict, 
             "[register_agent] WARNING: No prd-creator entry and OpenRouter not detected in openclaw.json. "
             "Using agents.defaults.model.primary for new agents. "
             "For best results with this pipeline, configure OpenRouter and use "
-            f"{MINIMAX_RECOMMENDED} (low-cost, instruction-following)."
+            f"{RECOMMENDED_MODEL} (the audited pipeline default)."
         )
         for line in notes:
             _eprint(line, stderr)
@@ -172,12 +174,12 @@ def _resolve_shared_model(agents_list: list, data: dict, stderr) -> tuple[dict, 
 
     notes.append(
         f"[register_agent] WARNING: No prd-creator, no OpenRouter block, no agents.defaults.model. "
-        f"Applying default primary {MINIMAX_RECOMMENDED} — ensure your gateway has a matching provider "
-        "or add prd-creator / OpenRouter config. Strongly recommend MiniMax 2.7 for this pipeline."
+        f"Applying default primary {RECOMMENDED_MODEL}, so ensure your gateway has a matching provider "
+        "or add prd-creator / OpenRouter config. Strongly recommend Kimi K2.7 Code for this pipeline."
     )
     for line in notes:
         _eprint(line, stderr)
-    return {"primary": MINIMAX_RECOMMENDED, "fallbacks": []}, notes
+    return {"primary": RECOMMENDED_MODEL, "fallbacks": []}, notes
 
 
 def _agent_ids_present(agents_list: list) -> set[str]:

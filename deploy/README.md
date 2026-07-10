@@ -57,7 +57,26 @@ A key in `deploy/.env` still works exactly as before and takes precedence: if
 it is set, the container boots straight to a running system and never enters
 setup mode. The persisted key from the dashboard lives at
 `/data/secrets/provider.env` (mode 600, never logged), so it survives
-container recreation.
+container recreation. Precedence is per variable: anything `deploy/.env`
+sets is pinned for the container's lifetime, while every other assignment in
+the dashboard's file applies. A keyed install can therefore still take
+dashboard-managed settings, and `deploy/.env` keeps the last word on the
+variables it defines.
+
+### Applying configuration changes while running
+
+The container applies dashboard configuration changes without a restart. The
+contract: a writer updates `/data/secrets/provider.env`, then touches
+`/data/secrets/apply.request`. The boot script's watch loop consumes the
+marker, re-reads the file (per-variable precedence as above), re-renders
+`openclaw.json`, re-wires any local models, and restarts the OpenClaw gateway
+so new agent sessions pick up the new values. The doctor then runs as an
+advisory check: a bad value is reported loudly in the container log and the
+dashboard's Health card, but it never tears down a running container. Running
+agent sessions keep the model they were created with, and the gateway restart
+interrupts them, so apply settings between runs. Values set directly in
+`deploy/.env` still need a container restart (compose reads that file at
+start).
 
 The setup screen also offers a third path: **skip model setup** and manage
 models and providers by hand in OpenClaw. It is confirmed via a modal because

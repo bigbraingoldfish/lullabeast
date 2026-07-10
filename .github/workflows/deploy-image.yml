@@ -103,6 +103,22 @@ jobs:
             > doctor.json || true
           python3 deploy/smoke_assert.py doctor.json
 
+      # The lifetime watch loop only exists at runtime: touch the apply
+      # marker in the running container and wait for the completion line,
+      # proving the re-render + gateway-restart cycle end to end.
+      - name: Exercise the config apply cycle
+        run: |
+          docker exec lullabeast-smoke touch /data/secrets/apply.request
+          for i in $(seq 1 60); do
+            if docker logs lullabeast-smoke 2>&1 | grep -q "configuration applied; gateway restarted"; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::apply cycle did not complete within 120s"
+          docker logs lullabeast-smoke
+          exit 1
+
       # Optional smoke deepener (roadmap "job 3"): the hermetic doctor and
       # template test modules, run against the image's own Python + layout.
       - name: Hermetic doctor test suite inside the image

@@ -26,7 +26,7 @@ def test_accepts_agents_defaults_without_list(tmp_path):
             "agents": {
                 "defaults": {
                     "model": {"primary": "openrouter/other/model"},
-                    "models": {"openrouter/minimax/minimax-m2.7": {}},
+                    "models": {"openrouter/moonshotai/kimi-k2.7-code": {}},
                 }
             },
             "hooks": {"token": "x"},
@@ -47,7 +47,7 @@ def test_accepts_agents_defaults_without_list(tmp_path):
         assert aid in ids
     rc = next(e for e in data["agents"]["list"] if e["id"] == "roadmap-converter")
     assert rc["workspace"] == os.path.join(root, "workspace-roadmap-converter")
-    assert rc["model"]["primary"] == "openrouter/minimax/minimax-m2.7"
+    assert rc["model"]["primary"] == "openrouter/moonshotai/kimi-k2.7-code"
     hooks = data.get("hooks", {}).get("allowedAgentIds", [])
     for aid in AUTODEV_AGENT_IDS:
         assert aid in hooks
@@ -87,7 +87,7 @@ def test_idempotent_already_registered(tmp_path):
     oc = tmp_path / "openclaw.json"
     root = str(tmp_path / "ocroot")
     os.makedirs(root, exist_ok=True)
-    m = {"primary": "openrouter/minimax/minimax-m2.7", "fallbacks": []}
+    m = {"primary": "openrouter/moonshotai/kimi-k2.7-code", "fallbacks": []}
     esc_tools = {
         "allow": ["read", "write"],
         "deny": ["edit", "apply_patch", "exec", "process", "browser"],
@@ -126,7 +126,7 @@ def test_adds_hooks_allowlist_if_missing(tmp_path):
                     {
                         "id": "roadmap-converter",
                         "workspace": os.path.join(root, "workspace-roadmap-converter"),
-                        "model": {"primary": "openrouter/minimax/minimax-m2.7", "fallbacks": []},
+                        "model": {"primary": "openrouter/moonshotai/kimi-k2.7-code", "fallbacks": []},
                     }
                 ]
             },
@@ -156,8 +156,8 @@ def test_missing_prd_creator_uses_openrouter_fallback_when_configured(tmp_path):
     assert register_roadmap_converter(str(oc), root, dry_run=False, stderr=err) == "registered"
     data = json.loads(oc.read_text())
     rc = next(e for e in data["agents"]["list"] if e["id"] == "roadmap-converter")
-    assert rc["model"]["primary"] == "openrouter/minimax/minimax-m2.7"
-    assert "openrouter" in err.getvalue().lower() or "minimax" in err.getvalue().lower()
+    assert rc["model"]["primary"] == "openrouter/moonshotai/kimi-k2.7-code"
+    assert "openrouter" in err.getvalue().lower() or "kimi" in err.getvalue().lower()
 
 
 def test_missing_prd_creator_uses_defaults_model_when_no_openrouter(tmp_path):
@@ -180,7 +180,7 @@ def test_missing_prd_creator_uses_defaults_model_when_no_openrouter(tmp_path):
     rc = next(e for e in data["agents"]["list"] if e["id"] == "roadmap-converter")
     assert rc["model"]["primary"] == "anthropic/claude-sonnet"
     warn = err.getvalue().lower()
-    assert "openrouter" in warn or "minimax" in warn or "recommend" in warn
+    assert "openrouter" in warn or "kimi" in warn or "recommend" in warn
 
 
 def test_agents_not_object_errors(tmp_path):
