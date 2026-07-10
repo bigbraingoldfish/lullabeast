@@ -96,6 +96,10 @@ The Ideas **PRD message** handler applies that merge when loading session for a 
 
 Same-session alignment/adversarial notifications merge roadmap drafts before writes as well.
 
+### Client turn recovery (never-stuck chat)
+
+The chat client always watches an unresolved turn to its verdict. The recovery watch is armed on send hand-off (bounded-wait abort) **and** whenever a loaded session's newest assistant row is still `pending` (idea reselected or page refreshed mid-turn), so a late reply renders without re-navigating. Watch budgets are wall-clock, never tick counts (background tabs throttle timers); a `visibilitychange`/`focus` listener fires an immediate reconcile on refocus; and on budget exhaustion the watch reports "couldn't confirm" but degrades to a slow unbounded poll instead of stopping, so a reply landing 30+ minutes late still auto-renders while the idea stays open. Contracts pinned in `tests/test_ui_ideas_never_stuck_turn_recovery.py`.
+
 ### Setup: validate-repo-path UI bug (fixed)
 
 The first version of `onRepoPathConfirm` did `if (d.valid)` after `r.json()` **without** checking `r.ok`. Any non-200 response (404, 502, wrong server) returns FastAPI’s `{ "detail": ... }`, which has **no** `valid` field — so the UI fell through to the generic **"Invalid path"** string. The handler now checks `!r.ok`, surfaces `detail`, and trims the path before POST.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from unittest.mock import patch
 
 import pytest
@@ -120,7 +121,13 @@ class TestDoctorHealthPanel:
         assert 'data-testid="gateway-open-link"' in html
         assert "/api/setup/gateway-access" in html
         assert "#token=" in html
-        assert ":18789" in html
+        # The link port is deployment-aware: it renders whatever port the
+        # gateway-access endpoint reports (dev stack publishes 28789), and
+        # only falls back to the standard published port 18789 when the
+        # endpoint gives no usable URL — never a hardcoded port in the URL.
+        assert re.search(r"useState\(\s*18789\s*\)", html), "gateway port fallback must stay 18789"
+        assert ":${gatewayPort}" in html, "gateway URL must use the resolved port"
+        assert re.search(r"setGatewayPort\(", html), "port must be adopted from gateway-access"
         # The two-button copy-token flow is gone.
         assert 'data-testid="gateway-copy-token"' not in html
 

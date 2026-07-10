@@ -5693,6 +5693,10 @@
             const [isAtBottom, setIsAtBottom] = useState(true);
             const readinessPollRef = useRef(null);
             const lateHealPollRef = useRef(null);
+            // Current heal-poll tick, exposed so the foreground catch-up
+            // listener can fire one immediate reconcile (background tabs
+            // throttle interval timers to ~1/min).
+            const lateHealPollTickRef = useRef(null);
             const currentIdeaIdRef = useRef(null); // mirrors currentIdeaId; every idea-scoped async resolve compares against it to drop stale-idea writes after a switch
             const roadmapRecoverPollRef = useRef(null);
             const convertRequestSeqRef = useRef(0);
@@ -5739,6 +5743,7 @@
                     clearInterval(lateHealPollRef.current);
                     lateHealPollRef.current = null;
                 }
+                lateHealPollTickRef.current = null;
             };
 
             // Max ms the chat send holds ONE HTTP connection before it stops
@@ -5749,41 +5754,72 @@
             // OS idle-connection reaping window.
             const CLIENT_WAIT_MS = 120000;
 
-            // One background poll loop, two callers (no second near-identical
-            // poller — the dual-source lesson). Watches GET /session every 5 s
-            // until `resolveWhen(messages)` is true, then renders the server
-            // state and runs the post-turn cleanup. `onExhausted` fires if
-            // `maxTicks` elapses first. Every loop exit (tick, resolve, reject)
-            // bails — stopLateHealPoll() + return, no state write — if the operator
+            // Recovery-watch budgets are WALL-CLOCK, not tick counts: background
+            // tabs throttle interval timers (Chrome clamps to ~1/min), so a
+            // tick-counted budget stretches "16 minutes" into hours. The fast
+            // watch out-waits the server's 900 s poll backstop; past that the
+            // same loop degrades to a slow unbounded watch so a very late
+            // verdict still renders while the idea stays open.
+            const HEAL_POLL_BUDGET_MS = 960000;
+            const HEAL_POLL_SLOW_INTERVAL_MS = 30000;
+
+            // One background poll loop, shared by every caller (no second
+            // near-identical poller — the dual-source lesson). Watches GET
+            // /session every `intervalMs` until `resolveWhen(messages)` is
+            // true, then renders the server state and runs the post-turn
+            // cleanup. The budget is wall-clock (`budgetMs`), checked AFTER
+            // each fetch so a foreground catch-up tick can still render a
+            // verdict that lands at the buzzer; when it expires, `onExhausted`
+            // fires once and the loop either stops or — when
+            // `degradeToIntervalMs` is set — keeps watching unbounded at the
+            // slower cadence. Every loop exit (tick, resolve, reject) bails —
+            // stopLateHealPoll() + return, no state write — if the operator
             // switched ideas mid-poll (ideaId !== currentIdeaIdRef.current), so a
             // stale in-flight /session fetch can't flash the old idea's messages/PRD
             // into the now-foreground idea (clearInterval can't cancel an already
             // in-flight fetch's microtask).
-            //   • 408/502/503 late-heal: resolveWhen = no assistant error remains
+            //   • 502/503 late-heal: resolveWhen = no assistant error remains
             //     (a late .done reconciled the error placeholder into a reply).
-            //   • bounded-wait abort / network drop: resolveWhen = the turn's
-            //     assistant message is no longer pending (real reply OR a
-            //     server-written reason-aware error).
-            const startSessionHealPoll = ({ ideaId, resolveWhen, onExhausted, onResolved, maxTicks }) => {
+            //   • bounded-wait abort / network drop / unresolved turn found on
+            //     mount: resolveWhen = the turn's assistant message is no
+            //     longer pending (real reply OR a server-written reason-aware
+            //     error).
+            const startSessionHealPoll = ({ ideaId, resolveWhen, onExhausted, onResolved, budgetMs, intervalMs = 5000, degradeToIntervalMs = null }) => {
+                // Arming for a non-foreground idea is never useful (the first
+                // tick would self-terminate) and must not kill the foreground
+                // idea's watch — e.g. a stale send hand-off firing after an
+                // idea switch, while the new idea's mount-armed watch runs.
+                if (!ideaId || ideaId !== currentIdeaIdRef.current) return;
                 stopLateHealPoll();
-                if (!ideaId) return;
-                let ticks = 0;
-                let fails = 0; // consecutive GET failures — bail fast if the server is actually down
-                lateHealPollRef.current = setInterval(() => {
-                    if (ideaId !== currentIdeaIdRef.current) { stopLateHealPoll(); return; }
-                    ticks += 1;
-                    if (ticks > maxTicks) {
+                let deadline = budgetMs ? Date.now() + budgetMs : null;
+                let fails = 0; // consecutive GET failures — exhaust early if the server is actually down
+                const exhaust = () => {
+                    if (degradeToIntervalMs) {
+                        // Degrade, don't dead-end: keep watching slowly and
+                        // unbounded while this idea stays selected, so a very
+                        // late verdict still auto-renders. (`tick` is declared
+                        // below; exhaust only runs from inside it, past the TDZ.)
+                        clearInterval(lateHealPollRef.current);
+                        lateHealPollRef.current = setInterval(tick, degradeToIntervalMs);
+                        deadline = null;
+                        fails = 0;
+                    } else {
                         stopLateHealPoll();
-                        if (onExhausted) onExhausted();
-                        return;
                     }
+                    if (onExhausted) onExhausted();
+                };
+                const tick = () => {
+                    if (ideaId !== currentIdeaIdRef.current) { stopLateHealPoll(); return; }
                     fetch(`/api/ideas/${ideaId}/session`)
                         .then((r) => r.json())
                         .then((d) => {
                             if (ideaId !== currentIdeaIdRef.current) { stopLateHealPoll(); return; }
                             fails = 0;
                             const rawMsgs = d.messages || [];
-                            if (!resolveWhen(rawMsgs)) return;
+                            if (!resolveWhen(rawMsgs)) {
+                                if (deadline && Date.now() > deadline) exhaust();
+                                return;
+                            }
                             stopLateHealPoll();
                             setStagedAttachment(null);
                             setHiddenNoteIdsForSend(() => new Set());
@@ -5813,12 +5849,46 @@
                         .catch(() => {
                             if (ideaId !== currentIdeaIdRef.current) { stopLateHealPoll(); return; }
                             fails += 1;
-                            if (fails >= 6) { // ~30s of unreachable server → stop waiting
-                                stopLateHealPoll();
-                                if (onExhausted) onExhausted();
-                            }
+                            // Bounded phase only: ~30 s of unreachable server (or
+                            // the budget elapsing) exhausts. The degraded slow
+                            // watch (deadline null) keeps trying indefinitely.
+                            if (deadline && (fails >= 6 || Date.now() > deadline)) exhaust();
                         });
-                }, 5000);
+                };
+                lateHealPollTickRef.current = tick;
+                lateHealPollRef.current = setInterval(tick, intervalMs);
+            };
+
+            // Watch an unresolved turn to its verdict — shared by the
+            // bounded-wait abort hand-off and the mount path (a persisted
+            // pending turn found when the idea is opened/reselected). Fast
+            // bounded watch first; on exhaustion it surfaces an honest
+            // "couldn't confirm" (NOT definitive — the turn may still succeed,
+            // so the draft is never restored here) and the same loop degrades
+            // to the slow unbounded watch.
+            const armTurnRecoveryPoll = ({ ideaId, onResolved }) => {
+                startSessionHealPoll({
+                    ideaId,
+                    resolveWhen: (msgs) => {
+                        const a = [...msgs].reverse().find((m) => m.role === "assistant");
+                        return !!a && !a.pending; // real reply OR the backend's definitive error
+                    },
+                    budgetMs: HEAL_POLL_BUDGET_MS, // out-waits the 900 s server backstop
+                    degradeToIntervalMs: HEAL_POLL_SLOW_INTERVAL_MS,
+                    onResolved,
+                    onExhausted: () => {
+                        setIsLoading(false);
+                        isLoadingRef.current = false;
+                        setMessages((prev) => {
+                            let lastPendingIdx = -1;
+                            prev.forEach((m, i) => { if (m.role === "assistant" && m.pending) lastPendingIdx = i; });
+                            if (lastPendingIdx === -1) return prev;
+                            return prev.map((m, i) => (i === lastPendingIdx
+                                ? { ...m, pending: false, error: true, content: "Couldn't confirm the reply landed — still checking in the background. You can retry, or refresh to check now." }
+                                : m));
+                        });
+                    },
+                });
             };
 
             const stopRoadmapRecoverPoll = () => {
@@ -5867,6 +5937,22 @@
             useEffect(() => () => stopLateHealPoll(), [currentIdeaId]);
 
             useEffect(() => () => stopRoadmapRecoverPoll(), [currentIdeaId]);
+
+            // Foreground catch-up: when the tab returns to the foreground while
+            // a recovery watch is running, fire one immediate reconcile instead
+            // of waiting out a throttled interval tick.
+            useEffect(() => {
+                const onForeground = () => {
+                    if (document.hidden) return;
+                    if (lateHealPollTickRef.current) lateHealPollTickRef.current();
+                };
+                document.addEventListener("visibilitychange", onForeground);
+                window.addEventListener("focus", onForeground);
+                return () => {
+                    document.removeEventListener("visibilitychange", onForeground);
+                    window.removeEventListener("focus", onForeground);
+                };
+            }, []);
 
             // Auto-scroll the chat to the newest assistant reply when it arrives.
             // Fires only when the LAST message is a non-pending assistant — so the
@@ -6095,6 +6181,18 @@
                         // spacer exists for scrollIntoView to target.
                         setIsAtBottom(true);
                         requestAnimationFrame(() => scrollChatToBottom("auto"));
+                        // A persisted pending turn means a send is still
+                        // unresolved server-side (screen remounted / idea
+                        // reselected mid-turn). Watch it to its verdict so the
+                        // reply renders without re-navigating — resolution is
+                        // owned by the system, not by whoever happened to be
+                        // watching when the turn started.
+                        const lastAssistant = [...rawMsgs].reverse().find((m) => m.role === "assistant");
+                        if (lastAssistant && lastAssistant.pending) {
+                            setIsLoading(true);
+                            isLoadingRef.current = true;
+                            armTurnRecoveryPoll({ ideaId: currentIdeaId });
+                        }
                         if (!isLoadingRef.current) {
                             fetchPrdSectionDiff(currentIdeaId);
                         }
@@ -6261,6 +6359,10 @@
             const submitMessage = (overrideText) => {
                 const t = (overrideText !== undefined ? overrideText : inputText).trim();
                 if (!t || isLoading || !currentIdeaId) return;
+                // A new send owns the turn lifecycle: stop any recovery watch
+                // left over from a prior turn (e.g. the degraded slow watch) so
+                // a stale /session snapshot can't clobber this turn's bubbles.
+                stopLateHealPoll();
                 setUserFirstTurnPending(false);
                 const baseMsgs = messages.filter((m) => !m._gatewayFailed);
                 const turn = baseMsgs.filter((m) => m.role === "user").length + 1;
@@ -6317,6 +6419,19 @@
                         return r.json();
                     })
                     .then((data) => {
+                        if (currentIdeaId !== currentIdeaIdRef.current) {
+                            // Reply for a background idea (user switched mid-send):
+                            // it's persisted server-side and the mount-armed watch
+                            // renders it on return. isLoading is screen-wide, so
+                            // release it ONLY if the foreground idea doesn't own
+                            // it — an armed watch means a foreground turn is
+                            // mid-flight and its resolve/exhaust manages the lock.
+                            if (!lateHealPollRef.current) {
+                                setIsLoading(false);
+                                isLoadingRef.current = false;
+                            }
+                            return;
+                        }
                         stopLateHealPoll();
                         let parsed = data.parsed || null;
                         if (data.response) {
@@ -6350,6 +6465,17 @@
                     })
                     .catch((err) => {
                         clearTimeout(_abortTimer);
+                        if (currentIdeaId !== currentIdeaIdRef.current) {
+                            // Stale outcome for a background idea — same contract
+                            // as the resolve path above: write nothing into the
+                            // foreground idea; release the screen-wide lock only
+                            // when no foreground watch owns it.
+                            if (!lateHealPollRef.current) {
+                                setIsLoading(false);
+                                isLoadingRef.current = false;
+                            }
+                            return;
+                        }
                         const isAbort = err && err.name === "AbortError";
                         const status = err?.status ?? parseInt(err?.message, 10);
 
@@ -6361,39 +6487,20 @@
                         // turn resolves to a DEFINITIVE backend error (married to
                         // the error bubble) — never on a frontend timer.
                         if (isAbort || !Number.isFinite(status) || status === 408) {
-                            startSessionHealPoll({
+                            armTurnRecoveryPoll({
                                 ideaId: currentIdeaId,
-                                resolveWhen: (msgs) => {
-                                    const a = [...msgs].reverse().find((m) => m.role === "assistant");
-                                    return !!a && !a.pending; // real reply OR the backend's definitive error
-                                },
-                                maxTicks: 192, // ~16 min @ 5s — out-waits the 900s backstop so we OBSERVE the verdict
                                 onResolved: (rawMsgs) => {
                                     // Definitive timeout confirmed when the resolved
-                                    // turn is an error (the heal poll already rendered
+                                    // turn is an error (the watch already rendered
                                     // the reason-specific message from session.json) —
                                     // hand the draft back for retry. Married to the
-                                    // error bubble; never on a successful reply.
+                                    // error bubble; never on a successful reply, and
+                                    // never on exhaustion (not a definitive signal).
                                     const a = [...rawMsgs].reverse().find((m) => m.role === "assistant");
                                     if (a && a.error && overrideText === undefined) {
                                         setInputText(t);
                                         setStagedAttachment(attachmentSnap);
                                     }
-                                },
-                                onExhausted: () => {
-                                    // No verdict ever observed (server unreachable).
-                                    // NOT a definitive signal — show "couldn't
-                                    // confirm" but do NOT revert the draft (the
-                                    // turn may well have succeeded).
-                                    setIsLoading(false);
-                                    isLoadingRef.current = false;
-                                    setMessages((prev) =>
-                                        prev.map((m) =>
-                                            m.id === assistantPendingId
-                                                ? { ...m, pending: false, error: true, content: "Couldn't confirm the reply landed — refresh to check, or retry." }
-                                                : m
-                                        )
-                                    );
                                 },
                             });
                             return;
@@ -6437,7 +6544,7 @@
                             startSessionHealPoll({
                                 ideaId: currentIdeaId,
                                 resolveWhen: (msgs) => !msgs.some((m) => m.role === "assistant" && m.error),
-                                maxTicks: 24,
+                                budgetMs: 120000, // ~2 min — a rolled-back turn heals only if a stale .done lands quickly
                             });
                         }
                     });
@@ -12483,16 +12590,23 @@
         /* Settings: install-wide surfaces that are not day-to-day workflow.
          * A plain stack of cards so future sections slot in alongside these. */
         function SettingsScreen({ welcomeAvailable, onShowWelcome }) {
-            // Browse the gateway on the dashboard's host; 18789 is the standard
-            // published port (a remapped host port must be opened manually).
-            const gatewayUrl = `${window.location.protocol}//${window.location.hostname}:18789`;
+            // Browse the gateway on the dashboard's host. The port comes from
+            // /api/setup/gateway-access (which honors gateway_published_port,
+            // e.g. the dev stack's remapped 28789); 18789 is the fallback.
+            const [gatewayPort, setGatewayPort] = React.useState(18789);
             const [gatewayToken, setGatewayToken] = React.useState("");
+            const gatewayUrl = `${window.location.protocol}//${window.location.hostname}:${gatewayPort}`;
 
             React.useEffect(() => {
                 let cancelled = false;
                 fetch("/api/setup/gateway-access")
                     .then((r) => r.json())
-                    .then((d) => { if (!cancelled) setGatewayToken((d && d.available && d.token) || ""); })
+                    .then((d) => {
+                        if (cancelled) return;
+                        setGatewayToken((d && d.available && d.token) || "");
+                        const port = parseInt(((d && d.url) || "").split(":").pop(), 10);
+                        if (port > 0) setGatewayPort(port);
+                    })
                     .catch(() => { if (!cancelled) setGatewayToken(""); });
                 return () => { cancelled = true; };
             }, []);

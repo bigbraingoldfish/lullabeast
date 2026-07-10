@@ -44,25 +44,26 @@ def test_chat_fetch_is_bounded_by_abort_controller():
 
 def test_abort_or_network_hands_off_to_recovery_poll_without_error():
     """On AbortError / network drop the handler must NOT show an error — the
-    server is still working — and must start the recovery poll, keeping the
+    server is still working — and must start the recovery watch, keeping the
     pending bubble alive."""
     html = load_index_html()
     assert 'name === "AbortError"' in html or "name === 'AbortError'" in html, (
         "Expected the catch to detect AbortError (client bounded-wait elapsed)"
     )
-    # A shared session-poll helper must exist and be invoked for recovery.
+    # One shared session-poll loop plus the turn-recovery wrapper around it
+    # (also armed on mount when a persisted pending turn is found).
     assert "startSessionHealPoll" in html, (
         "Expected a shared startSessionHealPoll helper used for recovery"
     )
+    assert "armTurnRecoveryPoll" in html, (
+        "Expected the shared armTurnRecoveryPoll wrapper (abort hand-off + mount)"
+    )
     # The recovery branch must early-return before the error-message path so no
     # error bubble / draft-restore fires while the server is still working.
-    # (Window widened: the recovery poll now also carries an `onResolved` hook
-    # — it restores the draft only on a DEFINITIVE backend error — so the
-    # startSessionHealPoll({...}) block before `return;` is legitimately larger.)
     assert re.search(
-        r'AbortError[\s\S]{0,1200}?startSessionHealPoll[\s\S]{0,2600}?return;',
+        r'AbortError[\s\S]{0,1200}?armTurnRecoveryPoll[\s\S]{0,2600}?return;',
         html,
-    ), "Expected the abort/network branch to start the recovery poll and return early"
+    ), "Expected the abort/network branch to arm the recovery watch and return early"
 
 
 def test_recovery_poll_resolves_on_nonpending_assistant():
@@ -77,14 +78,26 @@ def test_recovery_poll_resolves_on_nonpending_assistant():
 
 
 def test_recovery_poll_covers_the_full_server_backstop():
-    """Recovery must poll long enough to cover the 900 s server backstop (so a
-    very long but healthy reply still lands without a refresh)."""
+    """Recovery must watch long enough to cover the 900 s server backstop (so a
+    very long but healthy reply still lands without a refresh). The budget is
+    WALL-CLOCK — tick counting is forbidden because background-tab timer
+    throttling stretches ticks into hours."""
     html = load_index_html()
-    # maxTicks at 5 s/tick must reach >= ~900 s → >= 180 ticks for the recovery caller.
-    m = re.findall(r"maxTicks:\s*(\d+)", html)
-    assert m, "Expected an explicit maxTicks on the heal poll calls"
-    assert any(int(x) >= 180 for x in m), (
-        f"Expected a recovery maxTicks >= 180 (>= ~900 s at 5 s/tick); saw {m}"
+    m = re.search(r"HEAL_POLL_BUDGET_MS\s*=\s*(\d+)", html)
+    assert m, "Expected a named wall-clock budget constant HEAL_POLL_BUDGET_MS"
+    assert int(m.group(1)) >= 900000, (
+        f"Expected HEAL_POLL_BUDGET_MS >= 900000 (>= the 900 s backstop); saw {m.group(1)}"
+    )
+    assert re.search(r"budgetMs:\s*HEAL_POLL_BUDGET_MS", html), (
+        "Expected the recovery watch to pass budgetMs: HEAL_POLL_BUDGET_MS"
+    )
+    # The deadline must be captured from Date.now(), and no tick-counted budget
+    # may remain on any heal-poll caller.
+    assert re.search(r"Date\.now\(\)\s*\+\s*budgetMs", html), (
+        "Expected the poll deadline to be wall-clock (Date.now() + budgetMs)"
+    )
+    assert "maxTicks:" not in html, (
+        "Tick-counted heal-poll budgets must not come back (background-tab throttling)"
     )
 
 

@@ -69,11 +69,11 @@ def test_heal_poll_resolve_bails_on_idea_switch_before_setMessages():
 
 
 def test_heal_poll_tick_and_catch_are_also_guarded_on_idea_switch():
-    """Defense across all three loop exits: the interval tick (so maxTicks ->
-    onExhausted can't fire for a stale idea and the loop self-terminates) and
-    the .catch reject (so fails>=6 -> onExhausted can't write the old turn's
-    error into the new idea). At least three idea-identity guards must exist,
-    each tearing the loop down."""
+    """Defense across all three loop exits: the interval tick (so budget
+    exhaustion -> onExhausted can't fire for a stale idea and the loop
+    self-terminates) and the .catch reject (so fails>=6 -> onExhausted can't
+    write the old turn's error into the new idea). At least three
+    idea-identity guards must exist, each tearing the loop down."""
     html = load_index_html()
     guards = re.findall(
         r"ideaId\s*!==\s*currentIdeaIdRef\.current\s*\)\s*\{\s*stopLateHealPoll\(\)\s*;\s*return",
