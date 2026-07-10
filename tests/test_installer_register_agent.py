@@ -19,7 +19,7 @@ from autodev.installer.register_agent import AUTODEV_AGENT_IDS, register_roadmap
 _PRD_CREATOR_ENTRY = {
     "id": "prd-creator",
     "workspace": "~/.openclaw/workspace-prd-creator",
-    "model": {"primary": "openrouter/minimax/minimax-m2.7", "fallbacks": []},
+    "model": {"primary": "openrouter/moonshotai/kimi-k2.7-code", "fallbacks": []},
     "tools": {
         "allow": ["read", "write"],
         "deny": ["edit", "apply_patch", "exec", "process", "browser"],
@@ -29,7 +29,7 @@ _PRD_CREATOR_ENTRY = {
 _ROADMAP_CONVERTER_ENTRY = {
     "id": "roadmap-converter",
     "workspace": "/fake/openclaw/workspace-roadmap-converter",
-    "model": {"primary": "openrouter/minimax/minimax-m2.7", "fallbacks": []},
+    "model": {"primary": "openrouter/moonshotai/kimi-k2.7-code", "fallbacks": []},
     "tools": {
         "allow": ["read", "write"],
         "deny": ["edit", "apply_patch", "exec", "process", "browser"],
@@ -44,7 +44,7 @@ _ESCALATION_TOOLS = {
 
 def _fully_registered_agents(autodev_root: str) -> list:
     """Six pipeline agents as install would leave them (for idempotency tests)."""
-    m = {"primary": "openrouter/minimax/minimax-m2.7", "fallbacks": []}
+    m = {"primary": "openrouter/moonshotai/kimi-k2.7-code", "fallbacks": []}
     root = autodev_root.rstrip("/")
     return [
         {"id": "planner", "workspace": f"{root}/workspace-planner", "model": m},
@@ -94,7 +94,7 @@ def _base_openclaw_json(agents_list=None, allowed_agent_ids=None):
         "version": "1.2.0",
         "auth": {"profile": "anthropic:default"},
         "agents": {
-            "defaults": {"model": "openrouter/minimax/minimax-m2.7"},
+            "defaults": {"model": "openrouter/moonshotai/kimi-k2.7-code"},
             "list": agents_list,
         },
         "hooks": {
@@ -133,7 +133,7 @@ class TestAlreadyRegistered:
 
 
 class TestFallbackWhenNoPrdCreator:
-    def test_registers_with_minimax_when_openrouter_configured(self, tmp_path):
+    def test_registers_with_recommended_model_when_openrouter_configured(self, tmp_path):
         oc_json = tmp_path / "openclaw.json"
         data = _base_openclaw_json(agents_list=[])
         data["models"] = {"providers": {"openrouter": {"apiKey": "x"}}}
@@ -146,7 +146,7 @@ class TestFallbackWhenNoPrdCreator:
         for aid in AUTODEV_AGENT_IDS:
             assert aid in ids
         rc = next(a for a in updated["agents"]["list"] if a["id"] == "roadmap-converter")
-        assert rc["model"]["primary"] == "openrouter/minimax/minimax-m2.7"
+        assert rc["model"]["primary"] == "openrouter/moonshotai/kimi-k2.7-code"
 
     def test_missing_top_level_agents_key_is_normalized(self, tmp_path):
         oc_json = tmp_path / "openclaw.json"

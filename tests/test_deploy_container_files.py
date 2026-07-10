@@ -174,11 +174,13 @@ class TestEntrypoint:
 
     def test_seeds_setup_paths_into_ui_config(self):
         # The UI-port seeding block also seeds the container-only setup keys the
-        # server and doctor read (WP-App + provider_key check + local models).
+        # server and doctor read (WP-App + provider_key check + local models),
+        # plus the apply-request marker path the settings surface will write.
         assert 'cfg["provider_key_path"]' in ENTRYPOINT
         assert 'cfg["setup_marker_path"]' in ENTRYPOINT
         assert 'cfg["projects_dir"]' in ENTRYPOINT
         assert 'cfg["local_model_probe_host"]' in ENTRYPOINT
+        assert 'cfg["apply_request_path"]' in ENTRYPOINT
 
     def test_config_render_reconcile_is_a_function(self):
         # v1.0.0 Phase 3: the render/reconcile heredoc is wrapped in a function
@@ -652,17 +654,41 @@ class TestSetupMode:
         )
         assert m, "keyless setup-mode branch must be the elif of the OFFLINE gate"
 
-    def test_provider_env_sourced_when_env_absent(self):
-        # /data/secrets/provider.env is sourced only when both key env vars are
-        # unset, so deploy/.env always wins.
+    def test_provider_env_loaded_per_variable_with_env_pinned(self):
+        # provider.env is loaded per variable: anything deploy/.env sets at
+        # boot is pinned for the container's lifetime, every other assignment
+        # applies, and the apply path re-reads the file so dashboard edits
+        # land. The old whole-file source (all-or-nothing: a keyed install
+        # silently ignored every dashboard-written knob) is gone.
         assert 'PROVIDER_KEY_FILE="$DATA/secrets/provider.env"' in ENTRYPOINT
-        m = re.search(
-            r'if \[ -z "\$\{ANTHROPIC_API_KEY:-\}" \] && \[ -z "\$\{OPENROUTER_API_KEY:-\}" \]'
-            r'.*?\[ -s "\$PROVIDER_KEY_FILE" \].*?\. "\$PROVIDER_KEY_FILE"',
-            ENTRYPOINT,
-            re.DOTALL,
+        assert "source_provider_env() {" in ENTRYPOINT
+        assert "ENV_PINNED_VARS" in ENTRYPOINT
+        assert '. "$PROVIDER_KEY_FILE"' not in ENTRYPOINT, (
+            "the whole-file source must be replaced by source_provider_env"
         )
-        assert m, "provider.env must be sourced only when the key env vars are absent"
+
+    def test_provider_env_parser_is_allowlisted(self):
+        # The file is parsed line by line and only variables the dashboard may
+        # write are applied; it is never executed as shell.
+        assert "PROVIDER_ENV_VARS=" in ENTRYPOINT
+        for var in (
+            "ANTHROPIC_API_KEY",
+            "OPENROUTER_API_KEY",
+            "LOCAL_MODEL_URL",
+            "PROVIDER_SETUP_SKIPPED",
+            *TEMPLATE_MODEL_DEFAULTS,
+        ):
+            assert var in ENTRYPOINT, f"provider.env allowlist is missing {var}"
+
+    def test_provider_env_parser_strips_trailing_cr(self):
+        # A CRLF provider.env must not export values with an invisible
+        # trailing \r (an API key that "looks right" but fails auth).
+        assert "val=\"${val%$'\\r'}\"" in ENTRYPOINT
+        idx = ENTRYPOINT.find("val=\"${val%$'\\r'}\"")
+        export_idx = ENTRYPOINT.find('export "$key=$val"')
+        assert idx != -1 and export_idx != -1 and idx < export_idx, (
+            "the CR trim must happen before the value is exported"
+        )
 
     def test_setup_marker_written_and_cleared(self):
         # The marker is written after the /data mkdirs when in setup mode, and
@@ -688,30 +714,20 @@ class TestSetupMode:
         )
         assert m, "setup mode must defer the --live ping like OFFLINE"
 
-    def test_setup_watch_loop_restarts_gateway(self):
-        # The setup-watch loop must restart the gateway when the key lands so
+    def test_setup_unlock_restarts_gateway(self):
+        # The watch loop must restart the gateway when the key lands so
         # OpenClaw reads it from its process environment (the unlock mechanism).
-        # It runs behind the SETUP_MODE gate.
-        assert re.search(r'if \[ "\$SETUP_MODE" != "1" \]', ENTRYPOINT), (
-            "normal supervision must be gated so setup mode takes the watch loop"
-        )
-        # The watch loop sources the key, then stop+start+wait the gateway.
         m = re.search(
-            r'if \[ -s "\$PROVIDER_KEY_FILE" \];.*?'
-            r'\. "\$PROVIDER_KEY_FILE".*?stop_gateway.*?start_gateway.*?wait_for_gateway',
+            r'if \[ "\$SETUP_MODE" = "1" \] && \[ -s "\$PROVIDER_KEY_FILE" \];.*?'
+            r'source_provider_env.*?stop_gateway.*?start_gateway.*?wait_for_gateway',
             ENTRYPOINT,
             re.DOTALL,
         )
-        assert m, "setup-watch loop must source the key and restart the gateway"
+        assert m, "the watch loop must load the key and restart the gateway on unlock"
 
     def test_local_model_url_in_setup_gate(self):
         # v1.0.0 Phase 3, B2: setup mode is entered only when there is no cloud
-        # key AND no LOCAL_MODEL_URL. Both the sourcing guard and the
-        # setup-mode elif must include the LOCAL_MODEL_URL check.
-        assert re.search(
-            r'\[ -z "\$\{LOCAL_MODEL_URL:-\}" \] && \[ -s "\$PROVIDER_KEY_FILE" \]',
-            ENTRYPOINT,
-        ), "provider.env sourcing guard must include the LOCAL_MODEL_URL check"
+        # key AND no LOCAL_MODEL_URL (evaluated after provider.env is loaded).
         m = re.search(
             r'elif \[ -z "\$\{ANTHROPIC_API_KEY:-\}" \] && '
             r'\[ -z "\$\{OPENROUTER_API_KEY:-\}" \] \\?\s*'
@@ -729,16 +745,17 @@ class TestSetupMode:
 
     def test_watch_loop_reruns_config_wiring_before_gateway_restart(self):
         # A dashboard-wired *_MODEL / LOCAL_MODEL_URL must land in openclaw.json
-        # before the gateway restarts, so the watch loop re-runs both wiring
-        # functions after sourcing the key.
+        # before the gateway restarts, so the apply pass re-runs both wiring
+        # functions after re-reading provider.env (marker consumed first).
         m = re.search(
-            r'if \[ -s "\$PROVIDER_KEY_FILE" \];.*?\. "\$PROVIDER_KEY_FILE".*?'
+            r'if \[ "\$APPLY" = "1" \];.*?rm -f "\$APPLY_REQUEST_FILE".*?'
+            r'source_provider_env.*?'
             r'render_reconcile_config.*?wire_or_probe_local_models.*?'
-            r'stop_gateway.*?start_gateway',
+            r'stop_gateway.*?start_gateway.*?wait_for_gateway',
             ENTRYPOINT,
             re.DOTALL,
         )
-        assert m, "watch loop must re-run config wiring before the gateway restart"
+        assert m, "the apply pass must re-run config wiring before the gateway restart"
 
     def test_api_key_silently_accepted_comment(self):
         # B1-enforcement: ANTHROPIC_API_KEY is deliberately still accepted but
@@ -747,15 +764,15 @@ class TestSetupMode:
             r"#.*ANTHROPIC_API_KEY.*(accepted|B1-enforcement)", ENTRYPOINT
         ), "entrypoint must comment that ANTHROPIC_API_KEY is silently accepted"
 
-    def test_setup_watch_loop_checks_supervised_pids(self):
-        # The watch loop must fail the same way `wait -n` would if a supervised
-        # child dies during setup mode: kill -0 liveness on each pid.
+    def test_watch_loop_checks_supervised_pids(self):
+        # The lifetime watch loop owns supervision: kill -0 liveness on each
+        # pid, collect the exit status, tear down with it.
         m = re.search(
-            r'while :; do.*?kill -0 "\$pid".*?shutdown.*?exit 1',
+            r'while :; do.*?kill -0 "\$pid".*?wait "\$pid".*?shutdown.*?exit "\$rc"',
             ENTRYPOINT,
             re.DOTALL,
         )
-        assert m, "setup-watch loop must monitor supervised pids with kill -0"
+        assert m, "watch loop must monitor supervised pids and exit with their rc"
 
     def test_setup_watch_loop_clears_marker_on_unlock(self):
         # After the deferred doctor passes, the loop clears the setup marker and
@@ -764,6 +781,61 @@ class TestSetupMode:
         assert unlock_idx != -1
         rm_idx = ENTRYPOINT.find('rm -f "$SETUP_MARKER"', unlock_idx)
         assert rm_idx != -1, "the unlock path must clear the setup marker"
+
+
+class TestApplyWatch:
+    """The watch loop runs for the container's lifetime: it supervises the
+    four processes AND applies dashboard configuration changes (the
+    apply-request marker protocol), not just first-run setup."""
+
+    def test_apply_request_file_defined_under_secrets(self):
+        assert 'APPLY_REQUEST_FILE="$DATA/secrets/apply.request"' in ENTRYPOINT
+
+    def test_stale_marker_cleared_before_the_watch_loop(self):
+        # A marker surviving a container restart must not fire a redundant
+        # apply pass: boot already renders config and restarts the gateway.
+        rm_idx = ENTRYPOINT.find('rm -f "$APPLY_REQUEST_FILE"')
+        loop_idx = ENTRYPOINT.find("while :; do")
+        assert rm_idx != -1 and loop_idx != -1
+        assert rm_idx < loop_idx
+
+    def test_marker_consumed_before_apply_work_starts(self):
+        # Consume-first ordering: a request landing mid-apply coalesces into
+        # one more idempotent pass instead of being lost.
+        apply_idx = ENTRYPOINT.find('if [ "$APPLY" = "1" ]; then')
+        assert apply_idx != -1
+        consume_idx = ENTRYPOINT.find('rm -f "$APPLY_REQUEST_FILE"', apply_idx)
+        source_idx = ENTRYPOINT.find("source_provider_env", apply_idx)
+        assert consume_idx != -1 and source_idx != -1
+        assert consume_idx < source_idx
+
+    def test_watch_loop_replaces_wait_n(self):
+        # One lifetime loop supervises and applies; the blocking `wait -n`
+        # cannot host the apply trigger and is gone.
+        assert "wait -n" not in ENTRYPOINT
+
+    def test_post_setup_apply_doctor_is_advisory(self):
+        # A bad settings save must not tear down a container that may have
+        # queued work: the post-setup apply runs the non-live doctor and
+        # warns; only setup unlock keeps its fatal deferred --live doctor.
+        needle = "doctor reports failing checks after config apply"
+        idx = ENTRYPOINT.find(needle)
+        assert idx != -1
+        line = ENTRYPOINT[ENTRYPOINT.rfind("\n", 0, idx) : idx]
+        assert "say" in line and "die" not in line
+
+    def test_apply_logs_completion_needle(self):
+        # The CI smoke greps docker logs for exactly this byte sequence.
+        assert "configuration applied; gateway restarted" in ENTRYPOINT
+
+    def test_apply_pass_never_runs_live_doctor(self):
+        # The billable --live ping belongs to setup unlock only; the
+        # post-setup apply branch runs the doctor without flags.
+        apply_idx = ENTRYPOINT.find("doctor reports failing checks after config apply")
+        assert apply_idx != -1
+        # The doctor invocation feeding this warning must not carry --live.
+        region = ENTRYPOINT[apply_idx - 600 : apply_idx]
+        assert "python3 -m autodev.installer.doctor)" in region.replace("\n", "")
 
 
 def _load_smoke_assert_module():
@@ -925,6 +997,13 @@ class TestDeployImageWorkflow:
         assert "OFFLINE=1" in WORKFLOW_TEXT
         assert "autodev.installer.doctor --json" in WORKFLOW_TEXT
         assert "deploy/smoke_assert.py" in WORKFLOW_TEXT
+
+    def test_smoke_exercises_config_apply_cycle(self):
+        # The lifetime watch loop only exists at runtime: the smoke touches
+        # the apply marker in the running container and waits for the apply
+        # completion line, proving re-render + gateway restart end to end.
+        assert "apply.request" in WORKFLOW_TEXT
+        assert "configuration applied; gateway restarted" in WORKFLOW_TEXT
 
     def test_publish_gated_on_version_tags_with_packages_permission(self):
         jobs = self._load()["jobs"]

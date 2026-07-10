@@ -214,6 +214,24 @@ class TestModelPricing:
         assert 3 <= len(self._openrouter_models()) <= 4
 
 
+class TestMinimaxRouting:
+    def test_minimax_entries_carry_no_provider_ignore(self):
+        # The provider.ignore routing pin on MiniMax M3 was dropped
+        # (per-role model selection roadmap, Stage A); require_parameters
+        # stays. Both template locations must agree.
+        data = _template()
+        entry = next(
+            m
+            for m in data["models"]["providers"]["openrouter"]["models"]
+            if m["id"] == "minimax/minimax-m3"
+        )
+        assert "ignore" not in entry.get("params", {}).get("provider", {})
+        assert entry["params"]["provider"]["require_parameters"] is True
+        defaults = data["agents"]["defaults"]["models"]["openrouter/minimax/minimax-m3"]
+        assert "ignore" not in defaults["params"]["provider"]
+        assert defaults["params"]["provider"]["require_parameters"] is True
+
+
 # ── no secret-shaped values ──────────────────────────────────────────────────
 
 _SECRET_PATTERNS = (

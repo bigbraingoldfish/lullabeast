@@ -20,15 +20,16 @@
 #   4. Restart the gateway (plugin bundle + agent registrations are read at
 #      gateway start), then run the doctor: --live on first boot only, and
 #      deferred entirely in setup mode (like OFFLINE=1) until a key exists.
-#   5. Print the dashboard URL + token, then supervise four processes:
-#      gateway, UI server, heartbeat loop, session-cleanup loop. The
-#      orchestrator is NOT supervised; the UI server spawns it per run. Any
-#      supervised process dying tears the container down (compose's restart
-#      policy recovers it). In setup mode the main script runs a watch loop
-#      that (a) monitors the same supervised pids and (b) waits for the
-#      dashboard to drop the key file, then restarts the gateway, runs the
-#      deferred live doctor, clears the setup marker, and falls through to
-#      normal supervision.
+#   5. Print the dashboard URL + token, then run the lifetime watch loop
+#      over four processes: gateway, UI server, heartbeat loop,
+#      session-cleanup loop. The orchestrator is NOT supervised; the UI
+#      server spawns it per run. Any supervised process dying tears the
+#      container down (compose's restart policy recovers it). The same loop
+#      applies configuration changes: in setup mode it waits for the
+#      dashboard to drop the key file (restart gateway, deferred live
+#      doctor, clear the setup marker), and for the container's lifetime it
+#      consumes the apply-request marker the dashboard touches after editing
+#      provider.env (re-render config, restart gateway, advisory doctor).
 set -euo pipefail
 
 APP=/app
@@ -67,13 +68,16 @@ if [ "$DEV_MODE" = "1" ]; then
 fi
 
 # ── 1. Env contract ──────────────────────────────────────────────────────────
-# A provider can arrive several ways, checked in precedence order:
+# A provider can arrive several ways, with per-variable precedence:
 #   1. deploy/.env (env vars already set): the headless / power-user path.
 #      This is a cloud key (OPENROUTER_API_KEY / ANTHROPIC_API_KEY) OR a local
 #      model server (LOCAL_MODEL_URL, e.g. http://host.docker.internal:11434).
-#   2. /data/secrets/provider.env: written by the dashboard setup screen on a
-#      previous keyless boot. Sourced only when the env vars are absent, so
-#      deploy/.env always wins. It may carry a cloud key or a LOCAL_MODEL_URL.
+#      A variable set here is pinned for the container's lifetime.
+#   2. /data/secrets/provider.env: written by the dashboard (the setup screen,
+#      and settings saves after setup). Loaded per variable: pinned variables
+#      are skipped, every other assignment applies. The watch loop re-reads
+#      the file on an apply request, so dashboard edits land without a
+#      container restart.
 #   3. Neither: SETUP MODE. The container provisions fully and the dashboard
 #      collects a key or a local-model URL. Agents cannot run until it does.
 # ANTHROPIC_API_KEY is still accepted here (B1-enforcement) but never documented.
@@ -81,15 +85,41 @@ fi
 # the billable probes so CI can build+doctor the image on every deploy-file
 # change.
 PROVIDER_KEY_FILE="$DATA/secrets/provider.env"
-if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${OPENROUTER_API_KEY:-}" ] \
-    && [ -z "${LOCAL_MODEL_URL:-}" ] && [ -s "$PROVIDER_KEY_FILE" ]; then
-    # The file may hold the key with restrictive perms; never echo its
-    # contents. set -a exports whatever it defines into this process.
-    set -a
-    # shellcheck disable=SC1090
-    . "$PROVIDER_KEY_FILE"
-    set +a
-fi
+# The variables the dashboard may write into provider.env. Parsing is
+# allowlisted to this set: the file is read line by line, never executed.
+PROVIDER_ENV_VARS="ANTHROPIC_API_KEY OPENROUTER_API_KEY LOCAL_MODEL_URL \
+LOCAL_MODEL_MAX_TOKENS LOCAL_MODEL_REASONING LOCAL_MODEL_CONTEXT_WINDOW \
+LOCAL_MODEL_VISION PLANNER_MODEL EXECUTOR_MODEL REVIEWER_MODEL PRD_MODEL \
+ROADMAP_MODEL ESCALATION_MODEL PROVIDER_SETUP_SKIPPED"
+ENV_PINNED_VARS=""
+for _v in $PROVIDER_ENV_VARS; do
+    if [ -n "${!_v:-}" ]; then ENV_PINNED_VARS="$ENV_PINNED_VARS $_v"; fi
+done
+unset _v
+
+source_provider_env() {
+    # Values are never echoed: the file holds the provider key with
+    # restrictive perms.
+    [ -s "$PROVIDER_KEY_FILE" ] || return 0
+    local line key val
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in ''|'#'*) continue ;; esac
+        key="${line%%=*}"
+        val="${line#*=}"
+        # A CRLF file would export an invisible trailing \r inside the value
+        # (an API key that "looks right" but fails auth).
+        val="${val%$'\r'}"
+        case " $PROVIDER_ENV_VARS " in
+            *" $key "*) : ;;
+            *) continue ;;
+        esac
+        case " $ENV_PINNED_VARS " in
+            *" $key "*) continue ;;
+        esac
+        export "$key=$val"
+    done < "$PROVIDER_KEY_FILE"
+}
+source_provider_env
 
 OFFLINE="${OFFLINE:-0}"
 SETUP_MODE=0
@@ -129,6 +159,13 @@ mkdir -p "$OPENCLAW_ROOT" "$AUTODEV_PIPELINE_ROOT" "$DATA/projects"
 mkdir -p "$DATA/secrets"
 chmod 700 "$DATA/secrets"
 ln -sfn "$OPENCLAW_ROOT" "$HOME/.openclaw"
+
+# Config-apply marker: the dashboard touches this file after editing
+# provider.env; the watch loop consumes it, re-renders config, and restarts
+# the gateway. A stale marker from a previous run is cleared here: boot
+# already applies everything fresh.
+APPLY_REQUEST_FILE="$DATA/secrets/apply.request"
+rm -f "$APPLY_REQUEST_FILE"
 
 # Setup-mode marker: a file the dashboard and doctor read to know a key is
 # still owed. Written here (after the /data mkdirs) when we entered setup mode,
@@ -399,6 +436,7 @@ PY
 UI_PORT="$UI_PORT" \
 PROVIDER_KEY_FILE="$PROVIDER_KEY_FILE" \
 SETUP_MARKER="$SETUP_MARKER" \
+APPLY_REQUEST_FILE="$APPLY_REQUEST_FILE" \
 DATA_PROJECTS="$DATA/projects" \
 python3 - <<'PY'
 import json, os
@@ -415,6 +453,7 @@ if os.path.exists(path):
 cfg["port"] = int(os.environ["UI_PORT"])
 cfg["provider_key_path"] = os.environ["PROVIDER_KEY_FILE"]
 cfg["setup_marker_path"] = os.environ["SETUP_MARKER"]
+cfg["apply_request_path"] = os.environ["APPLY_REQUEST_FILE"]
 cfg["projects_dir"] = os.environ["DATA_PROJECTS"]
 cfg["autodev_repo_path"] = os.environ["AUTODEV_REPO_PATH"]
 cfg["openclaw_root"] = os.environ["OPENCLAW_ROOT"]
@@ -642,86 +681,99 @@ banner_unlocked() {
     echo
 }
 
-if [ "$SETUP_MODE" != "1" ]; then
+if [ "$SETUP_MODE" = "1" ]; then
+    banner_setup_mode
+    say "setup mode: waiting for the dashboard to supply a provider key at $PROVIDER_KEY_FILE"
+else
     banner_up
-    rc=0
-    wait -n || rc=$?
-    say "a supervised process exited (rc=$rc); stopping the container"
-    shutdown
-    exit "$rc"
 fi
 
-# ── 5b. Setup-watch loop (setup mode only) ──────────────────────────────────
-# We cannot use `wait -n` yet: agents have no key. The dashboard writes the
-# key to $PROVIDER_KEY_FILE; this loop notices it, restarts the gateway so the
-# key lands in the gateway's process environment (OpenClaw reads
-# OPENROUTER_API_KEY / ANTHROPIC_API_KEY from env at start; this is the whole
-# unlock mechanism), runs the deferred first-boot --live doctor, clears the
-# setup marker, then falls through to normal supervision.
-#
-# This runs in the MAIN script (not a supervised background child): a
-# backgrounded watcher that exited would itself trip the `wait -n` teardown.
-# The liveness check re-reads GATEWAY_PID every iteration because start_gateway
-# below changes it.
-banner_setup_mode
-say "setup mode: waiting for the dashboard to supply a provider key at $PROVIDER_KEY_FILE"
+# ── 5b. Watch loop (lifetime supervision + config apply) ────────────────────
+# One loop supervises the four processes and applies configuration changes
+# for the container's lifetime. Two triggers:
+#   * setup unlock: in setup mode, the dashboard writes the provider key to
+#     $PROVIDER_KEY_FILE; detected by content (the pre-marker contract the
+#     setup screen already speaks).
+#   * apply request: the dashboard touches $APPLY_REQUEST_FILE after editing
+#     provider.env (settings saves after setup). The marker is consumed
+#     before work starts, so a request landing mid-apply coalesces into one
+#     more idempotent pass instead of being lost.
+# Both paths re-read provider.env (per-variable, deploy/.env pinned), re-run
+# the config wiring, and restart the gateway: OpenClaw reads provider keys
+# from its process environment and agent models from openclaw.json at start,
+# so the restart is the whole apply mechanism. New sessions bind the new
+# config; running sessions keep the model they were created with.
+# This runs in the MAIN script, not a supervised background child: the
+# gateway must be restarted by the process that owns its pid (a watcher's
+# gateway would be the watcher's child, outside supervision). The liveness
+# check re-reads GATEWAY_PID every iteration because restarts change it.
 while :; do
     for pid in "$UI_PID" "$HB_PID" "$SC_PID" "$GATEWAY_PID"; do
         if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
-            say "a supervised process (pid $pid) exited during setup mode; stopping the container"
+            rc=0
+            wait "$pid" 2>/dev/null || rc=$?
+            say "a supervised process (pid $pid) exited (rc=$rc); stopping the container"
             shutdown
-            exit 1
+            exit "$rc"
         fi
     done
-    if [ -s "$PROVIDER_KEY_FILE" ]; then
-        say "provider key received from the dashboard; restarting the gateway to load it"
-        set -a
-        # shellcheck disable=SC1090
-        . "$PROVIDER_KEY_FILE"
-        set +a
-        # Re-run the config wiring before the restart so anything the dashboard
-        # wrote lands in openclaw.json: a sourced *_MODEL value takes effect via
-        # render_reconcile_config, and a dashboard-set LOCAL_MODEL_URL lands as
+    APPLY=0
+    if [ "$SETUP_MODE" = "1" ] && [ -s "$PROVIDER_KEY_FILE" ]; then
+        say "provider key received from the dashboard; applying configuration"
+        APPLY=1
+    elif [ -f "$APPLY_REQUEST_FILE" ]; then
+        say "configuration apply requested by the dashboard"
+        APPLY=1
+    fi
+    if [ "$APPLY" = "1" ]; then
+        rm -f "$APPLY_REQUEST_FILE"
+        source_provider_env
+        # Re-run the config wiring before the restart so anything the
+        # dashboard wrote lands in openclaw.json: a *_MODEL value takes
+        # effect via render_reconcile_config, and a LOCAL_MODEL_URL lands as
         # the models.providers.local entry via wire_or_probe_local_models.
-        # SETUP_MODE=0 keeps a plain cloud-key unlock from re-running the
-        # local-server discovery probe (we are unlocking, not still probing).
+        # SETUP_MODE=0 keeps the pass from re-running local-server discovery.
         render_reconcile_config
         SETUP_MODE=0 wire_or_probe_local_models
         stop_gateway
         start_gateway
         wait_for_gateway
-        if [ -n "${PROVIDER_SETUP_SKIPPED:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ] \
-            && [ -z "${OPENROUTER_API_KEY:-}" ] && [ -z "${LOCAL_MODEL_URL:-}" ]; then
-            # Skip-provider unlock: no key to validate, so no --live doctor and
-            # the first-boot marker stays unwritten, so a later real key still
-            # gets its one billable ping (same contract as OFFLINE).
-            say "provider setup skipped from the dashboard; models are managed manually in OpenClaw"
+        if [ "$SETUP_MODE" = "1" ]; then
+            if [ -n "${PROVIDER_SETUP_SKIPPED:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ] \
+                && [ -z "${OPENROUTER_API_KEY:-}" ] && [ -z "${LOCAL_MODEL_URL:-}" ]; then
+                # Skip-provider unlock: no key to validate, so no --live doctor
+                # and the first-boot marker stays unwritten, so a later real key
+                # still gets its one billable ping (same contract as OFFLINE).
+                say "provider setup skipped from the dashboard; models are managed manually in OpenClaw"
+            else
+                # Deferred first-boot --live doctor: the key exists now, so run
+                # the one billable webhook ping. Mark it spent BEFORE running
+                # (same crash-loop guard as the first-boot block above): a
+                # doctor die must not re-fire the paid ping on the next boot.
+                touch "$FIRST_BOOT_MARKER"
+                say "running deferred first-boot doctor --live to validate the key"
+                DOCTOR_EXIT=0
+                (cd "$APP" && OWNED_OPENCLAW=1 python3 -m autodev.installer.doctor --live) || DOCTOR_EXIT=$?
+                case "$DOCTOR_EXIT" in
+                    0|2) : ;;
+                    *) die "deferred live doctor reports failing checks (exit $DOCTOR_EXIT); see the FAIL lines above" ;;
+                esac
+            fi
+            rm -f "$SETUP_MARKER"
+            SETUP_MODE=0
+            banner_unlocked
         else
-            # Deferred first-boot --live doctor: the key exists now, so run the
-            # one billable webhook ping. Mark it spent BEFORE running (same
-            # crash-loop guard as the first-boot block above): a doctor die
-            # must not re-fire the paid ping on the next boot.
-            touch "$FIRST_BOOT_MARKER"
-            say "running deferred first-boot doctor --live to validate the key"
+            # Post-setup apply: advisory doctor only. A bad save must not tear
+            # down a container that may have queued work; the dashboard's
+            # Health card surfaces the same report.
             DOCTOR_EXIT=0
-            (cd "$APP" && OWNED_OPENCLAW=1 python3 -m autodev.installer.doctor --live) || DOCTOR_EXIT=$?
+            (cd "$APP" && OWNED_OPENCLAW=1 python3 -m autodev.installer.doctor) || DOCTOR_EXIT=$?
             case "$DOCTOR_EXIT" in
                 0|2) : ;;
-                *) die "deferred live doctor reports failing checks (exit $DOCTOR_EXIT); see the FAIL lines above" ;;
+                *) say "WARNING: doctor reports failing checks after config apply (exit $DOCTOR_EXIT); see the FAIL lines above" ;;
             esac
+            say "configuration applied; gateway restarted"
         fi
-        rm -f "$SETUP_MARKER"
-        banner_unlocked
-        break
     fi
     sleep 2
 done
-
-# Setup complete: the gateway was restarted with the key, the marker is
-# cleared. Fall through to the normal supervision path. `wait -n` waits on all
-# current children, which includes the new gateway pid start_gateway just set.
-rc=0
-wait -n || rc=$?
-say "a supervised process exited (rc=$rc); stopping the container"
-shutdown
-exit "$rc"
