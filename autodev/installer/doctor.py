@@ -1075,7 +1075,7 @@ def check_local_model_completeness(config: dict) -> CheckResult:
 # screenshot-based visual review (deploy/CONFIG-AUDIT.md). A text-only model on either
 # role rejects every image-bearing turn (HTTP 400) — a failure that surfaces at the
 # LAST phase of a first run, after real spend, instead of at boot.
-_VISION_ROLES = ("reviewer", "executor")
+_VISION_ROLES = ("reviewer", "executor", "prd-creator")
 OPENROUTER_ENDPOINTS_URL = "https://openrouter.ai/api/v1/models/{model_id}/endpoints"
 
 
@@ -1100,10 +1100,11 @@ def check_model_modality(config: dict) -> CheckResult:
     probe writes it). Only an openrouter/ model with no local declaration falls back
     to the live OpenRouter probe — skipped under OFFLINE=1 so CI stays hermetic.
     Confirmed text-only reviewer → fail (visual review cannot run at all); confirmed
-    text-only executor → warn (degraded on UI/INT phases). Unverifiable → skipped,
-    never a guessed verdict.
+    text-only prd-creator → fail (Ideas chat attachments are sent to it as images);
+    confirmed text-only executor → warn (degraded on UI/INT phases). Unverifiable →
+    skipped, never a guessed verdict.
     """
-    cid, title = "model_modality", "Reviewer/executor models accept images"
+    cid, title = "model_modality", "Reviewer/executor/prd-creator models accept images"
     path = os.path.join(config.get("openclaw_root") or "", "openclaw.json")
     data, _err = _load_openclaw_json(path)
     if data is None:
@@ -1118,7 +1119,9 @@ def check_model_modality(config: dict) -> CheckResult:
             if isinstance(primary, str) and "/" in primary:
                 primaries[agent["id"]] = primary
     if not primaries:
-        return CheckResult(cid, title, "skipped", "no reviewer/executor model configured")
+        return CheckResult(
+            cid, title, "skipped", "no reviewer/executor/prd-creator model configured"
+        )
     offline = (os.environ.get("OFFLINE") or "").strip() == "1"
     text_only, unverified, verified = [], [], []
     for role in _VISION_ROLES:
@@ -1150,13 +1153,20 @@ def check_model_modality(config: dict) -> CheckResult:
         else:
             verified.append(role)
     if text_only:
-        status = "fail" if any(s.startswith("reviewer=") for s in text_only) else "warn"
+        # Reviewer and prd-creator hard-fail: screenshot review turns and Ideas
+        # chat attachments cannot degrade, they 400 outright. Executor warns.
+        status = (
+            "fail"
+            if any(s.startswith(("reviewer=", "prd-creator=")) for s in text_only)
+            else "warn"
+        )
         return CheckResult(
             cid, title, status,
             "text-only model on a vision-dependent role: " + "; ".join(text_only),
-            "visual review attaches screenshots, which a text-only model rejects "
-            "(HTTP 400) on every review turn; set REVIEWER_MODEL / EXECUTOR_MODEL "
-            "(deploy/.env for the container) to a multimodal model and restart",
+            "visual review screenshots and Ideas chat attachments are sent as "
+            "images, which a text-only model rejects (HTTP 400); set "
+            "REVIEWER_MODEL / EXECUTOR_MODEL / PRD_MODEL (deploy/.env for the "
+            "container) to a multimodal model and restart",
         )
     if unverified:
         return CheckResult(

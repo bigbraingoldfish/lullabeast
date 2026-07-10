@@ -167,6 +167,11 @@ ln -sfn "$OPENCLAW_ROOT" "$HOME/.openclaw"
 APPLY_REQUEST_FILE="$DATA/secrets/apply.request"
 rm -f "$APPLY_REQUEST_FILE"
 
+# Model property overrides: dashboard-owned overlay re-applied on top of the
+# rendered config every pass (reconcile force-wins template values, so a raw
+# openclaw.json edit would not survive a boot). Persists on the data volume.
+MODEL_OVERRIDES_FILE="$DATA/model-overrides.json"
+
 # Setup-mode marker: a file the dashboard and doctor read to know a key is
 # still owed. Written here (after the /data mkdirs) when we entered setup mode,
 # removed when a key is present so a later keyed boot clears a stale marker.
@@ -227,7 +232,8 @@ fi
 # provider) must reach openclaw.json before the gateway restart. Idempotent.
 render_reconcile_config() {
     say "rendering/reconciling $OPENCLAW_ROOT/openclaw.json against the golden template"
-    HOOKS_TOKEN="$HOOKS_TOKEN" GATEWAY_TOKEN="$GATEWAY_TOKEN" python3 - <<'PY'
+    HOOKS_TOKEN="$HOOKS_TOKEN" GATEWAY_TOKEN="$GATEWAY_TOKEN" \
+    MODEL_OVERRIDES_FILE="$MODEL_OVERRIDES_FILE" python3 - <<'PY'
 import json
 import os
 from autodev.installer.openclaw_template import (
@@ -278,6 +284,21 @@ if published.isdigit() and published != "18789":
         origins.extend(o for o in wanted if o not in origins)
         write_json_atomic(target, cfg)
         print(f"[lullabeast] Control UI origins extended for published gateway port {published}")
+
+# Dashboard-owned model property overrides, re-applied after every
+# render/reconcile so they survive the template force-win. Applied before
+# wire_or_probe_local_models, whose merge preserves existing fields and whose
+# explicit LOCAL_MODEL_* env values keep the last word for local models.
+from autodev.installer.model_overrides import apply_model_overrides, load_model_overrides
+
+overrides = load_model_overrides(os.environ.get("MODEL_OVERRIDES_FILE") or "")
+if overrides:
+    with open(target, encoding="utf-8") as f:
+        cfg = json.load(f)
+    overlaid = apply_model_overrides(cfg, overrides)
+    if overlaid != cfg:
+        write_json_atomic(target, overlaid)
+        print("[lullabeast] model property overrides applied from the data volume")
 PY
 }
 
@@ -437,6 +458,7 @@ UI_PORT="$UI_PORT" \
 PROVIDER_KEY_FILE="$PROVIDER_KEY_FILE" \
 SETUP_MARKER="$SETUP_MARKER" \
 APPLY_REQUEST_FILE="$APPLY_REQUEST_FILE" \
+MODEL_OVERRIDES_FILE="$MODEL_OVERRIDES_FILE" \
 DATA_PROJECTS="$DATA/projects" \
 python3 - <<'PY'
 import json, os
@@ -454,6 +476,7 @@ cfg["port"] = int(os.environ["UI_PORT"])
 cfg["provider_key_path"] = os.environ["PROVIDER_KEY_FILE"]
 cfg["setup_marker_path"] = os.environ["SETUP_MARKER"]
 cfg["apply_request_path"] = os.environ["APPLY_REQUEST_FILE"]
+cfg["model_overrides_path"] = os.environ["MODEL_OVERRIDES_FILE"]
 cfg["projects_dir"] = os.environ["DATA_PROJECTS"]
 cfg["autodev_repo_path"] = os.environ["AUTODEV_REPO_PATH"]
 cfg["openclaw_root"] = os.environ["OPENCLAW_ROOT"]

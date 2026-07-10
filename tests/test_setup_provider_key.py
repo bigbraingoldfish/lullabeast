@@ -94,6 +94,25 @@ class TestProviderStatus:
             r = client.get("/api/setup/provider-status")
         assert r.json()["key_present"] is False
 
+    def test_applying_reflects_marker_presence(self, tmp_path, monkeypatch):
+        # The Settings model card polls this to distinguish "apply queued" from
+        # idle; the entrypoint removes the marker when its pass starts.
+        for v in ("OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"):
+            monkeypatch.delenv(v, raising=False)
+        cfg = _cfg(tmp_path)
+        with patch("ui.server.load_config", return_value=cfg):
+            assert client.get("/api/setup/provider-status").json()["applying"] is False
+
+        cfg["apply_request_path"] = str(tmp_path / "secrets" / "apply.request")
+        with patch("ui.server.load_config", return_value=cfg):
+            assert client.get("/api/setup/provider-status").json()["applying"] is False
+
+        marker = Path(cfg["apply_request_path"])
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("")
+        with patch("ui.server.load_config", return_value=cfg):
+            assert client.get("/api/setup/provider-status").json()["applying"] is True
+
 
 # ── provider-key ─────────────────────────────────────────────────────────────
 

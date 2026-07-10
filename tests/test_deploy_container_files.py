@@ -181,6 +181,18 @@ class TestEntrypoint:
         assert 'cfg["projects_dir"]' in ENTRYPOINT
         assert 'cfg["local_model_probe_host"]' in ENTRYPOINT
         assert 'cfg["apply_request_path"]' in ENTRYPOINT
+        assert 'cfg["model_overrides_path"]' in ENTRYPOINT
+
+    def test_model_overrides_overlay_applied_in_render(self):
+        # Stage B: the dashboard-owned overlay must be re-applied after every
+        # render/reconcile (reconcile force-wins template values) and before
+        # wire_or_probe_local_models (whose merge preserves existing fields).
+        assert 'MODEL_OVERRIDES_FILE="$DATA/model-overrides.json"' in ENTRYPOINT
+        render_def = ENTRYPOINT.find("render_reconcile_config() {")
+        render_end = ENTRYPOINT.find("wire_or_probe_local_models() {")
+        render_body = ENTRYPOINT[render_def:render_end]
+        assert "load_model_overrides" in render_body
+        assert "apply_model_overrides" in render_body
 
     def test_config_render_reconcile_is_a_function(self):
         # v1.0.0 Phase 3: the render/reconcile heredoc is wrapped in a function
