@@ -130,6 +130,38 @@ def _protect_pipeline_symlinks():
                 pass
 
 
+@pytest.fixture
+def hermetic_deploy_profile(tmp_path, monkeypatch):
+    """Repoint deployment-profile paths at the per-test sandbox.
+
+    ``ui/config.json`` is a deployment profile: absent/sparse on the public
+    stack, container-seeded on the dev stack (``/data/...`` paths, remapped
+    ports). Code under test that calls the real ``load_config()`` internally —
+    notably ``_run_init_project``'s Step-8 symlink scaffolding — would
+    otherwise write to whichever profile this machine carries (and fail on a
+    host where ``/data`` is the container's, not ours). Wrapping
+    ``load_config`` to substitute sandbox paths makes a suite pass identically
+    on a bare tree, the public stack, or the dev stack. Ports and non-path
+    keys pass through untouched. Apply per-module via
+    ``pytestmark = pytest.mark.usefixtures("hermetic_deploy_profile")``.
+    """
+    import ui.server as srv
+
+    real = srv.load_config
+    root = tmp_path / "openclaw-root"
+
+    def _sandboxed(config_path=None):
+        cfg = real(config_path)
+        cfg["openclaw_root"] = str(root)
+        cfg["project_dir_path"] = ""
+        cfg["autodev_pipeline_root"] = ""
+        cfg["projects_dir"] = ""
+        return cfg
+
+    monkeypatch.setattr(srv, "load_config", _sandboxed)
+    return root
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _prune_recent_projects_after_session():
     """Self-clean dead recents after the whole suite (4-B).

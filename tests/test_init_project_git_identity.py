@@ -23,6 +23,11 @@ from ui.server import (
     _run_init_project,
 )
 
+# _run_init_project reads the real load_config() internally; sandbox the
+# machine's deployment profile (public vs dev stack) so the suite passes on
+# either — see the fixture docstring in tests/conftest.py.
+pytestmark = pytest.mark.usefixtures("hermetic_deploy_profile")
+
 # Self-contained seeds (path-fixture rule: no machine paths, no cross-test imports).
 VALID_ROADMAP_SEED = (
     "- [ ] `TEST-E1` | LOW | Do the thing\n"

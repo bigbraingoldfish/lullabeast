@@ -7,6 +7,11 @@ from unittest.mock import patch, MagicMock, call
 
 import pytest
 
+# _run_init_project reads the real load_config() internally; sandbox the
+# machine's deployment profile (public vs dev stack) so the suite passes on
+# either — see the fixture docstring in tests/conftest.py.
+pytestmark = pytest.mark.usefixtures("hermetic_deploy_profile")
+
 
 # ---------------------------------------------------------------------------
 # Helpers

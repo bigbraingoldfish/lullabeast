@@ -31,10 +31,14 @@ def test_readiness_poll_completion_refreshes_ideas_list():
 
 
 def test_submit_message_success_still_refreshes_ideas_list():
-    """Regression: message POST success must keep refreshing list (readiness may still be pending)."""
+    """Regression: message POST success must keep refreshing list (readiness may still be pending).
+
+    (Window sized for the success handler's stale-idea guard — see
+    test_ui_ideas_never_stuck_turn_recovery — which sits between the fetch and
+    the refresh.)"""
     html = load_index_html()
     assert re.search(
-        r"fetch\s*\(\s*`/api/ideas/\$\{currentIdeaId\}/message`[\s\S]{0,3500}?refreshIdeas\s*\(\s*\)",
+        r"fetch\s*\(\s*`/api/ideas/\$\{currentIdeaId\}/message`[\s\S]{0,4500}?refreshIdeas\s*\(\s*\)",
         html,
     ), "submitMessage success path should call refreshIdeas()"
 
