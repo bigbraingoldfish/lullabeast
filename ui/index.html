@@ -457,7 +457,7 @@
 
         const P3_PIPELINE_PHASE_RAW_ID_TITLE = 'Phase ID from roadmap.md.';
         const P3_ACTIVITY_TAB_TITLE =
-            'Orchestrator + gate + webhook events on Activity tab; escalation-only on Escalation tab; live orchestrator log on Pipeline log tab.';
+            'Key orchestrator + gate + webhook events on Activity tab (full diagnostics in the Pipeline log); escalation-only on Escalation tab; live orchestrator log on Pipeline log tab.';
         const P3_STOPPED_RESUME_TITLE = 'Continues from the current agent in the current phase.';
         const P3_QUEUE_ADD_PATH_PLACEHOLDER = '/absolute/path/to/existing/git/repo';
 
@@ -849,6 +849,9 @@
                 case 'nuclear_reset':
                     return '#f0697c';
                 // warning / retry / parked — recoverable, worth attention (amber)
+                case 'token_capture_warning':
+                case 'scope_warning':
+                case 'queue_revive_project_missing':
                 case 'gate_fail':
                 case 'reachability_warning':
                 case 'gate_warning':
@@ -874,6 +877,8 @@
                 case 'abort_verify_failed':
                 case 'reviewer_verdict':
                 case 'stamp_init_failed':
+                case 'sentinel_overflow_hold':
+                case 'sentinel_verdict_hold':
                     return '#8e88ae';
                 default: return '#8e88ae';
             }
@@ -898,6 +903,14 @@
             stamp_init_failed: 'Setup Fail',
             tool_loop_detected: 'Tool Loop',
             escalation_command_invalid: 'Invalid Command',
+            // Layer 2 — verdict-hold episodes (a held sentinel, not a failure).
+            sentinel_overflow_hold: 'Overflow Hold',
+            sentinel_verdict_hold: 'Verdict Hold',
+            // Advisory warnings surfaced on otherwise-passing attempts.
+            token_capture_warning: 'Token Warn',
+            scope_warning: 'Scope Warn',
+            // P4 — failed queue revival (project directory gone).
+            queue_revive_project_missing: 'Revive Fail',
             // P1 Stage F — advisory reachability events.
             reachability_warning: 'Reach Warn',
             reachability_not_applicable: 'Reach N/A',
@@ -926,12 +939,17 @@
             status_changed: 'The pipeline state file was updated (status / agent / phase transition).',
             poll_start: 'Orchestrator began polling for this agent\'s completion sentinel. Detail lists the active stall threshold and startup grace.',
             poll_outcome: 'Polling ended. Detail.reason is one of succeeded / stalled / no_first_activity / stopped / timeout.',
-            attempt_end: 'One agent attempt finished. Dense summary mirroring the [ATTEMPT_END] log line.',
+            attempt_end: 'One agent attempt finished its turn. Not a pass/fail verdict: the gate row that follows carries that. Mirrors the [ATTEMPT_END] log line.',
             abort_attempted: 'Orchestrator tried to interrupt the prior agent session before moving on (steer). Detail.result is "ok" (steered, then settled), "skipped_idle" (turn already ended — not steered), "FAILED" (gateway rejected the steer), or "unconfirmed" (still streaming after the settle wait).',
             abort_verify_failed: 'Gateway acknowledged the abort but the agent kept refreshing its activity stamp. The orchestrator soft-continues — it launches the next attempt anyway rather than forcing the run to stop and wait for a human.',
             reviewer_verdict: 'The reviewer-gate dispatch decision. Detail.verdict is PASS / ROUTE_EXECUTOR / ROUTE_PLANNER / ROUTE_ESCALATE / MISSING_ARTIFACTS / CONTRACT_FAILURE / VISUAL_UNVERIFIED / BEHAVIORAL_UNVERIFIED / REGRESSION_UNVERIFIED.',
             stamp_init_failed: 'Could not seed the agent activity stamp — workspace dir is missing or unwritable. Stall detection would be silently disabled; pipeline halts loudly instead.',
             tool_loop_detected: 'The agent spun on the same tool call with identical input and no progress (a tool-call loop OpenClaw’s own block misses because the command output jitters). The looping session was stopped and retried fresh; it consumes one of the agent’s self-failure retries and escalates if it keeps looping — usually a sign the phase’s verification check is subjective and can’t be confirmed automatically.',
+            sentinel_overflow_hold: 'The agent hit a recoverable context overflow right at its completion signal. The orchestrator is holding the sentinel while the session auto-compacts and may still write its verdict. Self-healing, bounded by the hold budget.',
+            sentinel_verdict_hold: 'The agent signalled completion while its turn was still streaming, so the orchestrator is holding the sentinel for the late verdict instead of failing the attempt. Self-healing, bounded by the hold budget.',
+            token_capture_warning: 'Token usage for one attempt could not be read (session file missing or unresolved), so this phase\'s token totals under-count. The phase metrics row carries token_capture_degraded as the durable marker.',
+            scope_warning: 'The planner descoped a too-large phase and said so. Advisory only, the plan still passed its gate; the full note is stored on the phase metrics row.',
+            queue_revive_project_missing: 'A parked project could not be revived because its directory no longer exists (moved or deleted). Restore the folder or remove the queue entry.',
             escalation_command_invalid: 'The escalation agent returned an empty or unrecognized resume command. The orchestrator defaulted to STOP (recoverable) instead of a silent dead-end — resume from the escalation panel to continue.',
             // P1 Stage F — advisory reachability events. Hedged copy: operators
             // must not infer "broken" from "unreachable" — it could just be
@@ -988,13 +1006,31 @@
                             ? d.last_error_code.trim()
                             : "";
                     const friendly = lec ? getLastErrorCodeTitle(lec, event.agent) : "";
+                    // Reviewer verdicts route through gate_fail; each renders its routing
+                    // decision here (the reviewer_verdict event is feed-hidden — see
+                    // isFeedVisibleEvent).
                     let route = "";
                     if (d.gate_result === "ROUTE_EXECUTOR") route = "Review found issues — sending back to executor";
+                    else if (d.gate_result === "ROUTE_PLANNER")
+                        route = "Review blamed the plan, sending back to planner";
                     else if (d.gate_result === "ROUTE_ESCALATE")
                         route = "Review failed repeatedly — escalating for human input";
                     else if (d.gate_result === "MISSING_ARTIFACTS")
                         route = "Required output files missing — cannot review";
-                    else if (d.exit_code != null) route = `Agent output rejected (exit code ${d.exit_code})`;
+                    else if (d.gate_result === "CONTRACT_FAILURE")
+                        route = "Reviewer produced no usable output, retrying review in a fresh session";
+                    else if (d.gate_result === "VISUAL_UNVERIFIED")
+                        route = "Visual verification evidence missing, re-running reviewer";
+                    else if (d.gate_result === "BEHAVIORAL_UNVERIFIED")
+                        route = "Behavioral verification evidence missing, re-running reviewer";
+                    else if (d.gate_result === "REGRESSION_UNVERIFIED")
+                        route = "Prior-phase regression check unverified, re-running reviewer";
+                    else if (d.exit_code != null) {
+                        const who = event.agent
+                            ? event.agent[0].toUpperCase() + event.agent.slice(1)
+                            : "Agent";
+                        route = `${who} output rejected by gate (exit code ${d.exit_code})`;
+                    }
                     else route = "Gate check failed";
                     // P0 Stage H — prefix with retry-source label when the
                     // event carries retry_class. Initial attempts (and
@@ -1102,7 +1138,9 @@
                         d.retry_class === "executor_self_failure" ? " [self-failure retry]" :
                         d.retry_class === "reviewer_rejection" ? " [reviewer-rejection retry]" :
                         "";
-                    if (reason === 'succeeded') return `${prefix} succeeded${durStr}${classSuffix}`;
+                    // "succeeded" is the POLL reason (turn ended, sentinel written),
+                    // not a work verdict — the gate row that follows carries pass/fail.
+                    if (reason === 'succeeded') return `${prefix} finished${durStr}, gate check next${classSuffix}`;
                     if (reason === 'stalled') return `${prefix} stalled — no activity past the stall threshold${durStr}${classSuffix}`;
                     if (reason === 'no_first_activity') return `${prefix} never started — no first hook within the startup grace${classSuffix}`;
                     if (reason === 'timeout') return `${prefix} timed out — infrastructure backstop hit (gateway unreachable)${durStr}${classSuffix}`;
@@ -1153,6 +1191,24 @@
                     const n = typeof d.repeat_count === 'number' ? d.repeat_count : '?';
                     return `${role} stuck repeating ${t} (${n}x, identical input) — stopped the loop and retrying fresh; likely a subjective/unverifiable check`;
                 }
+                // Layer 2 — held sentinels: the poll is waiting on purpose, not stuck.
+                case 'sentinel_overflow_hold': {
+                    const role = d.agent_role || event.agent || 'agent';
+                    const held = d.elapsed_s != null ? ` (held ${d.elapsed_s}s)` : '';
+                    return `${role[0].toUpperCase() + role.slice(1)} hit a recoverable context overflow at its completion signal, holding for a late verdict${held}`;
+                }
+                case 'sentinel_verdict_hold': {
+                    const role = d.agent_role || event.agent || 'agent';
+                    const held = d.elapsed_s != null ? ` (held ${d.elapsed_s}s)` : '';
+                    return `${role[0].toUpperCase() + role.slice(1)} is still streaming past its completion signal, holding for the verdict${held}`;
+                }
+                case 'token_capture_warning': {
+                    const role = event.agent || 'agent';
+                    const why = d.reason === 'no_session_path'
+                        ? 'session path never resolved'
+                        : 'session file missing';
+                    return `Could not read ${role} token usage for this attempt (${why}), phase token totals under-count`;
+                }
                 // P1 Stage F — advisory reachability events. Hedged copy
                 // prevents the operator reading "unreachable" as "broken."
                 case 'reachability_warning': {
@@ -1191,6 +1247,13 @@
                     const tail = friendly ? ` — ${friendly}` : '';
                     return `Gate raised ${count} non-blocking warning(s)${tail}. Advisory — the reviewer will adjudicate (accept, or convert to a blocking issue).`;
                 }
+                case 'scope_warning': {
+                    const w = typeof d.warning === 'string' ? d.warning.trim() : '';
+                    const excerpt = w.length > 140 ? w.slice(0, 140) + '…' : w;
+                    return excerpt
+                        ? `Planner descoped the phase: ${excerpt}`
+                        : 'Planner descoped the phase to fit, see the metrics row for the note';
+                }
 
                 // ─── Phase 2 — SILENT lifecycle/destructive events rendered as prose ───
                 case 'nuclear_reset': {
@@ -1223,6 +1286,10 @@
                     const parent = d.parent_id ? ` parent ${d.parent_id}` : ' its parent';
                     return `${name} held — waiting on${parent} to complete`;
                 }
+                case 'queue_revive_project_missing': {
+                    const path = d.project_path || 'unknown path';
+                    return `Could not revive parked project, its directory is missing: ${path}`;
+                }
 
                 default:
                     return formatPipelineEventDetail(d) || type;
@@ -1248,6 +1315,25 @@
             const key = (raw || '').toLowerCase();
             if (EVENT_TYPE_DISPLAY[key]) return EVENT_TYPE_DISPLAY[key];
             return humanizeSnakeCase(key);
+        }
+
+        // Activity-tab curation. These rows restate an adjacent row or record a
+        // no-op, so the feed hides them; they remain in pipeline_events.jsonl,
+        // /api/events, and the Pipeline log tab.
+        //   poll_outcome     — same attempt summary the attempt_end row carries
+        //   reviewer_verdict — the gate_pass / gate_fail row that follows carries the decision
+        //   reachability_not_applicable — advisory skip; nothing to act on
+        //   abort_attempted (skipped_idle only) — no interrupt was needed or issued
+        const FEED_HIDDEN_EVENT_TYPES = new Set([
+            'poll_outcome',
+            'reviewer_verdict',
+            'reachability_not_applicable',
+        ]);
+        function isFeedVisibleEvent(event) {
+            const type = getEventTypeRaw(event).toLowerCase();
+            if (FEED_HIDDEN_EVENT_TYPES.has(type)) return false;
+            if (type === 'abort_attempted' && (event.detail || {}).result === 'skipped_idle') return false;
+            return true;
         }
 
         const AGENT_ATTEMPT_DOT_TITLES = {
@@ -3539,7 +3625,12 @@
 
         function ensureEventId(event) {
             if (event.id) return event;
-            const key = (event.ts || '') + '|' + (event.event || event.event_type || '') + '|' + (event.phase || '');
+            // Key must distinguish same-second events (poll_outcome + attempt_end
+            // land in the same second) — include agent + detail, not just ts|type|phase.
+            let detailKey = '';
+            try { detailKey = JSON.stringify(event.detail || {}); } catch (_) {}
+            const key = (event.ts || '') + '|' + (event.event || event.event_type || '') + '|'
+                + (event.phase || '') + '|' + (event.agent || '') + '|' + detailKey;
             return { ...event, id: 'fe_' + key };
         }
 
@@ -3819,9 +3910,12 @@
                             const eventTs = newEvent.ts || newEvent.timestamp;
                             if (newEvent && (newEvent.ts || newEvent.timestamp)) {
                                 setEvents(prevEvents => {
+                                    // Same-second events are distinct (poll_outcome and
+                                    // attempt_end share a timestamp) — require the composed
+                                    // id to match, not the timestamp alone.
                                     const isDuplicate = prevEvents.some(e => {
                                         const existingTs = e.ts || e.timestamp;
-                                        return existingTs && eventTs && existingTs === eventTs;
+                                        return existingTs && eventTs && existingTs === eventTs && e.id === newEvent.id;
                                     });
                                     if (isDuplicate) return prevEvents;
                                     setNewEventIds(prev => new Set([...prev, newEvent.id]));
@@ -3868,7 +3962,8 @@
             }
 
             function fetchEvents() {
-                fetch('/api/events?limit=30')
+                // 60 raw events ≈ 30+ visible rows after feed curation.
+                fetch('/api/events?limit=60')
                     .then(res => res.json())
                     .then(data => {
                         if (data.events && Array.isArray(data.events)) setEvents(data.events.map(ensureEventId));
@@ -3877,16 +3972,15 @@
             }
 
             function fetchEventsPolling() {
-                fetch('/api/events?limit=30')
+                fetch('/api/events?limit=60')
                     .then(res => res.json())
                     .then(data => {
                         if (data.events && Array.isArray(data.events)) {
                             setEvents(prevEvents => {
-                                const existingTs = new Set(prevEvents.map(e => e.ts || e.timestamp));
+                                const existingIds = new Set(prevEvents.map(e => e.id));
                                 const newEvents = data.events.map(ensureEventId).filter(e => {
-                                    const ts = e.ts || e.timestamp;
-                                    if (existingTs.has(ts)) return false;
-                                    existingTs.add(ts);
+                                    if (existingIds.has(e.id)) return false;
+                                    existingIds.add(e.id);
                                     return true;
                                 });
                                 if (newEvents.length === 0) return prevEvents;
@@ -3916,6 +4010,10 @@
                 return typ === "escalation_trigger" || typ === "escalation_resolve";
             });
 
+            // Activity tab renders the curated view; hidden rows stay in state
+            // (and in the Pipeline log) so the Escalation tab and dedup see everything.
+            const feedEvents = events.filter(isFeedVisibleEvent);
+
             const TabButton = ({ tab, label, title: tabTitle }) => (
                 <button
                     type="button"
@@ -3943,7 +4041,7 @@
                             <PipelineLogPanel />
                         ) : activityTab === 'escalation' ? (
                             <EscalationLogPanel events={escalationEvents} roadmap={roadmap} />
-                        ) : events.length === 0 ? (
+                        ) : feedEvents.length === 0 ? (
                             <div className="text-slate-500 italic text-sm">No events yet. Events appear here as the pipeline runs.</div>
                         ) : (
                             <div className="space-y-1">
@@ -3953,7 +4051,7 @@
                                     <span className="w-44 flex-shrink-0">Event</span>
                                     <span className="flex-1">What happened</span>
                                 </div>
-                                {events.map((event, index) => (
+                                {feedEvents.map((event, index) => (
                                     <EventRow
                                         key={event.id || index}
                                         event={event}
