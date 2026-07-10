@@ -244,7 +244,7 @@ class TestConversationLog:
                     r = client.post(f"/api/ideas/{idea_id}/message",
                                     json={"content": "u", "turn": 1})
 
-        assert r.status_code == 408
+        assert r.status_code == 504
         assert not (self.ideas_dir / idea_id / "conversation_log.md").exists()
 
     def test_log_not_written_on_webhook_failure(self):

@@ -6,7 +6,13 @@ This project follows [Semantic Versioning](https://semver.org/). The first publi
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Added
+- **The Ideas chat now shows whether the agent is actually working.** While a reply is pending, the bubble reports the agent's last activity live — a working pulse, an amber shift as silence approaches the stall threshold, and an honest "quiet" state past it — the same liveness signal the pipeline Monitor gives. Backed by a new read-only `turn-status` endpoint watching the same activity stamp the server's stall detection already uses.
+
+### Fixed
+- **Retrying a chat turn can no longer collide with the previous attempt.** Each retry now runs in a fresh agent session (per-attempt session keys, the same lesson the pipeline learned), so a still-streaming prior attempt cannot poison or interleave with the new one.
+- **A turn that finishes without writing a reply now says so.** When the agent signals completion but the reply is missing or empty, the chat shows an honest "finished without writing a reply" error instead of a blank bubble; the live send and the late-recovery path give the same verdict, and the empty completion signal is consumed so an immediate retry starts clean.
+- **A failed chat turn no longer triggers phantom browser retries.** Turn timeouts were reported with HTTP 408, whose transport semantics tell browsers to silently re-send the request — a failed turn could re-fire the agent several times with no user action (observed live as three ghost attempts). Definitive turn verdicts now ride HTTP 504, which browsers never auto-retry.
 
 ## [1.0.0] - planned
 

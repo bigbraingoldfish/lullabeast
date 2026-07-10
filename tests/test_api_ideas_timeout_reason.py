@@ -8,10 +8,12 @@ premature `no_first_activity` early-fail never fires on this path.) Before
 reason-awareness both collapsed to a single generic "the model may be slow"
 message, discarding insight we already had.
 
-`_ideas_timeout_message` is the SOLE author of the user-facing text: the 408
+`_ideas_timeout_message` is the SOLE author of the user-facing text: the 504
 response body and the persisted session placeholder both use it, and the
 frontend renders it verbatim (no second copy of the wording — avoids the
-dual-source drift that bit the timeout *values*).
+dual-source drift that bit the timeout *values*). 504, not 408: browsers
+transparently re-POST a request that gets a 408, which re-fired whole turns
+invisibly to the page JS.
 """
 import json
 import sys
@@ -67,7 +69,7 @@ def test_each_reason_yields_a_distinct_message():
     assert len(msgs) == 2, "each failure reason must produce distinct guidance"
 
 
-# ── integration: the 408 carries reason + message; placeholder matches ───────
+# ── integration: the 504 carries reason + message; placeholder matches ───────
 
 def _make_idea(ideas_dir: Path) -> str:
     idea_id = str(uuid.uuid4())
@@ -86,7 +88,7 @@ def _make_idea(ideas_dir: Path) -> str:
 
 
 @pytest.mark.parametrize("reason", ["stalled", "timeout"])
-def test_408_body_and_placeholder_carry_reason_specific_message(tmp_path, reason):
+def test_504_body_and_placeholder_carry_reason_specific_message(tmp_path, reason):
     ideas_dir = tmp_path / "ideas"
     ideas_dir.mkdir()
     idea_id = _make_idea(ideas_dir)
@@ -118,15 +120,15 @@ def test_408_body_and_placeholder_carry_reason_specific_message(tmp_path, reason
                         json={"content": "go", "turn": 1},
                     )
 
-    assert resp.status_code == 408, resp.text
+    assert resp.status_code == 504, resp.text
     detail = resp.json()["detail"]
-    assert isinstance(detail, dict), "408 detail must be a structured {reason, message}"
+    assert isinstance(detail, dict), "504 detail must be a structured {reason, message}"
     assert detail["reason"] == reason
     assert detail["message"] == expected
     assert detail["message"] != "Agent timed out — the model may be slow. You can retry." \
         or reason not in ("no_first_activity", "stalled", "timeout")
 
-    # The persisted placeholder the UI shows on refresh must match the 408 body
+    # The persisted placeholder the UI shows on refresh must match the 504 body
     # (single source — same string in both places).
     session = json.loads((idea_dir / "session.json").read_text())
     pend = [m for m in session["messages"] if m.get("role") == "assistant" and m.get("error")]

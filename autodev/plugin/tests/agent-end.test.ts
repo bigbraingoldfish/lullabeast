@@ -303,6 +303,32 @@ test("prd-creator writes ideas turn .done when absent for session-N key", () => 
   }
 });
 
+test("prd-creator writes ideas turn .done for retry-suffixed session key", () => {
+  // Retries run under ideas:{id}:session-{n}-r{k} (fresh OpenClaw session per
+  // attempt); the .done backstop must land on the same turns/{n}.done.
+  const tmpDir = makeTmpDir();
+  const openclawRoot = path.join(tmpDir, "openclaw");
+  const workspaceDir = path.join(openclawRoot, "workspace-prd-creator");
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  const ideasRoot = path.join(openclawRoot, "ideas");
+  const ideaId = "my-idea-1";
+  const turnsDir = path.join(ideasRoot, ideaId, "turns");
+  fs.mkdirSync(turnsDir, { recursive: true });
+  const donePath = path.join(turnsDir, "3.done");
+
+  try {
+    handleAgentEnd(baseEvent, {
+      agentId: "prd-creator",
+      sessionKey: `agent:prd-creator:ideas:${ideaId}:session-3-r2`,
+      workspaceDir,
+    });
+    assert.equal(fs.existsSync(donePath), true);
+    assert.equal(fs.readFileSync(donePath, "utf8"), "done");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test("prd-creator ignores non-session ideas keys (e.g. clarity)", () => {
   const tmpDir = makeTmpDir();
   const openclawRoot = path.join(tmpDir, "openclaw");

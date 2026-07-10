@@ -179,7 +179,7 @@ class TestApiIdeasMessage:
                     json={"content": "Hi agent", "turn": 1},
                 )
 
-        assert response.status_code in (200, 408), f"Unexpected status: {response.status_code}"
+        assert response.status_code in (200, 504), f"Unexpected status: {response.status_code}"
 
     def test_returns_response_and_prd_content_on_success(self):
         """Response body contains {response, prd_content} fields."""
@@ -313,8 +313,12 @@ class TestApiIdeasMessage:
         assert "Brief intro only." in prose
         assert body["parsed"].get("drafting") == "Full PRD Draft"
 
-    def test_returns_408_on_timeout(self):
-        """Returns 408 when sentinel file is not found within timeout."""
+    def test_returns_504_on_timeout(self):
+        """Returns 504 when sentinel file is not found within timeout.
+
+        504, not 408: browsers transparently re-POST a request that gets a
+        408, which re-fired whole turns invisibly to the page JS.
+        """
         client = load_server()
 
         self._write_session("9", {
@@ -341,8 +345,8 @@ class TestApiIdeasMessage:
                             json={"content": "Timeout test", "turn": 1},
                         )
 
-        # Should timeout and return 408
-        assert response.status_code == 408, f"Expected 408, got {response.status_code}"
+        # Should timeout and return 504
+        assert response.status_code == 504, f"Expected 504, got {response.status_code}"
 
     def test_returns_502_on_webhook_bad_status(self):
         """Returns 502 when hook returns non-2xx; pre-saved turn is rolled back (not persisted)."""
@@ -690,8 +694,8 @@ class TestApiIdeasMessage:
         cfg["poll_interval"] = 0.05
         return cfg
 
-    def test_returns_408_when_sentinel_missing_until_poll_deadline(self):
-        """POST /message returns 408 when ``turns/n.done`` never appears (hard poll only).
+    def test_returns_504_when_sentinel_missing_until_poll_deadline(self):
+        """POST /message returns 504 when ``turns/n.done`` never appears (hard poll only).
 
         Ideas disables stamp-based ``idle`` / ``no_session`` early exits on this path
         (``use_stamp_idle=False``) so only ``poll_timeout`` applies.
@@ -728,16 +732,16 @@ class TestApiIdeasMessage:
                     )
         elapsed = _time.monotonic() - start
 
-        assert response.status_code == 408, f"Expected 408, got {response.status_code}"
-        # 408 detail is now a structured {reason, message} object (reason-aware
+        assert response.status_code == 504, f"Expected 504, got {response.status_code}"
+        # Timeout detail is a structured {reason, message} object (reason-aware
         # timeout messaging) rather than a flat string.
         detail = (response.json() or {}).get("detail") or {}
-        assert isinstance(detail, dict), f"expected structured 408 detail, got {detail!r}"
+        assert isinstance(detail, dict), f"expected structured timeout detail, got {detail!r}"
         assert detail.get("reason") in {"stalled", "timeout"}
-        assert detail.get("message"), "408 detail must carry a user-facing message"
+        assert detail.get("message"), "timeout detail must carry a user-facing message"
         assert elapsed < 6.0, f"expected ~3s poll budget, took {elapsed:.2f}s"
 
-    def test_does_not_408_while_sentinel_present(self):
+    def test_does_not_timeout_while_sentinel_present(self):
         """Returns 200 when turn sentinel exists (agent completed before poll deadline)."""
         client = load_server()
         idea_id = "active_test_idea"
