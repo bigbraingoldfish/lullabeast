@@ -299,9 +299,9 @@ def build_local_provider_entry(base_url: str, model_ids, metadata: dict = None) 
     Every model entry carries ``maxTokens`` (derived via :func:`derive_max_tokens`
     — never OpenClaw's crippling 8192 fallback) and ``input``: probed vision maps
     to text+image / text, and UNKNOWN vision defaults to ``["text", "image"]`` —
-    the executor and reviewer require image input, and a missing ``input`` key
-    degrades them; a genuinely text-only model fails visibly at the model call
-    instead. ``contextWindow`` and ``reasoning`` are added only when ``metadata``
+    the executor, reviewer, and prd-creator require image input, and a missing
+    ``input`` key degrades them; a genuinely text-only model fails visibly at
+    the model call instead. ``contextWindow`` and ``reasoning`` are added only when ``metadata``
     (from :func:`probe_model_metadata`) knows them; those unknowns are omitted,
     not guessed.
     """

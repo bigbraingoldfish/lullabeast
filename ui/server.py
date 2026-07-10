@@ -87,6 +87,7 @@ from autodev.pipeline.event_log import append_pipeline_event  # noqa: E402
 # (_local_models.discover_local_servers); TEMPLATE_MODEL_DEFAULTS is the single
 # source of truth for the six per-role *_MODEL knob names the setup screen writes.
 from autodev.installer import local_models as _local_models  # noqa: E402
+from autodev.installer import model_overrides as _model_overrides  # noqa: E402
 from autodev.installer.openclaw_template import TEMPLATE_MODEL_DEFAULTS  # noqa: E402
 from autodev.pipeline.prereq_spec import parse_prerequisites  # noqa: E402  (PREREQ-3)
 from autodev.pipeline.atomic_io import write_json_atomic, write_text_atomic  # noqa: E402
@@ -675,6 +676,13 @@ DEFAULTS = {
     "provider_key_path": "",   # container: /data/secrets/provider.env
     "setup_marker_path": "",   # container: /data/.setup-mode
     "projects_dir": "",        # container: /data/projects
+    # Per-role model selection (Stage B). apply_request_path is the marker the
+    # entrypoint's watch loop consumes (config re-render + gateway restart);
+    # model_overrides_path is the dashboard-owned overlay re-applied on top of
+    # the rendered openclaw.json every pass. Unset on bare metal, where the
+    # model-roles surface degrades to read-only.
+    "apply_request_path": "",    # container: /data/secrets/apply.request
+    "model_overrides_path": "",  # container: /data/model-overrides.json
     # v1.0.0 Phase 3 B4 — host to probe for local model servers from the setup
     # screen. The container entrypoint seeds it to "host.docker.internal" (the
     # docker bridge host); bare metal leaves it "", which makes the local-model
@@ -3863,7 +3871,7 @@ def post_resume_ready():
     if not pipeline_state:
         raise HTTPException(
             status_code=503,
-            detail="Failed to read pipeline_state.json — it may be corrupt or empty. Check the file at the configured path.",
+            detail="Failed to read pipeline_state.json; it may be corrupt or empty. Check the file at the configured path.",
         )
 
     _status = pipeline_state.get("pipeline_status")
@@ -6750,7 +6758,7 @@ async def put_ideas_prd_section(idea_id: str, request: Request):
     if messages and messages[-1].get("role") == "assistant" and messages[-1].get("pending"):
         raise HTTPException(
             status_code=409,
-            detail="Agent turn in progress — wait for it to finish before editing.",
+            detail="Agent turn in progress; wait for it to finish before editing.",
         )
 
     cur_path = idea_dir / "prd_draft.md"
@@ -7763,6 +7771,31 @@ def _reject_shell_eval_chars(value: str, field: str) -> None:
         )
 
 
+def _merge_provider_env_lines(dest: str, owned_keys, new_lines) -> None:
+    """Merge ``new_lines`` into the dotenv at ``dest`` atomically (0600, parent 0700).
+
+    Any existing line whose KEY is in ``owned_keys`` is dropped in favor of
+    ``new_lines``; every other line (a co-tenant cloud key, comments, blanks)
+    is preserved verbatim. Raises OSError to the caller; the file contents are
+    never logged (preserved lines may hold a provider key).
+    """
+    preserved: list[str] = []
+    try:
+        with open(dest, "r", encoding="utf-8", errors="replace") as f:
+            existing = f.read()
+    except OSError:
+        existing = ""
+    for line in existing.splitlines():
+        if line.partition("=")[0].strip() in owned_keys:
+            continue
+        preserved.append(line)
+    content = "\n".join(preserved + list(new_lines)) + "\n"
+    parent = os.path.dirname(dest) or "."
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    write_text_atomic(dest, content)
+    os.chmod(dest, 0o600)
+
+
 def _local_model_url_line_present(path: str) -> bool:
     """True when ``path`` is a readable dotenv file with a non-empty LOCAL_MODEL_URL line.
 
@@ -7781,7 +7814,7 @@ def _local_model_url_line_present(path: str) -> bool:
 
 
 def _provider_status(config: dict) -> dict:
-    """Compute {supported, setup_mode, key_present, local_configured} without exposing key material."""
+    """Compute {supported, setup_mode, key_present, local_configured, applying} without exposing key material."""
     key_path = (config.get("provider_key_path") or "").strip()
     marker_path = (config.get("setup_marker_path") or "").strip()
     supported = bool(key_path or marker_path)
@@ -7807,11 +7840,18 @@ def _provider_status(config: dict) -> dict:
     if not local_configured and key_path:
         local_configured = _local_model_url_line_present(os.path.expanduser(key_path))
 
+    # applying: a config apply is requested but not yet consumed by the
+    # entrypoint watch loop (the marker is removed before the pass starts, so
+    # this covers the queued window; the poll settles once the pass begins).
+    apply_path = (config.get("apply_request_path") or "").strip()
+    applying = bool(apply_path) and os.path.exists(os.path.expanduser(apply_path))
+
     return {
         "supported": supported,
         "setup_mode": setup_mode,
         "key_present": bool(env_present or file_present),
         "local_configured": local_configured,
+        "applying": applying,
     }
 
 
@@ -7819,10 +7859,13 @@ def _provider_status(config: dict) -> dict:
 def get_setup_provider_status():
     """Report first-run provider-key status for the setup-mode screen (A2).
 
-    Returns {"supported": bool, "setup_mode": bool, "key_present": bool}. Never
-    returns key material. ``supported`` is false on bare-metal installs (neither
-    provider_key_path nor setup_marker_path configured); the frontend hides the
-    setup surface entirely in that case.
+    Returns {"supported": bool, "setup_mode": bool, "key_present": bool,
+    "local_configured": bool, "applying": bool}. Never returns key material.
+    ``supported`` is false on bare-metal installs (neither provider_key_path
+    nor setup_marker_path configured); the frontend hides the setup surface
+    entirely in that case. ``applying`` distinguishes a pending config apply
+    (marker written, gateway restart imminent) from idle, for the Settings
+    model-roles card's restart polling.
     """
     return _provider_status(load_config())
 
@@ -8135,29 +8178,8 @@ async def post_setup_local_model(request: Request):
         new_lines.append(f"LOCAL_MODEL_VISION={1 if vision else 0}")
 
     dest = os.path.expanduser(key_path)
-    preserved: list[str] = []
     try:
-        with open(dest, "r", encoding="utf-8", errors="replace") as f:
-            existing = f.read()
-    except OSError:
-        existing = ""
-    for line in existing.splitlines():
-        key = line.partition("=")[0].strip()
-        # Keep blank lines and comments; drop only lines whose KEY we are rewriting.
-        if key in owned_keys:
-            continue
-        preserved.append(line)
-
-    # Preserved lines first, then our owned lines, one trailing newline.
-    content = "\n".join(preserved + new_lines) + "\n"
-
-    parent = os.path.dirname(dest) or "."
-    try:
-        os.makedirs(parent, mode=0o700, exist_ok=True)
-        # Atomic write via the shared helper (mkstemp in the dest dir + os.replace).
-        # Never log `content` — it may carry a preserved cloud provider key.
-        write_text_atomic(dest, content)
-        os.chmod(dest, 0o600)
+        _merge_provider_env_lines(dest, owned_keys, new_lines)
     except OSError as exc:
         raise HTTPException(
             status_code=500,
@@ -8191,23 +8213,10 @@ def post_setup_skip_provider():
         )
 
     dest = os.path.expanduser(key_path)
-    preserved: list[str] = []
     try:
-        with open(dest, "r", encoding="utf-8", errors="replace") as f:
-            existing = f.read()
-    except OSError:
-        existing = ""
-    for line in existing.splitlines():
-        if line.partition("=")[0].strip() != "PROVIDER_SETUP_SKIPPED":
-            preserved.append(line)
-    content = "\n".join(preserved + ["PROVIDER_SETUP_SKIPPED=1"]) + "\n"
-
-    parent = os.path.dirname(dest) or "."
-    try:
-        os.makedirs(parent, mode=0o700, exist_ok=True)
-        # Never log `content` — preserved lines may carry a cloud provider key.
-        write_text_atomic(dest, content)
-        os.chmod(dest, 0o600)
+        _merge_provider_env_lines(
+            dest, {"PROVIDER_SETUP_SKIPPED"}, ["PROVIDER_SETUP_SKIPPED=1"]
+        )
     except OSError as exc:
         raise HTTPException(
             status_code=500,
@@ -8255,6 +8264,338 @@ def get_setup_gateway_access():
         "url": f"http://127.0.0.1:{port}",
         "token": token,
     }
+
+
+# ─── Per-role model selection (Settings "Model roles" card, Stage B) ───────────
+#
+# Lullabeast owns which registered model each pipeline role uses and the
+# capability/cost metadata of registered models; provider registration stays in
+# OpenClaw (the gateway UI above). Role assignments are the six *_MODEL lines in
+# provider.env plus the apply marker the entrypoint watch loop consumes; model
+# property edits persist in the model-overrides overlay, re-applied on top of
+# every config render (reconcile force-wins template values, so a raw
+# openclaw.json edit would not survive a boot).
+
+# Role id -> env knob. Keys mirror agents.list[].id in the golden template;
+# values must be exactly TEMPLATE_MODEL_DEFAULTS' keys (test-pinned).
+_ROLE_KNOBS = {
+    "planner": "PLANNER_MODEL",
+    "executor": "EXECUTOR_MODEL",
+    "reviewer": "REVIEWER_MODEL",
+    "prd-creator": "PRD_MODEL",
+    "roadmap-converter": "ROADMAP_MODEL",
+    "escalation": "ESCALATION_MODEL",
+}
+# Roles whose model must accept image input: the reviewer verifies screenshots
+# as its core gate duty, the executor debugs against them on visual phases, and
+# the prd-creator reads Ideas chat attachments. Save-blocked here and
+# boot-checked by the doctor's model_modality (D4: constraints, not
+# recommendations). Only a confirmed text-only catalog entry blocks; a model
+# with no declared input stays saveable and the doctor reports it unverified.
+_VISION_REQUIRED_ROLES = ("executor", "reviewer", "prd-creator")
+
+
+def _agent_primary(agent) -> Optional[str]:
+    """model.primary from an agents.list entry; tolerates the plain-string form."""
+    model = agent.get("model") if isinstance(agent, dict) else None
+    if isinstance(model, str):
+        return model or None
+    if isinstance(model, dict):
+        primary = model.get("primary")
+        if isinstance(primary, str) and primary:
+            return primary
+    return None
+
+
+def _load_openclaw_with_overrides(config: dict):
+    """The live openclaw.json with the model-overrides overlay applied, or None.
+
+    The overlay is applied in memory so the catalog reflects a saved-but-not-
+    yet-applied edit during the restart window.
+    """
+    oc_root = os.path.expanduser(str(config.get("openclaw_root") or ""))
+    data = _read_json_file(os.path.join(oc_root, "openclaw.json"))
+    if not isinstance(data, dict):
+        return None
+    overrides_path = (config.get("model_overrides_path") or "").strip()
+    if overrides_path:
+        overrides = _model_overrides.load_model_overrides(
+            os.path.expanduser(overrides_path)
+        )
+        data = _model_overrides.apply_model_overrides(data, overrides)
+    return data
+
+
+def _assemble_model_catalog(oc: dict) -> list:
+    """Picker entries from models.providers.* — OpenClaw-registered, probed-local,
+    and hand-added providers all appear. ``id`` is the fully-qualified
+    ``provider/model-id`` form the *_MODEL knobs and agents.list use; ``params``
+    are the per-model sampling params from agents.defaults.models."""
+    providers = (oc.get("models") or {}).get("providers") or {}
+    defaults_models = ((oc.get("agents") or {}).get("defaults") or {}).get("models") or {}
+    if not isinstance(defaults_models, dict):
+        defaults_models = {}
+    catalog = []
+    for provider_name, provider in providers.items():
+        if not isinstance(provider, dict):
+            continue
+        for entry in provider.get("models") or []:
+            if not isinstance(entry, dict):
+                continue
+            model_id = entry.get("id")
+            if not (isinstance(model_id, str) and model_id):
+                continue
+            ref = f"{provider_name}/{model_id}"
+            per_model = defaults_models.get(ref)
+            params = per_model.get("params") if isinstance(per_model, dict) else None
+            catalog.append({
+                "id": ref,
+                "provider": provider_name,
+                "name": entry.get("name") or model_id,
+                "input": entry.get("input"),
+                "contextWindow": entry.get("contextWindow"),
+                "maxTokens": entry.get("maxTokens"),
+                "cost": entry.get("cost"),
+                "reasoning": entry.get("reasoning"),
+                "params": {
+                    k: params[k]
+                    for k in _model_overrides.PARAM_KEYS
+                    if isinstance(params, dict) and k in params
+                },
+            })
+    return catalog
+
+
+def _models_write_supported(config: dict) -> bool:
+    """True when the dashboard can persist model changes (container install)."""
+    return all(
+        (config.get(k) or "").strip()
+        for k in ("provider_key_path", "apply_request_path", "model_overrides_path")
+    )
+
+
+def _pipeline_active(config: dict) -> bool:
+    """True when a gateway restart would kill a live pipeline agent session (D5).
+
+    Status alone is not enough: a stale RUNNING left by a dead orchestrator
+    must not lock model settings forever, so the orchestrator liveness check
+    gates the block. In-flight Ideas chats are interrupted, not blocked; the
+    confirm modal owns that warning.
+    """
+    state_path = config.get("pipeline_state_path")
+    state = _read_json_file(os.path.expanduser(state_path)) if state_path else None
+    if not state or state.get("pipeline_status") not in ("RUNNING", "WAITING_FOR_SENTINEL"):
+        return False
+    return _orchestrator_alive_from_config(config)
+
+
+def _guard_models_write(config: dict, unsupported_detail: str) -> None:
+    """The shared 409 matrix for model-write endpoints: bare metal, setup mode,
+    active pipeline. Raises HTTPException; returns None when writable."""
+    if not _models_write_supported(config):
+        raise HTTPException(status_code=409, detail=unsupported_detail)
+    marker_path = (config.get("setup_marker_path") or "").strip()
+    if marker_path and os.path.exists(os.path.expanduser(marker_path)):
+        raise HTTPException(
+            status_code=409,
+            detail="Model settings are locked during first-run setup. Finish the setup screen first.",
+        )
+    if _pipeline_active(config):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The pipeline is running and applying model changes restarts the "
+                "gateway, which would interrupt the active agent. Stop the pipeline "
+                "or wait for it to finish first."
+            ),
+        )
+
+
+def _touch_apply_marker(config: dict) -> None:
+    """Request a config apply: the entrypoint watch loop consumes the marker,
+    re-renders openclaw.json, and restarts the gateway."""
+    path = os.path.expanduser(config["apply_request_path"])
+    os.makedirs(os.path.dirname(path) or ".", mode=0o700, exist_ok=True)
+    write_text_atomic(path, "")
+
+
+@app.get("/api/models/roles")
+def get_models_roles():
+    """Current role->model assignments plus the selectable model catalog.
+
+    Returns {"supported", "defaults", "roles": {role: {"model", "knob"}},
+    "catalog": [{id, provider, name, input, contextWindow, maxTokens, cost,
+    reasoning, params}]}. ``supported`` false (bare metal) means read-only:
+    assignments render but saves are refused with a deploy/.env pointer.
+    503 when openclaw.json is unavailable.
+    """
+    config = load_config()
+    oc = _load_openclaw_with_overrides(config)
+    if oc is None:
+        raise HTTPException(
+            status_code=503,
+            detail="openclaw.json is unavailable; the model catalog cannot be read.",
+        )
+    agents = {
+        a.get("id"): a
+        for a in ((oc.get("agents") or {}).get("list") or [])
+        if isinstance(a, dict)
+    }
+    return {
+        "supported": _models_write_supported(config),
+        "defaults": {role: TEMPLATE_MODEL_DEFAULTS[knob] for role, knob in _ROLE_KNOBS.items()},
+        "roles": {
+            role: {"model": _agent_primary(agents.get(role)), "knob": knob}
+            for role, knob in _ROLE_KNOBS.items()
+        },
+        "catalog": _assemble_model_catalog(oc),
+    }
+
+
+@app.put("/api/models/roles")
+async def put_models_roles(request: Request):
+    """Assign models to pipeline roles: write *_MODEL knobs, request an apply.
+
+    Body: a partial {role: "provider/model-id"} map. Each model must be in the
+    catalog; executor, reviewer, and prd-creator refuse a confirmed text-only
+    model (D4 constraint; the boot doctor would fail it anyway, blocking here
+    is kinder). Changed knobs are merged into provider.env atomically (every
+    unrelated line preserved), then the apply marker is written once; the
+    entrypoint re-renders config and restarts the gateway.
+
+    409 on bare metal, during setup mode, or while the pipeline is active.
+    400 on validation failure (nothing written). On success:
+    {"ok": true, "restarting": true}.
+    """
+    config = load_config()
+    _guard_models_write(
+        config,
+        "In-dashboard model assignment is not available on this install. "
+        "Set the *_MODEL knobs in deploy/.env (headless path) instead.",
+    )
+
+    body = await request.json()
+    if not isinstance(body, dict) or not body:
+        raise HTTPException(
+            status_code=400, detail="body must be a non-empty {role: model} object"
+        )
+
+    oc = _load_openclaw_with_overrides(config)
+    if oc is None:
+        raise HTTPException(
+            status_code=503,
+            detail="openclaw.json is unavailable; assignments cannot be validated.",
+        )
+    catalog = {entry["id"]: entry for entry in _assemble_model_catalog(oc)}
+
+    updates: dict = {}
+    for role, raw_model in body.items():
+        if role not in _ROLE_KNOBS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown role {role}; roles are " + ", ".join(_ROLE_KNOBS),
+            )
+        if not isinstance(raw_model, str) or not raw_model.strip():
+            raise HTTPException(status_code=400, detail=f"{role}: model must be a non-empty string")
+        model = raw_model.strip()
+        # Written as `<KNOB>=<model>` into the entrypoint-read provider.env;
+        # same shape guards as every other value that file carries.
+        if any(ch.isspace() for ch in model) or not model.isprintable():
+            raise HTTPException(
+                status_code=400,
+                detail=f"{role}: model must not contain whitespace or non-printable characters",
+            )
+        _reject_shell_eval_chars(model, f"{role} model")
+        if model not in catalog:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{role}: {model} is not a registered model. Add models in OpenClaw first.",
+            )
+        if role in _VISION_REQUIRED_ROLES:
+            mods = catalog[model].get("input")
+            if isinstance(mods, list) and mods and "image" not in mods:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"{role} needs a model that accepts image input, and "
+                        f"{model} is text only. Pick a multimodal model."
+                    ),
+                )
+        updates[_ROLE_KNOBS[role]] = model
+
+    dest = os.path.expanduser(config["provider_key_path"])
+    try:
+        _merge_provider_env_lines(
+            dest, set(updates), [f"{knob}={model}" for knob, model in updates.items()]
+        )
+        _touch_apply_marker(config)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not write the provider key file at {dest} ({exc.strerror or exc})",
+        ) from None
+
+    return {"ok": True, "restarting": True}
+
+
+@app.put("/api/models/properties")
+async def put_models_properties(request: Request):
+    """Edit a registered model's capability/cost metadata (the overlay, D8).
+
+    Body: a partial {"provider/model-id": {input, contextWindow, maxTokens,
+    cost: {input, output, cacheRead, cacheWrite}, reasoning, params:
+    {temperature, top_p}}} map; null clears an override back to the registered
+    value. These values drive Lullabeast's cost tracking and modality gates.
+    Validated at the boundary, merged into the overlay file, then the apply
+    marker is written once. Same 409 matrix as the roles PUT. On success:
+    {"ok": true, "restarting": true}.
+    """
+    config = load_config()
+    _guard_models_write(
+        config,
+        "In-dashboard model property editing is not available on this install. "
+        "Edit models in OpenClaw directly instead.",
+    )
+
+    body = await request.json()
+    if not isinstance(body, dict) or not body:
+        raise HTTPException(
+            status_code=400, detail="body must be a non-empty {model: properties} object"
+        )
+
+    oc = _load_openclaw_with_overrides(config)
+    if oc is None:
+        raise HTTPException(
+            status_code=503,
+            detail="openclaw.json is unavailable; model edits cannot be validated.",
+        )
+    catalog = {entry["id"] for entry in _assemble_model_catalog(oc)}
+
+    for ref, props in body.items():
+        if ref not in catalog:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{ref} is not a registered model. Add models in OpenClaw first.",
+            )
+        errors = _model_overrides.validate_model_override(props)
+        if errors:
+            raise HTTPException(status_code=400, detail=f"{ref}: " + "; ".join(errors))
+
+    overrides_path = os.path.expanduser(config["model_overrides_path"])
+    merged = _model_overrides.merge_model_overrides(
+        _model_overrides.load_model_overrides(overrides_path), body
+    )
+    try:
+        os.makedirs(os.path.dirname(overrides_path) or ".", exist_ok=True)
+        write_json_atomic(overrides_path, {"models": merged})
+        _touch_apply_marker(config)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not write the model overrides file at {overrides_path} ({exc.strerror or exc})",
+        ) from None
+
+    return {"ok": True, "restarting": True}
 
 
 def _demo_source_dir(config: dict) -> str:

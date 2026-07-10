@@ -988,10 +988,11 @@ class TestLocalModelCompleteness:
 
 
 class TestModelModality:
-    """A text-only model on a vision-dependent role (reviewer/executor) rejects
-    every screenshot-bearing turn with HTTP 400 — at the LAST phase of a first
-    run, after real spend. The check resolves modality from the config-local
-    provider entry first and only falls back to the live OpenRouter probe."""
+    """A text-only model on a vision-dependent role (reviewer/executor/
+    prd-creator) rejects every image-bearing turn with HTTP 400 — at the LAST
+    phase of a first run, after real spend, or on the first Ideas attachment.
+    The check resolves modality from the config-local provider entry first and
+    only falls back to the live OpenRouter probe."""
 
     def _write(self, env, *, agents=None, openrouter_models=None):
         data = _good_openclaw_json()
@@ -1012,7 +1013,7 @@ class TestModelModality:
     def test_no_models_configured_skips(self, env):
         c = doctor.check_model_modality(env)
         assert c.status == "skipped"
-        assert "no reviewer/executor model" in c.detail
+        assert "no reviewer/executor/prd-creator model" in c.detail
 
     def test_missing_openclaw_json_skips(self, env):
         os.remove(os.path.join(env["openclaw_root"], "openclaw.json"))
@@ -1055,6 +1056,45 @@ class TestModelModality:
         c = doctor.check_model_modality(env)
         assert c.status == "warn"
         assert "executor=openrouter/z-ai/glm-5.2" in c.detail
+
+    def test_text_only_prd_creator_fails(self, env, monkeypatch):
+        # Ideas chat attachments are sent to the prd-creator as images; a
+        # text-only PRD_MODEL is broken functionality, not a degraded mode
+        # (Stage B of the per-role model selection roadmap).
+        self._no_probe(monkeypatch)
+        self._write(
+            env,
+            agents={
+                "reviewer": "openrouter/moonshotai/kimi-k2.7-code",
+                "executor": "openrouter/moonshotai/kimi-k2.7-code",
+                "prd-creator": "openrouter/z-ai/glm-5.2",
+            },
+            openrouter_models=[
+                {"id": "z-ai/glm-5.2", "input": ["text"]},
+                {"id": "moonshotai/kimi-k2.7-code", "input": ["text", "image"]},
+            ],
+        )
+        c = doctor.check_model_modality(env)
+        assert c.status == "fail"
+        assert "prd-creator=openrouter/z-ai/glm-5.2" in c.detail
+        assert "PRD_MODEL" in c.fix_hint
+
+    def test_multimodal_prd_creator_ok(self, env, monkeypatch):
+        self._no_probe(monkeypatch)
+        self._write(
+            env,
+            agents={
+                "reviewer": "openrouter/moonshotai/kimi-k2.7-code",
+                "executor": "openrouter/moonshotai/kimi-k2.7-code",
+                "prd-creator": "openrouter/moonshotai/kimi-k2.7-code",
+            },
+            openrouter_models=[
+                {"id": "moonshotai/kimi-k2.7-code", "input": ["text", "image"]},
+            ],
+        )
+        c = doctor.check_model_modality(env)
+        assert c.status == "ok"
+        assert "prd-creator" in c.detail
 
     def test_both_multimodal_ok_without_probe(self, env, monkeypatch):
         self._no_probe(monkeypatch)

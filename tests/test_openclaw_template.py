@@ -201,13 +201,17 @@ class TestModelPricing:
         referenced = self._referenced_model_ids()
         assert referenced <= shipped, referenced - shipped
 
-    def test_executor_and_reviewer_defaults_are_multimodal(self):
+    def test_vision_role_defaults_are_multimodal(self):
+        # Executor/reviewer: screenshot-based visual review. Prd-creator: Ideas
+        # chat attachments (per-role model selection roadmap, Stage B). The
+        # doctor's model_modality check hard-fails a text-only reviewer or
+        # prd-creator, so these defaults must never regress to text-only.
         models = self._openrouter_models()
-        for var in ("EXECUTOR_MODEL", "REVIEWER_MODEL"):
+        for var in ("EXECUTOR_MODEL", "REVIEWER_MODEL", "PRD_MODEL"):
             ref = TEMPLATE_MODEL_DEFAULTS[var]
             mid = ref[len("openrouter/"):]
             assert "image" in models[mid]["input"], (
-                f"{var} default {mid} must accept image input (visual review)"
+                f"{var} default {mid} must accept image input"
             )
 
     def test_shipped_set_is_three_or_four_models(self):

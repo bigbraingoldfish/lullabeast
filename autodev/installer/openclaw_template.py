@@ -29,9 +29,10 @@ file always parses as strict JSON):
     persists them under ``/data``).
   * ``PLANNER_MODEL`` / ``EXECUTOR_MODEL`` / ``REVIEWER_MODEL`` / ``PRD_MODEL``
     / ``ROADMAP_MODEL`` / ``ESCALATION_MODEL`` default to the audit-picked
-    models below when unset (one knob per agent role). The executor and
-    reviewer defaults must stay multimodal (image input) because the reviewer
-    gate demands visual verification on UI/INT phases.
+    models below when unset (one knob per agent role). The executor, reviewer,
+    and prd-creator defaults must stay multimodal (image input): the reviewer
+    gate demands visual verification on UI/INT phases, and the prd-creator
+    reads Ideas chat attachments.
 
 Stdlib-only on purpose: the doctor imports this module, and the doctor must
 run even when FastAPI/uvicorn are missing (python_deps is one of its checks).
@@ -51,9 +52,10 @@ TEMPLATE_RELPATH = os.path.join("deploy", "openclaw.template.json")
 TEMPLATE_PLACEHOLDER_RE = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
 
 # Audit-picked model defaults (deploy/CONFIG-AUDIT.md). One knob per agent
-# role. The executor and reviewer picks are multimodal by requirement — both
-# default to kimi-k2.7-code (image input) because the reviewer does
-# screenshot-based visual verification. PLANNER_MODEL also backs
+# role. The executor, reviewer, and prd-creator picks are multimodal by
+# requirement — all default to kimi-k2.7-code (image input): the reviewer does
+# screenshot-based visual verification and the prd-creator reads Ideas chat
+# attachments. PLANNER_MODEL also backs
 # agents.defaults.model; the planner and roadmap-converter default to glm-5.2,
 # which is text-only in the shipped template (neither needs vision). Every
 # default must be one of the shipped, fully priced OpenRouter models in

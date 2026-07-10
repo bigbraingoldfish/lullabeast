@@ -78,6 +78,25 @@ interrupts them, so apply settings between runs. Values set directly in
 `deploy/.env` still need a container restart (compose reads that file at
 start).
 
+Two dashboard surfaces ride this contract (the Settings "Model roles" card,
+via `GET/PUT /api/models/roles` and `PUT /api/models/properties`):
+
+- **Role assignments** are the six `*_MODEL` lines in `provider.env`. The API
+  only accepts models already registered in `openclaw.json` (adding or
+  removing models stays in OpenClaw), refuses a text-only model on the
+  executor, reviewer, or prd-creator (they receive screenshots or Ideas chat
+  attachments as images), and refuses while the pipeline is running (the
+  gateway restart would kill the active agent session). `deploy/.env` still
+  pins any knob it sets.
+- **Model property edits** (input modalities, context window, cost per M
+  tokens, reasoning, sampling params) persist in
+  `/data/model-overrides.json`, a Lullabeast-owned overlay re-applied on top
+  of every config render. This is necessary because the per-boot reconcile
+  forces template values back, so a raw `openclaw.json` edit does not survive
+  a boot. These values drive Lullabeast's cost tracking and modality gates;
+  explicit `LOCAL_MODEL_*` values in `deploy/.env` keep the last word for
+  local models.
+
 The setup screen also offers a third path: **skip model setup** and manage
 models and providers by hand in OpenClaw. It is confirmed via a modal because
 it is one-way (the welcome screen never reappears; the Settings screen keeps
