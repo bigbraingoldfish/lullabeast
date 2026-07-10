@@ -73,7 +73,10 @@ def test_heal_poll_tick_and_catch_are_also_guarded_on_idea_switch():
     exhaustion -> onExhausted can't fire for a stale idea and the loop
     self-terminates) and the .catch reject (so fails>=6 -> onExhausted can't
     write the old turn's error into the new idea). At least three
-    idea-identity guards must exist, each tearing the loop down."""
+    idea-identity guards must exist, each tearing the loop down. Each is
+    preceded by the generation guard (see
+    test_ui_ideas_single_poller.py) — a superseded watch's microtask must
+    plain-return, never stop the successor's loop."""
     html = load_index_html()
     guards = re.findall(
         r"ideaId\s*!==\s*currentIdeaIdRef\.current\s*\)\s*\{\s*stopLateHealPoll\(\)\s*;\s*return",
@@ -83,7 +86,8 @@ def test_heal_poll_tick_and_catch_are_also_guarded_on_idea_switch():
         f"Expected >= 3 idea-switch guards (tick + resolve + catch); found {len(guards)}"
     assert re.search(
         r"\.catch\(\s*\(\)\s*=>\s*\{\s*"
+        r"if\s*\(\s*gen\s*!==\s*lateHealPollGenRef\.current\s*\)\s*return;\s*"
         r"if\s*\(\s*ideaId\s*!==\s*currentIdeaIdRef\.current\s*\)\s*\{\s*stopLateHealPoll\(\)\s*;\s*return"
         r"[\s\S]{0,40}?fails\s*\+=\s*1",
         html,
-    ), "Expected the heal-poll .catch to bail on idea switch before incrementing fails"
+    ), "Expected the heal-poll .catch to bail (generation, then idea switch) before incrementing fails"

@@ -356,6 +356,38 @@ def _write_operator_event(config, action, target="", command=None, source="ui"):
         tagged("operator-event", f"{action}: {e}", level=logging.WARNING, logger=_ui_logger)
 
 
+def _write_ideas_turn_event(config, event, idea_id, detail=None, agent="prd-creator"):
+    """Append an Ideas agent-run event to the shared ``pipeline_events.jsonl``.
+
+    Turn failures and late recoveries (timeout/stall, late-done heal,
+    stranded-md rescue — and the roadmap converter's timeout/empty-draft/
+    late-salvage twins, ``agent="roadmap-converter"``) get a durable paper
+    trail in the same file the activity feed already tails, so a "chat feels
+    flaky" report is diagnosable from data instead of reproduction. Same
+    writer + rotation as ``_write_operator_event``; non-raising for the same
+    reason. Ideas runs are independent of any pipeline run, so
+    ``run_id``/``project``/``phase`` stay empty.
+    """
+    try:
+        events_path = (config or {}).get("events_path")
+        if not events_path:
+            return
+        d = {"idea_id": idea_id}
+        if detail:
+            d.update(detail)
+        append_pipeline_event(events_path, {
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "event": event,
+            "run_id": None,
+            "project": "",
+            "phase": "",
+            "agent": agent,
+            "detail": d,
+        })
+    except Exception as e:
+        tagged("ideas-event", f"{event}: {e}", level=logging.WARNING, logger=_ui_logger)
+
+
 async def _poll_state(prev_state):
     """Read pipeline_state.json, track previous values, and detect changes.
     
@@ -5567,7 +5599,12 @@ def _ideas_stranded_md_reply(
 
 
 def _reconcile_ideas_session_after_late_done(
-    idea_dir: Path, session_data: dict, quiet_secs: float = 300.0
+    idea_dir: Path,
+    session_data: dict,
+    quiet_secs: float = 300.0,
+    *,
+    config: dict | None = None,
+    idea_id: str | None = None,
 ) -> tuple[dict, bool]:
     """Heal an unresolved last turn (``pending`` or ``error``) once its output is on disk.
 
@@ -5577,6 +5614,9 @@ def _reconcile_ideas_session_after_late_done(
          quiet for ``quiet_secs`` (see :func:`_ideas_stranded_md_reply`).
 
     Uses user row ``ideas_turn`` + ``attempt_start_wall`` (post–post_ideas_message schema).
+    When ``config`` is passed, each heal emits one turn event
+    (:func:`_write_ideas_turn_event`); the heal is write-once per verdict, so
+    re-reads never double-emit.
     """
     if not isinstance(session_data, dict):
         return session_data, False
@@ -5612,6 +5652,7 @@ def _reconcile_ideas_session_after_late_done(
     md_path = turns_dir / f"{turn_int}.md"
 
     agent_response = None
+    source = None
     if done_path.exists():
         try:
             done_mtime = os.path.getmtime(done_path)
@@ -5619,9 +5660,11 @@ def _reconcile_ideas_session_after_late_done(
             done_mtime = None
         if done_mtime is not None and done_mtime >= attempt_start - IDEAS_LATE_DONE_MTIME_SLACK_SEC:
             agent_response = md_path.read_text() if md_path.exists() else ""
+            source = "late_done"
     if agent_response is None:
         # No fresh .done — recover a stranded .md if the agent has stopped.
         agent_response = _ideas_stranded_md_reply(idea_dir, turn_int, attempt_start, quiet_secs)
+        source = "stranded_md"
     if agent_response is None:
         return session_data, False
 
@@ -5637,6 +5680,10 @@ def _reconcile_ideas_session_after_late_done(
         asst["content"] = IDEAS_EMPTY_REPLY_MESSAGE
         asst["ts"] = _utc_now_iso()
         session_data["updated"] = asst["ts"]
+        _write_ideas_turn_event(
+            config, "ideas_turn_late_heal", idea_id,
+            {"turn": turn_int, "outcome": "empty_reply"},
+        )
         return session_data, True
     prd_draft_path = idea_dir / "prd_draft.md"
     prd_content = prd_draft_path.read_text() if prd_draft_path.exists() else ""
@@ -5676,6 +5723,15 @@ def _reconcile_ideas_session_after_late_done(
             if first_user.strip():
                 session_data["name"] = first_user.strip()[:40].title()
 
+    if source == "stranded_md":
+        _write_ideas_turn_event(
+            config, "ideas_turn_stranded_md_rescue", idea_id, {"turn": turn_int},
+        )
+    else:
+        _write_ideas_turn_event(
+            config, "ideas_turn_late_heal", idea_id,
+            {"turn": turn_int, "outcome": "reply"},
+        )
     return session_data, True
 
 
@@ -5803,7 +5859,8 @@ def get_ideas_session(idea_id: str):
     if changed:
         _atomic_write_json_file(session_path, session_data)
     session_data, late_changed = _reconcile_ideas_session_after_late_done(
-        idea_dir, session_data, quiet_secs=float(config.get("ideas_idle_threshold", 300))
+        idea_dir, session_data, quiet_secs=float(config.get("ideas_idle_threshold", 300)),
+        config=config, idea_id=idea_id,
     )
     if late_changed:
         _atomic_write_json_file(session_path, session_data)
@@ -5811,11 +5868,20 @@ def get_ideas_session(idea_id: str):
     # Post-timeout salvage: if /convert returned before the converter finished
     # writing one or both drafts to disk, surface them on the next session GET.
     # Each helper is sentinel-gated (writes only when ``*.done`` is present
-    # alongside ``*.md``) and idempotent (no rewrite when stripped text matches).
+    # alongside ``*.md``) and idempotent (no rewrite when stripped text matches
+    # — which also makes the salvage event below write-once).
+    _salvaged = []
     if _merge_roadmap_draft_into_session_data(idea_dir, session_data):
         _atomic_write_json_file(session_path, session_data)
+        _salvaged.append("roadmap")
     if _merge_verification_draft_into_session_data(idea_dir, session_data):
         _atomic_write_json_file(session_path, session_data)
+        _salvaged.append("verification")
+    if _salvaged:
+        _write_ideas_turn_event(
+            config, "ideas_convert_late_salvage", idea_id,
+            {"artifacts": _salvaged}, agent=ROADMAP_CONVERTER_AGENT_ID,
+        )
 
     _enrich_assistant_messages_with_parsed(session_data)
     session_data.pop("alignment_report", None)
@@ -6240,6 +6306,10 @@ async def post_ideas_message(idea_id: str, request: Request):
         _timeout_reason = getattr(sentinel_found, "reason", None)
         _timeout_msg = _ideas_timeout_message(_timeout_reason, poll_timeout)
         _ideas_fail_pending_turn(session_path, _pre_save_data, _timeout_msg)
+        _write_ideas_turn_event(
+            config, "ideas_turn_timeout", idea_id,
+            {"turn": int(turn_n), "reason": _timeout_reason or "timeout"},
+        )
         # 504, NOT 408: browsers transparently re-POST a request that gets a
         # 408 (transport semantics: "the server never read your request"),
         # which re-fired this whole turn invisibly to the page JS — observed
@@ -6267,6 +6337,10 @@ async def post_ideas_message(idea_id: str, request: Request):
         except OSError:
             pass
         _ideas_fail_pending_turn(session_path, _pre_save_data, IDEAS_EMPTY_REPLY_MESSAGE)
+        _write_ideas_turn_event(
+            config, "ideas_turn_timeout", idea_id,
+            {"turn": int(turn_n), "reason": "empty_reply"},
+        )
         raise HTTPException(
             status_code=504,
             detail={"reason": "empty_reply", "message": IDEAS_EMPTY_REPLY_MESSAGE},
@@ -7213,6 +7287,11 @@ async def post_ideas_convert(idea_id: str):
         extra_done_paths=(verification_done_path,),
     )
     if not poll_result:
+        _write_ideas_turn_event(
+            config, "ideas_convert_timeout", idea_id,
+            {"op": "roadmap_generation", "reason": getattr(poll_result, "reason", None) or "timeout"},
+            agent=ROADMAP_CONVERTER_AGENT_ID,
+        )
         # 504, not 408: browsers transparently re-POST on 408, which would
         # silently launch a duplicate converter run — see the chat-send
         # timeout above for the full rationale.
@@ -7237,6 +7316,10 @@ async def post_ideas_convert(idea_id: str):
     # is preserved (untouched) instead of being silently overwritten. The
     # converter produces two artifacts, so both must be non-empty.
     if not roadmap_content.strip() or not verification_content.strip():
+        _write_ideas_turn_event(
+            config, "ideas_convert_empty_draft", idea_id,
+            {"op": "roadmap_generation"}, agent=ROADMAP_CONVERTER_AGENT_ID,
+        )
         raise HTTPException(
             status_code=502,
             detail="converter produced an empty roadmap or verification draft",
@@ -7380,6 +7463,11 @@ async def post_ideas_fix_roadmap_format(idea_id: str, body: FixRoadmapFormatRequ
     )
     if not poll_result:
         _reason = getattr(poll_result, "reason", None) or "timeout"
+        _write_ideas_turn_event(
+            config, "ideas_convert_timeout", idea_id,
+            {"op": "format_correction", "reason": _reason},
+            agent=ROADMAP_CONVERTER_AGENT_ID,
+        )
         # 504, not 408: browsers transparently re-POST on 408, which would
         # silently launch a duplicate correction run — see the chat-send
         # timeout above for the full rationale.
@@ -7397,6 +7485,10 @@ async def post_ideas_fix_roadmap_format(idea_id: str, body: FixRoadmapFormatRequ
     # an empty draft. Reject with a 502 retry BEFORE persisting so the prior good
     # roadmap in session.json is preserved instead of being overwritten with "".
     if not corrected_content.strip():
+        _write_ideas_turn_event(
+            config, "ideas_convert_empty_draft", idea_id,
+            {"op": "format_correction"}, agent=ROADMAP_CONVERTER_AGENT_ID,
+        )
         raise HTTPException(
             status_code=502,
             detail="format correction produced an empty roadmap",

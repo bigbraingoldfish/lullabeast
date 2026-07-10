@@ -51,12 +51,18 @@ def test_convert_timeout_late_heals_roadmap_from_session():
         r"startRoadmapRecoverPoll\s*\(\s*ideaId\s*\)",
         html,
     ), "Expected convert timeout path to start roadmap recover polling"
+    # The recovery rides the shared /session watch loop (Phase 4): the wrapper
+    # delegates to startSessionHealPoll (which owns the GET) and renders the
+    # recovered roadmap in its onResolved.
     assert re.search(
-        r"startRoadmapRecoverPoll[\s\S]{0,2200}?"
-        r"fetch\s*\(\s*`/api/ideas/\$\{ideaId\}/session`[\s\S]{0,1200}?"
+        r"const startRoadmapRecoverPoll\s*=\s*\(\s*ideaId\s*,\s*onRecovered\s*\)\s*=>\s*\{[\s\S]{0,400}?"
+        r"startSessionHealPoll\(\{[\s\S]{0,600}?"
         r"setRoadmapContent\s*\(\s*d\.roadmap_content\s*\|\|\s*\"\"\s*\)",
         html,
     ), (
-        "Expected roadmap recover poll to call GET /api/ideas/{id}/session "
-        "and update roadmapContent when roadmap_draft.done is backfilled"
+        "Expected the roadmap recovery to watch GET /api/ideas/{id}/session via "
+        "the shared loop and update roadmapContent when roadmap_draft.done is backfilled"
     )
+    assert re.search(
+        r"fetch\s*\(\s*`/api/ideas/\$\{ideaId\}/session`", html
+    ), "Expected the shared watch loop to GET /api/ideas/{id}/session"

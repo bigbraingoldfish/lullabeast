@@ -61,7 +61,7 @@ def test_budget_is_checked_after_the_fetch_not_before():
     verdict that lands right at the buzzer instead of exhausting first."""
     html = load_index_html()
     assert re.search(
-        r"if\s*\(\s*!\s*resolveWhen\(\s*rawMsgs\s*\)\s*\)\s*\{\s*"
+        r"if\s*\(\s*!\s*resolveWhen\(\s*rawMsgs\s*,\s*d\s*\)\s*\)\s*\{\s*"
         r"if\s*\(\s*deadline\s*&&\s*Date\.now\(\)\s*>\s*deadline\s*\)",
         html,
     ), "Expected the wall-clock deadline checked after resolveWhen, inside the fetch resolve"
