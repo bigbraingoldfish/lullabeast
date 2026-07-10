@@ -5624,6 +5624,20 @@ def _reconcile_ideas_session_after_late_done(
         agent_response = _ideas_stranded_md_reply(idea_dir, turn_int, attempt_start, quiet_secs)
     if agent_response is None:
         return session_data, False
+
+    if not agent_response.strip():
+        # Fresh .done but no usable reply — same verdict as the send path's
+        # output gate, resolved here so a late sentinel can't heal into a
+        # blank bubble. Idempotent: re-reads don't rewrite the same verdict.
+        asst = msgs[asst_idx]
+        if asst.get("error") and asst.get("content") == IDEAS_EMPTY_REPLY_MESSAGE:
+            return session_data, False
+        asst["pending"] = False
+        asst["error"] = True
+        asst["content"] = IDEAS_EMPTY_REPLY_MESSAGE
+        asst["ts"] = _utc_now_iso()
+        session_data["updated"] = asst["ts"]
+        return session_data, True
     prd_draft_path = idea_dir / "prd_draft.md"
     prd_content = prd_draft_path.read_text() if prd_draft_path.exists() else ""
 
@@ -5711,6 +5725,57 @@ def get_ideas_draft_sync_status(idea_id: str):
         "prd_draft_mtime": prd_mtime,
         "roadmap_draft_mtime": rm_mtime,
         "verification_draft_mtime": ver_mtime,
+    }
+    return JSONResponse(content=body, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/ideas/{idea_id}/turn-status")
+def get_ideas_turn_status(idea_id: str, turn: int | None = None):
+    """Read-only agent-liveness snapshot for the Ideas chat — the chat twin of
+    ``/api/state``'s ``agent_activity_age_seconds``.
+
+    Reports the age of ``prd_creator_activity.stamp`` (the same mtime that
+    governs the idle-detection poll) plus, when ``turn`` is given, the presence
+    of that turn's ``turns/{n}.md`` / ``turns/{n}.done`` artifacts. ``state``
+    mirrors the poller's semantics: ``done`` (sentinel present), ``working``
+    (stamp fresher than ``ideas_idle_threshold``), ``quiet`` (stamp silent past
+    the threshold), or ``waiting`` (no stamp yet). No side effects.
+    """
+    config = load_config()
+    ideas_dir = Path(config.get("ideas_dir") or "")
+    idea_dir = ideas_dir / idea_id
+    if not idea_dir.exists():
+        raise HTTPException(status_code=404, detail="Idea not found")
+
+    idle_threshold = float(config.get("ideas_idle_threshold", 300))
+    stamp_age: float | None = None
+    try:
+        stamp_age = max(0.0, time.time() - (idea_dir / "prd_creator_activity.stamp").stat().st_mtime)
+    except OSError:
+        stamp_age = None
+
+    done_present = False
+    md_present = False
+    if turn is not None:
+        turns_dir = idea_dir / "turns"
+        done_present = (turns_dir / f"{turn}.done").exists()
+        md_present = (turns_dir / f"{turn}.md").exists()
+
+    if done_present:
+        state = "done"
+    elif stamp_age is None:
+        state = "waiting"
+    elif stamp_age < idle_threshold:
+        state = "working"
+    else:
+        state = "quiet"
+
+    body = {
+        "stamp_age_seconds": stamp_age,
+        "done_present": done_present,
+        "md_present": md_present,
+        "state": state,
+        "idle_threshold_seconds": idle_threshold,
     }
     return JSONResponse(content=body, headers={"Cache-Control": "no-store"})
 
@@ -5815,6 +5880,14 @@ def _strip_trailing_failed_pairs(messages: list[dict]) -> list[dict]:
     return result
 
 
+# Verdict for a turn whose .done landed without a usable reply (missing/empty
+# turns/{n}.md). Single source: the 408 body, the persisted placeholder, and
+# the late-heal reconciler all use this string.
+IDEAS_EMPTY_REPLY_MESSAGE = (
+    "The agent finished without writing a reply. Nothing was applied; retry the message."
+)
+
+
 def _ideas_timeout_message(reason: str | None, poll_timeout: float) -> str:
     """Map a chat-poll ``PollResult.reason`` to user-facing, reason-specific copy.
 
@@ -5828,13 +5901,15 @@ def _ideas_timeout_message(reason: str | None, poll_timeout: float) -> str:
     the timeout *values* (see ``tests/test_config_defaults_consistency.py``).
 
     The chat send waits for a DEFINITIVE verdict (it passes
-    ``startup_grace=None``), so only these two reasons reach this mapper:
+    ``startup_grace=None``), so only these reasons reach this mapper:
 
     * ``stalled`` — the agent was active then went silent past the stall
       threshold; the model most likely stalled mid-response.
     * ``timeout`` — the full ``poll_timeout`` infra backstop elapsed without the
       turn finishing (this also covers "never produced any activity"); the
       request may be too large or the model/gateway very slow.
+    * ``empty_reply`` — the sentinel landed but ``turns/{n}.md`` is missing or
+      empty (output-contract violation on the success path).
     * anything else / ``None`` (incl. a legacy ``no_first_activity``) — fall
       back to the original generic copy.
     """
@@ -5849,7 +5924,23 @@ def _ideas_timeout_message(reason: str | None, poll_timeout: float) -> str:
             f"The agent ran for ~{minutes} min without finishing — the request "
             "may be too large or the model very slow. Try a shorter message or retry."
         )
+    if reason == "empty_reply":
+        return IDEAS_EMPTY_REPLY_MESSAGE
     return "Agent timed out — the model may be slow. You can retry."
+
+
+def _ideas_fail_pending_turn(session_path: Path, fallback: dict, message: str) -> None:
+    """Flip the newest pending placeholder in session.json to an error verdict."""
+    data = _read_json_file(str(session_path)) or fallback
+    msgs = data.get("messages", [])
+    for m in reversed(msgs):
+        if m.get("pending"):
+            m["pending"] = False
+            m["error"] = True
+            m["content"] = message
+            break
+    data["messages"] = msgs
+    _atomic_write_json_file(str(session_path), data)
 
 
 def _late_done_valid_for_attempt(done_path: Path | str, attempt_start_wall: float) -> bool:
@@ -6031,8 +6122,22 @@ async def post_ideas_message(idea_id: str, request: Request):
         lines.append("[/SYSTEM EVENTS]")
         system_events_block = "\n".join(lines) + "\n\n"
 
-    # Build session key: ideas:{id}:session-{n}
-    session_key = f"ideas:{idea_id}:session-{turn_n}"
+    # Session key: ideas:{id}:session-{n}, with a fresh OpenClaw session per
+    # attempt — retries append -r{k} so a new attempt never resumes a
+    # possibly-still-streaming (or poisoned) prior session, mirroring the
+    # pipeline's per-attempt session keys. The [SESSION] first line below stays
+    # bare: it carries the output-path contract (idea id + turn), which is the
+    # same for every attempt of a turn.
+    _turn_attempts = pre_session.get("turn_attempts")
+    if not isinstance(_turn_attempts, dict):
+        _turn_attempts = {}
+    try:
+        _attempt_k = int(_turn_attempts.get(str(turn_n), 0))
+    except (TypeError, ValueError):
+        _attempt_k = 0
+    _turn_attempts[str(turn_n)] = _attempt_k + 1
+    pre_session["turn_attempts"] = _turn_attempts
+    session_key = f"ideas:{idea_id}:session-{turn_n}" + (f"-r{_attempt_k}" if _attempt_k else "")
 
     # Webhook payload — first line MUST be [SESSION] for agent output path parsing (AGENTS.md)
     _contract_footer = _ideas_turn_output_contract_footer(idea_id, int(turn_n))
@@ -6134,18 +6239,14 @@ async def post_ideas_message(idea_id: str, request: Request):
         # renders one authoritative message — see _ideas_timeout_message.
         _timeout_reason = getattr(sentinel_found, "reason", None)
         _timeout_msg = _ideas_timeout_message(_timeout_reason, poll_timeout)
-        _timeout_data = _read_json_file(str(session_path)) or _pre_save_data
-        _timeout_msgs = _timeout_data.get("messages", [])
-        for _m in reversed(_timeout_msgs):
-            if _m.get("pending"):
-                _m["pending"] = False
-                _m["error"] = True
-                _m["content"] = _timeout_msg
-                break
-        _timeout_data["messages"] = _timeout_msgs
-        _atomic_write_json_file(str(session_path), _timeout_data)
+        _ideas_fail_pending_turn(session_path, _pre_save_data, _timeout_msg)
+        # 504, NOT 408: browsers transparently re-POST a request that gets a
+        # 408 (transport semantics: "the server never read your request"),
+        # which re-fired this whole turn invisibly to the page JS — observed
+        # live as 3 phantom retry attempts. 504 carries the intended meaning
+        # (upstream agent didn't finish) and is never auto-retried.
         raise HTTPException(
-            status_code=408,
+            status_code=504,
             detail={"reason": _timeout_reason or "timeout", "message": _timeout_msg},
         )
 
@@ -6153,6 +6254,23 @@ async def post_ideas_message(idea_id: str, request: Request):
     agent_response = ""
     if md_path.exists():
         agent_response = md_path.read_text()
+
+    # Success-path output gate: a .done without a usable reply is a failed
+    # turn, not a blank bubble. Consume the bad sentinel (and an empty .md)
+    # so a quick retry cannot trip over it inside the mtime slack window,
+    # persist the honest verdict, and 504 like the timeout path (same
+    # definitive-verdict route client-side; see the 408-retry note above).
+    if not agent_response.strip():
+        try:
+            done_path.unlink(missing_ok=True)
+            md_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        _ideas_fail_pending_turn(session_path, _pre_save_data, IDEAS_EMPTY_REPLY_MESSAGE)
+        raise HTTPException(
+            status_code=504,
+            detail={"reason": "empty_reply", "message": IDEAS_EMPTY_REPLY_MESSAGE},
+        )
 
     # Read updated prd_content from prd_draft.md
     prd_content = ""

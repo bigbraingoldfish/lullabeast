@@ -5587,9 +5587,59 @@
                 return () => clearInterval(id);
             }, [startTs]);
             return (
-                <span className="text-slate-500 text-xs tabular-nums shrink-0 self-end pb-1">
+                <span className="text-slate-500 text-xs tabular-nums shrink-0">
                     ({secs}s)
                 </span>
+            );
+        }
+
+        // Liveness line inside the pending bubble — the chat twin of the
+        // dashboard's agent-activity pulse. Renders the server's turn-status
+        // snapshot (activity-stamp age vs the stall threshold): green pulse
+        // while working, amber as silence approaches the threshold, an honest
+        // "quiet" past it. Age is extrapolated from the fetch timestamp so it
+        // ticks between polls. A stamp older than this turn is residue from
+        // earlier activity, not a signal about this turn → neutral "waiting".
+        function PendingTurnLiveness({ liveness, startTs }) {
+            const [, setTickCount] = useState(0);
+            useEffect(() => {
+                const id = setInterval(() => setTickCount((n) => n + 1), 1000);
+                return () => clearInterval(id);
+            }, []);
+            if (!liveness) return null;
+            const started = typeof startTs === "string" ? Date.parse(startTs) : startTs;
+            const elapsed = Number.isNaN(started) ? null : Math.max(0, (Date.now() - started) / 1000);
+            const fetchedAt = liveness._fetchedAt || Date.now();
+            const age =
+                liveness.stamp_age_seconds == null
+                    ? null
+                    : liveness.stamp_age_seconds + Math.max(0, (Date.now() - fetchedAt) / 1000);
+            const threshold = liveness.idle_threshold_seconds || 300;
+            const preTurn = age == null || (elapsed != null && age > elapsed + 5);
+            let dotClass;
+            let text;
+            if (liveness.state === "done") {
+                dotClass = "bg-emerald-400";
+                text = "reply written, fetching it now";
+            } else if (liveness.state === "quiet" && !preTurn) {
+                dotClass = "bg-red-400";
+                text = `agent quiet for ${Math.max(1, Math.round(age / 60))}m, waiting for the server's verdict`;
+            } else if (liveness.state === "working" && !preTurn) {
+                const nearingStall = age >= threshold * 0.5;
+                dotClass = nearingStall ? "bg-amber-400 animate-pulse" : "bg-emerald-400 animate-pulse";
+                text = `agent working, last activity ${Math.max(0, Math.round(age))}s ago`;
+            } else {
+                dotClass = "bg-slate-500 animate-pulse";
+                text = "waiting for the agent's first activity";
+            }
+            return (
+                <div
+                    data-testid="ideas-turn-liveness"
+                    className="flex items-center gap-1.5 min-w-0 text-[11px] text-slate-400"
+                >
+                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotClass}`}></span>
+                    <span className="tabular-nums truncate">{text}</span>
+                </div>
             );
         }
 
@@ -5699,6 +5749,10 @@
             const lateHealPollTickRef = useRef(null);
             const currentIdeaIdRef = useRef(null); // mirrors currentIdeaId; every idea-scoped async resolve compares against it to drop stale-idea writes after a switch
             const roadmapRecoverPollRef = useRef(null);
+            // Turn-status liveness snapshot for the pending bubble (see the
+            // pendingTurn effect below); null when no turn is pending.
+            const [turnLiveness, setTurnLiveness] = useState(null);
+            const turnLivenessPollRef = useRef(null);
             const convertRequestSeqRef = useRef(0);
             const docPaneRef = useRef(null);
             const [splitPct, setSplitPct] = useState(45);
@@ -5762,6 +5816,9 @@
             // verdict still renders while the idea stays open.
             const HEAL_POLL_BUDGET_MS = 960000;
             const HEAL_POLL_SLOW_INTERVAL_MS = 30000;
+            // Cadence of the read-only turn-status liveness fetch while a turn
+            // is pending (cheap stat-only endpoint; 5 s tracks the stamp well).
+            const TURN_LIVENESS_POLL_MS = 5000;
 
             // One background poll loop, shared by every caller (no second
             // near-identical poller — the dual-source lesson). Watches GET
@@ -5953,6 +6010,50 @@
                     window.removeEventListener("focus", onForeground);
                 };
             }, []);
+
+            // Turn number of the newest pending assistant bubble, or null when
+            // no turn is unresolved. The preceding user row carries ideas_turn
+            // (persisted rows always; the optimistic send row sets it too).
+            const pendingTurn = useMemo(() => {
+                const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+                if (!lastAssistant || !lastAssistant.pending) return null;
+                const lastUser = [...messages].reverse().find((m) => m.role === "user");
+                if (lastUser && lastUser.ideas_turn != null) return lastUser.ideas_turn;
+                const count = messages.filter((m) => m.role === "user" && !m._gatewayFailed).length;
+                return count > 0 ? count : null;
+            }, [messages]);
+
+            // Liveness watch: while a turn is pending, mirror the server's view
+            // of the activity stamp (GET /turn-status, read-only) so the bubble
+            // can show working/quiet honestly instead of a bare elapsed clock.
+            useEffect(() => {
+                if (turnLivenessPollRef.current) {
+                    clearInterval(turnLivenessPollRef.current);
+                    turnLivenessPollRef.current = null;
+                }
+                if (!currentIdeaId || pendingTurn == null) {
+                    setTurnLiveness(null);
+                    return undefined;
+                }
+                const ideaId = currentIdeaId;
+                const tick = () => {
+                    fetch(`/api/ideas/${ideaId}/turn-status?turn=${pendingTurn}`)
+                        .then((r) => (r.ok ? r.json() : null))
+                        .then((d) => {
+                            if (ideaId !== currentIdeaIdRef.current) return;
+                            setTurnLiveness(d ? { ...d, _fetchedAt: Date.now() } : null);
+                        })
+                        .catch(() => {});
+                };
+                tick();
+                turnLivenessPollRef.current = setInterval(tick, TURN_LIVENESS_POLL_MS);
+                return () => {
+                    if (turnLivenessPollRef.current) {
+                        clearInterval(turnLivenessPollRef.current);
+                        turnLivenessPollRef.current = null;
+                    }
+                };
+            }, [currentIdeaId, pendingTurn]);
 
             // Auto-scroll the chat to the newest assistant reply when it arrives.
             // Fires only when the LAST message is a non-pending assistant — so the
@@ -6377,6 +6478,7 @@
                     role: "user",
                     content: t,
                     ts: nowIso,
+                    ideas_turn: turn, // matches the server's persisted row; the liveness watch keys on it
                     ...(optimisticSentContext ? { sent_context: optimisticSentContext } : {}),
                 };
                 setHiddenNoteIdsForSend(() => new Set(draftSnap.map((a) => a.id)));
@@ -6479,14 +6581,17 @@
                         const isAbort = err && err.name === "AbortError";
                         const status = err?.status ?? parseInt(err?.message, 10);
 
-                        // Abort / network drop / a direct (now-definitive) 408:
-                        // the gateway ACCEPTED the turn, so the backend is the
-                        // authority on success-vs-timeout. Keep the "Working on
-                        // your request…" bubble and poll GET /session until the
-                        // backend's verdict lands. Revert the draft ONLY when the
-                        // turn resolves to a DEFINITIVE backend error (married to
-                        // the error bubble) — never on a frontend timer.
-                        if (isAbort || !Number.isFinite(status) || status === 408) {
+                        // Abort / network drop / a direct definitive verdict
+                        // (504 today; 408 kept for old in-flight responses —
+                        // browsers transparently re-POST on 408, which is why
+                        // the backend moved off it): the gateway ACCEPTED the
+                        // turn, so the backend is the authority on
+                        // success-vs-timeout. Keep the pending bubble and poll
+                        // GET /session until the backend's verdict lands.
+                        // Revert the draft ONLY when the turn resolves to a
+                        // DEFINITIVE backend error (married to the error
+                        // bubble) — never on a frontend timer.
+                        if (isAbort || !Number.isFinite(status) || status === 408 || status === 504) {
                             armTurnRecoveryPoll({
                                 ideaId: currentIdeaId,
                                 onResolved: (rawMsgs) => {
@@ -7496,7 +7601,7 @@
                                                         {showAssistantCard ? (
                                                             <div className={assistantCardShell}>
                                                                 {msg.pending && <PendingBubbleLifeBackdrop />}
-                                                                {hasProse ? (
+                                                                {hasProse && !msg.pending ? (
                                                                     <div
                                                                         className={`relative z-10 flex flex-row items-stretch gap-1 px-3 py-2 w-full min-w-0 ${proseAssumptionsDivider}`}
                                                                     >
@@ -7504,9 +7609,7 @@
                                                                             className={`msg-md text-sm min-w-0 flex-1 leading-[1.6] ${
                                                                                 msg.error
                                                                                     ? "text-red-100"
-                                                                                    : msg.pending
-                                                                                      ? "text-slate-300"
-                                                                                      : "text-slate-200"
+                                                                                    : "text-slate-200"
                                                                             }`}
                                                                             dangerouslySetInnerHTML={{
                                                                                 __html:
@@ -7517,7 +7620,6 @@
                                                                                               .replace(/</g, "&lt;"),
                                                                             }}
                                                                         />
-                                                                        {msg.pending && <ChatElapsedSeconds startTs={msg.ts} />}
                                                                     </div>
                                                                 ) : null}
                                                                 {hasAssumptions ? (
@@ -7525,6 +7627,14 @@
                                                                 ) : null}
                                                             </div>
                                                         ) : null}
+                                                        {msg.pending && (
+                                                            <div className="flex items-center gap-3 px-1 -mt-1">
+                                                                <div className="flex-1 min-w-0">
+                                                                    <PendingTurnLiveness liveness={turnLiveness} startTs={msg.ts} />
+                                                                </div>
+                                                                <ChatElapsedSeconds startTs={msg.ts} />
+                                                            </div>
+                                                        )}
                                                         {messageDiscussesEnv(msg.parsed) ? (
                                                             <IdeasEnvSafetyNote />
                                                         ) : null}

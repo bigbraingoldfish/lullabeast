@@ -30,15 +30,19 @@ def load_index_html():
         return f.read()
 
 
-def test_408_routed_into_deferred_heal_poll_branch():
-    """408 must be handled by the deferred recovery branch (alongside abort /
-    network drop), NOT the immediate gateway-failure path — the agent may still
-    be working, so we keep 'Working…' and wait for the backend's verdict."""
+def test_definitive_verdict_routed_into_deferred_heal_poll_branch():
+    """The backend's definitive verdict (504 today; 408 kept for old in-flight
+    responses — browsers transparently re-POST on 408, which is why the backend
+    moved off it) must be handled by the deferred recovery branch (alongside
+    abort / network drop), NOT the immediate gateway-failure path — the agent
+    may still be working, so we keep the pending bubble and wait for the
+    backend's verdict."""
     html = load_index_html()
     assert re.search(
-        r"isAbort\s*\|\|\s*!\s*Number\.isFinite\(\s*status\s*\)\s*\|\|\s*status\s*===\s*408",
+        r"isAbort\s*\|\|\s*!\s*Number\.isFinite\(\s*status\s*\)\s*\|\|\s*"
+        r"status\s*===\s*408\s*\|\|\s*status\s*===\s*504",
         html,
-    ), "Expected 408 folded into the abort/network heal-poll guard (deferred, not immediate)"
+    ), "Expected 408 and 504 folded into the abort/network heal-poll guard (deferred, not immediate)"
 
 
 def test_immediate_draft_restore_is_gateway_only_not_408():

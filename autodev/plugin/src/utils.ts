@@ -33,12 +33,15 @@ export function isIdeasSession(sessionKey: string | undefined): boolean {
  *
  * Tolerates the gateway's ``agent:{role}:`` prefix so callers (e.g.
  * ``agent-end-handler``) see the same parse result whether they receive a
- * bare or normalised session key.
+ * bare or normalised session key. Also tolerates the server's per-attempt
+ * retry suffix (`session-{turn}-r{k}` — a fresh OpenClaw session per retry);
+ * every attempt of a turn parses to the same `{ideaId, turn}`, so the
+ * agent-end `.done` backstop covers retries too.
  */
 export function parseIdeasTurnSession(
   sessionKey: string,
 ): { ideaId: string; turn: number } | null {
-  const m = /^(?:agent:[a-z0-9_-]+:)?ideas:([^:]+):session-(\d+)$/i.exec(sessionKey);
+  const m = /^(?:agent:[a-z0-9_-]+:)?ideas:([^:]+):session-(\d+)(?:-r\d+)?$/i.exec(sessionKey);
   if (!m) return null;
   return { ideaId: m[1], turn: parseInt(m[2], 10) };
 }

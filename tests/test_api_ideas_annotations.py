@@ -291,7 +291,7 @@ def test_annotations_drafts_preserved_on_message_timeout(tmp_path):
                             json={"content": "slow", "turn": 1},
                         )
 
-        assert resp.status_code == 408
+        assert resp.status_code == 504
         annotations = client.get(f"/api/ideas/{idea_id}/annotations").json()
         assert len(annotations) == 1
         assert annotations[0]["submitted"] is False
