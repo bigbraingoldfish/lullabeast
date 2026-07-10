@@ -13,12 +13,14 @@ This suite pins the uniform treatment:
     (startNotificationPoll had no call sites), so it is removed outright rather
     than guarded — guarding code that never runs is meaningless.
 
-  * GUARDS (plain `return`, NOT the heal poll's stopX()+return) on the two live
-    pollers (startReadinessPoll, startRoadmapRecoverPoll), the idea-load effect's
-    own /session + /readiness resolves, and the one-shot fetchPrdSectionDiff /
-    refreshAnnotations. Plain return — never a self-stop — because these interval
-    refs are RE-ARMED by a newly-selected idea, so a stale resolve that called
-    stopReadinessPoll() would kill the NEW idea's poll.
+  * GUARDS (plain `return`, NOT the heal poll's stopX()+return) on the live
+    readiness poll, the idea-load effect's own /session + /readiness resolves,
+    and the one-shot fetchPrdSectionDiff / refreshAnnotations. Plain return —
+    never a self-stop — because these interval refs are RE-ARMED by a
+    newly-selected idea, so a stale resolve that called stopReadinessPoll()
+    would kill the NEW idea's poll. (Roadmap recovery rides the shared watch
+    loop since Phase 4; its stale-resolve safety is the loop's generation
+    guard — see test_ui_ideas_single_poller.py.)
 
   * the readiness poll's GLOBAL refreshIdeas() (sidebar X/10 for every idea) runs
     BEFORE its guard, so a background assessment that finishes after a switch still
@@ -74,17 +76,24 @@ def test_readiness_poll_guards_on_idea_switch_with_plain_return():
     ), "Expected the readiness nested resolve to run refreshIdeas() then plain-return before setReadinessStatus"
 
 
-def test_roadmap_recover_poll_resolve_guards_on_idea_switch():
-    """startRoadmapRecoverPoll's pollOnce resolve writes setRoadmapContent /
-    setVerificationContent; it must plain-return on idea switch before those writes
-    so a recovered roadmap can't land in the wrong idea's document pane."""
+def test_roadmap_recover_poll_rides_the_guarded_shared_loop():
+    """startRoadmapRecoverPoll's writes (setRoadmapContent / setVerificationContent)
+    must sit behind the shared watch loop's idea-switch + generation guards, so a
+    recovered roadmap can't land in the wrong idea's document pane: the wrapper
+    delegates to startSessionHealPoll and runs no bespoke fetch/interval of its own."""
     html = load_index_html()
+    start = html.index("const startRoadmapRecoverPoll")
+    body = html[start: html.index("};", start) + 2]
+    assert "startSessionHealPoll({" in body, (
+        "Expected startRoadmapRecoverPoll to delegate to the shared startSessionHealPoll"
+    )
+    for banned in ("fetch(", "setInterval("):
+        assert banned not in body, (
+            f"startRoadmapRecoverPoll must not run its own loop; found {banned!r}"
+        )
     assert re.search(
-        r"\.then\(\s*\(d\)\s*=>\s*\{\s*"
-        r"if\s*\(\s*ideaId\s*!==\s*currentIdeaIdRef\.current\s*\)\s*return;\s*"
-        r"const rm\s*=\s*\(d\.roadmap_content",
-        html,
-    ), "Expected the roadmap-recover pollOnce resolve to plain-return before setRoadmapContent"
+        r"applyTurnState:\s*false[\s\S]{0,600}?setRoadmapContent\(\s*d\.roadmap_content", body
+    ), "Expected the roadmap caller to opt out of the turn render and own its writes in onResolved"
 
 
 def test_idea_load_effect_resolves_guard_on_current_idea_ref():
@@ -124,14 +133,14 @@ def test_one_shot_fetches_guard_on_idea_switch():
 
 
 def test_new_poller_guards_do_not_self_stop():
-    """Correctness pin for the re-armable-ref hazard: the readiness and roadmap
-    guards must NOT pair the idea-switch check with stopReadinessPoll() /
-    stopRoadmapRecoverPoll() (which would clear the NEW idea's interval). Only the
-    heal poll (single-consumer ref) self-stops; the others plain-return."""
+    """Correctness pin for the re-armable-ref hazard: the readiness guard must
+    NOT pair the idea-switch check with stopReadinessPoll() (which would clear
+    the NEW idea's interval). The shared watch loop self-stops, but only via
+    its generation-owned exits; the bespoke roadmap poller (and its stop) are
+    gone entirely."""
     html = load_index_html()
     assert not re.search(
         r"currentIdeaIdRef\.current\s*\)\s*\{\s*stopReadinessPoll\(\)", html
     ), "Readiness idea-switch guard must be a plain return, not stopReadinessPoll()+return"
-    assert not re.search(
-        r"currentIdeaIdRef\.current\s*\)\s*\{\s*stopRoadmapRecoverPoll\(\)", html
-    ), "Roadmap-recover idea-switch guard must be a plain return, not stopRoadmapRecoverPoll()+return"
+    for sym in ("stopRoadmapRecoverPoll", "roadmapRecoverPollRef"):
+        assert sym not in html, f"Expected consolidated-away symbol {sym!r} to be fully removed"

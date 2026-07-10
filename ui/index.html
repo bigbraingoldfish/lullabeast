@@ -5747,8 +5747,12 @@
             // listener can fire one immediate reconcile (background tabs
             // throttle interval timers to ~1/min).
             const lateHealPollTickRef = useRef(null);
+            // Watch generation: bumped on every stop/arm so a superseded
+            // watch's in-flight fetch microtask (which clearInterval cannot
+            // cancel) is inert — it must neither repaint state nor clear the
+            // successor's interval.
+            const lateHealPollGenRef = useRef(0);
             const currentIdeaIdRef = useRef(null); // mirrors currentIdeaId; every idea-scoped async resolve compares against it to drop stale-idea writes after a switch
-            const roadmapRecoverPollRef = useRef(null);
             // Turn-status liveness snapshot for the pending bubble (see the
             // pendingTurn effect below); null when no turn is pending.
             const [turnLiveness, setTurnLiveness] = useState(null);
@@ -5793,6 +5797,7 @@
             };
 
             const stopLateHealPoll = () => {
+                lateHealPollGenRef.current += 1; // invalidate in-flight microtasks of the stopped watch
                 if (lateHealPollRef.current) {
                     clearInterval(lateHealPollRef.current);
                     lateHealPollRef.current = null;
@@ -5822,32 +5827,40 @@
 
             // One background poll loop, shared by every caller (no second
             // near-identical poller — the dual-source lesson). Watches GET
-            // /session every `intervalMs` until `resolveWhen(messages)` is
-            // true, then renders the server state and runs the post-turn
-            // cleanup. The budget is wall-clock (`budgetMs`), checked AFTER
-            // each fetch so a foreground catch-up tick can still render a
-            // verdict that lands at the buzzer; when it expires, `onExhausted`
-            // fires once and the loop either stops or — when
-            // `degradeToIntervalMs` is set — keeps watching unbounded at the
-            // slower cadence. Every loop exit (tick, resolve, reject) bails —
-            // stopLateHealPoll() + return, no state write — if the operator
-            // switched ideas mid-poll (ideaId !== currentIdeaIdRef.current), so a
-            // stale in-flight /session fetch can't flash the old idea's messages/PRD
-            // into the now-foreground idea (clearInterval can't cancel an already
-            // in-flight fetch's microtask).
+            // /session every `intervalMs` until `resolveWhen(messages, payload)`
+            // is true, then renders the server turn state (skipped when
+            // `applyTurnState` is false — document-recovery callers own their
+            // render via `onResolved`) and runs the post-turn cleanup. The
+            // budget is wall-clock (`budgetMs`), checked AFTER each fetch so a
+            // foreground catch-up tick can still render a verdict that lands
+            // at the buzzer; when it expires, `onExhausted` fires once and the
+            // loop either stops or — when `degradeToIntervalMs` is set — keeps
+            // watching unbounded at the slower cadence. Arming supersedes any
+            // prior watch (newest owner wins); every loop exit (tick, resolve,
+            // reject) first drops superseded generations (plain return — a
+            // stale microtask must not clear the successor's interval), then
+            // bails with stopLateHealPoll() + return, no state write, if the
+            // operator switched ideas mid-poll (ideaId !==
+            // currentIdeaIdRef.current), so a stale in-flight /session fetch
+            // can't flash the old idea's messages/PRD into the now-foreground
+            // idea (clearInterval can't cancel an already in-flight fetch's
+            // microtask).
             //   • 502/503 late-heal: resolveWhen = no assistant error remains
             //     (a late .done reconciled the error placeholder into a reply).
             //   • bounded-wait abort / network drop / unresolved turn found on
             //     mount: resolveWhen = the turn's assistant message is no
             //     longer pending (real reply OR a server-written reason-aware
             //     error).
-            const startSessionHealPoll = ({ ideaId, resolveWhen, onExhausted, onResolved, budgetMs, intervalMs = 5000, degradeToIntervalMs = null }) => {
+            //   • roadmap recovery (convert / fix-format timeout): resolveWhen
+            //     = roadmap content present in the payload; applyTurnState off.
+            const startSessionHealPoll = ({ ideaId, resolveWhen, onExhausted, onResolved, budgetMs, intervalMs = 5000, degradeToIntervalMs = null, applyTurnState = true, immediate = false }) => {
                 // Arming for a non-foreground idea is never useful (the first
                 // tick would self-terminate) and must not kill the foreground
                 // idea's watch — e.g. a stale send hand-off firing after an
                 // idea switch, while the new idea's mount-armed watch runs.
                 if (!ideaId || ideaId !== currentIdeaIdRef.current) return;
                 stopLateHealPoll();
+                const gen = ++lateHealPollGenRef.current;
                 let deadline = budgetMs ? Date.now() + budgetMs : null;
                 let fails = 0; // consecutive GET failures — exhaust early if the server is actually down
                 const exhaust = () => {
@@ -5866,44 +5879,49 @@
                     if (onExhausted) onExhausted();
                 };
                 const tick = () => {
+                    if (gen !== lateHealPollGenRef.current) return; // superseded watch
                     if (ideaId !== currentIdeaIdRef.current) { stopLateHealPoll(); return; }
                     fetch(`/api/ideas/${ideaId}/session`)
                         .then((r) => r.json())
                         .then((d) => {
+                            if (gen !== lateHealPollGenRef.current) return;
                             if (ideaId !== currentIdeaIdRef.current) { stopLateHealPoll(); return; }
                             fails = 0;
                             const rawMsgs = d.messages || [];
-                            if (!resolveWhen(rawMsgs)) {
+                            if (!resolveWhen(rawMsgs, d)) {
                                 if (deadline && Date.now() > deadline) exhaust();
                                 return;
                             }
                             stopLateHealPoll();
-                            setStagedAttachment(null);
-                            setHiddenNoteIdsForSend(() => new Set());
-                            setMessages(
-                                rawMsgs.map((m, idx) => ({
-                                    ...m,
-                                    id:
-                                        m.id ||
-                                        `${m.role}-${idx}-${(m.ts || "").slice(0, 19) || idx}`,
-                                }))
-                            );
-                            setPrdContent(d.prd_content || "");
-                            setIsLoading(false);
-                            isLoadingRef.current = false;
-                            refreshAnnotations(ideaId);
-                            fetchPrdSectionDiff(ideaId);
-                            setReadinessStatus("updating");
-                            setReadinessData(null);
-                            setReadinessTimedOut(false);
-                            startReadinessPoll(ideaId);
+                            if (applyTurnState) {
+                                setStagedAttachment(null);
+                                setHiddenNoteIdsForSend(() => new Set());
+                                setMessages(
+                                    rawMsgs.map((m, idx) => ({
+                                        ...m,
+                                        id:
+                                            m.id ||
+                                            `${m.role}-${idx}-${(m.ts || "").slice(0, 19) || idx}`,
+                                    }))
+                                );
+                                setPrdContent(d.prd_content || "");
+                                setIsLoading(false);
+                                isLoadingRef.current = false;
+                                refreshAnnotations(ideaId);
+                                fetchPrdSectionDiff(ideaId);
+                                setReadinessStatus("updating");
+                                setReadinessData(null);
+                                setReadinessTimedOut(false);
+                                startReadinessPoll(ideaId);
+                            }
                             // Caller hook: lets the recovery caller act on the
                             // resolved server state (e.g. restore the draft when
                             // the turn resolved to a DEFINITIVE backend error,
                             // married to the error bubble just rendered above).
-                            if (onResolved) onResolved(rawMsgs);
+                            if (onResolved) onResolved(rawMsgs, d);
                         })
                         .catch(() => {
+                            if (gen !== lateHealPollGenRef.current) return;
                             if (ideaId !== currentIdeaIdRef.current) { stopLateHealPoll(); return; }
                             fails += 1;
                             // Bounded phase only: ~30 s of unreachable server (or
@@ -5914,6 +5932,7 @@
                 };
                 lateHealPollTickRef.current = tick;
                 lateHealPollRef.current = setInterval(tick, intervalMs);
+                if (immediate) tick();
             };
 
             // Watch an unresolved turn to its verdict — shared by the
@@ -5948,52 +5967,37 @@
                 });
             };
 
-            const stopRoadmapRecoverPoll = () => {
-                if (roadmapRecoverPollRef.current) {
-                    clearInterval(roadmapRecoverPollRef.current);
-                    roadmapRecoverPollRef.current = null;
-                }
-            };
+            // Bound on the roadmap-recovery watch: the convert agent may
+            // finish shortly after the server-side timeout; past this, any
+            // later salvage still lands in session.json and renders on the
+            // next idea (re)load.
+            const ROADMAP_RECOVER_BUDGET_MS = 180000;
 
+            // Watch a timed-out convert / fix-format to its roadmap — the
+            // same shared loop resolving on the payload's roadmap content
+            // instead of the chat turn, so there is no second poller to
+            // drift. Supersedes (and is superseded by) any turn watch.
             const startRoadmapRecoverPoll = (ideaId, onRecovered) => {
-                stopRoadmapRecoverPoll();
-                if (!ideaId) return;
-                const pollOnce = () => {
-                    fetch(`/api/ideas/${ideaId}/session`)
-                        .then((r) => r.json())
-                        .then((d) => {
-                            if (ideaId !== currentIdeaIdRef.current) return;
-                            const rm = (d.roadmap_content || "").trim();
-                            if (rm) {
-                                setRoadmapContent(d.roadmap_content || "");
-                                setVerificationContent(d.verification_content || "");
-                                setConvertError("");
-                                refreshIdeas();
-                                stopRoadmapRecoverPoll();
-                                // Optional caller hook (format-correction): continue
-                                // setup with the FRESH recovered roadmap, since the
-                                // setRoadmapContent above has not flushed to state yet.
-                                if (onRecovered) onRecovered(d.roadmap_content || "");
-                            }
-                        })
-                        .catch(() => {});
-                };
-                let ticks = 0;
-                const maxTicks = 36; // 36 × 5s — agent may finish shortly after server-side convert timeout
-                pollOnce();
-                roadmapRecoverPollRef.current = setInterval(() => {
-                    ticks += 1;
-                    if (ticks > maxTicks) {
-                        stopRoadmapRecoverPoll();
-                        return;
-                    }
-                    pollOnce();
-                }, 5000);
+                startSessionHealPoll({
+                    ideaId,
+                    immediate: true,
+                    budgetMs: ROADMAP_RECOVER_BUDGET_MS,
+                    applyTurnState: false,
+                    resolveWhen: (msgs, d) => !!(d.roadmap_content || "").trim(),
+                    onResolved: (msgs, d) => {
+                        setRoadmapContent(d.roadmap_content || "");
+                        setVerificationContent(d.verification_content || "");
+                        setConvertError("");
+                        refreshIdeas();
+                        // Optional caller hook (format-correction): continue
+                        // setup with the FRESH recovered roadmap, since the
+                        // setRoadmapContent above has not flushed to state yet.
+                        if (onRecovered) onRecovered(d.roadmap_content || "");
+                    },
+                });
             };
 
             useEffect(() => () => stopLateHealPoll(), [currentIdeaId]);
-
-            useEffect(() => () => stopRoadmapRecoverPoll(), [currentIdeaId]);
 
             // Foreground catch-up: when the tab returns to the foreground while
             // a recovery watch is running, fire one immediate reconcile instead
@@ -6084,7 +6088,7 @@
                 messagesEndRef.current?.scrollIntoView({ behavior, block: "end" });
             };
 
-            // Idea-switch guards here (and in startRoadmapRecoverPoll) use a PLAIN
+            // Idea-switch guards here use a PLAIN
             // `return`, not the heal poll's stopXPoll()+return: readinessPollRef is
             // re-armed by the newly-selected idea, so a stale resolve calling
             // stopReadinessPoll() would clear the NEW idea's poll. The poll lifecycle
@@ -6778,7 +6782,10 @@
                 const startedAt = Date.now();
                 setConvertLoading(true);
                 setConvertError("");
-                stopRoadmapRecoverPoll();
+                // A leftover recovery watch (e.g. from a prior timed-out
+                // convert) would instantly resolve on this idea's existing
+                // roadmap content — stop it before the fresh attempt.
+                stopLateHealPoll();
                 const MIN_ROADMAP_GENERATING_UI_MS = 1500;
                 fetch(`/api/ideas/${ideaId}/convert`, { method: "POST" })
                     .then((r) => {

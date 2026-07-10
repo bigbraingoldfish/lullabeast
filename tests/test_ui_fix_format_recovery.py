@@ -50,14 +50,16 @@ def test_fix_format_starts_recover_poll_on_timeout_status():
 
 def test_start_roadmap_recover_poll_accepts_and_invokes_onRecovered():
     """startRoadmapRecoverPoll gains an optional onRecovered(freshRoadmap) invoked
-    after it picks up the recovered roadmap (so format-correction can continue)."""
+    after it picks up the recovered roadmap (so format-correction can continue).
+    Since the Phase-4 consolidation it rides the shared watch loop, so the hook
+    lives in its onResolved."""
     html = load_index_html()
     assert re.search(
         r"const startRoadmapRecoverPoll\s*=\s*\(\s*ideaId\s*,\s*onRecovered\s*\)\s*=>",
         html,
     ), "Expected startRoadmapRecoverPoll to accept an onRecovered parameter"
     assert re.search(
-        r"stopRoadmapRecoverPoll\(\);[\s\S]{0,300}?"  # tolerate an explanatory comment
+        r"onResolved:\s*\(\s*msgs\s*,\s*d\s*\)\s*=>\s*\{[\s\S]{0,600}?"
         r"if\s*\(\s*onRecovered\s*\)\s*onRecovered\(\s*d\.roadmap_content",
         html,
     ), "Expected the recover resolve to invoke onRecovered with the fresh roadmap content"
