@@ -27,7 +27,6 @@ except ModuleNotFoundError:  # pragma: no cover - native Windows lacks POSIX fcn
         "supported (the pipeline uses POSIX fcntl advisory locking) — "
         "run AutoDev under WSL2."
     )
-import hashlib
 import ipaddress
 import json
 import logging
@@ -46,7 +45,7 @@ import asyncio
 
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
@@ -2613,7 +2612,6 @@ def get_events(limit: int = 30, offset: int = 0):
     }
 
 
-import uuid
 from fastapi.responses import StreamingResponse
 
 
@@ -2650,7 +2648,7 @@ async def events_stream():
         last_heartbeat = time.time()
         
         # Send heartbeat immediately on connect
-        yield f"event: heartbeat\ndata: {{}}\n\n"
+        yield "event: heartbeat\ndata: {}\n\n"
         last_heartbeat = time.time()
         
         # For file-based, use the tail function directly
@@ -2685,7 +2683,7 @@ async def events_stream():
                 
                 # Send heartbeat if needed
                 if current_time - last_heartbeat >= heartbeat_interval:
-                    yield f"event: heartbeat\ndata: {{}}\n\n"
+                    yield "event: heartbeat\ndata: {}\n\n"
                     last_heartbeat = current_time
                 
                 # Small sleep to avoid busy loop
@@ -2697,7 +2695,7 @@ async def events_stream():
                 
                 # Send heartbeat if needed
                 if current_time - last_heartbeat >= heartbeat_interval:
-                    yield f"event: heartbeat\ndata: {{}}\n\n"
+                    yield "event: heartbeat\ndata: {}\n\n"
                     last_heartbeat = current_time
                 
                 # Drain this client's own queue and deliver every event. No
@@ -5995,6 +5993,36 @@ def _ideas_timeout_message(reason: str | None, poll_timeout: float) -> str:
     return "Agent timed out — the model may be slow. You can retry."
 
 
+def _ideas_convert_timeout_message(reason: str | None, op_label: str, poll_timeout: float) -> str:
+    """Converter twin of :func:`_ideas_timeout_message` (same single-source rule:
+    the 504 body is the only author of this wording; the dashboard renders it
+    verbatim and never duplicates it).
+
+    Serves both converter runs via ``op_label`` ("Conversion" / "Format
+    correction"). Both polls pass ``startup_grace=None``, so only ``stalled``
+    and ``timeout`` reach this mapper; anything else falls back to generic
+    copy. The timeout variant must keep starting with "{op_label} timed out":
+    the dashboard's legacy string-fallback matcher (for responses already in
+    flight during an upgrade) keys on that phrase. Unlike a chat turn, a slow
+    converter often still finishes after the request gives up and the
+    dashboard keeps watching for the drafts, so the copy says so.
+    """
+    if reason == "stalled":
+        return (
+            f"{op_label} stalled partway through. The model went quiet mid-run; "
+            "retrying usually clears it. Still watching for a few minutes in "
+            "case it finishes anyway."
+        )
+    if reason == "timeout":
+        minutes = max(1, int(poll_timeout) // 60)
+        return (
+            f"{op_label} timed out after ~{minutes} min. The input may be large "
+            "or the model slow. Still watching for a few minutes in case it "
+            "finishes; otherwise retry."
+        )
+    return f"{op_label} did not finish. Still watching for a few minutes; you can retry."
+
+
 def _ideas_fail_pending_turn(session_path: Path, fallback: dict, message: str) -> None:
     """Flip the newest pending placeholder in session.json to an error verdict."""
     data = _read_json_file(str(session_path)) or fallback
@@ -7287,17 +7315,23 @@ async def post_ideas_convert(idea_id: str):
         extra_done_paths=(verification_done_path,),
     )
     if not poll_result:
+        _timeout_reason = getattr(poll_result, "reason", None)
         _write_ideas_turn_event(
             config, "ideas_convert_timeout", idea_id,
-            {"op": "roadmap_generation", "reason": getattr(poll_result, "reason", None) or "timeout"},
+            {"op": "roadmap_generation", "reason": _timeout_reason or "timeout"},
             agent=ROADMAP_CONVERTER_AGENT_ID,
         )
         # 504, not 408: browsers transparently re-POST on 408, which would
         # silently launch a duplicate converter run — see the chat-send
-        # timeout above for the full rationale.
+        # timeout above for the full rationale. Structured {reason, message}
+        # like the chat send; _ideas_convert_timeout_message is the sole
+        # author of the wording.
         raise HTTPException(
             status_code=504,
-            detail=f"Conversion timed out after {CONVERT_TIMEOUT}s"
+            detail={
+                "reason": _timeout_reason or "timeout",
+                "message": _ideas_convert_timeout_message(_timeout_reason, "Conversion", CONVERT_TIMEOUT),
+            },
         )
 
     _record_operation_metric("roadmap_generation", time.time() - _attempt_start_wall, config)
@@ -7462,18 +7496,24 @@ async def post_ideas_fix_roadmap_format(idea_id: str, body: FixRoadmapFormatRequ
         rescue_stranded_reply_md=False,
     )
     if not poll_result:
-        _reason = getattr(poll_result, "reason", None) or "timeout"
+        _timeout_reason = getattr(poll_result, "reason", None)
         _write_ideas_turn_event(
             config, "ideas_convert_timeout", idea_id,
-            {"op": "format_correction", "reason": _reason},
+            {"op": "format_correction", "reason": _timeout_reason or "timeout"},
             agent=ROADMAP_CONVERTER_AGENT_ID,
         )
         # 504, not 408: browsers transparently re-POST on 408, which would
         # silently launch a duplicate correction run — see the chat-send
-        # timeout above for the full rationale.
+        # timeout above for the full rationale. Structured {reason, message}
+        # like the chat send and /convert.
         raise HTTPException(
             status_code=504,
-            detail=f"Format correction {_reason} after {FORMAT_CORRECTION_TIMEOUT}s",
+            detail={
+                "reason": _timeout_reason or "timeout",
+                "message": _ideas_convert_timeout_message(
+                    _timeout_reason, "Format correction", FORMAT_CORRECTION_TIMEOUT
+                ),
+            },
         )
 
     _record_operation_metric("format_correction", time.time() - _attempt_start_wall, config)
@@ -9175,7 +9215,6 @@ def _run_preflight_checks(repo_path: str, config: dict | None = None) -> list:
     A project with no ``## Prerequisites`` block is baseline-identical.
     """
     import subprocess
-    import glob as glob_mod
 
     repo_path = os.path.realpath(os.path.expanduser(repo_path))
     if config is None:
@@ -9192,7 +9231,7 @@ def _run_preflight_checks(repo_path: str, config: dict | None = None) -> list:
         if sym_parent:
             os.makedirs(sym_parent, exist_ok=True)
         _links = _pipeline_symlink_paths(config)
-        ok = all(os.path.lexists(l) and os.path.realpath(l) == repo_path for l in _links)
+        ok = all(os.path.lexists(p) and os.path.realpath(p) == repo_path for p in _links)
         if ok:
             checks.append({
                 "check": "symlink",

@@ -125,6 +125,24 @@ def test_convert_triggers_recover_poll_on_timeout_status():
     ), "Expected _runConvert to start recovery on a 504/408 status (with string fallback)"
 
 
+def test_server_error_bodies_render_their_message_not_the_json_envelope():
+    """Convert/fix-format error surfaces used to render the raw response text
+    (a JSON envelope like {"detail": ...}). Both must pass it through
+    httpErrorDetailMessage, which unwraps a string detail or the structured
+    {reason, message} the timeout paths send; the recovery matchers keep using
+    the raw text."""
+    html = load_index_html()
+    assert re.search(
+        r"const httpErrorDetailMessage\s*=\s*\(\s*raw\s*\)\s*=>", html
+    ), "Expected the shared httpErrorDetailMessage extractor"
+    assert re.search(
+        r"setConvertError\(\s*httpErrorDetailMessage\(\s*msg\s*\)\s*\)", html
+    ), "Expected convertError to show the unwrapped message"
+    assert re.search(
+        r"Fix Format failed: \$\{httpErrorDetailMessage\(", html
+    ), "Expected the Fix-Format failure notice to show the unwrapped message"
+
+
 def test_fix_format_success_path_passes_fresh_content():
     """The Fix-Format happy path passes the freshly corrected content to
     continueSetup (fixes the latent same-tick stale-state read)."""

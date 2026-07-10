@@ -6775,6 +6775,19 @@
                 _runConvert();
             };
 
+            // Server error bodies arrive as raw JSON text ({"detail": ...},
+            // where detail is a plain string or the structured {reason,
+            // message} the timeout paths send). Surface the human message,
+            // never the JSON envelope. Matchers keep using the raw text.
+            const httpErrorDetailMessage = (raw) => {
+                try {
+                    const d = JSON.parse(raw).detail;
+                    if (typeof d === "string") return d;
+                    if (d && d.message) return d.message;
+                } catch (err) { /* not JSON: fall through to the raw text */ }
+                return raw;
+            };
+
             const _runConvert = () => {
                 if (isLoading || isLoadingRef.current) return;
                 const ideaId = currentIdeaId;
@@ -6811,7 +6824,7 @@
                     .catch((e) => {
                         if (convertRequestSeqRef.current !== seq) return;
                         const msg = String(e.message || e);
-                        setConvertError(msg);
+                        setConvertError(httpErrorDetailMessage(msg));
                         setConvertLoading(false);
                         // 504 today; 408 kept for old in-flight responses —
                         // browsers transparently re-POST on 408, which is why
@@ -7017,7 +7030,7 @@
                             );
                             startRoadmapRecoverPoll(ideaId, (rm) => continueSetup(rm));
                         } else {
-                            setFormatInvalidDetail(`Fix Format failed: ${e.message || e}`);
+                            setFormatInvalidDetail(`Fix Format failed: ${httpErrorDetailMessage(String(e.message || e))}`);
                         }
                     });
             };
