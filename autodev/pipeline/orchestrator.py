@@ -330,6 +330,9 @@ SYMLINK_TARGET = os.path.join(AUTODEV_PIPELINE_ROOT, "pipeline-project")
 PROJECT_ARTIFACTS_DIR = os.path.join(SYMLINK_TARGET, ".autodev", "pipeline")
 CONFIG_FILE = os.path.join(OPENCLAW_ROOT, "openclaw.json")
 PHASE_STATE_FILE = os.path.join(PROJECT_ARTIFACTS_DIR, "phase_state.json")
+# Dashboard-written per-phase model overrides ({raw_id: {role: model}}),
+# consumed at the planner/executor/reviewer invoke sites.
+PHASE_MODEL_OVERRIDES_FILE = os.path.join(PROJECT_ARTIFACTS_DIR, "phase_model_overrides.json")
 
 ORCHESTRATOR_FILENAME = "orchestrator.py"
 
@@ -3494,15 +3497,17 @@ class Orchestrator:
         it always reflects the last-invoked (i.e. in-flight) agent. Cleared by
         :meth:`_abort_active_agent_session`. See Phase 9 (zombie-session fix).
 
-        Also stamps the role's configured model into ``phase_state.models_used``
-        (MON-1 — the metrics row copies it so the dashboard's Run Metrics model
-        badge can show what ran the phase, mirroring ``skill_injected``).
+        Also stamps the role's effective model — the phase's operator override
+        when one is set, else the configured model — into
+        ``phase_state.models_used`` (MON-1 — the metrics row copies it so the
+        dashboard's Run Metrics model badge can show what ran the phase,
+        mirroring ``skill_injected``).
         Best-effort telemetry: any failure is logged, never blocks the invocation."""
         self._active_agent_role = role
         self._active_agent_session_key = session_key
         self._active_agent_stamp = os.path.join(PROJECT_ARTIFACTS_DIR, f"{role}_activity.stamp")
         try:
-            _model = self._get_agent_model(role)
+            _model = self._phase_model_override(role) or self._get_agent_model(role)
             if _model:
                 _ps = self.read_phase_state()
                 _models = _ps.get("models_used")
@@ -4190,6 +4195,7 @@ class Orchestrator:
             directive = None
         return invoke_agent_webhook(
             "reviewer", session_key, token, message=directive or None,
+            model=self._phase_model_override("reviewer"),
             url=self.openclaw_config.get("hooks_url"),
         )
 
@@ -4245,6 +4251,7 @@ class Orchestrator:
             directive = None
         return invoke_agent_webhook(
             "executor", session_key, token, message=directive or None,
+            model=self._phase_model_override("executor"),
             url=self.openclaw_config.get("hooks_url"),
         )
 
@@ -4787,6 +4794,48 @@ class Orchestrator:
                 if isinstance(model, str):
                     return model
         return None
+
+    def _phase_model_override(self, role: str) -> str | None:
+        """Return the dashboard-set model override for *role* on the current phase, or None.
+
+        Read from ``PHASE_MODEL_OVERRIDES_FILE`` (``{raw_id: {role: model}}``) on
+        every invocation so an override set mid-phase applies to the next attempt.
+        Sessions bake their model at creation, so threading this as ``model=`` on
+        the webhook needs no gateway restart. Read-tolerant: a missing or
+        malformed file means no override.
+        """
+        raw_id = self.state.get("current_phase_raw_id") or ""
+        if not raw_id:
+            return None
+        try:
+            with open(PHASE_MODEL_OVERRIDES_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return None
+        entry = data.get(raw_id) if isinstance(data, dict) else None
+        model = entry.get(role) if isinstance(entry, dict) else None
+        return model if isinstance(model, str) and model.strip() else None
+
+    def _clear_phase_model_override(self, raw_id: str) -> None:
+        """Drop *raw_id*'s entry from the per-phase override file (best-effort).
+
+        Called when a phase closes (complete / skip / proceed); entries for
+        other (upcoming) phases are preserved, and the file is removed once empty.
+        """
+        if not raw_id:
+            return
+        try:
+            with open(PHASE_MODEL_OVERRIDES_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict) or raw_id not in data:
+                return
+            data.pop(raw_id, None)
+            if data:
+                write_json_atomic(PHASE_MODEL_OVERRIDES_FILE, data, indent=2)
+            else:
+                os.remove(PHASE_MODEL_OVERRIDES_FILE)
+        except (OSError, ValueError):
+            pass
 
     def _resolve_notification_channel(self, agent_id: str = "escalation") -> str | None:
         """Resolve the operator-notification channel for raw gateway POSTs, or None.
@@ -5581,6 +5630,9 @@ class Orchestrator:
                 os.remove(os.path.join(PROJECT_ARTIFACTS_DIR, t))
             except FileNotFoundError:
                 pass
+        # The closed phase's model-override entry expires with it; entries set
+        # on upcoming phases are kept.
+        self._clear_phase_model_override(self.state.get("current_phase_raw_id") or "")
 
         print(f"[INFO] Phase {phase} closed (trigger={trigger}). Resolving next pending phase.")
         self.state["current_agent"] = "planner"  # reset to start
@@ -6848,6 +6900,7 @@ class Orchestrator:
                     self.transition_state("WAITING_FOR_SENTINEL", "Invoking Planner via webhook")
                     webhook_status = invoke_agent_webhook(
                         "planner", session_key, token,
+                        model=self._phase_model_override("planner"),
                         url=self.openclaw_config.get("hooks_url"),
                     )
 

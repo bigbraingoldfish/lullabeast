@@ -3180,6 +3180,15 @@
             const [phaseAgentSplitMode, setPhaseAgentSplitMode] = useState('tokens');
             const lastScrolledMtimeRef = useRef(null);
             const completionContentRef = useRef(null);
+            // Per-phase model override (operator control): {raw_id: {role: model}},
+            // mirrored from /api/phase-model-override. The catalog for the picker is
+            // fetched lazily the first time an open (current/upcoming) row expands.
+            const [phaseOverrides, setPhaseOverrides] = useState({});
+            const [overrideCatalog, setOverrideCatalog] = useState(null);
+            const [overrideDraft, setOverrideDraft] = useState({ role: 'executor', model: '' });
+            const [overrideBusy, setOverrideBusy] = useState(false);
+            const [overrideError, setOverrideError] = useState('');
+            const [overrideWarning, setOverrideWarning] = useState('');
 
             useEffect(() => {
                 if (pipelineStatus !== 'PIPELINE_COMPLETE') return;
@@ -3219,6 +3228,76 @@
             const handlePhaseClick = (phaseId) => {
                 setExpandedPhaseId(prev => prev === phaseId ? null : phaseId);
                 setPhaseAgentSplitMode('tokens'); // each expansion opens on the token view
+                setOverrideError('');
+                setOverrideWarning('');
+            };
+
+            // A closed phase's override entry is dropped by the orchestrator; refetch
+            // when the completed count moves so stale badges clear.
+            const completedPhaseCount = Array.isArray(roadmap) ? roadmap.filter(p => p.status === 'complete').length : 0;
+            useEffect(() => {
+                let cancelled = false;
+                fetch('/api/phase-model-override')
+                    .then(r => r.json())
+                    .then(d => { if (!cancelled) setPhaseOverrides((d && d.overrides) || {}); })
+                    .catch(() => {});
+                return () => { cancelled = true; };
+            }, [completedPhaseCount]);
+
+            const expandedPhaseObj = Array.isArray(roadmap) ? roadmap.find(p => p.id === expandedPhaseId) : null;
+            const expandedIsOverridable = !!(expandedPhaseObj && (expandedPhaseObj.status === 'in_progress' || expandedPhaseObj.status === 'pending'));
+            useEffect(() => {
+                if (!expandedIsOverridable || overrideCatalog !== null) return;
+                let cancelled = false;
+                fetch('/api/models/roles')
+                    .then(r => r.json())
+                    .then(d => { if (!cancelled) setOverrideCatalog((d && d.catalog) || []); })
+                    .catch(() => { if (!cancelled) setOverrideCatalog([]); });
+                return () => { cancelled = true; };
+            }, [expandedIsOverridable, overrideCatalog]);
+
+            const submitPhaseOverride = async (rawId) => {
+                if (!overrideDraft.model) return;
+                setOverrideBusy(true); setOverrideError(''); setOverrideWarning('');
+                try {
+                    const r = await fetch('/api/phase-model-override', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ raw_id: rawId, role: overrideDraft.role, model: overrideDraft.model }),
+                    });
+                    const d = await r.json().catch(() => ({}));
+                    if (!r.ok) { setOverrideError(d.detail || 'Could not set the override.'); return; }
+                    if (d.warning) setOverrideWarning(d.warning);
+                    setPhaseOverrides(prev => ({ ...prev, [rawId]: { ...(prev[rawId] || {}), [d.role]: d.model } }));
+                } catch (_e) {
+                    setOverrideError('Network error while setting the override.');
+                } finally {
+                    setOverrideBusy(false);
+                }
+            };
+
+            const clearPhaseOverride = async (rawId, role) => {
+                setOverrideBusy(true); setOverrideError(''); setOverrideWarning('');
+                try {
+                    const r = await fetch('/api/phase-model-override', {
+                        method: 'DELETE',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ raw_id: rawId, role }),
+                    });
+                    const d = await r.json().catch(() => ({}));
+                    if (!r.ok) { setOverrideError(d.detail || 'Could not clear the override.'); return; }
+                    setPhaseOverrides(prev => {
+                        const entry = { ...(prev[rawId] || {}) };
+                        delete entry[role];
+                        const next = { ...prev };
+                        if (Object.keys(entry).length > 0) next[rawId] = entry; else delete next[rawId];
+                        return next;
+                    });
+                } catch (_e) {
+                    setOverrideError('Network error while clearing the override.');
+                } finally {
+                    setOverrideBusy(false);
+                }
             };
 
             if (!roadmap || !Array.isArray(roadmap) || roadmap.length === 0) {
@@ -3408,6 +3487,14 @@
                                                         </span>
                                                     );
                                                 })()}
+                                                {(() => {
+                                                    const ov = phaseOverrides[phase.id];
+                                                    if (!ov || Object.keys(ov).length === 0) return null;
+                                                    const title = Object.entries(ov).map(([role, m]) => `${role}: ${m}`).join(', ');
+                                                    return (
+                                                        <span data-testid="phase-override-badge" title={title} className="px-1 rounded bg-[#221b36] text-[#e2b14c] border border-[#2a2540] text-[10px] font-sans font-normal">model override</span>
+                                                    );
+                                                })()}
                                             </div>
                                             {phase.goal && (
                                                 <p className={`text-sm text-slate-400 mt-1 ${isExpanded ? '' : 'truncate'}`}>
@@ -3450,6 +3537,72 @@
                                                                 <span className="text-slate-400">{phase.behavioral_verification.failure_language}</span>
                                                             </div>
                                                         </div>
+                                                    )}
+                                                </div>
+                                            )}
+                                            {/* Per-phase model override: current/upcoming rows only.
+                                                Consumed by the orchestrator at invocation, so no
+                                                gateway restart; the entry expires with the phase. */}
+                                            {(phase.status === 'in_progress' || phase.status === 'pending') && (
+                                                <div className="mt-3 pt-2 border-t border-[#1c1829]" data-testid="phase-model-override-control">
+                                                    <div className="header-text text-[10px] uppercase tracking-wide text-slate-500 font-semibold mb-1.5">Model override</div>
+                                                    <p className="text-xs text-slate-500 leading-relaxed mb-2">
+                                                        Run this phase's planner, executor, or reviewer on a different model.
+                                                        Covers every attempt in this phase, needs no restart, and clears when
+                                                        the phase closes. There is no availability check: an unreachable model
+                                                        surfaces as a stall, then an escalation.
+                                                    </p>
+                                                    {phaseOverrides[phase.id] && Object.entries(phaseOverrides[phase.id]).map(([role, m]) => (
+                                                        <div key={role} className="flex items-center gap-2 mb-1.5">
+                                                            <span className="header-text text-[10px] px-1.5 py-0.5 rounded bg-[#221b36] border border-[#2a2540] text-[#e2b14c]" title={m}>{role}: {String(m).split('/').pop()}</span>
+                                                            <button
+                                                                type="button"
+                                                                data-testid="phase-override-clear"
+                                                                disabled={overrideBusy}
+                                                                onClick={() => clearPhaseOverride(phase.id, role)}
+                                                                className="text-[11px] text-slate-500 hover:text-slate-300 disabled:opacity-50"
+                                                            >
+                                                                Clear
+                                                            </button>
+                                                        </div>
+                                                    ))}
+                                                    <div className="flex flex-wrap items-center gap-2">
+                                                        <select
+                                                            data-testid="phase-override-role"
+                                                            value={overrideDraft.role}
+                                                            onChange={(e) => setOverrideDraft(prev => ({ ...prev, role: e.target.value }))}
+                                                            className="text-xs bg-[#15121f] border border-[#2a2540] rounded px-2 py-1 text-slate-200"
+                                                        >
+                                                            <option value="planner">planner</option>
+                                                            <option value="executor">executor</option>
+                                                            <option value="reviewer">reviewer</option>
+                                                        </select>
+                                                        <select
+                                                            data-testid="phase-override-model"
+                                                            value={overrideDraft.model}
+                                                            onChange={(e) => setOverrideDraft(prev => ({ ...prev, model: e.target.value }))}
+                                                            className="text-xs bg-[#15121f] border border-[#2a2540] rounded px-2 py-1 text-slate-200"
+                                                        >
+                                                            <option value="">{overrideCatalog === null ? 'loading models' : 'pick a model'}</option>
+                                                            {(overrideCatalog || []).map((entry) => (
+                                                                <option key={entry.id} value={entry.id}>{entry.id}</option>
+                                                            ))}
+                                                        </select>
+                                                        <button
+                                                            type="button"
+                                                            data-testid="phase-override-set"
+                                                            disabled={overrideBusy || !overrideDraft.model}
+                                                            onClick={() => submitPhaseOverride(phase.id)}
+                                                            className="header-text text-xs px-3 py-1 rounded bg-[#221b36] text-slate-300 border border-[#2a2540] hover:text-slate-200 disabled:opacity-50"
+                                                        >
+                                                            Set override
+                                                        </button>
+                                                    </div>
+                                                    {overrideError && (
+                                                        <p className="text-xs text-red-400 mt-1.5" data-testid="phase-override-error">{overrideError}</p>
+                                                    )}
+                                                    {overrideWarning && (
+                                                        <p className="text-xs text-amber-400 mt-1.5" data-testid="phase-override-warning">{overrideWarning}</p>
                                                     )}
                                                 </div>
                                             )}
@@ -8707,21 +8860,24 @@
             template_conformance: "The live OpenClaw config still matches the shipped golden template (container installs).",
         };
 
+        /* Runs on demand, not on mount: the full checklist is heavy and most
+         * Settings visits are not about health. */
         function DoctorHealthCard() {
             const [report, setReport] = useState(null);
+            const [running, setRunning] = useState(false);
             const [error, setError] = useState(null);
 
-            useEffect(() => {
-                let cancelled = false;
+            const runHealthCheck = () => {
+                setRunning(true);
+                setError(null);
                 fetch("/api/doctor")
                     .then((r) => {
                         if (!r.ok) throw new Error(`HTTP ${r.status}`);
                         return r.json();
                     })
-                    .then((data) => { if (!cancelled) setReport(data); })
-                    .catch((e) => { if (!cancelled) setError(String(e && e.message ? e.message : e)); });
-                return () => { cancelled = true; };
-            }, []);
+                    .then((data) => { setReport(data); setRunning(false); })
+                    .catch((e) => { setError(String(e && e.message ? e.message : e)); setRunning(false); });
+            };
 
             const overall = report ? report.status : null;
             const headerTone =
@@ -8744,8 +8900,8 @@
                     data-testid="doctor-health-card"
                     className="rounded border border-[#2a2540] bg-[#15121f] p-3 space-y-2"
                 >
-                    <div className="flex flex-wrap justify-between items-start gap-2">
-                        <div className="min-w-0 flex-1 space-y-1">
+                    <div className="flex flex-wrap justify-between items-start gap-3">
+                        <div className="min-w-0 flex-1 space-y-2">
                             <p className="header-text text-sm font-semibold text-slate-400">Install health</p>
                             <p className="text-xs text-slate-500 leading-relaxed max-w-prose">
                                 One pass over everything the pipeline depends on: gateway, agents, plugin,
@@ -8753,15 +8909,23 @@
                                 appear on anything amber or red.
                             </p>
                         </div>
-                        {report && (
-                            <span className={`header-text text-xs shrink-0 self-start ${headerTone}`} data-testid="doctor-health-summary">
-                                {summary || "no checks"}
-                            </span>
-                        )}
+                        <div className="flex flex-col items-end gap-1.5 shrink-0 self-center">
+                            <button
+                                type="button"
+                                data-testid="doctor-health-run"
+                                onClick={runHealthCheck}
+                                disabled={running}
+                                className="header-text text-xs px-3 py-1.5 rounded border border-[#2a2540] text-slate-300 hover:bg-[#221b36] disabled:opacity-50"
+                            >
+                                {running ? "Running…" : report ? "Run again" : "Run health check"}
+                            </button>
+                            {report && (
+                                <span className={`header-text text-xs ${headerTone}`} data-testid="doctor-health-summary">
+                                    {summary || "no checks"}
+                                </span>
+                            )}
+                        </div>
                     </div>
-                    {!report && !error && (
-                        <p className="text-xs text-slate-500" data-testid="doctor-health-loading">Running health checks&hellip;</p>
-                    )}
                     {error && (
                         <p className="text-xs text-red-400" data-testid="doctor-health-error">
                             Could not load the health report ({error}). The CLI form works too: <code>python -m autodev.installer.doctor</code>
@@ -12820,6 +12984,633 @@
             );
         }
 
+        /* Settings "Model roles" card: per-role assignment over the models OpenClaw
+         * has registered, plus per-model capability/cost editing (the overlay).
+         * Save writes the knobs and overlay, then the entrypoint apply loop
+         * re-renders openclaw.json and restarts the gateway; provider-status
+         * "applying" covers the queued window, so the restarting state polls it
+         * plus a settle tick and then re-reads the assignments. */
+        /* Display order follows the workflow: the two document agents produce the
+         * source of truth (PRD, roadmap), then the four pipeline agents build
+         * from it phase by phase. */
+        const MODEL_ROLE_GROUPS = [
+            {
+                key: "documents",
+                title: "From idea to roadmap",
+                blurb: "These two agents turn an idea into the project's source of truth, the PRD and the roadmap.",
+                roles: ["prd-creator", "roadmap-converter"],
+            },
+            {
+                key: "pipeline",
+                title: "Pipeline agents",
+                blurb: "These four build the project phase by phase from the roadmap: plan the phase, write the code, judge the result, and escalate when stuck.",
+                roles: ["planner", "executor", "reviewer", "escalation"],
+            },
+        ];
+        const MODEL_ROLE_INFO = {
+            "prd-creator": {
+                label: "PRD creator",
+                blurb: "Drafts the PRD with you in the Ideas chat.",
+                note: "Must accept image input to read Ideas chat attachments. A strong conversational cloud model gives the best PRD quality.",
+            },
+            "roadmap-converter": {
+                label: "Roadmap converter",
+                blurb: "Turns the finished PRD into the roadmap the pipeline builds from.",
+                note: "Foundational work; errors here compound through every later phase. Use the strongest model available.",
+            },
+            "planner": {
+                label: "Planner",
+                blurb: "Plans how each phase will be built.",
+                note: "A reasoning-strong model helps. Image input is not needed.",
+            },
+            "executor": {
+                label: "Executor",
+                blurb: "Writes each phase's code and captures screenshots of the result.",
+                note: "Must accept image input. Pick a coding-strong model.",
+            },
+            "reviewer": {
+                label: "Reviewer",
+                blurb: "Judges the executor's work before a phase can pass.",
+                note: "Must accept image input; it verifies screenshots as its core gate duty.",
+            },
+            "escalation": {
+                label: "Escalation",
+                blurb: "Asks for your help when a phase gets stuck.",
+                note: "Lightweight triage; an economical model is fine.",
+            },
+        };
+        const MODEL_VISION_ROLES = ["executor", "reviewer", "prd-creator"];
+
+        function fmtContextWindow(n) {
+            const v = Number(n);
+            if (!isFinite(v) || v <= 0) return null;
+            if (v >= 1000000) return (v % 1000000 === 0 ? String(v / 1000000) : (v / 1000000).toFixed(1)) + "M context";
+            if (v >= 1000) return Math.round(v / 1000) + "k context";
+            return v + " context";
+        }
+
+        function fmtModelCost(cost) {
+            if (!cost || (cost.input == null && cost.output == null)) return null;
+            const f = (v) => (v == null ? "?" : "$" + v);
+            return f(cost.input) + "/M in, " + f(cost.output) + "/M out";
+        }
+
+        function ModelRolesCard() {
+            const [data, setData] = React.useState(null);
+            const [loadError, setLoadError] = React.useState(null);
+            const [assignments, setAssignments] = React.useState({});
+            const [propEdits, setPropEdits] = React.useState({});
+            const [catalogOpen, setCatalogOpen] = React.useState(false);
+            const [expandedModel, setExpandedModel] = React.useState(null);
+            const [advancedOpen, setAdvancedOpen] = React.useState(false);
+            const [confirmOpen, setConfirmOpen] = React.useState(false);
+            const [saving, setSaving] = React.useState(false);
+            const [restarting, setRestarting] = React.useState(false);
+            const [saveError, setSaveError] = React.useState("");
+            const [savedNote, setSavedNote] = React.useState("");
+            const pollRef = React.useRef(null);
+
+            const assignmentsFrom = (d) => {
+                const next = {};
+                Object.keys((d && d.roles) || {}).forEach((role) => {
+                    next[role] = (d.roles[role] && d.roles[role].model) || "";
+                });
+                return next;
+            };
+
+            React.useEffect(() => {
+                let cancelled = false;
+                fetch("/api/models/roles")
+                    .then((r) => {
+                        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                        return r.json();
+                    })
+                    .then((d) => {
+                        if (cancelled) return;
+                        setData(d);
+                        setAssignments(assignmentsFrom(d));
+                    })
+                    .catch((e) => { if (!cancelled) setLoadError(String(e && e.message ? e.message : e)); });
+                return () => { cancelled = true; };
+            }, []);
+
+            React.useEffect(() => {
+                return () => { if (pollRef.current) clearInterval(pollRef.current); };
+            }, []);
+
+            const catalog = (data && data.catalog) || [];
+            const catalogById = {};
+            catalog.forEach((entry) => { catalogById[entry.id] = entry; });
+
+            const effInput = (id) => {
+                const edits = propEdits[id];
+                if (edits && (edits.vision === "yes" || edits.vision === "no")) {
+                    return edits.vision === "yes" ? ["text", "image"] : ["text"];
+                }
+                const entry = catalogById[id];
+                return entry ? entry.input : null;
+            };
+            const isTextOnly = (id) => {
+                const input = effInput(id);
+                return Array.isArray(input) && input.length > 0 && input.indexOf("image") === -1;
+            };
+            const visionBlocked = MODEL_VISION_ROLES.filter(
+                (role) => assignments[role] && isTextOnly(assignments[role])
+            );
+
+            const roleChanges = {};
+            if (data && data.roles) {
+                Object.keys(assignments).forEach((role) => {
+                    const current = (data.roles[role] && data.roles[role].model) || "";
+                    if (assignments[role] && assignments[role] !== current) roleChanges[role] = assignments[role];
+                });
+            }
+            const dirty = Object.keys(roleChanges).length > 0 || Object.keys(propEdits).length > 0;
+
+            const modelChips = (id) => {
+                const entry = catalogById[id];
+                if (!entry) return [];
+                const edits = propEdits[id] || {};
+                const input = effInput(id);
+                const declared = Array.isArray(input) && input.length > 0;
+                const cw = edits.contextWindow !== undefined && edits.contextWindow !== ""
+                    ? Number(edits.contextWindow) : entry.contextWindow;
+                const cost = Object.assign({}, entry.cost || {});
+                if (edits.costInput !== undefined && edits.costInput !== "") cost.input = Number(edits.costInput);
+                if (edits.costOutput !== undefined && edits.costOutput !== "") cost.output = Number(edits.costOutput);
+                const chips = [];
+                if (declared && input.indexOf("image") !== -1) chips.push({ key: "img", label: "image input", cls: "text-slate-300" });
+                else if (declared) chips.push({ key: "img", label: "text only", cls: "text-amber-400" });
+                const cwLabel = fmtContextWindow(cw);
+                if (cwLabel) chips.push({ key: "ctx", label: cwLabel, cls: "text-slate-300" });
+                const costLabel = fmtModelCost(cost);
+                if (costLabel) chips.push({ key: "cost", label: costLabel, cls: "text-slate-300" });
+                return chips;
+            };
+
+            /* Build the PUT /api/models/properties body from the sparse edit map.
+             * Empty string means "clear this override back to the registered value"
+             * (null in the overlay contract). Throws with a per-field message. */
+            const buildPropsBody = () => {
+                const body = {};
+                Object.keys(propEdits).forEach((id) => {
+                    const edits = propEdits[id];
+                    const entry = catalogById[id] || {};
+                    const out = {};
+                    if (edits.vision === "yes" || edits.vision === "no") {
+                        const base = (Array.isArray(entry.input) && entry.input.length > 0 ? entry.input : ["text"])
+                            .filter((v) => v !== "image");
+                        if (base.indexOf("text") === -1) base.push("text");
+                        out.input = edits.vision === "yes" ? base.concat(["image"]) : base;
+                    }
+                    if (edits.reasoning === "on" || edits.reasoning === "off") out.reasoning = edits.reasoning === "on";
+                    const posInt = (raw, label) => {
+                        if (raw === undefined) return undefined;
+                        if (raw === "") return null;
+                        if (!/^\d+$/.test(String(raw).trim()) || Number(raw) <= 0) {
+                            throw new Error(id + ": " + label + " must be a positive whole number.");
+                        }
+                        return Number(raw);
+                    };
+                    const num = (raw, label, minZero) => {
+                        if (raw === undefined) return undefined;
+                        if (raw === "") return null;
+                        const v = Number(raw);
+                        if (!isFinite(v) || (minZero && v < 0)) {
+                            throw new Error(id + ": " + label + " must be a " + (minZero ? "non-negative " : "") + "number.");
+                        }
+                        return v;
+                    };
+                    const cw = posInt(edits.contextWindow, "context window");
+                    if (cw !== undefined) out.contextWindow = cw;
+                    const mt = posInt(edits.maxTokens, "max output tokens");
+                    if (mt !== undefined) out.maxTokens = mt;
+                    const cost = {};
+                    const costFields = [
+                        ["costInput", "input", "input price"],
+                        ["costOutput", "output", "output price"],
+                        ["costCacheRead", "cacheRead", "cache read price"],
+                        ["costCacheWrite", "cacheWrite", "cache write price"],
+                    ];
+                    costFields.forEach(([editKey, apiKey, label]) => {
+                        const v = num(edits[editKey], label, true);
+                        if (v !== undefined) cost[apiKey] = v;
+                    });
+                    if (Object.keys(cost).length > 0) out.cost = cost;
+                    const params = {};
+                    const t = num(edits.temperature, "temperature", false);
+                    if (t !== undefined) params.temperature = t;
+                    const tp = num(edits.top_p, "top_p", false);
+                    if (tp !== undefined) params.top_p = tp;
+                    if (Object.keys(params).length > 0) out.params = params;
+                    if (Object.keys(out).length > 0) body[id] = out;
+                });
+                return Object.keys(body).length > 0 ? body : null;
+            };
+
+            const startRestartPoll = () => {
+                if (pollRef.current) clearInterval(pollRef.current);
+                let settleTicks = 0;
+                // Bound the poll: a stuck/failed restart must not spin forever. At
+                // 3s/tick this gives the apply ~3 min (copy says "under a minute")
+                // before we stop and fall back to the background-restart note.
+                let polls = 0;
+                const MAX_RESTART_POLLS = 60;
+                pollRef.current = setInterval(() => {
+                    if (++polls > MAX_RESTART_POLLS) {
+                        clearInterval(pollRef.current);
+                        pollRef.current = null;
+                        setRestarting(false);
+                        setSavedNote("Saved. The gateway is restarting in the background; reload Settings shortly to confirm.");
+                        return;
+                    }
+                    fetch("/api/setup/provider-status")
+                        .then((r) => r.json())
+                        .then((d) => {
+                            if (d && d.applying) { settleTicks = 0; return; }
+                            settleTicks += 1;
+                            /* The apply marker is consumed when the pass starts, so one
+                             * extra tick gives the re-render time to land before re-reading. */
+                            if (settleTicks < 2) return;
+                            clearInterval(pollRef.current);
+                            pollRef.current = null;
+                            fetch("/api/models/roles")
+                                .then((r) => r.json())
+                                .then((d2) => {
+                                    setData(d2);
+                                    setAssignments(assignmentsFrom(d2));
+                                    setPropEdits({});
+                                    setRestarting(false);
+                                    setSavedNote("Saved. The gateway is restarting; new agent sessions pick up the change.");
+                                })
+                                .catch(() => {
+                                    setRestarting(false);
+                                    setSavedNote("Saved. The gateway is restarting in the background.");
+                                });
+                        })
+                        .catch(() => {});
+                }, 3000);
+            };
+
+            const onConfirmSave = async () => {
+                setConfirmOpen(false);
+                setSaveError("");
+                setSavedNote("");
+                setSaving(true);
+                try {
+                    let propsBody = null;
+                    try {
+                        propsBody = buildPropsBody();
+                    } catch (e) {
+                        setSaveError(String(e && e.message ? e.message : e));
+                        return;
+                    }
+                    if (propsBody) {
+                        const r = await fetch("/api/models/properties", {
+                            method: "PUT",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify(propsBody),
+                        });
+                        const d = await r.json().catch(() => ({}));
+                        if (!r.ok) {
+                            setSaveError(d.detail || "Could not save the model properties.");
+                            return;
+                        }
+                    }
+                    if (Object.keys(roleChanges).length > 0) {
+                        const r = await fetch("/api/models/roles", {
+                            method: "PUT",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify(roleChanges),
+                        });
+                        const d = await r.json().catch(() => ({}));
+                        if (!r.ok) {
+                            setSaveError(d.detail || "Could not save the model assignments.");
+                            return;
+                        }
+                    }
+                    setRestarting(true);
+                    startRestartPoll();
+                } catch (_e) {
+                    setSaveError("Network error while saving model settings.");
+                } finally {
+                    setSaving(false);
+                }
+            };
+
+            const inputCls = "w-full text-sm bg-[#15121f] border border-[#2a2540] rounded px-3 py-2 text-slate-200";
+            const knownRoles = Object.keys((data && data.roles) || {});
+            const groupedRoles = MODEL_ROLE_GROUPS.reduce((acc, g) => acc.concat(g.roles), []);
+            const roleOrder = groupedRoles
+                .filter((r) => knownRoles.indexOf(r) !== -1)
+                .concat(knownRoles.filter((r) => groupedRoles.indexOf(r) === -1));
+
+            const renderRoleRow = (role) => {
+                const info = MODEL_ROLE_INFO[role] || { label: role, blurb: "", note: "" };
+                const selected = assignments[role] || "";
+                return (
+                    <div key={role} data-testid={`model-role-row-${role}`} className="rounded border border-[#2a2540] bg-[#221b36] p-3 space-y-1.5">
+                        <div className="flex flex-wrap items-baseline gap-2">
+                            <span className="header-text text-sm text-slate-200">{info.label}</span>
+                            {modelChips(selected).map((chip) => (
+                                <span key={chip.key} className={`header-text text-[10px] px-1.5 py-0.5 rounded bg-[#15121f] border border-[#2a2540] ${chip.cls}`}>{chip.label}</span>
+                            ))}
+                        </div>
+                        {info.blurb && <p className="text-xs text-slate-500">{info.blurb}</p>}
+                        {info.note && <p className="text-[11px] text-slate-500">{info.note}</p>}
+                        <select
+                            data-testid={`model-role-select-${role}`}
+                            value={selected}
+                            onChange={(e) => setAssignments((prev) => ({ ...prev, [role]: e.target.value }))}
+                            disabled={restarting}
+                            className={inputCls + " disabled:opacity-50"}
+                        >
+                            {(!selected || !catalogById[selected]) && (
+                                <option value={selected}>{selected ? selected + " (not in catalog)" : "not set"}</option>
+                            )}
+                            {catalog.map((entry) => (
+                                <option key={entry.id} value={entry.id}>{entry.id}</option>
+                            ))}
+                        </select>
+                        {MODEL_VISION_ROLES.indexOf(role) !== -1 && selected && isTextOnly(selected) && (
+                            <p className="text-xs text-amber-400" data-testid="model-roles-vision-warning">
+                                {info.label} needs a model that accepts image input, and {selected} is
+                                text only. Pick a multimodal model.
+                            </p>
+                        )}
+                    </div>
+                );
+            };
+
+            return (
+                <div
+                    data-testid="settings-model-roles-card"
+                    className="rounded border border-[#2a2540] bg-[#15121f] p-3 space-y-2"
+                >
+                    <p className="header-text text-sm font-semibold text-slate-400">Model roles</p>
+                    <p className="text-xs text-slate-500 leading-relaxed max-w-prose">
+                        Each pipeline role runs on a model from the catalog OpenClaw has registered.
+                        Assign models per role here; adding or removing models and providers stays
+                        in OpenClaw (the gateway card above).
+                    </p>
+                    {!data && !loadError && (
+                        <p className="text-xs text-slate-500" data-testid="model-roles-loading">Loading the model catalog&hellip;</p>
+                    )}
+                    {loadError && (
+                        <p className="text-xs text-red-400" data-testid="model-roles-error">
+                            Could not load the model roles ({loadError}).
+                        </p>
+                    )}
+                    {data && !data.supported && (
+                        <div data-testid="model-roles-readonly" className="space-y-1.5">
+                            <p className="text-xs text-slate-500 leading-relaxed max-w-prose">
+                                This install does not support in-dashboard model changes. Set the
+                                role's *_MODEL variable in deploy/.env and restart the container.
+                            </p>
+                            <ul className="space-y-1">
+                                {roleOrder.map((role) => (
+                                    <li key={role} className="text-xs">
+                                        <span className="text-slate-400">{(MODEL_ROLE_INFO[role] || { label: role }).label}:</span>{" "}
+                                        <span className="font-mono text-slate-300">{(data.roles[role] && data.roles[role].model) || "not set"}</span>
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                    )}
+                    {data && data.supported && (
+                        <div className="space-y-2">
+                            {MODEL_ROLE_GROUPS.map((group) => {
+                                const roles = group.roles.filter((r) => roleOrder.indexOf(r) !== -1);
+                                if (roles.length === 0) return null;
+                                return (
+                                    <div key={group.key} className="space-y-2 pt-1">
+                                        <div>
+                                            <p className="header-text text-[10px] uppercase tracking-wide text-slate-500 font-semibold">{group.title}</p>
+                                            <p className="text-xs text-slate-500 leading-relaxed max-w-prose">{group.blurb}</p>
+                                        </div>
+                                        {roles.map(renderRoleRow)}
+                                    </div>
+                                );
+                            })}
+                            {roleOrder.filter((r) => groupedRoles.indexOf(r) === -1).map(renderRoleRow)}
+                            <div className="border-t border-[#2a2540] pt-2">
+                                <button
+                                    type="button"
+                                    data-testid="model-props-toggle"
+                                    onClick={() => setCatalogOpen((v) => !v)}
+                                    className="header-text text-xs px-3 py-1.5 rounded border border-[#2a2540] text-slate-300 hover:bg-[#221b36]"
+                                >
+                                    {catalogOpen ? "▼ Hide model properties" : "▶ Edit model properties"}
+                                </button>
+                                {catalogOpen && (
+                                    <div className="mt-2 space-y-2">
+                                        <p className="text-xs text-slate-500 leading-relaxed max-w-prose" data-testid="model-props-note">
+                                            Lullabeast computes run costs and image-input checks from these
+                                            values. If cost figures look wrong, correct them here first.
+                                            Edits apply to the model itself, wherever it is used, and persist
+                                            across updates on top of the registered model.
+                                        </p>
+                                        <select
+                                            data-testid="model-props-picker"
+                                            value={expandedModel || ""}
+                                            onChange={(e) => { setExpandedModel(e.target.value || null); setAdvancedOpen(false); }}
+                                            className={inputCls}
+                                        >
+                                            <option value="">pick a model to edit</option>
+                                            {catalog.map((entry) => (
+                                                <option key={entry.id} value={entry.id}>{entry.id}{propEdits[entry.id] ? " (edited)" : ""}</option>
+                                            ))}
+                                        </select>
+                                        {expandedModel && catalogById[expandedModel] && (() => {
+                                            const entry = catalogById[expandedModel];
+                                            const edits = propEdits[entry.id] || {};
+                                            const setEdit = (k, v) => setPropEdits((prev) => ({ ...prev, [entry.id]: { ...prev[entry.id], [k]: v } }));
+                                            const visionValue = edits.vision !== undefined
+                                                ? edits.vision
+                                                : (Array.isArray(entry.input) && entry.input.length > 0
+                                                    ? (entry.input.indexOf("image") !== -1 ? "yes" : "no") : "");
+                                            const reasoningValue = edits.reasoning !== undefined
+                                                ? edits.reasoning
+                                                : (entry.reasoning === true ? "on" : entry.reasoning === false ? "off" : "");
+                                            const cost = entry.cost || {};
+                                            const params = entry.params || {};
+                                            const fieldVal = (editKey, current) =>
+                                                edits[editKey] !== undefined ? edits[editKey] : (current != null ? current : "");
+                                            return (
+                                                <div className="rounded border border-[#2a2540] bg-[#221b36] p-2 space-y-2">
+                                                    <div className="flex items-center justify-between gap-2">
+                                                        <span className="font-mono text-xs text-slate-300 truncate" title={entry.id}>{entry.id}</span>
+                                                        {propEdits[entry.id] && <span className="text-[10px] text-[#e2b14c] shrink-0">edited</span>}
+                                                    </div>
+                                                    <div className="space-y-2">
+                                                            <div className="grid grid-cols-2 gap-3">
+                                                                <label className="space-y-1">
+                                                                    <span className="header-text text-[11px] text-slate-500 block">Accepts image input</span>
+                                                                    <select
+                                                                        data-testid="model-props-vision"
+                                                                        value={visionValue}
+                                                                        onChange={(e) => setEdit("vision", e.target.value)}
+                                                                        className={inputCls}
+                                                                    >
+                                                                        <option value="">not declared</option>
+                                                                        <option value="yes">Yes</option>
+                                                                        <option value="no">No</option>
+                                                                    </select>
+                                                                </label>
+                                                                <label className="space-y-1">
+                                                                    <span className="header-text text-[11px] text-slate-500 block">Reasoning</span>
+                                                                    <select
+                                                                        data-testid="model-props-reasoning"
+                                                                        value={reasoningValue}
+                                                                        onChange={(e) => setEdit("reasoning", e.target.value)}
+                                                                        className={inputCls}
+                                                                    >
+                                                                        <option value="">not declared</option>
+                                                                        <option value="on">On</option>
+                                                                        <option value="off">Off</option>
+                                                                    </select>
+                                                                </label>
+                                                                <label className="space-y-1">
+                                                                    <span className="header-text text-[11px] text-slate-500 block">Context window</span>
+                                                                    <input
+                                                                        type="number"
+                                                                        data-testid="model-props-context-window"
+                                                                        min="1"
+                                                                        value={fieldVal("contextWindow", entry.contextWindow)}
+                                                                        onChange={(e) => setEdit("contextWindow", e.target.value)}
+                                                                        className={inputCls}
+                                                                    />
+                                                                </label>
+                                                            </div>
+                                                            <div className="space-y-1">
+                                                                <span className="header-text text-[11px] text-slate-500 block">Price per M tokens</span>
+                                                                <div className="grid grid-cols-2 gap-3">
+                                                                    <label className="space-y-1">
+                                                                        <span className="text-[11px] text-slate-500 block">Input</span>
+                                                                        <input type="number" data-testid="model-props-cost-input" min="0" step="any" value={fieldVal("costInput", cost.input)} onChange={(e) => setEdit("costInput", e.target.value)} className={inputCls} />
+                                                                    </label>
+                                                                    <label className="space-y-1">
+                                                                        <span className="text-[11px] text-slate-500 block">Output</span>
+                                                                        <input type="number" data-testid="model-props-cost-output" min="0" step="any" value={fieldVal("costOutput", cost.output)} onChange={(e) => setEdit("costOutput", e.target.value)} className={inputCls} />
+                                                                    </label>
+                                                                    <label className="space-y-1">
+                                                                        <span className="text-[11px] text-slate-500 block">Cache read</span>
+                                                                        <input type="number" data-testid="model-props-cost-cache-read" min="0" step="any" value={fieldVal("costCacheRead", cost.cacheRead)} onChange={(e) => setEdit("costCacheRead", e.target.value)} className={inputCls} />
+                                                                    </label>
+                                                                    <label className="space-y-1">
+                                                                        <span className="text-[11px] text-slate-500 block">Cache write</span>
+                                                                        <input type="number" data-testid="model-props-cost-cache-write" min="0" step="any" value={fieldVal("costCacheWrite", cost.cacheWrite)} onChange={(e) => setEdit("costCacheWrite", e.target.value)} className={inputCls} />
+                                                                    </label>
+                                                                </div>
+                                                            </div>
+                                                            <button
+                                                                type="button"
+                                                                data-testid="model-props-advanced-toggle"
+                                                                onClick={() => setAdvancedOpen((v) => !v)}
+                                                                className="header-text text-[11px] text-slate-400 hover:text-slate-200"
+                                                            >
+                                                                {advancedOpen ? "Hide advanced" : "Advanced"}
+                                                            </button>
+                                                            {advancedOpen && (
+                                                                <div className="grid grid-cols-2 gap-3">
+                                                                    <label className="space-y-1">
+                                                                        <span className="header-text text-[11px] text-slate-500 block">Temperature</span>
+                                                                        <input type="number" data-testid="model-props-temperature" step="any" value={fieldVal("temperature", params.temperature)} onChange={(e) => setEdit("temperature", e.target.value)} className={inputCls} />
+                                                                    </label>
+                                                                    <label className="space-y-1">
+                                                                        <span className="header-text text-[11px] text-slate-500 block">Top p</span>
+                                                                        <input type="number" data-testid="model-props-top-p" step="any" value={fieldVal("top_p", params.top_p)} onChange={(e) => setEdit("top_p", e.target.value)} className={inputCls} />
+                                                                    </label>
+                                                                    <label className="space-y-1">
+                                                                        <span className="header-text text-[11px] text-slate-500 block">Max output tokens</span>
+                                                                        <input type="number" data-testid="model-props-max-tokens" min="1" value={fieldVal("maxTokens", entry.maxTokens)} onChange={(e) => setEdit("maxTokens", e.target.value)} className={inputCls} />
+                                                                    </label>
+                                                                </div>
+                                                            )}
+                                                            {propEdits[entry.id] && (
+                                                                <button
+                                                                    type="button"
+                                                                    data-testid="model-props-discard"
+                                                                    onClick={() => setPropEdits((prev) => { const next = { ...prev }; delete next[entry.id]; return next; })}
+                                                                    className="header-text text-[11px] text-slate-500 hover:text-slate-300"
+                                                                >
+                                                                    Discard edits
+                                                                </button>
+                                                            )}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })()}
+                                    </div>
+                                )}
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2 pt-1">
+                                <button
+                                    type="button"
+                                    data-testid="model-roles-save"
+                                    disabled={!dirty || visionBlocked.length > 0 || saving || restarting}
+                                    onClick={() => setConfirmOpen(true)}
+                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#e2b14c] text-[#100d1a] font-semibold disabled:opacity-50"
+                                >
+                                    {saving ? "Saving…" : "Save and restart gateway"}
+                                </button>
+                                <button
+                                    type="button"
+                                    data-testid="model-roles-reset-defaults"
+                                    disabled={saving || restarting}
+                                    onClick={() => setAssignments(Object.assign({}, (data && data.defaults) || {}))}
+                                    className="header-text text-xs px-3 py-1.5 rounded border border-[#2a2540] text-slate-300 hover:bg-[#221b36] disabled:opacity-50"
+                                >
+                                    Reset to defaults
+                                </button>
+                            </div>
+                            {restarting && (
+                                <p className="text-xs text-slate-400" data-testid="model-roles-restarting">
+                                    Applying the change and restarting the gateway. This usually takes under a minute.
+                                </p>
+                            )}
+                            {saveError && (
+                                <p className="text-xs text-red-400" data-testid="model-roles-save-error">{saveError}</p>
+                            )}
+                            {savedNote && (
+                                <p className="text-xs text-emerald-500" data-testid="model-roles-saved">{savedNote}</p>
+                            )}
+                        </div>
+                    )}
+                    {confirmOpen && (
+                        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50" data-testid="model-roles-confirm-modal">
+                            <div className="bg-[#15121f] border border-[#1c1829] rounded-lg p-6 max-w-sm mx-4 space-y-3">
+                                <p className="header-text text-sm font-semibold text-slate-300">Save and restart gateway</p>
+                                <p className="text-xs text-slate-400 leading-relaxed">
+                                    Applying model changes restarts the OpenClaw gateway. Agent sessions
+                                    and Ideas chats that are mid-reply are interrupted; new sessions pick
+                                    up the new models. Saves are refused while the pipeline is running.
+                                </p>
+                                <div className="flex gap-2 justify-end">
+                                    <button
+                                        type="button"
+                                        data-testid="model-roles-confirm-cancel"
+                                        onClick={() => setConfirmOpen(false)}
+                                        className="header-text text-xs px-3 py-1.5 rounded border border-[#2a2540] text-slate-300 hover:bg-[#221b36]"
+                                    >
+                                        Cancel
+                                    </button>
+                                    <button
+                                        type="button"
+                                        data-testid="model-roles-confirm-save"
+                                        onClick={onConfirmSave}
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#e2b14c] text-[#100d1a] font-semibold"
+                                    >
+                                        Save and restart
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
         /* Settings: install-wide surfaces that are not day-to-day workflow.
          * A plain stack of cards so future sections slot in alongside these. */
         function SettingsScreen({ welcomeAvailable, onShowWelcome }) {
@@ -12860,50 +13651,57 @@
                             data-testid="settings-gateway-card"
                             className="rounded border border-[#2a2540] bg-[#15121f] p-3 space-y-2"
                         >
-                            <p className="header-text text-sm font-semibold text-slate-400">OpenClaw gateway</p>
-                            <p className="text-xs text-slate-500 leading-relaxed max-w-prose">
-                                Adding or removing models and providers is managed in OpenClaw, not here.
-                                The button below opens its dashboard signed in. Setup and
-                                inspection notes:{" "}
-                                <a
-                                    href="https://github.com/bigbraingoldfish/lullabeast/blob/main/deploy/README.md#looking-at-the-openclaw-gateway"
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="text-[#e2b14c] hover:underline"
-                                >
-                                    Looking at the OpenClaw gateway
-                                </a>.
-                            </p>
-                            <div className="flex flex-wrap gap-2 items-center">
+                            <div className="flex flex-wrap justify-between items-start gap-3">
+                                <div className="min-w-0 flex-1 space-y-2">
+                                    <p className="header-text text-sm font-semibold text-slate-400">OpenClaw gateway</p>
+                                    <p className="text-xs text-slate-500 leading-relaxed max-w-prose">
+                                        Adding or removing models and providers is managed in OpenClaw, not here.
+                                        The button opens its dashboard signed in. Setup and
+                                        inspection notes:{" "}
+                                        <a
+                                            href="https://github.com/bigbraingoldfish/lullabeast/blob/main/deploy/README.md#looking-at-the-openclaw-gateway"
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="text-[#e2b14c] hover:underline"
+                                        >
+                                            Looking at the OpenClaw gateway
+                                        </a>.
+                                    </p>
+                                </div>
                                 <a
                                     href={gatewayHref}
                                     target="_blank"
                                     rel="noopener noreferrer"
                                     data-testid="gateway-open-link"
-                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#e2b14c] text-[#100d1a] font-semibold"
+                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#e2b14c] text-[#100d1a] font-semibold shrink-0 self-center"
                                 >
                                     Open OpenClaw gateway
                                 </a>
                             </div>
                         </div>
+                        <ModelRolesCard />
                         {welcomeAvailable && (
                             <div
                                 data-testid="settings-welcome-card"
                                 className="rounded border border-[#2a2540] bg-[#15121f] p-3 space-y-2"
                             >
-                                <p className="header-text text-sm font-semibold text-slate-400">Welcome tour</p>
-                                <p className="text-xs text-slate-500 leading-relaxed max-w-prose">
-                                    Replay the first-run tour: the bundled demo project and how the
-                                    Ideas, Setup &amp; Preflight, Queue, and Monitor screens fit together.
-                                </p>
-                                <button
-                                    type="button"
-                                    data-testid="show-welcome-tour"
-                                    onClick={onShowWelcome}
-                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-400 border border-[#2a2540] hover:text-slate-200"
-                                >
-                                    Show welcome tour
-                                </button>
+                                <div className="flex flex-wrap justify-between items-start gap-3">
+                                    <div className="min-w-0 flex-1 space-y-2">
+                                        <p className="header-text text-sm font-semibold text-slate-400">Welcome tour</p>
+                                        <p className="text-xs text-slate-500 leading-relaxed max-w-prose">
+                                            Replay the first-run tour: the bundled demo project and how the
+                                            Ideas, Setup &amp; Preflight, Queue, and Monitor screens fit together.
+                                        </p>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        data-testid="show-welcome-tour"
+                                        onClick={onShowWelcome}
+                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#221b36] text-slate-400 border border-[#2a2540] hover:text-slate-200 shrink-0 self-center"
+                                    >
+                                        Show welcome tour
+                                    </button>
+                                </div>
                             </div>
                         )}
                         <DoctorHealthCard />
