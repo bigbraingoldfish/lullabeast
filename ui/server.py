@@ -7874,14 +7874,21 @@ def get_setup_provider_status():
 async def post_setup_provider_key(request: Request):
     """Persist the provider API key the entrypoint watches for (A2 unlock).
 
-    Body: {"provider": "openrouter", "key": "<str>"}. Writes a single dotenv line
-    (``OPENROUTER_API_KEY=...``) to provider_key_path atomically, mode 0600,
-    creating the parent dir 0700. Shape check only — no live validation; the
-    deferred ``--live`` doctor validates end to end. The key value never
-    appears in a log line, exception detail, or the response.
+    Body: {"provider": "openrouter", "key": "<str>", "roles"?: {role: model}}.
+    Writes the ``OPENROUTER_API_KEY=...`` dotenv line to provider_key_path
+    atomically, mode 0600, creating the parent dir 0700. Shape check only — no
+    live validation; the deferred ``--live`` doctor validates end to end. The
+    key value never appears in a log line, exception detail, or the response.
 
-    409 when provider_key_path is unset (bare metal). 400 on unknown provider or
-    bad key shape. On success: {"ok": true, "restarting": true}.
+    ``roles`` is the setup screen's optional per-role customization (Stage D):
+    a partial {role: model} map validated against the catalog like the Settings
+    roles PUT, written as ``*_MODEL`` knob lines with the key in the same
+    atomic pass, so the unlock costs one restart. Absent or empty, the audited
+    defaults apply and the write is a single key line, exactly as before.
+
+    409 when provider_key_path is unset (bare metal). 400 on unknown provider,
+    bad key shape, or an invalid role choice. On success:
+    {"ok": true, "restarting": true}.
     """
     config = load_config()
     key_path = (config.get("provider_key_path") or "").strip()
@@ -7934,13 +7941,32 @@ async def post_setup_provider_key(request: Request):
             ),
         )
 
+    roles = body.get("roles")
+    if roles is not None and not isinstance(roles, dict):
+        raise HTTPException(status_code=400, detail="roles must be a {role: model} object")
+    knob_lines: list[str] = []
+    if roles:
+        oc = _load_openclaw_with_overrides(config)
+        if oc is None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "openclaw.json is unavailable, so role choices cannot be "
+                    "validated. Save the key without customization and assign "
+                    "models in Settings instead."
+                ),
+            )
+        catalog = {entry["id"]: entry for entry in _assemble_model_catalog(oc)}
+        updates = _validate_role_assignments(roles, catalog)
+        knob_lines = [f"{knob}={model}" for knob, model in updates.items()]
+
     env_var = _PROVIDER_ENV_VAR[provider]
     dest = os.path.expanduser(key_path)
     parent = os.path.dirname(dest) or "."
     try:
         os.makedirs(parent, mode=0o700, exist_ok=True)
         # Atomic write via the shared helper (mkstemp in the dest dir + os.replace).
-        write_text_atomic(dest, f"{env_var}={key}\n")
+        write_text_atomic(dest, "\n".join([f"{env_var}={key}"] + knob_lines) + "\n")
         os.chmod(dest, 0o600)
     except OSError as exc:
         # Name the path, never the key content, in the surfaced error.
@@ -8036,11 +8062,11 @@ async def post_setup_local_model(request: Request):
     """Wire a discovered local model server as the provider (B4 unlock).
 
     Body: {"url": str, "model": str, "max_tokens"?: int, "reasoning"?: bool,
-    "context_window"?: int, "vision"?: bool}. Merges a ``LOCAL_MODEL_URL=``
-    line plus the six per-role ``*_MODEL=local/<model>`` knobs into
-    provider_key_path, preserving every other line already in the file (a
-    mixed install's cloud key stays intact). The optional confirm fields
-    persist as ``LOCAL_MODEL_MAX_TOKENS`` / ``LOCAL_MODEL_REASONING`` /
+    "context_window"?: int, "vision"?: bool, "roles"?: {role: model}}. Merges
+    a ``LOCAL_MODEL_URL=`` line plus the six per-role ``*_MODEL=local/<model>``
+    knobs into provider_key_path, preserving every other line already in the
+    file (a mixed install's cloud key stays intact). The optional confirm
+    fields persist as ``LOCAL_MODEL_MAX_TOKENS`` / ``LOCAL_MODEL_REASONING`` /
     ``LOCAL_MODEL_CONTEXT_WINDOW`` / ``LOCAL_MODEL_VISION`` lines, which the
     boot-time entry builder applies as the last word over probed metadata (an
     under-specified local model runs on truncating defaults; a missing input
@@ -8049,11 +8075,15 @@ async def post_setup_local_model(request: Request):
     The write is atomic, mode 0600, parent dir 0700 — the same secret-file handling
     as post_setup_provider_key.
 
-    Simplification: one model is assigned to all six roles here; per-role tuning
-    stays in deploy/.env. Validation is shape-only (no live probe), mirroring the
-    provider-key design decision. Neither the URL nor the file contents are logged
-    (the preserved lines may hold a cloud provider key; the URL itself is not a
-    secret and can appear in a 400 detail).
+    ``model`` is the default assigned to every role; ``roles`` (Stage D) swaps
+    individual roles to other models on the same server. When any role diverges
+    from the default, a ``LOCAL_MODEL_TUNING_TARGET=<model>`` line scopes the
+    confirm fields to the confirmed pick, so the entrypoint does not stamp its
+    tuning onto models the user never confirmed (those keep probed metadata,
+    editable later in Settings). Validation is shape-only (no live probe),
+    mirroring the provider-key design decision. Neither the URL nor the file
+    contents are logged (the preserved lines may hold a cloud provider key; the
+    URL itself is not a secret and can appear in a 400 detail).
 
     409 when provider_key_path is unset (bare metal). 400 on a malformed url or a
     bad model id. On success: {"ok": true, "restarting": true}.
@@ -8154,6 +8184,32 @@ async def post_setup_local_model(request: Request):
     if vision is not None and not isinstance(vision, bool):
         raise HTTPException(status_code=400, detail="vision must be a boolean")
 
+    roles = body.get("roles")
+    if roles is not None and not isinstance(roles, dict):
+        raise HTTPException(status_code=400, detail="roles must be a {role: model} object")
+    role_models: dict = {}
+    for role, raw_role_model in (roles or {}).items():
+        if role not in _ROLE_KNOBS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown role {role}; roles are " + ", ".join(_ROLE_KNOBS),
+            )
+        if not isinstance(raw_role_model, str) or not raw_role_model.strip():
+            raise HTTPException(status_code=400, detail=f"{role}: model must be a non-empty string")
+        role_model = raw_role_model.strip()
+        if any(ch.isspace() for ch in role_model) or not role_model.isprintable():
+            raise HTTPException(
+                status_code=400,
+                detail=f"{role}: model must not contain whitespace or non-printable characters",
+            )
+        _reject_shell_eval_chars(role_model, f"{role} model")
+        if len(role_model) > _LOCAL_MODEL_ID_MAX_LEN:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{role}: model id must be at most {_LOCAL_MODEL_ID_MAX_LEN} characters",
+            )
+        role_models[role] = role_model
+
     # The lines this write owns — LOCAL_MODEL_URL, the six role knobs, and the
     # model-tuning overrides. Any existing line with one of these keys is
     # replaced (or dropped when its field was omitted); every other line is kept
@@ -8164,10 +8220,13 @@ async def post_setup_local_model(request: Request):
         "LOCAL_MODEL_REASONING",
         "LOCAL_MODEL_CONTEXT_WINDOW",
         "LOCAL_MODEL_VISION",
+        "LOCAL_MODEL_TUNING_TARGET",
         *TEMPLATE_MODEL_DEFAULTS.keys(),
     }
     new_lines = [f"LOCAL_MODEL_URL={url}"]
-    new_lines += [f"{knob}=local/{model}" for knob in TEMPLATE_MODEL_DEFAULTS.keys()]
+    new_lines += [
+        f"{knob}=local/{role_models.get(role, model)}" for role, knob in _ROLE_KNOBS.items()
+    ]
     if max_tokens is not None:
         new_lines.append(f"LOCAL_MODEL_MAX_TOKENS={max_tokens}")
     if reasoning is not None:
@@ -8176,6 +8235,8 @@ async def post_setup_local_model(request: Request):
         new_lines.append(f"LOCAL_MODEL_CONTEXT_WINDOW={context_window}")
     if vision is not None:
         new_lines.append(f"LOCAL_MODEL_VISION={1 if vision else 0}")
+    if any(m != model for m in role_models.values()):
+        new_lines.append(f"LOCAL_MODEL_TUNING_TARGET={model}")
 
     dest = os.path.expanduser(key_path)
     try:
@@ -8305,6 +8366,47 @@ def _agent_primary(agent) -> Optional[str]:
         if isinstance(primary, str) and primary:
             return primary
     return None
+
+
+def _validate_role_assignments(assignments: dict, catalog: dict) -> dict:
+    """Validate a partial {role: model} map against the catalog; returns
+    {knob: model}. Enforces the D4 vision constraint. Raises HTTPException(400)
+    on any violation; shared by the Settings roles PUT and the setup paths."""
+    updates: dict = {}
+    for role, raw_model in assignments.items():
+        if role not in _ROLE_KNOBS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown role {role}; roles are " + ", ".join(_ROLE_KNOBS),
+            )
+        if not isinstance(raw_model, str) or not raw_model.strip():
+            raise HTTPException(status_code=400, detail=f"{role}: model must be a non-empty string")
+        model = raw_model.strip()
+        # Written as `<KNOB>=<model>` into the entrypoint-read provider.env;
+        # same shape guards as every other value that file carries.
+        if any(ch.isspace() for ch in model) or not model.isprintable():
+            raise HTTPException(
+                status_code=400,
+                detail=f"{role}: model must not contain whitespace or non-printable characters",
+            )
+        _reject_shell_eval_chars(model, f"{role} model")
+        if model not in catalog:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{role}: {model} is not a registered model. Add models in OpenClaw first.",
+            )
+        if role in _VISION_REQUIRED_ROLES:
+            mods = catalog[model].get("input")
+            if isinstance(mods, list) and mods and "image" not in mods:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"{role} needs a model that accepts image input, and "
+                        f"{model} is text only. Pick a multimodal model."
+                    ),
+                )
+        updates[_ROLE_KNOBS[role]] = model
+    return updates
 
 
 def _load_openclaw_with_overrides(config: dict):
@@ -8487,41 +8589,7 @@ async def put_models_roles(request: Request):
             detail="openclaw.json is unavailable; assignments cannot be validated.",
         )
     catalog = {entry["id"]: entry for entry in _assemble_model_catalog(oc)}
-
-    updates: dict = {}
-    for role, raw_model in body.items():
-        if role not in _ROLE_KNOBS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"unknown role {role}; roles are " + ", ".join(_ROLE_KNOBS),
-            )
-        if not isinstance(raw_model, str) or not raw_model.strip():
-            raise HTTPException(status_code=400, detail=f"{role}: model must be a non-empty string")
-        model = raw_model.strip()
-        # Written as `<KNOB>=<model>` into the entrypoint-read provider.env;
-        # same shape guards as every other value that file carries.
-        if any(ch.isspace() for ch in model) or not model.isprintable():
-            raise HTTPException(
-                status_code=400,
-                detail=f"{role}: model must not contain whitespace or non-printable characters",
-            )
-        _reject_shell_eval_chars(model, f"{role} model")
-        if model not in catalog:
-            raise HTTPException(
-                status_code=400,
-                detail=f"{role}: {model} is not a registered model. Add models in OpenClaw first.",
-            )
-        if role in _VISION_REQUIRED_ROLES:
-            mods = catalog[model].get("input")
-            if isinstance(mods, list) and mods and "image" not in mods:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"{role} needs a model that accepts image input, and "
-                        f"{model} is text only. Pick a multimodal model."
-                    ),
-                )
-        updates[_ROLE_KNOBS[role]] = model
+    updates = _validate_role_assignments(body, catalog)
 
     dest = os.path.expanduser(config["provider_key_path"])
     try:
