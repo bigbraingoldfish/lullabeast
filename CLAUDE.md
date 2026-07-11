@@ -558,9 +558,9 @@ In all cases a `[SKILL]` log line is emitted to stdout with `Status=loaded`, `St
 
 ### How models are resolved
 
-**Planner, executor, and reviewer** do not receive a `model` field on `POST /hooks/agent`. OpenClaw uses each agent’s `agents.list[].model.primary` from the live `openclaw.json` (same as the Ideas agent path). The orchestrator still implements `_get_agent_model(agent_id)` for any code paths that need to read the configured model string from disk; it is not passed into the webhook payload. Model changes in `openclaw.json` take effect on the next invocation (config is re-read each time).
+**Planner, executor, and reviewer** receive no `model` field on `POST /hooks/agent` by default; OpenClaw uses each agent’s `agents.list[].model.primary` from the live `openclaw.json` (same as the Ideas agent path). One exception: a **per-phase model override** set from the pipeline monitor is stored in the project’s `phase_model_overrides.json` (`{raw_id: {role: model}}`, written by `POST/DELETE /api/phase-model-override`) and threaded as `model=` at the three phase invoke sites (`_phase_model_override`). It needs no gateway restart (sessions bake their model at creation), covers every attempt within the phase, stamps `models_used` with the effective model, and is dropped when the phase closes. There is no model-health probe, so an override naming an unreachable model surfaces as a stall → escalation. The orchestrator still implements `_get_agent_model(agent_id)` for code paths that read the configured model string from disk.
 
-To change which model runs for a pipeline role, update that agent’s entry in `openclaw.json`. Remember that **session model is baked at session creation** — existing sessions keep their model until removed (see below).
+To change which model runs a role durably, use the Settings "Model roles" card (writes the `*_MODEL` knobs and requests a config apply) or the `*_MODEL` variables directly; a raw `agents.list[].model` edit is reverted by per-boot reconcile on owned installs. Remember that **session model is baked at session creation** — existing sessions keep their model until removed (see below).
 
 ### OpenClaw `thinking` on pipeline webhooks
 

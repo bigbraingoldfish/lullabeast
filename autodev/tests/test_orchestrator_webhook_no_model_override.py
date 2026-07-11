@@ -1,4 +1,11 @@
-"""Regression: orchestrator must not pass model= to invoke_agent_webhook (OpenClaw agent defaults)."""
+"""Regression: webhook ``model=`` may come only from the per-phase override.
+
+The three phase invoke sites (planner/executor/reviewer) thread
+``model=self._phase_model_override("<role>")`` (the dashboard's one-phase
+override); with no override set the kwarg is None and the payload omits it, so
+OpenClaw keeps using each agent's ``agents.list`` model. No other call site
+(escalation, the post-run completion reviewer) may carry ``model=``.
+"""
 
 import os
 import re
@@ -20,20 +27,37 @@ def _iter_invoke_agent_webhook_calls(source: str):
         yield source[start:i]
 
 
-def test_orchestrator_never_passes_model_kwarg_to_invoke_agent_webhook():
+def _orchestrator_source() -> str:
     pipeline_dir = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
         "autodev",
         "pipeline",
     )
-    path = os.path.join(pipeline_dir, "orchestrator.py")
-    with open(path, encoding="utf-8") as f:
-        src = f.read()
+    with open(os.path.join(pipeline_dir, "orchestrator.py"), encoding="utf-8") as f:
+        return f.read()
+
+
+def test_model_kwarg_comes_only_from_phase_override():
+    src = _orchestrator_source()
     bad = []
+    override_sites = set()
     for call in _iter_invoke_agent_webhook_calls(src):
-        if re.search(r"\bmodel\s*=", call):
-            bad.append(call[:200] + ("..." if len(call) > 200 else ""))
+        if not re.search(r"\bmodel\s*=", call):
+            continue
+        first_arg = re.search(r'invoke_agent_webhook\s*\(\s*"([\w-]+)"', call)
+        agent = first_arg.group(1) if first_arg else None
+        shaped = agent in ("planner", "executor", "reviewer") and re.search(
+            r'model\s*=\s*self\._phase_model_override\(\s*"' + re.escape(agent) + r'"\s*\)',
+            call,
+        )
+        if shaped:
+            override_sites.add(agent)
+        else:
+            bad.append(call[:200])
     assert not bad, (
-        "invoke_agent_webhook must not receive model= — use OpenClaw agents.list model:\n"
-        + "\n---\n".join(bad)
+        "model= must be exactly self._phase_model_override(<matching role>) and only "
+        "on the phase invoke sites:\n" + "\n---\n".join(bad)
+    )
+    assert override_sites == {"planner", "executor", "reviewer"}, (
+        f"expected the three phase invoke sites to thread the override, got {sorted(override_sites)}"
     )

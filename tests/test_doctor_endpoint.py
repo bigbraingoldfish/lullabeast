@@ -100,8 +100,15 @@ class TestDoctorHealthPanel:
         assert "function DoctorHealthCard()" in html
         assert 'data-testid="doctor-health-card"' in html
 
-    def test_card_fetches_the_doctor_endpoint_on_mount(self, html):
-        assert 'fetch("/api/doctor")' in html
+    def test_card_runs_the_doctor_on_click_not_on_mount(self, html):
+        # The full checklist is heavy; the card mounts idle and runs on demand
+        # (maintainer request 2026-07-10).
+        start = html.index("function DoctorHealthCard()")
+        end = html.index("function PreflightScreen(")
+        seg = html[start:end]
+        assert 'fetch("/api/doctor")' in seg
+        assert "useEffect" not in seg
+        assert 'data-testid="doctor-health-run"' in seg
 
     def test_card_mounted_on_the_settings_screen_only(self, html):
         settings = html.index("function SettingsScreen(")
@@ -143,9 +150,9 @@ class TestDoctorHealthPanel:
         assert "DOCTOR_CHECK_EXPLAIN" in html
         assert "title={DOCTOR_CHECK_EXPLAIN[c.id] || c.title}" in html
 
-    def test_card_is_read_only(self, html):
-        """No re-run / live button: the card component contains no button
-        element between its start and the following component."""
+    def test_run_is_the_cards_only_action(self, html):
+        """The run button is the card's single action; the report itself stays
+        read-only (no per-check fix or mutate controls)."""
         start = html.index('data-testid="doctor-health-card"')
         end = html.index("function PreflightScreen(")
-        assert "<button" not in html[start:end]
+        assert html[start:end].count("<button") == 1

@@ -8598,6 +8598,213 @@ async def put_models_properties(request: Request):
     return {"ok": True, "restarting": True}
 
 
+# ── per-phase model override (pipeline monitor) ───────────────────────────────
+# One-phase role→model overrides, stored per project in
+# phase_model_overrides.json ({raw_id: {role: model}}) and consumed by the
+# orchestrator at the planner/executor/reviewer invoke sites. No gateway
+# restart: sessions bake their model at creation, so the override binds on the
+# phase's next fresh session. The orchestrator drops a phase's entry when the
+# phase closes.
+
+_PHASE_OVERRIDE_ROLES = ("planner", "executor", "reviewer")
+_PHASE_OVERRIDES_FILENAME = "phase_model_overrides.json"
+_VISUAL_PHASE_PREFIXES = ("UI", "INT")
+
+
+def _is_visual_phase_raw_id(raw_id: str) -> bool:
+    """Mirror of the reviewer gate's ``_is_visual_phase`` (gate scripts are
+    subprocess-only, not importable here): UI-*/INT-* subsystem prefixes plus
+    any id listed in ``AUTODEV_VISUAL_PHASE_RAW_IDS``."""
+    raw = (raw_id or "").strip().upper()
+    if not raw:
+        return False
+    extra = os.environ.get("AUTODEV_VISUAL_PHASE_RAW_IDS") or ""
+    if raw in {item.strip().upper() for item in extra.split(",") if item.strip()}:
+        return True
+    return raw.split("-", 1)[0] in _VISUAL_PHASE_PREFIXES
+
+
+def _active_project_root(config: dict) -> Optional[str]:
+    """The active project's real path from pipeline_state, or None."""
+    state_path = config.get("pipeline_state_path")
+    state = _read_json_file(os.path.expanduser(state_path)) if state_path else None
+    raw = (state or {}).get("project_path", "")
+    if not raw:
+        return None
+    try:
+        project_real = os.path.realpath(os.path.expanduser(str(raw)))
+    except OSError:
+        return None
+    return project_real if os.path.isdir(project_real) else None
+
+
+def _load_phase_overrides(path: str) -> dict:
+    """Read-tolerant {raw_id: {role: model}} load; malformed shapes drop out."""
+    data = _read_json_file(path)
+    if not isinstance(data, dict):
+        return {}
+    return {
+        rid: dict(entry)
+        for rid, entry in data.items()
+        if isinstance(rid, str) and isinstance(entry, dict)
+    }
+
+
+@app.get("/api/phase-model-override")
+def get_phase_model_overrides():
+    """The active project's per-phase overrides: {"overrides": {raw_id: {role: model}}}."""
+    config = load_config()
+    project_root = _active_project_root(config)
+    if not project_root:
+        return {"overrides": {}}
+    path = os.path.join(_pipeline_artifacts_dir(project_root), _PHASE_OVERRIDES_FILENAME)
+    return {"overrides": _load_phase_overrides(path)}
+
+
+@app.post("/api/phase-model-override")
+async def post_phase_model_override(request: Request):
+    """Set a one-phase model override for a pipeline role.
+
+    Body: {"raw_id", "role", "model"}. The phase must exist in the active
+    roadmap and still be open; the role must be planner/executor/reviewer; the
+    model must be registered. A confirmed text-only model is refused for the
+    executor/reviewer on visual phases (every screenshot turn would fail) and
+    accepted with a warning elsewhere. The override covers every attempt in
+    that phase and expires when the phase closes.
+    """
+    config = load_config()
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be a {raw_id, role, model} object")
+    raw_id = body.get("raw_id")
+    role = body.get("role")
+    model = body.get("model")
+    if not isinstance(raw_id, str) or not raw_id.strip():
+        raise HTTPException(status_code=400, detail="raw_id must be a non-empty string")
+    raw_id = raw_id.strip()
+    if role not in _PHASE_OVERRIDE_ROLES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown role {role}; per-phase overrides cover planner, executor, reviewer",
+        )
+    if not isinstance(model, str) or not model.strip():
+        raise HTTPException(status_code=400, detail=f"{role}: model must be a non-empty string")
+    model = model.strip()
+
+    project_root = _active_project_root(config)
+    if not project_root:
+        raise HTTPException(
+            status_code=409,
+            detail="No active project. Per-phase overrides apply to the project the pipeline is working on.",
+        )
+    roadmap_path = _canonical_roadmap_path(project_root)
+    phases = parse_roadmap(roadmap_path) if roadmap_path else []
+    match = next((p for p in phases if p.get("id") == raw_id), None)
+    if match is None:
+        raise HTTPException(status_code=400, detail=f"{raw_id} is not a phase in the active roadmap")
+    if match.get("status") in ("complete", "skipped"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{raw_id} is already closed. Overrides apply to the current or an upcoming phase.",
+        )
+
+    oc = _load_openclaw_with_overrides(config)
+    if oc is None:
+        raise HTTPException(
+            status_code=503,
+            detail="openclaw.json is unavailable; the override cannot be validated.",
+        )
+    catalog = {entry["id"]: entry for entry in _assemble_model_catalog(oc)}
+    if model not in catalog:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{model} is not a registered model. Add models in OpenClaw first.",
+        )
+    warning = None
+    entry_input = catalog[model].get("input")
+    text_only = isinstance(entry_input, list) and entry_input and "image" not in entry_input
+    if text_only and role in ("executor", "reviewer"):
+        if _is_visual_phase_raw_id(raw_id):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{role} on {raw_id} needs image input for screenshot verification, "
+                    f"and {model} is text only. Pick a multimodal model."
+                ),
+            )
+        warning = (
+            f"{model} is text only. If this phase produces anything visual, "
+            f"the {role} cannot verify it."
+        )
+
+    overrides_path = os.path.join(_pipeline_artifacts_dir(project_root), _PHASE_OVERRIDES_FILENAME)
+    data = _load_phase_overrides(overrides_path)
+    entry = dict(data.get(raw_id) or {})
+    entry[role] = model
+    data[raw_id] = entry
+    try:
+        os.makedirs(os.path.dirname(overrides_path), exist_ok=True)
+        write_json_atomic(overrides_path, data)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not write the phase overrides file at {overrides_path} ({exc.strerror or exc})",
+        ) from None
+    resp = {"ok": True, "raw_id": raw_id, "role": role, "model": model}
+    if warning:
+        resp["warning"] = warning
+    return resp
+
+
+@app.delete("/api/phase-model-override")
+async def delete_phase_model_override(request: Request):
+    """Clear a per-phase override. Body: {"raw_id", "role"?}; omitting role
+    clears the phase's whole entry. Idempotent: clearing what is not set is ok."""
+    config = load_config()
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be a {raw_id, role} object")
+    raw_id = body.get("raw_id")
+    role = body.get("role")
+    if not isinstance(raw_id, str) or not raw_id.strip():
+        raise HTTPException(status_code=400, detail="raw_id must be a non-empty string")
+    raw_id = raw_id.strip()
+    if role is not None and role not in _PHASE_OVERRIDE_ROLES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown role {role}; per-phase overrides cover planner, executor, reviewer",
+        )
+
+    project_root = _active_project_root(config)
+    if not project_root:
+        return {"ok": True}
+    overrides_path = os.path.join(_pipeline_artifacts_dir(project_root), _PHASE_OVERRIDES_FILENAME)
+    data = _load_phase_overrides(overrides_path)
+    entry = dict(data.get(raw_id) or {})
+    if role is None:
+        entry = {}
+    else:
+        entry.pop(role, None)
+    if entry:
+        data[raw_id] = entry
+    else:
+        data.pop(raw_id, None)
+    try:
+        if data:
+            write_json_atomic(overrides_path, data)
+        elif os.path.exists(overrides_path):
+            os.remove(overrides_path)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not write the phase overrides file at {overrides_path} ({exc.strerror or exc})",
+        ) from None
+    return {"ok": True}
+
+
 def _demo_source_dir(config: dict) -> str:
     repo = config.get("autodev_repo_path") or _AUTODEV_UI_ROOT
     return os.path.join(os.path.expanduser(repo), "examples", _DEMO_PROJECT_NAME)
