@@ -5,6 +5,7 @@ cross-agent contract: the server's only unlock responsibility is writing the
 dotenv key file correctly; setup mode itself is entrypoint-owned via a marker
 file. Every surface degrades to "unsupported" when the config keys are unset.
 """
+import json
 import os
 import stat
 from pathlib import Path
@@ -261,3 +262,144 @@ class TestProviderKeySuccess:
             )
         content = Path(cfg["provider_key_path"]).read_text()
         assert content == "OPENROUTER_API_KEY=sk-or-second00\n"
+
+
+# ── provider-key with per-role customization (Stage D) ───────────────────────
+
+def _oc_root(tmp_path: Path) -> str:
+    """A minimal rendered openclaw.json: one multimodal and one text-only model."""
+    oc_root = tmp_path / "openclaw"
+    oc_root.mkdir(parents=True, exist_ok=True)
+    (oc_root / "openclaw.json").write_text(
+        json.dumps(
+            {
+                "models": {
+                    "providers": {
+                        "openrouter": {
+                            "models": [
+                                {"id": "moonshotai/kimi-k2.7-code", "input": ["text", "image"]},
+                                {"id": "z-ai/glm-5.2", "input": ["text"]},
+                            ]
+                        }
+                    }
+                },
+                "agents": {"list": []},
+            }
+        )
+    )
+    return str(oc_root)
+
+
+class TestProviderKeyRoleCustomization:
+    """The optional roles map rides the key write: one file pass, one restart."""
+
+    def _post(self, cfg, body):
+        with patch("ui.server.load_config", return_value=cfg):
+            return client.post("/api/setup/provider-key", json=body)
+
+    def test_default_write_is_a_single_key_line(self, tmp_path):
+        # Regression pin: without roles, the write is byte-identical to before.
+        cfg = _cfg(tmp_path)
+        r = self._post(cfg, {"provider": "openrouter", "key": "abc123456"})
+        assert r.status_code == 200
+        assert Path(cfg["provider_key_path"]).read_text() == "OPENROUTER_API_KEY=abc123456\n"
+
+    def test_empty_roles_object_behaves_like_absent(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        r = self._post(cfg, {"provider": "openrouter", "key": "abc123456", "roles": {}})
+        assert r.status_code == 200
+        assert Path(cfg["provider_key_path"]).read_text() == "OPENROUTER_API_KEY=abc123456\n"
+
+    def test_roles_written_with_key_in_one_pass(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        cfg["openclaw_root"] = _oc_root(tmp_path)
+        r = self._post(
+            cfg,
+            {
+                "provider": "openrouter",
+                "key": "abc123456",
+                "roles": {
+                    "planner": "openrouter/z-ai/glm-5.2",
+                    "executor": "openrouter/moonshotai/kimi-k2.7-code",
+                },
+            },
+        )
+        assert r.status_code == 200
+        assert r.json() == {"ok": True, "restarting": True}
+        lines = Path(cfg["provider_key_path"]).read_text().splitlines()
+        assert lines[0] == "OPENROUTER_API_KEY=abc123456"
+        assert "PLANNER_MODEL=openrouter/z-ai/glm-5.2" in lines
+        assert "EXECUTOR_MODEL=openrouter/moonshotai/kimi-k2.7-code" in lines
+        # Only the key and the two changed knobs: partial map, partial write.
+        assert len(lines) == 3
+
+    def test_roles_must_be_an_object(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        cfg["openclaw_root"] = _oc_root(tmp_path)
+        r = self._post(
+            cfg, {"provider": "openrouter", "key": "abc123456", "roles": ["planner"]}
+        )
+        assert r.status_code == 400
+        assert not os.path.exists(cfg["provider_key_path"])
+
+    def test_unknown_role_rejected(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        cfg["openclaw_root"] = _oc_root(tmp_path)
+        r = self._post(
+            cfg,
+            {
+                "provider": "openrouter",
+                "key": "abc123456",
+                "roles": {"conductor": "openrouter/z-ai/glm-5.2"},
+            },
+        )
+        assert r.status_code == 400
+        assert "unknown role" in r.json()["detail"]
+        assert not os.path.exists(cfg["provider_key_path"])
+
+    def test_unregistered_model_rejected(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        cfg["openclaw_root"] = _oc_root(tmp_path)
+        r = self._post(
+            cfg,
+            {
+                "provider": "openrouter",
+                "key": "abc123456",
+                "roles": {"planner": "openrouter/not-shipped"},
+            },
+        )
+        assert r.status_code == 400
+        assert "not a registered model" in r.json()["detail"]
+        assert not os.path.exists(cfg["provider_key_path"])
+
+    @pytest.mark.parametrize("role", ("executor", "reviewer", "prd-creator"))
+    def test_text_only_model_rejected_for_vision_roles(self, tmp_path, role):
+        cfg = _cfg(tmp_path)
+        cfg["openclaw_root"] = _oc_root(tmp_path)
+        r = self._post(
+            cfg,
+            {
+                "provider": "openrouter",
+                "key": "abc123456",
+                "roles": {role: "openrouter/z-ai/glm-5.2"},
+            },
+        )
+        assert r.status_code == 400
+        assert "image input" in r.json()["detail"]
+        assert not os.path.exists(cfg["provider_key_path"])
+
+    def test_roles_without_catalog_is_503(self, tmp_path):
+        # openclaw.json unreadable: role choices cannot be validated, and the
+        # key is not written either (the user retries or saves without roles).
+        cfg = _cfg(tmp_path)
+        cfg["openclaw_root"] = str(tmp_path / "missing")
+        r = self._post(
+            cfg,
+            {
+                "provider": "openrouter",
+                "key": "abc123456",
+                "roles": {"planner": "openrouter/z-ai/glm-5.2"},
+            },
+        )
+        assert r.status_code == 503
+        assert not os.path.exists(cfg["provider_key_path"])

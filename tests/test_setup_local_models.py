@@ -522,12 +522,14 @@ class TestLocalModelUiMarkers:
         assert "context_window" in html
         assert "suggested_max_tokens" in html
 
-    def test_vision_no_blocks_submit_with_warning(self):
-        # A "No" on image support disables the wire button and shows the
-        # multimodal-requirement warning.
+    def test_vision_block_narrowed_to_vision_roles(self):
+        # Stage D: the wire button is blocked only when the executor, reviewer,
+        # or prd-creator ends up on a text-only model, not on any "No" pick.
         html = self._html()
         assert 'data-testid="setup-local-vision-warning"' in html
         assert 'vision === "no"' in html
+        assert "MODEL_VISION_ROLES.filter((role) => effModel(role) && modelTextOnly(effModel(role)))" in html
+        assert "blockedRoles.length > 0" in html
 
     def test_skip_provider_surface_present(self):
         # The third welcome option: skip and manage models in OpenClaw, behind
@@ -537,3 +539,86 @@ class TestLocalModelUiMarkers:
         assert 'data-testid="setup-skip-provider"' in html
         assert 'data-testid="setup-skip-confirm-modal"' in html
         assert 'data-testid="setup-skip-confirm"' in html
+
+
+# ── local-model wiring: per-role customization (Stage D) ─────────────────────
+
+class TestLocalModelRoleCustomization:
+    def _post(self, cfg, body):
+        with patch("ui.server.load_config", return_value=cfg):
+            return client.post("/api/setup/local-model", json=body)
+
+    def test_roles_swap_individual_knobs(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        r = self._post(
+            cfg,
+            {
+                "url": "http://host:11434",
+                "model": "llama3.2-vision:11b",
+                "roles": {"planner": "qwen2.5:14b", "escalation": "qwen2.5:1.5b"},
+            },
+        )
+        assert r.status_code == 200
+        content = Path(cfg["provider_key_path"]).read_text()
+        assert "PLANNER_MODEL=local/qwen2.5:14b\n" in content
+        assert "ESCALATION_MODEL=local/qwen2.5:1.5b\n" in content
+        for knob in ("EXECUTOR_MODEL", "REVIEWER_MODEL", "PRD_MODEL", "ROADMAP_MODEL"):
+            assert f"{knob}=local/llama3.2-vision:11b\n" in content
+
+    def test_customized_roles_scope_tuning_to_the_confirmed_pick(self, tmp_path):
+        # The confirm fields were answered for the primary pick only; the
+        # target line keeps the entrypoint from stamping them onto models the
+        # user never confirmed.
+        cfg = _cfg(tmp_path)
+        r = self._post(
+            cfg,
+            {
+                "url": "http://host:11434",
+                "model": "llama3.2-vision:11b",
+                "max_tokens": 16384,
+                "roles": {"planner": "qwen2.5:14b"},
+            },
+        )
+        assert r.status_code == 200
+        content = Path(cfg["provider_key_path"]).read_text()
+        assert "LOCAL_MODEL_TUNING_TARGET=llama3.2-vision:11b\n" in content
+
+    def test_roles_matching_primary_write_no_tuning_target(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        r = self._post(
+            cfg,
+            {
+                "url": "http://host:11434",
+                "model": "llama3:8b",
+                "roles": {"planner": "llama3:8b"},
+            },
+        )
+        assert r.status_code == 200
+        content = Path(cfg["provider_key_path"]).read_text()
+        assert "LOCAL_MODEL_TUNING_TARGET" not in content
+        assert "PLANNER_MODEL=local/llama3:8b\n" in content
+
+    def test_default_rewire_drops_stale_tuning_target(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        p = Path(cfg["provider_key_path"])
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("LOCAL_MODEL_TUNING_TARGET=old-model\n")
+        r = self._post(cfg, {"url": "http://host:11434", "model": "llama3:8b"})
+        assert r.status_code == 200
+        assert "LOCAL_MODEL_TUNING_TARGET" not in p.read_text()
+
+    def test_400_bad_roles(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        base = {"url": "http://host:11434", "model": "llama3:8b"}
+        for bad_roles in (
+            ["planner"],
+            {"conductor": "llama3:8b"},
+            {"planner": ""},
+            {"planner": "a b"},
+            {"planner": "$(reboot)"},
+            {"planner": "x" * 300},
+            {"planner": 3},
+        ):
+            r = self._post(cfg, {**base, "roles": bad_roles})
+            assert r.status_code == 400, bad_roles
+            assert not os.path.exists(cfg["provider_key_path"])

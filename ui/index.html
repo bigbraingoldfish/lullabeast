@@ -1867,7 +1867,160 @@
 
         // ─── Modals ───────────────────────────────────────────────────────────────
 
-        function ConfirmationModal({ command, onConfirm, onDismiss, busy, escalationResets = 0 }) {
+        /* Collapsible per-phase override editor inside the retry confirmations
+         * (RESET_PHASE / RESET_EXECUTION / RESET_REVIEWER). Same mechanism as
+         * the roadmap row control: writes land immediately via
+         * /api/phase-model-override, cover every remaining attempt in the
+         * phase, and clear when the phase closes, so an override outlives a
+         * cancelled confirm (the roadmap row shows and clears it). */
+        function RetryModelOverrideSection({ rawId }) {
+            const [open, setOpen] = useState(false);
+            const [catalog, setCatalog] = useState(null);
+            const [overrides, setOverrides] = useState({});
+            const [draft, setDraft] = useState({ role: 'executor', model: '' });
+            const [busy, setBusy] = useState(false);
+            const [error, setError] = useState('');
+            const [warning, setWarning] = useState('');
+
+            const toggle = () => {
+                setOpen((v) => !v);
+                if (catalog !== null) return;
+                fetch('/api/models/roles')
+                    .then((r) => r.json())
+                    .then((d) => setCatalog((d && d.catalog) || []))
+                    .catch(() => setCatalog([]));
+                fetch('/api/phase-model-override')
+                    .then((r) => r.json())
+                    .then((d) => setOverrides(((d && d.overrides) || {})[rawId] || {}))
+                    .catch(() => {});
+            };
+
+            const setOverride = async () => {
+                if (!draft.model) return;
+                setBusy(true); setError(''); setWarning('');
+                try {
+                    const r = await fetch('/api/phase-model-override', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ raw_id: rawId, role: draft.role, model: draft.model }),
+                    });
+                    const d = await r.json().catch(() => ({}));
+                    if (!r.ok) { setError(d.detail || 'Could not set the override.'); return; }
+                    if (d.warning) setWarning(d.warning);
+                    setOverrides((prev) => ({ ...prev, [d.role]: d.model }));
+                } catch (_e) {
+                    setError('Network error while setting the override.');
+                } finally {
+                    setBusy(false);
+                }
+            };
+
+            const clearOverride = async (role) => {
+                setBusy(true); setError(''); setWarning('');
+                try {
+                    const r = await fetch('/api/phase-model-override', {
+                        method: 'DELETE',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ raw_id: rawId, role }),
+                    });
+                    const d = await r.json().catch(() => ({}));
+                    if (!r.ok) { setError(d.detail || 'Could not clear the override.'); return; }
+                    setOverrides((prev) => {
+                        const next = { ...prev };
+                        delete next[role];
+                        return next;
+                    });
+                } catch (_e) {
+                    setError('Network error while clearing the override.');
+                } finally {
+                    setBusy(false);
+                }
+            };
+
+            const activeCount = Object.keys(overrides).length;
+            return (
+                <div className="mb-4" data-testid="retry-model-override-section">
+                    <button
+                        type="button"
+                        data-testid="retry-override-toggle"
+                        onClick={toggle}
+                        aria-expanded={open}
+                        className="w-full flex items-center justify-between px-3 py-2 rounded border border-[#2a2540] text-left hover:bg-[#221b36] transition-colors"
+                    >
+                        <span className="header-text text-xs text-slate-300">
+                            Retry on a different model (optional)
+                            {activeCount > 0 && <span className="text-[#e2b14c]"> · {activeCount} set</span>}
+                        </span>
+                        <span className="text-slate-500 text-xs">{open ? '▲' : '▼'}</span>
+                    </button>
+                    {open && (
+                        <div className="mt-2 space-y-2 rounded border border-[#2a2540] bg-[#100d1a]/60 p-3">
+                            <p className="text-[11px] text-slate-500 leading-snug">
+                                Runs this phase's planner, executor, or reviewer on a different
+                                model for every remaining attempt, then clears when the phase
+                                closes. It takes effect as soon as you set it, even if you
+                                cancel below. There is no availability check: an unreachable
+                                model surfaces as a stall, then an escalation.
+                            </p>
+                            {Object.entries(overrides).map(([role, m]) => (
+                                <div key={role} className="flex items-center gap-2">
+                                    <span className="header-text text-[10px] px-1.5 py-0.5 rounded bg-[#221b36] border border-[#2a2540] text-[#e2b14c]" title={m}>{role}: {String(m).split('/').pop()}</span>
+                                    <button
+                                        type="button"
+                                        data-testid="retry-override-clear"
+                                        disabled={busy}
+                                        onClick={() => clearOverride(role)}
+                                        className="text-[11px] text-slate-500 hover:text-slate-300 disabled:opacity-50"
+                                    >
+                                        Clear
+                                    </button>
+                                </div>
+                            ))}
+                            <div className="flex flex-wrap items-center gap-2">
+                                <select
+                                    data-testid="retry-override-role"
+                                    value={draft.role}
+                                    onChange={(e) => setDraft((prev) => ({ ...prev, role: e.target.value }))}
+                                    className="text-xs bg-[#15121f] border border-[#2a2540] rounded px-2 py-1 text-slate-200"
+                                >
+                                    <option value="planner">planner</option>
+                                    <option value="executor">executor</option>
+                                    <option value="reviewer">reviewer</option>
+                                </select>
+                                <select
+                                    data-testid="retry-override-model"
+                                    value={draft.model}
+                                    onChange={(e) => setDraft((prev) => ({ ...prev, model: e.target.value }))}
+                                    className="text-xs bg-[#15121f] border border-[#2a2540] rounded px-2 py-1 text-slate-200"
+                                >
+                                    <option value="">{catalog === null ? 'loading models' : 'pick a model'}</option>
+                                    {(catalog || []).map((entry) => (
+                                        <option key={entry.id} value={entry.id}>{entry.id}</option>
+                                    ))}
+                                </select>
+                                <button
+                                    type="button"
+                                    data-testid="retry-override-set"
+                                    disabled={busy || !draft.model}
+                                    onClick={setOverride}
+                                    className="header-text text-xs px-3 py-1 rounded bg-[#221b36] text-slate-300 border border-[#2a2540] hover:text-slate-200 disabled:opacity-50"
+                                >
+                                    Set override
+                                </button>
+                            </div>
+                            {error && (
+                                <p className="text-xs text-red-400" data-testid="retry-override-error">{error}</p>
+                            )}
+                            {warning && (
+                                <p className="text-xs text-amber-400" data-testid="retry-override-warning">{warning}</p>
+                            )}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        function ConfirmationModal({ command, onConfirm, onDismiss, busy, escalationResets = 0, retryPhaseRawId = null }) {
             let title = "Confirm action";
             let body = "Are you sure you want to run this command?";
             let cta = "Confirm";
@@ -1893,15 +2046,20 @@
                 body = "Roadmap marks this phase complete and the pipeline advances to the next phase. Merge was confirmed on base before this action was unlocked.";
                 cta = "Mark Complete";
             }
+            // The retry commands rerun agents inside the same phase, so the
+            // per-phase override control rides their confirmation.
+            const showRetryOverride = !!retryPhaseRawId &&
+                ["RESET_PHASE", "RESET_EXECUTION", "RESET_REVIEWER"].indexOf(command) !== -1;
             return (
                 <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
                     <div className="bg-[#15121f] border border-[#1c1829] rounded-lg p-6 max-w-sm mx-4">
                         <h3 className="header-text text-lg font-semibold text-amber-400 mb-3">
                             {title}
                         </h3>
-                        <p className="text-slate-300 text-sm mb-6">
+                        <p className={`text-slate-300 text-sm ${showRetryOverride ? "mb-4" : "mb-6"}`}>
                             {body}
                         </p>
+                        {showRetryOverride && <RetryModelOverrideSection rawId={retryPhaseRawId} />}
                         <div className="flex gap-3 justify-end">
                             <button
                                 type="button"
@@ -2073,6 +2231,10 @@
             planner_output_exists = true,
             phase_branch_exists = true,
             merge_probe_passed = false,
+            // Enables the retry-confirm override control. Monitor-only: per-phase
+            // overrides act on the active project, so the Queue's deferred
+            // dispatch (targetProjectPath) never passes it.
+            current_phase_raw_id = null,
             targetProjectPath = null,
             onDispatched = null,
             showOrchestratorLifecycle = false,
@@ -2473,6 +2635,7 @@
                             onDismiss={modalDismiss}
                             busy={confirmBusy}
                             escalationResets={escalation_resets}
+                            retryPhaseRawId={targetProjectPath ? null : current_phase_raw_id}
                         />
                     )}
                     {showConfirmModal && modalCommand === "STOP" && (
@@ -12138,6 +12301,7 @@
                                 planner_output_exists={pState.planner_output_exists ?? true}
                                 phase_branch_exists={pState.phase_branch_exists ?? true}
                                 merge_probe_passed={pState.merge_probe_passed ?? false}
+                                current_phase_raw_id={pState.current_phase_raw_id}
                                 showOrchestratorLifecycle={true}
                                 showCommandSentScreen={true}
                             />
@@ -12535,6 +12699,77 @@
         // Welcome walkthrough first-visit gate (re-openable from Settings).
         const WELCOME_DONE_KEY = "lb_welcome_done";
 
+        /* Stage D — shared per-role picker for the setup paths. Same workflow
+         * order and copy as the Settings card; options and the text-only test
+         * come from the caller (catalog for the cloud path, the probed server
+         * model list for the local path). */
+        function SetupRolePicker({ idPrefix, options, values, onSelect, disabled, isTextOnly }) {
+            const inputCls = "w-full text-sm bg-[#15121f] border border-[#2a2540] rounded px-2 py-1.5 text-slate-200";
+            return (
+                <div className="space-y-3">
+                    {MODEL_ROLE_GROUPS.map((group) => (
+                        <div key={group.key} className="space-y-2">
+                            <div>
+                                <p className="header-text text-[11px] uppercase tracking-wide text-slate-500 font-semibold">{group.title}</p>
+                                <p className="text-[11px] text-slate-500 leading-snug">{group.blurb}</p>
+                            </div>
+                            {group.roles.map((role) => {
+                                const info = MODEL_ROLE_INFO[role] || { label: role, blurb: "", note: "" };
+                                const selected = values[role] || "";
+                                const blocked = MODEL_VISION_ROLES.indexOf(role) !== -1 && selected && isTextOnly(selected);
+                                return (
+                                    <div key={role} className="space-y-1">
+                                        <span className="header-text text-xs text-slate-300 block">{info.label}</span>
+                                        {(info.blurb || info.note) && (
+                                            <p className="text-[11px] text-slate-500 leading-snug">{info.blurb} {info.note}</p>
+                                        )}
+                                        <select
+                                            data-testid={`${idPrefix}-role-select-${role}`}
+                                            value={selected}
+                                            onChange={(e) => onSelect(role, e.target.value)}
+                                            disabled={disabled}
+                                            className={inputCls + " disabled:opacity-50"}
+                                        >
+                                            {(!selected || options.indexOf(selected) === -1) && (
+                                                <option value={selected}>{selected ? selected + " (not in catalog)" : "not set"}</option>
+                                            )}
+                                            {options.map((id) => (
+                                                <option key={id} value={id}>{id}</option>
+                                            ))}
+                                        </select>
+                                        {blocked && (
+                                            <p className="text-xs text-amber-400" data-testid={`${idPrefix}-role-vision-warning`}>
+                                                {info.label} needs a model that accepts image input, and {selected} is
+                                                text only. Pick a multimodal model.
+                                            </p>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    ))}
+                </div>
+            );
+        }
+
+        /* Collapsed-by-default reveal for the optional setup customization. A
+         * bordered button with a caret so it reads as clickable without
+         * claiming space until engaged. */
+        function SetupCustomizeToggle({ testid, open, onToggle }) {
+            return (
+                <button
+                    type="button"
+                    data-testid={testid}
+                    onClick={onToggle}
+                    aria-expanded={open}
+                    className="w-full flex items-center justify-between px-3 py-2 rounded border border-[#2a2540] text-left hover:bg-[#221b36] transition-colors"
+                >
+                    <span className="header-text text-xs text-slate-300">Customize model roles (optional)</span>
+                    <span className="text-slate-500 text-xs">{open ? '▲' : '▼'}</span>
+                </button>
+            );
+        }
+
         /* A2 — first-run provider-key entry (setup mode).
          *
          * The container boots keyless into "setup mode": the pipeline is provisioned
@@ -12571,6 +12806,47 @@
             const [skipped, setSkipped] = React.useState(false);
             const [skipError, setSkipError] = React.useState("");
 
+            /* Stage D — optional per-role customization. Cloud path: catalog +
+             * defaults fetched lazily on first expand; only roles changed from
+             * the defaults ride the submit (absent roles keep today's one-click
+             * write). Local path: per-server {role: model} drafts over the
+             * probed model list; unset roles follow the primary pick. */
+            const [cloudCustomizeOpen, setCloudCustomizeOpen] = React.useState(false);
+            const [cloudRolesInfo, setCloudRolesInfo] = React.useState(null);
+            const [cloudRoleChoices, setCloudRoleChoices] = React.useState({});
+            const [localCustomizeOpen, setLocalCustomizeOpen] = React.useState({});
+            const [localRoles, setLocalRoles] = React.useState({});
+
+            const toggleCloudCustomize = () => {
+                setCloudCustomizeOpen((v) => !v);
+                if (cloudRolesInfo !== null) return;
+                fetch("/api/models/roles")
+                    .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+                    .then((d) => {
+                        setCloudRolesInfo({ defaults: (d && d.defaults) || {}, catalog: (d && d.catalog) || [] });
+                        setCloudRoleChoices((prev) => (Object.keys(prev).length > 0 ? prev : { ...((d && d.defaults) || {}) }));
+                    })
+                    .catch(() => setCloudRolesInfo({ error: true }));
+            };
+
+            const cloudCatalogById = {};
+            (((cloudRolesInfo && cloudRolesInfo.catalog) || [])).forEach((e) => { cloudCatalogById[e.id] = e; });
+            const cloudTextOnly = (id) => {
+                const input = cloudCatalogById[id] && cloudCatalogById[id].input;
+                return Array.isArray(input) && input.length > 0 && input.indexOf("image") === -1;
+            };
+            const cloudVisionBlocked = MODEL_VISION_ROLES.some(
+                (role) => cloudRoleChoices[role] && cloudTextOnly(cloudRoleChoices[role])
+            );
+            const cloudChangedRoles = {};
+            if (cloudRolesInfo && cloudRolesInfo.defaults) {
+                Object.keys(cloudRoleChoices).forEach((role) => {
+                    if (cloudRoleChoices[role] && cloudRoleChoices[role] !== cloudRolesInfo.defaults[role]) {
+                        cloudChangedRoles[role] = cloudRoleChoices[role];
+                    }
+                });
+            }
+
             const loadLocalModels = React.useCallback(() => {
                 fetch("/api/setup/local-models")
                     .then((r) => r.json())
@@ -12606,10 +12882,12 @@
                 setError("");
                 setSubmitting(true);
                 try {
+                    const payload = { provider, key: keyValue };
+                    if (Object.keys(cloudChangedRoles).length > 0) payload.roles = cloudChangedRoles;
                     const r = await fetch("/api/setup/provider-key", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ provider, key: keyValue }),
+                        body: JSON.stringify(payload),
                     });
                     const d = await r.json().catch(() => ({}));
                     if (!r.ok) {
@@ -12666,11 +12944,17 @@
                  * to the boot-time probe (which knows when the server exposes it). */
                 if (tuning.reasoning === "on") payload.reasoning = true;
                 if (tuning.reasoning === "off") payload.reasoning = false;
-                /* Image input: submission is blocked while "no", so this is
-                 * always true here; explicit so the wired entry always carries
-                 * the input type the executor and reviewer depend on. */
+                /* Image input: vision-role submission is blocked while the
+                 * effective pick is "no"; explicit so the wired entry always
+                 * carries the input type the executor and reviewer depend on. */
                 const vision = tuning.vision || (detail.vision === false ? "no" : "yes");
                 payload.vision = vision === "yes";
+                const roleDraft = localRoles[server.url] || {};
+                const customized = {};
+                Object.keys(roleDraft).forEach((role) => {
+                    if (roleDraft[role] && roleDraft[role] !== model) customized[role] = roleDraft[role];
+                });
+                if (Object.keys(customized).length > 0) payload.roles = customized;
                 setLocalError("");
                 setLocalSubmitting(true);
                 try {
@@ -12731,13 +13015,45 @@
                                             . Your account needs a small credit balance for the models to run.
                                         </p>
                                     </div>
+                                    <div className="space-y-2" data-testid="setup-key-customize">
+                                        <SetupCustomizeToggle
+                                            testid="setup-key-customize-toggle"
+                                            open={cloudCustomizeOpen}
+                                            onToggle={toggleCloudCustomize}
+                                        />
+                                        {cloudCustomizeOpen && (
+                                            cloudRolesInfo === null ? (
+                                                <p className="text-xs text-slate-500">Loading the model catalog…</p>
+                                            ) : cloudRolesInfo.error ? (
+                                                <p className="text-xs text-slate-500">
+                                                    Could not load the model catalog. The audited defaults will be
+                                                    used; you can change each role's model later in Settings.
+                                                </p>
+                                            ) : (
+                                                <div className="space-y-2 rounded border border-[#2a2540] bg-[#100d1a]/60 p-3">
+                                                    <p className="text-[11px] text-slate-500 leading-snug">
+                                                        Prefilled with the audited defaults. Changes are saved with the
+                                                        key in one pass, and you can revisit them any time in Settings.
+                                                    </p>
+                                                    <SetupRolePicker
+                                                        idPrefix="setup-key"
+                                                        options={(cloudRolesInfo.catalog || []).map((entry) => entry.id)}
+                                                        values={cloudRoleChoices}
+                                                        onSelect={(role, v) => setCloudRoleChoices((prev) => ({ ...prev, [role]: v }))}
+                                                        disabled={submitting}
+                                                        isTextOnly={cloudTextOnly}
+                                                    />
+                                                </div>
+                                            )
+                                        )}
+                                    </div>
                                     {error && (
                                         <p className="text-xs text-red-400" data-testid="setup-key-error">{error}</p>
                                     )}
                                     <button
                                         type="submit"
                                         data-testid="setup-key-submit"
-                                        disabled={submitting || !keyValue.trim()}
+                                        disabled={submitting || !keyValue.trim() || cloudVisionBlocked}
                                         className="header-text text-sm px-4 py-2 rounded bg-[#e2b14c] text-[#100d1a] font-semibold disabled:opacity-50"
                                     >
                                         {submitting ? "Saving…" : "Save key and start"}
@@ -12753,9 +13069,9 @@
                                                 Or use a local model server
                                             </h2>
                                             <p className="text-xs text-slate-500 leading-relaxed">
-                                                Run entirely on your own hardware, no cloud key needed. The executor and
-                                                reviewer need a model that accepts image input for UI phases; you can tune
-                                                per-role models later in deploy/.env.
+                                                Run entirely on your own hardware, no cloud key needed. The executor,
+                                                reviewer, and PRD creator need a model that accepts image input; you can
+                                                change each role's model later in Settings.
                                             </p>
                                         </div>
                                         {localInfo.servers && localInfo.servers.length > 0 ? (
@@ -12775,6 +13091,18 @@
                                                      * need a multimodal model. A probed text-only model prefills
                                                      * no; overriding it back to yes is the user's call. */
                                                     const vision = tuning.vision || (detail.vision === false ? "no" : "yes");
+                                                    /* Per-role customization: unset roles follow the primary
+                                                     * pick. The vision block covers only the roles that need
+                                                     * image input, on whatever model each one ends up with. */
+                                                    const roleDraft = localRoles[server.url] || {};
+                                                    const effModel = (role) => roleDraft[role] || model;
+                                                    const modelTextOnly = (m) => {
+                                                        if (m === model) return vision === "no";
+                                                        const d = (server.details || {})[m] || {};
+                                                        return d.vision === false;
+                                                    };
+                                                    const blockedRoles = MODEL_VISION_ROLES.filter((role) => effModel(role) && modelTextOnly(effModel(role)));
+                                                    const localCustomized = Object.keys(roleDraft).some((role) => roleDraft[role] && roleDraft[role] !== model);
                                                     const inputCls = "w-full text-sm bg-[#15121f] border border-[#2a2540] rounded px-3 py-2 text-slate-200";
                                                     return (
                                                     <div
@@ -12855,12 +13183,45 @@
                                                                 </label>
                                                             </div>
                                                         )}
-                                                        {model && vision === "no" && (
+                                                        {model && server.models && server.models.length > 1 && (
+                                                            <div className="space-y-2" data-testid="setup-local-customize">
+                                                                <SetupCustomizeToggle
+                                                                    testid="setup-local-customize-toggle"
+                                                                    open={!!localCustomizeOpen[server.url]}
+                                                                    onToggle={() => setLocalCustomizeOpen((prev) => ({ ...prev, [server.url]: !prev[server.url] }))}
+                                                                />
+                                                                {localCustomizeOpen[server.url] && (
+                                                                    <div className="space-y-2 rounded border border-[#2a2540] bg-[#100d1a]/60 p-3">
+                                                                        <p className="text-[11px] text-slate-500 leading-snug">
+                                                                            Every role uses the model picked above unless you swap
+                                                                            it here. The tuning fields above apply to that pick;
+                                                                            other models keep what the server reported, editable
+                                                                            later in Settings.
+                                                                        </p>
+                                                                        <SetupRolePicker
+                                                                            idPrefix="setup-local"
+                                                                            options={server.models}
+                                                                            values={MODEL_ROLE_GROUPS.reduce((acc, g) => {
+                                                                                g.roles.forEach((role) => { acc[role] = effModel(role); });
+                                                                                return acc;
+                                                                            }, {})}
+                                                                            onSelect={(role, v) => setLocalRoles((prev) => ({
+                                                                                ...prev,
+                                                                                [server.url]: { ...(prev[server.url] || {}), [role]: v },
+                                                                            }))}
+                                                                            disabled={localSubmitting}
+                                                                            isTextOnly={modelTextOnly}
+                                                                        />
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        )}
+                                                        {model && blockedRoles.length > 0 && (
                                                             <p className="text-xs text-amber-400" data-testid="setup-local-vision-warning">
-                                                                The executor and reviewer require a model that accepts image
-                                                                input (screenshot-based visual review). Pick a multimodal
-                                                                model, or flip this to Yes if you are sure this one takes
-                                                                images.
+                                                                The executor, reviewer, and PRD creator need a model that
+                                                                accepts image input (screenshot-based visual review). Assign
+                                                                them a multimodal model, or flip Supports image input to Yes
+                                                                if you are sure the assigned one takes images.
                                                             </p>
                                                         )}
                                                         <button
@@ -12869,11 +13230,11 @@
                                                             disabled={
                                                                 localSubmitting ||
                                                                 !(server.models && server.models.length > 0) ||
-                                                                vision === "no"
+                                                                blockedRoles.length > 0
                                                             }
                                                             className="header-text text-sm px-4 py-2 rounded bg-[#e2b14c] text-[#100d1a] font-semibold disabled:opacity-50"
                                                         >
-                                                            {localSubmitting ? "Wiring…" : "Use this model for all roles"}
+                                                            {localSubmitting ? "Wiring…" : (localCustomized ? "Use these role assignments" : "Use this model for all roles")}
                                                         </button>
                                                     </div>
                                                     );
@@ -12929,6 +13290,9 @@
                                         </p>
                                         <p className="text-xs text-slate-500">
                                             This takes a few moments on the first key. The dashboard will unlock automatically.
+                                        </p>
+                                        <p className="text-xs text-slate-500">
+                                            You can change each role's model later in Settings.
                                         </p>
                                     </React.Fragment>
                                 )}

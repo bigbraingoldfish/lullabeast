@@ -687,10 +687,18 @@ class TestSetupMode:
             "ANTHROPIC_API_KEY",
             "OPENROUTER_API_KEY",
             "LOCAL_MODEL_URL",
+            "LOCAL_MODEL_TUNING_TARGET",
             "PROVIDER_SETUP_SKIPPED",
             *TEMPLATE_MODEL_DEFAULTS,
         ):
             assert var in ENTRYPOINT, f"provider.env allowlist is missing {var}"
+
+    def test_local_tuning_overrides_scoped_to_tuning_target(self):
+        # Stage D: with per-role local assignments, the confirm-field overrides
+        # apply only to the model the user confirmed (LOCAL_MODEL_TUNING_TARGET);
+        # without the target line, all role-referenced models, as before.
+        assert 'os.environ.get("LOCAL_MODEL_TUNING_TARGET")' in ENTRYPOINT
+        assert "targets = [tuning_target] if tuning_target else [" in ENTRYPOINT
 
     def test_provider_env_parser_strips_trailing_cr(self):
         # A CRLF provider.env must not export values with an invisible

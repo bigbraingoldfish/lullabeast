@@ -215,7 +215,10 @@ key. To wire it up:
    is unset), and `LOCAL_MODEL_VISION` (image input; the executor and
    reviewer require a multimodal model, so unprobed models default to
    text+image) work the same way. All apply to the `*_MODEL`-assigned local
-   models and win over probed values and hand-edits. The doctor's
+   models and win over probed values and hand-edits;
+   `LOCAL_MODEL_TUNING_TARGET=<model-id>` narrows them to that one model (the
+   dashboard setup writes it when it assigns roles across different local
+   models). The doctor's
    `local_model_completeness` check warns while any role-assigned local model
    entry is missing `maxTokens`, `contextWindow`, `input`, or `reasoning`.
 4. **`"apiKey": "no-key"` is mandatory on every local provider entry.** The

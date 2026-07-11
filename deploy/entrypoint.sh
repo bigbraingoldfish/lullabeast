@@ -89,8 +89,8 @@ PROVIDER_KEY_FILE="$DATA/secrets/provider.env"
 # allowlisted to this set: the file is read line by line, never executed.
 PROVIDER_ENV_VARS="ANTHROPIC_API_KEY OPENROUTER_API_KEY LOCAL_MODEL_URL \
 LOCAL_MODEL_MAX_TOKENS LOCAL_MODEL_REASONING LOCAL_MODEL_CONTEXT_WINDOW \
-LOCAL_MODEL_VISION PLANNER_MODEL EXECUTOR_MODEL REVIEWER_MODEL PRD_MODEL \
-ROADMAP_MODEL ESCALATION_MODEL PROVIDER_SETUP_SKIPPED"
+LOCAL_MODEL_VISION LOCAL_MODEL_TUNING_TARGET PLANNER_MODEL EXECUTOR_MODEL \
+REVIEWER_MODEL PRD_MODEL ROADMAP_MODEL ESCALATION_MODEL PROVIDER_SETUP_SKIPPED"
 ENV_PINNED_VARS=""
 for _v in $PROVIDER_ENV_VARS; do
     if [ -n "${!_v:-}" ]; then ENV_PINNED_VARS="$ENV_PINNED_VARS $_v"; fi
@@ -309,9 +309,9 @@ PY
 #       vision), build an enriched models.providers.local entry, and merge it
 #       into openclaw.json (via the shared local_models + atomic_io helpers).
 #       The merge preserves same-id fields a prior boot or a hand-edit already
-#       set; LOCAL_MODEL_MAX_TOKENS / LOCAL_MODEL_REASONING (applied to the
-#       *_MODEL-referenced local models, or all when no knob is local) have the
-#       last word. We print each discovered model in the exact "local/<id>"
+#       set; LOCAL_MODEL_MAX_TOKENS / LOCAL_MODEL_REASONING (applied to
+#       LOCAL_MODEL_TUNING_TARGET when set, else to the *_MODEL-referenced
+#       local models, or all when no knob is local) have the last word. We print each discovered model in the exact "local/<id>"
 #       form the *_MODEL knobs need, with the values it was wired with: every
 #       assumption is loud, because a silently under-specified entry truncates
 #       real pipeline turns. A failed probe still writes the provider entry
@@ -357,14 +357,16 @@ if url:
         metadata = local_models.probe_model_metadata(base, models or [])
         entry = local_models.build_local_provider_entry(base, models or [], metadata)
         merged = local_models.merge_local_provider(_load_config(), entry)
-        # Explicit overrides win over probes and prior edits; scope them to the
-        # role-referenced local models when any *_MODEL knob points at local/.
+        # Explicit overrides win over probes and prior edits; scope them to
+        # LOCAL_MODEL_TUNING_TARGET (the setup screen's confirmed pick) when
+        # set, else to every local model a *_MODEL knob references.
         from autodev.installer.openclaw_template import TEMPLATE_MODEL_DEFAULTS
         max_tokens = local_models.parse_positive_int(os.environ.get("LOCAL_MODEL_MAX_TOKENS"))
         reasoning = local_models.parse_bool_flag(os.environ.get("LOCAL_MODEL_REASONING"))
         context_window = local_models.parse_positive_int(os.environ.get("LOCAL_MODEL_CONTEXT_WINDOW"))
         vision = local_models.parse_bool_flag(os.environ.get("LOCAL_MODEL_VISION"))
-        targets = [
+        tuning_target = (os.environ.get("LOCAL_MODEL_TUNING_TARGET") or "").strip()
+        targets = [tuning_target] if tuning_target else [
             v[len("local/"):]
             for v in ((os.environ.get(k) or "").strip() for k in TEMPLATE_MODEL_DEFAULTS)
             if v.startswith("local/")
