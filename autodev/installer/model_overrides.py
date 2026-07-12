@@ -148,6 +148,25 @@ def validate_model_override(props) -> list[str]:
     return errors
 
 
+def split_valid_overrides(overrides: dict) -> tuple[dict, dict]:
+    """Partition an overrides map into ``(valid, dropped)``.
+
+    Each entry is checked with :func:`validate_model_override`, the same gate the
+    dashboard API applies; ``dropped`` maps every rejected ref to its errors. The
+    boot applies only ``valid`` so a hand-edited or upgrade-invalidated override
+    cannot reach the gateway config and crash-loop the boot.
+    """
+    valid: dict = {}
+    dropped: dict = {}
+    for ref, props in overrides.items():
+        errors = validate_model_override(props)
+        if errors:
+            dropped[ref] = errors
+        else:
+            valid[ref] = props
+    return valid, dropped
+
+
 def _merge_props(existing: dict, updates: dict) -> dict:
     """One model's override entry with ``updates`` merged in.
 

@@ -12818,7 +12818,9 @@
             const [localRoles, setLocalRoles] = React.useState({});
 
             const toggleCloudCustomize = () => {
-                setCloudCustomizeOpen((v) => !v);
+                const opening = !cloudCustomizeOpen;
+                setCloudCustomizeOpen(opening);
+                if (opening) setLocalCustomizeOpen({});
                 if (cloudRolesInfo !== null) return;
                 fetch("/api/models/roles")
                     .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
@@ -12979,9 +12981,9 @@
             };
 
             return (
-                <div className="flex h-screen items-center justify-center app-sky p-6" data-testid="setup-key-screen">
+                <div className="flex h-screen items-start justify-center overflow-y-auto app-sky p-6" data-testid="setup-key-screen">
                     <div className="ll-grain" aria-hidden="true"></div>
-                    <div className="relative max-w-lg w-full rounded-lg border border-[#2a2540] bg-[#15121f] p-6 space-y-4">
+                    <div className="relative max-w-lg w-full rounded-lg border border-[#2a2540] bg-[#15121f] p-6 space-y-4 my-auto">
                         <h1 className="header-text text-lg font-semibold text-slate-200">Welcome to Lullabeast</h1>
                         {!restarting && (
                             <React.Fragment>
@@ -13188,7 +13190,10 @@
                                                                 <SetupCustomizeToggle
                                                                     testid="setup-local-customize-toggle"
                                                                     open={!!localCustomizeOpen[server.url]}
-                                                                    onToggle={() => setLocalCustomizeOpen((prev) => ({ ...prev, [server.url]: !prev[server.url] }))}
+                                                                    onToggle={() => {
+                                                                        setCloudCustomizeOpen(false);
+                                                                        setLocalCustomizeOpen((prev) => (prev[server.url] ? {} : { [server.url]: true }));
+                                                                    }}
                                                                 />
                                                                 {localCustomizeOpen[server.url] && (
                                                                     <div className="space-y-2 rounded border border-[#2a2540] bg-[#100d1a]/60 p-3">

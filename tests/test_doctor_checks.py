@@ -1200,6 +1200,14 @@ class TestReportAndCli:
         assert warn.exit_code(warns_ok=True) == 0
         assert failing.exit_code() == 1
         assert failing.exit_code(warns_ok=True) == 1
+        # A boot where only dashboard-fixable checks fail degrades (exit 3)
+        # instead of crash-looping; any hard failure alongside stays exit 1.
+        recoverable = DoctorReport([CheckResult("template_conformance", "t", "fail")])
+        mixed = DoctorReport(
+            [CheckResult("template_conformance", "t", "fail"), CheckResult("b", "t", "fail")]
+        )
+        assert recoverable.exit_code() == 3
+        assert mixed.exit_code() == 1
 
     def test_json_shape_and_exit_code(self, env, monkeypatch, capsys):
         monkeypatch.setenv("OPENCLAW_ROOT", env["openclaw_root"])

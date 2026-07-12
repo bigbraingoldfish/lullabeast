@@ -13,10 +13,12 @@ import pytest
 
 from autodev.installer.model_overrides import (
     CONTEXT_WINDOW_CEILING,
+    COST_CEILING,
     MAX_TOKENS_CEILING,
     apply_model_overrides,
     load_model_overrides,
     merge_model_overrides,
+    split_valid_overrides,
     validate_model_override,
 )
 from autodev.installer import openclaw_template as tpl
@@ -71,6 +73,23 @@ class TestValidate:
         )
         assert errors == []
 
+    def test_full_envelope_at_ceilings_passes(self):
+        # The outer edge of what the editor permits, paired with the CI boot
+        # guard in deploy-image.yml: if this envelope ever stops booting the
+        # gateway, OpenClaw tightened its schema under our ceilings and both bounds
+        # move together.
+        errors = validate_model_override(
+            {
+                "input": ["text", "image", "video", "audio"],
+                "contextWindow": CONTEXT_WINDOW_CEILING,
+                "maxTokens": MAX_TOKENS_CEILING,
+                "reasoning": True,
+                "cost": {k: COST_CEILING for k in ("input", "output", "cacheRead", "cacheWrite")},
+                "params": {"temperature": 2, "top_p": 1},
+            }
+        )
+        assert errors == []
+
     def test_none_clears_are_accepted(self):
         assert validate_model_override({"reasoning": None, "cost": {"input": None}}) == []
 
@@ -112,6 +131,32 @@ class TestValidate:
     )
     def test_bad_values_rejected(self, props):
         assert validate_model_override(props) != []
+
+
+# ── split (boot-time quarantine) ─────────────────────────────────────────────
+
+class TestSplitValid:
+    def test_keeps_valid_drops_invalid(self):
+        valid, dropped = split_valid_overrides(
+            {
+                "openrouter/good": {"contextWindow": 200_000},
+                "openrouter/bad": {"contextWindow": -5},
+            }
+        )
+        assert valid == {"openrouter/good": {"contextWindow": 200_000}}
+        assert list(dropped) == ["openrouter/bad"]
+        assert dropped["openrouter/bad"]  # carries the validation error(s)
+
+    def test_all_valid_none_dropped(self):
+        ov = {"m/x": {"reasoning": True}}
+        valid, dropped = split_valid_overrides(ov)
+        assert valid == ov
+        assert dropped == {}
+
+    def test_all_invalid_none_applied(self):
+        valid, dropped = split_valid_overrides({"m/x": {"contextWindow": 0}})
+        assert valid == {}
+        assert list(dropped) == ["m/x"]
 
 
 # ── merge ────────────────────────────────────────────────────────────────────
@@ -239,6 +284,26 @@ class TestApply:
         assert params["temperature"] == 0.3
         assert params["top_p"] == 0.95, "unedited params keep template values"
         assert final["meta"] == {"runtime": "bookkeeping"}, "live-only keys survive"
+
+    def test_overlaid_config_conforms_against_overlay_aware_baseline(self):
+        # Boot order: reconcile toward the template, then re-apply the overlay. The
+        # doctor's expected baseline is the raw template with the same overlay, so
+        # the overlaid live config conforms against it. The absence of this
+        # assertion is what let the crash-loop ship.
+        raw = tpl.load_template(str(REPO))
+        overrides = {
+            "openrouter/moonshotai/kimi-k2.7-code": {
+                "cost": {"input": 0.9},
+                "contextWindow": 131_072,
+            }
+        }
+        reconciled = tpl.reconcile_config_to_template(
+            raw, apply_model_overrides(raw, overrides)
+        )
+        live = apply_model_overrides(reconciled, overrides)
+        expected = apply_model_overrides(raw, overrides)
+        assert tpl.template_conformance_issues(expected, live) == []
+        assert tpl.template_conformance_issues(raw, live) != []
 
 
 # ── load ─────────────────────────────────────────────────────────────────────
