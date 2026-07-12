@@ -7749,13 +7749,14 @@ _PROVIDER_ENV_VAR = {
 _DEMO_ARTIFACT_MAX_BYTES = 64 * 1024
 _DEMO_PROJECT_NAME = "first-run-snake"
 
-# Characters that trigger command substitution when a KEY=value line is loaded
-# by the container entrypoint with `source` ($(...) and `...`). Every value the
-# setup endpoints write into provider_key_path is validated against these (in
-# addition to the whitespace/printable checks, which block newline-injecting a
-# second dotenv line). Legitimate API keys, base URLs, and model ids never
-# contain them, so rejecting them is safe and closes the shell-eval vector at
-# the point of write regardless of how the entrypoint consumes the file.
+# Characters that would trigger shell command substitution ($(...) and `...`)
+# if a KEY=value line were ever evaluated by a shell. The entrypoint parses
+# provider.env line by line and never sources it, but every value the setup
+# endpoints write is validated against these anyway (defense in depth, plus the
+# whitespace/printable checks that block newline-injecting a second dotenv
+# line). Legitimate API keys, base URLs, and model ids never contain them, so
+# rejecting them is safe and closes the shell-eval vector at the point of write
+# regardless of how the entrypoint consumes the file.
 _SHELL_EVAL_CHARS = ("$", "`")
 
 
@@ -7768,6 +7769,22 @@ def _reject_shell_eval_chars(value: str, field: str) -> None:
         raise HTTPException(
             status_code=400,
             detail=f"{field} must not contain '$' or backtick characters",
+        )
+
+
+# A local-model id is substituted verbatim into a ${VAR} placeholder inside a
+# quoted JSON string in openclaw.json (render_template_text does no escaping), so
+# a bare " could inject a sibling key like apiKey and a " or \ could produce
+# invalid JSON that crash-loops the boot. Legitimate model ids never carry them.
+_JSON_UNSAFE_CHARS = ('"', "\\")
+
+
+def _reject_json_unsafe_chars(value: str, field: str) -> None:
+    """Raise 400 if ``value`` carries a character that breaks a JSON string."""
+    if any(ch in value for ch in _JSON_UNSAFE_CHARS):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field} must not contain a double-quote or backslash character",
         )
 
 
@@ -7796,8 +7813,8 @@ def _merge_provider_env_lines(dest: str, owned_keys, new_lines) -> None:
     os.chmod(dest, 0o600)
 
 
-def _local_model_url_line_present(path: str) -> bool:
-    """True when ``path`` is a readable dotenv file with a non-empty LOCAL_MODEL_URL line.
+def _dotenv_key_has_value(path: str, keys) -> bool:
+    """True when ``path`` is a readable dotenv setting any KEY in ``keys`` to a non-empty value.
 
     Reads only the KEY=value shape (splits on the first ``=``); never logs any line
     (the file also carries the cloud provider key on a mixed install). OSError -> False.
@@ -7806,11 +7823,16 @@ def _local_model_url_line_present(path: str) -> bool:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 key, sep, value = line.partition("=")
-                if sep and key.strip() == "LOCAL_MODEL_URL" and value.strip():
+                if sep and key.strip() in keys and value.strip():
                     return True
     except OSError:
         return False
     return False
+
+
+def _local_model_url_line_present(path: str) -> bool:
+    """True when ``path`` sets a non-empty LOCAL_MODEL_URL line (a wired local server)."""
+    return _dotenv_key_has_value(path, {"LOCAL_MODEL_URL"})
 
 
 def _provider_status(config: dict) -> dict:
@@ -7821,17 +7843,16 @@ def _provider_status(config: dict) -> dict:
 
     setup_mode = bool(marker_path) and os.path.exists(os.path.expanduser(marker_path))
 
-    # key_present: an env var carries a key, OR the persisted secret file is non-empty.
+    # key_present: a cloud key is present in the env, OR the secret file sets a
+    # known cloud-key var. A local-only install (only LOCAL_MODEL_URL) or a bare
+    # skip flag leaves the file non-empty but carries no cloud key, so scan for
+    # an actual key line rather than trusting file size.
     env_present = any(
         os.environ.get(v, "").strip() for v in _PROVIDER_ENV_VAR.values()
     )
-    file_present = False
-    if key_path:
-        p = os.path.expanduser(key_path)
-        try:
-            file_present = os.path.isfile(p) and os.path.getsize(p) > 0
-        except OSError:
-            file_present = False
+    file_present = bool(key_path) and _dotenv_key_has_value(
+        os.path.expanduser(key_path), set(_PROVIDER_ENV_VAR.values())
+    )
 
     # local_configured (B4): a local model server is wired when LOCAL_MODEL_URL is
     # set in the env, OR the persisted secret file carries a non-empty
@@ -7929,8 +7950,8 @@ async def post_setup_provider_key(request: Request):
             status_code=400,
             detail="key must contain only printable characters",
         )
-    # The key is written into provider_key_path, which the entrypoint `source`s;
-    # $/backtick would command-substitute even without whitespace.
+    # The key is written into provider_key_path; $/backtick would be unsafe if
+    # that file were ever evaluated by a shell, so reject them at the write.
     _reject_shell_eval_chars(key, "key")
     if not (_PROVIDER_KEY_MIN_LEN <= len(key) <= _PROVIDER_KEY_MAX_LEN):
         raise HTTPException(
@@ -7962,12 +7983,13 @@ async def post_setup_provider_key(request: Request):
 
     env_var = _PROVIDER_ENV_VAR[provider]
     dest = os.path.expanduser(key_path)
-    parent = os.path.dirname(dest) or "."
+    # Merge, do not overwrite (mirrors the three sibling writers): a co-tenant
+    # LOCAL_MODEL_* config, the PROVIDER_SETUP_SKIPPED flag, and role knobs not
+    # in this request survive. owned_keys is only what we write here.
+    owned_keys = {env_var, *(line.partition("=")[0] for line in knob_lines)}
+    new_lines = [f"{env_var}={key}"] + knob_lines
     try:
-        os.makedirs(parent, mode=0o700, exist_ok=True)
-        # Atomic write via the shared helper (mkstemp in the dest dir + os.replace).
-        write_text_atomic(dest, "\n".join([f"{env_var}={key}"] + knob_lines) + "\n")
-        os.chmod(dest, 0o600)
+        _merge_provider_env_lines(dest, owned_keys, new_lines)
     except OSError as exc:
         # Name the path, never the key content, in the surfaced error.
         raise HTTPException(
@@ -8148,8 +8170,10 @@ async def post_setup_local_model(request: Request):
             status_code=400,
             detail="model must contain only printable characters",
         )
-    # Written as `<KNOB>=local/<model>` into the entrypoint-sourced file.
+    # Written as `<KNOB>=local/<model>` into the entrypoint-parsed file, then
+    # substituted into openclaw.json; reject both shell- and JSON-unsafe chars.
     _reject_shell_eval_chars(model, "model")
+    _reject_json_unsafe_chars(model, "model")
     if len(model) > _LOCAL_MODEL_ID_MAX_LEN:
         raise HTTPException(
             status_code=400,
@@ -8157,8 +8181,8 @@ async def post_setup_local_model(request: Request):
         )
 
     # Optional confirm fields. Only int/bool JSON types are accepted (the values
-    # are written into the entrypoint-sourced file, so they must render as bare
-    # digits — never client-controlled text).
+    # are written into the entrypoint-parsed file, so they must render as bare
+    # digits, never client-controlled text).
     max_tokens = body.get("max_tokens")
     if max_tokens is not None and (
         isinstance(max_tokens, bool) or not isinstance(max_tokens, int)
@@ -8203,6 +8227,7 @@ async def post_setup_local_model(request: Request):
                 detail=f"{role}: model must not contain whitespace or non-printable characters",
             )
         _reject_shell_eval_chars(role_model, f"{role} model")
+        _reject_json_unsafe_chars(role_model, f"{role} model")
         if len(role_model) > _LOCAL_MODEL_ID_MAX_LEN:
             raise HTTPException(
                 status_code=400,
@@ -8596,11 +8621,20 @@ async def put_models_roles(request: Request):
         _merge_provider_env_lines(
             dest, set(updates), [f"{knob}={model}" for knob, model in updates.items()]
         )
-        _touch_apply_marker(config)
     except OSError as exc:
         raise HTTPException(
             status_code=500,
             detail=f"Could not write the provider key file at {dest} ({exc.strerror or exc})",
+        ) from None
+    try:
+        _touch_apply_marker(config)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Saved the model assignments, but could not request a config "
+                f"apply ({exc.strerror or exc}). Restart the container to apply them."
+            ),
         ) from None
 
     return {"ok": True, "restarting": True}
@@ -8674,11 +8708,20 @@ async def put_models_properties(request: Request):
     try:
         os.makedirs(os.path.dirname(overrides_path) or ".", exist_ok=True)
         write_json_atomic(overrides_path, {"models": merged})
-        _touch_apply_marker(config)
     except OSError as exc:
         raise HTTPException(
             status_code=500,
             detail=f"Could not write the model overrides file at {overrides_path} ({exc.strerror or exc})",
+        ) from None
+    try:
+        _touch_apply_marker(config)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Saved the model properties, but could not request a config "
+                f"apply ({exc.strerror or exc}). Restart the container to apply them."
+            ),
         ) from None
 
     return {"ok": True, "restarting": True}

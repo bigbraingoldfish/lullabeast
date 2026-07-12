@@ -97,7 +97,15 @@ for _v in $PROVIDER_ENV_VARS; do
 done
 unset _v
 
-source_provider_env() {
+load_provider_env() {
+    # Reset first: unset every non-pinned provider var so a knob the dashboard
+    # dropped from the file stops applying on a live re-read, matching a clean
+    # boot. deploy/.env-pinned vars are captured once at boot, never cleared.
+    local _v
+    for _v in $PROVIDER_ENV_VARS; do
+        case " $ENV_PINNED_VARS " in *" $_v "*) continue ;; esac
+        unset "$_v"
+    done
     # Values are never echoed: the file holds the provider key with
     # restrictive perms.
     [ -s "$PROVIDER_KEY_FILE" ] || return 0
@@ -119,7 +127,7 @@ source_provider_env() {
         export "$key=$val"
     done < "$PROVIDER_KEY_FILE"
 }
-source_provider_env
+load_provider_env
 
 OFFLINE="${OFFLINE:-0}"
 SETUP_MODE=0
@@ -133,7 +141,7 @@ if [ "$OFFLINE" = "1" ]; then
 elif [ -n "${PROVIDER_SETUP_SKIPPED:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ] \
     && [ -z "${OPENROUTER_API_KEY:-}" ] && [ -z "${LOCAL_MODEL_URL:-}" ]; then
     # The operator explicitly skipped provider setup from the welcome screen
-    # (persisted in provider.env, sourced above): models and providers are
+    # (persisted in provider.env, loaded above): models and providers are
     # managed by hand in OpenClaw. Not setup mode (the welcome screen must
     # never reappear), but agents cannot run until OpenClaw carries a provider.
     echo "[lullabeast] provider setup was skipped: models are managed manually"
@@ -228,7 +236,7 @@ fi
 # writes go through atomic_io.
 #
 # Wrapped in a function so the setup-watch loop can re-run it after the
-# dashboard supplies a key: a dashboard-set *_MODEL value (or a newly sourced
+# dashboard supplies a key: a dashboard-set *_MODEL value (or a newly loaded
 # provider) must reach openclaw.json before the gateway restart. Idempotent.
 render_reconcile_config() {
     say "rendering/reconciling $OPENCLAW_ROOT/openclaw.json against the golden template"
@@ -553,6 +561,13 @@ finally:
         fi
         sleep 0.5
     done
+    # Boot uses the fatal default (a compose restart is the recovery there). The
+    # apply path passes "advisory": a bad dashboard save must not tear down a
+    # reachable container, so the dashboard stays up to repair it.
+    if [ "${1:-}" = "advisory" ]; then
+        say "WARNING: gateway did not listen on port $GATEWAY_PORT within 60s after config apply; keeping the container up so the dashboard stays reachable"
+        return 1
+    fi
     die "gateway did not listen on port $GATEWAY_PORT within 60s"
 }
 
@@ -767,7 +782,7 @@ while :; do
     fi
     if [ "$APPLY" = "1" ]; then
         rm -f "$APPLY_REQUEST_FILE"
-        source_provider_env
+        load_provider_env
         # Re-run the config wiring before the restart so anything the
         # dashboard wrote lands in openclaw.json: a *_MODEL value takes
         # effect via render_reconcile_config, and a LOCAL_MODEL_URL lands as
@@ -777,7 +792,7 @@ while :; do
         SETUP_MODE=0 wire_or_probe_local_models
         stop_gateway
         start_gateway
-        wait_for_gateway
+        wait_for_gateway advisory || true
         if [ "$SETUP_MODE" = "1" ]; then
             if [ -n "${PROVIDER_SETUP_SKIPPED:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ] \
                 && [ -z "${OPENROUTER_API_KEY:-}" ] && [ -z "${LOCAL_MODEL_URL:-}" ]; then

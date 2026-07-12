@@ -12,7 +12,7 @@ The agent pipeline (planner → executor → reviewer) executes code on the host
 
 ### Container deployment
 
-The Docker deployment in `deploy/` moves the trust boundary from the local user account to the container: generated code runs as an unprivileged user with all Linux capabilities dropped, `no-new-privileges` set, Lullabeast's own code mounted read-only to that user, and the dashboard published to the host loopback only. The sandbox contains filesystem damage and host process access; it does **not** contain network exfiltration or package-install supply-chain risk, because model APIs and legitimate package installs need the internet. The full posture, the read-only rootfs assessment, and the secrets handling are documented in [deploy/README.md, "Security hardening"](deploy/README.md#security-hardening).
+The Docker deployment in `deploy/` moves the trust boundary from the local user account to the container: generated code runs as an unprivileged user with all Linux capabilities dropped, `no-new-privileges` set, Lullabeast's own code root-owned (read-only to that user apart from three narrow install.sh write islands), and the dashboard published to the host loopback only. The sandbox contains filesystem damage and host process access; it does **not** contain network exfiltration or package-install supply-chain risk, because model APIs and legitimate package installs need the internet. The full posture, the read-only rootfs assessment, and the secrets handling are documented in [deploy/README.md, "Security hardening"](deploy/README.md#security-hardening).
 
 ## Reporting vulnerabilities
 

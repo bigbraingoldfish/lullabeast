@@ -673,11 +673,28 @@ class TestSetupMode:
         # land. The old whole-file source (all-or-nothing: a keyed install
         # silently ignored every dashboard-written knob) is gone.
         assert 'PROVIDER_KEY_FILE="$DATA/secrets/provider.env"' in ENTRYPOINT
-        assert "source_provider_env() {" in ENTRYPOINT
+        assert "load_provider_env() {" in ENTRYPOINT
         assert "ENV_PINNED_VARS" in ENTRYPOINT
         assert '. "$PROVIDER_KEY_FILE"' not in ENTRYPOINT, (
-            "the whole-file source must be replaced by source_provider_env"
+            "the whole-file source must be replaced by load_provider_env"
         )
+        # The shell-source-suggestive name must not creep back in and invite a
+        # real `. provider.env`; the file is parsed, never executed.
+        assert "source_provider_env" not in ENTRYPOINT
+
+    def test_provider_env_reset_clears_non_pinned_before_reread(self):
+        # A knob the dashboard dropped must stop applying on a live apply,
+        # matching a clean boot: the loader unsets every non-pinned provider var
+        # before it reads the file, and does so before the empty-file early
+        # return so clearing still happens when the file is now empty.
+        m = re.search(
+            r'load_provider_env\(\) \{.*?for _v in \$PROVIDER_ENV_VARS; do'
+            r'.*?ENV_PINNED_VARS.*?unset "\$_v".*?done'
+            r'.*?\[ -s "\$PROVIDER_KEY_FILE" \] \|\| return 0',
+            ENTRYPOINT,
+            re.DOTALL,
+        )
+        assert m, "the loader must unset non-pinned provider vars before re-reading the file"
 
     def test_provider_env_parser_is_allowlisted(self):
         # The file is parsed line by line and only variables the dashboard may
@@ -739,7 +756,7 @@ class TestSetupMode:
         # OpenClaw reads it from its process environment (the unlock mechanism).
         m = re.search(
             r'if \[ "\$SETUP_MODE" = "1" \] && \[ -s "\$PROVIDER_KEY_FILE" \];.*?'
-            r'source_provider_env.*?stop_gateway.*?start_gateway.*?wait_for_gateway',
+            r'load_provider_env.*?stop_gateway.*?start_gateway.*?wait_for_gateway',
             ENTRYPOINT,
             re.DOTALL,
         )
@@ -769,7 +786,7 @@ class TestSetupMode:
         # functions after re-reading provider.env (marker consumed first).
         m = re.search(
             r'if \[ "\$APPLY" = "1" \];.*?rm -f "\$APPLY_REQUEST_FILE".*?'
-            r'source_provider_env.*?'
+            r'load_provider_env.*?'
             r'render_reconcile_config.*?wire_or_probe_local_models.*?'
             r'stop_gateway.*?start_gateway.*?wait_for_gateway',
             ENTRYPOINT,
@@ -825,9 +842,9 @@ class TestApplyWatch:
         apply_idx = ENTRYPOINT.find('if [ "$APPLY" = "1" ]; then')
         assert apply_idx != -1
         consume_idx = ENTRYPOINT.find('rm -f "$APPLY_REQUEST_FILE"', apply_idx)
-        source_idx = ENTRYPOINT.find("source_provider_env", apply_idx)
-        assert consume_idx != -1 and source_idx != -1
-        assert consume_idx < source_idx
+        load_idx = ENTRYPOINT.find("load_provider_env", apply_idx)
+        assert consume_idx != -1 and load_idx != -1
+        assert consume_idx < load_idx
 
     def test_watch_loop_replaces_wait_n(self):
         # One lifetime loop supervises and applies; the blocking `wait -n`
@@ -843,6 +860,23 @@ class TestApplyWatch:
         assert idx != -1
         line = ENTRYPOINT[ENTRYPOINT.rfind("\n", 0, idx) : idx]
         assert "say" in line and "die" not in line
+
+    def test_apply_path_gateway_restart_is_non_fatal(self):
+        # A bad save must not tear down a reachable container: the apply-path
+        # gateway wait is advisory (warn + stay up), while boot keeps the fatal
+        # default so a compose restart remains its recovery.
+        m = re.search(
+            r'if \[ "\$APPLY" = "1" \];.*?start_gateway\s*\n\s*wait_for_gateway advisory \|\| true',
+            ENTRYPOINT,
+            re.DOTALL,
+        )
+        assert m, "the apply-path gateway wait must be advisory (non-fatal)"
+        # wait_for_gateway keeps a fatal default (die) for boot and only warns
+        # via say in advisory mode.
+        wfg = re.search(r'wait_for_gateway\(\) \{.*?\n\}', ENTRYPOINT, re.DOTALL)
+        assert wfg, "wait_for_gateway definition not found"
+        body = wfg.group(0)
+        assert '"advisory"' in body and "say" in body and "die" in body
 
     def test_apply_logs_completion_needle(self):
         # The CI smoke greps docker logs for exactly this byte sequence.
@@ -1037,6 +1071,34 @@ class TestDeployImageWorkflow:
         assert "/lullabeast" in WORKFLOW_TEXT
         assert re.search(r"docker push .*:\$\{GITHUB_REF_NAME\}", WORKFLOW_TEXT)
         assert re.search(r'docker push .*:latest', WORKFLOW_TEXT)
+
+    def test_smoke_boots_with_shipped_hardening_posture(self):
+        # The smoke boots with the SHIPPED posture (mirrors docker-compose.yml),
+        # not the docker default, so it exercises the sandbox rather than the text.
+        assert "--cap-drop ALL" in WORKFLOW_TEXT
+        assert "no-new-privileges" in WORKFLOW_TEXT
+
+    def test_smoke_asserts_runtime_sandbox(self):
+        # A runtime probe confirms code is read-only to the runtime user (an
+        # existing root-owned file, not a bare new file in sticky /app) and that
+        # the capability bounding set is empty.
+        assert "/app/ui/server.py" in WORKFLOW_TEXT
+        assert "CapBnd" in WORKFLOW_TEXT
+        assert "0000000000000000" in WORKFLOW_TEXT
+
+    def test_publish_reuses_smoked_image_not_a_rebuild(self):
+        # publish pushes the exact bytes build-smoke smoked: build-smoke saves
+        # and uploads the image, publish downloads and docker-loads it, and the
+        # publish steps contain no docker build.
+        jobs = self._load()["jobs"]
+        smoke_steps = jobs["build-smoke"]["steps"]
+        assert any(str(s.get("uses", "")).startswith("actions/upload-artifact") for s in smoke_steps)
+        assert "docker save lullabeast:ci" in WORKFLOW_TEXT
+        publish = jobs["publish"]
+        assert any(str(s.get("uses", "")).startswith("actions/download-artifact") for s in publish["steps"])
+        publish_run = "\n".join(str(s.get("run", "")) for s in publish["steps"])
+        assert "docker load" in publish_run
+        assert "docker build" not in publish_run
 
     def test_no_floating_openclaw_version(self):
         # Cross-cutting risk 1: never float "latest" for OpenClaw anywhere.

@@ -320,6 +320,18 @@ class TestPlaceholders:
         with pytest.raises(ValueError, match=missing):
             render_template_text(_raw_text(), env)
 
+    def test_render_does_not_escape_substituted_values(self):
+        # render_template_text substitutes verbatim into a quoted JSON string, so
+        # a stray " in a model value breaks that string (invalid JSON, or an
+        # injected sibling key). This is why the dashboard write sites reject "
+        # and \\ before a value can reach a *_MODEL knob; that guard is
+        # load-bearing, keep it.
+        env = dict(_TEST_ENV, EXECUTOR_MODEL='local/x"')
+        rendered = render_template_text(_raw_text(), env)
+        assert 'local/x"' in rendered  # substituted raw, not escaped to local/x\"
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(rendered)
+
 
 # ── conformance checker unit behavior ────────────────────────────────────────
 
