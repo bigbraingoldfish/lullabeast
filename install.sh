@@ -1845,6 +1845,7 @@ DOCTOR_EXIT=0
 case "$DOCTOR_EXIT" in
     0) echo "${GREEN}${BOLD}✓ Doctor: all checks green.${RESET}" ;;
     2) echo "${YELLOW}${BOLD}⚠ Doctor: passing with warnings (fix hints above).${RESET}" ;;
+    3) echo "${YELLOW}${BOLD}⚠ Doctor: a dashboard-recoverable config issue detected (exit 3); fix it in the dashboard, then re-check. See FAIL lines above.${RESET}" ;;
     *)
         if [ "$OWNED_OPENCLAW" -eq 1 ] || [ "$STRICT" -eq 1 ]; then
             fail "Doctor reports failing checks (exit $DOCTOR_EXIT); see the FAIL lines and fix hints above."

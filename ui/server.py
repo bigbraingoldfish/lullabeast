@@ -8648,6 +8648,24 @@ async def put_models_properties(request: Request):
         errors = _model_overrides.validate_model_override(props)
         if errors:
             raise HTTPException(status_code=400, detail=f"{ref}: " + "; ".join(errors))
+        # Refuse stripping image input from a model a vision-required role runs;
+        # it breaks that role's visual turns. Mirrors the roles PUT guard.
+        new_input = props.get("input") if isinstance(props, dict) else None
+        if isinstance(new_input, list) and "image" not in new_input:
+            for agent in (oc.get("agents") or {}).get("list") or []:
+                if (
+                    isinstance(agent, dict)
+                    and agent.get("id") in _VISION_REQUIRED_ROLES
+                    and _agent_primary(agent) == ref
+                ):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"{agent['id']} needs a model that accepts image "
+                            f"input, and this edit makes {ref} text only. Keep "
+                            f"image in its inputs, or reassign the role first."
+                        ),
+                    )
 
     overrides_path = os.path.expanduser(config["model_overrides_path"])
     merged = _model_overrides.merge_model_overrides(

@@ -289,16 +289,30 @@ if published.isdigit() and published != "18789":
 # render/reconcile so they survive the template force-win. Applied before
 # wire_or_probe_local_models, whose merge preserves existing fields and whose
 # explicit LOCAL_MODEL_* env values keep the last word for local models.
-from autodev.installer.model_overrides import apply_model_overrides, load_model_overrides
+from autodev.installer.model_overrides import apply_model_overrides, load_model_overrides, split_valid_overrides
 
-overrides = load_model_overrides(os.environ.get("MODEL_OVERRIDES_FILE") or "")
+ov_path = os.environ.get("MODEL_OVERRIDES_FILE") or ""
+overrides = load_model_overrides(ov_path)
 if overrides:
-    with open(target, encoding="utf-8") as f:
-        cfg = json.load(f)
-    overlaid = apply_model_overrides(cfg, overrides)
-    if overlaid != cfg:
-        write_json_atomic(target, overlaid)
-        print("[lullabeast] model property overrides applied from the data volume")
+    # Apply only entries that pass the dashboard API's own validation, so a
+    # hand-edited or upgrade-invalidated value cannot reach the gateway config.
+    valid, dropped = split_valid_overrides(overrides)
+    if dropped:
+        quarantine = os.path.splitext(ov_path)[0] + ".invalid.json"
+        try:
+            os.replace(ov_path, quarantine)
+            if valid:
+                write_json_atomic(ov_path, {"models": valid})
+            print(f"[lullabeast] quarantined {len(dropped)} invalid model override(s) to {os.path.basename(quarantine)}; applied {len(valid)}")
+        except OSError as e:
+            print(f"[lullabeast] dropped {len(dropped)} invalid model override(s) (quarantine failed: {e}); applied {len(valid)}")
+    if valid:
+        with open(target, encoding="utf-8") as f:
+            cfg = json.load(f)
+        overlaid = apply_model_overrides(cfg, valid)
+        if overlaid != cfg:
+            write_json_atomic(target, overlaid)
+            print("[lullabeast] model property overrides applied from the data volume")
 PY
 }
 
@@ -603,6 +617,7 @@ DOCTOR_EXIT=0
 (cd "$APP" && OWNED_OPENCLAW=1 python3 -m autodev.installer.doctor "${DOCTOR_FLAGS[@]}") || DOCTOR_EXIT=$?
 case "$DOCTOR_EXIT" in
     0|2) : ;;
+    3) say "WARNING: doctor reports a dashboard-recoverable config issue (exit 3); continuing to boot so the dashboard is reachable for repair (see FAIL lines above)" ;;
     *) die "doctor reports failing checks (exit $DOCTOR_EXIT); see the FAIL lines above" ;;
 esac
 
@@ -781,6 +796,7 @@ while :; do
                 (cd "$APP" && OWNED_OPENCLAW=1 python3 -m autodev.installer.doctor --live) || DOCTOR_EXIT=$?
                 case "$DOCTOR_EXIT" in
                     0|2) : ;;
+                    3) say "WARNING: deferred live doctor reports a dashboard-recoverable config issue (exit 3); continuing so the dashboard stays reachable for repair (see FAIL lines above)" ;;
                     *) die "deferred live doctor reports failing checks (exit $DOCTOR_EXIT); see the FAIL lines above" ;;
                 esac
             fi
@@ -795,6 +811,7 @@ while :; do
             (cd "$APP" && OWNED_OPENCLAW=1 python3 -m autodev.installer.doctor) || DOCTOR_EXIT=$?
             case "$DOCTOR_EXIT" in
                 0|2) : ;;
+                3) say "WARNING: doctor reports a dashboard-recoverable config issue after config apply (exit 3); fix it from the dashboard (see FAIL lines above)" ;;
                 *) say "WARNING: doctor reports failing checks after config apply (exit $DOCTOR_EXIT); see the FAIL lines above" ;;
             esac
             say "configuration applied; gateway restarted"

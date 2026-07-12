@@ -119,6 +119,38 @@ jobs:
           docker logs lullabeast-smoke
           exit 1
 
+      # Regression guard: a full-envelope model overlay (every editable field at
+      # the ceilings the dashboard permits) must still boot the gateway. If a
+      # future OpenClaw tightens its model-config schema under our validation
+      # ceilings, this fails here instead of crash-looping a user's boot. Pairs
+      # with tests/test_model_overrides.py::test_full_envelope_at_ceilings_passes.
+      - name: Guard - a full-envelope overlay still boots the gateway
+        run: |
+          before=$(docker logs lullabeast-smoke 2>&1 | grep -c "Lullabeast is up." || true)
+          docker exec -i lullabeast-smoke python3 - <<'PY'
+          import json
+          from autodev.installer.model_overrides import CONTEXT_WINDOW_CEILING, MAX_TOKENS_CEILING, COST_CEILING
+          provs = (json.load(open("/data/openclaw/openclaw.json")).get("models", {}).get("providers") or {})
+          ref = next(f"{p}/{m['id']}" for p, prov in provs.items() if isinstance(prov, dict) for m in (prov.get("models") or []) if m.get("id"))
+          env = {"input": ["text", "image", "video", "audio"], "contextWindow": CONTEXT_WINDOW_CEILING, "maxTokens": MAX_TOKENS_CEILING, "reasoning": True, "cost": {k: COST_CEILING for k in ("input", "output", "cacheRead", "cacheWrite")}, "params": {"temperature": 2, "top_p": 1}}
+          open("/data/model-overrides.json", "w").write(json.dumps({"models": {ref: env}}))
+          print("seeded full-envelope overlay on", ref)
+          PY
+          docker restart lullabeast-smoke
+          for i in $(seq 1 120); do
+            now=$(docker logs lullabeast-smoke 2>&1 | grep -c "Lullabeast is up." || true)
+            if [ "$now" -gt "$before" ]; then exit 0; fi
+            if [ "$(docker inspect -f '{{.State.Running}}' lullabeast-smoke)" != "true" ]; then
+              echo "::error::full-envelope overlay bricked the gateway boot (OpenClaw may have tightened its model-config schema)"
+              docker logs lullabeast-smoke
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "::error::boot did not complete within 600s with a full-envelope overlay"
+          docker logs lullabeast-smoke
+          exit 1
+
       # Optional smoke deepener (roadmap "job 3"): the hermetic doctor and
       # template test modules, run against the image's own Python + layout.
       - name: Hermetic doctor test suite inside the image

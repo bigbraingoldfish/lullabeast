@@ -399,3 +399,23 @@ class TestPutProperties:
         _put_props(cfg, {"local/qwen3.5": {"maxTokens": 4096}})
         entries = {e["id"]: e for e in _get(cfg).json()["catalog"]}
         assert entries["local/qwen3.5"]["maxTokens"] == 4096
+
+    def test_400_text_only_edit_on_vision_bound_model(self, cfg):
+        # kimi runs reviewer/executor/prd-creator; stripping image would break
+        # their visual turns, so the edit is refused and nothing is written.
+        r = _put_props(cfg, {"openrouter/moonshotai/kimi-k2.7-code": {"input": ["text"]}})
+        assert r.status_code == 400
+        assert "image" in r.json()["detail"]
+        assert not os.path.exists(cfg["model_overrides_path"])
+        assert not os.path.exists(cfg["apply_request_path"])
+
+    def test_multimodal_edit_on_vision_bound_model_ok(self, cfg):
+        r = _put_props(
+            cfg, {"openrouter/moonshotai/kimi-k2.7-code": {"input": ["text", "image"]}}
+        )
+        assert r.status_code == 200
+
+    def test_text_only_edit_on_non_vision_model_ok(self, cfg):
+        # glm-5.2 runs only planner/roadmap-converter, so text-only is fine.
+        r = _put_props(cfg, {"openrouter/z-ai/glm-5.2": {"input": ["text"]}})
+        assert r.status_code == 200

@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from autodev.installer import doctor
+from autodev.installer.model_overrides import apply_model_overrides
 from autodev.installer.openclaw_template import (
     TEMPLATE_ENV_VARS,
     TEMPLATE_MODEL_DEFAULTS,
@@ -433,6 +434,49 @@ class TestDoctorAgainstRenderedTemplate:
         result = doctor.check_template_conformance(config)
         assert result.status == "fail"
         assert "not found" in result.detail
+
+    def test_template_conformance_ok_with_applied_overlay(
+        self, rendered_root, tmp_path, monkeypatch
+    ):
+        # A legitimate dashboard edit (the overlay) must not read as drift.
+        monkeypatch.setenv("OWNED_OPENCLAW", "1")
+        ref = "openrouter/moonshotai/kimi-k2.7-code"
+        overrides = {ref: {"cost": {"input": 0.9}, "contextWindow": 131_072}}
+        overlay = tmp_path / "model-overrides.json"
+        overlay.write_text(json.dumps({"models": overrides}), encoding="utf-8")
+        live_path = os.path.join(rendered_root["openclaw_root"], "openclaw.json")
+        with open(live_path) as f:
+            live = json.load(f)
+        with open(live_path, "w") as f:
+            json.dump(apply_model_overrides(live, overrides), f)
+        config = dict(rendered_root, model_overrides_path=str(overlay))
+        assert doctor.check_template_conformance(config).status == "ok"
+
+    def test_template_conformance_still_fails_on_unoverridden_key_drift(
+        self, rendered_root, tmp_path, monkeypatch
+    ):
+        # The overlay owns contextWindow here, not cost; a cost drift is still
+        # caught (the whole key category is not blanket-excluded).
+        monkeypatch.setenv("OWNED_OPENCLAW", "1")
+        ref = "openrouter/moonshotai/kimi-k2.7-code"
+        overrides = {ref: {"contextWindow": 131_072}}
+        overlay = tmp_path / "model-overrides.json"
+        overlay.write_text(json.dumps({"models": overrides}), encoding="utf-8")
+        live_path = os.path.join(rendered_root["openclaw_root"], "openclaw.json")
+        with open(live_path) as f:
+            live = apply_model_overrides(json.load(f), overrides)
+        kimi = next(
+            m
+            for m in live["models"]["providers"]["openrouter"]["models"]
+            if m["id"] == "moonshotai/kimi-k2.7-code"
+        )
+        kimi["cost"]["input"] = 999.0
+        with open(live_path, "w") as f:
+            json.dump(live, f)
+        config = dict(rendered_root, model_overrides_path=str(overlay))
+        result = doctor.check_template_conformance(config)
+        assert result.status == "fail"
+        assert "cost" in result.detail
 
 
 # ── reconcile: the write-side inverse of conformance (boot self-heal) ────────

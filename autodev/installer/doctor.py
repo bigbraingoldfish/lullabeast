@@ -37,6 +37,10 @@ import urllib.request
 from dataclasses import asdict, dataclass, field
 
 from autodev.installer import setup_helpers
+from autodev.installer.model_overrides import (
+    apply_model_overrides,
+    load_model_overrides,
+)
 from autodev.installer.openclaw_template import (
     load_template,
     template_conformance_issues,
@@ -128,6 +132,11 @@ class CheckResult:
         return asdict(self)
 
 
+# Failures a user can fix from the dashboard. When only these fail, the boot
+# degrades to a reachable UI (exit code 3) instead of crash-looping.
+_DASHBOARD_RECOVERABLE_CHECKS = frozenset({"template_conformance", "model_modality"})
+
+
 @dataclass
 class DoctorReport:
     checks: list[CheckResult] = field(default_factory=list)
@@ -155,6 +164,9 @@ class DoctorReport:
 
     def exit_code(self, warns_ok: bool = False) -> int:
         if self.has_fail:
+            fails = [c for c in self.checks if c.status == "fail"]
+            if all(c.id in _DASHBOARD_RECOVERABLE_CHECKS for c in fails):
+                return 3
             return 1
         if self.has_warn:
             return 0 if warns_ok else 2
@@ -1214,7 +1226,13 @@ def check_template_conformance(config: dict) -> CheckResult:
             f"cannot read openclaw.json ({err})",
             "fix openclaw.json first (see openclaw_json check)",
         )
-    issues = template_conformance_issues(template, live)
+    # Fold the dashboard-owned overlay into the expected baseline so a
+    # legitimate model edit is not counted as template drift.
+    overrides = load_model_overrides(
+        os.path.expanduser(config.get("model_overrides_path") or "")
+    )
+    expected = apply_model_overrides(template, overrides)
+    issues = template_conformance_issues(expected, live)
     if issues:
         shown = "; ".join(issues[:6])
         if len(issues) > 6:
@@ -1291,6 +1309,7 @@ _CLI_CONFIG_KEYS = (
     "conversion_prompt_path",
     "provider_key_path",
     "setup_marker_path",
+    "model_overrides_path",
 )
 
 
