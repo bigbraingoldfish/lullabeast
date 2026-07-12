@@ -95,6 +95,33 @@ class TestProviderStatus:
             r = client.get("/api/setup/provider-status")
         assert r.json()["key_present"] is False
 
+    def test_key_present_false_on_local_only_install(self, tmp_path, monkeypatch):
+        # A local-model-only install writes a non-empty file with no cloud key:
+        # key_present must be False (no cloud key) while local_configured is True.
+        for v in ("OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "LOCAL_MODEL_URL"):
+            monkeypatch.delenv(v, raising=False)
+        cfg = _cfg(tmp_path)
+        p = Path(cfg["provider_key_path"])
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("LOCAL_MODEL_URL=http://host.docker.internal:11434\nPLANNER_MODEL=local/llama3\n")
+        with patch("ui.server.load_config", return_value=cfg):
+            r = client.get("/api/setup/provider-status")
+        data = r.json()
+        assert data["key_present"] is False
+        assert data["local_configured"] is True
+
+    def test_key_present_false_on_skip_only_file(self, tmp_path, monkeypatch):
+        # A bare skip flag leaves a non-empty file with no cloud key line.
+        for v in ("OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "LOCAL_MODEL_URL"):
+            monkeypatch.delenv(v, raising=False)
+        cfg = _cfg(tmp_path)
+        p = Path(cfg["provider_key_path"])
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("PROVIDER_SETUP_SKIPPED=1\n")
+        with patch("ui.server.load_config", return_value=cfg):
+            r = client.get("/api/setup/provider-status")
+        assert r.json()["key_present"] is False
+
     def test_applying_reflects_marker_presence(self, tmp_path, monkeypatch):
         # The Settings model card polls this to distinguish "apply queued" from
         # idle; the entrypoint removes the marker when its pass starts.
@@ -262,6 +289,47 @@ class TestProviderKeySuccess:
             )
         content = Path(cfg["provider_key_path"]).read_text()
         assert content == "OPENROUTER_API_KEY=sk-or-second00\n"
+
+    def test_key_entry_preserves_co_tenant_lines(self, tmp_path):
+        # Entering a cloud key merges, it does not overwrite: a co-tenant
+        # local-model config, the skip flag, and a role knob not in this request
+        # all survive.
+        cfg = _cfg(tmp_path)
+        p = Path(cfg["provider_key_path"])
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            "LOCAL_MODEL_URL=http://host.docker.internal:11434\n"
+            "PROVIDER_SETUP_SKIPPED=1\n"
+            "ROADMAP_MODEL=local/llama3\n"
+        )
+        with patch("ui.server.load_config", return_value=cfg):
+            r = client.post(
+                "/api/setup/provider-key",
+                json={"provider": "openrouter", "key": "sk-or-abcdefg"},
+            )
+        assert r.status_code == 200
+        content = Path(cfg["provider_key_path"]).read_text()
+        assert "OPENROUTER_API_KEY=sk-or-abcdefg" in content
+        assert "LOCAL_MODEL_URL=http://host.docker.internal:11434" in content
+        assert "PROVIDER_SETUP_SKIPPED=1" in content
+        assert "ROADMAP_MODEL=local/llama3" in content
+
+    def test_key_rotation_preserves_co_tenant_local_url(self, tmp_path):
+        # Rotating the key replaces only the key line; the co-tenant local URL stays.
+        cfg = _cfg(tmp_path)
+        p = Path(cfg["provider_key_path"])
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("OPENROUTER_API_KEY=sk-or-old00000\nLOCAL_MODEL_URL=http://host:11434\n")
+        with patch("ui.server.load_config", return_value=cfg):
+            r = client.post(
+                "/api/setup/provider-key",
+                json={"provider": "openrouter", "key": "sk-or-new00000"},
+            )
+        assert r.status_code == 200
+        content = Path(cfg["provider_key_path"]).read_text()
+        assert "OPENROUTER_API_KEY=sk-or-new00000" in content
+        assert "OPENROUTER_API_KEY=sk-or-old00000" not in content
+        assert "LOCAL_MODEL_URL=http://host:11434" in content
 
 
 # ── provider-key with per-role customization (Stage D) ───────────────────────

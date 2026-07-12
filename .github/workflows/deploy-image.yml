@@ -3,11 +3,14 @@
 #
 # 1. build-smoke: build the default (OpenClaw-baked) image, boot it with
 #    OFFLINE=1 (the entrypoint's CI/smoke mode: no provider API key, no
-#    billable --live probe, everything else provisions for real), wait for the
-#    boot to reach the supervisor, then run the doctor with --json inside the
-#    container and assert the smoke contract via deploy/smoke_assert.py:
-#    report parses, no check fails, every keyless-runnable check is green,
-#    and the model-dependent webhook_ping reports skipped (never fail).
+#    billable --live probe, everything else provisions for real) AND the
+#    shipped hardening posture (--cap-drop ALL, no-new-privileges), wait for
+#    the boot to reach the supervisor, assert the runtime sandbox (code
+#    read-only to the runtime user, capabilities dropped), then run the doctor
+#    with --json inside the container and assert the smoke contract via
+#    deploy/smoke_assert.py: report parses, no check fails, every
+#    keyless-runnable check is green, and the model-dependent webhook_ping
+#    reports skipped (never fail).
 #    A final step re-runs the hermetic doctor/template pytest modules inside
 #    the image (the optional smoke deepener; drop it first if runtime creep
 #    ever matters).
@@ -15,9 +18,10 @@
 #    OPENCLAW_VERSION= empty, entrypoint installs the pin into /data on first
 #    boot). Build-only: its first boot needs the npm registry and duplicates
 #    the baked variant's smoke coverage.
-# 3. publish: on version tags only, push the baked image to GHCR. OpenClaw is
-#    MIT-licensed (decision recorded in deploy/README.md), so
-#    publishing with OpenClaw baked is permitted.
+# 3. publish: on version tags only, push the image build-smoke already smoked
+#    to GHCR by digest (build-smoke saves it as an artifact; publish loads and
+#    re-tags those exact bytes, never a fresh rebuild). OpenClaw is MIT-licensed
+#    (decision recorded in deploy/README.md), so publishing it baked is permitted.
 #
 # Trigger note: GitHub does not evaluate `paths` filters for tag pushes, so a
 # version tag always builds and publishes even when the tagged commit touched
@@ -65,8 +69,13 @@ jobs:
       - name: Build image (OpenClaw baked, the default variant)
         run: docker build -f deploy/Dockerfile -t lullabeast:ci .
 
-      - name: Boot container in OFFLINE smoke mode
-        run: docker run -d --name lullabeast-smoke -e OFFLINE=1 lullabeast:ci
+      # Boot with the SHIPPED hardening posture (mirrors docker-compose.yml), so
+      # the smoke proves the runtime sandbox, not just that the text lints.
+      - name: Boot container in OFFLINE smoke mode (shipped hardening posture)
+        run: >
+          docker run -d --name lullabeast-smoke -e OFFLINE=1
+          --cap-drop ALL --security-opt no-new-privileges
+          lullabeast:ci
 
       # The "Lullabeast is up." banner prints only after the entrypoint's own
       # doctor gate passed, so reaching it proves the boot sequence (config
@@ -92,6 +101,26 @@ jobs:
         run: |
           docker logs lullabeast-smoke 2>&1 | grep -q "running doctor"
           docker logs lullabeast-smoke 2>&1 | grep -q "OFFLINE=1: CI/smoke mode."
+
+      # Prove the shipped runtime posture: Lullabeast's code is read-only to the
+      # runtime user and every Linux capability is dropped. docker exec runs as
+      # the image USER (lullabeast) inside the container's cap set.
+      - name: Assert the runtime sandbox posture
+        run: |
+          # (a) Overwriting an existing root-owned file must fail. Target an
+          # existing file: /app is sticky group-writable, so a bare NEW file
+          # there would wrongly succeed.
+          if docker exec lullabeast-smoke sh -c 'echo x > /app/ui/server.py' 2>/dev/null; then
+            echo "::error::/app/ui/server.py is writable by the runtime user; code is not read-only"
+            exit 1
+          fi
+          # (b) The capability bounding set must be empty (--cap-drop ALL).
+          if ! docker exec lullabeast-smoke sh -c 'grep CapBnd /proc/self/status' | grep -q '0000000000000000'; then
+            echo "::error::capability bounding set is not empty"
+            docker exec lullabeast-smoke sh -c 'grep CapBnd /proc/self/status'
+            exit 1
+          fi
+          echo "runtime posture verified: /app read-only to the runtime user, capabilities dropped"
 
       # `|| true`: the doctor exits nonzero on fail/warn, but the assertion
       # step below must still see the JSON so the failing check is NAMED in
@@ -161,6 +190,21 @@ jobs:
             python -m pytest tests/test_doctor_checks.py tests/test_doctor_endpoint.py tests/test_openclaw_template.py -q -p no:cacheprovider
           '
 
+      # Export the exact bytes that just passed the smoke so the publish job
+      # pushes them by digest instead of rebuilding. Tag pushes only (publish
+      # runs only then), so branch/PR builds skip the save/upload cost.
+      - name: Export the smoked image for publish
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        run: docker save lullabeast:ci -o /tmp/lullabeast-ci.tar
+
+      - name: Upload the smoked image artifact
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoked-image
+          path: /tmp/lullabeast-ci.tar
+          retention-days: 1
+
       - name: Dump boot log on failure
         if: failure()
         run: docker logs lullabeast-smoke 2>&1 || true
@@ -192,12 +236,22 @@ jobs:
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      # Publish the baked variant (MIT license permits it). GHCR
-      # image names must be lowercase, hence the tr on the owner.
-      - name: Build and push
+      - name: Download the smoked image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: smoked-image
+          path: /tmp
+
+      # Publish the exact image build-smoke booted and asserted (MIT license
+      # permits baking OpenClaw): load the smoked bytes and push those, so
+      # :tag and :latest resolve to the smoked digest instead of a fresh
+      # rebuild. GHCR image names must be lowercase, hence the tr on the owner.
+      - name: Load the smoked image and push it
         run: |
+          docker load -i /tmp/lullabeast-ci.tar
           owner="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
           image="ghcr.io/${owner}/lullabeast"
-          docker build -f deploy/Dockerfile -t "$image:${GITHUB_REF_NAME}" -t "$image:latest" .
+          docker tag lullabeast:ci "$image:${GITHUB_REF_NAME}"
+          docker tag lullabeast:ci "$image:latest"
           docker push "$image:${GITHUB_REF_NAME}"
           docker push "$image:latest"

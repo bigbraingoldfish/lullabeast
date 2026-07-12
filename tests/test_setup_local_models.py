@@ -239,6 +239,30 @@ class TestLocalModelValidation:
             assert r.status_code == 400, bad
             assert not os.path.exists(cfg["provider_key_path"])
 
+    def test_400_model_json_metachar(self, tmp_path):
+        # The model id is substituted verbatim into a quoted JSON string in
+        # openclaw.json; a " could inject a sibling key (e.g. apiKey) and a "
+        # or \ could crash the boot JSON parse, so both are rejected at write.
+        cfg = _cfg(tmp_path)
+        for bad in ('x"y', "x\\y", 'foo"', '","apiKey":"sk-evil'):
+            r = self._post(cfg, {"url": "http://host:11434", "model": bad})
+            assert r.status_code == 400, bad
+            assert not os.path.exists(cfg["provider_key_path"])
+
+    def test_400_role_model_json_metachar(self, tmp_path):
+        # The per-role model id shares the same JSON-substitution path.
+        cfg = _cfg(tmp_path)
+        r = self._post(
+            cfg,
+            {
+                "url": "http://host:11434",
+                "model": "llama3:8b",
+                "roles": {"planner": 'a"b'},
+            },
+        )
+        assert r.status_code == 400
+        assert not os.path.exists(cfg["provider_key_path"])
+
 
 # ── local-model wiring: success + merge ──────────────────────────────────────
 

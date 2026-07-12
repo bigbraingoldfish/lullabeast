@@ -288,6 +288,17 @@ class TestPutRolesWrites:
         assert "ESCALATION_MODEL=local/qwen3.5\n" in content
         assert os.path.exists(cfg["apply_request_path"])
 
+    def test_marker_failure_reports_apply_error_not_config_error(self, cfg):
+        # The assignments saved; only the apply-request marker failed. The error
+        # must name the apply request, not claim the key-file write failed.
+        with patch("ui.server._touch_apply_marker", side_effect=OSError(28, "No space left")):
+            r = _put_roles(cfg, {"planner": "openrouter/z-ai/glm-5.2"})
+        assert r.status_code == 500
+        detail = r.json()["detail"]
+        assert "apply" in detail.lower()
+        assert "provider key file" not in detail
+        assert "PLANNER_MODEL=openrouter/z-ai/glm-5.2" in Path(cfg["provider_key_path"]).read_text()
+
     def test_partial_update_preserves_unrelated_lines(self, cfg):
         p = Path(cfg["provider_key_path"])
         p.parent.mkdir(parents=True)
@@ -367,6 +378,17 @@ class TestPutProperties:
         assert saved["models"]["local/qwen3.5"]["contextWindow"] == 131072
         assert saved["models"]["local/qwen3.5"]["params"] == {"temperature": 0.4}
         assert os.path.exists(cfg["apply_request_path"])
+
+    def test_marker_failure_reports_apply_error_not_config_error(self, cfg):
+        # The overlay saved; only the apply-request marker failed. The error must
+        # name the apply request, not claim the overrides-file write failed.
+        with patch("ui.server._touch_apply_marker", side_effect=OSError(28, "No space left")):
+            r = _put_props(cfg, {"local/qwen3.5": {"reasoning": True}})
+        assert r.status_code == 500
+        detail = r.json()["detail"]
+        assert "apply" in detail.lower()
+        assert "overrides file" not in detail
+        assert os.path.exists(cfg["model_overrides_path"])
 
     def test_merge_preserves_other_models_and_fields(self, cfg):
         Path(cfg["model_overrides_path"]).write_text(
