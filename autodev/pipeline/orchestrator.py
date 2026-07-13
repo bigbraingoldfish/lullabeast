@@ -333,6 +333,13 @@ PHASE_STATE_FILE = os.path.join(PROJECT_ARTIFACTS_DIR, "phase_state.json")
 # Dashboard-written per-phase model overrides ({raw_id: {role: model}}),
 # consumed at the planner/executor/reviewer invoke sites.
 PHASE_MODEL_OVERRIDES_FILE = os.path.join(PROJECT_ARTIFACTS_DIR, "phase_model_overrides.json")
+# Sidecar recording the run_id that owns the override file above. A per-phase
+# override expires when its phase closes, but a run that stops or is abandoned
+# mid-roadmap leaves entries on phases it never reached; those must not silently
+# re-apply on a later, unrelated run. The orchestrator stamps this with the
+# current run_id at run start and clears the overrides when the owner differs
+# (a resume keeps the same run_id, so its overrides survive).
+PHASE_MODEL_OVERRIDES_RUN_FILE = os.path.join(PROJECT_ARTIFACTS_DIR, "phase_model_overrides.run")
 
 ORCHESTRATOR_FILENAME = "orchestrator.py"
 
@@ -4137,6 +4144,24 @@ class Orchestrator:
         n = self._provider_error_retries()
         return f"-pr{n}" if n else ""
 
+    def _run_suffix(self) -> str:
+        """Session-key suffix (``-r{token}``) scoping a pipeline session to the
+        current run.
+
+        ``run_id`` is minted fresh on every run start and preserved across resume
+        (see :func:`_new_run_id`). Folding a short slice of it into the session key
+        means a re-run, a reset, or a different project gets a **fresh** OpenClaw
+        session — created with the current model — instead of reattaching a prior
+        run's session, whose model is frozen at creation (a session's model cannot
+        change after it is made). A resume keeps the same run_id, so it reattaches
+        the same run's session and continuity is preserved. Empty when run_id is
+        absent (runs predating the field, and most unit tests) so those keys stay
+        byte-identical to the legacy shape. Appended outermost, after the
+        ``-pr/-c/-u`` retry discriminators, and the ``pipeline:`` prefix the
+        run-exit sweep matches on is untouched."""
+        rid = (getattr(self, "state", None) or {}).get("run_id") or ""
+        return "-r" + rid.replace("-", "")[:8] if rid else ""
+
     def _reset_provider_error_retries(self) -> None:
         """Clear the consecutive provider-retry counter (writes only when set). Called
         whenever an attempt ends in a non-(transient-provider) outcome, so the budget is
@@ -4846,6 +4871,49 @@ class Orchestrator:
             else:
                 os.remove(PHASE_MODEL_OVERRIDES_FILE)
         except (OSError, ValueError):
+            pass
+
+    def _reconcile_phase_overrides_for_run(self) -> None:
+        """Drop per-phase model overrides left by a *previous* run of this project.
+
+        Overrides expire when their phase closes (see
+        :meth:`_clear_phase_model_override`), but a run that stops or is abandoned
+        before reaching a phase leaves that phase's override behind. It belongs to
+        the old run's intent and must not silently re-apply when a fresh run later
+        reaches the phase (the "stale override on re-run" bug). Overrides are
+        therefore scoped to the run that set them: a sidecar records the owning
+        run_id; a run whose id differs owns none of the existing entries, so they
+        are cleared and the sidecar re-stamped. A resume keeps the same run_id, so
+        its overrides survive. Best-effort; no-op when run_id is absent (legacy).
+
+        Called once at run start (top of :meth:`run`), before any phase invoke
+        reads the override file. New overrides the operator sets mid-run land under
+        the now-current stamp and so survive until this run's next start.
+        """
+        run_id = (getattr(self, "state", None) or {}).get("run_id") or ""
+        if not run_id:
+            return
+        try:
+            with open(PHASE_MODEL_OVERRIDES_RUN_FILE, encoding="utf-8") as f:
+                owner = (f.read() or "").strip()
+        except OSError:
+            owner = ""
+        if owner == run_id:
+            return  # same run (fresh start already stamped, or a resume): keep them
+        try:
+            if os.path.exists(PHASE_MODEL_OVERRIDES_FILE):
+                os.remove(PHASE_MODEL_OVERRIDES_FILE)
+                print(
+                    f"[INFO] Cleared prior-run phase model overrides "
+                    f"(owner {owner or 'none'} -> run {run_id})."
+                )
+        except OSError:
+            pass
+        try:
+            os.makedirs(PROJECT_ARTIFACTS_DIR, exist_ok=True)
+            with open(PHASE_MODEL_OVERRIDES_RUN_FILE, "w", encoding="utf-8") as f:
+                f.write(run_id)
+        except OSError:
             pass
 
     def _resolve_notification_channel(self, agent_id: str = "escalation") -> str | None:
@@ -6740,6 +6808,11 @@ class Orchestrator:
         try:
             self.read_state()
 
+            # Scope per-phase overrides to this run: a fresh run drops a prior
+            # run's leftover overrides (a resume, same run_id, keeps them) before
+            # any phase reads the file.
+            self._reconcile_phase_overrides_for_run()
+
             # --- Stranded temp-file cleanup (FIND-STRANDED-TEMPS) ---
             # Remove any mkstemp files left behind by a previous crash before
             # running the repo init check, so stale files don't interfere with
@@ -6758,7 +6831,7 @@ class Orchestrator:
                 self.transition_state("RUNNING", failure_context)
                 phase = self.state.get("current_phase", 0)
                 raw_id = self.state.get("current_phase_raw_id", "unknown")
-                session_key = f"pipeline:phase-{phase}:{raw_id}:repo-init-failure"
+                session_key = f"pipeline:phase-{phase}:{raw_id}:repo-init-failure" + self._run_suffix()
                 token = self.openclaw_config.get("hooks", {}).get("token", "")
                 if os.path.exists(SYMLINK_TARGET):
                     cleanup_output_files(PROJECT_ARTIFACTS_DIR, "escalation")
@@ -6890,7 +6963,7 @@ class Orchestrator:
                         time.sleep(2)
                         continue
 
-                    session_key = f"pipeline:phase-{phase}:{raw_id}:planner-attempt-{retries + 1}" + self._provider_retry_suffix()
+                    session_key = f"pipeline:phase-{phase}:{raw_id}:planner-attempt-{retries + 1}" + self._provider_retry_suffix() + self._run_suffix()
                     self._record_active_agent("planner", session_key)  # Phase 9 — abort-on-escalation target
                     sentinel_path = os.path.join(PROJECT_ARTIFACTS_DIR, "planner_output.done")
                     token = self.openclaw_config.get("hooks", {}).get("token", "")
@@ -7192,7 +7265,7 @@ class Orchestrator:
                         time.sleep(2)
                         continue
 
-                    session_key = f"pipeline:phase-{phase}:{raw_id}:executor-attempt-{retries + 1}" + self._provider_retry_suffix()
+                    session_key = f"pipeline:phase-{phase}:{raw_id}:executor-attempt-{retries + 1}" + self._provider_retry_suffix() + self._run_suffix()
                     self._record_active_agent("executor", session_key)  # Phase 9 — abort-on-escalation target
                     attempt_label = "Cloud"
 
@@ -7213,6 +7286,7 @@ class Orchestrator:
                             role="executor",
                             session_key=(
                                 f"pipeline:phase-{phase}:{raw_id}:executor-attempt-{retries}"
+                                + self._run_suffix()
                             ),
                             stamp_path=os.path.join(
                                 PROJECT_ARTIFACTS_DIR, "executor_activity.stamp"
@@ -7509,7 +7583,7 @@ class Orchestrator:
                     _unverified_retries = _ps_rk.get("reviewer_unverified_retries", 0)
                     session_key = self._reviewer_session_key(
                         phase, raw_id, retries, _contract_retries, _unverified_retries
-                    ) + self._provider_retry_suffix()
+                    ) + self._provider_retry_suffix() + self._run_suffix()
                     self._record_active_agent("reviewer", session_key)  # Phase 9 — abort-on-escalation target
 
                     sentinel_path = os.path.join(PROJECT_ARTIFACTS_DIR, "reviewer_output.done")
@@ -8423,7 +8497,7 @@ class Orchestrator:
                     if self._should_invoke_escalation_agent():
                         phase = self.state.get("current_phase", 0)
                         raw_id = self.state.get("current_phase_raw_id", "unknown")
-                        session_key = f"pipeline:phase-{phase}:{raw_id}:escalation"
+                        session_key = f"pipeline:phase-{phase}:{raw_id}:escalation" + self._run_suffix()
                         token = self.openclaw_config.get("hooks", {}).get("token", "")
 
                         # Phase 9 — the orchestrator is giving up on this phase; abort the
@@ -8698,7 +8772,7 @@ class Orchestrator:
             try:
                 phase = self.state.get("current_phase", 0)
                 raw_id = self.state.get("current_phase_raw_id", "unknown")
-                session_key = f"pipeline:phase-{phase}:{raw_id}:exception-escalation"
+                session_key = f"pipeline:phase-{phase}:{raw_id}:exception-escalation" + self._run_suffix()
                 token = self.openclaw_config.get("hooks", {}).get("token", "")
                 self._preset_session_response_usage("escalation", session_key)
                 webhook_status = invoke_agent_webhook(
