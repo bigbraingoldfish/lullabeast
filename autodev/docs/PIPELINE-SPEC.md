@@ -1270,7 +1270,7 @@ This handles both first-run and restart cases safely.
 
 | Scenario | Working Tree Action |
 |---|---|
-| Failed-to-complete (timeout/crash) | `git reset --hard HEAD` then `git clean -fd` |
+| Failed-to-complete (timeout/crash) | Working tree preserved; the auto executor-retry re-runs on its prior files (`git reset --hard HEAD` only to restore an unaccounted file deletion). No `git clean`. |
 | Reviewer-rejection | Leave as-is — executor's files are the starting point |
 
 **Merge conflict:** → escalation agent immediately; do not attempt auto-resolve. After manual resolution via SSH, use the `PROCEED` resume command to trigger post-merge cleanup (tag, roadmap update, working file clear). See § Escalation Agent > Resume Commands.
