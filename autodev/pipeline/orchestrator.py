@@ -4375,14 +4375,6 @@ class Orchestrator:
             return False
         return True
 
-    def reset_working_tree(self):
-        try:
-            subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=SYMLINK_TARGET, check=True)
-            subprocess.run(["git", "clean", "-fd"], cwd=SYMLINK_TARGET, check=True)
-            print("[INFO] Working tree reset.")
-        except subprocess.CalledProcessError as e:
-            print(f"[ERROR] Failed to reset working tree: {e}")
-
     def read_phase_state(self):
         """Read phase_state.json, return dict (empty if file absent).
 
