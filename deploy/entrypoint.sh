@@ -97,6 +97,22 @@ for _v in $PROVIDER_ENV_VARS; do
 done
 unset _v
 
+# The *_MODEL knobs pinned in deploy/.env (the subset of ENV_PINNED_VARS that
+# are role knobs), exported for the dashboard. A pinned role wins at render
+# over any value the Settings card writes to provider.env, so the card reads
+# this to tell the operator a role is env-pinned, rather than appearing to
+# save and then silently reverting on the post-apply re-read. Captured here,
+# before load_provider_env mixes provider.env values into the environment
+# (which would otherwise make a dashboard-set role look pinned too).
+AUTODEV_PINNED_MODEL_KNOBS=""
+for _v in PLANNER_MODEL EXECUTOR_MODEL REVIEWER_MODEL PRD_MODEL ROADMAP_MODEL ESCALATION_MODEL; do
+    case " $ENV_PINNED_VARS " in
+        *" $_v "*) AUTODEV_PINNED_MODEL_KNOBS="$AUTODEV_PINNED_MODEL_KNOBS $_v" ;;
+    esac
+done
+unset _v
+export AUTODEV_PINNED_MODEL_KNOBS="${AUTODEV_PINNED_MODEL_KNOBS# }"
+
 load_provider_env() {
     # Reset first: unset every non-pinned provider var so a knob the dashboard
     # dropped from the file stops applying on a live re-read, matching a clean

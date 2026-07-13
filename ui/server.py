@@ -8568,11 +8568,23 @@ def get_models_roles():
         for a in ((oc.get("agents") or {}).get("list") or [])
         if isinstance(a, dict)
     }
+    # Role knobs pinned in deploy/.env win at render over anything a Settings
+    # save writes to provider.env (see entrypoint load_provider_env). The
+    # entrypoint captures that boot-time set into AUTODEV_PINNED_MODEL_KNOBS;
+    # surface it per role so the card can say a role is env-pinned instead of
+    # letting the save look successful and then silently revert on re-read.
+    pinned_knobs = {
+        k for k in (os.environ.get("AUTODEV_PINNED_MODEL_KNOBS") or "").split() if k
+    }
     return {
         "supported": _models_write_supported(config),
         "defaults": {role: TEMPLATE_MODEL_DEFAULTS[knob] for role, knob in _ROLE_KNOBS.items()},
         "roles": {
-            role: {"model": _agent_primary(agents.get(role)), "knob": knob}
+            role: {
+                "model": _agent_primary(agents.get(role)),
+                "knob": knob,
+                "pinned": knob in pinned_knobs,
+            }
             for role, knob in _ROLE_KNOBS.items()
         },
         "catalog": _assemble_model_catalog(oc),

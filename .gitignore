@@ -21,6 +21,11 @@ htmlcov/
 Thumbs.db
 ui/index.html.bak
 *.bak
+# Suffixed backups (e.g. .env.bak-modelpins) that *.bak does not match.
+*.bak-*
+
+# Test-runner output (regenerated per run; never committed).
+test-results/
 
 # Accidental literal `~` directory (must never hold real OpenClaw data)
 /~/

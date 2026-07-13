@@ -89,6 +89,26 @@ class TestSetSessionResponseUsage:
         frames = [json.loads(c.args[0]) for c in ws.send.call_args_list]
         assert frames[-1]["params"]["responseUsage"] == "tokens"
 
+    def test_omits_model_when_not_passed(self):
+        """No model -> the entry bakes the agent's configured default; the patch
+        must not carry a model key."""
+        ws = _make_ws_mock([CONNECT_CHALLENGE, HELLO_OK, PATCH_OK])
+        with patch.object(wc.websocket, "WebSocket", return_value=ws):
+            wc.set_session_response_usage("agent:planner:k", "ws://x", "tok")
+        assert "model" not in json.loads(ws.send.call_args_list[-1].args[0])["params"]
+
+    def test_bakes_model_on_the_creating_patch_when_passed(self):
+        """The override must ride this patch: a session's model is fixed at
+        creation, so a later webhook model= cannot change the pre-created entry."""
+        ws = _make_ws_mock([CONNECT_CHALLENGE, HELLO_OK, PATCH_OK])
+        with patch.object(wc.websocket, "WebSocket", return_value=ws):
+            wc.set_session_response_usage(
+                "agent:executor:k", "ws://x", "tok", model="openrouter/big/strong"
+            )
+        params = json.loads(ws.send.call_args_list[-1].args[0])["params"]
+        assert params["model"] == "openrouter/big/strong"
+        assert params["responseUsage"] == "full"
+
     def test_returns_false_on_rejection(self):
         ws = _make_ws_mock([CONNECT_CHALLENGE, HELLO_OK, PATCH_FAIL])
         with patch.object(wc.websocket, "WebSocket", return_value=ws):

@@ -28,8 +28,8 @@ def _make_orch(monkeypatch, tmp_path):
     monkeypatch.setattr(orch_mod, "PROJECT_ARTIFACTS_DIR", str(tmp_path))
     calls = []
 
-    def _set_usage(store_key, ws_url, token, mode="full", **k):
-        calls.append((store_key, ws_url, token, mode))
+    def _set_usage(store_key, ws_url, token, mode="full", model=None, **k):
+        calls.append((store_key, ws_url, token, mode, model))
         return True
 
     monkeypatch.setattr(orch_mod, "set_session_response_usage", _set_usage)
@@ -53,7 +53,7 @@ def test_preset_builds_store_key_and_uses_gateway_creds(monkeypatch, tmp_path):
     )
     assert calls == [(
         "agent:executor:pipeline:phase-2:core-1:executor-attempt-1",
-        "ws://gw", "gw-tok", "full",
+        "ws://gw", "gw-tok", "full", None,
     )]
 
 
@@ -99,3 +99,43 @@ def test_preset_failure_never_raises(monkeypatch, tmp_path):
 
     monkeypatch.setattr(orch_mod, "set_session_response_usage", _boom)
     orch._preset_session_response_usage("executor", "pipeline:x")  # must not raise
+
+
+def test_preset_threads_model_onto_the_patch(monkeypatch, tmp_path):
+    """A given model must ride the session-creating patch."""
+    monkeypatch.setenv("AUTODEV_RESPONSE_USAGE", "full")
+    orch, calls = _make_orch(monkeypatch, tmp_path)
+    orch._preset_session_response_usage(
+        "executor", "pipeline:phase-2:CORE-1:executor-attempt-1",
+        model="openrouter/big/strong",
+    )
+    assert calls[0][4] == "openrouter/big/strong"
+
+
+def _stub_phase_state(orch, override):
+    """Isolate the threading: fix the override the role resolves and no-op the
+    phase_state read/write the models_used stamp performs."""
+    orch._phase_model_override = lambda role: override
+    orch._get_agent_model = lambda role: "configured/default"
+    orch.read_phase_state = lambda: {}
+    orch.write_phase_state_atomic = lambda ps: None
+
+
+def test_record_active_agent_bakes_phase_override_as_model(monkeypatch, tmp_path):
+    """The fix: a phase override must reach the session-creating patch (a
+    session's model is fixed at creation), not only the later webhook."""
+    monkeypatch.setenv("AUTODEV_RESPONSE_USAGE", "full")
+    orch, calls = _make_orch(monkeypatch, tmp_path)
+    _stub_phase_state(orch, "openrouter/big/strong")
+    orch._record_active_agent("executor", "pipeline:phase-2:CORE-1:executor-attempt-1")
+    assert calls and calls[0][4] == "openrouter/big/strong"
+
+
+def test_record_active_agent_no_override_leaves_model_unset(monkeypatch, tmp_path):
+    """No override -> model unset, so the entry bakes the configured default
+    (the pre-fix behavior for the common no-override case is preserved)."""
+    monkeypatch.setenv("AUTODEV_RESPONSE_USAGE", "full")
+    orch, calls = _make_orch(monkeypatch, tmp_path)
+    _stub_phase_state(orch, None)
+    orch._record_active_agent("planner", "pipeline:phase-1:CORE-1:planner-attempt-1")
+    assert calls and calls[0][4] is None

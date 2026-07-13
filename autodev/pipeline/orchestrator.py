@@ -3449,7 +3449,9 @@ class Orchestrator:
         )
         return False
 
-    def _preset_session_response_usage(self, role: str, session_key: str) -> None:
+    def _preset_session_response_usage(
+        self, role: str, session_key: str, model: str | None = None
+    ) -> None:
         """Pre-seed ``responseUsage: "full"`` on the about-to-be-invoked session.
 
         OpenClaw's ``responseUsage`` is a per-session-entry preference (no config
@@ -3458,6 +3460,11 @@ class Orchestrator:
         exist yet, so calling this *before* the webhook fires pre-seeds the
         preference race-free; the run reuses the pre-created entry and appends a
         token-usage + cost line to each reply it records.
+
+        ``model`` (the phase override, when set) rides the same creating patch so
+        the entry is baked with it — the session's model is fixed at creation, so
+        setting it on this patch is the only channel that takes effect once the
+        entry exists.  ``None`` lets the entry bake the configured default.
 
         ``session_key`` is the bare ``pipeline:…`` key; the gateway store key is
         the ``agent:{role}:…`` lowercase form (same shape ``sessions.abort`` uses).
@@ -3477,7 +3484,7 @@ class Orchestrator:
             gw_ws_url = self.openclaw_config.get(
                 "gateway_ws_url", "ws://127.0.0.1:18789/__openclaw__/ws"
             )
-            ok = set_session_response_usage(store_key, gw_ws_url, gw_token, mode=mode)
+            ok = set_session_response_usage(store_key, gw_ws_url, gw_token, mode=mode, model=model)
             print(
                 f"[USAGE] responseUsage={mode} {'set' if ok else 'FAILED'} "
                 f"session_key={store_key}"
@@ -3506,8 +3513,9 @@ class Orchestrator:
         self._active_agent_role = role
         self._active_agent_session_key = session_key
         self._active_agent_stamp = os.path.join(PROJECT_ARTIFACTS_DIR, f"{role}_activity.stamp")
+        _override = self._phase_model_override(role)
         try:
-            _model = self._phase_model_override(role) or self._get_agent_model(role)
+            _model = _override or self._get_agent_model(role)
             if _model:
                 _ps = self.read_phase_state()
                 _models = _ps.get("models_used")
@@ -3519,9 +3527,12 @@ class Orchestrator:
                     self.write_phase_state_atomic(_ps)
         except Exception as e:
             print(f"[WARN] could not record model for {role}: {e}")
-        # Pre-seed responseUsage="full" on the session entry before the webhook
-        # fires so the run records a token-usage + cost line on every reply.
-        self._preset_session_response_usage(role, session_key)
+        # Pre-seed responseUsage="full" AND bake the phase override model (when set)
+        # on the entry this patch creates. The model must ride the creating patch:
+        # a session's model is fixed at creation, so a later webhook model= against
+        # the now-existing entry is ignored. No override -> the entry bakes the
+        # configured default.
+        self._preset_session_response_usage(role, session_key, model=_override)
 
     def _wait_for_stamp_settle(self, stamp_path: str) -> bool:
         """Poll an activity stamp until it stays quiet for ``_INTERRUPT_SETTLE_QUIET``
