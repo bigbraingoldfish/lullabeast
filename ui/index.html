@@ -203,6 +203,135 @@
         .header-text.font-mono {
             font-family: 'JetBrains Mono', monospace;
         }
+        /* ---- Model roles roster (Settings card) ----------------------------
+           Ported from the "Model Settings Redesign" design handoff, direction A:
+           dense agent rows with checkbox multi-select and a bulk-assign bar, a
+           rich model-picker popover, an inline pending-changes bar, and the
+           model-properties modal. Compact one-line rules so the ported block
+           reads as one unit. Text ramp: #d9d5e6 / #c1bbd5 / #a9a2c0 / #8079a0 /
+           #564f74 (bright to dim). */
+        .ms-thead{display:grid;grid-template-columns:24px 1fr minmax(280px,320px);align-items:center;gap:12px;padding:0 6px 8px;border-bottom:1px solid var(--ll-border);}
+        .ms-thead__a,.ms-thead__m{font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#8079a0;}
+        .ms-thead__m{text-align:right;}
+        .ms-group__label{font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#8079a0;font-weight:600;padding:12px 6px 5px;}
+        .ms-row{display:grid;grid-template-columns:24px 1fr minmax(280px,320px);align-items:center;gap:12px;padding:9px 6px;border-radius:8px;transition:background .12s,box-shadow .12s;}
+        .ms-row:hover{background:#1b1730;}
+        .ms-row.is-selected{background:rgba(226,177,76,.07);box-shadow:inset 0 0 0 1px rgba(226,177,76,.3);}
+        .ms-row__agent{min-width:0;}
+        .ms-row__name{display:flex;align-items:center;gap:7px;font-size:13.5px;font-weight:600;color:#d9d5e6;}
+        .ms-row__hint{display:block;font-size:11.5px;color:#8079a0;margin-top:1px;}
+        .ms-req{position:relative;font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.03em;text-transform:uppercase;color:var(--ll-brand);border:1px solid rgba(226,177,76,.4);border-radius:4px;padding:1px 4px;font-weight:600;cursor:help;}
+        .ms-req::after{content:"*";margin-left:1px;}
+        .ms-req__tip{position:absolute;left:-2px;top:calc(100% + 6px);z-index:55;display:none;width:216px;background:#191426;border:1px solid #39335a;border-radius:9px;box-shadow:0 14px 40px rgba(0,0,0,.5);padding:9px 11px;font-family:'Hanken Grotesk',sans-serif;font-size:11.5px;font-weight:400;line-height:1.45;letter-spacing:0;text-transform:none;color:#c1bbd5;cursor:default;}
+        .ms-req:hover .ms-req__tip,.ms-req:focus .ms-req__tip,.ms-req:focus-within .ms-req__tip{display:block;}
+        .ms-info{position:relative;display:inline-flex;flex:0 0 auto;}
+        .ms-info__btn{width:15px;height:15px;border-radius:50%;border:1px solid #564f74;background:transparent;color:#8079a0;font-family:'JetBrains Mono',monospace;font-size:9.5px;font-weight:700;font-style:italic;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .12s;padding:0;}
+        .ms-info__btn:hover,.ms-info__btn.is-open{border-color:var(--ll-brand);color:var(--ll-brand);}
+        .ms-info__pop{position:absolute;left:-2px;top:calc(100% + 7px);z-index:50;display:block;width:262px;background:#191426;border:1px solid #39335a;border-radius:10px;box-shadow:0 16px 44px rgba(0,0,0,.55);padding:11px 12px;cursor:default;animation:msPop .12s ease;}
+        .ms-info__about{display:block;font-size:12px;color:#c1bbd5;line-height:1.5;font-weight:400;text-align:left;text-transform:none;letter-spacing:0;font-family:'Hanken Grotesk',sans-serif;}
+        .ms-info__sug{display:flex;gap:8px;align-items:baseline;margin-top:9px;padding-top:9px;border-top:1px solid var(--ll-border);}
+        .ms-info__suglabel{font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:var(--ll-brand);font-weight:600;white-space:nowrap;flex:0 0 auto;}
+        .ms-info__sugtext{font-size:11.5px;color:#c1bbd5;line-height:1.45;font-weight:400;text-align:left;text-transform:none;letter-spacing:0;font-family:'Hanken Grotesk',sans-serif;}
+        .ms-row__model{display:flex;flex-direction:column;align-items:flex-end;gap:5px;min-width:0;}
+        .ms-warn{font-size:11px;color:#eab873;text-align:right;line-height:1.4;margin:0;}
+        .ms-check{position:relative;display:inline-flex;width:24px;height:24px;align-items:center;justify-content:center;cursor:pointer;}
+        .ms-check input{position:absolute;inset:0;opacity:0;cursor:pointer;margin:0;}
+        .ms-check input:disabled{cursor:not-allowed;}
+        .ms-check span{position:relative;width:17px;height:17px;border:1.5px solid #564f74;border-radius:5px;background:var(--ll-bg-panel);transition:all .12s;}
+        .ms-check input:checked+span{background:var(--ll-brand);border-color:var(--ll-brand);}
+        .ms-check input:checked+span::after{content:"";position:absolute;left:5px;top:1.5px;width:4.5px;height:9px;border:solid #100d1a;border-width:0 2px 2px 0;transform:rotate(45deg);}
+        .ms-select-wrap{position:relative;width:100%;}
+        .ms-select{width:100%;display:flex;align-items:center;gap:8px;background:#1b1526;border:1px solid var(--ll-border);border-radius:8px;padding:7px 10px;cursor:pointer;text-align:left;font-family:'Hanken Grotesk',sans-serif;transition:border-color .12s,background .12s;}
+        .ms-select:hover{border-color:#39335a;}
+        .ms-select.is-open{border-color:var(--ll-brand);background:#1e1830;}
+        .ms-select:disabled{opacity:.5;cursor:not-allowed;}
+        .ms-select__ph{font-size:12.5px;color:#8079a0;}
+        .ms-caret{margin-left:auto;color:#8079a0;font-size:10px;}
+        .ms-select--static{cursor:default;background:#171224;border-style:dashed;}
+        .ms-select--static:hover{border-color:var(--ll-border);}
+        .ms-pinned-note{font-size:11px;color:#8079a0;text-align:right;line-height:1.4;margin:0;font-family:'JetBrains Mono',monospace;}
+        .ms-cell{display:flex;flex-direction:column;gap:3px;min-width:0;}
+        .ms-cell__name{display:flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;color:#d9d5e6;}
+        .ms-cell__chips{display:flex;flex-wrap:wrap;gap:4px;}
+        .ms-cell--none{font-size:12px;color:#8079a0;font-style:italic;}
+        .ms-chip{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.02em;color:#a9a2c0;background:var(--ll-bg-panel);border:1px solid var(--ll-border);border-radius:999px;padding:1.5px 7px;white-space:nowrap;}
+        .ms-chip--warn{color:var(--ll-brand);border-color:rgba(226,177,76,.4);}
+        .ms-dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto;display:inline-block;}
+        .ms-dot--cloud{background:#8f88cf;}
+        .ms-dot--local{background:var(--ll-running);}
+        .ms-pop{position:absolute;top:calc(100% + 6px);left:0;right:0;z-index:40;background:#191426;border:1px solid #39335a;border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.6);overflow:hidden;animation:msPop .12s ease;}
+        .ms-pop--right{left:auto;right:0;width:340px;}
+        @keyframes msPop{from{opacity:0;transform:translateY(-4px);}to{opacity:1;transform:none;}}
+        .ms-pop__search{padding:8px;border-bottom:1px solid var(--ll-border);}
+        .ms-pop__search input{width:100%;background:#120f1c;border:1px solid var(--ll-border);border-radius:7px;padding:6px 9px;font-size:12px;color:#d9d5e6;font-family:'Hanken Grotesk',sans-serif;}
+        .ms-pop__search input::placeholder{color:#564f74;}
+        .ms-pop__list{max-height:318px;overflow-y:auto;padding:6px;}
+        .ms-pop__glabel{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:#8079a0;padding:7px 8px 4px;}
+        .ms-opt{position:relative;width:100%;display:flex;flex-direction:column;gap:4px;align-items:flex-start;text-align:left;background:transparent;border:0;border-radius:8px;padding:8px 30px 8px 9px;cursor:pointer;transition:background .1s;}
+        .ms-opt:hover:not(.is-disabled){background:#241d38;}
+        .ms-opt.is-active{background:rgba(226,177,76,.1);box-shadow:inset 2px 0 0 var(--ll-brand);}
+        .ms-opt.is-disabled{opacity:.4;cursor:not-allowed;}
+        .ms-opt__head{display:flex;align-items:baseline;gap:8px;}
+        .ms-opt__name{display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;color:#d9d5e6;}
+        .ms-opt__prov{font-size:10.5px;color:#8079a0;}
+        .ms-opt__chips{display:flex;flex-wrap:wrap;gap:4px;}
+        .ms-opt__blocked{font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.05em;text-transform:uppercase;color:#eab873;}
+        .ms-opt__tick{position:absolute;right:10px;top:9px;color:var(--ll-brand);font-size:12px;}
+        .ms-bulk{display:flex;align-items:center;gap:10px;margin-top:12px;padding:10px 12px;background:#1c1730;border:1px solid #39335a;border-radius:10px;animation:msSlideUp .18s ease;}
+        @keyframes msSlideUp{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:none;}}
+        .ms-bulk__n{font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;color:var(--ll-brand);background:var(--ll-brand-tint);border:1px solid rgba(226,177,76,.35);border-radius:6px;padding:3px 8px;white-space:nowrap;}
+        .ms-bulk__lbl{font-size:12px;color:#a9a2c0;white-space:nowrap;}
+        .ms-bulk__pick{flex:1;min-width:0;}
+        .ms-pending{margin-top:14px;padding:11px 13px;background:#171224;border:1px solid var(--ll-border);border-radius:10px;}
+        .ms-pending--blocked{border-color:rgba(226,177,76,.4);}
+        .ms-pending--applying,.ms-pending--done{display:flex;align-items:center;gap:9px;font-size:12.5px;margin-top:14px;padding:11px 13px;border-radius:10px;}
+        .ms-pending--applying{color:var(--ll-brand);background:#171224;border:1px solid rgba(226,177,76,.35);}
+        .ms-pending--done{color:var(--ll-running);background:rgba(79,217,140,.06);border:1px solid rgba(79,217,140,.35);}
+        .ms-pending__warn{font-size:11.5px;color:#eab873;margin:0 0 8px;}
+        .ms-pending__row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
+        .ms-pending__count{font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;color:#d9d5e6;}
+        .ms-pending__sp{flex:1;}
+        .ms-spin{width:13px;height:13px;border:2px solid rgba(226,177,76,.3);border-top-color:var(--ll-brand);border-radius:50%;animation:msSpin .7s linear infinite;flex:0 0 auto;}
+        @keyframes msSpin{to{transform:rotate(360deg);}}
+        .ms-diff{margin-top:10px;padding-top:10px;border-top:1px solid var(--ll-border);display:flex;flex-direction:column;gap:6px;}
+        .ms-diff__row{display:flex;align-items:center;gap:8px;font-size:12px;flex-wrap:wrap;}
+        .ms-diff__role{font-weight:600;color:#c1bbd5;min-width:120px;}
+        .ms-diff__from{color:#8079a0;text-decoration:line-through;}
+        .ms-diff__arrow{color:var(--ll-brand);}
+        .ms-diff__to{color:#d9d5e6;font-weight:600;}
+        .ms-diff__note{font-size:11px;color:#8079a0;line-height:1.5;margin:2px 0 0;}
+        .ms-btn{font-family:'JetBrains Mono',monospace;font-size:11.5px;font-weight:600;border-radius:8px;padding:7px 13px;cursor:pointer;border:1px solid transparent;transition:all .12s;}
+        .ms-btn--primary{background:var(--ll-brand);color:#100d1a;}
+        .ms-btn--primary:hover{background:#eab95f;}
+        .ms-btn--primary:disabled{opacity:.4;cursor:not-allowed;}
+        .ms-btn--ghost{background:transparent;border-color:#39335a;color:#c1bbd5;}
+        .ms-btn--ghost:hover{background:var(--ll-bg-panel-2);color:#d9d5e6;}
+        .ms-link{font-family:'JetBrains Mono',monospace;font-size:11px;color:#a9a2c0;background:none;border:0;cursor:pointer;padding:2px;}
+        .ms-link:hover{color:var(--ll-brand);}
+        .ms-link--dim{color:#8079a0;}
+        .ms-link:disabled{opacity:.5;cursor:not-allowed;}
+        .ms-foot{display:flex;align-items:center;margin-top:14px;padding-top:12px;border-top:1px solid var(--ll-border);}
+        .ms-foot__sp{flex:1;}
+        .ms-modal{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;padding:20px;}
+        .ms-modal__backdrop{position:absolute;inset:0;background:rgba(8,6,14,.78);}
+        .ms-modal__card{position:relative;width:100%;max-width:460px;background:var(--ll-bg-panel);border:1px solid #39335a;border-radius:14px;padding:18px;box-shadow:0 24px 70px rgba(0,0,0,.6);max-height:100%;overflow-y:auto;}
+        .ms-modal__head{display:flex;gap:12px;justify-content:space-between;margin-bottom:14px;}
+        .ms-modal__title{font-size:15px;font-weight:700;color:#d9d5e6;margin:0;}
+        .ms-modal__sub{font-size:11.5px;color:#8079a0;line-height:1.5;margin:4px 0 0;}
+        .ms-modal__foot{display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-top:16px;}
+        .ms-modal__hint{font-size:11px;color:#8079a0;flex:1;}
+        .ms-x{background:none;border:0;color:#8079a0;font-size:14px;cursor:pointer;}
+        .ms-x:hover{color:#d9d5e6;}
+        .ms-pop__list::-webkit-scrollbar,.ms-modal__card::-webkit-scrollbar{width:10px;}
+        .ms-pop__list::-webkit-scrollbar-thumb,.ms-modal__card::-webkit-scrollbar-thumb{background:#2f2947;border-radius:6px;border:3px solid transparent;background-clip:padding-box;}
+        @media (max-width:900px){
+            .ms-thead{grid-template-columns:24px 1fr;}
+            .ms-thead__m{display:none;}
+            .ms-row{grid-template-columns:24px 1fr;row-gap:6px;}
+            .ms-row__model{grid-column:1 / -1;align-items:stretch;}
+            .ms-warn,.ms-pinned-note{text-align:left;}
+            .ms-pop--right{left:0;right:0;width:auto;}
+        }
         
         /* Amber pulse — legacy non-pipeline indicators (e.g. stopping) */
         @keyframes amber-pulse {
@@ -13353,12 +13482,14 @@
             );
         }
 
-        /* Settings "Model roles" card: per-role assignment over the models OpenClaw
-         * has registered, plus per-model capability/cost editing (the overlay).
-         * Save writes the knobs and overlay, then the entrypoint apply loop
-         * re-renders openclaw.json and restarts the gateway; provider-status
-         * "applying" covers the queued window, so the restarting state polls it
-         * plus a settle tick and then re-reads the assignments. */
+        /* Settings "Model roles" card: a dense agent roster over the models
+         * OpenClaw has registered. One row per agent with checkbox multi-select
+         * and a bulk-assign bar; a rich picker popover with capability and cost
+         * chips; per-model capability/cost editing (the overlay) behind a footer
+         * link in a modal. Save writes the knobs and overlay, then the
+         * entrypoint apply loop re-renders openclaw.json and restarts the
+         * gateway; provider-status "applying" covers the queued window, so the
+         * applying state polls it plus a settle tick and then re-reads. */
         /* Display order follows the workflow: the two document agents produce the
          * source of truth (PRD, roadmap), then the four pipeline agents build
          * from it phase by phase. */
@@ -13376,52 +13507,271 @@
                 roles: ["planner", "executor", "reviewer", "escalation"],
             },
         ];
+        /* label + blurb + note are shared with the Setup role pickers; about is
+         * the roster info popover's first paragraph, note doubles as its
+         * "Suggested" line. */
         const MODEL_ROLE_INFO = {
             "prd-creator": {
                 label: "PRD creator",
                 blurb: "Drafts the PRD with you in the Ideas chat.",
+                about: "Works with you in the Ideas chat to turn a rough idea into a written PRD, the project's source of truth.",
                 note: "Must accept image input to read Ideas chat attachments. A strong conversational cloud model gives the best PRD quality.",
             },
             "roadmap-converter": {
                 label: "Roadmap converter",
                 blurb: "Turns the finished PRD into the roadmap the pipeline builds from.",
+                about: "Reads the finished PRD and breaks it into the ordered roadmap of phases the pipeline builds from.",
                 note: "Foundational work; errors here compound through every later phase. Use the strongest model available.",
             },
             "planner": {
                 label: "Planner",
                 blurb: "Plans how each phase will be built.",
+                about: "At the start of each phase, decides what to build and how before any code is written.",
                 note: "A reasoning-strong model helps. Image input is not needed.",
             },
             "executor": {
                 label: "Executor",
                 blurb: "Writes each phase's code and captures screenshots of the result.",
+                about: "Does the hands-on work of a phase: writes the code and captures screenshots of the result.",
                 note: "Must accept image input. Pick a coding-strong model.",
             },
             "reviewer": {
                 label: "Reviewer",
                 blurb: "Judges the executor's work before a phase can pass.",
+                about: "Inspects each finished phase, including its screenshots, and decides whether it passes.",
                 note: "Must accept image input; it verifies screenshots as its core gate duty.",
             },
             "escalation": {
                 label: "Escalation",
                 blurb: "Asks for your help when a phase gets stuck.",
+                about: "Steps in only when a phase gets stuck, to diagnose the problem and ask for your help.",
                 note: "Lightweight triage; an economical model is fine.",
             },
         };
         const MODEL_VISION_ROLES = ["executor", "reviewer", "prd-creator"];
 
+        /* The catalog carries no explicit tier flag; local models are recognised
+         * by the provider segment (the probed-local path registers under
+         * "local", hand-added local servers use their engine name). */
+        const MODEL_LOCAL_PROVIDER_HINTS = ["local", "llamacpp", "ollama", "vllm", "lmstudio"];
+        function modelTier(entry) {
+            const p = String((entry && entry.provider) || "").toLowerCase();
+            for (let i = 0; i < MODEL_LOCAL_PROVIDER_HINTS.length; i++) {
+                if (p.indexOf(MODEL_LOCAL_PROVIDER_HINTS[i]) !== -1) return "local";
+            }
+            return "cloud";
+        }
+
         function fmtContextWindow(n) {
             const v = Number(n);
             if (!isFinite(v) || v <= 0) return null;
-            if (v >= 1000000) return (v % 1000000 === 0 ? String(v / 1000000) : (v / 1000000).toFixed(1)) + "M context";
-            if (v >= 1000) return Math.round(v / 1000) + "k context";
-            return v + " context";
+            if (v >= 1000000) return (v % 1000000 === 0 ? String(v / 1000000) : (v / 1000000).toFixed(1)) + "M";
+            if (v >= 1000) return Math.round(v / 1000) + "k";
+            return String(v);
         }
 
-        function fmtModelCost(cost) {
-            if (!cost || (cost.input == null && cost.output == null)) return null;
-            const f = (v) => (v == null ? "?" : "$" + v);
-            return f(cost.input) + "/M in, " + f(cost.output) + "/M out";
+        function fmtCostFig(v) {
+            const n = Number(v);
+            return isFinite(n) ? n.toFixed(2) : String(v);
+        }
+
+        function fmtModelCost(cost, tier) {
+            if (!cost || (cost.input == null && cost.output == null)) {
+                return tier === "local" ? "free · local" : null;
+            }
+            const f = (v) => (v == null ? "?" : fmtCostFig(v));
+            return "$" + f(cost.input) + "·" + f(cost.output) + "/M";
+        }
+
+        function fmtModelCostLong(cost, tier) {
+            if (!cost || (cost.input == null && cost.output == null)) {
+                return tier === "local" ? "free (local model)" : null;
+            }
+            const f = (v) => (v == null ? "?" : "$" + fmtCostFig(v));
+            return f(cost.input) + " in · " + f(cost.output) + " out per M tokens";
+        }
+
+        /* Per-agent info popover: what the agent does plus the model suggestion.
+         * Click-toggle rather than hover so it works inside dense rows. */
+        function ModelRoleInfoTip({ about, suggest, testid }) {
+            const [open, setOpen] = React.useState(false);
+            const wrapRef = React.useRef(null);
+            React.useEffect(() => {
+                if (!open) return;
+                const onDoc = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false); };
+                const onKey = (e) => { if (e.key === "Escape") setOpen(false); };
+                document.addEventListener("mousedown", onDoc);
+                document.addEventListener("keydown", onKey);
+                return () => { document.removeEventListener("mousedown", onDoc); document.removeEventListener("keydown", onKey); };
+            }, [open]);
+            return (
+                <span className="ms-info" ref={wrapRef}>
+                    <button
+                        type="button"
+                        data-testid={testid}
+                        className={"ms-info__btn" + (open ? " is-open" : "")}
+                        aria-label="About this agent"
+                        onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}
+                    >i</button>
+                    {open && (
+                        <span className="ms-info__pop" onClick={(e) => e.stopPropagation()}>
+                            <span className="ms-info__about">{about}</span>
+                            {suggest && (
+                                <span className="ms-info__sug">
+                                    <span className="ms-info__suglabel">Suggested</span>
+                                    <span className="ms-info__sugtext">{suggest}</span>
+                                </span>
+                            )}
+                        </span>
+                    )}
+                </span>
+            );
+        }
+
+        /* Agent identity cell: name, info popover, image-required badge, hint. */
+        function ModelRoleLabel({ role }) {
+            const info = MODEL_ROLE_INFO[role] || { label: role, blurb: "", about: "", note: "" };
+            return (
+                <div className="ms-row__agent">
+                    <span className="ms-row__name">
+                        {info.label}
+                        <ModelRoleInfoTip about={info.about} suggest={info.note} testid={`model-role-info-${role}`} />
+                        {MODEL_VISION_ROLES.indexOf(role) !== -1 && (
+                            <span className="ms-req" tabIndex={0} role="note">
+                                image
+                                <span className="ms-req__tip">
+                                    Required: this agent reads screenshots, so it must run on a
+                                    model that accepts image input.
+                                </span>
+                            </span>
+                        )}
+                    </span>
+                    {info.blurb && <span className="ms-row__hint">{info.blurb}</span>}
+                </div>
+            );
+        }
+
+        /* Rich model picker: a popover grouped by tier, each option carrying the
+         * friendly name, provider, capability and cost chips. visionRequired
+         * greys out text-only models so a vision role cannot be misassigned.
+         * chipsFor and isTextOnly come from the card so overlay edits that are
+         * still pending are reflected. Closes on outside click and Escape. */
+        function ModelSelect({ catalog, catalogById, chipsFor, isTextOnly, value, onChange, visionRequired, placeholder, disabled, readOnly, align, testid }) {
+            const [open, setOpen] = React.useState(false);
+            const [q, setQ] = React.useState("");
+            const wrapRef = React.useRef(null);
+            React.useEffect(() => {
+                if (!open) return;
+                const onDoc = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false); };
+                const onKey = (e) => { if (e.key === "Escape") setOpen(false); };
+                document.addEventListener("mousedown", onDoc);
+                document.addEventListener("keydown", onKey);
+                return () => { document.removeEventListener("mousedown", onDoc); document.removeEventListener("keydown", onKey); };
+            }, [open]);
+            const cur = value ? catalogById[value] : null;
+            const ql = q.trim().toLowerCase();
+            const pick = (id) => { onChange(id); setOpen(false); setQ(""); };
+            const tiers = [{ key: "cloud", label: "Cloud" }, { key: "local", label: "Local" }];
+            const renderCell = (entry) => (
+                <span className="ms-cell">
+                    <span className="ms-cell__name">
+                        <span className={"ms-dot ms-dot--" + modelTier(entry)} title={modelTier(entry) === "local" ? "Local model" : "Cloud model"}></span>
+                        {entry.name}
+                    </span>
+                    <span className="ms-cell__chips">
+                        {chipsFor(entry.id).map((c) => (
+                            <span key={c.key} className={"ms-chip" + (c.tone ? " ms-chip--" + c.tone : "")} title={c.title}>{c.label}</span>
+                        ))}
+                    </span>
+                </span>
+            );
+            /* Pinned roles are controlled by deploy/.env, not the dashboard:
+             * render the assigned model as a static, non-interactive cell so
+             * the operator sees the value but cannot start a save that would
+             * silently revert. The card explains why alongside. */
+            if (readOnly) {
+                return (
+                    <div className="ms-select-wrap">
+                        <div className="ms-select ms-select--static" data-testid={testid} aria-disabled="true">
+                            {cur ? renderCell(cur) : (
+                                <span className={value ? "ms-cell ms-cell--none" : "ms-select__ph"}>
+                                    {value ? value + " (not in catalog)" : (placeholder || "Not set")}
+                                </span>
+                            )}
+                        </div>
+                    </div>
+                );
+            }
+            return (
+                <div className="ms-select-wrap" ref={wrapRef}>
+                    <button
+                        type="button"
+                        data-testid={testid}
+                        className={"ms-select" + (open ? " is-open" : "")}
+                        disabled={disabled}
+                        aria-haspopup="listbox"
+                        aria-expanded={open}
+                        onClick={() => setOpen((o) => !o)}
+                    >
+                        {cur ? renderCell(cur) : (
+                            <span className={value ? "ms-cell ms-cell--none" : "ms-select__ph"}>
+                                {value ? value + " (not in catalog)" : (placeholder || "Choose a model")}
+                            </span>
+                        )}
+                        <span className="ms-caret" aria-hidden="true">▾</span>
+                    </button>
+                    {open && (
+                        <div className={"ms-pop" + (align === "right" ? " ms-pop--right" : "")}>
+                            <div className="ms-pop__search">
+                                <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search models…" />
+                            </div>
+                            <div className="ms-pop__list" role="listbox">
+                                {tiers.map((t) => {
+                                    const items = catalog.filter((m) =>
+                                        modelTier(m) === t.key &&
+                                        (!ql || (m.name + " " + m.provider + " " + m.id).toLowerCase().indexOf(ql) !== -1)
+                                    );
+                                    if (items.length === 0) return null;
+                                    return (
+                                        <div key={t.key}>
+                                            <div className="ms-pop__glabel">{t.label}</div>
+                                            {items.map((m) => {
+                                                const blocked = visionRequired && isTextOnly(m.id);
+                                                return (
+                                                    <button
+                                                        key={m.id}
+                                                        type="button"
+                                                        role="option"
+                                                        aria-selected={m.id === value}
+                                                        disabled={blocked}
+                                                        className={"ms-opt" + (m.id === value ? " is-active" : "") + (blocked ? " is-disabled" : "")}
+                                                        onClick={() => { if (!blocked) pick(m.id); }}
+                                                    >
+                                                        <span className="ms-opt__head">
+                                                            <span className="ms-opt__name">
+                                                                <span className={"ms-dot ms-dot--" + t.key}></span>
+                                                                {m.name}
+                                                            </span>
+                                                            <span className="ms-opt__prov">{m.provider}</span>
+                                                        </span>
+                                                        <span className="ms-opt__chips">
+                                                            {chipsFor(m.id, true).map((c) => (
+                                                                <span key={c.key} className={"ms-chip" + (c.tone ? " ms-chip--" + c.tone : "")} title={c.title}>{c.label}</span>
+                                                            ))}
+                                                        </span>
+                                                        {blocked && <span className="ms-opt__blocked">needs image input</span>}
+                                                        {m.id === value && <span className="ms-opt__tick" aria-hidden="true">✓</span>}
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
         }
 
         function ModelRolesCard() {
@@ -13429,15 +13779,18 @@
             const [loadError, setLoadError] = React.useState(null);
             const [assignments, setAssignments] = React.useState({});
             const [propEdits, setPropEdits] = React.useState({});
-            const [catalogOpen, setCatalogOpen] = React.useState(false);
+            const [selected, setSelected] = React.useState(() => new Set());
+            const [reviewOpen, setReviewOpen] = React.useState(false);
+            const [propsOpen, setPropsOpen] = React.useState(false);
             const [expandedModel, setExpandedModel] = React.useState(null);
             const [advancedOpen, setAdvancedOpen] = React.useState(false);
-            const [confirmOpen, setConfirmOpen] = React.useState(false);
             const [saving, setSaving] = React.useState(false);
             const [restarting, setRestarting] = React.useState(false);
             const [saveError, setSaveError] = React.useState("");
             const [savedNote, setSavedNote] = React.useState("");
+            const [notApplied, setNotApplied] = React.useState("");
             const pollRef = React.useRef(null);
+            const attemptRef = React.useRef({});
 
             const assignmentsFrom = (d) => {
                 const next = {};
@@ -13471,6 +13824,12 @@
             const catalogById = {};
             catalog.forEach((entry) => { catalogById[entry.id] = entry; });
 
+            /* A role pinned in deploy/.env is controlled there, not by the
+             * dashboard: its picker is read-only and it is excluded from
+             * selection, pending changes, and bulk assignment. */
+            const rolePinned = (role) => !!(data && data.roles && data.roles[role] && data.roles[role].pinned);
+            const roleCurrent = (role) => (data && data.roles && data.roles[role] && data.roles[role].model) || "";
+
             const effInput = (id) => {
                 const edits = propEdits[id];
                 if (edits && (edits.vision === "yes" || edits.vision === "no")) {
@@ -13490,13 +13849,17 @@
             const roleChanges = {};
             if (data && data.roles) {
                 Object.keys(assignments).forEach((role) => {
+                    if (rolePinned(role)) return;
                     const current = (data.roles[role] && data.roles[role].model) || "";
                     if (assignments[role] && assignments[role] !== current) roleChanges[role] = assignments[role];
                 });
             }
-            const dirty = Object.keys(roleChanges).length > 0 || Object.keys(propEdits).length > 0;
+            const propEditIds = Object.keys(propEdits);
+            const pendingCount = Object.keys(roleChanges).length + propEditIds.length;
 
-            const modelChips = (id) => {
+            /* Chips for a model cell or picker option, with pending overlay edits
+             * applied so the row matches what would be saved. */
+            const chipsFor = (id, full) => {
                 const entry = catalogById[id];
                 if (!entry) return [];
                 const edits = propEdits[id] || {};
@@ -13507,13 +13870,18 @@
                 const cost = Object.assign({}, entry.cost || {});
                 if (edits.costInput !== undefined && edits.costInput !== "") cost.input = Number(edits.costInput);
                 if (edits.costOutput !== undefined && edits.costOutput !== "") cost.output = Number(edits.costOutput);
+                const tier = modelTier(entry);
                 const chips = [];
-                if (declared && input.indexOf("image") !== -1) chips.push({ key: "img", label: "image input", cls: "text-slate-300" });
-                else if (declared) chips.push({ key: "img", label: "text only", cls: "text-amber-400" });
+                if (declared && input.indexOf("image") !== -1) chips.push({ key: "img", label: "image", title: "Accepts image input" });
+                else if (declared) chips.push({ key: "img", label: "text only", tone: "warn", title: "Text only, no image input" });
+                if (full) {
+                    const reasoning = edits.reasoning !== undefined ? edits.reasoning === "on" : entry.reasoning === true;
+                    if (reasoning) chips.push({ key: "rsn", label: "reasoning", title: "Reasoning model" });
+                }
                 const cwLabel = fmtContextWindow(cw);
-                if (cwLabel) chips.push({ key: "ctx", label: cwLabel, cls: "text-slate-300" });
-                const costLabel = fmtModelCost(cost);
-                if (costLabel) chips.push({ key: "cost", label: costLabel, cls: "text-slate-300" });
+                if (cwLabel) chips.push({ key: "ctx", label: cwLabel + " ctx", title: Number(cw).toLocaleString() + " token context window" });
+                const costLabel = fmtModelCost(cost, tier);
+                if (costLabel) chips.push({ key: "cost", label: costLabel, title: fmtModelCostLong(cost, tier) || undefined });
                 return chips;
             };
 
@@ -13610,7 +13978,32 @@
                                     setAssignments(assignmentsFrom(d2));
                                     setPropEdits({});
                                     setRestarting(false);
-                                    setSavedNote("Saved. The gateway is restarting; new agent sessions pick up the change.");
+                                    /* Honesty backstop: any role we tried to change whose
+                                     * value did not actually land was overridden at render,
+                                     * a deploy/.env pin winning over the provider.env write.
+                                     * Name it and the fix rather than showing a bare success
+                                     * over a silent revert. */
+                                    const attempted = attemptRef.current || {};
+                                    const stuck = Object.keys(attempted).filter((role) => {
+                                        const landed = (d2.roles && d2.roles[role] && d2.roles[role].model) || "";
+                                        return landed !== attempted[role];
+                                    });
+                                    attemptRef.current = {};
+                                    if (stuck.length > 0) {
+                                        const names = stuck.map((role) => (MODEL_ROLE_INFO[role] || { label: role }).label).join(", ");
+                                        const allPinned = stuck.every((role) => d2.roles && d2.roles[role] && d2.roles[role].pinned);
+                                        const verb = stuck.length === 1 ? "was" : "were";
+                                        const them = stuck.length === 1 ? "it" : "them";
+                                        setNotApplied(
+                                            allPinned
+                                                ? `${names} ${verb} not changed: pinned in deploy/.env, which the dashboard cannot override. Edit deploy/.env and restart the container to change ${them}.`
+                                                : `${names} ${verb} not changed. A role pinned in deploy/.env can only be changed there; otherwise the value is set directly in OpenClaw.`
+                                        );
+                                        setSavedNote("");
+                                    } else {
+                                        setNotApplied("");
+                                        setSavedNote("Models updated. New agent sessions pick up the change.");
+                                    }
                                 })
                                 .catch(() => {
                                     setRestarting(false);
@@ -13621,10 +14014,13 @@
                 }, 3000);
             };
 
-            const onConfirmSave = async () => {
-                setConfirmOpen(false);
+            const onApply = async () => {
                 setSaveError("");
                 setSavedNote("");
+                setNotApplied("");
+                // Remember what we tried to change so the post-restart re-read can
+                // tell whether each assignment actually landed (an env pin reverts it).
+                attemptRef.current = { ...roleChanges };
                 setSaving(true);
                 try {
                     let propsBody = null;
@@ -13658,6 +14054,8 @@
                             return;
                         }
                     }
+                    setSelected(new Set());
+                    setReviewOpen(false);
                     setRestarting(true);
                     startRestartPoll();
                 } catch (_e) {
@@ -13674,39 +14072,79 @@
                 .filter((r) => knownRoles.indexOf(r) !== -1)
                 .concat(knownRoles.filter((r) => groupedRoles.indexOf(r) === -1));
 
+            // Pinned roles are controlled by deploy/.env; they cannot be selected
+            // or bulk-assigned, so every selection operation is over the assignable
+            // (non-pinned) roles only.
+            const assignableRoles = roleOrder.filter((r) => !rolePinned(r));
+            const pinnedRoles = roleOrder.filter(rolePinned);
+            const selRoles = assignableRoles.filter((r) => selected.has(r));
+            const allSelected = assignableRoles.length > 0 && assignableRoles.every((r) => selected.has(r));
+            const bulkVision = selRoles.some((r) => MODEL_VISION_ROLES.indexOf(r) !== -1);
+            const toggleSel = (role) => {
+                if (rolePinned(role)) return;
+                setSelected((s) => {
+                    const n = new Set(s);
+                    if (n.has(role)) n.delete(role); else n.add(role);
+                    return n;
+                });
+            };
+            const toggleAll = () => setSelected(allSelected ? new Set() : new Set(assignableRoles));
+            const setOne = (role, id) => setAssignments((prev) => ({ ...prev, [role]: id }));
+            const bulkAssign = (id) => setAssignments((prev) => {
+                const n = { ...prev };
+                selRoles.forEach((r) => { n[r] = id; });
+                return n;
+            });
+            const discard = () => { setAssignments(assignmentsFrom(data)); setPropEdits({}); setReviewOpen(false); };
+            const modelName = (id) => (catalogById[id] && catalogById[id].name) || id || "not set";
+
             const renderRoleRow = (role) => {
-                const info = MODEL_ROLE_INFO[role] || { label: role, blurb: "", note: "" };
-                const selected = assignments[role] || "";
+                const info = MODEL_ROLE_INFO[role] || { label: role, blurb: "", about: "", note: "" };
+                const pinned = rolePinned(role);
+                // A pinned row shows its live value (from deploy/.env), never a
+                // draft: the picker is read-only so the value can't drift.
+                const value = pinned ? roleCurrent(role) : (assignments[role] || "");
+                const on = !pinned && selected.has(role);
                 return (
-                    <div key={role} data-testid={`model-role-row-${role}`} className="rounded border border-[#2a2540] bg-[#221b36] p-3 space-y-1.5">
-                        <div className="flex flex-wrap items-baseline gap-2">
-                            <span className="header-text text-sm text-slate-200">{info.label}</span>
-                            {modelChips(selected).map((chip) => (
-                                <span key={chip.key} className={`header-text text-[10px] px-1.5 py-0.5 rounded bg-[#15121f] border border-[#2a2540] ${chip.cls}`}>{chip.label}</span>
-                            ))}
-                        </div>
-                        {info.blurb && <p className="text-xs text-slate-500">{info.blurb}</p>}
-                        {info.note && <p className="text-[11px] text-slate-500">{info.note}</p>}
-                        <select
-                            data-testid={`model-role-select-${role}`}
-                            value={selected}
-                            onChange={(e) => setAssignments((prev) => ({ ...prev, [role]: e.target.value }))}
-                            disabled={restarting}
-                            className={inputCls + " disabled:opacity-50"}
-                        >
-                            {(!selected || !catalogById[selected]) && (
-                                <option value={selected}>{selected ? selected + " (not in catalog)" : "not set"}</option>
+                    <div key={role} data-testid={`model-role-row-${role}`} className={"ms-row" + (on ? " is-selected" : "")}>
+                        <label className="ms-check">
+                            <input
+                                type="checkbox"
+                                data-testid={`model-role-check-${role}`}
+                                checked={on}
+                                disabled={restarting || pinned}
+                                onChange={() => toggleSel(role)}
+                                aria-label={`Select ${info.label}`}
+                            />
+                            <span></span>
+                        </label>
+                        <ModelRoleLabel role={role} />
+                        <div className="ms-row__model">
+                            <ModelSelect
+                                catalog={catalog}
+                                catalogById={catalogById}
+                                chipsFor={chipsFor}
+                                isTextOnly={isTextOnly}
+                                value={value}
+                                onChange={(id) => setOne(role, id)}
+                                visionRequired={MODEL_VISION_ROLES.indexOf(role) !== -1}
+                                disabled={restarting}
+                                readOnly={pinned}
+                                align="right"
+                                testid={`model-role-select-${role}`}
+                            />
+                            {pinned && (
+                                <p className="ms-pinned-note" data-testid={`model-role-pinned-${role}`}>
+                                    Pinned in deploy/.env. Change it there and restart the container.
+                                </p>
                             )}
-                            {catalog.map((entry) => (
-                                <option key={entry.id} value={entry.id}>{entry.id}</option>
-                            ))}
-                        </select>
-                        {MODEL_VISION_ROLES.indexOf(role) !== -1 && selected && isTextOnly(selected) && (
-                            <p className="text-xs text-amber-400" data-testid="model-roles-vision-warning">
-                                {info.label} needs a model that accepts image input, and {selected} is
-                                text only. Pick a multimodal model.
-                            </p>
-                        )}
+                            {!pinned && MODEL_VISION_ROLES.indexOf(role) !== -1 && value && isTextOnly(value) && (
+                                <p className="ms-warn" data-testid="model-roles-vision-warning">
+                                    {info.label} needs a model that accepts image input, and {modelName(value)} is
+                                    text only. Pick a multimodal model.
+                                </p>
+                            )}
+                        </div>
                     </div>
                 );
             };
@@ -13714,14 +14152,24 @@
             return (
                 <div
                     data-testid="settings-model-roles-card"
-                    className="rounded border border-[#2a2540] bg-[#15121f] p-3 space-y-2"
+                    className="rounded border border-[#2a2540] bg-[#15121f] p-4 space-y-2"
                 >
-                    <p className="header-text text-sm font-semibold text-slate-400">Model roles</p>
+                    <p className="header-text text-sm font-semibold text-slate-200">Model roles</p>
                     <p className="text-xs text-slate-500 leading-relaxed max-w-prose">
-                        Each pipeline role runs on a model from the catalog OpenClaw has registered.
-                        Assign models per role here; adding or removing models and providers stays
-                        in OpenClaw (the gateway card above).
+                        Each agent runs on a model from the catalog OpenClaw has registered.
+                        Tick one row, several, or all of them to assign in one move; adding
+                        or removing models and providers stays in OpenClaw (the gateway card
+                        above).
                     </p>
+                    {data && data.supported && pinnedRoles.length > 0 && (
+                        <p className="text-xs text-amber-400 leading-relaxed max-w-prose" data-testid="model-roles-pinned-explainer">
+                            {pinnedRoles.length === roleOrder.length
+                                ? "Every role is pinned in deploy/.env, so the dashboard cannot change any of them here."
+                                : `${pinnedRoles.length} role${pinnedRoles.length === 1 ? " is" : "s are"} pinned in deploy/.env and can only be changed there.`}
+                            {" "}A pinned role wins over anything saved here, so its picker is read-only. Edit
+                            deploy/.env and restart the container to change a pinned role.
+                        </p>
+                    )}
                     {!data && !loadError && (
                         <p className="text-xs text-slate-500" data-testid="model-roles-loading">Loading the model catalog&hellip;</p>
                     )}
@@ -13747,231 +14195,293 @@
                         </div>
                     )}
                     {data && data.supported && (
-                        <div className="space-y-2">
+                        <div>
+                            <div className="ms-thead">
+                                <label className="ms-check">
+                                    <input
+                                        type="checkbox"
+                                        data-testid="model-roles-select-all"
+                                        checked={allSelected}
+                                        disabled={restarting || assignableRoles.length === 0}
+                                        onChange={toggleAll}
+                                        aria-label="Select all agents"
+                                    />
+                                    <span></span>
+                                </label>
+                                <span className="ms-thead__a">Agent</span>
+                                <span className="ms-thead__m">Model</span>
+                            </div>
                             {MODEL_ROLE_GROUPS.map((group) => {
                                 const roles = group.roles.filter((r) => roleOrder.indexOf(r) !== -1);
                                 if (roles.length === 0) return null;
                                 return (
-                                    <div key={group.key} className="space-y-2 pt-1">
-                                        <div>
-                                            <p className="header-text text-[10px] uppercase tracking-wide text-slate-500 font-semibold">{group.title}</p>
-                                            <p className="text-xs text-slate-500 leading-relaxed max-w-prose">{group.blurb}</p>
-                                        </div>
+                                    <div key={group.key}>
+                                        <div className="ms-group__label" title={group.blurb}>{group.title}</div>
                                         {roles.map(renderRoleRow)}
                                     </div>
                                 );
                             })}
                             {roleOrder.filter((r) => groupedRoles.indexOf(r) === -1).map(renderRoleRow)}
-                            <div className="border-t border-[#2a2540] pt-2">
+                            {selRoles.length > 0 && !restarting && (
+                                <div className="ms-bulk" data-testid="model-roles-bulk-bar">
+                                    <span className="ms-bulk__n">{selRoles.length} selected</span>
+                                    <span className="ms-bulk__lbl">assign to</span>
+                                    <div className="ms-bulk__pick">
+                                        <ModelSelect
+                                            catalog={catalog}
+                                            catalogById={catalogById}
+                                            chipsFor={chipsFor}
+                                            isTextOnly={isTextOnly}
+                                            value=""
+                                            placeholder="choose a model"
+                                            visionRequired={bulkVision}
+                                            onChange={bulkAssign}
+                                            testid="model-roles-bulk-select"
+                                        />
+                                    </div>
+                                    <button type="button" className="ms-link ms-link--dim" onClick={() => setSelected(new Set())}>Clear</button>
+                                </div>
+                            )}
+                            {restarting && (
+                                <div className="ms-pending ms-pending--applying" data-testid="model-roles-restarting">
+                                    <span className="ms-spin" aria-hidden="true"></span>
+                                    <span>Applying the changes and restarting the gateway. This usually takes under a minute.</span>
+                                </div>
+                            )}
+                            {!restarting && (pendingCount > 0 || visionBlocked.length > 0) && (
+                                <div className={"ms-pending" + (visionBlocked.length > 0 ? " ms-pending--blocked" : "")} data-testid="model-roles-pending">
+                                    {visionBlocked.length > 0 && (
+                                        <p className="ms-pending__warn" data-testid="model-roles-pending-blocked">
+                                            ⚠ {visionBlocked.length} vision agent{visionBlocked.length === 1 ? "" : "s"} on a text-only model; fix before applying.
+                                        </p>
+                                    )}
+                                    {pendingCount > 0 && (
+                                        <div className="ms-pending__row">
+                                            <span className="ms-pending__count">{pendingCount} pending change{pendingCount === 1 ? "" : "s"}</span>
+                                            <button type="button" className="ms-link" data-testid="model-roles-review-toggle" onClick={() => setReviewOpen((v) => !v)}>
+                                                {reviewOpen ? "Hide" : "Review"}
+                                            </button>
+                                            <span className="ms-pending__sp"></span>
+                                            <button type="button" className="ms-btn ms-btn--ghost" data-testid="model-roles-discard" disabled={saving} onClick={discard}>Discard</button>
+                                            <button
+                                                type="button"
+                                                className="ms-btn ms-btn--primary"
+                                                data-testid="model-roles-save"
+                                                disabled={visionBlocked.length > 0 || saving}
+                                                onClick={onApply}
+                                            >
+                                                {saving ? "Saving…" : "Apply and restart"}
+                                            </button>
+                                        </div>
+                                    )}
+                                    {reviewOpen && pendingCount > 0 && (
+                                        <div className="ms-diff">
+                                            {Object.keys(roleChanges).map((role) => (
+                                                <div className="ms-diff__row" key={role}>
+                                                    <span className="ms-diff__role">{(MODEL_ROLE_INFO[role] || { label: role }).label}</span>
+                                                    <span className="ms-diff__from">{modelName((data.roles[role] && data.roles[role].model) || "")}</span>
+                                                    <span className="ms-diff__arrow" aria-hidden="true">→</span>
+                                                    <span className="ms-diff__to">{modelName(roleChanges[role])}</span>
+                                                </div>
+                                            ))}
+                                            {propEditIds.map((id) => (
+                                                <div className="ms-diff__row" key={id}>
+                                                    <span className="ms-diff__role">Properties</span>
+                                                    <span className="ms-diff__to">{modelName(id)} edited</span>
+                                                </div>
+                                            ))}
+                                            <p className="ms-diff__note">
+                                                Applying restarts the OpenClaw gateway. Agent sessions and
+                                                Ideas chats that are mid-reply are interrupted; new sessions
+                                                pick up the new models. Saves are refused while the pipeline is running.
+                                            </p>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                            {saveError && (
+                                <p className="text-xs text-red-400" data-testid="model-roles-save-error">{saveError}</p>
+                            )}
+                            {notApplied && !restarting && (
+                                <div className="ms-pending ms-pending--blocked" data-testid="model-roles-not-applied">
+                                    <p className="ms-pending__warn" style={{ margin: 0 }}>⚠ {notApplied}</p>
+                                </div>
+                            )}
+                            {savedNote && !notApplied && !restarting && pendingCount === 0 && (
+                                <div className="ms-pending ms-pending--done" data-testid="model-roles-saved">
+                                    <span aria-hidden="true">✓</span>
+                                    <span>{savedNote}</span>
+                                </div>
+                            )}
+                            <div className="ms-foot">
+                                <button type="button" className="ms-link" data-testid="model-props-toggle" disabled={restarting} onClick={() => setPropsOpen(true)}>
+                                    ⚙ Adjust model properties
+                                </button>
+                                <span className="ms-foot__sp"></span>
                                 <button
                                     type="button"
-                                    data-testid="model-props-toggle"
-                                    onClick={() => setCatalogOpen((v) => !v)}
-                                    className="header-text text-xs px-3 py-1.5 rounded border border-[#2a2540] text-slate-300 hover:bg-[#221b36]"
+                                    className="ms-link ms-link--dim"
+                                    data-testid="model-roles-reset-defaults"
+                                    disabled={saving || restarting}
+                                    onClick={() => setAssignments(Object.assign({}, (data && data.defaults) || {}))}
                                 >
-                                    {catalogOpen ? "▼ Hide model properties" : "▶ Edit model properties"}
+                                    Reset to defaults
                                 </button>
-                                {catalogOpen && (
-                                    <div className="mt-2 space-y-2">
-                                        <p className="text-xs text-slate-500 leading-relaxed max-w-prose" data-testid="model-props-note">
+                            </div>
+                        </div>
+                    )}
+                    {propsOpen && data && data.supported && (
+                        <div className="ms-modal" data-testid="model-props-modal">
+                            <div className="ms-modal__backdrop" onClick={() => setPropsOpen(false)}></div>
+                            <div className="ms-modal__card">
+                                <div className="ms-modal__head">
+                                    <div>
+                                        <p className="ms-modal__title">Model properties</p>
+                                        <p className="ms-modal__sub" data-testid="model-props-note">
                                             Lullabeast computes run costs and image-input checks from these
                                             values. If cost figures look wrong, correct them here first.
                                             Edits apply to the model itself, wherever it is used, and persist
                                             across updates on top of the registered model.
                                         </p>
-                                        <select
-                                            data-testid="model-props-picker"
-                                            value={expandedModel || ""}
-                                            onChange={(e) => { setExpandedModel(e.target.value || null); setAdvancedOpen(false); }}
-                                            className={inputCls}
-                                        >
-                                            <option value="">pick a model to edit</option>
-                                            {catalog.map((entry) => (
-                                                <option key={entry.id} value={entry.id}>{entry.id}{propEdits[entry.id] ? " (edited)" : ""}</option>
-                                            ))}
-                                        </select>
-                                        {expandedModel && catalogById[expandedModel] && (() => {
-                                            const entry = catalogById[expandedModel];
-                                            const edits = propEdits[entry.id] || {};
-                                            const setEdit = (k, v) => setPropEdits((prev) => ({ ...prev, [entry.id]: { ...prev[entry.id], [k]: v } }));
-                                            const visionValue = edits.vision !== undefined
-                                                ? edits.vision
-                                                : (Array.isArray(entry.input) && entry.input.length > 0
-                                                    ? (entry.input.indexOf("image") !== -1 ? "yes" : "no") : "");
-                                            const reasoningValue = edits.reasoning !== undefined
-                                                ? edits.reasoning
-                                                : (entry.reasoning === true ? "on" : entry.reasoning === false ? "off" : "");
-                                            const cost = entry.cost || {};
-                                            const params = entry.params || {};
-                                            const fieldVal = (editKey, current) =>
-                                                edits[editKey] !== undefined ? edits[editKey] : (current != null ? current : "");
-                                            return (
-                                                <div className="rounded border border-[#2a2540] bg-[#221b36] p-2 space-y-2">
-                                                    <div className="flex items-center justify-between gap-2">
-                                                        <span className="font-mono text-xs text-slate-300 truncate" title={entry.id}>{entry.id}</span>
-                                                        {propEdits[entry.id] && <span className="text-[10px] text-[#e2b14c] shrink-0">edited</span>}
-                                                    </div>
-                                                    <div className="space-y-2">
+                                    </div>
+                                    <button type="button" className="ms-x" onClick={() => setPropsOpen(false)} aria-label="Close">✕</button>
+                                </div>
+                                <div className="space-y-2">
+                                    <select
+                                        data-testid="model-props-picker"
+                                        value={expandedModel || ""}
+                                        onChange={(e) => { setExpandedModel(e.target.value || null); setAdvancedOpen(false); }}
+                                        className={inputCls}
+                                    >
+                                        <option value="">pick a model to edit</option>
+                                        {catalog.map((entry) => (
+                                            <option key={entry.id} value={entry.id}>{entry.id}{propEdits[entry.id] ? " (edited)" : ""}</option>
+                                        ))}
+                                    </select>
+                                    {expandedModel && catalogById[expandedModel] && (() => {
+                                        const entry = catalogById[expandedModel];
+                                        const edits = propEdits[entry.id] || {};
+                                        const setEdit = (k, v) => setPropEdits((prev) => ({ ...prev, [entry.id]: { ...prev[entry.id], [k]: v } }));
+                                        const visionValue = edits.vision !== undefined
+                                            ? edits.vision
+                                            : (Array.isArray(entry.input) && entry.input.length > 0
+                                                ? (entry.input.indexOf("image") !== -1 ? "yes" : "no") : "");
+                                        const reasoningValue = edits.reasoning !== undefined
+                                            ? edits.reasoning
+                                            : (entry.reasoning === true ? "on" : entry.reasoning === false ? "off" : "");
+                                        const cost = entry.cost || {};
+                                        const params = entry.params || {};
+                                        const fieldVal = (editKey, current) =>
+                                            edits[editKey] !== undefined ? edits[editKey] : (current != null ? current : "");
+                                        return (
+                                            <div className="rounded border border-[#2a2540] bg-[#221b36] p-2 space-y-2">
+                                                <div className="flex items-center justify-between gap-2">
+                                                    <span className="font-mono text-xs text-slate-300 truncate" title={entry.id}>{entry.id}</span>
+                                                    {propEdits[entry.id] && <span className="text-[10px] text-[#e2b14c] shrink-0">edited</span>}
+                                                </div>
+                                                <div className="space-y-2">
+                                                        <div className="grid grid-cols-2 gap-3">
+                                                            <label className="space-y-1">
+                                                                <span className="header-text text-[11px] text-slate-500 block">Accepts image input</span>
+                                                                <select
+                                                                    data-testid="model-props-vision"
+                                                                    value={visionValue}
+                                                                    onChange={(e) => setEdit("vision", e.target.value)}
+                                                                    className={inputCls}
+                                                                >
+                                                                    <option value="">not declared</option>
+                                                                    <option value="yes">Yes</option>
+                                                                    <option value="no">No</option>
+                                                                </select>
+                                                            </label>
+                                                            <label className="space-y-1">
+                                                                <span className="header-text text-[11px] text-slate-500 block">Reasoning</span>
+                                                                <select
+                                                                    data-testid="model-props-reasoning"
+                                                                    value={reasoningValue}
+                                                                    onChange={(e) => setEdit("reasoning", e.target.value)}
+                                                                    className={inputCls}
+                                                                >
+                                                                    <option value="">not declared</option>
+                                                                    <option value="on">On</option>
+                                                                    <option value="off">Off</option>
+                                                                </select>
+                                                            </label>
+                                                            <label className="space-y-1">
+                                                                <span className="header-text text-[11px] text-slate-500 block">Context window</span>
+                                                                <input
+                                                                    type="number"
+                                                                    data-testid="model-props-context-window"
+                                                                    min="1"
+                                                                    value={fieldVal("contextWindow", entry.contextWindow)}
+                                                                    onChange={(e) => setEdit("contextWindow", e.target.value)}
+                                                                    className={inputCls}
+                                                                />
+                                                            </label>
+                                                        </div>
+                                                        <div className="space-y-1">
+                                                            <span className="header-text text-[11px] text-slate-500 block">Price per M tokens</span>
                                                             <div className="grid grid-cols-2 gap-3">
                                                                 <label className="space-y-1">
-                                                                    <span className="header-text text-[11px] text-slate-500 block">Accepts image input</span>
-                                                                    <select
-                                                                        data-testid="model-props-vision"
-                                                                        value={visionValue}
-                                                                        onChange={(e) => setEdit("vision", e.target.value)}
-                                                                        className={inputCls}
-                                                                    >
-                                                                        <option value="">not declared</option>
-                                                                        <option value="yes">Yes</option>
-                                                                        <option value="no">No</option>
-                                                                    </select>
+                                                                    <span className="text-[11px] text-slate-500 block">Input</span>
+                                                                    <input type="number" data-testid="model-props-cost-input" min="0" step="any" value={fieldVal("costInput", cost.input)} onChange={(e) => setEdit("costInput", e.target.value)} className={inputCls} />
                                                                 </label>
                                                                 <label className="space-y-1">
-                                                                    <span className="header-text text-[11px] text-slate-500 block">Reasoning</span>
-                                                                    <select
-                                                                        data-testid="model-props-reasoning"
-                                                                        value={reasoningValue}
-                                                                        onChange={(e) => setEdit("reasoning", e.target.value)}
-                                                                        className={inputCls}
-                                                                    >
-                                                                        <option value="">not declared</option>
-                                                                        <option value="on">On</option>
-                                                                        <option value="off">Off</option>
-                                                                    </select>
+                                                                    <span className="text-[11px] text-slate-500 block">Output</span>
+                                                                    <input type="number" data-testid="model-props-cost-output" min="0" step="any" value={fieldVal("costOutput", cost.output)} onChange={(e) => setEdit("costOutput", e.target.value)} className={inputCls} />
                                                                 </label>
                                                                 <label className="space-y-1">
-                                                                    <span className="header-text text-[11px] text-slate-500 block">Context window</span>
-                                                                    <input
-                                                                        type="number"
-                                                                        data-testid="model-props-context-window"
-                                                                        min="1"
-                                                                        value={fieldVal("contextWindow", entry.contextWindow)}
-                                                                        onChange={(e) => setEdit("contextWindow", e.target.value)}
-                                                                        className={inputCls}
-                                                                    />
+                                                                    <span className="text-[11px] text-slate-500 block">Cache read</span>
+                                                                    <input type="number" data-testid="model-props-cost-cache-read" min="0" step="any" value={fieldVal("costCacheRead", cost.cacheRead)} onChange={(e) => setEdit("costCacheRead", e.target.value)} className={inputCls} />
+                                                                </label>
+                                                                <label className="space-y-1">
+                                                                    <span className="text-[11px] text-slate-500 block">Cache write</span>
+                                                                    <input type="number" data-testid="model-props-cost-cache-write" min="0" step="any" value={fieldVal("costCacheWrite", cost.cacheWrite)} onChange={(e) => setEdit("costCacheWrite", e.target.value)} className={inputCls} />
                                                                 </label>
                                                             </div>
-                                                            <div className="space-y-1">
-                                                                <span className="header-text text-[11px] text-slate-500 block">Price per M tokens</span>
-                                                                <div className="grid grid-cols-2 gap-3">
-                                                                    <label className="space-y-1">
-                                                                        <span className="text-[11px] text-slate-500 block">Input</span>
-                                                                        <input type="number" data-testid="model-props-cost-input" min="0" step="any" value={fieldVal("costInput", cost.input)} onChange={(e) => setEdit("costInput", e.target.value)} className={inputCls} />
-                                                                    </label>
-                                                                    <label className="space-y-1">
-                                                                        <span className="text-[11px] text-slate-500 block">Output</span>
-                                                                        <input type="number" data-testid="model-props-cost-output" min="0" step="any" value={fieldVal("costOutput", cost.output)} onChange={(e) => setEdit("costOutput", e.target.value)} className={inputCls} />
-                                                                    </label>
-                                                                    <label className="space-y-1">
-                                                                        <span className="text-[11px] text-slate-500 block">Cache read</span>
-                                                                        <input type="number" data-testid="model-props-cost-cache-read" min="0" step="any" value={fieldVal("costCacheRead", cost.cacheRead)} onChange={(e) => setEdit("costCacheRead", e.target.value)} className={inputCls} />
-                                                                    </label>
-                                                                    <label className="space-y-1">
-                                                                        <span className="text-[11px] text-slate-500 block">Cache write</span>
-                                                                        <input type="number" data-testid="model-props-cost-cache-write" min="0" step="any" value={fieldVal("costCacheWrite", cost.cacheWrite)} onChange={(e) => setEdit("costCacheWrite", e.target.value)} className={inputCls} />
-                                                                    </label>
-                                                                </div>
+                                                        </div>
+                                                        <button
+                                                            type="button"
+                                                            data-testid="model-props-advanced-toggle"
+                                                            onClick={() => setAdvancedOpen((v) => !v)}
+                                                            className="header-text text-[11px] text-slate-400 hover:text-slate-200"
+                                                        >
+                                                            {advancedOpen ? "Hide advanced" : "Advanced"}
+                                                        </button>
+                                                        {advancedOpen && (
+                                                            <div className="grid grid-cols-2 gap-3">
+                                                                <label className="space-y-1">
+                                                                    <span className="header-text text-[11px] text-slate-500 block">Temperature</span>
+                                                                    <input type="number" data-testid="model-props-temperature" step="any" value={fieldVal("temperature", params.temperature)} onChange={(e) => setEdit("temperature", e.target.value)} className={inputCls} />
+                                                                </label>
+                                                                <label className="space-y-1">
+                                                                    <span className="header-text text-[11px] text-slate-500 block">Top p</span>
+                                                                    <input type="number" data-testid="model-props-top-p" step="any" value={fieldVal("top_p", params.top_p)} onChange={(e) => setEdit("top_p", e.target.value)} className={inputCls} />
+                                                                </label>
+                                                                <label className="space-y-1">
+                                                                    <span className="header-text text-[11px] text-slate-500 block">Max output tokens</span>
+                                                                    <input type="number" data-testid="model-props-max-tokens" min="1" value={fieldVal("maxTokens", entry.maxTokens)} onChange={(e) => setEdit("maxTokens", e.target.value)} className={inputCls} />
+                                                                </label>
                                                             </div>
+                                                        )}
+                                                        {propEdits[entry.id] && (
                                                             <button
                                                                 type="button"
-                                                                data-testid="model-props-advanced-toggle"
-                                                                onClick={() => setAdvancedOpen((v) => !v)}
-                                                                className="header-text text-[11px] text-slate-400 hover:text-slate-200"
+                                                                data-testid="model-props-discard"
+                                                                onClick={() => setPropEdits((prev) => { const next = { ...prev }; delete next[entry.id]; return next; })}
+                                                                className="header-text text-[11px] text-slate-500 hover:text-slate-300"
                                                             >
-                                                                {advancedOpen ? "Hide advanced" : "Advanced"}
+                                                                Discard edits
                                                             </button>
-                                                            {advancedOpen && (
-                                                                <div className="grid grid-cols-2 gap-3">
-                                                                    <label className="space-y-1">
-                                                                        <span className="header-text text-[11px] text-slate-500 block">Temperature</span>
-                                                                        <input type="number" data-testid="model-props-temperature" step="any" value={fieldVal("temperature", params.temperature)} onChange={(e) => setEdit("temperature", e.target.value)} className={inputCls} />
-                                                                    </label>
-                                                                    <label className="space-y-1">
-                                                                        <span className="header-text text-[11px] text-slate-500 block">Top p</span>
-                                                                        <input type="number" data-testid="model-props-top-p" step="any" value={fieldVal("top_p", params.top_p)} onChange={(e) => setEdit("top_p", e.target.value)} className={inputCls} />
-                                                                    </label>
-                                                                    <label className="space-y-1">
-                                                                        <span className="header-text text-[11px] text-slate-500 block">Max output tokens</span>
-                                                                        <input type="number" data-testid="model-props-max-tokens" min="1" value={fieldVal("maxTokens", entry.maxTokens)} onChange={(e) => setEdit("maxTokens", e.target.value)} className={inputCls} />
-                                                                    </label>
-                                                                </div>
-                                                            )}
-                                                            {propEdits[entry.id] && (
-                                                                <button
-                                                                    type="button"
-                                                                    data-testid="model-props-discard"
-                                                                    onClick={() => setPropEdits((prev) => { const next = { ...prev }; delete next[entry.id]; return next; })}
-                                                                    className="header-text text-[11px] text-slate-500 hover:text-slate-300"
-                                                                >
-                                                                    Discard edits
-                                                                </button>
-                                                            )}
-                                                    </div>
+                                                        )}
                                                 </div>
-                                            );
-                                        })()}
-                                    </div>
-                                )}
-                            </div>
-                            <div className="flex flex-wrap items-center gap-2 pt-1">
-                                <button
-                                    type="button"
-                                    data-testid="model-roles-save"
-                                    disabled={!dirty || visionBlocked.length > 0 || saving || restarting}
-                                    onClick={() => setConfirmOpen(true)}
-                                    className="header-text text-xs px-3 py-1.5 rounded bg-[#e2b14c] text-[#100d1a] font-semibold disabled:opacity-50"
-                                >
-                                    {saving ? "Saving…" : "Save and restart gateway"}
-                                </button>
-                                <button
-                                    type="button"
-                                    data-testid="model-roles-reset-defaults"
-                                    disabled={saving || restarting}
-                                    onClick={() => setAssignments(Object.assign({}, (data && data.defaults) || {}))}
-                                    className="header-text text-xs px-3 py-1.5 rounded border border-[#2a2540] text-slate-300 hover:bg-[#221b36] disabled:opacity-50"
-                                >
-                                    Reset to defaults
-                                </button>
-                            </div>
-                            {restarting && (
-                                <p className="text-xs text-slate-400" data-testid="model-roles-restarting">
-                                    Applying the change and restarting the gateway. This usually takes under a minute.
-                                </p>
-                            )}
-                            {saveError && (
-                                <p className="text-xs text-red-400" data-testid="model-roles-save-error">{saveError}</p>
-                            )}
-                            {savedNote && (
-                                <p className="text-xs text-emerald-500" data-testid="model-roles-saved">{savedNote}</p>
-                            )}
-                        </div>
-                    )}
-                    {confirmOpen && (
-                        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50" data-testid="model-roles-confirm-modal">
-                            <div className="bg-[#15121f] border border-[#1c1829] rounded-lg p-6 max-w-sm mx-4 space-y-3">
-                                <p className="header-text text-sm font-semibold text-slate-300">Save and restart gateway</p>
-                                <p className="text-xs text-slate-400 leading-relaxed">
-                                    Applying model changes restarts the OpenClaw gateway. Agent sessions
-                                    and Ideas chats that are mid-reply are interrupted; new sessions pick
-                                    up the new models. Saves are refused while the pipeline is running.
-                                </p>
-                                <div className="flex gap-2 justify-end">
-                                    <button
-                                        type="button"
-                                        data-testid="model-roles-confirm-cancel"
-                                        onClick={() => setConfirmOpen(false)}
-                                        className="header-text text-xs px-3 py-1.5 rounded border border-[#2a2540] text-slate-300 hover:bg-[#221b36]"
-                                    >
-                                        Cancel
-                                    </button>
-                                    <button
-                                        type="button"
-                                        data-testid="model-roles-confirm-save"
-                                        onClick={onConfirmSave}
-                                        className="header-text text-xs px-3 py-1.5 rounded bg-[#e2b14c] text-[#100d1a] font-semibold"
-                                    >
-                                        Save and restart
-                                    </button>
+                                            </div>
+                                        );
+                                    })()}
+                                </div>
+                                <div className="ms-modal__foot">
+                                    <span className="ms-modal__hint">Edits queue as pending changes on the card; apply them there.</span>
+                                    <button type="button" className="ms-btn ms-btn--ghost" onClick={() => setPropsOpen(false)}>Close</button>
                                 </div>
                             </div>
                         </div>

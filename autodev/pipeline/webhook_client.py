@@ -505,6 +505,7 @@ def set_session_response_usage(
     gateway_ws_url: str,
     gateway_token: str,
     mode: str = "full",
+    model: str | None = None,
     timeout_seconds: int = 8,
 ) -> bool:
     """Set the per-session ``responseUsage`` preference via gateway ``sessions.patch``.
@@ -517,6 +518,12 @@ def set_session_response_usage(
     ``/hooks/agent`` webhook fires pre-seeds the preference race-free — the run
     then reuses the pre-created entry.
 
+    ``model`` (when given) rides the **same** creating patch so the entry is baked
+    with the chosen model. A session's model is fixed at creation, so once this
+    patch has created the entry a later webhook ``model=`` has no effect — the
+    model must be set here or not at all. Unset it (``None``) to let the entry bake
+    the agent's configured default.
+
     ``session_key`` must be the gateway **store key** — i.e. the
     ``agent:{role}:{bare_key}`` lowercase form (same shape ``sessions.abort``
     expects), not the bare ``pipeline:…`` key.
@@ -524,10 +531,13 @@ def set_session_response_usage(
     Best-effort: returns True when the gateway acknowledged the patch, False on
     any failure.  Callers must never block an agent invocation on this.
     """
+    _params = {"key": session_key, "responseUsage": mode}
+    if model:
+        _params["model"] = model
     resp = _gateway_request_once(
         session_key, gateway_ws_url, gateway_token, timeout_seconds,
         method="sessions.patch",
-        params={"key": session_key, "responseUsage": mode},
+        params=_params,
         # sessions.patch is gated on operator.admin (sessions.abort needs only
         # operator.write) — verified live against the gateway: requesting
         # operator.write alone returns INVALID_REQUEST "missing scope:

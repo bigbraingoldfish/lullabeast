@@ -696,6 +696,21 @@ class TestSetupMode:
         )
         assert m, "the loader must unset non-pinned provider vars before re-reading the file"
 
+    def test_pinned_model_knobs_exported_for_dashboard(self):
+        # The boot-time set of deploy/.env-pinned *_MODEL knobs is exported so
+        # the dashboard can tell the operator a role is env-pinned, instead of
+        # letting a Settings save look successful and then silently revert on
+        # the post-apply re-read. Derived from ENV_PINNED_VARS (captured before
+        # load_provider_env mixes provider.env values into the environment).
+        assert "export AUTODEV_PINNED_MODEL_KNOBS=" in ENTRYPOINT
+        m = re.search(
+            r'AUTODEV_PINNED_MODEL_KNOBS="".*?for _v in .*?ROADMAP_MODEL.*?do'
+            r'.*?ENV_PINNED_VARS.*?done.*?export AUTODEV_PINNED_MODEL_KNOBS=',
+            ENTRYPOINT,
+            re.DOTALL,
+        )
+        assert m, "pinned model knobs must be derived from ENV_PINNED_VARS and exported"
+
     def test_provider_env_parser_is_allowlisted(self):
         # The file is parsed line by line and only variables the dashboard may
         # write are applied; it is never executed as shell.

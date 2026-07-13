@@ -99,6 +99,13 @@ def cfg(tmp_path: Path) -> dict:
     }
 
 
+@pytest.fixture(autouse=True)
+def _no_env_pins(monkeypatch):
+    """Default to no deploy/.env pins so role dicts read pinned=False; the
+    pinned-detection test sets AUTODEV_PINNED_MODEL_KNOBS explicitly."""
+    monkeypatch.delenv("AUTODEV_PINNED_MODEL_KNOBS", raising=False)
+
+
 def _get(cfg):
     with patch("ui.server.load_config", return_value=cfg):
         return client.get("/api/models/roles")
@@ -133,10 +140,23 @@ class TestGetRoles:
         assert data["roles"]["executor"] == {
             "model": "openrouter/moonshotai/kimi-k2.7-code",
             "knob": "EXECUTOR_MODEL",
+            "pinned": False,
         }
         # The plain-string model form is tolerated.
         assert data["roles"]["roadmap-converter"]["model"] == "openrouter/z-ai/glm-5.2"
         assert data["roles"]["escalation"]["model"] == "local/qwen3.5"
+
+    def test_roles_report_deploy_env_pins(self, cfg, monkeypatch):
+        # A *_MODEL knob pinned in deploy/.env wins over any provider.env write
+        # at render; the entrypoint exports that boot-time set so the card can
+        # say so instead of letting a save silently revert. Only the named
+        # knobs read pinned.
+        monkeypatch.setenv("AUTODEV_PINNED_MODEL_KNOBS", "ROADMAP_MODEL EXECUTOR_MODEL")
+        roles = _get(cfg).json()["roles"]
+        assert roles["roadmap-converter"]["pinned"] is True
+        assert roles["executor"]["pinned"] is True
+        assert roles["planner"]["pinned"] is False
+        assert roles["prd-creator"]["pinned"] is False
 
     def test_defaults_come_from_template(self, cfg):
         data = _get(cfg).json()
