@@ -944,3 +944,74 @@ def ensure_openclaw_context_limits(openclaw_json_path: str) -> str:
         except OSError:
             pass
         return f"error:{e}"
+
+
+def ensure_model_switch_allowlist(openclaw_json_path: str) -> str:
+    """Seed ``agents.defaults.models`` so every registered model is switchable (atomic).
+
+    The gateway accepts a session-level model only when it appears in
+    ``agents.defaults.models``; a role's configured primary bypasses that list.
+    Model *registration* (``models.providers.*``) is written by a different path
+    (template render, local-server wiring, hand edits), so a registered model
+    can appear in every dashboard picker yet be rejected at session creation
+    with "model not allowed" — which the per-phase override feature turns into
+    a stalled attempt. Seeding an empty entry per registered model closes the
+    gap: pickers and the gateway then agree by construction.
+
+    Additive only: existing entries (and their params) are never modified, and
+    allowlist entries for since-removed models are left alone. Safe to re-run;
+    the entrypoint runs it on every boot and config apply.
+
+    Returns: updated | unchanged | error:<msg>
+    """
+    path = os.path.abspath(openclaw_json_path)
+    if not os.path.isfile(path):
+        return "error:file not found"
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        return f"error:{e}"
+    if not isinstance(data, dict):
+        return "error:root must be an object"
+    providers = (data.get("models") or {}).get("providers")
+    if not isinstance(providers, dict):
+        return "unchanged"
+    agents = data.setdefault("agents", {})
+    if not isinstance(agents, dict):
+        return "error:agents must be an object"
+    defaults = agents.setdefault("defaults", {})
+    if not isinstance(defaults, dict):
+        return "error:agents.defaults must be an object"
+    models_map = defaults.setdefault("models", {})
+    if not isinstance(models_map, dict):
+        return "error:agents.defaults.models must be an object"
+
+    before = json.dumps(data, sort_keys=True)
+    for provider_name, provider in providers.items():
+        if not isinstance(provider, dict):
+            continue
+        for entry in provider.get("models") or []:
+            if not isinstance(entry, dict):
+                continue
+            model_id = entry.get("id")
+            if not (isinstance(model_id, str) and model_id):
+                continue
+            models_map.setdefault(f"{provider_name}/{model_id}", {})
+
+    after = json.dumps(data, sort_keys=True)
+    if before == after:
+        return "unchanged"
+    parent = os.path.dirname(path)
+    try:
+        fd, tmp = tempfile.mkstemp(dir=parent, prefix="openclaw_allowlist_", suffix=".json")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+        return "updated"
+    except Exception as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return f"error:{e}"

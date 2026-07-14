@@ -44,12 +44,13 @@ class TestSetSessionResponseUsage:
     def test_returns_true_on_ok(self):
         ws = _make_ws_mock([CONNECT_CHALLENGE, HELLO_OK, PATCH_OK])
         with patch.object(wc.websocket, "WebSocket", return_value=ws):
-            ok = wc.set_session_response_usage(
+            ok, detail = wc.set_session_response_usage(
                 "agent:planner:pipeline:phase-1:core-e1:planner-attempt-1",
                 "ws://127.0.0.1:18789/__openclaw__/ws",
                 "tok",
             )
         assert ok is True
+        assert detail is None
 
     def test_sends_sessions_patch_with_response_usage_full(self):
         """The request frame must be sessions.patch carrying the store key and
@@ -112,16 +113,33 @@ class TestSetSessionResponseUsage:
     def test_returns_false_on_rejection(self):
         ws = _make_ws_mock([CONNECT_CHALLENGE, HELLO_OK, PATCH_FAIL])
         with patch.object(wc.websocket, "WebSocket", return_value=ws):
-            ok = wc.set_session_response_usage("agent:planner:k", "ws://x", "tok")
+            ok, detail = wc.set_session_response_usage("agent:planner:k", "ws://x", "tok")
         assert ok is False
+        assert "invalid responseUsage" in detail
+
+    def test_rejection_detail_carries_the_gateway_reason(self):
+        """The caller escalates with this string when a model rode the patch, so
+        it must carry the gateway's code + message (e.g. "model not allowed")."""
+        reject = {
+            "type": "res", "id": "2", "ok": False,
+            "error": {"code": "INVALID_REQUEST", "message": "model not allowed: local/x"},
+        }
+        ws = _make_ws_mock([CONNECT_CHALLENGE, HELLO_OK, reject])
+        with patch.object(wc.websocket, "WebSocket", return_value=ws):
+            ok, detail = wc.set_session_response_usage(
+                "agent:executor:k", "ws://x", "tok", model="local/x"
+            )
+        assert ok is False
+        assert detail == "INVALID_REQUEST: model not allowed: local/x"
 
     def test_returns_false_on_connection_error(self):
         """Best-effort: connection failure must not raise."""
         ws = MagicMock()
         ws.connect.side_effect = ConnectionError("refused")
         with patch.object(wc.websocket, "WebSocket", return_value=ws):
-            ok = wc.set_session_response_usage("agent:planner:k", "ws://x", "tok")
+            ok, detail = wc.set_session_response_usage("agent:planner:k", "ws://x", "tok")
         assert ok is False
+        assert detail
 
     def test_skips_interleaved_event_frames(self):
         """Unsolicited gateway events between request and response are skipped,
@@ -130,5 +148,5 @@ class TestSetSessionResponseUsage:
             [HEALTH_EVENT, CONNECT_CHALLENGE, HEALTH_EVENT, HELLO_OK, HEALTH_EVENT, PATCH_OK]
         )
         with patch.object(wc.websocket, "WebSocket", return_value=ws):
-            ok = wc.set_session_response_usage("agent:planner:k", "ws://x", "tok")
+            ok, _ = wc.set_session_response_usage("agent:planner:k", "ws://x", "tok")
         assert ok is True

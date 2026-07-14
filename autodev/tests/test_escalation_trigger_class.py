@@ -41,6 +41,7 @@ EXPECTED_CLASSES = {
     "reviewer_routed",
     "reviewer_verification_unmet",
     "provider_rejected",
+    "model_override_rejected",
     "webhook_failure",
     "resolver_failed",
     "roadmap_checkbox_failed",
@@ -64,6 +65,7 @@ def test_derive_maps_known_error_codes():
     error-coded chokepoints are classified without an explicit stamp."""
     cases = {
         "ERR_PROVIDER_REJECTED": "provider_rejected",
+        "ERR_MODEL_OVERRIDE_REJECTED": "model_override_rejected",
         "ERR_SESSION_DEAD_ON_ARRIVAL": "provider_rejected",
         "ERR_RESET_PHASE_GIT_FAILED": "reset_git_failed",
         "ERR_RESET_EXECUTION_GIT_FAILED": "reset_git_failed",

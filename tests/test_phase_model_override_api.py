@@ -32,6 +32,8 @@ ROADMAP = """# Roadmap
 
 
 def _openclaw_json() -> dict:
+    # agents.defaults.models mirrors the provider registry, as the boot-time
+    # allowlist sync (ensure_model_switch_allowlist) guarantees on real installs.
     return {
         "models": {
             "providers": {
@@ -44,7 +46,10 @@ def _openclaw_json() -> dict:
                 "local": {"models": [{"id": "mystery"}]},
             }
         },
-        "agents": {"list": []},
+        "agents": {
+            "defaults": {"models": {MULTIMODAL: {}, TEXT_ONLY: {}, UNDECLARED: {}}},
+            "list": [],
+        },
     }
 
 
@@ -188,6 +193,32 @@ def test_post_undeclared_input_allowed_on_visual_phase(cfg, monkeypatch):
     # Only a confirmed text-only model is blocked (matches the roles PUT).
     monkeypatch.delenv("AUTODEV_VISUAL_PHASE_RAW_IDS", raising=False)
     r = _post(cfg, {"raw_id": "UI-2", "role": "executor", "model": UNDECLARED})
+    assert r.status_code == 200
+
+
+def test_post_registered_but_not_switchable_rejected(cfg, tmp_path):
+    """Registry/allowlist drift: the gateway would reject the session with
+    "model not allowed" and the attempt would stall out, so the endpoint must
+    refuse up front with an actionable message."""
+    oc = _openclaw_json()
+    del oc["agents"]["defaults"]["models"][MULTIMODAL]
+    (Path(cfg["openclaw_root"]) / "openclaw.json").write_text(json.dumps(oc))
+    r = _post(cfg, {"raw_id": "CORE-1", "role": "executor", "model": MULTIMODAL})
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert "not yet enabled" in detail
+    assert "—" not in detail  # UI copy standard: no em dashes
+    assert not _overrides_path(cfg).exists()
+
+
+def test_post_agent_primary_counts_as_switchable(cfg):
+    """A model reachable only as a configured role primary is accepted: the
+    gateway honors primaries without an allowlist entry."""
+    oc = _openclaw_json()
+    del oc["agents"]["defaults"]["models"][MULTIMODAL]
+    oc["agents"]["list"] = [{"id": "executor", "model": {"primary": MULTIMODAL}}]
+    (Path(cfg["openclaw_root"]) / "openclaw.json").write_text(json.dumps(oc))
+    r = _post(cfg, {"raw_id": "CORE-1", "role": "executor", "model": MULTIMODAL})
     assert r.status_code == 200
 
 

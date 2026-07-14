@@ -534,3 +534,102 @@ def test_postcompaction_cap_covers_largest_always_apply_block():
             f"cap is {setup_helpers.AUTODEV_POSTCOMPACTION_MAX_CHARS}; raise "
             f"AUTODEV_POSTCOMPACTION_MAX_CHARS or trim the sections."
         )
+
+
+# ---------------------------------------------------------------------------
+# ensure_model_switch_allowlist — registered ⇒ switchable.
+#
+# The gateway only accepts a session-level model that appears in
+# ``agents.defaults.models`` (a role's configured primary bypasses the list).
+# Providers are registered by a different path, so without this sync a probed
+# local model shows in every picker yet is rejected at session creation.
+# ---------------------------------------------------------------------------
+
+
+def _oc_with_providers(tmp_path, providers, defaults_models=None):
+    oc = tmp_path / "openclaw.json"
+    data = {
+        "models": {"providers": providers},
+        "agents": {"defaults": {"models": defaults_models or {}}, "list": []},
+    }
+    oc.write_text(json.dumps(data))
+    return oc
+
+
+def test_allowlist_seeds_every_registered_model(tmp_path):
+    oc = _oc_with_providers(tmp_path, {
+        "openrouter": {"models": [{"id": "qwen/qwen3.6-27b"}]},
+        "local": {"models": [{"id": "qwen3.6-27b"}, {"id": "qwen3.6-35b-3a"}]},
+    })
+    assert setup_helpers.ensure_model_switch_allowlist(str(oc)) == "updated"
+    data = json.loads(oc.read_text())
+    models = data["agents"]["defaults"]["models"]
+    assert models == {
+        "openrouter/qwen/qwen3.6-27b": {},
+        "local/qwen3.6-27b": {},
+        "local/qwen3.6-35b-3a": {},
+    }
+
+
+def test_allowlist_never_touches_existing_entries(tmp_path):
+    """Hand-tuned params (and operator-added entries for unregistered models)
+    survive the sync byte-for-byte."""
+    existing = {
+        "openrouter/z-ai/glm-5.2": {"params": {"temperature": 0.6}},
+        "openrouter/gone/removed-model": {"params": {"top_p": 0.9}},
+    }
+    oc = _oc_with_providers(
+        tmp_path,
+        {"openrouter": {"models": [{"id": "z-ai/glm-5.2"}, {"id": "new/model"}]}},
+        defaults_models=existing,
+    )
+    assert setup_helpers.ensure_model_switch_allowlist(str(oc)) == "updated"
+    models = json.loads(oc.read_text())["agents"]["defaults"]["models"]
+    assert models["openrouter/z-ai/glm-5.2"] == {"params": {"temperature": 0.6}}
+    assert models["openrouter/gone/removed-model"] == {"params": {"top_p": 0.9}}
+    assert models["openrouter/new/model"] == {}
+
+
+def test_allowlist_idempotent(tmp_path):
+    oc = _oc_with_providers(tmp_path, {"local": {"models": [{"id": "m1"}]}})
+    assert setup_helpers.ensure_model_switch_allowlist(str(oc)) == "updated"
+    assert setup_helpers.ensure_model_switch_allowlist(str(oc)) == "unchanged"
+
+
+def test_allowlist_creates_defaults_path_when_absent(tmp_path):
+    oc = tmp_path / "openclaw.json"
+    oc.write_text(json.dumps({"models": {"providers": {"local": {"models": [{"id": "m1"}]}}}}))
+    assert setup_helpers.ensure_model_switch_allowlist(str(oc)) == "updated"
+    assert json.loads(oc.read_text())["agents"]["defaults"]["models"] == {"local/m1": {}}
+
+
+def test_allowlist_skips_malformed_entries(tmp_path):
+    oc = _oc_with_providers(tmp_path, {
+        "local": {"models": [{"id": "good"}, {"name": "no-id"}, "not-a-dict", {"id": ""}]},
+        "broken": "not-a-dict",
+        "empty": {"models": []},
+    })
+    assert setup_helpers.ensure_model_switch_allowlist(str(oc)) == "updated"
+    assert json.loads(oc.read_text())["agents"]["defaults"]["models"] == {"local/good": {}}
+
+
+def test_allowlist_no_providers_is_unchanged(tmp_path):
+    oc = tmp_path / "openclaw.json"
+    oc.write_text(json.dumps({"agents": {"defaults": {}}}))
+    assert setup_helpers.ensure_model_switch_allowlist(str(oc)) == "unchanged"
+
+
+def test_allowlist_missing_file_errors(tmp_path):
+    assert setup_helpers.ensure_model_switch_allowlist(
+        str(tmp_path / "missing.json")
+    ) == "error:file not found"
+
+
+def test_allowlist_malformed_defaults_models_errors(tmp_path):
+    oc = tmp_path / "openclaw.json"
+    oc.write_text(json.dumps({
+        "models": {"providers": {"local": {"models": [{"id": "m1"}]}}},
+        "agents": {"defaults": {"models": ["not", "a", "map"]}},
+    }))
+    result = setup_helpers.ensure_model_switch_allowlist(str(oc))
+    assert result.startswith("error:")

@@ -4999,7 +4999,7 @@ def _preset_session_response_usage_sync(agent_id: str, session_key: str) -> None
         gw_port = gw.get("port", 18789)
         ws_url = f"ws://127.0.0.1:{gw_port}/__openclaw__/ws"
         store_key = f"agent:{agent_id}:{session_key}".lower()
-        ok = set_session_response_usage(store_key, ws_url, gw_token, mode=mode)
+        ok, _detail = set_session_response_usage(store_key, ws_url, gw_token, mode=mode)
         tagged(
             "usage",
             f"responseUsage={mode} {'set' if ok else 'FAILED'} "
@@ -8493,6 +8493,31 @@ def _assemble_model_catalog(oc: dict) -> list:
     return catalog
 
 
+def _gateway_switchable_models(oc: dict) -> set:
+    """Model refs the gateway accepts on a session: the ``agents.defaults.models``
+    allowlist plus each agent's configured primary (primaries bypass the list).
+    Boot keeps the allowlist synced to the provider registry
+    (``ensure_model_switch_allowlist``); this read backs the override endpoint's
+    guard for installs that have not rebooted since a model was registered."""
+    agents = oc.get("agents") or {}
+    defaults = agents.get("defaults") or {}
+    allowed = {k for k in (defaults.get("models") or {}) if isinstance(k, str)}
+
+    def _primary(model_field):
+        if isinstance(model_field, str):
+            return model_field
+        if isinstance(model_field, dict) and isinstance(model_field.get("primary"), str):
+            return model_field["primary"]
+        return None
+
+    holders = [defaults] + [a for a in (agents.get("list") or []) if isinstance(a, dict)]
+    for holder in holders:
+        ref = _primary(holder.get("model"))
+        if ref:
+            allowed.add(ref)
+    return allowed
+
+
 def _models_write_supported(config: dict) -> bool:
     """True when the dashboard can persist model changes (container install)."""
     return all(
@@ -8860,6 +8885,19 @@ async def post_phase_model_override(request: Request):
         raise HTTPException(
             status_code=400,
             detail=f"{model} is not a registered model. Add models in OpenClaw first.",
+        )
+    # The gateway rejects a session model missing from agents.defaults.models
+    # even when the model is registered, so a catalog check alone would accept
+    # an override the executor can never run on. Boot syncs the two lists;
+    # this guard catches drift before it costs the operator a stalled attempt.
+    if model not in _gateway_switchable_models(oc):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{model} is registered but not yet enabled for agent sessions. "
+                "Restart the Lullabeast container to sync it, or add it under "
+                "agents.defaults.models in OpenClaw."
+            ),
         )
     warning = None
     entry_input = catalog[model].get("input")

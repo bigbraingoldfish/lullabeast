@@ -451,6 +451,18 @@ elif os.environ.get("SETUP_MODE") == "1":
         print(f"[lullabeast] detected {hit['name']} at {hit['url']} with models: {summary}")
         print(f"[lullabeast]   to wire it, add LOCAL_MODEL_URL={hit['url']} to deploy/.env "
               "and reboot, or use the dashboard setup screen's one-click wiring.")
+
+# Registered => switchable. The gateway only lets a session run on a model
+# listed in agents.defaults.models, and nothing above writes that list, so a
+# probed local model would show in every picker yet be rejected at session
+# creation. Runs after all config writers, every boot and apply, so the two
+# lists agree.
+from autodev.installer.setup_helpers import ensure_model_switch_allowlist
+_sync = ensure_model_switch_allowlist(target)
+if _sync == "updated":
+    print("[lullabeast] model switch allowlist synced to the provider registry")
+elif _sync.startswith("error:"):
+    print(f"[lullabeast] WARNING: model allowlist sync failed ({_sync[6:]})")
 PY
 }
 

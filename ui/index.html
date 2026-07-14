@@ -2002,7 +2002,7 @@
          * /api/phase-model-override, cover every remaining attempt in the
          * phase, and clear when the phase closes, so an override outlives a
          * cancelled confirm (the roadmap row shows and clears it). */
-        function RetryModelOverrideSection({ rawId }) {
+        function RetryModelOverrideSection({ rawId, onOverridesChanged = null }) {
             const [open, setOpen] = useState(false);
             const [catalog, setCatalog] = useState(null);
             const [overrides, setOverrides] = useState({});
@@ -2037,6 +2037,10 @@
                     if (!r.ok) { setError(d.detail || 'Could not set the override.'); return; }
                     if (d.warning) setWarning(d.warning);
                     setOverrides((prev) => ({ ...prev, [d.role]: d.model }));
+                    // Same backend state the roadmap card badge mirrors; without
+                    // this ping the Monitor shows stale overrides until a phase
+                    // completes or the page reloads.
+                    if (onOverridesChanged) onOverridesChanged();
                 } catch (_e) {
                     setError('Network error while setting the override.');
                 } finally {
@@ -2059,6 +2063,7 @@
                         delete next[role];
                         return next;
                     });
+                    if (onOverridesChanged) onOverridesChanged();
                 } catch (_e) {
                     setError('Network error while clearing the override.');
                 } finally {
@@ -2088,8 +2093,9 @@
                                 Runs this phase's planner, executor, or reviewer on a different
                                 model for every remaining attempt, then clears when the phase
                                 closes. It takes effect as soon as you set it, even if you
-                                cancel below. There is no availability check: an unreachable
-                                model surfaces as a stall, then an escalation.
+                                cancel below. Only models the gateway accepts are offered here.
+                                If one still fails to apply, the attempt stops right away and
+                                escalates with the reason.
                             </p>
                             {Object.entries(overrides).map(([role, m]) => (
                                 <div key={role} className="flex items-center gap-2">
@@ -2149,7 +2155,7 @@
             );
         }
 
-        function ConfirmationModal({ command, onConfirm, onDismiss, busy, escalationResets = 0, retryPhaseRawId = null }) {
+        function ConfirmationModal({ command, onConfirm, onDismiss, busy, escalationResets = 0, retryPhaseRawId = null, onRetryOverridesChanged = null }) {
             let title = "Confirm action";
             let body = "Are you sure you want to run this command?";
             let cta = "Confirm";
@@ -2188,7 +2194,7 @@
                         <p className={`text-slate-300 text-sm ${showRetryOverride ? "mb-4" : "mb-6"}`}>
                             {body}
                         </p>
-                        {showRetryOverride && <RetryModelOverrideSection rawId={retryPhaseRawId} />}
+                        {showRetryOverride && <RetryModelOverrideSection rawId={retryPhaseRawId} onOverridesChanged={onRetryOverridesChanged} />}
                         <div className="flex gap-3 justify-end">
                             <button
                                 type="button"
@@ -2365,6 +2371,9 @@
             // dispatch (targetProjectPath) never passes it.
             current_phase_raw_id = null,
             targetProjectPath = null,
+            // Fired after the retry-confirm control sets or clears an override,
+            // so the Monitor's roadmap badge refetches instead of going stale.
+            onPhaseOverridesChanged = null,
             onDispatched = null,
             showOrchestratorLifecycle = false,
             showCommandSentScreen = false,
@@ -2765,6 +2774,7 @@
                             busy={confirmBusy}
                             escalationResets={escalation_resets}
                             retryPhaseRawId={targetProjectPath ? null : current_phase_raw_id}
+                            onRetryOverridesChanged={onPhaseOverridesChanged}
                         />
                     )}
                     {showConfirmModal && modalCommand === "STOP" && (
@@ -3459,7 +3469,7 @@
         // Wrapped in React.memo so it only re-renders when roadmap or metricsSummary
         // props actually change — avoids DOM churn caused by parent pState polling.
 
-        const RoadmapPanel = React.memo(function RoadmapPanel({ roadmap, metricsSummary, pipelineStatus, completionReport, runStartedAt, currentPhaseTokens }) {
+        const RoadmapPanel = React.memo(function RoadmapPanel({ roadmap, metricsSummary, pipelineStatus, completionReport, runStartedAt, currentPhaseTokens, overridesRefreshKey = 0 }) {
             const [expandedPhaseId, setExpandedPhaseId] = useState(null);
             // "Run so far" hidden toggles — clicking the cost / token value swaps it
             // for its breakdown (per-role cost; input/output/cache token classes).
@@ -3525,7 +3535,9 @@
             };
 
             // A closed phase's override entry is dropped by the orchestrator; refetch
-            // when the completed count moves so stale badges clear.
+            // when the completed count moves so stale badges clear. The refresh key
+            // bumps when the escalation retry-confirm control writes an override,
+            // which lands in the same backend file this panel mirrors.
             const completedPhaseCount = Array.isArray(roadmap) ? roadmap.filter(p => p.status === 'complete').length : 0;
             useEffect(() => {
                 let cancelled = false;
@@ -3534,7 +3546,7 @@
                     .then(d => { if (!cancelled) setPhaseOverrides((d && d.overrides) || {}); })
                     .catch(() => {});
                 return () => { cancelled = true; };
-            }, [completedPhaseCount]);
+            }, [completedPhaseCount, overridesRefreshKey]);
 
             const expandedPhaseObj = Array.isArray(roadmap) ? roadmap.find(p => p.id === expandedPhaseId) : null;
             const expandedIsOverridable = !!(expandedPhaseObj && (expandedPhaseObj.status === 'in_progress' || expandedPhaseObj.status === 'pending'));
@@ -3841,8 +3853,9 @@
                                                     <p className="text-xs text-slate-500 leading-relaxed mb-2">
                                                         Run this phase's planner, executor, or reviewer on a different model.
                                                         Covers every attempt in this phase, needs no restart, and clears when
-                                                        the phase closes. There is no availability check: an unreachable model
-                                                        surfaces as a stall, then an escalation.
+                                                        the phase closes. Only models the gateway accepts are offered here.
+                                                        If one still fails to apply, the attempt stops right away and
+                                                        escalates with the reason.
                                                     </p>
                                                     {phaseOverrides[phase.id] && Object.entries(phaseOverrides[phase.id]).map(([role, m]) => (
                                                         <div key={role} className="flex items-center gap-2 mb-1.5">
@@ -11656,6 +11669,9 @@
             const [roadmap, setRoadmap] = useState(null);
             const [metricsSummary, setMetricsSummary] = useState(null);
             const [completionReport, setCompletionReport] = useState(null);
+            // Bumped when the escalation retry-confirm control changes an override;
+            // RoadmapPanel refetches so its badge matches what was just saved.
+            const [overridesRefreshKey, setOverridesRefreshKey] = useState(0);
             const [generateDocsBusy, setGenerateDocsBusy] = useState(false);
             const [generateDocsError, setGenerateDocsError] = useState("");
             const [feedCollapsed, setFeedCollapsed] = useState(false);
@@ -12431,6 +12447,7 @@
                                 phase_branch_exists={pState.phase_branch_exists ?? true}
                                 merge_probe_passed={pState.merge_probe_passed ?? false}
                                 current_phase_raw_id={pState.current_phase_raw_id}
+                                onPhaseOverridesChanged={() => setOverridesRefreshKey(k => k + 1)}
                                 showOrchestratorLifecycle={true}
                                 showCommandSentScreen={true}
                             />
@@ -12446,6 +12463,7 @@
                                 completionReport={completionReport}
                                 runStartedAt={pState.run_started_at || null}
                                 currentPhaseTokens={pState.current_phase_tokens}
+                                overridesRefreshKey={overridesRefreshKey}
                             />
                         </div>
                     </main>
@@ -14729,7 +14747,7 @@
 
                         <div className="space-y-2">
                             <p className="text-xs text-slate-500 leading-relaxed" data-testid="welcome-expectations">
-                                The demo is a real pipeline run: expect roughly 20 to 30 minutes depending
+                                The demo is a real pipeline run: expect roughly 30 to 60 minutes depending
                                 on your models and inference speed, and real API cost unless you run local
                                 models.
                             </p>
