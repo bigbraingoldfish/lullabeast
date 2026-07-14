@@ -507,7 +507,7 @@ def set_session_response_usage(
     mode: str = "full",
     model: str | None = None,
     timeout_seconds: int = 8,
-) -> bool:
+) -> tuple[bool, str | None]:
     """Set the per-session ``responseUsage`` preference via gateway ``sessions.patch``.
 
     ``responseUsage: "full"`` makes OpenClaw append a token-usage + cost line to
@@ -528,8 +528,12 @@ def set_session_response_usage(
     ``agent:{role}:{bare_key}`` lowercase form (same shape ``sessions.abort``
     expects), not the bare ``pipeline:…`` key.
 
-    Best-effort: returns True when the gateway acknowledged the patch, False on
-    any failure.  Callers must never block an agent invocation on this.
+    Returns ``(ok, detail)``: ``detail`` is None on success, else a short
+    operator-facing reason (the gateway's error message when it sent one, e.g.
+    ``INVALID_REQUEST: model not allowed: local/x``). The usage preference
+    itself stays best-effort — but when ``model`` rides the patch the caller
+    must treat failure as fatal: proceeding would run the wrong model silently
+    or invoke a session the gateway never created.
     """
     _params = {"key": session_key, "responseUsage": mode}
     if model:
@@ -545,16 +549,19 @@ def set_session_response_usage(
         scopes=("operator.admin",),
     )
     if resp is None:
-        return False
+        return False, "no response from the gateway (sessions.patch)"
     if resp.get("ok"):
         logging.info(
             "[USAGE] sessions.patch responseUsage=%s for %s", mode, session_key
         )
-        return True
+        return True, None
     logging.warning(
         "[USAGE] sessions.patch rejected for %s: %s", session_key, resp
     )
-    return False
+    err = resp.get("error") if isinstance(resp.get("error"), dict) else {}
+    message = err.get("message") or "gateway rejected sessions.patch"
+    code = err.get("code")
+    return False, f"{code}: {message}" if code else message
 
 
 def abort_agent_session(

@@ -6,14 +6,14 @@ This project follows [Semantic Versioning](https://semver.org/). Format follows 
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-07-12
+## [1.0.0] - 2026-07-14
 
 The deploy-simplification release. Lullabeast now installs and runs as one Docker container, with a health-check doctor, dashboard model control, and a hardened sandbox for the code its agents write.
 
 ### Added
 - **One-command Docker install.** `docker compose up` with an API key starts the gateway, dashboard, and maintenance loops in one container; OpenClaw ships bundled and pre-configured, so there is no separate install step. First boot renders config, runs the installer, validates itself, and prints the tokenized dashboard URL. Full contract: [deploy/README.md](deploy/README.md).
 - **A health-check doctor.** One read-only command (26 checks) covers every known silent-failure mode and prints a green/red checklist with a one-line fix each. It runs on boot, serves at `GET /api/doctor`, and shows as a Health card in the dashboard.
-- **Dashboard model control, per role and per phase.** Pick which model each pipeline and document role uses from Settings with no config-file editing, override a single phase or retry onto a stronger or cheaper model, and edit each model's capability and cost metadata (which survives upgrades). Changes apply through a gateway restart and are refused mid-run; there is no availability probe yet, so an unreachable model surfaces as a stall, then an escalation.
+- **Dashboard model control, per role and per phase.** Pick which model each pipeline and document role uses from Settings with no config-file editing, override a single phase or retry onto a stronger or cheaper model, and edit each model's capability and cost metadata (which survives upgrades). Changes apply through a gateway restart and are refused mid-run. Pickers offer only models the gateway accepts (boot syncs its session allowlist to every registered model), an override that still fails to apply escalates immediately with the gateway's reason instead of stalling, and overrides set from the escalation retry dialog show on the roadmap card at once.
 - **A hardened container sandbox.** Agent-written code runs non-root, with all Linux capabilities dropped, `no-new-privileges` set, and Lullabeast's own code root-owned. It contains filesystem and host-process damage, not network exfiltration or package-install supply-chain risk; the honest scope is documented in [SECURITY.md](SECURITY.md) and [deploy/README.md](deploy/README.md).
 - **A bundled first-run sample and onboarding tour.** A tiny Snake game ships as a ready-to-run project, so the first pipeline run needs no authoring.
 - **Local model servers on the Docker host, documented and auto-wired.** Reach a llama.cpp, Ollama, or LM Studio server through `host.docker.internal`; [deploy/README.md](deploy/README.md) covers the setup and the loopback-binding gotcha.

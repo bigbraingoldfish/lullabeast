@@ -56,6 +56,7 @@ from env_resolvers import resolve_openclaw_root, resolve_pipeline_root, load_rep
 from atomic_io import write_json_atomic, write_text_atomic
 from error_codes import (
     ERR_MERGE_FAILED,
+    ERR_MODEL_OVERRIDE_REJECTED,
     ERR_PHASE_RESOLVER_FAILED,
     ERR_PROVIDER_REJECTED,
     ERR_RESET_EXECUTION_GIT_FAILED,
@@ -534,6 +535,7 @@ ESCALATION_TRIGGER_CLASSES = frozenset({
     "reviewer_routed",            # reviewer gate returned ROUTE_ESCALATE
     "reviewer_verification_unmet",  # missing-artifacts / contract / unverified caps
     "provider_rejected",          # provider quota/policy reject or session dead-on-arrival
+    "model_override_rejected",    # gateway refused the phase override model at session creation
     "webhook_failure",            # /hooks/agent returned non-SUCCESS
     "resolver_failed",            # phase_resolver exit 1 / crash
     "roadmap_checkbox_failed",
@@ -550,6 +552,7 @@ ESCALATION_TRIGGER_CLASSES = frozenset({
 # classified by derivation, so they need no explicit stamp.
 _ERR_CODE_TO_TRIGGER_CLASS = {
     ERR_PROVIDER_REJECTED: "provider_rejected",
+    ERR_MODEL_OVERRIDE_REJECTED: "model_override_rejected",
     ERR_SESSION_DEAD_ON_ARRIVAL: "provider_rejected",
     ERR_RESET_PHASE_GIT_FAILED: "reset_git_failed",
     ERR_RESET_EXECUTION_GIT_FAILED: "reset_git_failed",
@@ -3458,7 +3461,7 @@ class Orchestrator:
 
     def _preset_session_response_usage(
         self, role: str, session_key: str, model: str | None = None
-    ) -> None:
+    ) -> str | None:
         """Pre-seed ``responseUsage: "full"`` on the about-to-be-invoked session.
 
         OpenClaw's ``responseUsage`` is a per-session-entry preference (no config
@@ -3476,32 +3479,44 @@ class Orchestrator:
         ``session_key`` is the bare ``pipeline:…`` key; the gateway store key is
         the ``agent:{role}:…`` lowercase form (same shape ``sessions.abort`` uses).
 
-        Best-effort and non-blocking: a failure is logged and the invocation
-        proceeds — usage display is observability, never worth failing a phase.
+        Returns None when the invocation may proceed. The usage preference is
+        best-effort (a failure is logged, never blocks) — but when ``model``
+        rides the patch a failure is returned as an operator-facing detail
+        string: the override did not bake, so invoking anyway would run the
+        wrong model silently or wait out the startup grace on a session the
+        gateway refused to create (observed live: INVALID_REQUEST "model not
+        allowed" surfaced as a 10-minute no_first_activity stall).
 
         Env ``AUTODEV_RESPONSE_USAGE`` overrides the mode (default ``full``);
         an empty value or ``off`` disables the patch entirely.
         """
         mode = os.environ.get("AUTODEV_RESPONSE_USAGE", "full").strip().lower()
         if mode in ("", "off"):
-            return
+            return None
         try:
             store_key = f"agent:{role}:{session_key}".lower()
             gw_token = self.openclaw_config.get("gateway_token", "")
             gw_ws_url = self.openclaw_config.get(
                 "gateway_ws_url", "ws://127.0.0.1:18789/__openclaw__/ws"
             )
-            ok = set_session_response_usage(store_key, gw_ws_url, gw_token, mode=mode, model=model)
+            ok, detail = set_session_response_usage(
+                store_key, gw_ws_url, gw_token, mode=mode, model=model
+            )
             print(
                 f"[USAGE] responseUsage={mode} {'set' if ok else 'FAILED'} "
                 f"session_key={store_key}"
             )
+            if not ok and model:
+                return detail or "gateway rejected the session patch"
         except Exception as exc:
             print(
                 f"[USAGE] responseUsage patch failed for {role} {session_key}: {exc}"
             )
+            if model:
+                return str(exc)
+        return None
 
-    def _record_active_agent(self, role: str, session_key: str) -> None:
+    def _record_active_agent(self, role: str, session_key: str) -> str | None:
         """Remember the just-invoked pipeline agent's session so a later give-up
         (escalation) can abort it.
 
@@ -3515,8 +3530,12 @@ class Orchestrator:
         when one is set, else the configured model — into
         ``phase_state.models_used`` (MON-1 — the metrics row copies it so the
         dashboard's Run Metrics model badge can show what ran the phase,
-        mirroring ``skill_injected``).
-        Best-effort telemetry: any failure is logged, never blocks the invocation."""
+        mirroring ``skill_injected``). That stamp is best-effort telemetry.
+
+        Returns None when the invocation may proceed. When a phase override is
+        set and its session-creating patch fails, returns the gateway's reason —
+        the caller must escalate instead of invoking (see
+        :meth:`_escalate_model_override_rejected`)."""
         self._active_agent_role = role
         self._active_agent_session_key = session_key
         self._active_agent_stamp = os.path.join(PROJECT_ARTIFACTS_DIR, f"{role}_activity.stamp")
@@ -3539,7 +3558,7 @@ class Orchestrator:
         # a session's model is fixed at creation, so a later webhook model= against
         # the now-existing entry is ignored. No override -> the entry bakes the
         # configured default.
-        self._preset_session_response_usage(role, session_key, model=_override)
+        return self._preset_session_response_usage(role, session_key, model=_override)
 
     def _wait_for_stamp_settle(self, stamp_path: str) -> bool:
         """Poll an activity stamp until it stays quiet for ``_INTERRUPT_SETTLE_QUIET``
@@ -4122,6 +4141,31 @@ class Orchestrator:
         self.transition_state(
             "RUNNING",
             f"ERR_PROVIDER_REJECTED ({role_label}): {msg[:240]}",
+        )
+        return True
+
+    def _escalate_model_override_rejected(self, role_label: str, detail: str) -> bool:
+        """The phase's model override did not bake onto the session-creating patch
+        (typically gateway INVALID_REQUEST "model not allowed"). Invoking anyway
+        would run the wrong model silently or wait out the full startup grace on
+        a session the gateway refused to create, then escalate under a stale
+        error code — so escalate now, carrying the gateway's reason. The retry
+        counter is not consumed: this is a config problem, not an agent failure.
+
+        Always returns True (caller must ``continue`` the main loop), mirroring
+        :meth:`_escalate_if_provider_rejected`'s dispatch shape."""
+        print(f"[ERROR] [{role_label}] Model override rejected: {detail[:240]}")
+        _ps = self.read_phase_state()
+        _ps["last_error_code"] = ERR_MODEL_OVERRIDE_REJECTED
+        _ps["escalation_trigger_reason"] = (
+            f"{role_label} model override could not be applied: {detail[:900]}. "
+            "Clear or change the phase model override, then retry."
+        )
+        self.write_phase_state_atomic(_ps)
+        self.state["current_agent"] = "escalation"
+        self.transition_state(
+            "RUNNING",
+            f"ERR_MODEL_OVERRIDE_REJECTED ({role_label}): {detail[:240]}",
         )
         return True
 
@@ -6956,7 +7000,10 @@ class Orchestrator:
                         continue
 
                     session_key = f"pipeline:phase-{phase}:{raw_id}:planner-attempt-{retries + 1}" + self._provider_retry_suffix() + self._run_suffix()
-                    self._record_active_agent("planner", session_key)  # Phase 9 — abort-on-escalation target
+                    _override_err = self._record_active_agent("planner", session_key)  # Phase 9 — abort-on-escalation target
+                    if _override_err:
+                        self._escalate_model_override_rejected("planner", _override_err)
+                        continue
                     sentinel_path = os.path.join(PROJECT_ARTIFACTS_DIR, "planner_output.done")
                     token = self.openclaw_config.get("hooks", {}).get("token", "")
 
@@ -7258,7 +7305,10 @@ class Orchestrator:
                         continue
 
                     session_key = f"pipeline:phase-{phase}:{raw_id}:executor-attempt-{retries + 1}" + self._provider_retry_suffix() + self._run_suffix()
-                    self._record_active_agent("executor", session_key)  # Phase 9 — abort-on-escalation target
+                    _override_err = self._record_active_agent("executor", session_key)  # Phase 9 — abort-on-escalation target
+                    if _override_err:
+                        self._escalate_model_override_rejected("executor", _override_err)
+                        continue
                     attempt_label = "Cloud"
 
                     sentinel_path = os.path.join(PROJECT_ARTIFACTS_DIR, "executor_output.done")
@@ -7576,7 +7626,10 @@ class Orchestrator:
                     session_key = self._reviewer_session_key(
                         phase, raw_id, retries, _contract_retries, _unverified_retries
                     ) + self._provider_retry_suffix() + self._run_suffix()
-                    self._record_active_agent("reviewer", session_key)  # Phase 9 — abort-on-escalation target
+                    _override_err = self._record_active_agent("reviewer", session_key)  # Phase 9 — abort-on-escalation target
+                    if _override_err:
+                        self._escalate_model_override_rejected("reviewer", _override_err)
+                        continue
 
                     sentinel_path = os.path.join(PROJECT_ARTIFACTS_DIR, "reviewer_output.done")
                     token = self.openclaw_config.get("hooks", {}).get("token", "")

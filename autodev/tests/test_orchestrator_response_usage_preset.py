@@ -30,7 +30,7 @@ def _make_orch(monkeypatch, tmp_path):
 
     def _set_usage(store_key, ws_url, token, mode="full", model=None, **k):
         calls.append((store_key, ws_url, token, mode, model))
-        return True
+        return True, None
 
     monkeypatch.setattr(orch_mod, "set_session_response_usage", _set_usage)
     orch = orch_mod.Orchestrator.__new__(orch_mod.Orchestrator)
@@ -90,7 +90,8 @@ def test_env_mode_override(monkeypatch, tmp_path):
 
 
 def test_preset_failure_never_raises(monkeypatch, tmp_path):
-    """Best-effort contract: a gateway failure must not block the invocation."""
+    """Best-effort contract (no model riding): a gateway failure must not block
+    the invocation."""
     monkeypatch.setenv("AUTODEV_RESPONSE_USAGE", "full")
     orch, _ = _make_orch(monkeypatch, tmp_path)
 
@@ -98,7 +99,47 @@ def test_preset_failure_never_raises(monkeypatch, tmp_path):
         raise RuntimeError("gateway down")
 
     monkeypatch.setattr(orch_mod, "set_session_response_usage", _boom)
-    orch._preset_session_response_usage("executor", "pipeline:x")  # must not raise
+    assert orch._preset_session_response_usage("executor", "pipeline:x") is None
+
+
+def test_preset_failure_without_model_is_benign(monkeypatch, tmp_path):
+    """A rejected usage-only patch stays best-effort: the session still bakes
+    the configured default, so the invocation proceeds."""
+    monkeypatch.setenv("AUTODEV_RESPONSE_USAGE", "full")
+    orch, _ = _make_orch(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        orch_mod, "set_session_response_usage",
+        lambda *a, **k: (False, "gateway busy"),
+    )
+    assert orch._preset_session_response_usage("executor", "pipeline:x") is None
+
+
+def test_preset_failure_with_model_returns_the_gateway_reason(monkeypatch, tmp_path):
+    """Fatal contract: when the phase override rides the creating patch and the
+    gateway rejects it, the caller gets the reason and must not invoke —
+    proceeding ran the wrong model or stalled out the startup grace (observed
+    live: "model not allowed" surfaced as a 601s no_first_activity)."""
+    monkeypatch.setenv("AUTODEV_RESPONSE_USAGE", "full")
+    orch, _ = _make_orch(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        orch_mod, "set_session_response_usage",
+        lambda *a, **k: (False, "INVALID_REQUEST: model not allowed: local/x"),
+    )
+    err = orch._preset_session_response_usage("executor", "pipeline:x", model="local/x")
+    assert err == "INVALID_REQUEST: model not allowed: local/x"
+
+
+def test_preset_exception_with_model_returns_detail(monkeypatch, tmp_path):
+    monkeypatch.setenv("AUTODEV_RESPONSE_USAGE", "full")
+    orch, _ = _make_orch(monkeypatch, tmp_path)
+
+    def _boom(*a, **k):
+        raise RuntimeError("gateway down")
+
+    monkeypatch.setattr(orch_mod, "set_session_response_usage", _boom)
+    assert orch._preset_session_response_usage(
+        "executor", "pipeline:x", model="local/x"
+    ) == "gateway down"
 
 
 def test_preset_threads_model_onto_the_patch(monkeypatch, tmp_path):
@@ -139,3 +180,57 @@ def test_record_active_agent_no_override_leaves_model_unset(monkeypatch, tmp_pat
     _stub_phase_state(orch, None)
     orch._record_active_agent("planner", "pipeline:phase-1:CORE-1:planner-attempt-1")
     assert calls and calls[0][4] is None
+
+
+def test_record_active_agent_surfaces_a_rejected_override(monkeypatch, tmp_path):
+    """The invoke sites branch to escalation on this return value; a baked
+    override that the gateway refuses must not report success."""
+    monkeypatch.setenv("AUTODEV_RESPONSE_USAGE", "full")
+    orch, _ = _make_orch(monkeypatch, tmp_path)
+    _stub_phase_state(orch, "local/not-allowed")
+    monkeypatch.setattr(
+        orch_mod, "set_session_response_usage",
+        lambda *a, **k: (False, "INVALID_REQUEST: model not allowed: local/not-allowed"),
+    )
+    err = orch._record_active_agent("executor", "pipeline:phase-2:CORE-1:executor-attempt-1")
+    assert err == "INVALID_REQUEST: model not allowed: local/not-allowed"
+
+
+def test_record_active_agent_ok_returns_none(monkeypatch, tmp_path):
+    monkeypatch.setenv("AUTODEV_RESPONSE_USAGE", "full")
+    orch, calls = _make_orch(monkeypatch, tmp_path)
+    _stub_phase_state(orch, "openrouter/big/strong")
+    assert orch._record_active_agent(
+        "executor", "pipeline:phase-2:CORE-1:executor-attempt-1"
+    ) is None
+    assert calls
+
+
+def test_escalate_model_override_rejected_routes_to_escalation(monkeypatch, tmp_path):
+    """State effects: ERR_MODEL_OVERRIDE_REJECTED + the gateway reason land in
+    phase_state, current_agent flips to escalation, and the retry counter is
+    untouched (config problem, not an agent failure)."""
+    orch, _ = _make_orch(monkeypatch, tmp_path)
+    written = {}
+    orch.read_phase_state = lambda: {"executor_retries": 1}
+    orch.write_phase_state_atomic = lambda ps: written.update(ps)
+    transitions = []
+    orch.transition_state = lambda status, reason: transitions.append((status, reason))
+
+    assert orch._escalate_model_override_rejected(
+        "executor", "INVALID_REQUEST: model not allowed: local/x"
+    ) is True
+    assert written["last_error_code"] == orch_mod.ERR_MODEL_OVERRIDE_REJECTED
+    assert "model not allowed: local/x" in written["escalation_trigger_reason"]
+    assert "Clear or change the phase model override" in written["escalation_trigger_reason"]
+    assert written["executor_retries"] == 1
+    assert orch.state["current_agent"] == "escalation"
+    assert transitions and transitions[0][0] == "RUNNING"
+    assert "ERR_MODEL_OVERRIDE_REJECTED (executor)" in transitions[0][1]
+
+
+def test_trigger_class_derivation_covers_override_rejection():
+    assert orch_mod._derive_escalation_trigger_class(
+        orch_mod.ERR_MODEL_OVERRIDE_REJECTED
+    ) == "model_override_rejected"
+    assert "model_override_rejected" in orch_mod.ESCALATION_TRIGGER_CLASSES

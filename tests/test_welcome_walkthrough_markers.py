@@ -77,7 +77,7 @@ class TestWelcomeWalkthrough:
         html = load_html()
         # Time + cost are stated once, calmly, before the load button.
         assert 'data-testid="welcome-expectations"' in html
-        assert "20 to 30 minutes" in html
+        assert "30 to 60 minutes" in html
 
     def test_rebuild_confirm_guard(self):
         html = load_html()

@@ -29,7 +29,7 @@ class TestRetryOverrideSection:
     def test_gated_to_the_three_recover_commands(self):
         html = _html()
         assert '["RESET_PHASE", "RESET_EXECUTION", "RESET_REVIEWER"].indexOf(command) !== -1' in html
-        assert "{showRetryOverride && <RetryModelOverrideSection rawId={retryPhaseRawId} />}" in html
+        assert "{showRetryOverride && <RetryModelOverrideSection rawId={retryPhaseRawId} onOverridesChanged={onRetryOverridesChanged} />}" in html
 
     def test_collapsed_by_default_but_noticeable(self):
         # A bordered toggle with a caret, plus an active-count marker so a set
@@ -45,12 +45,13 @@ class TestRetryOverrideSection:
         assert "retryPhaseRawId={targetProjectPath ? null : current_phase_raw_id}" in html
         assert "current_phase_raw_id={pState.current_phase_raw_id}" in html
 
-    def test_copy_is_honest_about_persistence_and_stalls(self):
-        # Overrides land immediately and outlive a cancelled confirm; there is
-        # still no model-health probe.
+    def test_copy_is_honest_about_persistence_and_failures(self):
+        # Overrides land immediately and outlive a cancelled confirm; the picker
+        # is allowlist-backed and a residual apply failure fails fast.
         html = _html()
         assert "It takes effect as soon as you set it, even if you" in html
-        assert "cancel below. There is no availability check: an unreachable" in html
+        assert "cancel below. Only models the gateway accepts are offered here." in html
+        assert "escalates with the reason." in html
 
     def test_new_copy_has_no_em_dashes(self):
         html = _html()
@@ -62,3 +63,26 @@ class TestRetryOverrideSection:
         ):
             assert snippet in html, snippet
             assert "—" not in snippet
+
+
+class TestRetryOverrideMonitorSync:
+    """Setting or clearing an override from the retry confirm must refresh the
+    Monitor's roadmap badge; before this wiring the badge stayed stale until a
+    phase completed or the page reloaded."""
+
+    def test_section_pings_after_set_and_clear(self):
+        html = _html()
+        assert "function RetryModelOverrideSection({ rawId, onOverridesChanged = null })" in html
+        assert html.count("if (onOverridesChanged) onOverridesChanged();") == 2
+
+    def test_callback_threads_monitor_to_modal(self):
+        html = _html()
+        assert "onPhaseOverridesChanged = null," in html
+        assert "onRetryOverridesChanged={onPhaseOverridesChanged}" in html
+        assert "onPhaseOverridesChanged={() => setOverridesRefreshKey(k => k + 1)}" in html
+
+    def test_roadmap_panel_refetches_on_the_key(self):
+        html = _html()
+        assert "overridesRefreshKey = 0 }" in html
+        assert "}, [completedPhaseCount, overridesRefreshKey]);" in html
+        assert "overridesRefreshKey={overridesRefreshKey}" in html

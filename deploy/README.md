@@ -205,7 +205,11 @@ key. To wire it up:
    pipeline turns). The boot log prints each model in the `local/<model-id>`
    form with the values it was wired with. Same-id fields already in the
    entry survive restarts, so a hand-tuned model is never regressed by a
-   reboot. Detection requires the server to answer `/v1/models`.
+   reboot. Detection requires the server to answer `/v1/models`. Every
+   registered model is also enabled for agent sessions
+   (`agents.defaults.models` is synced to the provider registry on each
+   boot), so anything the dashboard pickers offer, including per-phase
+   overrides, is accepted by the gateway.
 3. **Confirm what the probe cannot know.** llama.cpp and LM Studio do not
    report whether a model is a reasoning model; an undeclared reasoning model
    burns its output budget thinking and ends its turn with nothing. If yours

@@ -873,6 +873,7 @@ hdr "8/14  Register Lullabeast agents in openclaw.json"
 REGISTER_STATUS_STEP="not attempted"
 TOOLS_PROFILE_STEP="skipped"
 CTX_LIMITS_STEP="not attempted"
+MODEL_ALLOWLIST_STEP="not attempted"
 HOOKS_STEP="not attempted"
 WEBHOOK_SYNC_STEP="not checked"
 REGISTER_AGENT="$AUTODEV_REPO_PATH/autodev/installer/register_agent.py"
@@ -975,6 +976,22 @@ print(ensure_openclaw_context_limits(sys.argv[1]))
         updated)   ok "Context limits seeded (owned mode)"; CTX_LIMITS_STEP="updated" ;;
         unchanged) ok "Context limits already in place"; CTX_LIMITS_STEP="ok (unchanged)" ;;
         *)         fail "Could not seed context limits (owned mode): $CTX_LIMITS_RESULT" ;;
+    esac
+
+    # Registered => switchable: every models.providers.* model gets an
+    # agents.defaults.models entry, so nothing a picker offers is rejected by
+    # the gateway at session creation ("model not allowed").
+    ALLOWLIST_RESULT=$(
+        cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import ensure_model_switch_allowlist
+import sys
+print(ensure_model_switch_allowlist(sys.argv[1]))
+" "$OPENCLAW_ROOT/openclaw.json" 2>/dev/null || echo "error:helper"
+    )
+    case "$ALLOWLIST_RESULT" in
+        updated)   ok "Model switch allowlist synced (owned mode)"; MODEL_ALLOWLIST_STEP="updated" ;;
+        unchanged) ok "Model switch allowlist already complete"; MODEL_ALLOWLIST_STEP="ok (unchanged)" ;;
+        *)         fail "Could not sync model allowlist (owned mode): $ALLOWLIST_RESULT" ;;
     esac
     # owned-mode-end: step 8
 else
@@ -1344,6 +1361,35 @@ print(ensure_openclaw_context_limits(sys.argv[1]))
         *)
             warn "Unexpected context-limits result: $CTX_LIMITS_RESULT"
             CTX_LIMITS_STEP="unexpected result"
+            ;;
+    esac
+
+    # Registered => switchable: every models.providers.* model gets an
+    # agents.defaults.models entry, so nothing a picker offers is rejected by
+    # the gateway at session creation ("model not allowed").
+    ALLOWLIST_RESULT=$(
+        cd "$AUTODEV_REPO_PATH" && PYTHONPATH="$AUTODEV_REPO_PATH" "$PYTHON" -c "
+from autodev.installer.setup_helpers import ensure_model_switch_allowlist
+import sys
+print(ensure_model_switch_allowlist(sys.argv[1]))
+" "$OPENCLAW_ROOT/openclaw.json" 2>/dev/null || echo "error:helper"
+    )
+    case "$ALLOWLIST_RESULT" in
+        updated)
+            ok "Model switch allowlist synced with the provider registry"
+            MODEL_ALLOWLIST_STEP="updated"
+            ;;
+        unchanged)
+            ok "Model switch allowlist already complete"
+            MODEL_ALLOWLIST_STEP="ok (unchanged)"
+            ;;
+        error:*)
+            warn "Could not sync model allowlist: ${ALLOWLIST_RESULT#error:}"
+            MODEL_ALLOWLIST_STEP="error"
+            ;;
+        *)
+            warn "Unexpected model-allowlist result: $ALLOWLIST_RESULT"
+            MODEL_ALLOWLIST_STEP="unexpected result"
             ;;
     esac
 fi
@@ -1811,6 +1857,7 @@ printf "  %-32s %s\n" "Webhook secret sync:"      "$WEBHOOK_SYNC_STEP"
 printf "  %-32s %s\n" "OpenClaw tools.profile:"   "$TOOLS_PROFILE_STEP"
 printf "  %-32s %s\n" "OpenClaw agents (register):" "$REGISTER_STATUS_STEP"
 printf "  %-32s %s\n" "OpenClaw context limits:"  "$CTX_LIMITS_STEP"
+printf "  %-32s %s\n" "Model switch allowlist:"   "$MODEL_ALLOWLIST_STEP"
 printf "  %-32s %s\n" "Pipeline signals plugin:"    "$PLUGIN_INSTALL_STEP"
 printf "  %-32s %s\n" "Playwright MCP (visual):"   "$PLAYWRIGHT_STEP"
 echo   "  Agent files deployed:"

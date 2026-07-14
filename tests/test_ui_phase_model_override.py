@@ -38,18 +38,19 @@ class TestPhaseOverrideUi:
         assert '<option value="executor">executor</option>' in html
         assert '<option value="reviewer">reviewer</option>' in html
 
-    def test_help_copy_is_honest_about_stalls(self):
-        # No model-health probe exists; the control says what failure looks like.
+    def test_help_copy_is_honest_about_failures(self):
+        # The picker only offers gateway-accepted models, and a residual apply
+        # failure fails fast; the control says both.
         html = _html()
-        assert "There is no availability check: an unreachable model" in html
-        assert "surfaces as a stall, then an escalation" in html
+        assert "Only models the gateway accepts are offered here." in html
+        assert "escalates with the reason" in html
         assert "clears when" in html
 
     def test_new_copy_has_no_em_dashes(self):
         html = _html()
         for snippet in (
             "Run this phase's planner, executor, or reviewer on a different model.",
-            "surfaces as a stall, then an escalation.",
+            "escalates with the reason.",
             "Could not set the override.",
             "Could not clear the override.",
         ):
