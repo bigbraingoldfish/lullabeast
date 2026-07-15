@@ -9,6 +9,7 @@ responsibility is writing the dotenv file correctly (LOCAL_MODEL_URL + the six
 *_MODEL knobs); setup mode itself is entrypoint-owned. Every surface degrades to
 "unsupported" when the config keys are unset, and no key material is ever logged.
 """
+import json
 import os
 import stat
 from pathlib import Path
@@ -527,9 +528,12 @@ class TestLocalModelUiMarkers:
         assert "/api/setup/local-models" in html
         assert "/api/setup/local-model" in html
 
-    def test_use_this_model_button_present(self):
+    def test_wizard_finish_submits_local_wiring(self):
+        # The wizard's Finish step posts the primary pick (the model most
+        # roles run on) plus only the diverging role assignments.
         html = self._html()
-        assert "Use this model for all roles" in html
+        assert "Finish setup and start" in html
+        assert "localPrimary" in html
 
     def test_local_models_surface_testid(self):
         html = self._html()
@@ -547,13 +551,13 @@ class TestLocalModelUiMarkers:
         assert "suggested_max_tokens" in html
 
     def test_vision_block_narrowed_to_vision_roles(self):
-        # Stage D: the wire button is blocked only when the executor, reviewer,
-        # or prd-creator ends up on a text-only model, not on any "No" pick.
+        # The wizard blocks only when the executor, reviewer, or prd-creator
+        # ends up on a text-only model, not on any "No" pick.
         html = self._html()
         assert 'data-testid="setup-local-vision-warning"' in html
-        assert 'vision === "no"' in html
-        assert "MODEL_VISION_ROLES.filter((role) => effModel(role) && modelTextOnly(effModel(role)))" in html
-        assert "blockedRoles.length > 0" in html
+        assert "MODEL_VISION_ROLES.filter((role) => {" in html
+        assert "modelEntryTextOnly" in html
+        assert "visionBlocked.length > 0" in html
 
     def test_skip_provider_surface_present(self):
         # The third welcome option: skip and manage models in OpenClaw, behind
@@ -646,3 +650,87 @@ class TestLocalModelRoleCustomization:
             r = self._post(cfg, {**base, "roles": bad_roles})
             assert r.status_code == 400, bad_roles
             assert not os.path.exists(cfg["provider_key_path"])
+
+
+# ── local-model wiring: per-model property confirmations ─────────────────────
+
+class TestLocalModelProperties:
+    """The wizard confirms every wired model: the primary through the
+    LOCAL_MODEL_* fields, the others through the model-overrides overlay
+    riding this POST as ``properties``."""
+
+    def _post(self, cfg, body):
+        with patch("ui.server.load_config", return_value=cfg):
+            return client.post("/api/setup/local-model", json=body)
+
+    def _cfg_with_overrides(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        cfg["model_overrides_path"] = str(tmp_path / "overrides" / "model-overrides.json")
+        return cfg
+
+    def test_properties_written_to_overlay(self, tmp_path):
+        cfg = self._cfg_with_overrides(tmp_path)
+        r = self._post(
+            cfg,
+            {
+                "url": "http://host:11434",
+                "model": "llama3.2-vision:11b",
+                "roles": {"planner": "qwen2.5:14b"},
+                "properties": {
+                    "local/qwen2.5:14b": {
+                        "input": ["text"],
+                        "reasoning": True,
+                        "contextWindow": 131072,
+                        "maxTokens": 32768,
+                    }
+                },
+            },
+        )
+        assert r.status_code == 200
+        overlay = json.loads(Path(cfg["model_overrides_path"]).read_text())
+        entry = overlay["models"]["local/qwen2.5:14b"]
+        assert entry["contextWindow"] == 131072
+        assert entry["reasoning"] is True
+        # The env lines were still written (the overlay rides the same pass).
+        assert "LOCAL_MODEL_URL=http://host:11434" in Path(cfg["provider_key_path"]).read_text()
+
+    def test_properties_limited_to_wired_models(self, tmp_path):
+        cfg = self._cfg_with_overrides(tmp_path)
+        r = self._post(
+            cfg,
+            {
+                "url": "http://host:11434",
+                "model": "llama3.2-vision:11b",
+                "properties": {"local/other-model": {"contextWindow": 131072}},
+            },
+        )
+        assert r.status_code == 400
+        assert "not one of the models this request wires" in r.json()["detail"]
+        assert not os.path.exists(cfg["provider_key_path"])
+
+    def test_invalid_properties_rejected_before_any_write(self, tmp_path):
+        cfg = self._cfg_with_overrides(tmp_path)
+        r = self._post(
+            cfg,
+            {
+                "url": "http://host:11434",
+                "model": "llama3.2-vision:11b",
+                "properties": {"local/llama3.2-vision:11b": {"contextWindow": -5}},
+            },
+        )
+        assert r.status_code == 400
+        assert not os.path.exists(cfg["provider_key_path"])
+        assert not os.path.exists(cfg["model_overrides_path"])
+
+    def test_properties_without_overlay_path_409(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        r = self._post(
+            cfg,
+            {
+                "url": "http://host:11434",
+                "model": "llama3.2-vision:11b",
+                "properties": {"local/llama3.2-vision:11b": {"contextWindow": 131072}},
+            },
+        )
+        assert r.status_code == 409
+        assert not os.path.exists(cfg["provider_key_path"])

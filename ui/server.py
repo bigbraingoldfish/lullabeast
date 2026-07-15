@@ -7895,7 +7895,8 @@ def get_setup_provider_status():
 async def post_setup_provider_key(request: Request):
     """Persist the provider API key the entrypoint watches for (A2 unlock).
 
-    Body: {"provider": "openrouter", "key": "<str>", "roles"?: {role: model}}.
+    Body: {"provider": "openrouter", "key": "<str>", "roles"?: {role: model},
+    "properties"?: {model: props}}.
     Writes the ``OPENROUTER_API_KEY=...`` dotenv line to provider_key_path
     atomically, mode 0600, creating the parent dir 0700. Shape check only — no
     live validation; the deferred ``--live`` doctor validates end to end. The
@@ -7906,6 +7907,11 @@ async def post_setup_provider_key(request: Request):
     roles PUT, written as ``*_MODEL`` knob lines with the key in the same
     atomic pass, so the unlock costs one restart. Absent or empty, the audited
     defaults apply and the write is a single key line, exactly as before.
+
+    ``properties`` is the wizard's optional Configure-step confirmation: a
+    partial {model: props} map with the same shape and validation as
+    PUT /api/models/properties, merged into the model-overrides overlay before
+    the key write so the first boot already renders the confirmed values.
 
     409 when provider_key_path is unset (bare metal). 400 on unknown provider,
     bad key shape, or an invalid role choice. On success:
@@ -7965,8 +7971,14 @@ async def post_setup_provider_key(request: Request):
     roles = body.get("roles")
     if roles is not None and not isinstance(roles, dict):
         raise HTTPException(status_code=400, detail="roles must be a {role: model} object")
+    properties = body.get("properties")
+    if properties is not None and not isinstance(properties, dict):
+        raise HTTPException(
+            status_code=400, detail="properties must be a {model: properties} object"
+        )
     knob_lines: list[str] = []
-    if roles:
+    catalog: dict = {}
+    if roles or properties:
         oc = _load_openclaw_with_overrides(config)
         if oc is None:
             raise HTTPException(
@@ -7978,8 +7990,70 @@ async def post_setup_provider_key(request: Request):
                 ),
             )
         catalog = {entry["id"]: entry for entry in _assemble_model_catalog(oc)}
+    if roles:
         updates = _validate_role_assignments(roles, catalog)
         knob_lines = [f"{knob}={model}" for knob, model in updates.items()]
+
+    # Optional per-model property confirmations from the setup wizard's
+    # Configure step: same shape and overlay as PUT /api/models/properties,
+    # validated here and written before the key so a bad edit fails the whole
+    # request without unlocking. A failed key write can therefore leave the
+    # overlay written; that is inert (nothing renders it until an unlock) and
+    # idempotent on retry. The key write below triggers the boot apply, which
+    # renders the overlay into openclaw.json.
+    overrides_path = ""
+    if properties:
+        overrides_path = (config.get("model_overrides_path") or "").strip()
+        if not overrides_path:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Model property edits are not available on this install. "
+                    "Save the key without them and edit models in OpenClaw instead."
+                ),
+            )
+        # Effective assignment after this request: audited defaults overlaid
+        # with the roles riding the same payload.
+        effective = {
+            role: TEMPLATE_MODEL_DEFAULTS[knob] for role, knob in _ROLE_KNOBS.items()
+        }
+        effective.update({role: m for role, m in (roles or {}).items()})
+        for ref, props in properties.items():
+            if ref not in catalog:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{ref} is not a registered model. Add models in OpenClaw first.",
+                )
+            errors = _model_overrides.validate_model_override(props)
+            if errors:
+                raise HTTPException(status_code=400, detail=f"{ref}: " + "; ".join(errors))
+            new_input = props.get("input") if isinstance(props, dict) else None
+            if isinstance(new_input, list) and "image" not in new_input:
+                for vision_role in _VISION_REQUIRED_ROLES:
+                    if effective.get(vision_role) == ref:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"{vision_role} needs a model that accepts image "
+                                f"input, and this edit makes {ref} text only. Keep "
+                                f"image in its inputs, or assign the role elsewhere."
+                            ),
+                        )
+        overrides_dest = os.path.expanduser(overrides_path)
+        merged = _model_overrides.merge_model_overrides(
+            _model_overrides.load_model_overrides(overrides_dest), properties
+        )
+        try:
+            os.makedirs(os.path.dirname(overrides_dest) or ".", exist_ok=True)
+            write_json_atomic(overrides_dest, {"models": merged})
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Could not write the model overrides file at {overrides_dest} "
+                    f"({exc.strerror or exc})"
+                ),
+            ) from None
 
     env_var = _PROVIDER_ENV_VAR[provider]
     dest = os.path.expanduser(key_path)
@@ -8084,7 +8158,8 @@ async def post_setup_local_model(request: Request):
     """Wire a discovered local model server as the provider (B4 unlock).
 
     Body: {"url": str, "model": str, "max_tokens"?: int, "reasoning"?: bool,
-    "context_window"?: int, "vision"?: bool, "roles"?: {role: model}}. Merges
+    "context_window"?: int, "vision"?: bool, "roles"?: {role: model},
+    "properties"?: {"local/<model-id>": props}}. Merges
     a ``LOCAL_MODEL_URL=`` line plus the six per-role ``*_MODEL=local/<model>``
     knobs into provider_key_path, preserving every other line already in the
     file (a mixed install's cloud key stays intact). The optional confirm
@@ -8101,8 +8176,10 @@ async def post_setup_local_model(request: Request):
     individual roles to other models on the same server. When any role diverges
     from the default, a ``LOCAL_MODEL_TUNING_TARGET=<model>`` line scopes the
     confirm fields to the confirmed pick, so the entrypoint does not stamp its
-    tuning onto models the user never confirmed (those keep probed metadata,
-    editable later in Settings). Validation is shape-only (no live probe),
+    tuning onto models the user never confirmed. Those other wired models carry
+    their confirmations through ``properties`` (the model-overrides overlay,
+    same shape as PUT /api/models/properties), which the boot renders on top of
+    the probed metadata. Validation is shape-only (no live probe),
     mirroring the provider-key design decision. Neither the URL nor the file
     contents are logged (the preserved lines may hold a cloud provider key; the
     URL itself is not a secret and can appear in a 400 detail).
@@ -8234,6 +8311,60 @@ async def post_setup_local_model(request: Request):
                 detail=f"{role}: model id must be at most {_LOCAL_MODEL_ID_MAX_LEN} characters",
             )
         role_models[role] = role_model
+
+    # Optional per-model property confirmations for the wizard's Configure
+    # step. The LOCAL_MODEL_* confirm fields above cover only the primary
+    # pick; the other assigned models persist through the model-overrides
+    # overlay, keyed "local/<model-id>". The models are not registered yet
+    # (that happens at the boot this write triggers), so refs are validated
+    # against the models this request wires rather than the catalog. Written
+    # before the env lines so a bad edit fails the request without unlocking;
+    # a failed env write can leave the overlay written, which is inert until
+    # an unlock renders it and idempotent on retry.
+    properties = body.get("properties")
+    if properties is not None and not isinstance(properties, dict):
+        raise HTTPException(
+            status_code=400, detail="properties must be a {model: properties} object"
+        )
+    if properties:
+        overrides_path = (config.get("model_overrides_path") or "").strip()
+        if not overrides_path:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Model property edits are not available on this install. "
+                    "Wire the model without them and edit models in OpenClaw instead."
+                ),
+            )
+        wired = {model, *role_models.values()}
+        allowed_refs = {f"local/{mid}" for mid in wired}
+        for ref, props in properties.items():
+            if ref not in allowed_refs:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"{ref} is not one of the models this request wires. "
+                        "Properties here cover the wired local models only."
+                    ),
+                )
+            errors = _model_overrides.validate_model_override(props)
+            if errors:
+                raise HTTPException(status_code=400, detail=f"{ref}: " + "; ".join(errors))
+        overrides_dest = os.path.expanduser(overrides_path)
+        merged_overrides = _model_overrides.merge_model_overrides(
+            _model_overrides.load_model_overrides(overrides_dest), properties
+        )
+        try:
+            os.makedirs(os.path.dirname(overrides_dest) or ".", exist_ok=True)
+            write_json_atomic(overrides_dest, {"models": merged_overrides})
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Could not write the model overrides file at {overrides_dest} "
+                    f"({exc.strerror or exc})"
+                ),
+            ) from None
 
     # The lines this write owns — LOCAL_MODEL_URL, the six role knobs, and the
     # model-tuning overrides. Any existing line with one of these keys is
@@ -8516,6 +8647,95 @@ def _gateway_switchable_models(oc: dict) -> set:
         if ref:
             allowed.add(ref)
     return allowed
+
+
+# Providers recognised as locally hosted, and therefore probeable: the
+# LOCAL_MODEL_URL path registers under "local"; hand-added local providers
+# use their engine name. Mirrors MODEL_LOCAL_PROVIDER_HINTS in ui/index.html.
+_LOCAL_PROVIDER_HINTS = ("local", "llamacpp", "ollama", "vllm", "lmstudio")
+
+
+def _local_provider_base_url(oc: dict, provider_name: str) -> Optional[str]:
+    """The provider's baseUrl when it looks locally hosted, else None."""
+    name = (provider_name or "").lower()
+    if not any(hint in name for hint in _LOCAL_PROVIDER_HINTS):
+        return None
+    provider = ((oc.get("models") or {}).get("providers") or {}).get(provider_name)
+    base = provider.get("baseUrl") if isinstance(provider, dict) else None
+    return base if isinstance(base, str) and base.strip() else None
+
+
+def _probe_model_ref(oc: dict, ref: str) -> dict:
+    """Bounded liveness check of the server behind a registered model ref.
+
+    The catalog and gateway-allowlist checks confirm the gateway accepts a
+    model, not that its backing server can serve it. This closes that gap for
+    local providers by asking the server's /models endpoint directly. Cloud
+    models are reached through the gateway and have no cheap liveness signal,
+    so they report not_probeable rather than a guess.
+    """
+    provider_name, _, model_id = (ref or "").partition("/")
+    base = _local_provider_base_url(oc, provider_name)
+    if not base or not model_id:
+        return {"state": "not_probeable"}
+    started = time.monotonic()
+    models = _local_models.probe_openai_models(base)
+    if models is None:
+        return {"state": "unreachable", "base_url": base}
+    return {
+        "state": "live",
+        "latency_ms": int((time.monotonic() - started) * 1000),
+        "serves_model": model_id in models,
+        "base_url": base,
+    }
+
+
+def _probe_warning_for(oc: dict, ref: str) -> Optional[str]:
+    """A user-facing sentence when the model's backing server looks down, else None."""
+    probe = _probe_model_ref(oc, ref)
+    if probe["state"] == "unreachable":
+        return (
+            f"{ref} did not answer a liveness check: its server at "
+            f"{probe['base_url']} is unreachable right now. If it is still down "
+            "when the agent starts, the attempt stalls through the startup window."
+        )
+    if probe["state"] == "live" and not probe.get("serves_model", True):
+        return (
+            f"The server behind {ref} is up but does not list that model. "
+            "Load or pull the model on the server, or pick one it serves."
+        )
+    return None
+
+
+@app.get("/api/models/probe")
+def get_models_probe(model: str = ""):
+    """Liveness of the server behind a registered model.
+
+    Query: ``model=<provider/model-id>``. Returns {"state": "live"|
+    "unreachable"|"not_probeable", "model", and for local providers
+    "base_url" plus "latency_ms"/"serves_model" when live}. Read-only and
+    bounded (one GET, local_models.DEFAULT_PROBE_TIMEOUT); pickers use it to
+    flag a dead local server at assignment time instead of letting the run
+    discover it as a stall.
+    """
+    ref = (model or "").strip()
+    if not ref:
+        raise HTTPException(status_code=400, detail="model query parameter is required")
+    config = load_config()
+    oc = _load_openclaw_with_overrides(config)
+    if oc is None:
+        raise HTTPException(
+            status_code=503,
+            detail="openclaw.json is unavailable; the model cannot be resolved.",
+        )
+    if ref not in {entry["id"] for entry in _assemble_model_catalog(oc)}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{ref} is not a registered model.",
+        )
+    result = _probe_model_ref(oc, ref)
+    result["model"] = ref
+    return result
 
 
 def _models_write_supported(config: dict) -> bool:
@@ -8915,6 +9135,15 @@ async def post_phase_model_override(request: Request):
             f"{model} is text only. If this phase produces anything visual, "
             f"the {role} cannot verify it."
         )
+    # The allowlist proves the gateway accepts the model, not that its backing
+    # server is up; check liveness now, while the operator is looking, instead
+    # of letting a dead local server surface as a mid-run stall. Advisory: the
+    # server may be back before the phase runs, so the override still saves.
+    # Offloaded: the probe is a blocking GET (bounded, up to 2s) and this
+    # handler is async, so running it inline would stall the event loop.
+    probe_warning = await asyncio.to_thread(_probe_warning_for, oc, model)
+    if probe_warning:
+        warning = f"{warning} {probe_warning}" if warning else probe_warning
 
     overrides_path = os.path.join(_pipeline_artifacts_dir(project_root), _PHASE_OVERRIDES_FILENAME)
     data = _load_phase_overrides(overrides_path)

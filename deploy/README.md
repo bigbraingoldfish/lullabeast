@@ -48,10 +48,13 @@ one tiny agent session to validate your API key end to end.
 You do not have to edit `.env` before the first boot. With no provider set (no
 `OPENROUTER_API_KEY` and no `LOCAL_MODEL_URL`), `docker compose up` boots
 into setup mode: it provisions everything except agent capability, prints a
-loud SETUP MODE banner with the dashboard URL, and waits. Open the dashboard,
-enter your provider key in the setup screen, and the container wires it,
-restarts the gateway, validates it with the one-time live webhook ping, and
-unlocks the pipeline automatically. No terminal, no file editing.
+loud SETUP MODE banner with the dashboard URL, and waits. Open the dashboard
+and walk the setup wizard: add a model source (a cloud key, a detected local
+server, or both), assign the six agents on the same roster Settings uses,
+confirm model properties (pricing and sampling included), and finish. The
+container wires it, restarts the gateway, validates a cloud key with the
+one-time live webhook ping, and unlocks the pipeline automatically. No
+terminal, no file editing.
 
 A key in `deploy/.env` still works exactly as before and takes precedence: if
 it is set, the container boots straight to a running system and never enters
@@ -93,11 +96,12 @@ via `GET/PUT /api/models/roles` and `PUT /api/models/properties`):
   `/data/model-overrides.json`, a Lullabeast-owned overlay re-applied on top
   of every config render. This is necessary because the per-boot reconcile
   forces template values back, so a raw `openclaw.json` edit does not survive
-  a boot. These values drive Lullabeast's cost tracking and modality gates;
+  a boot. The setup wizard's Configure step seeds the same overlay at first
+  boot. These values drive Lullabeast's cost tracking and modality gates;
   explicit `LOCAL_MODEL_*` values in `deploy/.env` keep the last word for
   local models.
 
-The setup screen also offers a third path: **skip model setup** and manage
+The setup wizard also offers a third path: **skip model setup** and manage
 models and providers by hand in OpenClaw. It is confirmed via a modal because
 it is one-way (the welcome screen never reappears; the Settings screen keeps
 the OpenClaw gateway link). The skip persists as a
@@ -108,8 +112,8 @@ unspent, so a real key added later still gets it.
 
 A local model server is an alternative to a cloud key: either set
 `LOCAL_MODEL_URL` in `deploy/.env` (which satisfies the provider gate on its
-own, no cloud key needed) or, on a keyless boot, use the setup screen's
-detected-server card to wire a server running on the host. See "Local models
+own, no cloud key needed) or, on a keyless boot, choose a detected server in
+the setup wizard to wire a server running on the host. See "Local models
 on the host" below.
 
 Spend warning: agent pipelines are token-hungry. Cache reads dominate and
@@ -250,20 +254,24 @@ key. To wire it up:
    hardware can need minutes per model call, which the default 75 minute
    backstop misreads as a dead gateway.
 
-**Boot without a key: the setup screen auto-detects local servers.** On a
+**Boot without a key: the setup wizard auto-detects local servers.** On a
 keyless boot (setup mode, see "First boot without a key" above), the
 container best-effort probes `host.docker.internal` on the known ports
-(Ollama 11434, llama.cpp 8080, LM Studio 1234) and the dashboard setup screen
-shows any detected server with one-click wiring. Detection still requires the
-server to answer `/v1/models`. One click picks a single model for all roles,
-with the max output tokens, context window, reasoning, and image-input fields
-prefilled from the probe for you to confirm (they persist as the
-`LOCAL_MODEL_*` overrides from step 3). Answering No on image input blocks
-the wiring with a warning: the executor and reviewer require a multimodal
-model, and flipping it back to Yes on a model you know better than the probe
-is your call. Per-role tuning stays in `deploy/.env` through the `*_MODEL`
-variables. If no server answers, re-check the bind requirement in step 1: a
-`127.0.0.1`-bound server is invisible to the container.
+(Ollama 11434, llama.cpp 8080, LM Studio 1234) and the setup wizard lists
+any detected server. Detection still requires the server to answer
+`/v1/models`. Choosing a server hands its models to the wizard's assign step
+(the same roster as Settings, Model roles), and the configure step prefills
+max output tokens, context window, reasoning, and image input from the probe
+for every assigned model: detected values are labeled as suggestions, and
+anything the server could not report must be answered before the wizard
+finishes, never silently defaulted. The answers persist as the
+`LOCAL_MODEL_*` overrides from step 3 for the model most roles run on, and
+through the model-overrides overlay for the other assigned models. A
+screenshot-reading role (executor, reviewer, PRD creator) on a
+text-only model blocks the finish with a warning; flipping image input back
+to Yes on a model you know better than the probe is your call. If no server
+answers, re-check the bind requirement in step 1: a `127.0.0.1`-bound server
+is invisible to the container.
 
 **Advanced: hand-edit `openclaw.json` for multiple providers or per-model
 metadata.** `LOCAL_MODEL_URL` covers the single-provider case. For multiple
@@ -524,6 +532,14 @@ docker compose exec lullabeast bash
 
 The first lists the models the gateway can serve; the second drops you into an
 interactive shell inside the container to poke around.
+
+**Adding models and providers.** Registration happens in OpenClaw itself, not
+in Lullabeast. Do it in this UI, following the
+[OpenClaw model providers guide](https://docs.openclaw.ai/concepts/model-providers)
+(official provider plugins, custom `models.providers` entries, local servers).
+Additions survive Lullabeast's per-boot config reconcile, and after a gateway
+restart they appear in the dashboard's model pickers, where capability and
+cost metadata stays editable (Settings, Model roles).
 
 The gateway is the agents' control plane, so the same exposure rule as the
 dashboard applies: it is published to `127.0.0.1` only, and widening that is a

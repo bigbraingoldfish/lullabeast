@@ -324,6 +324,35 @@
         .ms-x:hover{color:#d9d5e6;}
         .ms-pop__list::-webkit-scrollbar,.ms-modal__card::-webkit-scrollbar{width:10px;}
         .ms-pop__list::-webkit-scrollbar-thumb,.ms-modal__card::-webkit-scrollbar-thumb{background:#2f2947;border-radius:6px;border:3px solid transparent;background-clip:padding-box;}
+        .ms-flag{display:inline-flex;align-items:center;gap:5px;font-family:'JetBrains Mono',monospace;font-size:10px;color:#eab873;background:rgba(226,177,76,.08);border:1px solid rgba(226,177,76,.35);border-radius:999px;padding:2px 8px;white-space:nowrap;max-width:100%;}
+        .ms-flag--bad{color:#f28b82;background:rgba(242,139,130,.08);border-color:rgba(242,139,130,.4);}
+        .ms-flag__dot{width:6px;height:6px;border-radius:50%;background:currentColor;flex:0 0 auto;}
+        .ms-suggest{display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-top:5px;}
+        .ms-suggest__lbl{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.05em;text-transform:uppercase;color:#8079a0;}
+        .ms-sg{font-family:'JetBrains Mono',monospace;font-size:10px;color:#a9a2c0;background:var(--ll-bg-panel);border:1px solid var(--ll-border);border-radius:999px;padding:2px 9px;cursor:pointer;transition:all .12s;}
+        .ms-sg:hover{border-color:#39335a;color:#d9d5e6;}
+        .ms-sg.is-applied{color:var(--ll-brand);border-color:rgba(226,177,76,.45);background:var(--ll-brand-tint);}
+        .ms-live{display:inline-flex;align-items:center;gap:6px;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--ll-running);}
+        .ms-live__dot{width:7px;height:7px;border-radius:50%;background:var(--ll-running);flex:0 0 auto;}
+        .ms-live.is-checking{color:#8079a0;}
+        .ms-live.is-checking .ms-live__dot{background:#8079a0;animation:msLivePulse 1s ease infinite;}
+        .ms-live.is-dead{color:#f28b82;}
+        .ms-live.is-dead .ms-live__dot{background:#f28b82;}
+        @keyframes msLivePulse{50%{opacity:.35;}}
+        .ms-wizsteps{display:flex;align-items:center;gap:7px;}
+        .ms-wizsteps__dot{width:8px;height:8px;border-radius:50%;background:#2f2947;transition:background .15s;}
+        .ms-wizsteps__dot.is-done{background:#564f74;cursor:pointer;}
+        .ms-wizsteps__dot.is-current{background:var(--ll-brand);}
+        .ms-wizsteps__meta{font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#8079a0;margin-left:4px;}
+        .ms-ready{display:flex;align-items:center;gap:9px;padding:9px 12px;background:rgba(79,217,140,.05);border:1px solid rgba(79,217,140,.25);border-radius:10px;font-size:12px;color:#c1bbd5;}
+        .ms-ready__dot{width:7px;height:7px;border-radius:50%;background:var(--ll-running);flex:0 0 auto;}
+        .ms-ready__more{margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#a9a2c0;background:none;border:0;cursor:pointer;}
+        .ms-ready__more:hover{color:var(--ll-brand);}
+        .ms-ready__list{display:flex;flex-direction:column;gap:4px;margin-top:6px;padding:0 12px;}
+        .ms-ready__item{display:flex;align-items:center;gap:8px;font-size:11.5px;color:#8079a0;}
+        .ms-ready__edit{font-family:'JetBrains Mono',monospace;font-size:10px;color:#a9a2c0;background:none;border:0;cursor:pointer;margin-left:auto;}
+        .ms-ready__edit:hover{color:var(--ll-brand);}
+        .ms-row__status{display:flex;justify-content:flex-end;align-items:center;gap:8px;flex-wrap:wrap;margin-top:4px;}
         @media (max-width:900px){
             .ms-thead{grid-template-columns:24px 1fr;}
             .ms-thead__m{display:none;}
@@ -6309,6 +6338,7 @@
             // successor's interval.
             const lateHealPollGenRef = useRef(0);
             const currentIdeaIdRef = useRef(null); // mirrors currentIdeaId; every idea-scoped async resolve compares against it to drop stale-idea writes after a switch
+            const autoDraftInFlightRef = useRef(false); // guards the "no ideas yet -> auto-open a draft" effect from firing a second create while the first POST is in flight
             // Turn-status liveness snapshot for the pending bubble (see the
             // pendingTurn effect below); null when no turn is pending.
             const [turnLiveness, setTurnLiveness] = useState(null);
@@ -6733,15 +6763,25 @@
             }, []);
 
             useEffect(() => {
-                if (currentIdeaId === null && ideasList.length > 0) {
+                if (currentIdeaId !== null) return;
+                // Wait for the real list before deciding — during the initial
+                // load ideasList is [] but ideas may still exist.
+                if (ideasLoading) return;
+                if (ideasList.length > 0) {
                     const stored = sessionStorage.getItem(LAST_IDEA_KEY);
                     const valid = stored && ideasList.some((it) => it.id === stored);
                     setCurrentIdeaId(valid ? stored : ideasList[0].id);
                     if (!valid && stored) {
                         sessionStorage.removeItem(LAST_IDEA_KEY);
                     }
+                } else if (!autoDraftInFlightRef.current) {
+                    // No ideas to select: open a ready-to-send draft by default so
+                    // the screen never lands on a blank, dead composer (the Send
+                    // button stays disabled while currentIdeaId is null by design).
+                    autoDraftInFlightRef.current = true;
+                    newIdea();
                 }
-            }, [ideasList, currentIdeaId]);
+            }, [ideasList, ideasLoading, currentIdeaId]);
 
             useEffect(() => () => stopReadinessPoll(), []);
 
@@ -7224,7 +7264,7 @@
 
             const newIdea = () => {
                 fetch("/api/ideas", { method: "POST" })
-                    .then((r) => r.json())
+                    .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
                     .then((d) => {
                         setCurrentIdeaId(d.id);
                         sessionStorage.setItem(LAST_IDEA_KEY, d.id);
@@ -7242,7 +7282,9 @@
                         setShowActionMenu(false);
                         setStagedAttachment(null);
                         setUserFirstTurnPending(true);
-                    });
+                    })
+                    .catch(() => {})
+                    .finally(() => { autoDraftInFlightRef.current = false; });
             };
 
             const selectIdeaFromRail = (id) => {
@@ -12846,166 +12888,676 @@
         // Welcome walkthrough first-visit gate (re-openable from Settings).
         const WELCOME_DONE_KEY = "lb_welcome_done";
 
-        /* Stage D — shared per-role picker for the setup paths. Same workflow
-         * order and copy as the Settings card; options and the text-only test
-         * come from the caller (catalog for the cloud path, the probed server
-         * model list for the local path). */
-        function SetupRolePicker({ idPrefix, options, values, onSelect, disabled, isTextOnly }) {
-            const inputCls = "w-full text-sm bg-[#15121f] border border-[#2a2540] rounded px-2 py-1.5 text-slate-200";
+        /* ── Setup wizard shared helpers ─────────────────────────────────────
+         * The first-run wizard mirrors the Settings "Model roles" card: same
+         * roster, picker, chips, and property semantics, staged as steps.
+         * These helpers are shared by both surfaces so they never drift. */
+
+        /* Effective input modalities for a catalog entry with pending edits. */
+        function modelEffInput(entry, edits) {
+            const e = edits || {};
+            if (e.vision === "yes" || e.vision === "no") {
+                return e.vision === "yes" ? ["text", "image"] : ["text"];
+            }
+            return entry ? entry.input : null;
+        }
+
+        function modelEntryTextOnly(entry, edits) {
+            const input = modelEffInput(entry, edits);
+            return Array.isArray(input) && input.length > 0 && input.indexOf("image") === -1;
+        }
+
+        /* Capability and cost chips for a catalog entry, pending edits applied. */
+        function modelEntryChips(entry, edits, full) {
+            if (!entry) return [];
+            const e = edits || {};
+            const input = modelEffInput(entry, e);
+            const declared = Array.isArray(input) && input.length > 0;
+            const cw = e.contextWindow !== undefined && e.contextWindow !== ""
+                ? Number(e.contextWindow) : entry.contextWindow;
+            const cost = Object.assign({}, entry.cost || {});
+            if (e.costInput !== undefined && e.costInput !== "") cost.input = Number(e.costInput);
+            if (e.costOutput !== undefined && e.costOutput !== "") cost.output = Number(e.costOutput);
+            const tier = modelTier(entry);
+            const chips = [];
+            if (declared && input.indexOf("image") !== -1) chips.push({ key: "img", label: "image", title: "Accepts image input" });
+            else if (declared) chips.push({ key: "img", label: "text only", tone: "warn", title: "Text only, no image input" });
+            if (full) {
+                const reasoning = e.reasoning !== undefined ? e.reasoning === "on" : entry.reasoning === true;
+                if (reasoning) chips.push({ key: "rsn", label: "reasoning", title: "Reasoning model" });
+            }
+            const cwLabel = fmtContextWindow(cw);
+            if (cwLabel) chips.push({ key: "ctx", label: cwLabel + " ctx", title: Number(cw).toLocaleString() + " token context window" });
+            const costLabel = fmtModelCost(cost, tier);
+            if (costLabel) chips.push({ key: "cost", label: costLabel, title: fmtModelCostLong(cost, tier) || undefined });
+            return chips;
+        }
+
+        /* Which of the values Lullabeast depends on (image input, reasoning,
+         * context window) are still undeclared on an entry, pending edits
+         * applied. Drives the "needs confirmation" flags in the wizard and
+         * the Settings property editor. */
+        function modelMetaMissing(entry, edits) {
+            const e = edits || {};
+            const missing = [];
+            const input = modelEffInput(entry, e);
+            if (!(Array.isArray(input) && input.length > 0)) missing.push("image input");
+            const reasoning = e.reasoning === "on" || e.reasoning === "off"
+                ? (e.reasoning === "on")
+                : (entry ? entry.reasoning : undefined);
+            if (reasoning !== true && reasoning !== false) missing.push("reasoning");
+            const cwRaw = e.contextWindow !== undefined && e.contextWindow !== ""
+                ? e.contextWindow
+                : (entry ? entry.contextWindow : null);
+            const cw = Number(cwRaw);
+            if (!(isFinite(cw) && cw > 0)) missing.push("context window");
+            return missing;
+        }
+
+        /* Below this, a pipeline model's context is unlikely to hold a phase's
+         * working set. A warning, never a hard block: some setups know better. */
+        const MODEL_CTX_RECOMMENDED_MIN = 64000;
+        function modelCtxLow(value) {
+            const v = Number(value);
+            return isFinite(v) && v > 0 && v < MODEL_CTX_RECOMMENDED_MIN;
+        }
+        const MODEL_CTX_LOW_NOTE = "Under 64k is likely too low for pipeline work.";
+
+        /* Attention pill for undeclared values; renders nothing when complete. */
+        function ModelMetaFlag({ missing, testid }) {
+            if (!missing || missing.length === 0) return null;
             return (
-                <div className="space-y-3">
-                    {MODEL_ROLE_GROUPS.map((group) => (
-                        <div key={group.key} className="space-y-2">
-                            <div>
-                                <p className="header-text text-[11px] uppercase tracking-wide text-slate-500 font-semibold">{group.title}</p>
-                                <p className="text-[11px] text-slate-500 leading-snug">{group.blurb}</p>
-                            </div>
-                            {group.roles.map((role) => {
-                                const info = MODEL_ROLE_INFO[role] || { label: role, blurb: "", note: "" };
-                                const selected = values[role] || "";
-                                const blocked = MODEL_VISION_ROLES.indexOf(role) !== -1 && selected && isTextOnly(selected);
-                                return (
-                                    <div key={role} className="space-y-1">
-                                        <span className="header-text text-xs text-slate-300 block">{info.label}</span>
-                                        {(info.blurb || info.note) && (
-                                            <p className="text-[11px] text-slate-500 leading-snug">{info.blurb} {info.note}</p>
-                                        )}
-                                        <select
-                                            data-testid={`${idPrefix}-role-select-${role}`}
-                                            value={selected}
-                                            onChange={(e) => onSelect(role, e.target.value)}
-                                            disabled={disabled}
-                                            className={inputCls + " disabled:opacity-50"}
-                                        >
-                                            {(!selected || options.indexOf(selected) === -1) && (
-                                                <option value={selected}>{selected ? selected + " (not in catalog)" : "not set"}</option>
-                                            )}
-                                            {options.map((id) => (
-                                                <option key={id} value={id}>{id}</option>
-                                            ))}
-                                        </select>
-                                        {blocked && (
-                                            <p className="text-xs text-amber-400" data-testid={`${idPrefix}-role-vision-warning`}>
-                                                {info.label} needs a model that accepts image input, and {selected} is
-                                                text only. Pick a multimodal model.
-                                            </p>
-                                        )}
-                                    </div>
-                                );
-                            })}
-                        </div>
+                <span className="ms-flag" data-testid={testid}>
+                    <span className="ms-flag__dot"></span>
+                    <span>needs confirmation: {missing.join(", ")}</span>
+                </span>
+            );
+        }
+
+        /* Tap-to-apply suggested values under a field. Each chip names its
+         * source (registered, detected, or a recommendation), so a suggestion
+         * is never mistaken for a value that is already set. */
+        function SuggestChips({ suggests, value, onApply, testid }) {
+            const items = (suggests || []).filter((s) => s && s.value !== undefined && s.value !== null && s.value !== "");
+            if (items.length === 0) return null;
+            return (
+                <div className="ms-suggest" data-testid={testid}>
+                    <span className="ms-suggest__lbl">suggested</span>
+                    {items.map((s) => (
+                        <button
+                            type="button"
+                            key={s.label}
+                            className={"ms-sg" + (String(value) === String(s.value) ? " is-applied" : "")}
+                            title={s.title}
+                            onClick={() => onApply(String(s.value))}
+                        >{s.label}</button>
                     ))}
                 </div>
             );
         }
 
-        /* Collapsed-by-default reveal for the optional setup customization. A
-         * bordered button with a caret so it reads as clickable without
-         * claiming space until engaged. */
-        function SetupCustomizeToggle({ testid, open, onToggle }) {
+        /* Liveness of the server behind a registered model (local providers).
+         * The gateway allowlist proves a model is accepted, not that its
+         * backing server is up; this closes that gap at assignment time. */
+        function fetchModelProbe(ref) {
+            return fetch("/api/models/probe?model=" + encodeURIComponent(ref))
+                .then((r) => (r.ok ? r.json() : null))
+                .then((d) => (d && d.state ? d : null))
+                .catch(() => null);
+        }
+
+        function ModelProbeStatus({ probe, onRetry, testid }) {
+            if (!probe || probe.state === "not_probeable") return null;
+            const dead = probe.state === "unreachable";
+            const checking = probe.state === "checking";
+            const txt = checking
+                ? "checking the model server…"
+                : dead
+                    ? "model server unreachable"
+                    : probe.serves_model === false
+                        ? "server up, model not loaded"
+                        : "server reachable" + (probe.latency_ms != null ? " · " + probe.latency_ms + "ms" : "");
             return (
-                <button
-                    type="button"
-                    data-testid={testid}
-                    onClick={onToggle}
-                    aria-expanded={open}
-                    className="w-full flex items-center justify-between px-3 py-2 rounded border border-[#2a2540] text-left hover:bg-[#221b36] transition-colors"
-                >
-                    <span className="header-text text-xs text-slate-300">Customize model roles (optional)</span>
-                    <span className="text-slate-500 text-xs">{open ? '▲' : '▼'}</span>
-                </button>
+                <span className={"ms-live" + (checking ? " is-checking" : dead ? " is-dead" : "")} data-testid={testid}>
+                    <span className="ms-live__dot"></span>
+                    <span>{txt}</span>
+                    {(dead || probe.serves_model === false) && onRetry && (
+                        <button type="button" className="ms-link ms-link--dim" onClick={onRetry}>recheck</button>
+                    )}
+                </span>
             );
         }
 
-        /* A2 — first-run provider-key entry (setup mode).
+        /* PUT /api/models/properties body from a sparse edit map. Empty string
+         * clears an override back to the registered value (null in the overlay
+         * contract). Throws with a per-field message. Shared by the Settings
+         * card and the setup wizard's Configure step. */
+        function buildModelPropsBody(propEdits, catalogById) {
+            const body = {};
+            Object.keys(propEdits).forEach((id) => {
+                const edits = propEdits[id];
+                const entry = catalogById[id] || {};
+                const out = {};
+                if (edits.vision === "yes" || edits.vision === "no") {
+                    const base = (Array.isArray(entry.input) && entry.input.length > 0 ? entry.input : ["text"])
+                        .filter((v) => v !== "image");
+                    if (base.indexOf("text") === -1) base.push("text");
+                    out.input = edits.vision === "yes" ? base.concat(["image"]) : base;
+                }
+                if (edits.reasoning === "on" || edits.reasoning === "off") out.reasoning = edits.reasoning === "on";
+                const posInt = (raw, label) => {
+                    if (raw === undefined) return undefined;
+                    if (raw === "") return null;
+                    if (!/^\d+$/.test(String(raw).trim()) || Number(raw) <= 0) {
+                        throw new Error(id + ": " + label + " must be a positive whole number.");
+                    }
+                    return Number(raw);
+                };
+                const num = (raw, label, minZero) => {
+                    if (raw === undefined) return undefined;
+                    if (raw === "") return null;
+                    const v = Number(raw);
+                    if (!isFinite(v) || (minZero && v < 0)) {
+                        throw new Error(id + ": " + label + " must be a " + (minZero ? "non-negative " : "") + "number.");
+                    }
+                    return v;
+                };
+                const cw = posInt(edits.contextWindow, "context window");
+                if (cw !== undefined) out.contextWindow = cw;
+                const mt = posInt(edits.maxTokens, "max output tokens");
+                if (mt !== undefined) out.maxTokens = mt;
+                const cost = {};
+                const costFields = [
+                    ["costInput", "input", "input price"],
+                    ["costOutput", "output", "output price"],
+                    ["costCacheRead", "cacheRead", "cache read price"],
+                    ["costCacheWrite", "cacheWrite", "cache write price"],
+                ];
+                costFields.forEach(([editKey, apiKey, label]) => {
+                    const v = num(edits[editKey], label, true);
+                    if (v !== undefined) cost[apiKey] = v;
+                });
+                if (Object.keys(cost).length > 0) out.cost = cost;
+                const params = {};
+                const t = num(edits.temperature, "temperature", false);
+                if (t !== undefined) params.temperature = t;
+                const tp = num(edits.top_p, "top_p", false);
+                if (tp !== undefined) params.top_p = tp;
+                if (Object.keys(params).length > 0) out.params = params;
+                if (Object.keys(out).length > 0) body[id] = out;
+            });
+            return Object.keys(body).length > 0 ? body : null;
+        }
+
+        /* Wizard step header: progress dots plus the step name. Done dots
+         * click back to their step. */
+        function SetupWizardSteps({ steps, idx, onJump }) {
+            return (
+                <div className="ms-wizsteps" data-testid="setup-wizard-steps">
+                    {steps.map((s, i) => (
+                        <span
+                            key={s.key}
+                            className={"ms-wizsteps__dot" + (i === idx ? " is-current" : i < idx ? " is-done" : "")}
+                            onClick={() => { if (i < idx && onJump) onJump(i); }}
+                        ></span>
+                    ))}
+                    <span className="ms-wizsteps__meta">Step {idx + 1} of {steps.length} · {steps[idx].label}</span>
+                </div>
+            );
+        }
+
+        /* Assign step roster: the Settings card's assign view, reused for the
+         * wizard. Same grouping, info popovers with the per-agent suggestion,
+         * rich picker, checkbox multi-select with a bulk-assign bar, and the
+         * vision guard. Assignment drafts live in the wizard. */
+        function SetupAssignRoster({ catalog, catalogById, assignments, propEdits, onAssign, disabled, idPrefix }) {
+            const [selected, setSelected] = React.useState(() => new Set());
+            const isTextOnly = (id) => modelEntryTextOnly(catalogById[id], (propEdits || {})[id]);
+            const chipsFor = (id, full) => modelEntryChips(catalogById[id], (propEdits || {})[id], full);
+            const roles = MODEL_ROLE_GROUPS.reduce((acc, g) => acc.concat(g.roles), []);
+            const selRoles = roles.filter((r) => selected.has(r));
+            const allSelected = roles.every((r) => selected.has(r));
+            const bulkVision = selRoles.some((r) => MODEL_VISION_ROLES.indexOf(r) !== -1);
+            const toggleSel = (role) => setSelected((s) => {
+                const n = new Set(s);
+                if (n.has(role)) n.delete(role); else n.add(role);
+                return n;
+            });
+            const toggleAll = () => setSelected(allSelected ? new Set() : new Set(roles));
+            const bulkAssign = (id) => { selRoles.forEach((r) => onAssign(r, id)); setSelected(new Set()); };
+            return (
+                <div>
+                    <div className="ms-thead">
+                        <label className="ms-check">
+                            <input
+                                type="checkbox"
+                                data-testid={`${idPrefix}-select-all`}
+                                checked={allSelected}
+                                disabled={disabled}
+                                onChange={toggleAll}
+                                aria-label="Select all agents"
+                            />
+                            <span></span>
+                        </label>
+                        <span className="ms-thead__a">Agent</span>
+                        <span className="ms-thead__m">Model</span>
+                    </div>
+                    {MODEL_ROLE_GROUPS.map((group) => (
+                        <div key={group.key}>
+                            <div className="ms-group__label" title={group.blurb}>{group.title}</div>
+                            {group.roles.map((role) => {
+                                const info = MODEL_ROLE_INFO[role] || { label: role, blurb: "" };
+                                const value = assignments[role] || "";
+                                const on = selected.has(role);
+                                return (
+                                    <div key={role} data-testid={`${idPrefix}-row-${role}`} className={"ms-row" + (on ? " is-selected" : "")}>
+                                        <label className="ms-check">
+                                            <input
+                                                type="checkbox"
+                                                data-testid={`${idPrefix}-check-${role}`}
+                                                checked={on}
+                                                disabled={disabled}
+                                                onChange={() => toggleSel(role)}
+                                                aria-label={`Select ${info.label}`}
+                                            />
+                                            <span></span>
+                                        </label>
+                                        <ModelRoleLabel role={role} />
+                                        <div className="ms-row__model">
+                                            <ModelSelect
+                                                catalog={catalog}
+                                                catalogById={catalogById}
+                                                chipsFor={chipsFor}
+                                                isTextOnly={isTextOnly}
+                                                value={value}
+                                                onChange={(id) => onAssign(role, id)}
+                                                visionRequired={MODEL_VISION_ROLES.indexOf(role) !== -1}
+                                                disabled={disabled}
+                                                align="right"
+                                                testid={`${idPrefix}-select-${role}`}
+                                            />
+                                            {MODEL_VISION_ROLES.indexOf(role) !== -1 && value && isTextOnly(value) && (
+                                                <p className="ms-warn" data-testid={`${idPrefix}-vision-warning`}>
+                                                    {info.label} needs a model that accepts image input, and {(catalogById[value] && catalogById[value].name) || value} is
+                                                    text only. Pick a multimodal model.
+                                                </p>
+                                            )}
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    ))}
+                    {selRoles.length > 0 && !disabled && (
+                        <div className="ms-bulk" data-testid={`${idPrefix}-bulk-bar`}>
+                            <span className="ms-bulk__n">{selRoles.length} selected</span>
+                            <span className="ms-bulk__lbl">assign to</span>
+                            <div className="ms-bulk__pick">
+                                <ModelSelect
+                                    catalog={catalog}
+                                    catalogById={catalogById}
+                                    chipsFor={chipsFor}
+                                    isTextOnly={isTextOnly}
+                                    value=""
+                                    placeholder="choose a model"
+                                    visionRequired={bulkVision}
+                                    onChange={bulkAssign}
+                                    testid={`${idPrefix}-bulk-select`}
+                                />
+                            </div>
+                            <button type="button" className="ms-link ms-link--dim" onClick={() => setSelected(new Set())}>Clear</button>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        /* Configure step form for a cloud model: the same fields as Settings,
+         * Adjust model properties (image input, reasoning, context window,
+         * price per M tokens, and the advanced sampling knobs), with suggested
+         * chips and needs-confirmation flags. Blank fields keep the registered
+         * value; edits ride the setup POST as a properties overlay. */
+        function SetupModelConfigForm({ entry, edits, setEdit, usedBy, needVision, onClose }) {
+            const [advancedOpen, setAdvancedOpen] = React.useState(false);
+            const inputCls = "w-full text-sm bg-[#15121f] border border-[#2a2540] rounded px-3 py-2 text-slate-200";
+            const missing = modelMetaMissing(entry, edits);
+            const visionValue = edits.vision !== undefined
+                ? edits.vision
+                : (Array.isArray(entry.input) && entry.input.length > 0
+                    ? (entry.input.indexOf("image") !== -1 ? "yes" : "no") : "");
+            const reasoningValue = edits.reasoning !== undefined
+                ? edits.reasoning
+                : (entry.reasoning === true ? "on" : entry.reasoning === false ? "off" : "");
+            const cost = entry.cost || {};
+            const params = entry.params || {};
+            const fieldVal = (editKey, current) =>
+                edits[editKey] !== undefined ? edits[editKey] : (current != null ? current : "");
+            const ctxLow = modelCtxLow(fieldVal("contextWindow", entry.contextWindow));
+            const ready = missing.length === 0 && !(needVision && visionValue !== "yes");
+            const registeredChip = (current, fmt) => (current != null
+                ? [{ label: (fmt ? fmt(current) : current) + " (registered)", value: current }]
+                : []);
+            return (
+                <div className="rounded border border-[#2a2540] bg-[#221b36] p-3 space-y-2" data-testid="setup-model-config">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <div className="min-w-0">
+                            <span className="header-text text-sm text-slate-200 block truncate" title={entry.id}>{entry.name}</span>
+                            <span className="text-[11px] text-slate-500">{usedBy}</span>
+                        </div>
+                        {!ready ? (
+                            <ModelMetaFlag missing={missing} testid="setup-model-config-flag" />
+                        ) : ctxLow ? (
+                            <span className="ms-flag" data-testid="setup-model-config-ctx-low">
+                                <span className="ms-flag__dot"></span>
+                                <span>context under 64k, likely too low</span>
+                            </span>
+                        ) : (
+                            <span className="flex items-center gap-2">
+                                <span className="text-[11px] text-[#4fd98c]">ready</span>
+                                {onClose && <button type="button" className="ms-link ms-link--dim" onClick={onClose}>Done</button>}
+                            </span>
+                        )}
+                    </div>
+                    <p className="text-[11px] text-slate-500 leading-snug">
+                        Prefilled from the registered catalog. Blank fields keep the registered
+                        value; a needs-confirmation flag means no value is registered yet, so
+                        the answer is yours to give.
+                    </p>
+                    <div className="grid grid-cols-2 gap-3">
+                        <label className="space-y-1">
+                            <span className="header-text text-[11px] text-slate-500 block">Accepts image input</span>
+                            <select data-testid="setup-props-vision" value={visionValue} onChange={(e) => setEdit("vision", e.target.value)} className={inputCls}>
+                                {visionValue === "" && <option value="">choose one</option>}
+                                <option value="yes">Yes</option>
+                                <option value="no">No</option>
+                            </select>
+                            {needVision && visionValue !== "yes" && (
+                                <p className="ms-warn">An agent assigned here reads screenshots, so this model must accept images.</p>
+                            )}
+                        </label>
+                        <label className="space-y-1">
+                            <span className="header-text text-[11px] text-slate-500 block">Reasoning</span>
+                            <select data-testid="setup-props-reasoning" value={reasoningValue} onChange={(e) => setEdit("reasoning", e.target.value)} className={inputCls}>
+                                {reasoningValue === "" && <option value="">choose one</option>}
+                                <option value="on">On</option>
+                                <option value="off">Off</option>
+                            </select>
+                        </label>
+                        <label className="space-y-1">
+                            <span className="header-text text-[11px] text-slate-500 block">Context window</span>
+                            <input type="number" data-testid="setup-props-context-window" min="1" value={fieldVal("contextWindow", entry.contextWindow)} onChange={(e) => setEdit("contextWindow", e.target.value)} className={inputCls} />
+                            <SuggestChips
+                                value={fieldVal("contextWindow", entry.contextWindow)}
+                                onApply={(v) => setEdit("contextWindow", v)}
+                                suggests={registeredChip(entry.contextWindow, fmtContextWindow)}
+                            />
+                            {ctxLow && (
+                                <p className="ms-warn" data-testid="setup-props-ctx-low">{MODEL_CTX_LOW_NOTE}</p>
+                            )}
+                        </label>
+                        <label className="space-y-1">
+                            <span className="header-text text-[11px] text-slate-500 block">Max output tokens</span>
+                            <input type="number" data-testid="setup-props-max-tokens" min="1" value={fieldVal("maxTokens", entry.maxTokens)} onChange={(e) => setEdit("maxTokens", e.target.value)} className={inputCls} />
+                            <SuggestChips
+                                value={fieldVal("maxTokens", entry.maxTokens)}
+                                onApply={(v) => setEdit("maxTokens", v)}
+                                suggests={registeredChip(entry.maxTokens, fmtContextWindow).concat(
+                                    [{ label: "16k", value: 16384 }, { label: "32k", value: 32768 }]
+                                        .filter((s) => s.value !== entry.maxTokens)
+                                )}
+                            />
+                        </label>
+                    </div>
+                    <div className="space-y-1">
+                        <span className="header-text text-[11px] text-slate-500 block">Price per M tokens</span>
+                        <div className="grid grid-cols-2 gap-3">
+                            <label className="space-y-1">
+                                <span className="text-[11px] text-slate-500 block">Input</span>
+                                <input type="number" data-testid="setup-props-cost-input" min="0" step="any" value={fieldVal("costInput", cost.input)} onChange={(e) => setEdit("costInput", e.target.value)} className={inputCls} />
+                            </label>
+                            <label className="space-y-1">
+                                <span className="text-[11px] text-slate-500 block">Output</span>
+                                <input type="number" data-testid="setup-props-cost-output" min="0" step="any" value={fieldVal("costOutput", cost.output)} onChange={(e) => setEdit("costOutput", e.target.value)} className={inputCls} />
+                            </label>
+                            <label className="space-y-1">
+                                <span className="text-[11px] text-slate-500 block">Cache read</span>
+                                <input type="number" data-testid="setup-props-cost-cache-read" min="0" step="any" value={fieldVal("costCacheRead", cost.cacheRead)} onChange={(e) => setEdit("costCacheRead", e.target.value)} className={inputCls} />
+                            </label>
+                            <label className="space-y-1">
+                                <span className="text-[11px] text-slate-500 block">Cache write</span>
+                                <input type="number" data-testid="setup-props-cost-cache-write" min="0" step="any" value={fieldVal("costCacheWrite", cost.cacheWrite)} onChange={(e) => setEdit("costCacheWrite", e.target.value)} className={inputCls} />
+                            </label>
+                        </div>
+                    </div>
+                    <button
+                        type="button"
+                        data-testid="setup-props-advanced-toggle"
+                        onClick={() => setAdvancedOpen((v) => !v)}
+                        className="header-text text-[11px] text-slate-400 hover:text-slate-200"
+                    >
+                        {advancedOpen ? "Hide advanced" : "Advanced"}
+                    </button>
+                    {advancedOpen && (
+                        <div className="grid grid-cols-2 gap-3">
+                            <label className="space-y-1">
+                                <span className="header-text text-[11px] text-slate-500 block">Temperature</span>
+                                <input type="number" data-testid="setup-props-temperature" step="any" value={fieldVal("temperature", params.temperature)} onChange={(e) => setEdit("temperature", e.target.value)} className={inputCls} />
+                                <SuggestChips
+                                    value={fieldVal("temperature", params.temperature)}
+                                    onApply={(v) => setEdit("temperature", v)}
+                                    suggests={registeredChip(params.temperature)}
+                                />
+                            </label>
+                            <label className="space-y-1">
+                                <span className="header-text text-[11px] text-slate-500 block">Top p</span>
+                                <input type="number" data-testid="setup-props-top-p" step="any" value={fieldVal("top_p", params.top_p)} onChange={(e) => setEdit("top_p", e.target.value)} className={inputCls} />
+                            </label>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        /* Configure step form for one assigned local model. Detected values
+         * are prefilled and labeled; what the server did not report has no
+         * silent default and must be answered before the wizard continues.
+         * The primary pick persists through the LOCAL_MODEL_* overrides, the
+         * others through the model-overrides overlay. */
+        function SetupLocalConfigForm({ model, detail, tuning, setTune, usedBy }) {
+            const inputCls = "w-full text-sm bg-[#15121f] border border-[#2a2540] rounded px-3 py-2 text-slate-200";
+            const detectedReasoning = detail.reasoning === true ? "on" : detail.reasoning === false ? "off" : null;
+            const detectedVision = detail.vision === true ? "yes" : detail.vision === false ? "no" : "";
+            const vision = tuning.vision || detectedVision;
+            const reasoning = tuning.reasoning || (detectedReasoning ? "auto" : "");
+            const cwEffective = tuning.contextWindow != null ? tuning.contextWindow : (detail.context_window || "");
+            const mtEffective = tuning.maxTokens != null ? tuning.maxTokens : (detail.suggested_max_tokens || 16384);
+            const missing = [];
+            if (!vision) missing.push("image input");
+            if (!(reasoning === "on" || reasoning === "off" || (reasoning === "auto" && detectedReasoning))) missing.push("reasoning");
+            if (!(isFinite(Number(cwEffective)) && Number(cwEffective) > 0)) missing.push("context window");
+            const ctxLow = modelCtxLow(cwEffective);
+            return (
+                <div className="rounded border border-[#2a2540] bg-[#221b36] p-3 space-y-2" data-testid="setup-model-config">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <div className="min-w-0">
+                            <span className="header-text text-sm text-slate-200 block truncate" title={model}>{model}</span>
+                            <span className="text-[11px] text-slate-500">{usedBy}</span>
+                        </div>
+                        {missing.length > 0 ? (
+                            <ModelMetaFlag missing={missing} testid="setup-model-config-flag" />
+                        ) : ctxLow ? (
+                            <span className="ms-flag" data-testid="setup-model-config-ctx-low">
+                                <span className="ms-flag__dot"></span>
+                                <span>context under 64k, likely too low</span>
+                            </span>
+                        ) : (
+                            <span className="text-[11px] text-[#4fd98c]">ready</span>
+                        )}
+                    </div>
+                    <p className="text-[11px] text-slate-500 leading-snug">
+                        Prefilled from what the server reported. What it could not report is
+                        yours to answer; nothing is assumed for you.
+                    </p>
+                    <div className="grid grid-cols-2 gap-3">
+                        <label className="space-y-1">
+                            <span className="header-text text-[11px] text-slate-500 block">Max output tokens</span>
+                            <input
+                                type="number"
+                                data-testid="setup-local-max-tokens"
+                                min="1"
+                                value={mtEffective}
+                                onChange={(e) => setTune("maxTokens", e.target.value)}
+                                className={inputCls}
+                            />
+                            <SuggestChips
+                                value={mtEffective}
+                                onApply={(v) => setTune("maxTokens", v)}
+                                suggests={(detail.suggested_max_tokens
+                                    ? [{ label: fmtContextWindow(detail.suggested_max_tokens) + " (derived from probe)", value: detail.suggested_max_tokens }]
+                                    : []).concat(
+                                    [{ label: "16k", value: 16384 }, { label: "32k", value: 32768 }]
+                                        .filter((s) => s.value !== detail.suggested_max_tokens)
+                                )}
+                            />
+                        </label>
+                        <label className="space-y-1">
+                            <span className="header-text text-[11px] text-slate-500 block">Context window</span>
+                            <input
+                                type="number"
+                                data-testid="setup-local-context-window"
+                                min="1"
+                                placeholder="unknown, set it"
+                                value={cwEffective}
+                                onChange={(e) => setTune("contextWindow", e.target.value)}
+                                className={inputCls}
+                            />
+                            <SuggestChips
+                                value={cwEffective}
+                                onApply={(v) => setTune("contextWindow", v)}
+                                suggests={(detail.context_window
+                                    ? [{ label: fmtContextWindow(detail.context_window) + " (detected)", value: detail.context_window }]
+                                    : []).concat(
+                                    [
+                                        { label: "96k", value: 98304 },
+                                        { label: "128k", value: 131072 },
+                                        { label: "200k", value: 200000 },
+                                        { label: "262k", value: 262144 },
+                                    ].filter((s) => s.value !== detail.context_window)
+                                )}
+                            />
+                            {ctxLow && (
+                                <p className="ms-warn" data-testid="setup-local-ctx-low">{MODEL_CTX_LOW_NOTE}</p>
+                            )}
+                        </label>
+                        <label className="space-y-1">
+                            <span className="header-text text-[11px] text-slate-500 block">Reasoning model</span>
+                            <select
+                                data-testid="setup-local-reasoning"
+                                value={reasoning}
+                                onChange={(e) => setTune("reasoning", e.target.value)}
+                                className={inputCls}
+                            >
+                                {detectedReasoning
+                                    ? <option value="auto">Auto (detected {detectedReasoning})</option>
+                                    : <option value="">choose one</option>}
+                                <option value="on">On (emits thinking)</option>
+                                <option value="off">Off</option>
+                            </select>
+                        </label>
+                        <label className="space-y-1">
+                            <span className="header-text text-[11px] text-slate-500 block">Supports image input</span>
+                            <select
+                                data-testid="setup-local-vision"
+                                value={vision}
+                                onChange={(e) => setTune("vision", e.target.value)}
+                                className={inputCls}
+                            >
+                                {detectedVision === "" && <option value="">choose one</option>}
+                                <option value="yes">Yes</option>
+                                <option value="no">No</option>
+                            </select>
+                        </label>
+                    </div>
+                </div>
+            );
+        }
+
+        /* A2/B4 — first-run setup wizard (setup mode).
          *
-         * The container boots keyless into "setup mode": the pipeline is provisioned
-         * but agent capability is locked until a provider key exists. While
-         * /api/setup/provider-status reports setup_mode, this surface takes over the
-         * main content area. On a successful POST it shows a restart-in-progress state
-         * and polls until setup_mode clears (the entrypoint's watcher restarts the
-         * gateway with the key and removes the marker). The key is never echoed back
-         * into the DOM after submit. */
+         * The container boots keyless into "setup mode": the pipeline is
+         * provisioned but agent capability is locked until a provider exists.
+         * While /api/setup/provider-status reports setup_mode, this surface
+         * takes over the main content area as a four-step wizard: add model
+         * sources (cloud key and/or a probed local server), assign agents on
+         * the Settings-style roster, confirm model properties, then one save.
+         * The save POSTs /api/setup/provider-key (key + changed roles +
+         * property confirmations) or /api/setup/local-model (server + tuning +
+         * roles), shows a restart state, and polls until setup_mode clears.
+         * The key is never echoed back into the DOM after submit. */
         function SetupKeyScreen({ onUnlocked }) {
             const provider = "openrouter";
+            const STEPS = [
+                { key: "sources", label: "Add models" },
+                { key: "assign", label: "Assign agents" },
+                { key: "configure", label: "Configure" },
+                { key: "finish", label: "Finish" },
+            ];
+            const [stepIdx, setStepIdx] = React.useState(0);
             const [keyValue, setKeyValue] = React.useState("");
             const [error, setError] = React.useState("");
             const [submitting, setSubmitting] = React.useState(false);
             const [restarting, setRestarting] = React.useState(false);
+            const [finishedLocal, setFinishedLocal] = React.useState(false);
+            // Non-fatal finish problem (key not saved after local wiring); shown on the restart screen.
+            const [keyWarning, setKeyWarning] = React.useState("");
             const pollRef = React.useRef(null);
 
-            /* B4 — subordinate "or use a local model server" alternative. null while
-             * loading; {supported:false} renders nothing; else a probe result
-             * {supported:true, servers:[...], hint}. Wiring a local model reuses the
-             * same restarting/startPolling unlock path as the cloud key form above. */
+            /* Cloud catalog: audited defaults + registered models, fetched once
+             * so the assign and configure steps mirror Settings exactly. */
+            const [rolesInfo, setRolesInfo] = React.useState(null);
+            const [cloudAssign, setCloudAssign] = React.useState({});
+            const [propEdits, setPropEdits] = React.useState({});
+            const [openIds, setOpenIds] = React.useState(() => new Set());
+            const [showReady, setShowReady] = React.useState(false);
+
+            /* Local servers (B4): probed on mount and on demand. Choosing one
+             * hands it the role assignments (the LOCAL_MODEL_URL path). */
             const [localInfo, setLocalInfo] = React.useState(null);
-            const [selectedModels, setSelectedModels] = React.useState({});
-            /* Per server+model tuning confirm fields, keyed "url::model" so a
-             * model switch re-prefills from that model's probed details. */
+            const [localChecking, setLocalChecking] = React.useState(false);
+            const [localServerUrl, setLocalServerUrl] = React.useState("");
+            const [localAssign, setLocalAssign] = React.useState({});
             const [localTuning, setLocalTuning] = React.useState({});
-            const [localError, setLocalError] = React.useState("");
-            const [localSubmitting, setLocalSubmitting] = React.useState(false);
 
             /* Skip path: models managed manually in OpenClaw. Confirmed via a
-             * modal because it is one-way (the welcome screen never reappears). */
+             * modal because it is one-way (this screen never reappears). */
             const [skipConfirmOpen, setSkipConfirmOpen] = React.useState(false);
             const [skipping, setSkipping] = React.useState(false);
             const [skipped, setSkipped] = React.useState(false);
             const [skipError, setSkipError] = React.useState("");
 
-            /* Stage D — optional per-role customization. Cloud path: catalog +
-             * defaults fetched lazily on first expand; only roles changed from
-             * the defaults ride the submit (absent roles keep today's one-click
-             * write). Local path: per-server {role: model} drafts over the
-             * probed model list; unset roles follow the primary pick. */
-            const [cloudCustomizeOpen, setCloudCustomizeOpen] = React.useState(false);
-            const [cloudRolesInfo, setCloudRolesInfo] = React.useState(null);
-            const [cloudRoleChoices, setCloudRoleChoices] = React.useState({});
-            const [localCustomizeOpen, setLocalCustomizeOpen] = React.useState({});
-            const [localRoles, setLocalRoles] = React.useState({});
-
-            const toggleCloudCustomize = () => {
-                const opening = !cloudCustomizeOpen;
-                setCloudCustomizeOpen(opening);
-                if (opening) setLocalCustomizeOpen({});
-                if (cloudRolesInfo !== null) return;
+            React.useEffect(() => {
+                let cancelled = false;
                 fetch("/api/models/roles")
                     .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
                     .then((d) => {
-                        setCloudRolesInfo({ defaults: (d && d.defaults) || {}, catalog: (d && d.catalog) || [] });
-                        setCloudRoleChoices((prev) => (Object.keys(prev).length > 0 ? prev : { ...((d && d.defaults) || {}) }));
+                        if (cancelled) return;
+                        setRolesInfo({ defaults: (d && d.defaults) || {}, catalog: (d && d.catalog) || [] });
+                        setCloudAssign((prev) => (Object.keys(prev).length > 0 ? prev : { ...((d && d.defaults) || {}) }));
                     })
-                    .catch(() => setCloudRolesInfo({ error: true }));
-            };
-
-            const cloudCatalogById = {};
-            (((cloudRolesInfo && cloudRolesInfo.catalog) || [])).forEach((e) => { cloudCatalogById[e.id] = e; });
-            const cloudTextOnly = (id) => {
-                const input = cloudCatalogById[id] && cloudCatalogById[id].input;
-                return Array.isArray(input) && input.length > 0 && input.indexOf("image") === -1;
-            };
-            const cloudVisionBlocked = MODEL_VISION_ROLES.some(
-                (role) => cloudRoleChoices[role] && cloudTextOnly(cloudRoleChoices[role])
-            );
-            const cloudChangedRoles = {};
-            if (cloudRolesInfo && cloudRolesInfo.defaults) {
-                Object.keys(cloudRoleChoices).forEach((role) => {
-                    if (cloudRoleChoices[role] && cloudRoleChoices[role] !== cloudRolesInfo.defaults[role]) {
-                        cloudChangedRoles[role] = cloudRoleChoices[role];
-                    }
-                });
-            }
+                    .catch(() => { if (!cancelled) setRolesInfo({ error: true, defaults: {}, catalog: [] }); });
+                return () => { cancelled = true; };
+            }, []);
 
             const loadLocalModels = React.useCallback(() => {
+                setLocalChecking(true);
                 fetch("/api/setup/local-models")
                     .then((r) => r.json())
                     .then((d) => setLocalInfo(d || { supported: false }))
-                    .catch(() => setLocalInfo({ supported: false }));
+                    .catch(() => setLocalInfo({ supported: false }))
+                    .then(() => setLocalChecking(false));
             }, []);
 
-            React.useEffect(() => {
-                loadLocalModels();
-            }, [loadLocalModels]);
+            React.useEffect(() => { loadLocalModels(); }, [loadLocalModels]);
 
             React.useEffect(() => {
                 return () => { if (pollRef.current) clearInterval(pollRef.current); };
@@ -13026,29 +13578,250 @@
                 }, 3000);
             }, [onUnlocked]);
 
-            const onSubmit = async (e) => {
-                if (e && e.preventDefault) e.preventDefault();
+            /* Source resolution: entering a key marks the cloud path; choosing
+             * a server marks the local path. With both, the local server owns
+             * the role assignments (the backend's LOCAL_MODEL_* knobs win) and
+             * the key is saved alongside, so the cloud catalog is one Settings
+             * visit away after setup. */
+            const cloudActive = keyValue.trim().length > 0;
+            const localServer = ((localInfo && localInfo.servers) || []).find((s) => s.url === localServerUrl) || null;
+            const source = localServer ? "local" : (cloudActive ? "cloud" : "");
+            const rosterRoles = MODEL_ROLE_GROUPS.reduce((acc, g) => acc.concat(g.roles), []);
+
+            /* Picker entries for the active source. A local server's probed
+             * models become entries of the same shape the Settings card reads,
+             * so the roster, chips, and guards work unchanged. */
+            const catalog = React.useMemo(() => {
+                if (localServer) {
+                    return (localServer.models || []).map((mid) => {
+                        const d = (localServer.details || {})[mid] || {};
+                        return {
+                            id: mid,
+                            provider: "local · " + (localServer.name || "server"),
+                            name: mid,
+                            input: d.vision === true ? ["text", "image"] : d.vision === false ? ["text"] : null,
+                            contextWindow: d.context_window || null,
+                            maxTokens: d.suggested_max_tokens || null,
+                            cost: null,
+                            reasoning: typeof d.reasoning === "boolean" ? d.reasoning : null,
+                            params: {},
+                        };
+                    });
+                }
+                return (rolesInfo && rolesInfo.catalog) || [];
+            }, [localServer, rolesInfo]);
+            const catalogById = {};
+            catalog.forEach((entry) => { catalogById[entry.id] = entry; });
+            const catalogUnavailable = source === "cloud" && rolesInfo && (rolesInfo.error || catalog.length === 0);
+
+            const assignments = source === "local" ? localAssign : cloudAssign;
+            const onAssign = (role, id) => (source === "local" ? setLocalAssign : setCloudAssign)((prev) => ({ ...prev, [role]: id }));
+
+            /* The local primary: the model most roles run on. The backend
+             * assigns it to every role and swaps the diverging ones. */
+            const localPrimary = React.useMemo(() => {
+                if (!localServer) return "";
+                const counts = {};
+                rosterRoles.forEach((r) => { const id = localAssign[r]; if (id) counts[id] = (counts[id] || 0) + 1; });
+                const ids = Object.keys(counts);
+                if (ids.length === 0) return "";
+                ids.sort((a, b) => counts[b] - counts[a]);
+                const top = counts[ids[0]];
+                const tied = ids.filter((id) => counts[id] === top);
+                return tied.indexOf(localAssign.executor) !== -1 ? localAssign.executor : tied[0];
+            }, [localServer, localAssign]);
+
+            const chooseServer = (url) => {
+                if (url === localServerUrl) {
+                    setLocalServerUrl("");
+                    setLocalAssign({});
+                    setLocalTuning({});
+                    return;
+                }
+                setLocalServerUrl(url);
+                setLocalTuning({});
+                const server = ((localInfo && localInfo.servers) || []).find((s) => s.url === url);
+                const first = (server && server.models && server.models[0]) || "";
+                setLocalAssign(first ? rosterRoles.reduce((acc, r) => { acc[r] = first; return acc; }, {}) : {});
+            };
+
+            /* Pending edits as the vision/meta checks see them. Every assigned
+             * local model is confirmable: the primary persists through the
+             * LOCAL_MODEL_* lines, the others through the properties overlay. */
+            const editsFor = (id) => {
+                if (source !== "local") return propEdits[id];
+                const t = localTuning[localServerUrl + "::" + id] || {};
+                const e = {};
+                if (t.vision === "yes" || t.vision === "no") e.vision = t.vision;
+                if (t.reasoning === "on" || t.reasoning === "off") e.reasoning = t.reasoning;
+                if (t.contextWindow !== undefined) e.contextWindow = t.contextWindow;
+                if (t.maxTokens !== undefined) e.maxTokens = t.maxTokens;
+                return e;
+            };
+            const assignedIds = rosterRoles.map((r) => assignments[r]).filter((id) => id && catalogById[id]);
+            const uniqueAssigned = assignedIds.filter((id, i) => assignedIds.indexOf(id) === i);
+            const visionBlocked = MODEL_VISION_ROLES.filter((role) => {
+                const id = assignments[role];
+                return id && catalogById[id] && modelEntryTextOnly(catalogById[id], editsFor(id));
+            });
+            const missingFor = (id) => modelMetaMissing(catalogById[id], editsFor(id));
+            const attentionIds = uniqueAssigned.filter((id) => missingFor(id).length > 0);
+            const ctxLowFor = (id) => {
+                const entry = catalogById[id];
+                const e = editsFor(id) || {};
+                const cw = e.contextWindow !== undefined && e.contextWindow !== ""
+                    ? e.contextWindow
+                    : (entry ? entry.contextWindow : null);
+                return modelCtxLow(cw);
+            };
+            const usedByLabel = (id) => rosterRoles
+                .filter((r) => assignments[r] === id)
+                .map((r) => (MODEL_ROLE_INFO[r] || { label: r }).label)
+                .join(", ");
+            const needVision = (id) => MODEL_VISION_ROLES.some((r) => assignments[r] === id);
+
+            /* Models needing attention (unanswered values, or a context below
+             * the recommended floor) stay open while being fixed; the user
+             * tucks them away explicitly once they read ready. */
+            const openNeededIds = uniqueAssigned.filter((id) => missingFor(id).length > 0 || ctxLowFor(id));
+            const attnKey = openNeededIds.join(",");
+            React.useEffect(() => {
+                setOpenIds((prev) => {
+                    const n = new Set(prev);
+                    openNeededIds.forEach((id) => n.add(id));
+                    return n;
+                });
+            }, [attnKey]);
+
+            const changedCloudRoles = {};
+            if (rolesInfo && rolesInfo.defaults) {
+                Object.keys(cloudAssign).forEach((role) => {
+                    if (cloudAssign[role] && cloudAssign[role] !== rolesInfo.defaults[role]) {
+                        changedCloudRoles[role] = cloudAssign[role];
+                    }
+                });
+            }
+
+            const onFinish = async () => {
                 setError("");
                 setSubmitting(true);
+                let localWired = false;
                 try {
-                    const payload = { provider, key: keyValue };
-                    if (Object.keys(cloudChangedRoles).length > 0) payload.roles = cloudChangedRoles;
-                    const r = await fetch("/api/setup/provider-key", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify(payload),
-                    });
-                    const d = await r.json().catch(() => ({}));
-                    if (!r.ok) {
-                        setError(d.detail || "Could not save the key. Check the value and try again.");
-                        return;
+                    /* Local wiring goes FIRST when both sources are set. Both
+                     * endpoints write the same provider file, and the entrypoint
+                     * unlocks on its first non-empty poll, which can land between
+                     * the two POSTs. Local owns the role assignments, so the
+                     * local write must be the one an early unlock sees complete;
+                     * a key line landing late is inert until the next apply. */
+                    if (source === "local" && localServer && localPrimary) {
+                        const detail = (localServer.details || {})[localPrimary] || {};
+                        const tuning = localTuning[localServer.url + "::" + localPrimary] || {};
+                        const payload = { url: localServer.url, model: localPrimary };
+                        /* Max output tokens: the typed value, else the probe-derived
+                         * suggestion. Explicit in the payload so the wired entry never
+                         * falls back to a truncating default. */
+                        const mt = parseInt(tuning.maxTokens != null ? tuning.maxTokens : detail.suggested_max_tokens, 10);
+                        if (Number.isFinite(mt) && mt > 0) payload.max_tokens = mt;
+                        /* Context window: the typed value, else the probed one. */
+                        const cw = parseInt(tuning.contextWindow != null ? tuning.contextWindow : detail.context_window, 10);
+                        if (Number.isFinite(cw) && cw > 0) payload.context_window = cw;
+                        /* Reasoning: only an explicit On/Off choice is sent; Auto defers
+                         * to the boot-time probe (which knows when the server exposes it). */
+                        if (tuning.reasoning === "on") payload.reasoning = true;
+                        if (tuning.reasoning === "off") payload.reasoning = false;
+                        /* Image input: the user's explicit answer, else the probe's.
+                         * The configure gate guarantees one exists; nothing is assumed. */
+                        const vision = tuning.vision || (detail.vision === true ? "yes" : detail.vision === false ? "no" : "");
+                        if (vision) payload.vision = vision === "yes";
+                        const customized = {};
+                        rosterRoles.forEach((role) => {
+                            if (localAssign[role] && localAssign[role] !== localPrimary) customized[role] = localAssign[role];
+                        });
+                        if (Object.keys(customized).length > 0) payload.roles = customized;
+                        /* Confirmations for the other wired models ride the overlay;
+                         * the LOCAL_MODEL_* fields above cover only the primary. */
+                        const props = {};
+                        uniqueAssigned.filter((mid) => mid !== localPrimary).forEach((mid) => {
+                            const t = localTuning[localServer.url + "::" + mid] || {};
+                            const d = (localServer.details || {})[mid] || {};
+                            const out = {};
+                            const vis = t.vision || (d.vision === true ? "yes" : d.vision === false ? "no" : "");
+                            if (vis) out.input = vis === "yes" ? ["text", "image"] : ["text"];
+                            const rs = t.reasoning === "on" ? true : t.reasoning === "off" ? false
+                                : (typeof d.reasoning === "boolean" ? d.reasoning : null);
+                            if (rs !== null) out.reasoning = rs;
+                            const rcw = parseInt(t.contextWindow != null ? t.contextWindow : d.context_window, 10);
+                            if (Number.isFinite(rcw) && rcw > 0) out.contextWindow = rcw;
+                            const rmt = parseInt(t.maxTokens != null ? t.maxTokens : d.suggested_max_tokens, 10);
+                            if (Number.isFinite(rmt) && rmt > 0) out.maxTokens = rmt;
+                            if (Object.keys(out).length > 0) props["local/" + mid] = out;
+                        });
+                        if (Object.keys(props).length > 0) payload.properties = props;
+                        const r = await fetch("/api/setup/local-model", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify(payload),
+                        });
+                        const d = await r.json().catch(() => ({}));
+                        if (!r.ok) {
+                            setError(d.detail || "Could not wire the local model. Try again.");
+                            return;
+                        }
+                        localWired = true;
+                        setFinishedLocal(true);
                     }
-                    // Never keep the key in state past a successful submit.
-                    setKeyValue("");
+                    if (cloudActive) {
+                        const payload = { provider, key: keyValue };
+                        if (source === "cloud") {
+                            if (Object.keys(changedCloudRoles).length > 0) payload.roles = changedCloudRoles;
+                            let propsBody = null;
+                            try {
+                                /* Only models the assignments actually use ride the
+                                 * overlay; an edited-then-unassigned model is dropped. */
+                                const assignedEdits = {};
+                                uniqueAssigned.forEach((id) => { if (propEdits[id]) assignedEdits[id] = propEdits[id]; });
+                                propsBody = buildModelPropsBody(assignedEdits, catalogById);
+                            } catch (e) {
+                                setError(String(e && e.message ? e.message : e));
+                                return;
+                            }
+                            if (propsBody) payload.properties = propsBody;
+                        }
+                        let failMsg = "";
+                        try {
+                            const r = await fetch("/api/setup/provider-key", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify(payload),
+                            });
+                            const d = await r.json().catch(() => ({}));
+                            if (!r.ok) failMsg = d.detail || "Could not save the key. Check the value and try again.";
+                        } catch (_e) {
+                            failMsg = "Network error while saving the key. Try again.";
+                        }
+                        if (failMsg) {
+                            /* Local already wired: the unlock restart is in flight
+                             * and cannot be recalled, so surface the miss on the
+                             * restart screen instead of stranding the wizard. */
+                            if (!localWired) {
+                                setError(failMsg);
+                                return;
+                            }
+                            setKeyWarning(
+                                "Your local server is wired and the restart is underway, but the key was not saved: " +
+                                failMsg + " Add it in Settings once the dashboard unlocks."
+                            );
+                        } else {
+                            // Never keep the key in state past a successful submit.
+                            setKeyValue("");
+                        }
+                    }
                     setRestarting(true);
                     startPolling();
                 } catch (_e) {
-                    setError("Network error while saving the key. Try again.");
+                    setError(localWired
+                        ? "The local server is wired, but a network error interrupted the finish. Reload this page."
+                        : "Network error while saving the setup. Try again.");
                 } finally {
                     setSubmitting(false);
                 }
@@ -13075,351 +13848,372 @@
                 }
             };
 
-            const onLocalSubmit = async (server) => {
-                const model = selectedModels[server.url] || (server.models && server.models[0]) || "";
-                if (!model) return;
-                const detail = (server.details || {})[model] || {};
-                const tuning = localTuning[server.url + "::" + model] || {};
-                const payload = { url: server.url, model };
-                /* Max output tokens: the typed value, else the probe-derived
-                 * suggestion. Explicit in the payload so the wired entry never
-                 * falls back to a truncating default. */
-                const mt = parseInt(tuning.maxTokens != null ? tuning.maxTokens : detail.suggested_max_tokens, 10);
-                if (Number.isFinite(mt) && mt > 0) payload.max_tokens = mt;
-                /* Context window: the typed value, else the probed one. */
-                const cw = parseInt(tuning.contextWindow != null ? tuning.contextWindow : detail.context_window, 10);
-                if (Number.isFinite(cw) && cw > 0) payload.context_window = cw;
-                /* Reasoning: only an explicit On/Off choice is sent; Auto defers
-                 * to the boot-time probe (which knows when the server exposes it). */
-                if (tuning.reasoning === "on") payload.reasoning = true;
-                if (tuning.reasoning === "off") payload.reasoning = false;
-                /* Image input: vision-role submission is blocked while the
-                 * effective pick is "no"; explicit so the wired entry always
-                 * carries the input type the executor and reviewer depend on. */
-                const vision = tuning.vision || (detail.vision === false ? "no" : "yes");
-                payload.vision = vision === "yes";
-                const roleDraft = localRoles[server.url] || {};
-                const customized = {};
-                Object.keys(roleDraft).forEach((role) => {
-                    if (roleDraft[role] && roleDraft[role] !== model) customized[role] = roleDraft[role];
-                });
-                if (Object.keys(customized).length > 0) payload.roles = customized;
-                setLocalError("");
-                setLocalSubmitting(true);
-                try {
-                    const r = await fetch("/api/setup/local-model", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify(payload),
-                    });
-                    const d = await r.json().catch(() => ({}));
-                    if (!r.ok) {
-                        setLocalError(d.detail || "Could not wire the local model. Try again.");
-                        return;
-                    }
-                    // Same unlock path as the cloud key: restart + poll setup_mode.
-                    setRestarting(true);
-                    startPolling();
-                } catch (_e) {
-                    setLocalError("Network error while wiring the local model. Try again.");
-                } finally {
-                    setLocalSubmitting(false);
-                }
+            /* Step gating: soft guides everywhere, a hard block only where the
+             * backend would refuse the save anyway (a vision agent on a
+             * text-only model). */
+            const step = STEPS[stepIdx];
+            let nextDisabled = false;
+            let gateMsg = "";
+            if (step.key === "sources" && !source) {
+                nextDisabled = true;
+                gateMsg = "Paste a cloud key or choose a local server, or skip below.";
+            }
+            if (step.key === "configure" && attentionIds.length > 0) {
+                nextDisabled = true;
+                gateMsg = "Answer the flagged values to continue. The pipeline plans budgets and image work from them.";
+            }
+            if ((step.key === "assign" || step.key === "configure") && visionBlocked.length > 0) {
+                nextDisabled = true;
+                gateMsg = visionBlocked.length + " agent" + (visionBlocked.length === 1 ? "" : "s") + " that read screenshots sit on a text-only model. Fix that to continue.";
+            }
+            const goTo = (n) => setStepIdx(Math.max(0, Math.min(STEPS.length - 1, n)));
+            const onContinue = () => {
+                /* When the catalog is unreadable the assign and configure steps
+                 * have nothing to show; the audited defaults apply unchanged. */
+                if (step.key === "sources" && catalogUnavailable) { goTo(3); return; }
+                goTo(stepIdx + 1);
+            };
+            const onBack = () => {
+                if (step.key === "finish" && catalogUnavailable) { goTo(0); return; }
+                goTo(stepIdx - 1);
+            };
+
+            const inputCls = "w-full text-sm bg-[#15121f] border border-[#2a2540] rounded px-3 py-2 text-slate-200";
+            const readyIds = uniqueAssigned.filter((id) => missingFor(id).length === 0 && !ctxLowFor(id) && !openIds.has(id));
+            const openList = uniqueAssigned.filter((id) => openIds.has(id) || missingFor(id).length > 0 || ctxLowFor(id));
+
+            const renderSourcesStep = () => (
+                <div className="space-y-4">
+                    <p className="text-sm text-slate-400 leading-relaxed">
+                        Lullabeast needs a model provider before it can run agents. Connect a
+                        cloud provider, a local server, or both. Whatever you add here becomes
+                        assignable to your agents on the next step, and your key stays local,
+                        never sent anywhere except your provider.
+                    </p>
+                    <div className="space-y-1">
+                        <label className="header-text text-xs text-slate-400 block">OpenRouter API key</label>
+                        <input
+                            data-testid="setup-key-input"
+                            type="password"
+                            autoComplete="off"
+                            value={keyValue}
+                            onChange={(e) => setKeyValue(e.target.value)}
+                            placeholder="paste your key"
+                            className="w-full text-sm font-mono bg-[#221b36] border border-[#2a2540] rounded px-3 py-2 text-slate-200"
+                        />
+                        <p className="text-xs text-slate-500 leading-relaxed">
+                            Get an OpenRouter key at{" "}
+                            <a
+                                href="https://openrouter.ai/settings/keys"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-[#e2b14c] hover:underline"
+                            >
+                                openrouter.ai/settings/keys
+                            </a>
+                            . Your account needs a small credit balance for the models to run.
+                            One key wires the audited model catalog; no cloud costs until an agent runs.
+                        </p>
+                    </div>
+                    {localInfo && localInfo.supported && (
+                        <div className="border-t border-[#2a2540] pt-4 space-y-3" data-testid="setup-local-models">
+                            <div className="flex items-baseline justify-between gap-2">
+                                <div className="space-y-1 min-w-0">
+                                    <h2 className="header-text text-sm font-semibold text-slate-300">
+                                        Or use a local model server
+                                    </h2>
+                                    <p className="text-xs text-slate-500 leading-relaxed">
+                                        Run entirely on your own hardware, no cloud key needed. Servers
+                                        are probed live, so a listed server is reachable right now.
+                                    </p>
+                                </div>
+                                <button
+                                    type="button"
+                                    data-testid="setup-local-recheck"
+                                    onClick={loadLocalModels}
+                                    disabled={localChecking}
+                                    className="ms-link ms-link--dim shrink-0"
+                                >
+                                    {localChecking ? "checking…" : "Recheck servers"}
+                                </button>
+                            </div>
+                            {localInfo.servers && localInfo.servers.length > 0 ? (
+                                <div className="space-y-2">
+                                    {localInfo.servers.map((server) => {
+                                        const chosen = server.url === localServerUrl;
+                                        return (
+                                            <div
+                                                key={server.url}
+                                                data-testid="setup-local-server"
+                                                className={"rounded border p-3 space-y-2 " + (chosen ? "border-[#e2b14c] bg-[#221b36]" : "border-[#2a2540] bg-[#221b36]")}
+                                            >
+                                                <div className="flex items-center justify-between gap-2 flex-wrap">
+                                                    <div className="flex items-baseline gap-2 min-w-0">
+                                                        <span className="header-text text-sm text-slate-200">{server.name}</span>
+                                                        <span className="text-xs font-mono text-slate-500 truncate">{server.url}</span>
+                                                    </div>
+                                                    <button
+                                                        type="button"
+                                                        data-testid="setup-local-choose"
+                                                        onClick={() => chooseServer(server.url)}
+                                                        disabled={!chosen && (!server.models || server.models.length === 0)}
+                                                        className={"header-text text-xs px-3 py-1.5 rounded border disabled:opacity-50 " + (chosen
+                                                            ? "border-[#e2b14c] text-[#e2b14c]"
+                                                            : "border-[#2a2540] text-slate-300 hover:bg-[#2a2540]")}
+                                                    >
+                                                        {chosen ? "Selected, tap to unselect" : "Use this server"}
+                                                    </button>
+                                                </div>
+                                                <div className="space-y-1">
+                                                    {(server.models || []).map((m) => {
+                                                        const d = (server.details || {})[m] || {};
+                                                        const meta = [
+                                                            d.vision === true ? "image" : d.vision === false ? "text only" : "image not reported",
+                                                            d.context_window ? fmtContextWindow(d.context_window) + " context" : "context not reported",
+                                                        ].join("  ·  ");
+                                                        return (
+                                                            <div key={m} className="flex items-baseline gap-2 text-xs">
+                                                                <span className="font-mono text-slate-300">{m}</span>
+                                                                <span className="text-slate-500">{meta}</span>
+                                                            </div>
+                                                        );
+                                                    })}
+                                                    {(!server.models || server.models.length === 0) && (
+                                                        <p className="text-xs text-slate-500">No models loaded on this server yet.</p>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            ) : (
+                                <p className="text-xs text-slate-500 leading-relaxed">
+                                    {localInfo.hint || "No local model server was found."}
+                                </p>
+                            )}
+                        </div>
+                    )}
+                    {cloudActive && localServer && (
+                        <p className="text-xs text-slate-500 leading-relaxed" data-testid="setup-both-sources-note">
+                            Both sources set: your agents start on the local server, and the key
+                            is saved too, so cloud models are one Settings visit away after setup.
+                        </p>
+                    )}
+                </div>
+            );
+
+            const renderAssignStep = () => (
+                <div className="space-y-3">
+                    <p className="text-sm text-slate-400 leading-relaxed">
+                        Six agents run the pipeline. Each is prefilled with a suggested
+                        default; tick one row, several, or all of them to assign in one move.
+                        Agents that read screenshots only accept models with image input.
+                    </p>
+                    {catalogUnavailable ? (
+                        <p className="text-xs text-slate-500">
+                            Could not load the model catalog. The audited defaults will be
+                            used; you can change each role's model later in Settings.
+                        </p>
+                    ) : (
+                        <SetupAssignRoster
+                            catalog={catalog}
+                            catalogById={catalogById}
+                            assignments={assignments}
+                            propEdits={source === "cloud" ? propEdits : {}}
+                            onAssign={onAssign}
+                            disabled={submitting}
+                            idPrefix="setup-assign"
+                        />
+                    )}
+                </div>
+            );
+
+            const renderConfigureStep = () => (
+                <div className="space-y-3">
+                    <p className="text-sm text-slate-400 leading-relaxed">
+                        {source === "local"
+                            ? "Confirm the values your server cannot always report. The pipeline plans budgets and image work from these numbers."
+                            : "Cloud models arrive configured from the audited catalog. Confirm anything flagged, and adjust prices or sampling if your account differs."}
+                    </p>
+                    {source === "local" && localServer ? (
+                        <React.Fragment>
+                            {uniqueAssigned.length === 0 && (
+                                <p className="text-xs text-slate-500">Assign at least one agent first.</p>
+                            )}
+                            {uniqueAssigned.map((mid) => (
+                                <SetupLocalConfigForm
+                                    key={mid}
+                                    model={mid}
+                                    detail={(localServer.details || {})[mid] || {}}
+                                    tuning={localTuning[localServer.url + "::" + mid] || {}}
+                                    setTune={(k, v) => {
+                                        const tKey = localServer.url + "::" + mid;
+                                        setLocalTuning((prev) => ({ ...prev, [tKey]: { ...prev[tKey], [k]: v } }));
+                                    }}
+                                    usedBy={usedByLabel(mid)}
+                                />
+                            ))}
+                            {visionBlocked.length > 0 && (
+                                <p className="text-xs text-amber-400" data-testid="setup-local-vision-warning">
+                                    The executor, reviewer, and PRD creator need a model that
+                                    accepts image input (screenshot-based visual review). Assign
+                                    them a multimodal model, or flip Supports image input to Yes
+                                    if you are sure the assigned one takes images.
+                                </p>
+                            )}
+                        </React.Fragment>
+                    ) : catalogUnavailable ? (
+                        <p className="text-xs text-slate-500">
+                            Could not load the model catalog, so there is nothing to confirm here.
+                        </p>
+                    ) : (
+                        <React.Fragment>
+                            {readyIds.length > 0 && (
+                                <div>
+                                    <div className="ms-ready" data-testid="setup-configure-ready">
+                                        <span className="ms-ready__dot"></span>
+                                        <span><b>{readyIds.length}</b> model{readyIds.length === 1 ? "" : "s"} ready, nothing to confirm</span>
+                                        <button type="button" className="ms-ready__more" onClick={() => setShowReady((v) => !v)}>
+                                            {showReady ? "hide" : "review"}
+                                        </button>
+                                    </div>
+                                    {showReady && (
+                                        <div className="ms-ready__list">
+                                            {readyIds.map((id) => (
+                                                <span key={id} className="ms-ready__item">
+                                                    <span className="font-mono">{id}</span>
+                                                    <button type="button" className="ms-ready__edit" onClick={() => setOpenIds((p) => { const n = new Set(p); n.add(id); return n; })}>edit</button>
+                                                </span>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                            {openList.length === 0 && readyIds.length === 0 && (
+                                <p className="text-xs text-slate-500">Assign at least one agent first.</p>
+                            )}
+                            {openList.map((id) => (
+                                <SetupModelConfigForm
+                                    key={id}
+                                    entry={catalogById[id]}
+                                    edits={propEdits[id] || {}}
+                                    setEdit={(k, v) => setPropEdits((prev) => ({ ...prev, [id]: { ...prev[id], [k]: v } }))}
+                                    usedBy={usedByLabel(id)}
+                                    needVision={needVision(id)}
+                                    onClose={() => setOpenIds((p) => { const n = new Set(p); n.delete(id); return n; })}
+                                />
+                            ))}
+                        </React.Fragment>
+                    )}
+                </div>
+            );
+
+            const renderFinishStep = () => {
+                // Count only edits that will ride the save (assigned models).
+                const propsEdited = Object.keys(propEdits).filter((id) => uniqueAssigned.indexOf(id) !== -1).length;
+                return (
+                    <div className="space-y-3">
+                        <p className="text-sm text-slate-400 leading-relaxed">
+                            Finishing saves the setup and starts the model gateway. That takes a
+                            few moments; the dashboard unlocks automatically.
+                        </p>
+                        <div className="rounded border border-[#2a2540] bg-[#221b36] p-3 space-y-1.5 text-xs" data-testid="setup-finish-summary">
+                            <div className="flex justify-between gap-3">
+                                <span className="text-slate-500">Model source</span>
+                                <span className="text-slate-300 text-right">
+                                    {source === "local" && localServer
+                                        ? localServer.name + (cloudActive ? ", plus your OpenRouter key" : "")
+                                        : "OpenRouter cloud"}
+                                </span>
+                            </div>
+                            <div className="flex justify-between gap-3">
+                                <span className="text-slate-500">Agents assigned</span>
+                                <span className="text-slate-300 text-right">
+                                    {catalogUnavailable
+                                        ? "audited defaults"
+                                        : rosterRoles.filter((r) => assignments[r]).length + " of " + rosterRoles.length}
+                                </span>
+                            </div>
+                            <div className="flex justify-between gap-3">
+                                <span className="text-slate-500">Models</span>
+                                <span className="text-slate-300 text-right">
+                                    {catalogUnavailable
+                                        ? "registered catalog"
+                                        : uniqueAssigned.length + " in use" + (source === "cloud" && propsEdited > 0 ? ", " + propsEdited + " adjusted" : "")}
+                                </span>
+                            </div>
+                        </div>
+                        <p className="text-xs text-slate-500 leading-relaxed">
+                            Everything here stays editable in Settings, Model roles: reassign
+                            agents, adjust model properties, and add or remove models in OpenClaw.
+                        </p>
+                    </div>
+                );
             };
 
             return (
                 <div className="flex h-screen items-start justify-center overflow-y-auto app-sky p-6" data-testid="setup-key-screen">
                     <div className="ll-grain" aria-hidden="true"></div>
-                    <div className="relative max-w-lg w-full rounded-lg border border-[#2a2540] bg-[#15121f] p-6 space-y-4 my-auto">
-                        <h1 className="header-text text-lg font-semibold text-slate-200">Welcome to Lullabeast</h1>
+                    <div className="relative max-w-2xl w-full rounded-lg border border-[#2a2540] bg-[#15121f] p-6 space-y-4 my-auto">
+                        <div className="flex items-center justify-between gap-3 flex-wrap">
+                            <h1 className="header-text text-lg font-semibold text-slate-200">Welcome to Lullabeast</h1>
+                            {!restarting && <SetupWizardSteps steps={STEPS} idx={stepIdx} onJump={goTo} />}
+                        </div>
                         {!restarting && (
                             <React.Fragment>
-                                <p className="text-sm text-slate-400 leading-relaxed">
-                                    Lullabeast needs a model provider key before it can run agents. Paste a key below
-                                    and it will be saved on this machine and used to start the model gateway. Your key
-                                    stays local and is never sent anywhere except your provider.
-                                </p>
-                                <form className="space-y-4" onSubmit={onSubmit}>
-                                    <div className="space-y-1">
-                                        <label className="header-text text-xs text-slate-400 block">OpenRouter API key</label>
-                                        <input
-                                            data-testid="setup-key-input"
-                                            type="password"
-                                            autoComplete="off"
-                                            value={keyValue}
-                                            onChange={(e) => setKeyValue(e.target.value)}
-                                            placeholder="paste your key"
-                                            className="w-full text-sm font-mono bg-[#221b36] border border-[#2a2540] rounded px-3 py-2 text-slate-200"
-                                        />
-                                        <p className="text-xs text-slate-500 leading-relaxed">
-                                            Get an OpenRouter key at{" "}
-                                            <a
-                                                href="https://openrouter.ai/settings/keys"
-                                                target="_blank"
-                                                rel="noopener noreferrer"
-                                                className="text-[#e2b14c] hover:underline"
-                                            >
-                                                openrouter.ai/settings/keys
-                                            </a>
-                                            . Your account needs a small credit balance for the models to run.
-                                        </p>
-                                    </div>
-                                    <div className="space-y-2" data-testid="setup-key-customize">
-                                        <SetupCustomizeToggle
-                                            testid="setup-key-customize-toggle"
-                                            open={cloudCustomizeOpen}
-                                            onToggle={toggleCloudCustomize}
-                                        />
-                                        {cloudCustomizeOpen && (
-                                            cloudRolesInfo === null ? (
-                                                <p className="text-xs text-slate-500">Loading the model catalog…</p>
-                                            ) : cloudRolesInfo.error ? (
-                                                <p className="text-xs text-slate-500">
-                                                    Could not load the model catalog. The audited defaults will be
-                                                    used; you can change each role's model later in Settings.
-                                                </p>
-                                            ) : (
-                                                <div className="space-y-2 rounded border border-[#2a2540] bg-[#100d1a]/60 p-3">
-                                                    <p className="text-[11px] text-slate-500 leading-snug">
-                                                        Prefilled with the audited defaults. Changes are saved with the
-                                                        key in one pass, and you can revisit them any time in Settings.
-                                                    </p>
-                                                    <SetupRolePicker
-                                                        idPrefix="setup-key"
-                                                        options={(cloudRolesInfo.catalog || []).map((entry) => entry.id)}
-                                                        values={cloudRoleChoices}
-                                                        onSelect={(role, v) => setCloudRoleChoices((prev) => ({ ...prev, [role]: v }))}
-                                                        disabled={submitting}
-                                                        isTextOnly={cloudTextOnly}
-                                                    />
-                                                </div>
-                                            )
-                                        )}
-                                    </div>
-                                    {error && (
-                                        <p className="text-xs text-red-400" data-testid="setup-key-error">{error}</p>
-                                    )}
-                                    <button
-                                        type="submit"
-                                        data-testid="setup-key-submit"
-                                        disabled={submitting || !keyValue.trim() || cloudVisionBlocked}
-                                        className="header-text text-sm px-4 py-2 rounded bg-[#e2b14c] text-[#100d1a] font-semibold disabled:opacity-50"
-                                    >
-                                        {submitting ? "Saving…" : "Save key and start"}
-                                    </button>
-                                </form>
-                                {localInfo && localInfo.supported && (
-                                    <div
-                                        className="border-t border-[#2a2540] pt-4 space-y-3"
-                                        data-testid="setup-local-models"
-                                    >
-                                        <div className="space-y-1">
-                                            <h2 className="header-text text-sm font-semibold text-slate-300">
-                                                Or use a local model server
-                                            </h2>
-                                            <p className="text-xs text-slate-500 leading-relaxed">
-                                                Run entirely on your own hardware, no cloud key needed. The executor,
-                                                reviewer, and PRD creator need a model that accepts image input; you can
-                                                change each role's model later in Settings.
-                                            </p>
-                                        </div>
-                                        {localInfo.servers && localInfo.servers.length > 0 ? (
-                                            <div className="space-y-2">
-                                                {localInfo.servers.map((server) => {
-                                                    /* Confirm fields: prefilled from the probe; what the model
-                                                     * server can't report (reasoning / vision on llama.cpp and
-                                                     * LM Studio) is the user's one-line call. */
-                                                    const model = selectedModels[server.url] || (server.models && server.models[0]) || "";
-                                                    const detail = model ? ((server.details || {})[model] || {}) : {};
-                                                    const tKey = server.url + "::" + model;
-                                                    const tuning = localTuning[tKey] || {};
-                                                    const setTune = (k, v) =>
-                                                        setLocalTuning((prev) => ({ ...prev, [tKey]: { ...prev[tKey], [k]: v } }));
-                                                    const detectedReasoning = detail.reasoning === true ? "on" : detail.reasoning === false ? "off" : "not detected";
-                                                    /* Image support defaults to yes: the executor and reviewer
-                                                     * need a multimodal model. A probed text-only model prefills
-                                                     * no; overriding it back to yes is the user's call. */
-                                                    const vision = tuning.vision || (detail.vision === false ? "no" : "yes");
-                                                    /* Per-role customization: unset roles follow the primary
-                                                     * pick. The vision block covers only the roles that need
-                                                     * image input, on whatever model each one ends up with. */
-                                                    const roleDraft = localRoles[server.url] || {};
-                                                    const effModel = (role) => roleDraft[role] || model;
-                                                    const modelTextOnly = (m) => {
-                                                        if (m === model) return vision === "no";
-                                                        const d = (server.details || {})[m] || {};
-                                                        return d.vision === false;
-                                                    };
-                                                    const blockedRoles = MODEL_VISION_ROLES.filter((role) => effModel(role) && modelTextOnly(effModel(role)));
-                                                    const localCustomized = Object.keys(roleDraft).some((role) => roleDraft[role] && roleDraft[role] !== model);
-                                                    const inputCls = "w-full text-sm bg-[#15121f] border border-[#2a2540] rounded px-3 py-2 text-slate-200";
-                                                    return (
-                                                    <div
-                                                        key={server.url}
-                                                        className="rounded border border-[#2a2540] bg-[#221b36] p-3 space-y-2"
-                                                    >
-                                                        <div className="flex items-baseline justify-between gap-2">
-                                                            <span className="header-text text-sm text-slate-200">{server.name}</span>
-                                                            <span className="text-xs font-mono text-slate-500 truncate">{server.url}</span>
-                                                        </div>
-                                                        <select
-                                                            value={model}
-                                                            onChange={(e) =>
-                                                                setSelectedModels((prev) => ({ ...prev, [server.url]: e.target.value }))
-                                                            }
-                                                            disabled={!server.models || server.models.length === 0}
-                                                            className={inputCls + " disabled:opacity-50"}
-                                                        >
-                                                            {(server.models && server.models.length > 0
-                                                                ? server.models
-                                                                : []
-                                                            ).map((m) => (
-                                                                <option key={m} value={m}>{m}</option>
-                                                            ))}
-                                                            {(!server.models || server.models.length === 0) && (
-                                                                <option value="">no models loaded</option>
-                                                            )}
-                                                        </select>
-                                                        {model && (
-                                                            <div className="grid grid-cols-2 gap-3">
-                                                                <label className="space-y-1">
-                                                                    <span className="header-text text-[11px] text-slate-500 block">Max output tokens</span>
-                                                                    <input
-                                                                        type="number"
-                                                                        data-testid="setup-local-max-tokens"
-                                                                        min="1"
-                                                                        value={tuning.maxTokens != null ? tuning.maxTokens : (detail.suggested_max_tokens || 16384)}
-                                                                        onChange={(e) => setTune("maxTokens", e.target.value)}
-                                                                        className={inputCls}
-                                                                    />
-                                                                </label>
-                                                                <label className="space-y-1">
-                                                                    <span className="header-text text-[11px] text-slate-500 block">Context window</span>
-                                                                    <input
-                                                                        type="number"
-                                                                        data-testid="setup-local-context-window"
-                                                                        min="1"
-                                                                        placeholder="unknown"
-                                                                        value={tuning.contextWindow != null ? tuning.contextWindow : (detail.context_window || "")}
-                                                                        onChange={(e) => setTune("contextWindow", e.target.value)}
-                                                                        className={inputCls}
-                                                                    />
-                                                                </label>
-                                                                <label className="space-y-1">
-                                                                    <span className="header-text text-[11px] text-slate-500 block">Reasoning model</span>
-                                                                    <select
-                                                                        data-testid="setup-local-reasoning"
-                                                                        value={tuning.reasoning || "auto"}
-                                                                        onChange={(e) => setTune("reasoning", e.target.value)}
-                                                                        className={inputCls}
-                                                                    >
-                                                                        <option value="auto">Auto ({detectedReasoning})</option>
-                                                                        <option value="on">On (emits thinking)</option>
-                                                                        <option value="off">Off</option>
-                                                                    </select>
-                                                                </label>
-                                                                <label className="space-y-1">
-                                                                    <span className="header-text text-[11px] text-slate-500 block">Supports image input</span>
-                                                                    <select
-                                                                        data-testid="setup-local-vision"
-                                                                        value={vision}
-                                                                        onChange={(e) => setTune("vision", e.target.value)}
-                                                                        className={inputCls}
-                                                                    >
-                                                                        <option value="yes">Yes</option>
-                                                                        <option value="no">No</option>
-                                                                    </select>
-                                                                </label>
-                                                            </div>
-                                                        )}
-                                                        {model && server.models && server.models.length > 1 && (
-                                                            <div className="space-y-2" data-testid="setup-local-customize">
-                                                                <SetupCustomizeToggle
-                                                                    testid="setup-local-customize-toggle"
-                                                                    open={!!localCustomizeOpen[server.url]}
-                                                                    onToggle={() => {
-                                                                        setCloudCustomizeOpen(false);
-                                                                        setLocalCustomizeOpen((prev) => (prev[server.url] ? {} : { [server.url]: true }));
-                                                                    }}
-                                                                />
-                                                                {localCustomizeOpen[server.url] && (
-                                                                    <div className="space-y-2 rounded border border-[#2a2540] bg-[#100d1a]/60 p-3">
-                                                                        <p className="text-[11px] text-slate-500 leading-snug">
-                                                                            Every role uses the model picked above unless you swap
-                                                                            it here. The tuning fields above apply to that pick;
-                                                                            other models keep what the server reported, editable
-                                                                            later in Settings.
-                                                                        </p>
-                                                                        <SetupRolePicker
-                                                                            idPrefix="setup-local"
-                                                                            options={server.models}
-                                                                            values={MODEL_ROLE_GROUPS.reduce((acc, g) => {
-                                                                                g.roles.forEach((role) => { acc[role] = effModel(role); });
-                                                                                return acc;
-                                                                            }, {})}
-                                                                            onSelect={(role, v) => setLocalRoles((prev) => ({
-                                                                                ...prev,
-                                                                                [server.url]: { ...(prev[server.url] || {}), [role]: v },
-                                                                            }))}
-                                                                            disabled={localSubmitting}
-                                                                            isTextOnly={modelTextOnly}
-                                                                        />
-                                                                    </div>
-                                                                )}
-                                                            </div>
-                                                        )}
-                                                        {model && blockedRoles.length > 0 && (
-                                                            <p className="text-xs text-amber-400" data-testid="setup-local-vision-warning">
-                                                                The executor, reviewer, and PRD creator need a model that
-                                                                accepts image input (screenshot-based visual review). Assign
-                                                                them a multimodal model, or flip Supports image input to Yes
-                                                                if you are sure the assigned one takes images.
-                                                            </p>
-                                                        )}
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => onLocalSubmit(server)}
-                                                            disabled={
-                                                                localSubmitting ||
-                                                                !(server.models && server.models.length > 0) ||
-                                                                blockedRoles.length > 0
-                                                            }
-                                                            className="header-text text-sm px-4 py-2 rounded bg-[#e2b14c] text-[#100d1a] font-semibold disabled:opacity-50"
-                                                        >
-                                                            {localSubmitting ? "Wiring…" : (localCustomized ? "Use these role assignments" : "Use this model for all roles")}
-                                                        </button>
-                                                    </div>
-                                                    );
-                                                })}
-                                                {localError && (
-                                                    <p className="text-xs text-red-400" data-testid="setup-local-error">{localError}</p>
-                                                )}
-                                            </div>
-                                        ) : (
-                                            <div className="space-y-2">
-                                                <p className="text-xs text-slate-500 leading-relaxed">
-                                                    {localInfo.hint || "No local model server was found."}
-                                                </p>
-                                                <button
-                                                    type="button"
-                                                    onClick={loadLocalModels}
-                                                    className="header-text text-xs px-3 py-1.5 rounded border border-[#2a2540] text-slate-300 hover:bg-[#221b36]"
-                                                >
-                                                    Check again
-                                                </button>
-                                            </div>
-                                        )}
-                                    </div>
+                                {step.key === "sources" && renderSourcesStep()}
+                                {step.key === "assign" && renderAssignStep()}
+                                {step.key === "configure" && renderConfigureStep()}
+                                {step.key === "finish" && renderFinishStep()}
+                                {error && (
+                                    <p className="text-xs text-red-400" data-testid="setup-key-error">{error}</p>
                                 )}
-                                <div className="border-t border-[#2a2540] pt-3">
-                                    <button
-                                        type="button"
-                                        data-testid="setup-skip-provider"
-                                        onClick={() => { setSkipError(""); setSkipConfirmOpen(true); }}
-                                        className="text-xs text-slate-500 hover:text-slate-300 underline decoration-dotted"
-                                    >
-                                        Skip model setup: I'll manage models and providers in OpenClaw myself
-                                    </button>
+                                <div className="border-t border-[#2a2540] pt-3 flex items-center gap-3 flex-wrap">
+                                    {stepIdx > 0 && (
+                                        <button
+                                            type="button"
+                                            data-testid="setup-wizard-back"
+                                            onClick={onBack}
+                                            className="header-text text-xs px-3 py-1.5 rounded border border-[#2a2540] text-slate-300 hover:bg-[#221b36]"
+                                        >
+                                            Back
+                                        </button>
+                                    )}
+                                    {step.key === "sources" && (
+                                        <button
+                                            type="button"
+                                            data-testid="setup-skip-provider"
+                                            onClick={() => { setSkipError(""); setSkipConfirmOpen(true); }}
+                                            className="text-xs text-slate-500 hover:text-slate-300 underline decoration-dotted"
+                                        >
+                                            Skip model setup: I'll manage models and providers in OpenClaw myself
+                                        </button>
+                                    )}
+                                    <span className="flex-1"></span>
+                                    {gateMsg && (
+                                        <span className="text-xs text-amber-400" data-testid="setup-wizard-gate">{gateMsg}</span>
+                                    )}
+                                    {step.key === "finish" ? (
+                                        <button
+                                            type="button"
+                                            data-testid="setup-key-submit"
+                                            disabled={submitting || !source || visionBlocked.length > 0 || attentionIds.length > 0 || (source === "cloud" && !cloudActive) || (source === "local" && !localPrimary)}
+                                            onClick={onFinish}
+                                            className="header-text text-sm px-4 py-2 rounded bg-[#e2b14c] text-[#100d1a] font-semibold disabled:opacity-50"
+                                        >
+                                            {submitting ? "Saving…" : (source === "local" ? "Finish setup and start" : "Save key and start")}
+                                        </button>
+                                    ) : (
+                                        <button
+                                            type="button"
+                                            data-testid="setup-wizard-next"
+                                            disabled={nextDisabled || submitting}
+                                            onClick={onContinue}
+                                            className="header-text text-sm px-4 py-2 rounded bg-[#e2b14c] text-[#100d1a] font-semibold disabled:opacity-50"
+                                        >
+                                            Continue
+                                        </button>
+                                    )}
                                 </div>
                             </React.Fragment>
                         )}
@@ -13438,11 +14232,16 @@
                                 ) : (
                                     <React.Fragment>
                                         <p className="text-sm text-slate-300">
-                                            Key saved. The model gateway is restarting and validating your key…
+                                            {finishedLocal
+                                                ? "Setup saved. The model gateway is restarting with your local server…"
+                                                : "Key saved. The model gateway is restarting and validating your key…"}
                                         </p>
                                         <p className="text-xs text-slate-500">
-                                            This takes a few moments on the first key. The dashboard will unlock automatically.
+                                            This takes a few moments on the first setup. The dashboard will unlock automatically.
                                         </p>
+                                        {keyWarning && (
+                                            <p className="text-xs text-amber-400" data-testid="setup-key-warning">{keyWarning}</p>
+                                        )}
                                         <p className="text-xs text-slate-500">
                                             You can change each role's model later in Settings.
                                         </p>
@@ -13809,6 +14608,11 @@
             const [notApplied, setNotApplied] = React.useState("");
             const pollRef = React.useRef(null);
             const attemptRef = React.useRef({});
+            /* Liveness of assigned local models: the catalog proves the gateway
+             * accepts them, not that the backing server is up, so each newly
+             * assigned local model gets one bounded probe (recheckable). */
+            const [probes, setProbes] = React.useState({});
+            const probedRef = React.useRef(new Set());
 
             const assignmentsFrom = (d) => {
                 const next = {};
@@ -13848,21 +14652,26 @@
             const rolePinned = (role) => !!(data && data.roles && data.roles[role] && data.roles[role].pinned);
             const roleCurrent = (role) => (data && data.roles && data.roles[role] && data.roles[role].model) || "";
 
-            const effInput = (id) => {
-                const edits = propEdits[id];
-                if (edits && (edits.vision === "yes" || edits.vision === "no")) {
-                    return edits.vision === "yes" ? ["text", "image"] : ["text"];
-                }
-                const entry = catalogById[id];
-                return entry ? entry.input : null;
-            };
-            const isTextOnly = (id) => {
-                const input = effInput(id);
-                return Array.isArray(input) && input.length > 0 && input.indexOf("image") === -1;
-            };
+            const isTextOnly = (id) => modelEntryTextOnly(catalogById[id], propEdits[id]);
             const visionBlocked = MODEL_VISION_ROLES.filter(
                 (role) => assignments[role] && isTextOnly(assignments[role])
             );
+
+            const probeModelRef = (id) => {
+                setProbes((p) => ({ ...p, [id]: { state: "checking" } }));
+                fetchModelProbe(id).then((d) => setProbes((p) => ({ ...p, [id]: d || { state: "not_probeable" } })));
+            };
+            React.useEffect(() => {
+                if (!data) return;
+                Object.keys(assignments).forEach((role) => {
+                    const id = assignments[role];
+                    if (!id || probedRef.current.has(id)) return;
+                    const entry = catalogById[id];
+                    if (!entry || modelTier(entry) !== "local") return;
+                    probedRef.current.add(id);
+                    probeModelRef(id);
+                });
+            }, [assignments, data]);
 
             const roleChanges = {};
             if (data && data.roles) {
@@ -13876,92 +14685,15 @@
             const pendingCount = Object.keys(roleChanges).length + propEditIds.length;
 
             /* Chips for a model cell or picker option, with pending overlay edits
-             * applied so the row matches what would be saved. */
-            const chipsFor = (id, full) => {
-                const entry = catalogById[id];
-                if (!entry) return [];
-                const edits = propEdits[id] || {};
-                const input = effInput(id);
-                const declared = Array.isArray(input) && input.length > 0;
-                const cw = edits.contextWindow !== undefined && edits.contextWindow !== ""
-                    ? Number(edits.contextWindow) : entry.contextWindow;
-                const cost = Object.assign({}, entry.cost || {});
-                if (edits.costInput !== undefined && edits.costInput !== "") cost.input = Number(edits.costInput);
-                if (edits.costOutput !== undefined && edits.costOutput !== "") cost.output = Number(edits.costOutput);
-                const tier = modelTier(entry);
-                const chips = [];
-                if (declared && input.indexOf("image") !== -1) chips.push({ key: "img", label: "image", title: "Accepts image input" });
-                else if (declared) chips.push({ key: "img", label: "text only", tone: "warn", title: "Text only, no image input" });
-                if (full) {
-                    const reasoning = edits.reasoning !== undefined ? edits.reasoning === "on" : entry.reasoning === true;
-                    if (reasoning) chips.push({ key: "rsn", label: "reasoning", title: "Reasoning model" });
-                }
-                const cwLabel = fmtContextWindow(cw);
-                if (cwLabel) chips.push({ key: "ctx", label: cwLabel + " ctx", title: Number(cw).toLocaleString() + " token context window" });
-                const costLabel = fmtModelCost(cost, tier);
-                if (costLabel) chips.push({ key: "cost", label: costLabel, title: fmtModelCostLong(cost, tier) || undefined });
-                return chips;
-            };
+             * applied so the row matches what would be saved. Shared with the
+             * setup wizard's roster. */
+            const chipsFor = (id, full) => modelEntryChips(catalogById[id], propEdits[id] || {}, full);
 
             /* Build the PUT /api/models/properties body from the sparse edit map.
              * Empty string means "clear this override back to the registered value"
-             * (null in the overlay contract). Throws with a per-field message. */
-            const buildPropsBody = () => {
-                const body = {};
-                Object.keys(propEdits).forEach((id) => {
-                    const edits = propEdits[id];
-                    const entry = catalogById[id] || {};
-                    const out = {};
-                    if (edits.vision === "yes" || edits.vision === "no") {
-                        const base = (Array.isArray(entry.input) && entry.input.length > 0 ? entry.input : ["text"])
-                            .filter((v) => v !== "image");
-                        if (base.indexOf("text") === -1) base.push("text");
-                        out.input = edits.vision === "yes" ? base.concat(["image"]) : base;
-                    }
-                    if (edits.reasoning === "on" || edits.reasoning === "off") out.reasoning = edits.reasoning === "on";
-                    const posInt = (raw, label) => {
-                        if (raw === undefined) return undefined;
-                        if (raw === "") return null;
-                        if (!/^\d+$/.test(String(raw).trim()) || Number(raw) <= 0) {
-                            throw new Error(id + ": " + label + " must be a positive whole number.");
-                        }
-                        return Number(raw);
-                    };
-                    const num = (raw, label, minZero) => {
-                        if (raw === undefined) return undefined;
-                        if (raw === "") return null;
-                        const v = Number(raw);
-                        if (!isFinite(v) || (minZero && v < 0)) {
-                            throw new Error(id + ": " + label + " must be a " + (minZero ? "non-negative " : "") + "number.");
-                        }
-                        return v;
-                    };
-                    const cw = posInt(edits.contextWindow, "context window");
-                    if (cw !== undefined) out.contextWindow = cw;
-                    const mt = posInt(edits.maxTokens, "max output tokens");
-                    if (mt !== undefined) out.maxTokens = mt;
-                    const cost = {};
-                    const costFields = [
-                        ["costInput", "input", "input price"],
-                        ["costOutput", "output", "output price"],
-                        ["costCacheRead", "cacheRead", "cache read price"],
-                        ["costCacheWrite", "cacheWrite", "cache write price"],
-                    ];
-                    costFields.forEach(([editKey, apiKey, label]) => {
-                        const v = num(edits[editKey], label, true);
-                        if (v !== undefined) cost[apiKey] = v;
-                    });
-                    if (Object.keys(cost).length > 0) out.cost = cost;
-                    const params = {};
-                    const t = num(edits.temperature, "temperature", false);
-                    if (t !== undefined) params.temperature = t;
-                    const tp = num(edits.top_p, "top_p", false);
-                    if (tp !== undefined) params.top_p = tp;
-                    if (Object.keys(params).length > 0) out.params = params;
-                    if (Object.keys(out).length > 0) body[id] = out;
-                });
-                return Object.keys(body).length > 0 ? body : null;
-            };
+             * (null in the overlay contract). Throws with a per-field message.
+             * Shared with the setup wizard's Configure step. */
+            const buildPropsBody = () => buildModelPropsBody(propEdits, catalogById);
 
             const startRestartPoll = () => {
                 if (pollRef.current) clearInterval(pollRef.current);
@@ -14162,6 +14894,31 @@
                                     text only. Pick a multimodal model.
                                 </p>
                             )}
+                            {(() => {
+                                /* Same honesty cues as the setup wizard: flag values
+                                 * the catalog never declared, and show whether a
+                                 * local model's backing server is actually up. */
+                                if (!value || !catalogById[value]) return null;
+                                const missing = modelMetaMissing(catalogById[value], propEdits[value]);
+                                const probe = probes[value];
+                                const rowEdits = propEdits[value] || {};
+                                const rowCw = rowEdits.contextWindow !== undefined && rowEdits.contextWindow !== ""
+                                    ? rowEdits.contextWindow : catalogById[value].contextWindow;
+                                const ctxLow = modelCtxLow(rowCw);
+                                if (missing.length === 0 && !ctxLow && (!probe || probe.state === "not_probeable")) return null;
+                                return (
+                                    <div className="ms-row__status">
+                                        <ModelMetaFlag missing={missing} testid={`model-role-meta-${role}`} />
+                                        {ctxLow && missing.length === 0 && (
+                                            <span className="ms-flag" data-testid={`model-role-ctx-low-${role}`}>
+                                                <span className="ms-flag__dot"></span>
+                                                <span>context under 64k, likely too low</span>
+                                            </span>
+                                        )}
+                                        <ModelProbeStatus probe={probe} onRetry={() => probeModelRef(value)} testid={`model-role-probe-${role}`} />
+                                    </div>
+                                );
+                            })()}
                         </div>
                     </div>
                 );
@@ -14359,7 +15116,9 @@
                                             Lullabeast computes run costs and image-input checks from these
                                             values. If cost figures look wrong, correct them here first.
                                             Edits apply to the model itself, wherever it is used, and persist
-                                            across updates on top of the registered model.
+                                            across updates on top of the registered model. A suggested chip
+                                            restores the registered value; a needs-confirmation flag means
+                                            nothing is registered yet.
                                         </p>
                                     </div>
                                     <button type="button" className="ms-x" onClick={() => setPropsOpen(false)} aria-label="Close">✕</button>
@@ -14411,6 +15170,9 @@
                                                                     <option value="yes">Yes</option>
                                                                     <option value="no">No</option>
                                                                 </select>
+                                                                {visionValue === "" && (
+                                                                    <ModelMetaFlag missing={["image input"]} testid="model-props-vision-missing" />
+                                                                )}
                                                             </label>
                                                             <label className="space-y-1">
                                                                 <span className="header-text text-[11px] text-slate-500 block">Reasoning</span>
@@ -14424,6 +15186,9 @@
                                                                     <option value="on">On</option>
                                                                     <option value="off">Off</option>
                                                                 </select>
+                                                                {reasoningValue === "" && (
+                                                                    <ModelMetaFlag missing={["reasoning"]} testid="model-props-reasoning-missing" />
+                                                                )}
                                                             </label>
                                                             <label className="space-y-1">
                                                                 <span className="header-text text-[11px] text-slate-500 block">Context window</span>
@@ -14435,6 +15200,27 @@
                                                                     onChange={(e) => setEdit("contextWindow", e.target.value)}
                                                                     className={inputCls}
                                                                 />
+                                                                <SuggestChips
+                                                                    testid="model-props-context-window-suggest"
+                                                                    value={fieldVal("contextWindow", entry.contextWindow)}
+                                                                    onApply={(v) => setEdit("contextWindow", v)}
+                                                                    suggests={(entry.contextWindow != null
+                                                                        ? [{ label: (fmtContextWindow(entry.contextWindow) || String(entry.contextWindow)) + " (registered)", value: entry.contextWindow }]
+                                                                        : []).concat(modelTier(entry) === "local"
+                                                                        ? [
+                                                                            { label: "96k", value: 98304 },
+                                                                            { label: "128k", value: 131072 },
+                                                                            { label: "200k", value: 200000 },
+                                                                            { label: "262k", value: 262144 },
+                                                                        ].filter((s) => s.value !== entry.contextWindow)
+                                                                        : [])}
+                                                                />
+                                                                {fieldVal("contextWindow", entry.contextWindow) === "" && (
+                                                                    <ModelMetaFlag missing={["context window"]} testid="model-props-context-missing" />
+                                                                )}
+                                                                {modelCtxLow(fieldVal("contextWindow", entry.contextWindow)) && (
+                                                                    <p className="ms-warn" data-testid="model-props-ctx-low">{MODEL_CTX_LOW_NOTE}</p>
+                                                                )}
                                                             </label>
                                                         </div>
                                                         <div className="space-y-1">
@@ -14471,6 +15257,13 @@
                                                                 <label className="space-y-1">
                                                                     <span className="header-text text-[11px] text-slate-500 block">Temperature</span>
                                                                     <input type="number" data-testid="model-props-temperature" step="any" value={fieldVal("temperature", params.temperature)} onChange={(e) => setEdit("temperature", e.target.value)} className={inputCls} />
+                                                                    <SuggestChips
+                                                                        value={fieldVal("temperature", params.temperature)}
+                                                                        onApply={(v) => setEdit("temperature", v)}
+                                                                        suggests={params.temperature != null
+                                                                            ? [{ label: params.temperature + " (registered)", value: params.temperature }]
+                                                                            : []}
+                                                                    />
                                                                 </label>
                                                                 <label className="space-y-1">
                                                                     <span className="header-text text-[11px] text-slate-500 block">Top p</span>
@@ -14479,6 +15272,16 @@
                                                                 <label className="space-y-1">
                                                                     <span className="header-text text-[11px] text-slate-500 block">Max output tokens</span>
                                                                     <input type="number" data-testid="model-props-max-tokens" min="1" value={fieldVal("maxTokens", entry.maxTokens)} onChange={(e) => setEdit("maxTokens", e.target.value)} className={inputCls} />
+                                                                    <SuggestChips
+                                                                        value={fieldVal("maxTokens", entry.maxTokens)}
+                                                                        onApply={(v) => setEdit("maxTokens", v)}
+                                                                        suggests={(entry.maxTokens != null
+                                                                            ? [{ label: (fmtContextWindow(entry.maxTokens) || String(entry.maxTokens)) + " (registered)", value: entry.maxTokens }]
+                                                                            : []).concat(
+                                                                            [{ label: "16k", value: 16384 }, { label: "32k", value: 32768 }]
+                                                                                .filter((s) => s.value !== entry.maxTokens)
+                                                                        )}
+                                                                    />
                                                                 </label>
                                                             </div>
                                                         )}
@@ -14535,10 +15338,12 @@
             /* One-click sign-in: the Control UI reads the token from the URL
              * hash fragment, which never leaves the browser (not sent in the
              * request, absent from server logs) — safer than ?token=. Without
-             * a resolvable token the plain URL still opens (manual paste). */
+             * a resolvable token the plain URL still opens (manual paste).
+             * Lands on the sessions view: the operator opens this to watch
+             * agent activity, not to start a chat. */
             const gatewayHref = gatewayToken
-                ? `${gatewayUrl}/#token=${encodeURIComponent(gatewayToken)}`
-                : gatewayUrl;
+                ? `${gatewayUrl}/sessions#token=${encodeURIComponent(gatewayToken)}`
+                : `${gatewayUrl}/sessions`;
 
             return (
                 <div className="flex-1 overflow-y-auto bg-transparent p-6">

@@ -471,3 +471,108 @@ class TestProviderKeyRoleCustomization:
         )
         assert r.status_code == 503
         assert not os.path.exists(cfg["provider_key_path"])
+
+
+# ── provider-key with property confirmations (setup wizard Configure step) ───
+
+class TestProviderKeyProperties:
+    """The optional properties map rides the key write into the model-overrides
+    overlay, validated exactly like PUT /api/models/properties. Everything is
+    checked before any write, so a bad edit fails the request without
+    unlocking setup mode."""
+
+    def _post(self, cfg, body):
+        with patch("ui.server.load_config", return_value=cfg):
+            return client.post("/api/setup/provider-key", json=body)
+
+    def _cfg_with_overrides(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        cfg["openclaw_root"] = _oc_root(tmp_path)
+        cfg["model_overrides_path"] = str(tmp_path / "overrides" / "model-overrides.json")
+        return cfg
+
+    def test_properties_written_to_overlay_with_key(self, tmp_path):
+        cfg = self._cfg_with_overrides(tmp_path)
+        r = self._post(
+            cfg,
+            {
+                "provider": "openrouter",
+                "key": "abc123456",
+                "properties": {
+                    "openrouter/z-ai/glm-5.2": {
+                        "contextWindow": 200000,
+                        "cost": {"input": 0.3},
+                    }
+                },
+            },
+        )
+        assert r.status_code == 200
+        overlay = json.loads(Path(cfg["model_overrides_path"]).read_text())
+        assert overlay["models"]["openrouter/z-ai/glm-5.2"]["contextWindow"] == 200000
+        assert "OPENROUTER_API_KEY=abc123456" in Path(cfg["provider_key_path"]).read_text()
+
+    def test_properties_must_be_an_object(self, tmp_path):
+        cfg = self._cfg_with_overrides(tmp_path)
+        r = self._post(
+            cfg, {"provider": "openrouter", "key": "abc123456", "properties": ["x"]}
+        )
+        assert r.status_code == 400
+        assert not os.path.exists(cfg["provider_key_path"])
+
+    def test_unregistered_model_rejected(self, tmp_path):
+        cfg = self._cfg_with_overrides(tmp_path)
+        r = self._post(
+            cfg,
+            {
+                "provider": "openrouter",
+                "key": "abc123456",
+                "properties": {"openrouter/not-shipped": {"contextWindow": 1000}},
+            },
+        )
+        assert r.status_code == 400
+        assert "not a registered model" in r.json()["detail"]
+        assert not os.path.exists(cfg["provider_key_path"])
+
+    def test_invalid_property_shape_rejected_before_any_write(self, tmp_path):
+        cfg = self._cfg_with_overrides(tmp_path)
+        r = self._post(
+            cfg,
+            {
+                "provider": "openrouter",
+                "key": "abc123456",
+                "properties": {"openrouter/z-ai/glm-5.2": {"contextWindow": -5}},
+            },
+        )
+        assert r.status_code == 400
+        assert not os.path.exists(cfg["provider_key_path"])
+        assert not os.path.exists(cfg["model_overrides_path"])
+
+    def test_stripping_image_from_an_effective_vision_role_rejected(self, tmp_path):
+        # kimi is the executor's audited default; making it text only at setup
+        # would break every screenshot turn, so the whole request refuses.
+        cfg = self._cfg_with_overrides(tmp_path)
+        r = self._post(
+            cfg,
+            {
+                "provider": "openrouter",
+                "key": "abc123456",
+                "properties": {"openrouter/moonshotai/kimi-k2.7-code": {"input": ["text"]}},
+            },
+        )
+        assert r.status_code == 400
+        assert "image input" in r.json()["detail"]
+        assert not os.path.exists(cfg["provider_key_path"])
+
+    def test_properties_without_overlay_path_409(self, tmp_path):
+        cfg = _cfg(tmp_path)
+        cfg["openclaw_root"] = _oc_root(tmp_path)
+        r = self._post(
+            cfg,
+            {
+                "provider": "openrouter",
+                "key": "abc123456",
+                "properties": {"openrouter/z-ai/glm-5.2": {"contextWindow": 1000}},
+            },
+        )
+        assert r.status_code == 409
+        assert not os.path.exists(cfg["provider_key_path"])
