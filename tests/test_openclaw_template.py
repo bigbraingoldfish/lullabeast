@@ -220,21 +220,27 @@ class TestModelPricing:
 
 
 class TestMinimaxRouting:
-    def test_minimax_entries_carry_no_provider_ignore(self):
-        # The provider.ignore routing pin on MiniMax M3 was dropped
-        # (per-role model selection roadmap, Stage A); require_parameters
-        # stays. Both template locations must agree.
+    def test_minimax_entries_carry_no_provider_pins(self):
+        # MiniMax M3 must not pin provider routing. `require_parameters: true`
+        # made OpenRouter reject with 404 model_not_found whenever OpenClaw's
+        # emitted param set had no single minimax-m3 endpoint supporting all of
+        # it, so the agent silently never replied. Dropped from both template
+        # locations; neither require_parameters nor ignore may return.
         data = _template()
         entry = next(
             m
             for m in data["models"]["providers"]["openrouter"]["models"]
             if m["id"] == "minimax/minimax-m3"
         )
-        assert "ignore" not in entry.get("params", {}).get("provider", {})
-        assert entry["params"]["provider"]["require_parameters"] is True
-        defaults = data["agents"]["defaults"]["models"]["openrouter/minimax/minimax-m3"]
-        assert "ignore" not in defaults["params"]["provider"]
-        assert defaults["params"]["provider"]["require_parameters"] is True
+        entry_provider = entry.get("params", {}).get("provider", {})
+        assert "ignore" not in entry_provider
+        assert "require_parameters" not in entry_provider
+        defaults = data["agents"]["defaults"]["models"].get(
+            "openrouter/minimax/minimax-m3", {}
+        )
+        defaults_provider = defaults.get("params", {}).get("provider", {})
+        assert "ignore" not in defaults_provider
+        assert "require_parameters" not in defaults_provider
 
 
 # ── no secret-shaped values ──────────────────────────────────────────────────

@@ -533,6 +533,13 @@ cfg["projects_dir"] = os.environ["DATA_PROJECTS"]
 cfg["autodev_repo_path"] = os.environ["AUTODEV_REPO_PATH"]
 cfg["openclaw_root"] = os.environ["OPENCLAW_ROOT"]
 cfg["autodev_pipeline_root"] = os.environ["AUTODEV_PIPELINE_ROOT"]
+# Ideas artifacts (activity stamp, turn sentinels, PRD draft) are written by
+# the OpenClaw plugin under $OPENCLAW_ROOT/ideas (autodev/plugin utils.ts).
+# The server derives ideas_dir from the pipeline root when this is unset, which
+# points it at the wrong tree, so a completed PRD turn is never detected and the
+# chat hangs "pending". Assert it to the plugin's location, like the container-
+# structural keys above; a dev bind mount already carries it explicitly.
+cfg["ideas_dir"] = os.path.join(os.environ["OPENCLAW_ROOT"], "ideas")
 # The gateway always listens on 18789 inside the container.
 cfg["hooks_url"] = "http://localhost:18789/hooks/agent"
 # Host-published gateway port, when remapped (dev stack): the Settings
@@ -719,7 +726,8 @@ dashboard_url() { echo "http://127.0.0.1:${UI_PORT}/?token=${AUTODEV_UI_TOKEN}";
 # echo/say/die secret-echo lint (printf is not matched anyway).
 banner_dashboard_line() {
     printf '\033[1;32m  Dashboard:  %s\033[0m\n' "$(dashboard_url)"
-    echo "  OpenClaw gateway (model management): http://127.0.0.1:${GATEWAY_LINK_PORT}"
+    # /sessions: operators open this to watch agent activity, not to chat.
+    echo "  OpenClaw gateway (model management): http://127.0.0.1:${GATEWAY_LINK_PORT}/sessions"
     if [ "$DEV_MODE" = "1" ]; then
         echo "  DEV MODE: /app is your working tree; the UI server hot-reloads."
     fi
