@@ -29,11 +29,6 @@
           {
             "id": "minimax/minimax-m3",
             "name": "MiniMax M3",
-            "params": {
-              "provider": {
-                "require_parameters": true
-              }
-            },
             "reasoning": true,
             "input": [
               "text",
@@ -93,15 +88,6 @@
         "fallbacks": []
       },
       "models": {
-        "openrouter/minimax/minimax-m3": {
-          "params": {
-            "temperature": 0.7,
-            "top_p": 0.95,
-            "provider": {
-              "require_parameters": true
-            }
-          }
-        },
         "openrouter/moonshotai/kimi-k2.7-code": {
           "params": {
             "temperature": 0.6,

@@ -506,7 +506,8 @@ model and provider management lives, and where you approve the pipeline's gate
 scripts the first time they run. The dashboard's **Settings** screen opens it
 signed in: the button carries the gateway token in the URL hash fragment,
 which stays in the browser (never sent in the request, absent from server
-logs). The golden config already allow-lists the loopback origin, so there is
+logs), and lands on the sessions view (`/sessions`), where agent activity
+lives. The golden config already allow-lists the loopback origin, so there is
 no origin prompt on the default port. If you prefer the shell, the token is
 at:
 

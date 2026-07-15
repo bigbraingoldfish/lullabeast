@@ -183,6 +183,15 @@ class TestEntrypoint:
         assert 'cfg["apply_request_path"]' in ENTRYPOINT
         assert 'cfg["model_overrides_path"]' in ENTRYPOINT
 
+    def test_seeds_ideas_dir_from_openclaw_root(self):
+        # The Ideas plugin writes activity stamps and turn sentinels under
+        # $OPENCLAW_ROOT/ideas; the server derives ideas_dir from the pipeline
+        # root when it is unset, which points it at the wrong tree and leaves a
+        # completed PRD turn undetected (the chat hangs "pending"). A fresh
+        # container build excludes ui/config.json, so the entrypoint must seed
+        # ideas_dir itself rather than rely on a bind mount's explicit value.
+        assert 'cfg["ideas_dir"] = os.path.join(os.environ["OPENCLAW_ROOT"], "ideas")' in ENTRYPOINT
+
     def test_model_overrides_overlay_applied_in_render(self):
         # Stage B: the dashboard-owned overlay must be re-applied after every
         # render/reconcile (reconcile force-wins template values) and before
