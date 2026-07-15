@@ -203,6 +203,21 @@ class TestEntrypoint:
         assert "load_model_overrides" in render_body
         assert "apply_model_overrides" in render_body
 
+    def test_local_overlay_reapplied_inside_wiring(self):
+        # First boot after setup: the main overlay pass runs before the local
+        # provider exists, so the wiring re-applies the local/* overlay refs
+        # between the probe merge and the LOCAL_MODEL_* env overrides (which
+        # keep the last word, preserving the documented precedence).
+        wiring = ENTRYPOINT[ENTRYPOINT.find("wire_or_probe_local_models() {"):]
+        assert "local_overlay" in wiring
+        assert 0 < wiring.find("apply_model_overrides(merged, local_overlay)") < wiring.find(
+            "apply_local_model_overrides("
+        )
+        # MODEL_OVERRIDES_FILE is a plain (non-exported) shell variable, so the
+        # wiring heredoc must receive it explicitly or the overlay silently
+        # loads as empty (the exact first-boot bug this pins).
+        assert 'MODEL_OVERRIDES_FILE="$MODEL_OVERRIDES_FILE" python3' in wiring
+
     def test_config_render_reconcile_is_a_function(self):
         # v1.0.0 Phase 3: the render/reconcile heredoc is wrapped in a function
         # so the setup-watch loop can re-run it, and called in the boot path.

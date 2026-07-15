@@ -93,7 +93,8 @@ class TestModelRolesCard:
 
     def test_rich_picker_popover(self):
         # A searchable popover grouped by tier, not a native select: friendly
-        # name, provider, capability and cost chips per option.
+        # name, provider, capability and cost chips per option. The chip
+        # builder is shared with the setup wizard.
         seg = _card_segment()
         assert 'testid={`model-role-select-${role}`}' in seg
         assert "Search models" in seg
@@ -101,7 +102,8 @@ class TestModelRolesCard:
         assert '{ key: "cloud", label: "Cloud" }' in seg
         assert '{ key: "local", label: "Local" }' in seg
         assert "ms-chip" in seg
-        assert "ctx" in seg
+        assert "modelEntryChips" in seg
+        assert '" ctx"' in _html()
 
     def test_picker_blocks_text_only_for_vision_roles(self):
         seg = _card_segment()
@@ -223,3 +225,46 @@ class TestModelRolesCard:
     def test_no_em_dashes_in_card(self):
         # UI copy standard: commas and periods, never em dashes.
         assert "—" not in _card_segment()
+
+
+class TestSuggestedAndMissingPresentation:
+    """The property editor mirrors the setup wizard: suggested chips restore
+    registered values, and undeclared values carry needs-confirmation flags."""
+
+    def test_shared_atoms_wired(self):
+        seg = _card_segment()
+        assert "SuggestChips" in seg
+        assert "ModelMetaFlag" in seg
+
+    def test_props_modal_missing_flags(self):
+        seg = _card_segment()
+        assert 'testid="model-props-vision-missing"' in seg
+        assert 'testid="model-props-reasoning-missing"' in seg
+        assert 'testid="model-props-context-missing"' in seg
+
+    def test_props_modal_registered_suggestions(self):
+        seg = _card_segment()
+        assert "(registered)" in seg
+        assert 'testid="model-props-context-window-suggest"' in seg
+
+    def test_note_explains_the_cues(self):
+        seg = _card_segment()
+        assert "A suggested chip" in seg
+        assert "needs-confirmation flag" in seg
+
+
+class TestRosterHonestyCues:
+    def test_roster_flags_undeclared_metadata(self):
+        seg = _card_segment()
+        assert "modelMetaMissing" in seg
+        assert 'testid={`model-role-meta-${role}`}' in seg
+
+    def test_assigned_local_models_get_a_liveness_probe(self):
+        # The catalog proves the gateway accepts a model, not that its backing
+        # server is up; each assigned local model gets one bounded probe with
+        # a recheck affordance.
+        seg = _card_segment()
+        assert "/api/models/probe" in _html()
+        assert "fetchModelProbe" in seg
+        assert 'testid={`model-role-probe-${role}`}' in seg
+        assert 'modelTier(entry) !== "local"' in seg

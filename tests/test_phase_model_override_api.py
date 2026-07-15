@@ -255,3 +255,54 @@ def test_delete_is_idempotent(cfg):
 def test_delete_rejects_unknown_role(cfg):
     r = _delete(cfg, {"raw_id": "CORE-1", "role": "escalation"})
     assert r.status_code == 400
+
+
+# ── liveness probe at override-set time ──────────────────────────────────────
+# The switchable-models check proves the gateway accepts the override, not
+# that the backing server can serve it. For local providers the POST runs one
+# bounded probe and reports a dead server as an advisory warning, so the
+# operator learns now instead of via a mid-run stall.
+#
+# The probe runs via asyncio.to_thread (the handler is async and the probe is
+# a blocking GET). TestClient executes handlers synchronously, so that
+# event-loop-safety property is verified by inspection, not by these tests.
+
+def _add_local_base_url(cfg):
+    oc_path = Path(cfg["openclaw_root"]) / "openclaw.json"
+    oc = json.loads(oc_path.read_text())
+    oc["models"]["providers"]["local"]["baseUrl"] = "http://host.docker.internal:11434/v1"
+    oc_path.write_text(json.dumps(oc))
+
+
+def test_post_local_server_down_still_saves_with_warning(cfg):
+    _add_local_base_url(cfg)
+    with patch("ui.server._local_models.probe_openai_models", return_value=None):
+        r = _post(cfg, {"raw_id": "CORE-1", "role": "planner", "model": UNDECLARED})
+    assert r.status_code == 200
+    assert "liveness check" in r.json()["warning"]
+    assert _overrides_path(cfg).exists()
+
+
+def test_post_local_model_not_served_warns(cfg):
+    _add_local_base_url(cfg)
+    with patch("ui.server._local_models.probe_openai_models", return_value=["other"]):
+        r = _post(cfg, {"raw_id": "CORE-1", "role": "planner", "model": UNDECLARED})
+    assert r.status_code == 200
+    assert "does not list that model" in r.json()["warning"]
+
+
+def test_post_local_model_live_no_warning(cfg):
+    _add_local_base_url(cfg)
+    with patch("ui.server._local_models.probe_openai_models", return_value=["mystery"]):
+        r = _post(cfg, {"raw_id": "CORE-1", "role": "planner", "model": UNDECLARED})
+    assert r.status_code == 200
+    assert "warning" not in r.json()
+
+
+def test_post_cloud_model_skips_the_probe(cfg):
+    with patch(
+        "ui.server._local_models.probe_openai_models",
+        side_effect=AssertionError("probed a cloud model"),
+    ):
+        r = _post(cfg, {"raw_id": "CORE-1", "role": "planner", "model": MULTIMODAL})
+    assert r.status_code == 200

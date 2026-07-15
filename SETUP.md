@@ -199,7 +199,7 @@ The fields Lullabeast reads from `pipeline_state.json` are: `pipeline_status`, `
 
 ## `openclaw.json` Requirements
 
-The container renders and reconciles `openclaw.json` from the golden template (`deploy/openclaw.template.json`) on every boot, so none of this needs hand-configuration there. It matters when you manage models and providers by hand in OpenClaw (the setup screen's "skip model setup" path) or otherwise operate your own OpenClaw tree. The orchestrator and UI treat the file as read-only.
+The container renders and reconciles `openclaw.json` from the golden template (`deploy/openclaw.template.json`) on every boot, so none of this needs hand-configuration there. It matters when you manage models and providers by hand in OpenClaw (the setup wizard's "skip model setup" path) or otherwise operate your own OpenClaw tree. The orchestrator and UI treat the file as read-only.
 
 ### `agents.list` and pipeline agents
 
@@ -313,7 +313,7 @@ Once `cost.total` is non-zero on disk, Lullabeast surfaces it automatically — 
 
 OpenClaw owns all model configuration, so Lullabeast doesn't care whether an agent runs on a cloud
 or a local model. The container wires a local provider for you: one `LOCAL_MODEL_URL` line in
-`deploy/.env` (or the setup screen's detected-server card on a keyless boot) generates the provider
+`deploy/.env` (or the setup wizard's detected-server list on a keyless boot) generates the provider
 entry, and roles point at it via the `*_MODEL` variables — see
 [deploy/README.md](deploy/README.md) under "Local models on the host". A fully-local configuration
 has been run end-to-end (planner/executor/reviewer on Qwen-27B-class models via a local llama.cpp /

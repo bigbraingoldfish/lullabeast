@@ -364,7 +364,7 @@ PY
 #       answers we print nothing extra (the bind hint lives in the docs and the
 #       setup screen; a keyless boot is not spammed).
 wire_or_probe_local_models() {
-    SETUP_MODE="$SETUP_MODE" python3 - <<'PY'
+    SETUP_MODE="$SETUP_MODE" MODEL_OVERRIDES_FILE="$MODEL_OVERRIDES_FILE" python3 - <<'PY'
 import json
 import os
 
@@ -395,6 +395,26 @@ if url:
         metadata = local_models.probe_model_metadata(base, models or [])
         entry = local_models.build_local_provider_entry(base, models or [], metadata)
         merged = local_models.merge_local_provider(_load_config(), entry)
+        # Dashboard-confirmed local model properties (the model-overrides
+        # overlay). The main overlay pass runs before this wiring, so on the
+        # first boot after setup the local entries do not exist yet when it
+        # applies; re-applying the local/* refs here keeps the documented
+        # precedence (template -> overlay -> explicit LOCAL_MODEL_* values).
+        from autodev.installer.model_overrides import (
+            apply_model_overrides,
+            load_model_overrides,
+            split_valid_overrides,
+        )
+        overlay, _ = split_valid_overrides(
+            load_model_overrides(os.environ.get("MODEL_OVERRIDES_FILE") or "")
+        )
+        local_prefix = local_models.LOCAL_PROVIDER_ID + "/"
+        local_overlay = {
+            ref: props for ref, props in overlay.items() if ref.startswith(local_prefix)
+        }
+        if local_overlay:
+            merged = apply_model_overrides(merged, local_overlay)
+            print(f"[lullabeast] applied {len(local_overlay)} dashboard-confirmed local model override(s)")
         # Explicit overrides win over probes and prior edits; scope them to
         # LOCAL_MODEL_TUNING_TARGET (the setup screen's confirmed pick) when
         # set, else to every local model a *_MODEL knob references.
