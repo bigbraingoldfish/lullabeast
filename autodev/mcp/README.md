@@ -102,6 +102,7 @@ scripts use against the dashboard.
 | `roadmap` | `GET /api/roadmap` |
 | `metrics_summary` | `GET /api/metrics-summary` |
 | `doctor_report` | `GET /api/doctor` (26 read-only health checks) |
+| `phase_model_overrides` | `GET /api/phase-model-override` |
 | `queue_list` / `queue_status` | `GET /api/queue` / `GET /api/queue/status` |
 | `queue_snapshot` / `queue_report` | `GET /api/queue/{id}/snapshot` / `.../report` |
 | `completion_report` | `GET /api/completion-report` |
@@ -118,6 +119,7 @@ scripts use against the dashboard.
 | `git_recover` | `POST /api/pipeline/git-recover` (heavy fallback) |
 | `launch_project` | `POST /api/setup/launch` |
 | `switch_project` | `POST /api/setup/switch-project` |
+| `set_phase_model_override` / `clear_phase_model_override` | `POST /api/phase-model-override` / `DELETE /api/phase-model-override` (one-phase, one-role model override; expires when the phase closes) |
 | `queue_add` / `queue_delete` | `POST /api/queue/add` / `DELETE /api/queue/{id}` |
 | `queue_trigger_next` | `POST /api/queue/trigger-next` |
 | `queue_set_mode` | `PATCH /api/queue/mode` (auto/manual) |

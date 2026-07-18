@@ -63,6 +63,10 @@ class TestToolCatalogue:
         for command in mcp.ESCALATION_COMMANDS:
             assert '"%s"' % command in source
 
+    def test_phase_override_roles_match_ui_server(self):
+        from ui import server as ui_server
+        assert tuple(mcp.PHASE_OVERRIDE_ROLES) == tuple(ui_server._PHASE_OVERRIDE_ROLES)
+
 
 # ---------------------------------------------------------------------------
 # JSON-RPC handshake
@@ -135,6 +139,14 @@ ROUTING = [
     ("switch_project", {"repo_path": "/tmp/x", "start_orchestrator": True}, "POST",
      "/api/setup/switch-project", {},
      {"repo_path": "/tmp/x", "start_orchestrator": True}),
+    ("phase_model_overrides", {}, "GET", "/api/phase-model-override", {}, None),
+    ("set_phase_model_override",
+     {"raw_id": "CORE-1", "role": "executor", "model": "local/qwen"},
+     "POST", "/api/phase-model-override", {},
+     {"raw_id": "CORE-1", "role": "executor", "model": "local/qwen"}),
+    # DELETE with a JSON body — the endpoint reads {raw_id, role?} from the body.
+    ("clear_phase_model_override", {"raw_id": "CORE-1"}, "DELETE",
+     "/api/phase-model-override", {}, {"raw_id": "CORE-1"}),
     ("queue_add", {"project_path": "/tmp/x"}, "POST", "/api/queue/add", {},
      {"project_path": "/tmp/x"}),
     ("queue_trigger_next", {}, "POST", "/api/queue/trigger-next", {}, None),
