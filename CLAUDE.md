@@ -55,6 +55,8 @@ autodev-ui/
 │   │   ├── setup_helpers.py        # Installer audit/patch helpers (hooks, secrets, context limits)
 │   │   ├── openclaw_template.py    # DS-2b golden-template render + conformance helpers (stdlib-only)
 │   │   └── register_agent.py       # Registers the 6 Lullabeast agents in openclaw.json
+│   ├── mcp/
+│   │   └── dashboard_server.py     # Stdlib-only MCP stdio server exposing the dashboard API as agent tools (autodev/mcp/README.md)
 │   ├── tests/                      # Pipeline-level tests (orchestration, sentinel, skills)
 │   └── docs/
 │       ├── PIPELINE-SPEC.md        # Architecture spec — single source of truth (~1,900 lines)
@@ -929,6 +931,10 @@ An up-front, honest read on whether the host can build/test a project, plus the 
 **Env-sourcing (DEC-5).** The webhook has no env channel — agents inherit the gateway env. The project's entry-point/test command must load its own `.env` (dotenv loader, or prepend `set -a; . ./.env; set +a`). Documented, not enforced.
 
 ---
+
+## Dashboard MCP Server (`autodev/mcp/dashboard_server.py`)
+
+A **stdlib-only MCP server (stdio, newline-delimited JSON-RPC)** that proxies the dashboard HTTP API as ~25 agent-callable tools — full agentic control + visibility (state, events, log tail, roadmap, metrics, doctor, queue CRUD/control, escalation answers, stop/resume/launch/switch, a guarded `dashboard_get` escape hatch for any other `GET /api/*`). It is a **thin proxy with zero business logic**: all validation, liveness-409 guards, queue CAS, and token auth stay in `ui/server.py`; the MCP server never touches pipeline state files directly. Auth mirrors any script client — `AUTODEV_UI_TOKEN` env (→ `ui/config.json` `ui_token`) as `Authorization: Bearer`; base URL from `AUTODEV_UI_URL` or the resolved port. Entry-point-only `.env` self-load (same contract as the crons — never at import). Run as `python3 -m autodev.mcp.dashboard_server` or by absolute script path (sys.path bootstrap). Client wiring: copy `.mcp.json.example` → `.mcp.json` (the root `/.mcp.json` is gitignored for local wiring). **Deliberately NOT registered in the golden OpenClaw template**: giving the pipeline's own agents the power to stop the pipeline / answer their own escalations inverts the orchestrator's control hierarchy — OpenClaw registration is a documented opt-in for supervisory agents only (`autodev/mcp/README.md`). Tests: `tests/test_mcp_dashboard_server.py`.
 
 ## Key Reference Documents
 

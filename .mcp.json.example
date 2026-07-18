@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "lullabeast-dashboard": {
+      "command": "python3",
+      "args": ["-m", "autodev.mcp.dashboard_server"]
+    }
+  }
+}
