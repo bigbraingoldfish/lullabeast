@@ -7,7 +7,7 @@ This project follows [Semantic Versioning](https://semver.org/). Format follows 
 ## [Unreleased]
 
 ### Added
-- **Dashboard MCP server for agentic control.** A stdlib-only MCP server (`python3 -m autodev.mcp.dashboard_server`) exposes the dashboard API as ~25 agent tools — live state, events, logs, roadmap, metrics, doctor, full queue control, escalation answers, stop/resume/launch — so Claude Code or any MCP client can drive and observe the pipeline. Copy `.mcp.json.example` to `.mcp.json` to wire it up; it authenticates with the same `AUTODEV_UI_TOKEN` as any script. Deliberately not granted to the pipeline's own agents. Docs: [autodev/mcp/README.md](autodev/mcp/README.md).
+- **Dashboard MCP server for agentic control.** A stdlib-only MCP server (`python3 -m autodev.mcp.dashboard_server`) exposes the dashboard API as ~28 agent tools — live state, events, logs, roadmap, metrics, doctor, full queue control, escalation answers, per-phase model overrides, stop/resume/launch — so Claude Code or any MCP client can drive and observe the pipeline. Copy `.mcp.json.example` to `.mcp.json` to wire it up; it authenticates with the same `AUTODEV_UI_TOKEN` as any script. Deliberately not granted to the pipeline's own agents. Docs: [autodev/mcp/README.md](autodev/mcp/README.md).
 
 ## [1.0.0] - 2026-07-15
 

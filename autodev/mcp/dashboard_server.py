@@ -67,6 +67,10 @@ ESCALATION_COMMANDS = [
 ]
 
 
+# Mirrors ui/server.py _PHASE_OVERRIDE_ROLES.
+PHASE_OVERRIDE_ROLES = ("planner", "executor", "reviewer")
+
+
 class ToolError(Exception):
     """A tool-argument problem detected locally (never sent to the dashboard)."""
 
@@ -399,6 +403,45 @@ TOOL_SPECS = [
                                    "description": "Spawn the orchestrator after switching (default false)."},
         },
         required=("repo_path",), destructive=True,
+    ),
+    _tool(
+        "phase_model_overrides",
+        "The active project's per-phase model overrides (GET /api/phase-model-override): "
+        "{overrides: {raw_id: {role: model}}}. Empty when none are set.",
+        "GET", "/api/phase-model-override", read_only=True,
+    ),
+    _tool(
+        "set_phase_model_override",
+        "Set a one-phase model override for a pipeline role (POST "
+        "/api/phase-model-override). The phase must exist in the active roadmap and "
+        "still be open; the model must be registered with the gateway (discover ids "
+        "via dashboard_get /api/models/roles). Covers every attempt in that phase and "
+        "expires when the phase closes. Local-provider models get a bounded liveness "
+        "probe — the response may carry an advisory warning (e.g. backing server down, "
+        "or a text-only model on a visual phase).",
+        "POST", "/api/phase-model-override",
+        properties={
+            "raw_id": {"type": "string",
+                       "description": "Roadmap phase id, e.g. CORE-E2 (see the roadmap tool)."},
+            "role": {"type": "string", "enum": list(PHASE_OVERRIDE_ROLES),
+                     "description": "Pipeline role the override applies to."},
+            "model": {"type": "string",
+                      "description": "Registered model id, e.g. openrouter/... or local/<id>."},
+        },
+        required=("raw_id", "role", "model"),
+    ),
+    _tool(
+        "clear_phase_model_override",
+        "Clear a per-phase model override (DELETE /api/phase-model-override). Omit "
+        "role to clear the phase's whole entry. Idempotent — clearing what is not "
+        "set succeeds.",
+        "DELETE", "/api/phase-model-override",
+        properties={
+            "raw_id": {"type": "string", "description": "Roadmap phase id."},
+            "role": {"type": "string", "enum": list(PHASE_OVERRIDE_ROLES),
+                     "description": "Optional: clear only this role's override."},
+        },
+        required=("raw_id",),
     ),
     _tool(
         "queue_add",
