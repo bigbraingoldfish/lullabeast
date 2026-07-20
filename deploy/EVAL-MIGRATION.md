@@ -1,74 +1,75 @@
 # Lullabeast eval-harness migration notes
 
-Audience: the `lullabeast-eval` sister repo (`../lullabeast-eval`), which
-drives Lullabeast through its host-native setup path and depends on the
-symlink structure, state-file locations, and ports documented here.
+Audience: the `lullabeast-eval` sister repo (`../../lullabeast-eval` relative to
+this file), which drives Lullabeast end-to-end and depends on the paths, state
+files, and ports documented here.
 
-**Bottom line first: no eval-repo change is required.** The eval harness
-stays on bare-metal guest mode (a deliberate decision), and the
-container work is purely additive: nothing in it changed the host-native
-paths, the guest-mode installer behavior, the state-file formats, or the
-ports. The "before" column below is still the supported dev configuration
-and is what `lullabeast-eval` should keep targeting. The "after" column
-exists so the eval repo can reason about container deployments if it ever
-inspects one.
+**Bottom line (2026-07-18, supersedes the 2026-07-07 revision): the container
+IS the eval target now.** The bare-metal host this repo's guest mode served as
+the eval configuration is retired. The harness runs INSIDE the dev container
+(`docker-compose.dev.yml` stacked with the eval repo's
+`deploy/docker-compose.eval.yml` overlay, which bind-mounts the harness
+read-only at `/eval` — dev stack only; the consumer stack never carries eval
+tooling). The harness's `environment.py` + `REVALIDATION.md` §1b own the
+harness-side details; this file records the pipeline-side contract.
 
-**Freeze status:** the "after" column reflects the container image plus its
-hardening pass. The hardening changed no paths or ports; the deltas an eval
-harness could
-notice inside a container are: `/app` is now root-owned and read-only to the
-runtime user except the `.env` / `.autodev` / `ui/config.json` /
-`autodev/plugin` write islands, and the compose service runs with
-`cap_drop: [ALL]` plus `no-new-privileges`. If future container acceptance
-runs force changes, this doc gets one further pass.
+History: the 2026-07-07 revision froze a "before" (bare-metal guest) vs
+"after" (container) contract diff and concluded no eval change was needed
+because bare-metal remained the dev configuration. Both tables below still
+describe the two worlds accurately; only the conclusion flipped.
 
 ## Path and layout contract
 
-| Contract item | Before (host bare-metal, guest mode; what lullabeast-eval uses) | After (container, owned mode) |
+| Contract item | Bare-metal guest mode (historical) | Container (current eval target) |
 |---|---|---|
 | `OPENCLAW_ROOT` | `~/.openclaw` (or operator override in `.env`) | `/data/openclaw` |
-| `AUTODEV_REPO_PATH` | the repo checkout (e.g. `~/projects/autodev-ui`) | `/app` (baked into the image) |
-| `AUTODEV_PIPELINE_ROOT` | `<repo>/.autodev` (default) | `/data/pipeline-state` |
-| Projects | anywhere the operator points the queue | `/data/projects` (bind-mounted from `deploy/projects` on the host) |
+| `AUTODEV_REPO_PATH` | the repo checkout (e.g. `~/projects/autodev-ui`) | `/app` (dev stack: the working tree, bind-mounted rw) |
+| `AUTODEV_PIPELINE_ROOT` | `<repo>/.autodev` (default) | `/data/pipeline-state`; harness cells override per cell under `/data/eval/work/...` |
+| Projects | anywhere the operator points the queue | `/data/projects` (bind-mounted from `deploy/projects`, dev: `deploy/projects-dev`) |
 | Symlink hub, AUTODEV side (`config["project_dir_path"]`) | `<repo>/.autodev/pipeline-project` | `/data/pipeline-state/pipeline-project` |
 | Symlink hub, OpenClaw side | `~/.openclaw/pipeline-project` | `/data/openclaw/pipeline-project` |
-| `_pipeline_symlink_paths` resolves to | both of the above (OpenClaw side included because `openclaw_root` is configured) | both of the above; identical mechanics, container paths |
-| Per-agent workspace links (`workspace-*/pipeline-project`) | `~/.openclaw/workspace-{agent}/pipeline-project` -> the OpenClaw-side hub | `/data/openclaw/workspace-{agent}/pipeline-project` -> the OpenClaw-side hub |
+| Per-agent workspace links (`workspace-*/pipeline-project`) | `~/.openclaw/workspace-{agent}/pipeline-project` | `/data/openclaw/workspace-{agent}/pipeline-project` |
 | `pipeline_state.json`, `pipeline_queue.json`, `pipeline_events.jsonl`, `pipeline.lock`, `orchestrator.log`, `metrics_history/` | `<repo>/.autodev/` | `/data/pipeline-state/` |
 | Session JSONLs (`agents/{agent}/sessions/`) | `~/.openclaw/agents/{agent}/sessions/` | `/data/openclaw/agents/{agent}/sessions/` |
-| `openclaw.json` | operator-managed, installer patches as a guest | rendered from `deploy/openclaw.template.json` on first boot, owned by the installer |
-| `~/.openclaw` inside the running system | the real directory | a symlink to `/data/openclaw` (the openclaw CLI ignores Lullabeast's `OPENCLAW_ROOT`; the container also sets OpenClaw's own `OPENCLAW_STATE_DIR=/data/openclaw`) |
+| `openclaw.json` | operator-managed, installer patches as a guest | rendered from `deploy/openclaw.template.json` on first boot; live at `/data/openclaw/openclaw.json`; `*_MODEL` env re-applied per boot |
+| `~/.openclaw` inside the running system | the real directory | a symlink to `/data/openclaw` (plus `OPENCLAW_STATE_DIR=/data/openclaw`) |
+
+Re-verified against the containerized source 2026-07-18 (harness-side recon,
+PROGRESS 2026-07-18): pipeline status vocabulary, the
+`<project>/.autodev/pipeline/pipeline_stop_requested` stop sentinel, the
+`escalation_output.json` + `.done` answer protocol, and per-process
+`AUTODEV_PIPELINE_ROOT` isolation are all unchanged from the bare-metal recon.
 
 ## Ports and reachability
 
-| Item | Before | After |
+| Item | Bare-metal (historical) | Container (current) |
 |---|---|---|
-| OpenClaw gateway (18789) | host loopback, reachable by any host process | container-internal only, never published |
-| Dashboard (18790) | host loopback (`uvicorn --host 127.0.0.1`) | published to host loopback via compose (`127.0.0.1:18790:18790`); inside the container the server binds all interfaces |
-| Reaching state from outside | read the files directly | `docker compose exec lullabeast bash` (env vars are preset in the image), the `./projects` bind mount for project trees, or an additional read-only `/data` mount added to the compose file |
+| OpenClaw gateway (18789) | host loopback | published to host loopback — user stack `127.0.0.1:18789`, dev stack `127.0.0.1:28789` (in-container always `localhost:18789`, which is what the in-container harness preflights) |
+| Dashboard (18790) | host loopback | published to host loopback (user `18790`, dev `28790`) |
+| Eval harness UI (8321) | host loopback | published to host loopback by the eval overlay |
+| Reaching pipeline state | read files directly | in-container reads (`/data/...`); host-side: `docker compose exec`, the `./projects` bind mount, or the eval backup script |
 
-An eval harness cannot POST to a containerized gateway from the host at all
-(18789 is unpublished); this is another reason the bare-metal guest-mode
-configuration remains the supported one for `lullabeast-eval`.
+(The 2026-07-07 claim that a host process can never POST to a containerized
+gateway is obsolete — the gateway has been published to the host loopback
+since the compose files gained the port mapping.)
 
 ## Token sourcing
 
-| Token | Before | After |
+| Token | Bare-metal (historical) | Container (current) |
 |---|---|---|
-| `hooks.token` (webhook Bearer) | operator's `openclaw.json`, synced by install.sh into `<repo>/.env` (`AUTODEV_HOOKS_TOKEN`) and `ui/config.json` | generated on first boot (`secrets.token_urlsafe`), persisted at `/data/secrets/hooks_token`, rendered into the config and synced into `/app/.env` the same way |
+| `hooks.token` (webhook Bearer) | operator's `openclaw.json`, synced by install.sh into `<repo>/.env` + `ui/config.json` | generated on first boot, persisted at `/data/secrets/hooks_token`, rendered + synced the same way |
 | `gateway.auth.token` | operator's `openclaw.json` | generated on first boot, persisted at `/data/secrets/gateway_token` |
-| `AUTODEV_UI_TOKEN` (dashboard) | generated by install.sh step 10 into `<repo>/.env` | generated on first boot, persisted at `/data/secrets/ui_token`, printed in the boot banner URL |
+| `AUTODEV_UI_TOKEN` (dashboard) | generated by install.sh step 10 | generated on first boot, persisted at `/data/secrets/ui_token`, printed in the boot banner |
 
-## What lullabeast-eval keeps unchanged
+## What the eval harness depends on, container edition
 
-Everything. Running bare-metal guest mode (the supported dev configuration):
-
-- install path: `./install.sh` guest mode, unchanged by the container work;
-- all "before"-column paths, formats, and ports;
-- the doctor CLI (`python -m autodev.installer.doctor`), which works
-  identically in both worlds;
-- the state-file schemas (`pipeline_state.json`, queue, events, metrics),
-  which are world-independent.
-
-The only new host-side artifact the container work adds to the repo is the
-`deploy/` directory itself; nothing in the eval harness's dependency surface moved.
+- The dev stack up, with the eval overlay stacked on (`/eval` mount present).
+- `AUTODEV_PIPELINE_ROOT` honored per process (per-cell isolation) — unchanged.
+- The state-file schemas (`pipeline_state.json`, queue, events, metrics) —
+  world-independent, unchanged.
+- `openclaw.json` writable at `/data/openclaw/openclaw.json` (model enactment;
+  the harness refuses models absent from its catalog — an uncataloged model
+  stalls silent as `no_first_activity` instead of erroring).
+- One live pipeline at a time: harness cells refuse to dispatch while the
+  dashboard's own orchestrator is RUNNING/WAITING_FOR_HUMAN on
+  `/data/pipeline-state` (shared gateway + agent workspaces).
