@@ -9,7 +9,7 @@ IS the eval target now.** The bare-metal host this repo's guest mode served as
 the eval configuration is retired. The harness runs INSIDE the dev container
 (`docker-compose.dev.yml` stacked with the eval repo's
 `deploy/docker-compose.eval.yml` overlay, which bind-mounts the harness
-read-only at `/eval` — dev stack only; the consumer stack never carries eval
+read-only at `/eval`, dev stack only; the consumer stack never carries eval
 tooling). The harness's `environment.py` + `REVALIDATION.md` §1b own the
 harness-side details; this file records the pipeline-side contract.
 
@@ -19,6 +19,10 @@ because bare-metal remained the dev configuration. Both tables below still
 describe the two worlds accurately; only the conclusion flipped.
 
 ## Path and layout contract
+
+The symlink hub rows below are computed by `_pipeline_symlink_paths` in
+`ui/server.py`; the function derives every link location from `config`, so the
+container paths hold without eval-side hardcoding.
 
 | Contract item | Bare-metal guest mode (historical) | Container (current eval target) |
 |---|---|---|
@@ -44,13 +48,13 @@ PROGRESS 2026-07-18): pipeline status vocabulary, the
 
 | Item | Bare-metal (historical) | Container (current) |
 |---|---|---|
-| OpenClaw gateway (18789) | host loopback | published to host loopback — user stack `127.0.0.1:18789`, dev stack `127.0.0.1:28789` (in-container always `localhost:18789`, which is what the in-container harness preflights) |
+| OpenClaw gateway (18789) | host loopback | published to host loopback: user stack `127.0.0.1:18789`, dev stack `127.0.0.1:28789` (in-container always `localhost:18789`, which is what the in-container harness preflights) |
 | Dashboard (18790) | host loopback | published to host loopback (user `18790`, dev `28790`) |
 | Eval harness UI (8321) | host loopback | published to host loopback by the eval overlay |
 | Reaching pipeline state | read files directly | in-container reads (`/data/...`); host-side: `docker compose exec`, the `./projects` bind mount, or the eval backup script |
 
 (The 2026-07-07 claim that a host process can never POST to a containerized
-gateway is obsolete — the gateway has been published to the host loopback
+gateway is obsolete; the gateway has been published to the host loopback
 since the compose files gained the port mapping.)
 
 ## Token sourcing
@@ -64,11 +68,11 @@ since the compose files gained the port mapping.)
 ## What the eval harness depends on, container edition
 
 - The dev stack up, with the eval overlay stacked on (`/eval` mount present).
-- `AUTODEV_PIPELINE_ROOT` honored per process (per-cell isolation) — unchanged.
-- The state-file schemas (`pipeline_state.json`, queue, events, metrics) —
+- `AUTODEV_PIPELINE_ROOT` honored per process (per-cell isolation), unchanged.
+- The state-file schemas (`pipeline_state.json`, queue, events, metrics) are
   world-independent, unchanged.
 - `openclaw.json` writable at `/data/openclaw/openclaw.json` (model enactment;
-  the harness refuses models absent from its catalog — an uncataloged model
+  the harness refuses models absent from its catalog; an uncataloged model
   stalls silent as `no_first_activity` instead of erroring).
 - One live pipeline at a time: harness cells refuse to dispatch while the
   dashboard's own orchestrator is RUNNING/WAITING_FOR_HUMAN on
