@@ -395,12 +395,25 @@ TOOL_SPECS = [
         "switch_project",
         "Switch the active project (POST /api/setup/switch-project); pipeline must be "
         "stopped. A parked-escalation target routes through revival automatically. Set "
-        "start_orchestrator to also spawn the orchestrator.",
+        "start_orchestrator to also spawn the orchestrator. A 200 response with "
+        "ok:false may ask for confirmation (e.g. archiving an existing roadmap) — "
+        "re-call with confirm_roadmap_archive / confirm_destructive set.",
         "POST", "/api/setup/switch-project",
         properties={
             "repo_path": {"type": "string", "description": "Absolute path to the project repo."},
             "start_orchestrator": {"type": "boolean",
                                    "description": "Spawn the orchestrator after switching (default false)."},
+            "confirm_roadmap_archive": {
+                "type": "boolean",
+                "description": "Confirm archiving the project's existing roadmap when the "
+                               "response asked for it."},
+            "keep_filename": {
+                "type": "string",
+                "description": "Optional roadmap filename to keep (from the confirmation response)."},
+            "confirm_destructive": {
+                "type": "array", "items": {"type": "string"},
+                "description": "Basenames of project files confirmed for overwrite (from the "
+                               "confirmation response)."},
         },
         required=("repo_path",), destructive=True,
     ),
