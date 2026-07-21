@@ -4,7 +4,7 @@ This project follows [Semantic Versioning](https://semver.org/). Format follows 
 
 > **Pre-1.0 development history.** Lullabeast was built across many TDD phases, each recorded in detail. The full, verbose engineering log — every fix, refactor, and decision, with internal phase tags (`P1 Stage *`, `T6.*`) and incident IDs — lives in **[`docs/archive/CHANGELOG-full.md`](docs/archive/CHANGELOG-full.md)**. That archive remains the system-of-record for the pre-release period. From `0.1.0` onward, this file carries concise, user-facing release notes.
 
-## [Unreleased]
+## [1.1.0] - 2026-07-21
 
 ### Added
 - **Dashboard MCP server for agentic control.** A stdlib-only MCP server (`python3 -m autodev.mcp.dashboard_server`) exposes the dashboard API as ~28 agent tools — live state, events, logs, roadmap, metrics, doctor, full queue control, escalation answers, per-phase model overrides, stop/resume/launch — so Claude Code or any MCP client can drive and observe the pipeline. Copy `.mcp.json.example` to `.mcp.json` to wire it up; it authenticates with the same `AUTODEV_UI_TOKEN` as any script. Deliberately not granted to the pipeline's own agents. Docs: [autodev/mcp/README.md](autodev/mcp/README.md).
