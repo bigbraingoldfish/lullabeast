@@ -663,8 +663,9 @@ for your own model, follow the walkthrough in [SETUP.md](../SETUP.md) under
   flags drift against it.
 - [CONFIG-AUDIT.md](CONFIG-AUDIT.md): the key-by-key decision record behind
   the template, including the minimum-hardware statement.
-- [EVAL-MIGRATION.md](EVAL-MIGRATION.md): the before/after contract diff for
-  the `lullabeast-eval` sister repo (currently a bare-metal guest install).
+- [EVAL-MIGRATION.md](EVAL-MIGRATION.md): the pipeline-side contract for the
+  `lullabeast-eval` sister repo (which runs inside the dev container via its
+  own compose overlay since 2026-07-18).
 - [smoke_assert.py](smoke_assert.py): the CI assertion script; validates
   the doctor's `--json` report from an `OFFLINE=1` smoke boot (run by
   [.github/workflows/deploy-image.yml](../.github/workflows/deploy-image.yml)).

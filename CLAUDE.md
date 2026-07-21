@@ -82,7 +82,7 @@ autodev-ui/
 │   ├── .env.example                # Container env contract (provider key, *_MODEL knobs, UI_PORT), every var commented
 │   ├── openclaw.template.json      # DS-2b golden OpenClaw config (rendered by entrypoint.sh on first boot)
 │   ├── CONFIG-AUDIT.md             # Key-by-key decision record behind the template
-│   ├── EVAL-MIGRATION.md           # Before/after contract diff for the lullabeast-eval sister repo (currently bare-metal guest)
+│   ├── EVAL-MIGRATION.md           # Pipeline-side contract for the lullabeast-eval sister repo (eval target = dev container since 2026-07-18)
 │   ├── smoke_assert.py             # DS-5 CI assertion script: validates the doctor --json report from an OFFLINE=1 smoke boot (stdlib-only)
 │   └── README.md                   # Container quickstart, env/volume/upgrade contract, Task-0 licensing note, DS-4 hardening + sandbox-boundary docs, DS-5 CI/GHCR + OFFLINE docs, DS-7 host local-model bridge (host.docker.internal + *_MODEL wiring), Development container + bare-metal migration walkthrough
 ├── .github/workflows/
