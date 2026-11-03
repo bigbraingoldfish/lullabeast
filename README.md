@@ -15,7 +15,7 @@
 
 </div>
 
-Lullabeast is an open-source, local-capable, autonomous development pipeline. Describe what you want to build in plain English, and your team of agents (planner, executor, reviewer) implements it phase by phase against a real git repository, with deterministic gate scripts checking every step and an escalation path back to you when they get stuck.
+Lullabeast is an open-source, autonomous development pipeline built to get real, tested apps from local and cheap open-weight models such as Qwen, DeepSeek, Kimi, MiniMax, and GLM. Describe what you want to build in plain English, and your team of agents (planner, executor, reviewer) implements it phase by phase against a real git repository, with deterministic gate scripts checking every step, cost and token tracking per phase and per agent as it runs (when your models report usage), and an escalation path back to you when the agents get stuck.
 
 Lullabeast runs on [OpenClaw](https://docs.openclaw.ai/) and requires it: Lullabeast is the pipeline and dashboard, while the agents themselves run inside OpenClaw's runtime environment. The Docker image bundles a pinned, pre-configured OpenClaw, so the install path below needs nothing but Docker and an API key.
 
@@ -23,27 +23,27 @@ Lullabeast runs on [OpenClaw](https://docs.openclaw.ai/) and requires it: Lullab
   <img src="docs/assets/diagrams/demo-cycle.gif" alt="One full Lullabeast run, from idea to finished app" width="720">
 </p>
 
-> **Early release, and honest about it.** Lullabeast reliably builds small, single-purpose webapps end to end, and hard phases escalate to you by design, but larger or more complex projects tend to surface more issues and need more polish before they're done. This beta release is a single-user tool meant to run on a trusted machine, protected by a locally generated access token. (I personally run the pipeline and OpenClaw in a VM for transparency.) I'm shipping now to get it in front of other builders and find out where it breaks so I can strengthen it. Bug reports and suggestions are welcome.
+> **Early release, and honest about it.** Lullabeast reliably builds small, single-purpose webapps end to end, and hard phases escalate to you by design, but larger or more complex projects tend to surface more issues and need more polish before they're done. This beta release is a single-user tool meant to run on a trusted machine, protected by a locally generated access token. Frontier one-shot models (the latest GPT, Gemini, and Claude) cost more and are capable enough to suit a different architecture, so this one isn't built for them. (I personally run the pipeline and OpenClaw in a VM for transparency.) I'm shipping now to get it in front of other builders and find out where it breaks so I can strengthen it. Bug reports and suggestions are welcome.
 
 ---
 
 ## Why it exists
 
-Open-weight models like Qwen, Kimi, and MiniMax cost a fraction of frontier prices, and they fail in known, repeatable ways. Lullabeast is built around those failures:
+Open-weight models like Qwen, DeepSeek, Kimi, MiniMax, and GLM now write real software at a fraction of frontier prices, and some run on your own hardware. They're good, not flawless: they still trail the frontier, and benchmarks flatter them. Lullabeast gives them the structure to deliver, with gates around every phase. The structure is for the models; the gates are a safety net for the misses:
 
-| The failure mode | How Lullabeast handles it |
+| What the safety net catches | How Lullabeast handles it |
 |---|---|
-| **Deleting files** under context pressure | Every deletion has to be declared up front. If a file disappears that wasn't, the gate flags it and the phase re-runs. |
-| **Drifting from the spec** as a build grows | Context is cleared between tasks and each one stays atomic, so focus stays narrow against a clear definition of done; the reviewer then confirms those principles held across the whole phase. |
-| **Declaring victory** without running the tests | A phase can't close until the gate confirms every required test exists, is structured correctly, and passes. |
-| **Disappearing mid-turn** and leaving you guessing | Each agent gets three real attempts before anything is flagged to you, and timeouts catch an agent that never starts or hangs, so one dropped turn never sinks the run. |
+| A file **disappears** without being declared | Every deletion has to be declared up front. If a file disappears that wasn't, the gate flags it and the phase re-runs. |
+| The build **drifts from the spec** as it grows | Context is cleared between tasks and each one stays atomic, so focus stays narrow against a clear definition of done; the reviewer then confirms those principles held across the whole phase. |
+| A phase **claims it's done** before the tests pass | A phase can't close until the gate confirms every required test exists, is structured correctly, and passes. |
+| An agent **goes quiet** mid-turn | Each agent gets three real attempts before anything is flagged to you, and timeouts catch an agent that never starts or hangs, so one dropped turn never sinks the run. |
 
 ---
 
 ## How it works
 
 <p align="center">
-  <img src="docs/assets/diagrams/workflow.png" alt="Lullabeast workflow: idea to PRD to roadmap, then the gated planner/executor/reviewer build loop with escalation, to a finished app" width="760">
+  <img src="docs/assets/diagrams/workflow.png" alt="How a run works. Setup, once per project: Idea, PRD (prd-creator), Roadmap (roadmap-converter). Per phase, until the roadmap is done: Planner plans the work and its tests up front, Executor writes and commits the code, Reviewer checks it behaves, with a plain-Python gate after each, then the phase lands. If a gate can't be satisfied, the run stops and asks you. An optional completion report closes the roadmap." width="1008">
 </p>
 
 Queue several projects and Lullabeast works them in order, honoring dependencies between them.
