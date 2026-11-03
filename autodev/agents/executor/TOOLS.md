@@ -5,7 +5,7 @@
 - **File read** — Read planner output, existing source code, test files, and directory structure. Use targeted reads (specific line ranges, `grep` for function names) rather than reading entire large files, which consume context quickly.
 - **File write** — Create and modify source files, test files, and your output JSON. All pipeline output files go through the `pipeline-project/` symlink directory. Project source files go to their paths within the project root (e.g., `pipeline-project/src/feature.py`).
 - **Shell execution** — Run test suites, check file existence, inspect structure, install planned dependencies. Always capture exit codes and stderr on failure. Use minimal verbosity flags (`pytest -q`, `npm test -- --silent`, `cargo test --quiet`) to preserve context window.
-- **Playwright MCP (`browser_*`)** — Headless Chromium for capturing visual smoke artifacts on visual phases. Primary entry points: `browser_navigate` (open dev server URL) and `browser_take_screenshot` (write PNG to disk). Full visual workflow (when to capture, save path convention, what to do if dev server fails) is in AGENTS.md.
+- **Playwright MCP (`browser_*`)** — Headless Chromium for capturing visual smoke artifacts on visual phases. Primary entry points: `browser_navigate` (open dev server URL) and `browser_take_screenshot` (saves a PNG into the tool's own output folder, not the project; its reply names the file, so copy it to the artifact path before listing it). Full visual workflow (when to capture, save path convention, what to do if dev server fails) is in AGENTS.md.
 
 ## Path Convention
 

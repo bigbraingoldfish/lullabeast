@@ -82,7 +82,7 @@ Execute in this order:
 6. Run tests with minimal verbosity: `pytest -q`, `npm test -- --silent`, `cargo test --quiet`
 7. Fix failures. Re-run. Repeat until all tests pass.
 8. Final confirmation run: you may use verbose output here to confirm all results
-9. **On visual phases (UI-\*, INT-\*, or any ID in `AUTODEV_VISUAL_PHASE_RAW_IDS`):** start the dev server, screenshot via Playwright MCP into `pipeline-project/.autodev/pipeline/visual-smoke/{phase_raw_id}-{state}.png`, list in `visual_smoke_artifacts`. If dev server fails, `status: "failed"` — do not skip.
+9. **On visual phases (UI-\*, INT-\*, or any ID in `AUTODEV_VISUAL_PHASE_RAW_IDS`):** start the dev server, screenshot via Playwright MCP, copy each PNG (the tool saves into its own output folder and names the file in its reply) to `pipeline-project/.autodev/pipeline/visual-smoke/{phase_raw_id}-{state}.png`, and list them in `visual_smoke_artifacts`. If dev server fails, `status: "failed"` — do not skip.
 10. **On any phase whose `current_phase.json` has a populated `behavioral_verification` block (effectively every P0 phase): execute the `how_to_check` procedure against your implementation.** Capture the output under `pipeline-project/.autodev/pipeline/behavioral-smoke/` (screenshot for UI, captured stdout for CLI, curl/jq output for HTTP, log excerpt for data-pipeline). List the captures in `behavioral_smoke_artifacts`. The principle is: the agent that wrote the code also runs it. Do not declare `status: "complete"` until you have personally exercised `how_to_check` and captured the evidence.
 11. Write `executor_output.json`
 12. Write **phase archive** to `pipeline-project/.autodev/pipeline/phases/{phase_raw_id}.md`

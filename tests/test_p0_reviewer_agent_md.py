@@ -10,6 +10,7 @@ its output schema — silent drift = silently weakening the verifier.
 """
 
 import os
+import re
 
 import pytest
 
@@ -18,6 +19,9 @@ REPO_ROOT = os.path.abspath(
 )
 REVIEWER_AGENTS_MD = os.path.join(
     REPO_ROOT, "autodev", "agents", "reviewer", "AGENTS.md"
+)
+REVIEWER_TOOLS_MD = os.path.join(
+    REPO_ROOT, "autodev", "agents", "reviewer", "TOOLS.md"
 )
 
 
@@ -117,6 +121,46 @@ def test_gate_warnings_adjudication_documented(agents_md_text):
         "reviewer/AGENTS.md must document the reject-with-specifics adjudication path "
         "(convert the warning into a blocking_issue)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Evidence files. A DeepSeek V4.1 Flash reviewer cited CORE-E1-default.png, the
+# example name this doc used to show, and invented names for logs it had saved
+# under other names. The contract now shows placeholders, says where evidence
+# may be written, and has every path copied from a folder listing.
+# ---------------------------------------------------------------------------
+
+
+def test_evidence_examples_are_placeholders(agents_md_text):
+    """Every evidence path in the Output Contract example is a placeholder, so
+    there is no real-looking file name to copy."""
+    example = agents_md_text.split("```json", 1)[1].split("```", 1)[0]
+    cited = re.findall(r'"(?:file_or_screenshot_or_log|path)":\s*"([^"]*)"', example)
+    assert len(cited) >= 7, cited
+    for value in cited:
+        assert "<" in value and ">" in value, value
+
+
+def test_evidence_paths_copied_from_a_listing(agents_md_text):
+    """The reviewer lists the evidence folder and copies each path from it."""
+    assert "Never type a file name from memory" in agents_md_text
+
+
+def test_red_lines_permit_evidence_files(agents_md_text):
+    """The Red Lines must not forbid the evidence files the gate requires: a
+    reviewer told to write only its output JSON has nothing real to cite."""
+    red_lines = agents_md_text.split("## Red Lines", 1)[1].split("\n## ", 1)[0]
+    assert "behavioral-smoke/" in red_lines
+
+
+def test_tools_md_permits_evidence_and_explains_screenshots():
+    """TOOLS.md agrees: evidence under behavioral-smoke/ is allowed, and a
+    Playwright screenshot has to be copied out of the tool's own folder."""
+    with open(REVIEWER_TOOLS_MD, "r", encoding="utf-8") as f:
+        tools = f.read()
+    denials = tools.split("## Explicit Denials", 1)[1]
+    assert "behavioral-smoke/" in denials
+    assert "own output folder" in tools
 
 
 def test_phase_intent_validated_removed(agents_md_text):
