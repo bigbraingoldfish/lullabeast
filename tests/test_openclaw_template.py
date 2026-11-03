@@ -313,9 +313,9 @@ class TestSamplingParams:
             assert block == {"params": {"temperature": 0.6, "top_p": 0.95}}, ref
 
     def test_kimi_k3_1_pro_has_no_sampling_params(self):
-        # OpenRouter lists no temperature/top_p support for kimi-k3.1-pro, so it
-        # gets no `agents.defaults.models` params block (as X's July Kimi K3
-        # edit did for K3 when it was in the same position).
+        # Only the Qwen and GLM sampling values were validated in pipeline runs,
+        # so kimi-k3.1-pro gets no `agents.defaults.models` params block and
+        # runs on provider defaults (as X's July Kimi K3 edit did for K3).
         defaults = _template()["agents"]["defaults"]["models"]
         assert "openrouter/moonshotai/kimi-k3.1-pro" not in defaults
 
