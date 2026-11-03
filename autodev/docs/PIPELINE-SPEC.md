@@ -852,6 +852,7 @@ reviewer_artifacts_retries += 1
 IF reviewer_artifacts_retries >= 2  → escalation agent
 ELSE:
     set executor_retry_directive in phase_state.json
+    clear executor_succeeded (else the crash-recovery skip bypasses the executor)
     reset executor_retries to 0
     re-invoke executor (directive delivered as webhook message= by _invoke_executor)
 ```

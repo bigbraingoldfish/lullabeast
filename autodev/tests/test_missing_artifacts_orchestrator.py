@@ -194,6 +194,37 @@ class TestExecutorDirectiveDelivery:
         )
 
 
+def _missing_artifacts_handler_window():
+    """The run loop's ``elif gate_result == "MISSING_ARTIFACTS":`` branch."""
+    text = (Path(_PIPE) / "orchestrator.py").read_text(encoding="utf-8")
+    start = text.index('elif gate_result == "MISSING_ARTIFACTS":')
+    end = text.index('elif gate_result == "CONTRACT_FAILURE":', start)
+    return text[start:end]
+
+
+def test_handler_clears_executor_succeeded_before_routing_to_the_executor():
+    """The handler routes to the executor with ``executor_retries`` at 0. If the
+    executor gate's ``executor_succeeded`` flag is still set, the executor
+    branch's crash-recovery skip fires and the executor never runs: the reviewer
+    is re-invoked on the same output, the gate finds the same artifacts missing,
+    and the second miss escalates. A DeepSeek V4.1 Flash MultiLife run escalated
+    its first phase this way. The ROUTE_EXECUTOR handler clears the flag for the
+    same reason."""
+    window = _missing_artifacts_handler_window()
+    route = window.index('self.state["current_agent"] = "executor"')
+    clear = window.find('.pop("executor_succeeded", None)')
+    assert 0 <= clear < route, (
+        "the MISSING_ARTIFACTS handler must clear executor_succeeded before it "
+        "routes to the executor, or the crash-recovery skip bypasses the executor"
+    )
+
+
+def test_directive_does_not_promise_a_fresh_session():
+    """The re-invoked executor keeps its attempt-1 session key (the handler
+    resets executor_retries), so the directive must not claim a fresh session."""
+    assert "fresh session" not in _missing_artifacts_handler_window()
+
+
 def test_dead_artifact_instruction_field_removed():
     """Removal + self-containment guard.
 

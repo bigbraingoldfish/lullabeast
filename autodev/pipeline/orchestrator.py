@@ -8456,12 +8456,12 @@ class Orchestrator:
                             # webhook message= by _invoke_executor (one-shot). It must be
                             # self-contained because message= replaces the executor's
                             # default prompt — so it re-asserts that prior work is
-                            # preserved and points the fresh session at what to record.
+                            # preserved and points the executor at what to record.
                             _raw_id = self.state.get("current_phase_raw_id", "this phase")
                             _executor_directive = (
                                 f"MISSING COMPLETION ARTIFACTS: Your implementation for this phase is already "
-                                f"complete and PRESERVED on the branch — do NOT re-implement or rebuild it. This "
-                                f"is a fresh session re-invoked solely to add the two completion artifacts the "
+                                f"complete and PRESERVED on the branch — do NOT re-implement or rebuild it. You "
+                                f"are re-invoked solely to add the two completion artifacts the "
                                 f"reviewer found missing. Read current_phase.json and your existing work on the "
                                 f"branch for what to record, then, before writing executor_output.done, you MUST "
                                 f"produce both: "
@@ -8471,6 +8471,13 @@ class Orchestrator:
                                 f"your AGENTS.md. Write the archive first, metrics second, sentinel last."
                             )
                             _ps_ma["executor_retry_directive"] = _executor_directive
+                            # Clear the executor gate's success flag, as the
+                            # ROUTE_EXECUTOR handler does: with executor_retries at 0
+                            # and the flag set, the executor branch's crash-recovery
+                            # skip would advance straight back to the reviewer, the
+                            # executor would never run, and the second miss would
+                            # escalate.
+                            _ps_ma.pop("executor_succeeded", None)
                             self.write_phase_state_atomic(_ps_ma)
                             self.state["current_agent"] = "executor"
                             self.state["executor_retries"] = 0
