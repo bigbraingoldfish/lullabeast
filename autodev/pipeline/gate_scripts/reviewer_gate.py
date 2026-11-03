@@ -22,6 +22,7 @@ from utils import (
     PHASE_STATE_FILE,
     WORKSPACE_DIR,
     path_escapes_workspace,
+    resolve_workspace_path,
     write_json_atomic,
     ERR_MISSING_ARTIFACTS,
     ERR_REVIEWER_CONTRACT_FAILURE,
@@ -92,6 +93,9 @@ def _check_behavioral_verification(data):
         check that resolves symlinks on BOTH sides — same guard pattern as the
         file_manifest validator in :mod:`executor_gate`; an in-workspace symlink
         resolving outside the workspace is rejected — and must resolve on disk.
+        A relative path names a file in the project, with or without the
+        ``pipeline-project/`` prefix the reviewer writes through
+        (:func:`utils.resolve_workspace_path`).
 
     A ``"fail"`` or ``"cannot_verify"`` verdict is not treated as a
     gate-script-level problem here — it flows through the validation block in
@@ -139,9 +143,7 @@ def _check_behavioral_verification(data):
             return [
                 f"behavioral_verification.evidence[{i}] path escapes workspace: {path}"
             ]
-        real_path = os.path.realpath(
-            path if os.path.isabs(path) else os.path.join(WORKSPACE_DIR, path)
-        )
+        real_path = os.path.realpath(resolve_workspace_path(path, WORKSPACE_DIR))
         if not os.path.exists(real_path):
             return [
                 f"behavioral_verification.evidence[{i}] path does not exist on disk: {path}"
@@ -227,9 +229,7 @@ def _check_regression_verification(data, current_phase):
             return [
                 f"regression_verification.evidence[{i}] path escapes workspace: {path}"
             ]
-        real_path = os.path.realpath(
-            path if os.path.isabs(path) else os.path.join(WORKSPACE_DIR, path)
-        )
+        real_path = os.path.realpath(resolve_workspace_path(path, WORKSPACE_DIR))
         if not os.path.exists(real_path):
             return [
                 f"regression_verification.evidence[{i}] path does not exist on disk: {path}"
@@ -426,9 +426,7 @@ def _check_visual_verification(data):
             # both sides (CLAUDE.md Security Constraints; do not weaken).
             if path_escapes_workspace(path):
                 return [f"visual_smoke_artifacts[{i}] path escapes workspace: {path}"]
-            real_path = os.path.realpath(
-                path if os.path.isabs(path) else os.path.join(WORKSPACE_DIR, path)
-            )
+            real_path = os.path.realpath(resolve_workspace_path(path, WORKSPACE_DIR))
             if not os.path.exists(real_path):
                 return [f"visual_smoke_artifacts[{i}] path does not exist on disk: {path}"]
     return []

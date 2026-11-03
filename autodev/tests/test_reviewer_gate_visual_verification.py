@@ -199,6 +199,32 @@ class TestVisualVerificationRequiredOnUiPhases:
 
         assert result == "PASS"
 
+    def test_artifact_cited_through_the_agent_link_allows_pass(self, tmp_workspace):
+        """A screenshot path written through the reviewer's ``pipeline-project``
+        link names the project's file and passes like the plain form."""
+        _write_current_phase(tmp_workspace, "UI-E1")
+        _write_phase_state(tmp_workspace)
+        _write_done_artifacts(tmp_workspace, "UI-E1")
+        screenshot_path = os.path.join(tmp_workspace, "visual-smoke", "UI-E1-default.png")
+        os.makedirs(os.path.dirname(screenshot_path), exist_ok=True)
+        with open(screenshot_path, "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\n")
+
+        output_path = os.path.join(tmp_workspace, "reviewer_output.json")
+        with open(output_path, "w") as f:
+            json.dump(_reviewer_output(
+                visual_verification="pass",
+                visual_smoke_artifacts=[
+                    {"path": "pipeline-project/visual-smoke/UI-E1-default.png",
+                     "description": "card faces show suit glyphs"}
+                ],
+            ), f)
+
+        with _patch_workspace(tmp_workspace):
+            result = reviewer_gate_module.evaluate_reviewer(output_path)
+
+        assert result == "PASS"
+
     def test_visual_verification_fail_routes_as_rejection(self, tmp_workspace):
         """visual_verification=fail → treat as a blocking issue → reviewer rejection routing."""
         _write_current_phase(tmp_workspace, "UI-E1")

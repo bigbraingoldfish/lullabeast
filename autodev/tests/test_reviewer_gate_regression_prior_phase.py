@@ -533,6 +533,34 @@ class TestRegressionShapeValidation:
             result = reviewer_gate_module.evaluate_reviewer(output_path)
         assert result == "REGRESSION_UNVERIFIED"
 
+    def test_regression_evidence_cited_through_the_agent_link_passes(
+        self, tmp_workspace
+    ):
+        """Regression evidence cited through the reviewer's ``pipeline-project``
+        link names the project's files and passes, like behavioural evidence."""
+        _write_current_phase_with_prior(tmp_workspace)
+        _write_phase_state(tmp_workspace)
+        _write_done_artifacts(tmp_workspace, "CORE-E2")
+        bv_block = _valid_behavioral_block(tmp_workspace)
+        regression_block = _valid_regression_block(tmp_workspace)
+        for entry in regression_block["evidence"]:
+            entry["file_or_screenshot_or_log"] = (
+                "pipeline-project/" + entry["file_or_screenshot_or_log"]
+            )
+        output_path = os.path.join(tmp_workspace, "reviewer_output.json")
+        with open(output_path, "w") as f:
+            json.dump(
+                _reviewer_output(
+                    behavioral_verification=bv_block,
+                    regression_verification=regression_block,
+                ),
+                f,
+            )
+
+        with _patch_workspace(tmp_workspace):
+            result = reviewer_gate_module.evaluate_reviewer(output_path)
+        assert result == "PASS"
+
     def test_regression_block_pass_verdict_with_two_anchors_fails_shape_check(
         self, tmp_workspace
     ):

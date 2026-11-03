@@ -86,3 +86,49 @@ def test_non_string_does_not_escape(workspace):
     the helper must not raise on it (it is called on raw agent output)."""
     assert utils_module.path_escapes_workspace(None) is False
     assert utils_module.path_escapes_workspace(123) is False
+
+
+# ---------------------------------------------------------------------------
+# resolve_workspace_path: every agent reaches the project through a link named
+# ``pipeline-project`` in its own workspace and writes paths through it (each
+# agent's TOOLS.md), while the gates resolve relative paths against the project
+# folder that link points to. Both spellings must name the same file.
+# ---------------------------------------------------------------------------
+
+
+def test_link_prefix_names_the_same_project_file(workspace):
+    """``pipeline-project/<p>`` resolves to ``<p>`` in the project, so evidence
+    cited the way the reviewer's TOOLS.md writes paths is found."""
+    expected = os.path.join(workspace, ".autodev/pipeline/shot.png")
+    for cited in (
+        ".autodev/pipeline/shot.png",
+        "pipeline-project/.autodev/pipeline/shot.png",
+        "./pipeline-project/.autodev/pipeline/shot.png",
+        "pipeline-project//.autodev/pipeline/shot.png",
+    ):
+        assert utils_module.resolve_workspace_path(cited, workspace) == expected, cited
+
+
+def test_link_prefix_kept_when_the_project_has_that_entry(workspace):
+    """A project with its own ``pipeline-project`` entry keeps the path as
+    written: the prefix is dropped only when it names nothing in the project."""
+    os.mkdir(os.path.join(workspace, "pipeline-project"))
+    assert utils_module.resolve_workspace_path("pipeline-project/x.txt", workspace) == (
+        os.path.join(workspace, "pipeline-project/x.txt")
+    )
+
+
+def test_bare_link_name_and_absolute_paths_are_left_alone(workspace):
+    """Only a ``pipeline-project/`` folder prefix is rewritten; a file named
+    ``pipeline-project`` and absolute paths pass through unchanged."""
+    assert utils_module.resolve_workspace_path("pipeline-project", workspace) == (
+        os.path.join(workspace, "pipeline-project")
+    )
+    assert utils_module.resolve_workspace_path("/etc/passwd", workspace) == "/etc/passwd"
+
+
+def test_link_prefix_cannot_hide_an_escape(workspace):
+    """The boundary check runs on the resolved path: dropping the prefix never
+    turns an escape into an in-bounds path, and an in-bounds one stays in."""
+    assert utils_module.path_escapes_workspace("pipeline-project/../../etc/passwd") is True
+    assert utils_module.path_escapes_workspace("pipeline-project/ok.txt") is False

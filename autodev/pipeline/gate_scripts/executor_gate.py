@@ -23,6 +23,7 @@ from utils import (
     record_error_code_only,
     PHASE_STATE_FILE,
     WORKSPACE_DIR,
+    resolve_workspace_path,
     write_json_atomic,
     ERR_STATUS_NOT_COMPLETE,
     ERR_TESTS_FAILING,
@@ -458,7 +459,9 @@ def evaluate_executor(output_path=None):
                         "detail": f"behavioral_smoke_artifacts[{i}] is missing its path.",
                     })
                     continue
-                target_real = os.path.realpath(os.path.join(WORKSPACE_DIR, path))
+                # The executor writes through the pipeline-project link in its
+                # workspace, so accept that spelling of a project path too.
+                target_real = os.path.realpath(resolve_workspace_path(path, WORKSPACE_DIR))
                 # Workspace-boundary check — SECURITY guard, NOT demoted. Canonical
                 # (realpath) resolution on both sides so a symlink escape is caught.
                 try:

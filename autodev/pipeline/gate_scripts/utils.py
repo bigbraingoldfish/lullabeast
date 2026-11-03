@@ -2,8 +2,9 @@
 
 Imported by the verdict and resolver gates in this directory. Provides the workspace path
 constants, the atomic phase-state writers (``record_error_code_only`` / ``update_phase_state_error``),
-``load_json_safe``, and ``path_escapes_workspace`` — the ``os.path.realpath`` workspace-boundary
-check shared by the executor and reviewer gates. See ./README.md for the gate execution model.
+``load_json_safe``, ``resolve_workspace_path`` (where an agent-written path points in the project),
+and ``path_escapes_workspace`` — the ``os.path.realpath`` workspace-boundary check shared by the
+executor and reviewer gates. See ./README.md for the gate execution model.
 """
 import os
 import sys
@@ -67,6 +68,38 @@ AUTODEV_PIPELINE_SUBDIR = os.path.join(".autodev", "pipeline")
 ARTIFACTS_DIR = os.path.join(WORKSPACE_DIR.rstrip(os.sep), AUTODEV_PIPELINE_SUBDIR) + os.sep
 PHASE_STATE_FILE = os.path.join(ARTIFACTS_DIR, "phase_state.json")
 
+# Each agent reaches the project through a link of this name in its own OpenClaw
+# workspace, and its TOOLS.md has it write every path through that link, so an
+# agent-cited path often reads ``pipeline-project/.autodev/...``. The gates
+# resolve relative paths against the project folder itself, where that prefix
+# names nothing.
+AGENT_PROJECT_LINK = "pipeline-project"
+
+
+def resolve_workspace_path(path, workspace_dir):
+    """Return the absolute path a gate checks for an agent-cited ``path``.
+
+    An absolute ``path`` is returned unchanged. A relative one is joined to
+    ``workspace_dir`` (the project folder), first dropping a leading
+    ``pipeline-project/`` — the link agents write through — when the project
+    has no entry of that name, so ``pipeline-project/.autodev/x.png`` and
+    ``.autodev/x.png`` name the same file. Nothing is resolved here: callers
+    apply ``os.path.realpath`` and the boundary check to the result.
+    """
+    if os.path.isabs(path):
+        return path
+    parts = path.split("/")
+    while len(parts) > 1 and parts[0] == ".":
+        parts = parts[1:]
+    if (
+        len(parts) > 1
+        and parts[0] == AGENT_PROJECT_LINK
+        and not os.path.lexists(os.path.join(workspace_dir, AGENT_PROJECT_LINK))
+    ):
+        # lstrip: a doubled slash after the prefix must not make the rest absolute.
+        path = "/".join(parts[1:]).lstrip("/")
+    return os.path.join(workspace_dir, path)
+
 
 def path_escapes_workspace(path):
     """Return True if ``path`` resolves outside the pipeline workspace.
@@ -75,9 +108,10 @@ def path_escapes_workspace(path):
     reviewer gate's contract validators and its failure-verdict blocking-issue
     synthesisers. Symlinks are resolved on BOTH sides, so an in-workspace
     symlink pointing outside the workspace is caught (a lexical compare is not
-    enough). A relative ``path`` is joined against :data:`WORKSPACE_DIR`; an
-    absolute ``path`` is used as-is. A path sharing no common root with the
-    workspace (``os.path.commonpath`` raises ``ValueError``) counts as an escape.
+    enough). A relative ``path`` is resolved against :data:`WORKSPACE_DIR` by
+    :func:`resolve_workspace_path`; an absolute ``path`` is used as-is. A path
+    sharing no common root with the workspace (``os.path.commonpath`` raises
+    ``ValueError``) counts as an escape.
 
     Boundary check ONLY. On-disk existence is a separate, caller-owned concern:
     the pass-verdict validators additionally require the artifact to exist, but
@@ -92,8 +126,7 @@ def path_escapes_workspace(path):
     if not isinstance(path, str) or not path:
         return False
     workspace_real = os.path.realpath(WORKSPACE_DIR)
-    abs_path = path if os.path.isabs(path) else os.path.join(WORKSPACE_DIR, path)
-    real_path = os.path.realpath(abs_path)
+    real_path = os.path.realpath(resolve_workspace_path(path, WORKSPACE_DIR))
     try:
         return os.path.commonpath([workspace_real, real_path]) != workspace_real
     except ValueError:

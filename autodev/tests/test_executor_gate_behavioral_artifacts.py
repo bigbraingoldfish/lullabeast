@@ -252,6 +252,35 @@ def test_valid_behavioral_smoke_artifacts_pass(tmp_workspace, monkeypatch):
     assert not os.path.exists(os.path.join(tmp_workspace, "gate_warnings.json"))
 
 
+def test_artifacts_cited_through_the_agent_link_pass(tmp_workspace, monkeypatch):
+    """The executor writes through the ``pipeline-project`` link in its
+    workspace too. An artifact cited that way is the project's file, so the
+    reviewer gets no not-on-disk warning for it."""
+    _write_current_phase_with_behavioral(tmp_workspace)
+    _write_pipeline_state(tmp_workspace)
+    _write_planner_output(tmp_workspace)
+
+    rel = _make_artifact(tmp_workspace, "behavioral-smoke/CORE-E1-step1.txt")
+    out = _executor_output(tmp_workspace, behavioral_artifacts=[
+        {"path": f"pipeline-project/{rel}", "description": "Step 1 ran clean"},
+    ])
+    output_path = os.path.join(tmp_workspace, "executor_output.json")
+    with open(output_path, "w") as f:
+        json.dump(out, f)
+
+    import subprocess
+    class _Sub:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Sub())
+
+    with _patch_workspace(tmp_workspace):
+        result = executor_gate_module.evaluate_executor(output_path)
+    assert result == "PASS"
+    assert not os.path.exists(os.path.join(tmp_workspace, "gate_warnings.json"))
+
+
 # ===========================================================================
 # Phase 1 defensive hardening — gate output & boundary hardening
 # (defensive-hardening-roadmap.md PHASE 1: T1.1 manifest type-coercion,

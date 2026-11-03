@@ -73,6 +73,7 @@ test-mockability). See the comments at both call sites in `orchestrator.py`.
 
 ## `utils.py` is shared infrastructure, not a gate
 
-`utils.py` holds the workspace path constants, the atomic phase-state writers, `load_json_safe`, and
-`path_escapes_workspace` (the realpath workspace-boundary check used by the executor and reviewer gates). It is
-imported by the gates; it is never invoked as one.
+`utils.py` holds the workspace path constants, the atomic phase-state writers, `load_json_safe`,
+`resolve_workspace_path` (where an agent-cited path points in the project, with or without the `pipeline-project/`
+prefix agents write through), and `path_escapes_workspace` (the realpath workspace-boundary check used by the
+executor and reviewer gates). It is imported by the gates; it is never invoked as one.

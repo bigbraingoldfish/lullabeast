@@ -359,6 +359,22 @@ class TestCheckBehavioralVerificationContract:
             })
         assert problems == []
 
+    def test_evidence_cited_through_the_agent_link_returns_empty(self, tmp_workspace):
+        """The reviewer writes every path through the ``pipeline-project`` link
+        in its workspace (reviewer TOOLS.md). Evidence cited that way names the
+        project's files, so the gate must find them instead of rejecting files
+        that exist."""
+        block = _valid_behavioral_block(tmp_workspace, n_anchors=3)
+        for entry in block["evidence"]:
+            entry["file_or_screenshot_or_log"] = (
+                "pipeline-project/" + entry["file_or_screenshot_or_log"]
+            )
+        with _patch_workspace(tmp_workspace):
+            problems = reviewer_gate_module._check_behavioral_verification({
+                "behavioral_verification": block,
+            })
+        assert problems == []
+
     def test_fail_verdict_does_not_require_three_anchors(self, tmp_workspace):
         """A 'fail' verdict is itself the rejection signal — it doesn't need
         three anchors. (Mirror of how visual_verification='fail' is permissive

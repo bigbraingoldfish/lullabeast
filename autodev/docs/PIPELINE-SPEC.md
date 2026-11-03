@@ -499,7 +499,7 @@ The reviewer gate runs the same script on each pass. Routing on failure varies b
           "type": "object",
           "properties": {
             "claim": { "type": "string" },
-            "file_or_screenshot_or_log": { "type": "string", "description": "Workspace-relative path; gate enforces both path safety and on-disk existence." },
+            "file_or_screenshot_or_log": { "type": "string", "description": "Path relative to the project folder (a leading pipeline-project/ is accepted); gate enforces both path safety and on-disk existence." },
             "method": { "type": "string", "description": "e.g. playwright_screenshot, curl_then_jq, stdout_capture, log_grep." }
           },
           "required": ["claim", "file_or_screenshot_or_log", "method"]
