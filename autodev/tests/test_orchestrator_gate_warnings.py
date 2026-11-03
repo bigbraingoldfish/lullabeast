@@ -165,6 +165,40 @@ def test_clean_pass_clears_stale_stash(gw_env):
 
 
 # ---------------------------------------------------------------------------
+# Corrupt phase_state — re-raise, never wipe the budgets
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("with_warnings", [False, True], ids=["clean_pass", "warnings_present"])
+def test_corrupt_phase_state_raises(gw_env, with_warnings):
+    """A corrupt phase_state at executor PASS must propagate read_phase_state's
+    quarantine error so the event loop halts and escalates, instead of the PASS
+    path's next read finding no file and writing a phase_state with the retry
+    and reset budgets gone."""
+    tmp_path, _ = gw_env
+    (tmp_path / "phase_state.json").write_text("{not json")
+    if with_warnings:
+        _write_warnings(tmp_path, _SAMPLE)
+    with pytest.raises(orch_mod.PhaseStateCorruptError):
+        _make_orchestrator()._emit_gate_warnings("CORE-E1")
+    assert list(tmp_path.glob("phase_state.json.corrupt.*")), "corrupt file must be quarantined"
+    assert not (tmp_path / "phase_state.json").exists(), (
+        "no fresh phase_state.json may be written over the quarantined one"
+    )
+
+
+def test_non_dict_phase_state_still_swallowed(gw_env):
+    """Only the corruption error propagates. A parseable but non-dict
+    phase_state (TypeError on the merge) stays best-effort and never breaks
+    the PASS path."""
+    tmp_path, captured = gw_env
+    (tmp_path / "phase_state.json").write_text("[]")
+    _write_warnings(tmp_path, _SAMPLE)
+    _make_orchestrator()._emit_gate_warnings("CORE-E1")
+    assert len(captured) == 1
+
+
+# ---------------------------------------------------------------------------
 # Structural — call site on the PASS path + file in the artifact-lifecycle lists
 # ---------------------------------------------------------------------------
 

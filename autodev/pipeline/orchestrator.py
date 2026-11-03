@@ -1540,6 +1540,15 @@ def _write_run_summary(outcome: str, outcome_detail: str) -> None:
         print(f"[W2B] run_summary write failed (non-fatal): {_e}")
 
 
+class PhaseStateCorruptError(RuntimeError):
+    """``read_phase_state`` found phase_state.json unparseable and quarantined it.
+
+    A RuntimeError subclass, so existing ``except RuntimeError`` handlers keep
+    working. Best-effort phase_state writers re-raise it rather than swallow it:
+    after the quarantine no file exists, so the next reader would get ``{}`` and
+    write back a phase_state with the retry and reset budgets gone."""
+
+
 class Orchestrator:
     def __init__(self):
         self.lock_fd = None
@@ -4423,7 +4432,8 @@ class Orchestrator:
         """Read phase_state.json, return dict (empty if file absent).
 
         On parse failure the corrupt file is quarantined (renamed to
-        phase_state.json.corrupt.<timestamp>) and a RuntimeError is raised.
+        phase_state.json.corrupt.<timestamp>) and a PhaseStateCorruptError (a
+        RuntimeError) is raised.
         Silently returning {} on corruption would drop planner_retries /
         executor_retries / escalation fields, causing misrouted retries.
         """
@@ -4438,7 +4448,7 @@ class Orchestrator:
                     print(f"[ERROR] phase_state.json is corrupt; quarantined to {corrupt_path}: {e}")
                 except OSError as rename_err:
                     print(f"[ERROR] Could not quarantine corrupt phase_state.json: {rename_err}")
-                raise RuntimeError(
+                raise PhaseStateCorruptError(
                     f"[FATAL] phase_state.json is corrupt and has been quarantined to "
                     f"{corrupt_path}. Manual recovery required."
                 ) from e
@@ -4592,12 +4602,17 @@ class Orchestrator:
         both end up in the file).
 
         Best-effort: errors are logged and swallowed so a phase-state
-        write failure never crashes the pipeline.
+        write failure never crashes the pipeline. The exception is a corrupt
+        phase_state: ``PhaseStateCorruptError`` is re-raised so the event loop
+        halts and escalates, instead of this merge writing a fresh phase_state
+        that holds only ``fields`` and drops the retry and reset budgets.
         """
         if not fields:
             return
         try:
             phase_state = self.read_phase_state() if hasattr(self, "read_phase_state") else {}
+        except PhaseStateCorruptError:
+            raise  # quarantined: halt and escalate, never rewrite the budgets
         except Exception as e:
             print(f"[WARN] _record_phase_outcome: read_phase_state failed: {e}")
             phase_state = {}
@@ -4615,7 +4630,9 @@ class Orchestrator:
         canonical metrics row, written later on the reviewer-PASS path after
         this file is gone, can persist the reachability outcome), then remove
         the file. The stash is best-effort and read-modify-write so it never
-        breaks event emission or clobbers sibling phase_state keys."""
+        breaks event emission or clobbers sibling phase_state keys; a corrupt
+        phase_state (``PhaseStateCorruptError``) is re-raised, as in
+        ``_emit_gate_warnings``, after the file is removed."""
         advisory_path = os.path.join(PROJECT_ARTIFACTS_DIR, "executor_advisory_detail.json")
         if not os.path.exists(advisory_path):
             return
@@ -4694,12 +4711,15 @@ class Orchestrator:
                 _ps_reach = self.read_phase_state()
                 _ps_reach["last_reachability_summary"] = _reach_stash
                 self.write_phase_state_atomic(_ps_reach)
+        except PhaseStateCorruptError:
+            raise  # quarantined: halt and escalate, never rewrite the budgets
         except Exception as _reach_err:
             print(f"[WARN] _emit_reachability_advisory: stash failed: {_reach_err}")
-        try:
-            os.remove(advisory_path)
-        except OSError:
-            pass
+        finally:
+            try:
+                os.remove(advisory_path)
+            except OSError:
+                pass
 
     def _emit_gate_warnings(self, raw_id):
         """Drain gate_warnings.json (the executor gate's reviewer-facing PASS
@@ -4713,7 +4733,12 @@ class Orchestrator:
         On the clean-pass common case (no file) this clears any stale
         ``last_gate_warnings`` so the metrics row never reports a prior attempt's
         warnings. Best-effort + read-modify-write throughout so a phase_state
-        hiccup never breaks the PASS path or clobbers sibling keys."""
+        hiccup never breaks the PASS path or clobbers sibling keys. The one
+        exception is a corrupt phase_state: ``read_phase_state`` quarantines it
+        and raises ``PhaseStateCorruptError``, which is re-raised so the event
+        loop halts and escalates. Swallowing it would let the PASS path's next
+        read find no file and write a phase_state with the retry and reset
+        budgets gone."""
         warnings_path = os.path.join(PROJECT_ARTIFACTS_DIR, "gate_warnings.json")
         if not os.path.exists(warnings_path):
             # Clean pass — drop any stale stash so the row's gate_warnings is null.
@@ -4721,6 +4746,8 @@ class Orchestrator:
                 _ps = self.read_phase_state()
                 if _ps.pop("last_gate_warnings", None) is not None:
                     self.write_phase_state_atomic(_ps)
+            except PhaseStateCorruptError:
+                raise  # quarantined: halt and escalate, never rewrite the budgets
             except Exception as _gw_err:
                 print(f"[WARN] _emit_gate_warnings: stale-stash clear failed: {_gw_err}")
             return
@@ -4761,6 +4788,8 @@ class Orchestrator:
             _ps = self.read_phase_state()
             _ps["last_gate_warnings"] = {"count": len(warns), "codes": codes}
             self.write_phase_state_atomic(_ps)
+        except PhaseStateCorruptError:
+            raise  # quarantined: halt and escalate, never rewrite the budgets
         except Exception as _gw_err:
             print(f"[WARN] _emit_gate_warnings: stash failed: {_gw_err}")
 
@@ -4786,9 +4815,13 @@ class Orchestrator:
         On the clean common case (no field) this clears any stale
         ``last_scope_warning`` so the metrics row never reports a prior attempt's
         warning. Best-effort + read-modify-write throughout so a phase_state
-        hiccup never breaks the PASS path or clobbers sibling keys. Unlike
-        ``gate_warnings.json`` there is no separate file to preserve — the signal
-        lives inside ``planner_output.json``, which the executor reads next."""
+        hiccup never breaks the PASS path or clobbers sibling keys, except a
+        corrupt phase_state: as in ``_emit_gate_warnings``,
+        ``PhaseStateCorruptError`` is re-raised so the event loop halts and
+        escalates instead of the next read wiping the retry and reset budgets.
+        Unlike ``gate_warnings.json`` there is no separate file to preserve — the
+        signal lives inside ``planner_output.json``, which the executor reads
+        next."""
         planner_path = os.path.join(PROJECT_ARTIFACTS_DIR, "planner_output.json")
         warning = None
         try:
@@ -4810,6 +4843,8 @@ class Orchestrator:
                 _ps = self.read_phase_state()
                 if _ps.pop("last_scope_warning", None) is not None:
                     self.write_phase_state_atomic(_ps)
+            except PhaseStateCorruptError:
+                raise  # quarantined: halt and escalate, never rewrite the budgets
             except Exception as _sw_err:
                 print(f"[WARN] _emit_scope_warning: stale-stash clear failed: {_sw_err}")
             return
@@ -4824,6 +4859,8 @@ class Orchestrator:
             _ps = self.read_phase_state()
             _ps["last_scope_warning"] = warning
             self.write_phase_state_atomic(_ps)
+        except PhaseStateCorruptError:
+            raise  # quarantined: halt and escalate, never rewrite the budgets
         except Exception as _sw_err:
             print(f"[WARN] _emit_scope_warning: stash failed: {_sw_err}")
 

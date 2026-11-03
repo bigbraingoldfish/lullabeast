@@ -154,3 +154,23 @@ def test_no_advisory_file_no_phase_state_write(reach_env):
     tmp_path = reach_env
     _make_orchestrator()._emit_reachability_advisory("CORE-E1")
     assert "last_reachability_summary" not in _read_ps(tmp_path)
+
+
+def test_corrupt_phase_state_raises_and_still_removes_advisory(reach_env):
+    """A corrupt phase_state at the stash must propagate the quarantine error
+    (halt and escalate) rather than let _emit_gate_warnings, next on the
+    executor-PASS path, read an absent file and wipe the budgets. The advisory
+    file is still consumed."""
+    tmp_path = reach_env
+    (tmp_path / "phase_state.json").write_text("{not json")
+    _write_advisory(tmp_path, {
+        "reachability_summary": {"files": ["x.py"], "count": 1,
+                                 "command": "python x.py", "reason_template": "..."},
+        "reachability_not_applicable": None,
+        "reachability_diagnostics": [],
+    })
+    with pytest.raises(orch_mod.PhaseStateCorruptError):
+        _make_orchestrator()._emit_reachability_advisory("CORE-E1")
+    assert list(tmp_path.glob("phase_state.json.corrupt.*"))
+    assert not (tmp_path / "phase_state.json").exists()
+    assert not os.path.exists(os.path.join(str(tmp_path), "executor_advisory_detail.json"))

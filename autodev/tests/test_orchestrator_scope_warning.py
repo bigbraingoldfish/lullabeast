@@ -178,6 +178,46 @@ def test_clean_pass_clears_stale_stash(sw_env):
 
 
 # ---------------------------------------------------------------------------
+# Corrupt phase_state — re-raise, never wipe the budgets
+# ---------------------------------------------------------------------------
+
+
+def _assert_quarantined_not_rewritten(tmp_path):
+    assert list(tmp_path.glob("phase_state.json.corrupt.*")), "corrupt file must be quarantined"
+    assert not (tmp_path / "phase_state.json").exists(), (
+        "no fresh phase_state.json may be written over the quarantined one"
+    )
+
+
+@pytest.mark.parametrize("payload", [
+    {"implementation_plan": ["a"], "tdd_test_structure": ["t"], "pass_criteria": [{"condition": "x"}]},
+    _SAMPLE,
+], ids=["clean_pass", "warning_present"])
+def test_corrupt_phase_state_raises(sw_env, payload):
+    """A corrupt phase_state at planner PASS must propagate read_phase_state's
+    quarantine error so the event loop halts and escalates. Swallowing it let
+    the PASS path's next read find no file and write a phase_state with the
+    retry and reset budgets gone."""
+    tmp_path, _ = sw_env
+    (tmp_path / "phase_state.json").write_text("{not json")
+    _write_planner(tmp_path, payload)
+    with pytest.raises(orch_mod.PhaseStateCorruptError):
+        _make_orchestrator()._emit_scope_warning("CORE-E1")
+    _assert_quarantined_not_rewritten(tmp_path)
+
+
+def test_non_dict_phase_state_still_swallowed(sw_env):
+    """Only the corruption error propagates. A parseable but non-dict
+    phase_state (TypeError on the merge) stays best-effort and never breaks
+    the PASS path."""
+    tmp_path, captured = sw_env
+    (tmp_path / "phase_state.json").write_text("[]")
+    _write_planner(tmp_path, _SAMPLE)
+    _make_orchestrator()._emit_scope_warning("CORE-E1")
+    assert len(captured) == 1
+
+
+# ---------------------------------------------------------------------------
 # Structural — call site on the planner-PASS path
 # ---------------------------------------------------------------------------
 

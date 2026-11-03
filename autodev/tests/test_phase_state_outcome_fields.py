@@ -90,6 +90,19 @@ def test_record_phase_outcome_writes_supplied_fields(bare_orch):
     assert ps.get("executor_retries") == 2
 
 
+def test_record_phase_outcome_corrupt_phase_state_raises(bare_orch):
+    """A corrupt phase_state must propagate the quarantine error so the event
+    loop halts and escalates. Swallowing it wrote back a phase_state holding
+    only the outcome fields, dropping the retry and reset budgets at the end of
+    every attempt."""
+    orch, tmp_path = bare_orch
+    (tmp_path / "phase_state.json").write_text("{not json")
+    with pytest.raises(orch_mod.PhaseStateCorruptError):
+        orch._record_phase_outcome(last_poll_reason="succeeded")
+    assert list(tmp_path.glob("phase_state.json.corrupt.*"))
+    assert not (tmp_path / "phase_state.json").exists()
+
+
 def test_record_phase_outcome_overwrites_prior_values(bare_orch):
     """Repeated calls must update the fields (last-write-wins), not
     accumulate or skip."""
