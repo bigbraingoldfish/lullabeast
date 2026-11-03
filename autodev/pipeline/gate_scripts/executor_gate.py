@@ -227,9 +227,12 @@ def _check_reachability_advisory(current_phase, executor_output, project_root):
         return {"summary": None, "not_applicable": None, "diagnostics": diagnostics}
     manifest = executor_output.get("file_manifest") or []
     reachable_norm = {os.path.normpath(p) for p in (result.reachable or set())}
+    source_exts = tuple(getattr(resolver, "source_extensions", None) or ())
     unreachable = [
         p for p in manifest
-        if isinstance(p, str) and os.path.normpath(p) not in reachable_norm
+        if isinstance(p, str)
+        and _is_reachability_candidate(p, source_exts)
+        and os.path.normpath(p) not in reachable_norm
     ]
     summary = None
     if unreachable:
@@ -245,6 +248,38 @@ def _check_reachability_advisory(current_phase, executor_output, project_root):
             ),
         }
     return {"summary": summary, "not_applicable": None, "diagnostics": diagnostics}
+
+
+_TEST_DIR_NAMES = {"tests", "test", "__tests__"}
+
+
+def _is_reachability_candidate(path, source_exts):
+    """True if ``path`` is a source file the active resolver walks.
+
+    The resolvers walk their own language's source files, so a README, a
+    stylesheet, or a ``.ts`` file under a Python entry is never reported
+    reachable, and flagging it reads as an orphan when nothing is wrong.
+    TypeScript declaration files (``*.d.ts``) are type-only and never
+    imported at run time. Test files are reached from the test runner, not
+    the entry point, so they are dropped too: anything under ``tests/``,
+    ``test/`` or ``__tests__/``, plus ``test_*``, ``*_test.*``,
+    ``conftest.py``, ``*.test.*`` and ``*.spec.*``. Matching ignores case.
+    An empty ``source_exts`` (a resolver that declares none) keeps every
+    path that is not a test file."""
+    parts = path.replace("\\", "/").lower().split("/")
+    name = parts[-1]
+    if source_exts and not name.endswith(tuple(e.lower() for e in source_exts)):
+        return False
+    if name.endswith(".d.ts"):
+        return False
+    if any(part in _TEST_DIR_NAMES for part in parts[:-1]):
+        return False
+    stem = name.split(".", 1)[0]
+    if name.startswith("test_") or stem.endswith("_test") or name == "conftest.py":
+        return False
+    if ".test." in name or ".spec." in name:
+        return False
+    return True
 
 
 def _load_current_phase():

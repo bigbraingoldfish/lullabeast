@@ -36,6 +36,7 @@ class JsTsResolver:
     parsing (advisory-only; misses dynamic patterns)."""
 
     language = "javascript"
+    source_extensions = _EXTENSIONS
 
     def resolve(self, project_root, entry_point_command):
         entry_rel, derived_from_pkg = self._derive_entry(project_root, entry_point_command)

@@ -32,8 +32,13 @@ class ReachabilityResult:
 
 
 class Resolver(Protocol):
-    """Protocol satisfied by PythonResolver and JsTsResolver."""
+    """Protocol satisfied by PythonResolver and JsTsResolver.
+
+    ``source_extensions`` lists the source-file suffixes the resolver walks;
+    the executor gate only compares manifest files with those suffixes, so a
+    README or stylesheet is never flagged."""
     language: str
+    source_extensions: tuple[str, ...]
 
     def resolve(self, project_root: str, entry_point_command: str) -> ReachabilityResult: ...
 

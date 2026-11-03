@@ -124,6 +124,50 @@ def test_python_dash_m_entry_derivation(tmp_path):
     assert "a.py" in reachable
 
 
+def test_package_inits_reached_through_dotted_import(tmp_path):
+    """Importing pkg.sub.mod runs pkg/__init__.py and pkg/sub/__init__.py
+    first, so both are reachable (and walked: an import there is followed)."""
+    root = str(tmp_path)
+    _write(os.path.join(root, "main.py"), "import pkg.sub.mod\n")
+    _write(os.path.join(root, "pkg", "__init__.py"), "from a import x\n")
+    _write(os.path.join(root, "pkg", "sub", "__init__.py"), "")
+    _write(os.path.join(root, "pkg", "sub", "mod.py"), "")
+    _write(os.path.join(root, "a.py"), "")
+    reachable = _norm(PythonResolver().resolve(root, "python main.py").reachable, root)
+    for rel in ("pkg/__init__.py", "pkg/sub/__init__.py", "pkg/sub/mod.py", "a.py"):
+        assert os.path.normpath(rel) in reachable, rel
+
+
+def test_from_package_import_submodule(tmp_path):
+    """`from pkg import mod` and `from . import helpers` name submodules:
+    each matching file is reachable; an attribute name with no file is
+    skipped silently."""
+    root = str(tmp_path)
+    _write(os.path.join(root, "main.py"), "from pkg import mod, CONSTANT\n")
+    _write(os.path.join(root, "pkg", "__init__.py"), "CONSTANT = 1\n")
+    _write(os.path.join(root, "pkg", "mod.py"), "from . import helpers\n")
+    _write(os.path.join(root, "pkg", "helpers.py"), "")
+    result = PythonResolver().resolve(root, "python main.py")
+    reachable = _norm(result.reachable, root)
+    assert os.path.normpath("pkg/mod.py") in reachable
+    assert os.path.normpath("pkg/helpers.py") in reachable
+    assert result.limitations == []
+
+
+def test_module_entry_reaches_its_package_init(tmp_path):
+    """`python -m pkg.mod` imports pkg first, so pkg/__init__.py is reachable;
+    a script entry (`python tools/run.py`) does not run tools/__init__.py."""
+    root = str(tmp_path)
+    _write(os.path.join(root, "pkg", "__init__.py"), "")
+    _write(os.path.join(root, "pkg", "mod.py"), "")
+    _write(os.path.join(root, "tools", "__init__.py"), "")
+    _write(os.path.join(root, "tools", "run.py"), "")
+    module_reach = _norm(PythonResolver().resolve(root, "python -m pkg.mod").reachable, root)
+    assert os.path.normpath("pkg/__init__.py") in module_reach
+    script_reach = _norm(PythonResolver().resolve(root, "python tools/run.py").reachable, root)
+    assert os.path.normpath("tools/__init__.py") not in script_reach
+
+
 def test_missing_entry_file_returns_no_entry_resolved(tmp_path):
     """If the entry script does not exist on disk, the resolver returns
     entry_resolved=None and an empty reachable set. The gate helper then

@@ -20,6 +20,7 @@ class PythonResolver:
     """Static import-graph walk from a Python entry script."""
 
     language = "python"
+    source_extensions = (".py",)
 
     def resolve(self, project_root, entry_point_command):
         entry_rel = self._derive_entry(project_root, entry_point_command)
@@ -30,6 +31,11 @@ class PythonResolver:
         seen = set(reachable)
         queue = [entry_rel]
         limitations = []
+        if self._entry_is_module(entry_point_command):
+            # `python -m pkg.mod` / `uvicorn pkg.mod:app` import the entry as a
+            # module, so its packages' __init__.py files run first.
+            dotted = os.path.splitext(os.path.normpath(entry_rel))[0].replace(os.sep, ".")
+            self._enqueue_package_inits(dotted, project_root, reachable, seen, queue)
 
         while queue:
             current_rel = queue.pop(0)
@@ -60,6 +66,16 @@ class PythonResolver:
                             target, current_rel, project_root,
                             reachable, seen, queue,
                         )
+                    # `from pkg import mod` / `from . import mod` may name a
+                    # submodule rather than an attribute: follow it if a file
+                    # matches (silent skip otherwise, as for any import).
+                    base = self._from_import_base(node, current_rel)
+                    for alias in node.names:
+                        if alias.name != "*":
+                            self._enqueue_module(
+                                ".".join(base + [alias.name]), current_rel, project_root,
+                                reachable, seen, queue,
+                            )
                 elif isinstance(node, ast.Call):
                     if self._is_dynamic_import_call(node):
                         limitations.append(
@@ -119,6 +135,21 @@ class PythonResolver:
             return None
         return None
 
+    def _entry_is_module(self, command):
+        """True when ``_derive_entry`` resolved the entry from a dotted module
+        name (``-m``, uvicorn / gunicorn / hypercorn, ``flask --app``) rather
+        than a script path."""
+        try:
+            tokens = shlex.split((command or "").strip())
+        except ValueError:
+            tokens = (command or "").split()
+        if not tokens:
+            return False
+        head = tokens[0]
+        if head.startswith("python"):
+            return "-m" in tokens
+        return head in ("uvicorn", "gunicorn", "hypercorn", "flask")
+
     def _module_target_to_path(self, dotted, project_root):
         """Try ``<project_root>/a/b/c.py`` then ``<project_root>/a/b/c/__init__.py``.
         Return the workspace-relative path or None."""
@@ -133,13 +164,14 @@ class PythonResolver:
 
     # ---- import resolution ------------------------------------------------
 
-    def _resolve_from_import(self, node, current_rel):
+    def _from_import_base(self, node, current_rel):
         """For ``from pkg.mod import name`` / ``from .mod import name``,
-        return the dotted module name resolved against ``current_rel``'s
-        package."""
+        return the dotted module name as a list of parts, resolved against
+        ``current_rel``'s package. Empty for ``from . import name`` at the
+        project root."""
         if node.level == 0:
-            # Absolute import: from pkg.mod import name → "pkg.mod"
-            return node.module
+            # Absolute import: from pkg.mod import name → ["pkg", "mod"]
+            return node.module.split(".") if node.module else []
         # Relative import: convert to absolute via current_rel's package path.
         current_pkg = os.path.dirname(current_rel).replace(os.sep, ".")
         if current_pkg:
@@ -150,20 +182,38 @@ class PythonResolver:
         if node.level - 1 > 0:
             parts = parts[: -(node.level - 1)] if (node.level - 1) <= len(parts) else []
         if node.module:
-            parts.append(node.module)
-        if not parts:
-            return None
-        return ".".join(parts)
+            parts.extend(node.module.split("."))
+        return parts
+
+    def _resolve_from_import(self, node, current_rel):
+        """The module a ``from ... import`` statement imports from, dotted, or
+        None when it is the project root itself."""
+        parts = self._from_import_base(node, current_rel)
+        return ".".join(parts) if parts else None
 
     def _enqueue_module(self, dotted, current_rel, project_root, reachable, seen, queue):
         """Resolve a dotted module to a file under ``project_root`` and enqueue
-        it for BFS. Silent skip when no on-disk file matches (stdlib /
-        third-party / typo — we cannot distinguish without a Python interpreter
-        in the loop, and the noise floor of warning on every external import
-        would be intolerable)."""
+        it for BFS, along with the ``__init__.py`` of every package above it
+        (importing ``pkg.sub.mod`` runs ``pkg/__init__.py`` and
+        ``pkg/sub/__init__.py`` first). Silent skip when no on-disk file
+        matches (stdlib / third-party / typo — we cannot distinguish without a
+        Python interpreter in the loop, and the noise floor of warning on every
+        external import would be intolerable)."""
         target_rel = self._module_target_to_path(dotted, project_root)
         if target_rel is None:
             return
+        self._enqueue_package_inits(dotted, project_root, reachable, seen, queue)
+        self._enqueue_path(target_rel, reachable, seen, queue)
+
+    def _enqueue_package_inits(self, dotted, project_root, reachable, seen, queue):
+        """Enqueue ``__init__.py`` for each package strictly above ``dotted``."""
+        parts = dotted.split(".")
+        for i in range(1, len(parts)):
+            init_rel = os.path.join(*parts[:i], "__init__.py")
+            if os.path.isfile(os.path.join(project_root, init_rel)):
+                self._enqueue_path(init_rel, reachable, seen, queue)
+
+    def _enqueue_path(self, target_rel, reachable, seen, queue):
         norm = os.path.normpath(target_rel)
         if norm in seen:
             return

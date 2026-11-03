@@ -88,7 +88,8 @@ def _write_planner_output(workspace, tdd_paths=None):
 
 def _stage_python_workspace(workspace, *, manifest, files):
     """files is {rel_path: body}. Writes each file under workspace and stages
-    them in git so the deletion check sees a clean diff."""
+    them in git so the deletion check sees a clean diff. Language-agnostic
+    despite the name: the JS/TS cases use it too."""
     for rel, body in files.items():
         abs_p = os.path.join(workspace, rel)
         os.makedirs(os.path.dirname(abs_p), exist_ok=True)
@@ -351,6 +352,134 @@ def test_unsupported_language_emits_no_resolver_diagnostic(tmp_workspace):
         advisory = json.load(f)
     diagnostics = advisory.get("reachability_diagnostics") or []
     assert any(d.get("kind") == "no_resolver" for d in diagnostics)
+
+
+# ---------------------------------------------------------------------------
+# Manifest filter — only files the active resolver could ever reach
+# ---------------------------------------------------------------------------
+
+
+def _run_complete_phase(workspace, command, files):
+    """Stage a COMPLETE-R0 phase whose manifest is every key of ``files`` and
+    return the advisory summary (``None`` when no advisory file was written)."""
+    with _patch_workspace(workspace):
+        base = _git_init_with_base_commit(workspace)
+        _write_pipeline_state(workspace, base)
+        _write_current_phase(
+            workspace,
+            raw_id="COMPLETE-R0",
+            entry_point={"command": command, "ready_signal": "HTTP 200"},
+        )
+        _write_planner_output(workspace)
+        _stage_python_workspace(workspace, manifest=list(files), files=files)
+        _write_executor_output(workspace, file_manifest=list(files))
+
+        result = executor_gate_module.evaluate_executor()
+
+    assert result == "PASS"
+    advisory_path = os.path.join(workspace, "executor_advisory_detail.json")
+    if not os.path.exists(advisory_path):
+        return None
+    with open(advisory_path) as f:
+        return json.load(f).get("reachability_summary")
+
+
+def test_non_source_and_test_files_not_flagged(tmp_workspace):
+    """A Python resolver can never reach a README, a stylesheet or a test
+    file, so none of them may be reported as unreached."""
+    files = {
+        "main.py": "from a import x\n",
+        "a.py": "",
+        "README.md": "# App\n",
+        "static/style.css": "body {}\n",
+        "tests/test_main.py": "def test_x(): pass\n",
+        "test_a.py": "def test_a(): pass\n",
+        "a_test.py": "def test_b(): pass\n",
+        "conftest.py": "",
+    }
+    assert _run_complete_phase(tmp_workspace, "python main.py", files) is None
+
+
+def test_ts_file_under_python_entry_not_flagged(tmp_workspace):
+    """A .ts file is outside the Python resolver's extensions, so it is never
+    compared against a Python walk."""
+    files = {
+        "main.py": "",
+        "web/app.ts": "export const x = 1;\n",
+    }
+    assert _run_complete_phase(tmp_workspace, "python main.py", files) is None
+
+
+def test_real_orphan_still_flagged_alongside_filtered_files(tmp_workspace):
+    """The filter drops only what the resolver can't reach: a genuine Python
+    orphan is still the one file in the summary."""
+    files = {
+        "main.py": "from a import x\n",
+        "a.py": "",
+        "dead.py": "print('nothing imports me')\n",
+        "README.md": "# App\n",
+        "tests/test_main.py": "def test_x(): pass\n",
+    }
+    summary = _run_complete_phase(tmp_workspace, "python main.py", files)
+    assert summary is not None
+    assert summary["files"] == ["dead.py"]
+    assert summary["count"] == 1
+
+
+def test_package_init_and_submodule_not_flagged(tmp_workspace):
+    """Importing pkg.models runs pkg/__init__.py, and `from pkg import views`
+    imports pkg/views.py: neither is an orphan."""
+    files = {
+        "main.py": "from pkg.models import M\nfrom pkg import views\n",
+        "pkg/__init__.py": "",
+        "pkg/models.py": "M = 1\n",
+        "pkg/views.py": "",
+    }
+    assert _run_complete_phase(tmp_workspace, "python main.py", files) is None
+
+
+def test_js_test_and_spec_files_not_flagged(tmp_workspace):
+    """JS/TS test conventions (*.test.*, *.spec.*, __tests__/) are dropped; a
+    real JS orphan is still flagged."""
+    files = {
+        "index.js": "import { x } from './src/a.js';\n",
+        "src/a.js": "export const x = 1;\n",
+        "src/a.test.js": "test('x', () => {});\n",
+        "src/a.spec.ts": "test('x', () => {});\n",
+        "__tests__/b.js": "test('b', () => {});\n",
+        "src/styles.css": "body {}\n",
+        "src/types.d.ts": "export type T = number;\n",
+        "src/orphan.ts": "export const y = 2;\n",
+    }
+    summary = _run_complete_phase(tmp_workspace, "node index.js", files)
+    assert summary is not None
+    assert summary["files"] == ["src/orphan.ts"]
+
+
+@pytest.mark.parametrize("path, exts, expected", [
+    ("app/models.py", (".py",), True),
+    ("README.md", (".py",), False),
+    ("web/app.ts", (".py",), False),
+    ("tests/test_app.py", (".py",), False),
+    ("pkg/test/helpers.py", (".py",), False),
+    ("test_app.py", (".py",), False),
+    ("app_test.py", (".py",), False),
+    ("conftest.py", (".py",), False),
+    ("src/latest.py", (".py",), True),
+    ("src/contest.py", (".py",), True),
+    ("src/app.test.tsx", (".ts", ".tsx"), False),
+    ("src/app.spec.js", (".js",), False),
+    ("src/__tests__/app.js", (".js",), False),
+    ("src\\app.ts", (".ts",), True),
+    ("notes.txt", (), True),
+    ("src/types.d.ts", (".ts",), False),
+    ("Tests/x.py", (".py",), False),
+    ("Test_foo.py", (".py",), False),
+    ("MAIN.PY", (".py",), True),
+    ("pkg/__init__.py", (".py",), True),
+])
+def test_is_reachability_candidate(path, exts, expected):
+    assert executor_gate_module._is_reachability_candidate(path, exts) is expected
 
 
 # ---------------------------------------------------------------------------

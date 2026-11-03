@@ -13,6 +13,7 @@ This project follows [Semantic Versioning](https://semver.org/). Format follows 
 ### Fixed
 - **A corrupt phase state found mid-phase now halts the run and escalates, instead of carrying on with the phase's retry and reset budgets wiped.** The corrupt file is still quarantined for manual recovery.
 - **Launching on an existing repository no longer sweeps your uncommitted work into the init commit.** That commit now holds only the files Lullabeast wrote; your local edits, untracked files and staged changes stay as they were. A `.gitignore` you were already editing gets the pipeline entry appended but is left for you to commit. Each phase's commit still stages the whole working tree, so launch from a clean tree.
+- **The end-of-build reachability check no longer flags files it could never reach.** READMEs, stylesheets, test files, TypeScript declarations and files in a different language from the entry point are left out, and the Python check now counts a package's `__init__.py` and `from pkg import mod` submodules as reached. Files it still lists are worth a look. The check stays advisory and never fails a phase.
 
 ## [1.1.0] - 2026-07-21
 
