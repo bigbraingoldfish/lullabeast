@@ -20,15 +20,15 @@ placeholders; real values are generated at first boot and persisted under
 | `models.mode` | `"merge"` | Custom provider entries merge with OpenClaw's built-ins. |
 | `models.pricing.enabled` | `true` | Required for cost tracking (see "Cost tracking" below). |
 | `models.providers.openrouter` | standard endpoint, `openai-completions` API | The recommended provider path; the shipped defaults use it. |
-| `models.providers.openrouter.models[]` | 4 entries: `qwen/qwen3.6-27b`, `minimax/minimax-m3`, `moonshotai/kimi-k2.7-code`, `z-ai/glm-5.2` | The recommended, cheap, pipeline-capable set, each with a complete 4-field `cost` block so runs report real dollar costs. Three are multimodal because the reviewer does screenshot-based visual review; `z-ai/glm-5.2` is text-only (`input: ["text"]`) and backs the text-only planner/roadmap roles. Premium models (Claude via OpenRouter, etc.) work but are meter-it-yourself. |
+| `models.providers.openrouter.models[]` | 9 entries, each family's latest model plus its flash variant where OpenRouter lists one: `qwen/qwen3.8-27b`, `qwen/qwen3.8-flash`, `minimax/minimax-m3`, `minimax/minimax-m3.1-flash`, `moonshotai/kimi-k3.1-pro`, `z-ai/glm-5.3`, `z-ai/glm-5.3-flash`, `deepseek/deepseek-v4-pro-0813`, `deepseek/deepseek-v4.1-flash-1017` | The recommended, cheap, pipeline-capable set. Pricing (a complete 4-field `cost` block, so runs report real dollar costs), context window, max output and input modalities are copied from OpenRouter's public `/api/v1/models` (2026-11-03). The context window and max output are the serving provider's (`top_provider`), which can be smaller than the model's nominal window. Where OpenRouter lists a time-of-day discount, the entry carries the base price. `z-ai/glm-5.3` and `deepseek/deepseek-v4-pro-0813` are text-only; `z-ai/glm-5.3` backs the text-only planner/roadmap roles. The vision roles default to `moonshotai/kimi-k3.1-pro` (image input). Kimi has no flash variant on OpenRouter. Defaults never point at a flash variant. Premium models (Claude via OpenRouter, etc.) work but are meter-it-yourself. |
 | `agents.defaults.model` | `${PLANNER_MODEL}` | A safe fallback for any agent without an explicit model. |
-| `agents.defaults.models.*` | per-model params for the 4 shipped models | Sampling and cache-retention values validated in real pipeline runs. The minimax entry carries `require_parameters` provider routing (its `provider.ignore` pin was dropped; reconcile preserves live-only keys, so pre-existing volumes keep the old pin until re-rendered fresh). |
+| `agents.defaults.models.*` | `temperature: 0.6`, `top_p: 0.95` for `qwen/qwen3.8-27b` and `z-ai/glm-5.3` | Sampling values validated in real pipeline runs on their predecessors (Qwen3.6 27B, GLM 5.2), carried to the direct successors because OpenRouter lists `temperature` and `top_p` as supported for each. `moonshotai/kimi-k3.1-pro` gets no block: OpenRouter lists no `temperature` or `top_p` support for it. Flash variants, DeepSeek and MiniMax get no block either and run on provider defaults. MiniMax carries no provider routing pins: `require_parameters` left no tool-capable endpoint (404) and was dropped. Reconcile preserves live-only keys, so pre-existing volumes keep an old pin until re-rendered fresh. |
 | `agents.defaults.skipBootstrap` | `true` | Stops OpenClaw from seeding its own starter workspace files over the Lullabeast agent identity docs. |
 | `agents.defaults.compaction` | `safeguard` mode + the three `Always-Apply:` section names | Without the section names, the agents' standing rules are dropped from context on every compaction. |
 | `agents.defaults.heartbeat.every` | `"0m"` | Required: a non-zero heartbeat interrupts pipeline runs mid-phase. |
 | `agents.defaults.maxConcurrent` | `3` | The pipeline runs one agent at a time; headroom covers Ideas flows running beside a phase. |
 | `agents.defaults.subagents.maxConcurrent` | `1` | Pipeline agents do not rely on subagent fan-out; an uncapped fan-out only multiplies spend. |
-| `agents.list[planner]` | `${PLANNER_MODEL}`, tools `read, write, exec` | Explicit `exec` is load-bearing (a past OpenClaw release stripped it and broke planning). The planner default is `z-ai/glm-5.2` (text-only; planning needs no vision). `minimax/minimax-m3` and `kimi-k2.7-code` stay shipped, priced, and selectable via `PLANNER_MODEL` — `minimax/minimax-m3` was dropped as the planner default after a first-run test with a fresh OpenRouter key hit "404 No endpoints found" (its `require_parameters` routing left no tool-capable endpoint). |
+| `agents.list[planner]` | `${PLANNER_MODEL}`, tools `read, write, exec` | Explicit `exec` is load-bearing (a past OpenClaw release stripped it and broke planning). The planner default is `z-ai/glm-5.3` (text-only; planning needs no vision). Every other shipped model stays priced and selectable via `PLANNER_MODEL` — `minimax/minimax-m3` was dropped as the planner default after a first-run test with a fresh OpenRouter key hit "404 No endpoints found" (its `require_parameters` routing left no tool-capable endpoint). |
 | `agents.list[executor]` | `${EXECUTOR_MODEL}`, tools `read, write, edit, exec, process, browser` | Must be multimodal: it captures screenshots on UI/INT phases. |
 | `agents.list[reviewer]` | `${REVIEWER_MODEL}`, tools `read, write, exec, process, browser` | Must be multimodal: it performs visual review. |
 | `agents.list[prd-creator]` | `${PRD_MODEL}`, read/write only | Drafting agent; needs no execution surface. |
@@ -77,7 +77,7 @@ in these areas survives upgrades (see the customization contract in the
 
 ## Cost tracking
 
-The template ships `models.pricing.enabled: true` plus the 4 recommended
+The template ships `models.pricing.enabled: true` plus the 9 recommended
 OpenRouter model entries, each with a complete pricing block. **Field names
 verified against the pinned OpenClaw version (2026.6.11):** a model entry
 carries `cost: {input, output, cacheRead, cacheWrite}` in USD per million
@@ -95,12 +95,12 @@ One knob per agent role; defaults are encoded in
 
 | Env var | Default | Used by |
 |---|---|---|
-| `PLANNER_MODEL` | `openrouter/z-ai/glm-5.2` | planner, `agents.defaults.model` (text-only) |
-| `EXECUTOR_MODEL` | `openrouter/moonshotai/kimi-k2.7-code` | executor (multimodal, required) |
-| `REVIEWER_MODEL` | `openrouter/moonshotai/kimi-k2.7-code` | reviewer (multimodal, required) |
-| `PRD_MODEL` | `openrouter/moonshotai/kimi-k2.7-code` | prd-creator |
-| `ROADMAP_MODEL` | `openrouter/z-ai/glm-5.2` | roadmap-converter |
-| `ESCALATION_MODEL` | `openrouter/qwen/qwen3.6-27b` | escalation (notify-only) |
+| `PLANNER_MODEL` | `openrouter/z-ai/glm-5.3` | planner, `agents.defaults.model` (text-only) |
+| `EXECUTOR_MODEL` | `openrouter/moonshotai/kimi-k3.1-pro` | executor (multimodal, required) |
+| `REVIEWER_MODEL` | `openrouter/moonshotai/kimi-k3.1-pro` | reviewer (multimodal, required) |
+| `PRD_MODEL` | `openrouter/moonshotai/kimi-k3.1-pro` | prd-creator |
+| `ROADMAP_MODEL` | `openrouter/z-ai/glm-5.3` | roadmap-converter |
+| `ESCALATION_MODEL` | `openrouter/qwen/qwen3.8-27b` | escalation (notify-only) |
 
 `HOOKS_TOKEN` and `GATEWAY_TOKEN` are the two required render-time secrets; the
 container entrypoint generates them on first boot and persists them under

@@ -632,7 +632,7 @@ does not provide them.
 ## Cost tracking and the $0 case
 
 The golden config ships `models.pricing.enabled: true` and complete pricing
-blocks for its 4 recommended OpenRouter models, so runs on the shipped
+blocks for its 9 recommended OpenRouter models, so runs on the shipped
 defaults report real dollar costs in the dashboard. Every other provider or
 model is meter-it-yourself: **if a run's cost shows $0, OpenClaw has no
 pricing for the model that ran**, not that the run was free. To add pricing

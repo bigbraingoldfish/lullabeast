@@ -4,6 +4,11 @@ This project follows [Semantic Versioning](https://semver.org/). Format follows 
 
 > **Pre-1.0 development history.** Lullabeast was built across many TDD phases, each recorded in detail. The full, verbose engineering log — every fix, refactor, and decision, with internal phase tags (`P1 Stage *`, `T6.*`) and incident IDs — lives in **[`docs/archive/CHANGELOG-full.md`](docs/archive/CHANGELOG-full.md)**. That archive remains the system-of-record for the pre-release period. From `0.1.0` onward, this file carries concise, user-facing release notes.
 
+## [Unreleased]
+
+### Changed
+- **The OpenRouter model picker moves to each family's latest models and adds DeepSeek.** The template now ships Qwen3.8 27B, MiniMax M3, Kimi K3.1 Pro, GLM 5.3 and DeepSeek V4 Pro 0813, plus the flash variants OpenRouter lists (Qwen3.8 Flash, MiniMax M3.1 Flash, GLM 5.3 Flash, DeepSeek V4.1 Flash 1017). Every entry carries OpenRouter's listed pricing, context window, max output and input modalities. Default roles move within their family: planner and roadmap-converter to GLM 5.3, executor, reviewer and prd-creator to Kimi K3.1 Pro, escalation to Qwen3.8 27B. That changes default per-token prices: Kimi K3.1 Pro lists $2 in and $10 out per million tokens (Kimi K2.7 Code was $0.75 and $3.50 in the template), GLM 5.3 $0.08 and $3.60 (GLM 5.2 was $0.95 and $3), Qwen3.8 27B $0.15 and $1.875. On an existing install, roles you set in `.env` or from the dashboard keep their model, and unset roles move to the new defaults on the next boot. The previous picker entries stay in its config with their old template prices; correct them from the dashboard's model settings if you keep using one.
+
 ## [1.1.0] - 2026-07-21
 
 ### Added

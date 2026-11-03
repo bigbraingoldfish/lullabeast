@@ -215,32 +215,99 @@ class TestModelPricing:
                 f"{var} default {mid} must accept image input"
             )
 
-    def test_shipped_set_is_three_or_four_models(self):
-        assert 3 <= len(self._openrouter_models()) <= 4
+    def test_every_shipped_model_is_fully_specified(self):
+        # Every picker entry is selectable from the dashboard, so each must be
+        # complete, not only the defaults: a full pricing block, a context
+        # window, a max output and input modalities. This checks shape and sign;
+        # the values come from OpenRouter's public model list.
+        for mid, m in self._openrouter_models().items():
+            cost = m["cost"]
+            for field in PRICING_FIELDS:
+                v = cost.get(field)
+                assert isinstance(v, (int, float)) and not isinstance(v, bool), (
+                    f"{mid}: cost.{field} missing or not numeric"
+                )
+                assert v >= 0, f"{mid}: cost.{field} negative"
+            assert cost["input"] > 0 and cost["output"] > 0, mid
+            for field in ("contextWindow", "maxTokens"):
+                assert isinstance(m.get(field), int) and m[field] > 0, f"{mid}: {field}"
+            assert "text" in m["input"], mid
+
+    def test_defaults_stay_in_family_and_skip_flash_variants(self):
+        # X, 2026-11-03: a default role moves to the latest model of the same
+        # family, never to a flash variant or another family.
+        families = {
+            "PLANNER_MODEL": "z-ai",
+            "ROADMAP_MODEL": "z-ai",
+            "EXECUTOR_MODEL": "moonshotai",
+            "REVIEWER_MODEL": "moonshotai",
+            "PRD_MODEL": "moonshotai",
+            "ESCALATION_MODEL": "qwen",
+        }
+        assert set(families) == set(TEMPLATE_MODEL_DEFAULTS)
+        for var, ref in TEMPLATE_MODEL_DEFAULTS.items():
+            assert ref.startswith(f"openrouter/{families[var]}/"), f"{var}: {ref}"
+            assert "flash" not in ref, f"{var} default {ref} is a flash variant"
+
+    def test_shipped_set_is_the_nine_model_picker(self):
+        # X, 2026-11-03: every family in the picker (Qwen, MiniMax, Kimi, GLM,
+        # DeepSeek) ships its latest model plus its flash variant where
+        # OpenRouter lists one. Kimi has no flash variant, so 5 + 4 = 9. A
+        # change here should be a deliberate picker decision, not drift.
+        models = self._openrouter_models()
+        assert len(models) == 9
+        families = {mid.split("/", 1)[0] for mid in models}
+        assert families == {"qwen", "minimax", "moonshotai", "z-ai", "deepseek"}
+        flash = sorted(mid for mid in models if "flash" in mid)
+        assert [mid.split("/", 1)[0] for mid in flash] == [
+            "deepseek", "minimax", "qwen", "z-ai"
+        ]
 
 
 class TestMinimaxRouting:
-    def test_minimax_entries_carry_no_provider_pins(self):
-        # MiniMax M3 must not pin provider routing. `require_parameters: true`
+    @pytest.mark.parametrize("mid", ["minimax/minimax-m3", "minimax/minimax-m3.1-flash"])
+    def test_minimax_entries_carry_no_provider_pins(self, mid):
+        # MiniMax models must not pin provider routing. `require_parameters: true`
         # made OpenRouter reject with 404 model_not_found whenever OpenClaw's
         # emitted param set had no single minimax-m3 endpoint supporting all of
         # it, so the agent silently never replied. Dropped from both template
-        # locations; neither require_parameters nor ignore may return.
+        # locations; neither require_parameters nor ignore may return, and the
+        # M3.1 Flash entry follows the same rule.
         data = _template()
         entry = next(
             m
             for m in data["models"]["providers"]["openrouter"]["models"]
-            if m["id"] == "minimax/minimax-m3"
+            if m["id"] == mid
         )
         entry_provider = entry.get("params", {}).get("provider", {})
         assert "ignore" not in entry_provider
         assert "require_parameters" not in entry_provider
-        defaults = data["agents"]["defaults"]["models"].get(
-            "openrouter/minimax/minimax-m3", {}
-        )
+        defaults = data["agents"]["defaults"]["models"].get(f"openrouter/{mid}", {})
         defaults_provider = defaults.get("params", {}).get("provider", {})
         assert "ignore" not in defaults_provider
         assert "require_parameters" not in defaults_provider
+
+
+class TestSamplingParams:
+    def test_params_blocks_only_on_validated_lines(self):
+        # Sampling blocks carry over only to the direct successors of entries
+        # that had one and only where OpenRouter lists temperature and top_p as
+        # supported: Qwen3.8 27B and GLM 5.3. Flash variants, DeepSeek and
+        # MiniMax run on provider defaults.
+        defaults = _template()["agents"]["defaults"]["models"]
+        assert set(defaults) == {
+            "openrouter/qwen/qwen3.8-27b",
+            "openrouter/z-ai/glm-5.3",
+        }
+        for ref, block in defaults.items():
+            assert block == {"params": {"temperature": 0.6, "top_p": 0.95}}, ref
+
+    def test_kimi_k3_1_pro_has_no_sampling_params(self):
+        # OpenRouter lists no temperature/top_p support for kimi-k3.1-pro, so it
+        # gets no `agents.defaults.models` params block (as X's July Kimi K3
+        # edit did for K3 when it was in the same position).
+        defaults = _template()["agents"]["defaults"]["models"]
+        assert "openrouter/moonshotai/kimi-k3.1-pro" not in defaults
 
 
 # ── no secret-shaped values ──────────────────────────────────────────────────
@@ -458,7 +525,7 @@ class TestDoctorAgainstRenderedTemplate:
     ):
         # A legitimate dashboard edit (the overlay) must not read as drift.
         monkeypatch.setenv("OWNED_OPENCLAW", "1")
-        ref = "openrouter/moonshotai/kimi-k2.7-code"
+        ref = "openrouter/moonshotai/kimi-k3.1-pro"
         overrides = {ref: {"cost": {"input": 0.9}, "contextWindow": 131_072}}
         overlay = tmp_path / "model-overrides.json"
         overlay.write_text(json.dumps({"models": overrides}), encoding="utf-8")
@@ -476,7 +543,7 @@ class TestDoctorAgainstRenderedTemplate:
         # The overlay owns contextWindow here, not cost; a cost drift is still
         # caught (the whole key category is not blanket-excluded).
         monkeypatch.setenv("OWNED_OPENCLAW", "1")
-        ref = "openrouter/moonshotai/kimi-k2.7-code"
+        ref = "openrouter/moonshotai/kimi-k3.1-pro"
         overrides = {ref: {"contextWindow": 131_072}}
         overlay = tmp_path / "model-overrides.json"
         overlay.write_text(json.dumps({"models": overrides}), encoding="utf-8")
@@ -486,7 +553,7 @@ class TestDoctorAgainstRenderedTemplate:
         kimi = next(
             m
             for m in live["models"]["providers"]["openrouter"]["models"]
-            if m["id"] == "moonshotai/kimi-k2.7-code"
+            if m["id"] == "moonshotai/kimi-k3.1-pro"
         )
         kimi["cost"]["input"] = 999.0
         with open(live_path, "w") as f:

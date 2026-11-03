@@ -345,8 +345,8 @@ def _oc_root(tmp_path: Path) -> str:
                     "providers": {
                         "openrouter": {
                             "models": [
-                                {"id": "moonshotai/kimi-k2.7-code", "input": ["text", "image"]},
-                                {"id": "z-ai/glm-5.2", "input": ["text"]},
+                                {"id": "moonshotai/kimi-k3.1-pro", "input": ["text", "image"]},
+                                {"id": "z-ai/glm-5.3", "input": ["text"]},
                             ]
                         }
                     }
@@ -387,8 +387,8 @@ class TestProviderKeyRoleCustomization:
                 "provider": "openrouter",
                 "key": "abc123456",
                 "roles": {
-                    "planner": "openrouter/z-ai/glm-5.2",
-                    "executor": "openrouter/moonshotai/kimi-k2.7-code",
+                    "planner": "openrouter/z-ai/glm-5.3",
+                    "executor": "openrouter/moonshotai/kimi-k3.1-pro",
                 },
             },
         )
@@ -396,8 +396,8 @@ class TestProviderKeyRoleCustomization:
         assert r.json() == {"ok": True, "restarting": True}
         lines = Path(cfg["provider_key_path"]).read_text().splitlines()
         assert lines[0] == "OPENROUTER_API_KEY=abc123456"
-        assert "PLANNER_MODEL=openrouter/z-ai/glm-5.2" in lines
-        assert "EXECUTOR_MODEL=openrouter/moonshotai/kimi-k2.7-code" in lines
+        assert "PLANNER_MODEL=openrouter/z-ai/glm-5.3" in lines
+        assert "EXECUTOR_MODEL=openrouter/moonshotai/kimi-k3.1-pro" in lines
         # Only the key and the two changed knobs: partial map, partial write.
         assert len(lines) == 3
 
@@ -418,7 +418,7 @@ class TestProviderKeyRoleCustomization:
             {
                 "provider": "openrouter",
                 "key": "abc123456",
-                "roles": {"conductor": "openrouter/z-ai/glm-5.2"},
+                "roles": {"conductor": "openrouter/z-ai/glm-5.3"},
             },
         )
         assert r.status_code == 400
@@ -449,7 +449,7 @@ class TestProviderKeyRoleCustomization:
             {
                 "provider": "openrouter",
                 "key": "abc123456",
-                "roles": {role: "openrouter/z-ai/glm-5.2"},
+                "roles": {role: "openrouter/z-ai/glm-5.3"},
             },
         )
         assert r.status_code == 400
@@ -466,7 +466,7 @@ class TestProviderKeyRoleCustomization:
             {
                 "provider": "openrouter",
                 "key": "abc123456",
-                "roles": {"planner": "openrouter/z-ai/glm-5.2"},
+                "roles": {"planner": "openrouter/z-ai/glm-5.3"},
             },
         )
         assert r.status_code == 503
@@ -499,7 +499,7 @@ class TestProviderKeyProperties:
                 "provider": "openrouter",
                 "key": "abc123456",
                 "properties": {
-                    "openrouter/z-ai/glm-5.2": {
+                    "openrouter/z-ai/glm-5.3": {
                         "contextWindow": 200000,
                         "cost": {"input": 0.3},
                     }
@@ -508,7 +508,7 @@ class TestProviderKeyProperties:
         )
         assert r.status_code == 200
         overlay = json.loads(Path(cfg["model_overrides_path"]).read_text())
-        assert overlay["models"]["openrouter/z-ai/glm-5.2"]["contextWindow"] == 200000
+        assert overlay["models"]["openrouter/z-ai/glm-5.3"]["contextWindow"] == 200000
         assert "OPENROUTER_API_KEY=abc123456" in Path(cfg["provider_key_path"]).read_text()
 
     def test_properties_must_be_an_object(self, tmp_path):
@@ -540,7 +540,7 @@ class TestProviderKeyProperties:
             {
                 "provider": "openrouter",
                 "key": "abc123456",
-                "properties": {"openrouter/z-ai/glm-5.2": {"contextWindow": -5}},
+                "properties": {"openrouter/z-ai/glm-5.3": {"contextWindow": -5}},
             },
         )
         assert r.status_code == 400
@@ -556,7 +556,7 @@ class TestProviderKeyProperties:
             {
                 "provider": "openrouter",
                 "key": "abc123456",
-                "properties": {"openrouter/moonshotai/kimi-k2.7-code": {"input": ["text"]}},
+                "properties": {"openrouter/moonshotai/kimi-k3.1-pro": {"input": ["text"]}},
             },
         )
         assert r.status_code == 400
@@ -571,7 +571,7 @@ class TestProviderKeyProperties:
             {
                 "provider": "openrouter",
                 "key": "abc123456",
-                "properties": {"openrouter/z-ai/glm-5.2": {"contextWindow": 1000}},
+                "properties": {"openrouter/z-ai/glm-5.3": {"contextWindow": 1000}},
             },
         )
         assert r.status_code == 409

@@ -26,7 +26,7 @@ def test_accepts_agents_defaults_without_list(tmp_path):
             "agents": {
                 "defaults": {
                     "model": {"primary": "openrouter/other/model"},
-                    "models": {"openrouter/moonshotai/kimi-k2.7-code": {}},
+                    "models": {"openrouter/moonshotai/kimi-k3.1-pro": {}},
                 }
             },
             "hooks": {"token": "x"},
@@ -47,7 +47,7 @@ def test_accepts_agents_defaults_without_list(tmp_path):
         assert aid in ids
     rc = next(e for e in data["agents"]["list"] if e["id"] == "roadmap-converter")
     assert rc["workspace"] == os.path.join(root, "workspace-roadmap-converter")
-    assert rc["model"]["primary"] == "openrouter/moonshotai/kimi-k2.7-code"
+    assert rc["model"]["primary"] == "openrouter/moonshotai/kimi-k3.1-pro"
     hooks = data.get("hooks", {}).get("allowedAgentIds", [])
     for aid in AUTODEV_AGENT_IDS:
         assert aid in hooks
@@ -87,7 +87,7 @@ def test_idempotent_already_registered(tmp_path):
     oc = tmp_path / "openclaw.json"
     root = str(tmp_path / "ocroot")
     os.makedirs(root, exist_ok=True)
-    m = {"primary": "openrouter/moonshotai/kimi-k2.7-code", "fallbacks": []}
+    m = {"primary": "openrouter/moonshotai/kimi-k3.1-pro", "fallbacks": []}
     esc_tools = {
         "allow": ["read", "write"],
         "deny": ["edit", "apply_patch", "exec", "process", "browser"],
@@ -126,7 +126,7 @@ def test_adds_hooks_allowlist_if_missing(tmp_path):
                     {
                         "id": "roadmap-converter",
                         "workspace": os.path.join(root, "workspace-roadmap-converter"),
-                        "model": {"primary": "openrouter/moonshotai/kimi-k2.7-code", "fallbacks": []},
+                        "model": {"primary": "openrouter/moonshotai/kimi-k3.1-pro", "fallbacks": []},
                     }
                 ]
             },
@@ -156,7 +156,7 @@ def test_missing_prd_creator_uses_openrouter_fallback_when_configured(tmp_path):
     assert register_roadmap_converter(str(oc), root, dry_run=False, stderr=err) == "registered"
     data = json.loads(oc.read_text())
     rc = next(e for e in data["agents"]["list"] if e["id"] == "roadmap-converter")
-    assert rc["model"]["primary"] == "openrouter/moonshotai/kimi-k2.7-code"
+    assert rc["model"]["primary"] == "openrouter/moonshotai/kimi-k3.1-pro"
     assert "openrouter" in err.getvalue().lower() or "kimi" in err.getvalue().lower()
 
 

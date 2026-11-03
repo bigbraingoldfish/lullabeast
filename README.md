@@ -111,7 +111,7 @@ Lullabeast is model-agnostic. OpenClaw owns all model configuration, so you choo
 
 | Mode | What runs the agents | Trade-off |
 |---|---|---|
-| **Budget cloud** (best results so far) | Open-weight multi-modal models via your OpenRouter key (e.g. MiniMax, GLM, Kimi, Qwen) | Cheap per token; your key, your provider |
+| **Budget cloud** (best results so far) | Open-weight multi-modal models via your OpenRouter key (e.g. MiniMax, GLM, Kimi, Qwen, DeepSeek) | Cheap per token; your key, your provider |
 | **Fully local** | Validated on a single RTX 4090 (48GB, modded) with `unsloth/Qwen3.6-27B-MTP-GGUF` & `llamacpp/Qwen3.6-27B` (both q8_0); [wiring guide](deploy/README.md#local-models-on-the-host) | No cloud in the loop; front-end (UI) phases are the weak spot, with the most failures and retries |
 | **Hybrid** | Local for **escalation + executor** (where most of the work, and the cost savings, happen), cloud for **planner and/or reviewer** (cheap to build a strong foundation and review thoroughly) | Often the best cost/quality balance; still being tuned |
 

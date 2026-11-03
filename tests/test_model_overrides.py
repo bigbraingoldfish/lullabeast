@@ -255,7 +255,7 @@ class TestApply:
             )
         template = json.loads(rendered)
         overrides = {
-            "openrouter/moonshotai/kimi-k2.7-code": {
+            "openrouter/z-ai/glm-5.3": {
                 "cost": {"input": 0.9},
                 "contextWindow": 131_072,
                 "params": {"temperature": 0.3},
@@ -265,22 +265,22 @@ class TestApply:
         live["meta"] = {"runtime": "bookkeeping"}
 
         reconciled = tpl.reconcile_config_to_template(template, live)
-        kimi = next(
+        glm = next(
             m
             for m in reconciled["models"]["providers"]["openrouter"]["models"]
-            if m["id"] == "moonshotai/kimi-k2.7-code"
+            if m["id"] == "z-ai/glm-5.3"
         )
-        assert kimi["cost"]["input"] == 0.75, "reconcile must revert the raw edit"
+        assert glm["cost"]["input"] == 0.08, "reconcile must revert the raw edit"
 
         final = apply_model_overrides(reconciled, overrides)
-        kimi = next(
+        glm = next(
             m
             for m in final["models"]["providers"]["openrouter"]["models"]
-            if m["id"] == "moonshotai/kimi-k2.7-code"
+            if m["id"] == "z-ai/glm-5.3"
         )
-        assert kimi["cost"]["input"] == 0.9
-        assert kimi["contextWindow"] == 131_072
-        params = final["agents"]["defaults"]["models"]["openrouter/moonshotai/kimi-k2.7-code"]["params"]
+        assert glm["cost"]["input"] == 0.9
+        assert glm["contextWindow"] == 131_072
+        params = final["agents"]["defaults"]["models"]["openrouter/z-ai/glm-5.3"]["params"]
         assert params["temperature"] == 0.3
         assert params["top_p"] == 0.95, "unedited params keep template values"
         assert final["meta"] == {"runtime": "bookkeeping"}, "live-only keys survive"
@@ -292,7 +292,7 @@ class TestApply:
         # assertion is what let the crash-loop ship.
         raw = tpl.load_template(str(REPO))
         overrides = {
-            "openrouter/moonshotai/kimi-k2.7-code": {
+            "openrouter/moonshotai/kimi-k3.1-pro": {
                 "cost": {"input": 0.9},
                 "contextWindow": 131_072,
             }

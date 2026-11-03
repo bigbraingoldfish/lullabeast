@@ -19,7 +19,7 @@ Warnings go to stderr so install.sh can use stdout | tail -1 for status.
 Model selection (shared for new coding agents; escalation uses the same default but
 gets PIPELINE-SPEC tool policy: read/write only):
     1) Copy from prd-creator entry in agents.list if present with model.
-    2) Else if OpenRouter appears configured, use openrouter/moonshotai/kimi-k2.7-code.
+    2) Else if OpenRouter appears configured, use openrouter/moonshotai/kimi-k3.1-pro.
     3) Else use agents.defaults.model if present, else the recommended id with warning.
 
 roadmap-converter copies per-agent ``tools`` from prd-creator when that entry defines
@@ -39,7 +39,7 @@ import tempfile
 
 # The audited pipeline default (multimodal, coding-strong); must stay one of
 # the shipped, priced models in deploy/openclaw.template.json.
-RECOMMENDED_MODEL = "openrouter/moonshotai/kimi-k2.7-code"
+RECOMMENDED_MODEL = "openrouter/moonshotai/kimi-k3.1-pro"
 
 # Canonical order for appending newly created entries (existing order preserved).
 AUTODEV_AGENT_IDS = (
@@ -175,7 +175,7 @@ def _resolve_shared_model(agents_list: list, data: dict, stderr) -> tuple[dict, 
     notes.append(
         f"[register_agent] WARNING: No prd-creator, no OpenRouter block, no agents.defaults.model. "
         f"Applying default primary {RECOMMENDED_MODEL}, so ensure your gateway has a matching provider "
-        "or add prd-creator / OpenRouter config. Strongly recommend Kimi K2.7 Code for this pipeline."
+        "or add prd-creator / OpenRouter config. Strongly recommend Kimi K3.1 Pro for this pipeline."
     )
     for line in notes:
         _eprint(line, stderr)
