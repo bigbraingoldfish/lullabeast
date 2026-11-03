@@ -219,7 +219,7 @@ def test_elapsed_cell_formats(html):
 def test_cost_cell_zero_suppressed(html):
     rows = _rows_region(html)
     assert "Number(entry.cost_total) > 0" in rows
-    assert "fmtUSD(entry.cost_total)" in rows
+    assert "<CostFigure value={entry.cost_total}" in rows
     assert "$0.00" not in html
 
 

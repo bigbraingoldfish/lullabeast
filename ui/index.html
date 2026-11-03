@@ -1709,6 +1709,26 @@
             return `$${n.toFixed(2)}`;
         };
 
+        /* A dollar figure, labeled "est." while part of it is still a list-price
+         * estimate (cost_estimated): OpenRouter publishes a call's billed cost a
+         * minute or two after the call, and other providers report none. */
+        function CostFigure({ value, estimated }) {
+            const est = Number(estimated) || 0;
+            return (
+                <>
+                    {fmtUSD(value)}
+                    {est > 0 && (
+                        <span
+                            className="ml-1 text-[0.8em] font-normal tracking-wide text-slate-500"
+                            title={`Estimate: ${fmtUSD(est)} of this is at list price because the billed cost is not in yet. OpenRouter reports it a few minutes after each call; other providers report none.`}
+                        >
+                            est.
+                        </span>
+                    )}
+                </>
+            );
+        }
+
         /** P0 Stage H — format "Exec attempts" with retry-source breakdown.
          *
          * Clean common case: when both lifetime counters are 0 (single
@@ -2937,7 +2957,7 @@
                         <span className="w-16 flex-shrink-0">Phase</span>
                         <span className="w-14 flex-shrink-0 text-right">Duration</span>
                         <span className="w-10 flex-shrink-0 text-right">Execs</span>
-                        {hasCostColumn && <span className="w-14 flex-shrink-0 text-right">Cost</span>}
+                        {hasCostColumn && <span className="w-20 flex-shrink-0 text-right">Cost</span>}
                         {hasTokenColumn && <span className="w-16 flex-shrink-0 text-right">Tokens</span>}
                         <span className="ml-auto">Result</span>
                     </div>
@@ -2947,7 +2967,7 @@
                             <span className="text-slate-400 w-14 flex-shrink-0 text-right font-mono">{formatDuration(phase.duration_seconds)}</span>
                             <span className="text-slate-400 w-10 flex-shrink-0 text-right font-mono">{phase.executor_attempts}</span>
                             {hasCostColumn && (
-                                <span className="text-slate-400 w-14 flex-shrink-0 text-right font-mono">{Number(phase.cost_total) > 0 ? fmtUSD(phase.cost_total) : '—'}</span>
+                                <span className="text-slate-400 w-20 flex-shrink-0 text-right font-mono">{Number(phase.cost_total) > 0 ? <CostFigure value={phase.cost_total} estimated={phase.cost_estimated} /> : '—'}</span>
                             )}
                             {hasTokenColumn && (
                                 <span className="text-slate-400 w-16 flex-shrink-0 text-right font-mono" title={fmtTokenBreakdown(phase.tokens_breakdown) || undefined}>{Number(phase.tokens_total) > 0 ? fmtTokens(phase.tokens_total) : '—'}</span>
@@ -3003,7 +3023,7 @@
                                 {totalCost > 0 && (
                                     <div className="bg-[#221b36] rounded p-2 flex-1 min-w-[8rem]">
                                         <div className="text-slate-500 text-xs mb-0.5 header-text uppercase tracking-wide">Total Cost</div>
-                                        <div className="header-text text-lg font-semibold text-slate-200 font-mono">{fmtUSD(totalCost)}</div>
+                                        <div className="header-text text-lg font-semibold text-slate-200 font-mono"><CostFigure value={totalCost} estimated={metricsSummary.cost_estimated} /></div>
                                         <div className="mt-1 space-y-0.5 text-xs">
                                             <div className="flex justify-between text-slate-400"><span>Planner</span><span className="font-mono">{fmtUSD(metricsSummary.planner_cost_total)}</span></div>
                                             <div className="flex justify-between text-slate-400"><span>Executor</span><span className="font-mono">{fmtUSD(metricsSummary.executor_cost_total)}</span></div>
@@ -3710,7 +3730,7 @@
                                         <div data-testid="live-phase-spend" className="text-[10px] text-slate-500"
                                             title="In-progress phase — updates after each attempt completes, not mid-stream">
                                             <span className="uppercase tracking-wide">+ this phase</span>{' '}
-                                            {liveCost > 0 && <span className="font-mono text-slate-300">{fmtUSD(liveCost)}</span>}
+                                            {liveCost > 0 && <span className="font-mono text-slate-300"><CostFigure value={liveCost} estimated={liveTok && liveTok.cost_estimated} /></span>}
                                             {liveCost > 0 && liveTokens > 0 && <span className="text-slate-600"> · </span>}
                                             {liveTokens > 0 && <span className="font-mono text-slate-300">{fmtTokensCompact(liveTokens)}</span>}
                                         </div>
@@ -3722,7 +3742,7 @@
                                                 title="Cost by agent"
                                                 onClick={() => { setShowRunCostSplit(v => !v); setShowRunTokenSplit(false); }}
                                                 className={`header-text text-[10px] uppercase tracking-wide px-3 py-1.5 rounded border transition-colors ${showRunCostSplit ? 'border-[#e2b14c]/60 bg-[#241d10]/50 text-slate-300' : 'border-[#2a2540] text-slate-500 hover:text-slate-300'}`}>
-                                                Total cost <span className="font-mono text-xs font-semibold text-slate-200">{fmtUSD(metricsSummary.total_cost)}</span>
+                                                Total cost <span className="font-mono text-xs font-semibold text-slate-200"><CostFigure value={metricsSummary.total_cost} estimated={metricsSummary.cost_estimated} /></span>
                                                 <span className="text-slate-600 ml-1">{showRunCostSplit ? '▴' : '▾'}</span>
                                             </button>
                                         )}
@@ -4022,7 +4042,9 @@
                                                                         <SplitStatCard
                                                                             title="By agent"
                                                                             total={agentMode === '$' ? phaseMeta.cost_total : phaseMeta.tokens_total}
-                                                                            fmtValue={agentMode === '$' ? fmtUSD : undefined}
+                                                                            fmtValue={agentMode === '$'
+                                                                                ? (v) => fmtUSD(v) + (Number(phaseMeta.cost_estimated) > 0 ? ' est.' : '')
+                                                                                : undefined}
                                                                             rows={agentMode === '$'
                                                                                 ? roleSplitRows(phaseMeta.planner_cost, phaseMeta.executor_cost, phaseMeta.reviewer_cost)
                                                                                 : roleSplitRows(phaseMeta.planner_tokens, phaseMeta.executor_tokens, phaseMeta.reviewer_tokens)}
@@ -10543,7 +10565,9 @@
                     else if (rank != null && rank > 1) nextLine = `${rank - 1} project${rank - 1 !== 1 ? 's' : ''} ahead of it in line.`;
                 }
 
-                const costValue = snap && snap.cost_total > 0 ? fmtUSD(snap.cost_total) : '—';
+                const costValue = snap && snap.cost_total > 0
+                    ? fmtUSD(snap.cost_total) + (Number(snap.cost_estimated) > 0 ? ' est.' : '')
+                    : '—';
                 const tokensValue = snap && snap.tokens_total > 0 ? fmtTokensCompact(snap.tokens_total) : '—';
                 // QT-3 — the Cost/Tokens cards link into the Cost & Tokens tab
                 // (only when there is something to break down).
@@ -11615,7 +11639,7 @@
                                                                 title="View cost & token breakdown"
                                                                 onClick={openMetricsBreakout}
                                                                 className="font-mono text-[11px] px-1.5 py-0.5 rounded border border-[#2a2540] bg-[#221b36] text-slate-300 hover:border-[#e2b14c]/50 transition-colors">
-                                                                {fmtUSD(entry.cost_total)}
+                                                                <CostFigure value={entry.cost_total} estimated={entry.cost_estimated} />
                                                             </button>
                                                         )}
                                                         {hasTokensChip && (

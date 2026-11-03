@@ -632,8 +632,13 @@ does not provide them.
 ## Cost tracking and the $0 case
 
 The golden config ships `models.pricing.enabled: true` and complete pricing
-blocks for its 9 recommended OpenRouter models, so runs on the shipped
-defaults report real dollar costs in the dashboard. Every other provider or
+blocks for its 9 recommended OpenRouter models, so every call on a shipped
+model gets a dollar cost. Those are list prices, and OpenRouter often bills
+less because it routes to cheaper endpoints. Lullabeast looks up what
+OpenRouter billed for each call once OpenRouter publishes it, usually within
+a few minutes of the call, and the dashboard marks any cost still at list
+price "est.". The lookup uses your OpenRouter key and runs while the dashboard
+is up. Every other provider or
 model is meter-it-yourself: **if a run's cost shows $0, OpenClaw has no
 pricing for the model that ran**, not that the run was free. To add pricing
 for your own model, follow the walkthrough in [SETUP.md](../SETUP.md) under

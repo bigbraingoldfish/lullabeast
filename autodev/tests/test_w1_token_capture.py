@@ -197,6 +197,7 @@ def test_sum_session_tokens_returns_zeros_on_missing_file(sum_fn, tmp_path):
     """Returns all-zeros dict when file does not exist, no exception."""
     result = sum_fn(str(tmp_path / "nonexistent.jsonl"))
     assert isinstance(result, dict)
+    assert result.pop("cost_pending") == {}
     assert all(v == 0 or v == 0.0 for v in result.values())
 
 
@@ -251,13 +252,19 @@ def test_sum_session_tokens_handles_empty_file(sum_fn, tmp_path):
     jsonl = tmp_path / "session.jsonl"
     jsonl.write_text("")
     result = sum_fn(str(jsonl))
+    assert result.pop("cost_pending") == {}
     assert all(v == 0 or v == 0.0 for v in result.values())
 
 
 def test_sum_session_tokens_result_keys(sum_fn):
     """Result dict must have exactly the required keys."""
     result = sum_fn(None)
-    required_keys = {"input", "output", "cache_read", "cache_write", "total_tokens", "cost_total"}
+    required_keys = {
+        "input", "output", "cache_read", "cache_write", "total_tokens", "cost_total",
+        # The list-price part of cost_total, and the OpenRouter generations
+        # behind it (autodev/pipeline/billed_costs.py).
+        "cost_estimated", "cost_pending",
+    }
     assert set(result.keys()) == required_keys, (
         f"Unexpected keys in result: {set(result.keys())} vs expected {required_keys}"
     )

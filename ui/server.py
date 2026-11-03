@@ -35,6 +35,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 from collections import deque
@@ -91,6 +92,7 @@ from autodev.installer import model_overrides as _model_overrides  # noqa: E402
 from autodev.installer.openclaw_template import TEMPLATE_MODEL_DEFAULTS  # noqa: E402
 from autodev.pipeline.prereq_spec import parse_prerequisites  # noqa: E402  (PREREQ-3)
 from autodev.pipeline.atomic_io import write_json_atomic, write_text_atomic  # noqa: E402
+from autodev.pipeline import billed_costs as _billed_costs  # noqa: E402
 from autodev.pipeline.log_utils import configure_stream_logging, resolve_log_level, set_level, tagged  # noqa: E402
 from env_resolvers import resolve_openclaw_root, resolve_pipeline_root  # noqa: E402
 from skill_manager import SkillManager  # noqa: E402  (W5-E: inline completion reviewer)
@@ -3104,6 +3106,9 @@ def get_state():
                 _cpt = {_r: (_accs[_r] if isinstance(_accs[_r], dict) else {}) for _r in _roles}
                 _cpt["total_tokens"] = sum(_role_token_total(_ps_extra, f"{_r}_tokens_acc") for _r in _roles)
                 _cpt["cost_total"] = round(sum(_role_cost(_ps_extra, f"{_r}_tokens_acc") for _r in _roles), 6)
+                _cpt["cost_estimated"] = round(
+                    sum(_role_cost_estimated(_ps_extra, f"{_r}_tokens_acc") for _r in _roles), 9
+                )
                 response["current_phase_tokens"] = _cpt
 
     # P2-A — agent liveness proxy: now - mtime of the active agent's activity stamp
@@ -4197,6 +4202,35 @@ def _phase_cost(p: dict) -> float:
         return 0.0
 
 
+def _role_cost_estimated(p: dict, role_key: str) -> float:
+    """The part of one role's cost that is still a list-price estimate.
+
+    Token dicts written before billed-cost settlement carry no
+    ``cost_estimated``: their whole cost was the list-price figure OpenClaw
+    recorded, so all of it counts as estimated.
+    """
+    role_obj = p.get(role_key) or {}
+    if not isinstance(role_obj, dict):
+        return 0.0
+    if "cost_estimated" not in role_obj:
+        return _role_cost(p, role_key)
+    try:
+        return float(role_obj.get("cost_estimated") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _phase_cost_estimated(p: dict) -> float:
+    """The part of a metrics row's cost that is still a list-price estimate
+    (rows written before billed-cost settlement: all of it)."""
+    if "cost_estimated" not in p:
+        return _phase_cost(p)
+    try:
+        return float(p.get("cost_estimated") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _role_token_total(p: dict, role_key: str) -> int:
     """Sum of a role's token count for one phase row. Parallels ``_role_cost``;
     defaults a missing/non-numeric ``total_tokens`` to 0 so pre-token history
@@ -4292,6 +4326,138 @@ def _metrics_history_rows(project_path, pipeline_root):
     return rows
 
 
+# ── OpenRouter billed costs, settled after the fact ──────────────────────────
+# OpenClaw records each OpenRouter call at list price because its own lookup of
+# the billed cost runs before OpenRouter publishes it (autodev/pipeline/
+# billed_costs.py has the detail). The orchestrator names, on each metrics row,
+# the generations still at list price (cost_pending). The server looks them up
+# in the background, at most one pass per project per minute, keeps the billed
+# costs in <pipeline_root>/billed_costs/<project>.json, and settles rows on read.
+_BILLED_COSTS_DIRNAME = "billed_costs"
+_BILLED_RESOLVE_INTERVAL_SECONDS = 60
+# Rows older than this stop being looked up: a generation OpenRouter has not
+# published within a day is not coming, and the row keeps its labeled estimate.
+_BILLED_LOOKUP_MAX_AGE_SECONDS = 24 * 3600
+_billed_resolve_lock = threading.Lock()
+_billed_resolve_last: dict[str, float] = {}
+_billed_resolve_running: set[str] = set()
+
+
+def _billed_costs_path(project_path, pipeline_root):
+    """``<pipeline_root>/billed_costs/<project>.json``, keyed like metrics_history.
+
+    None without a project or a pipeline root.
+    """
+    if not project_path or not pipeline_root:
+        return None
+    try:
+        project_name = os.path.basename(os.path.realpath(project_path))
+    except OSError:
+        return None
+    if not project_name:
+        return None
+    return os.path.join(
+        os.path.expanduser(pipeline_root), _BILLED_COSTS_DIRNAME, f"{project_name}.json"
+    )
+
+
+def _load_billed_costs(path) -> dict:
+    """The cached ``{generation_id: billed cost}`` map (``{}`` when absent or unreadable)."""
+    data = _read_json_file(path) if path else None
+    if not isinstance(data, dict):
+        return {}
+    return {
+        k: v
+        for k, v in data.items()
+        if isinstance(k, str) and isinstance(v, (int, float)) and not isinstance(v, bool)
+    }
+
+
+def _row_recent_enough_to_settle(row) -> bool:
+    """True when a metrics row is young enough for its pending calls to be looked up."""
+    ts = _parse_event_ts(row.get("ts")) if isinstance(row, dict) else None
+    return ts is not None and time.time() - ts <= _BILLED_LOOKUP_MAX_AGE_SECONDS
+
+
+def _openrouter_api_key() -> str:
+    """The OpenRouter key for billed-cost lookups, or "" when there is none.
+
+    The environment first, then the provider file the dashboard writes (a key
+    entered after boot is not in this process's environment). Never logged.
+    """
+    key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if key:
+        return key
+    key_path = (load_config().get("provider_key_path") or "").strip()
+    if not key_path:
+        return ""
+    try:
+        with open(os.path.expanduser(key_path), "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                name, sep, value = line.partition("=")
+                if sep and name.strip() == "OPENROUTER_API_KEY":
+                    return value.strip()
+    except OSError:
+        return ""
+    return ""
+
+
+def _resolve_billed_costs(path, generation_ids, api_key) -> int:
+    """Look ``generation_ids`` up and merge the billed costs found into the cache.
+
+    Returns how many were found. Generations OpenRouter has not published yet
+    are left for a later pass.
+    """
+    found = _billed_costs.lookup_generation_costs(generation_ids, api_key)
+    if not found:
+        return 0
+    with _billed_resolve_lock:
+        merged = _load_billed_costs(path)
+        merged.update(found)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        write_json_atomic(path, merged, indent=None)
+    return len(found)
+
+
+def _schedule_billed_cost_resolution(path, generation_ids, *, start=None) -> bool:
+    """Start one background lookup pass for ``generation_ids``.
+
+    At most one pass per cache file at a time and one per minute, and only
+    with an OpenRouter key. ``start`` runs the pass (default: a daemon
+    thread). Returns whether a pass was started.
+    """
+    if not path or not generation_ids:
+        return False
+    now = time.monotonic()
+    with _billed_resolve_lock:
+        if path in _billed_resolve_running:
+            return False
+        last = _billed_resolve_last.get(path)
+        if last is not None and now - last < _BILLED_RESOLVE_INTERVAL_SECONDS:
+            return False
+        api_key = _openrouter_api_key()
+        if not api_key:
+            return False
+        _billed_resolve_last[path] = now
+        _billed_resolve_running.add(path)
+    ids = list(generation_ids)
+
+    def _run():
+        try:
+            _resolve_billed_costs(path, ids, api_key)
+        except Exception as e:  # a failed pass must never surface in a request
+            tagged("billed-costs", f"lookup pass failed: {e}", level=logging.WARNING, logger=_ui_logger)
+        finally:
+            with _billed_resolve_lock:
+                _billed_resolve_running.discard(path)
+
+    if start is None:
+        threading.Thread(target=_run, name="billed-costs", daemon=True).start()
+    else:
+        start(_run)
+    return True
+
+
 def _project_metrics_totals(project_path, pipeline_root=None):
     """Aggregate ``{project_path}/.autodev/pipeline/metrics.jsonl`` (pure, read-only).
 
@@ -4299,7 +4465,9 @@ def _project_metrics_totals(project_path, pipeline_root=None):
     ``<pipeline_root>/metrics_history/<project>.jsonl`` is overlaid per phase (it
     wins, being the unclobberable source of cost/tokens/duration). When ``None``
     (the default — e.g. callers without a configured root, or tests), only the
-    project-local file is read, preserving the prior pure behavior.
+    project-local file is read, preserving the prior pure behavior. With a
+    root, every row is also settled against the project's billed-cost cache
+    (``_billed_costs_path``); looking pending calls up is the caller's job.
 
     Shared by ``GET /api/metrics-summary`` (the active project) and the
     ``GET /api/queue`` per-entry summary block (any queued project's cost,
@@ -4315,6 +4483,8 @@ def _project_metrics_totals(project_path, pipeline_root=None):
         {
           "phases":           list[dict],  # deduped keep-LAST per phase, first-seen order
           "cost_total":       float,       # round(sum of per-row cost_total, 6)
+          "cost_estimated":   float,       # the part of cost_total still at list price
+          "pending_generation_ids": list,  # OpenRouter calls to look up (rows < 1 day old)
           "tokens_total":     int,         # sum of per-phase role token totals (METRICS-E3)
           "duration_seconds": int,         # sum of per-phase duration_seconds (active work)
           "last_phase":       str | None,  # phases[-1]["phase"], or None when phases empty
@@ -4381,9 +4551,16 @@ def _project_metrics_totals(project_path, pipeline_root=None):
         seen[phase] = row           # project-only phase (e.g. escalated), keep last
 
     phases = [seen[p] for p in order]
+    billed = _load_billed_costs(_billed_costs_path(project_path, pipeline_root))
+    if billed:
+        phases = [_billed_costs.settle_row(p, billed) for p in phases]
     return {
         "phases": phases,
         "cost_total": round(sum(_phase_cost(p) for p in phases), 6),
+        "cost_estimated": round(sum(_phase_cost_estimated(p) for p in phases), 9),
+        "pending_generation_ids": _billed_costs.pending_generation_ids(
+            p for p in phases if _row_recent_enough_to_settle(p)
+        ),
         "tokens_total": sum(_phase_token_total(p) for p in phases),
         "duration_seconds": sum((p.get("duration_seconds") or 0) for p in phases),
         "last_phase": phases[-1].get("phase") if phases else None,
@@ -4408,6 +4585,7 @@ def _compact_metrics_phases(totals) -> list[dict]:
             "executor_attempts": p.get("executor_attempts", 0),
             "escalations": p.get("escalations", 0),
             "cost_total": _phase_cost(p),
+            "cost_estimated": _phase_cost_estimated(p),
             "tokens_total": _phase_token_total(p),
             "tokens_breakdown": _phase_token_breakdown(p),
             "planner_tokens": _role_token_total(p, "planner_tokens"),
@@ -4430,6 +4608,7 @@ def _empty_metrics_summary():
         "total_reviewer_passes": 0,
         "total_escalations": 0,
         "total_cost": 0.0,
+        "cost_estimated": 0.0,
         "planner_cost_total": 0.0,
         "executor_cost_total": 0.0,
         "reviewer_cost_total": 0.0,
@@ -4544,7 +4723,10 @@ def get_metrics_summary():
 
 
 def _build_project_metrics_summary(project_dir_path, config):
-    """Full metrics-summary dict for ONE project directory (pure read).
+    """Full metrics-summary dict for ONE project directory.
+
+    A read, except that it may start a background lookup of the project's
+    pending OpenRouter billed costs (``_schedule_billed_cost_resolution``).
 
     ``total_duration_seconds`` is the SUM of per-phase ``duration_seconds`` (real
     phase work, in-phase holds included) — never run_summary.json's calendar
@@ -4570,9 +4752,13 @@ def _build_project_metrics_summary(project_dir_path, config):
     # Shared aggregation (read + parse + dedup keep-last + cost/duration sums)
     # lives in _project_metrics_totals — also consumed by the GET /api/queue
     # per-entry summary block. None covers exactly the old empty-summary cases.
-    totals = _project_metrics_totals(project_dir_path, (config or {}).get("autodev_pipeline_root"))
+    pipeline_root = (config or {}).get("autodev_pipeline_root")
+    totals = _project_metrics_totals(project_dir_path, pipeline_root)
     if totals is None:
         return _empty_metrics_summary()
+    _schedule_billed_cost_resolution(
+        _billed_costs_path(project_dir_path, pipeline_root), totals["pending_generation_ids"]
+    )
 
     phases = totals["phases"]
 
@@ -4632,6 +4818,8 @@ def _build_project_metrics_summary(project_dir_path, config):
         "total_reviewer_passes": total_reviewer,
         "total_escalations": total_escalations,
         "total_cost": total_cost,
+        # The part of total_cost still at list price (labeled "est." in the UI).
+        "cost_estimated": totals["cost_estimated"],
         "planner_cost_total": planner_cost_total,
         "executor_cost_total": executor_cost_total,
         "reviewer_cost_total": reviewer_cost_total,
@@ -4663,6 +4851,7 @@ def _build_project_metrics_summary(project_dir_path, config):
                 # invocation; null for pre-deploy rows / malformed values.
                 "models_used": p.get("models_used") if isinstance(p.get("models_used"), dict) else None,
                 "cost_total": _phase_cost(p),
+                "cost_estimated": _phase_cost_estimated(p),
                 "planner_cost": _role_cost(p, "planner_tokens"),
                 "executor_cost": _role_cost(p, "executor_tokens"),
                 "reviewer_cost": _role_cost(p, "reviewer_tokens"),
@@ -11170,11 +11359,17 @@ def get_queue():
         # project's metrics.jsonl via the shared helper (None when no metrics
         # exist). tokens_total (METRICS-E3) feeds the row's token metric chip,
         # parallel to the cost chip.
+        _root = (config or {}).get("autodev_pipeline_root")
         try:
-            _totals = _project_metrics_totals(_proj, (config or {}).get("autodev_pipeline_root"))
+            _totals = _project_metrics_totals(_proj, _root)
         except Exception:
             _totals = None  # non-fatal — cost/tokens/duration stay None
+        if _totals:
+            _schedule_billed_cost_resolution(
+                _billed_costs_path(_proj, _root), _totals["pending_generation_ids"]
+            )
         entry["cost_total"] = _totals["cost_total"] if _totals else None
+        entry["cost_estimated"] = _totals["cost_estimated"] if _totals else None
         entry["tokens_total"] = _totals["tokens_total"] if _totals else None
         entry["duration_seconds"] = _totals["duration_seconds"] if _totals else None
 
@@ -11664,11 +11859,17 @@ def get_queue_entry_snapshot(entry_id: str):
     # (shared helper; None when the project has no metrics — the UI suppresses
     # all three). metrics_phases (METRICS-E3) is the compact per-phase
     # projection behind the row expansion's cost/token breakout table.
+    _root = (config or {}).get("autodev_pipeline_root")
     try:
-        _totals = _project_metrics_totals(project_path, (config or {}).get("autodev_pipeline_root"))
+        _totals = _project_metrics_totals(project_path, _root)
     except Exception:
         _totals = None
+    if _totals:
+        _schedule_billed_cost_resolution(
+            _billed_costs_path(project_path, _root), _totals["pending_generation_ids"]
+        )
     snapshot_cost_total = _totals["cost_total"] if _totals else None
+    snapshot_cost_estimated = _totals["cost_estimated"] if _totals else None
     snapshot_tokens_total = _totals["tokens_total"] if _totals else None
     snapshot_duration_seconds = _totals["duration_seconds"] if _totals else None
     snapshot_metrics_phases = _compact_metrics_phases(_totals)
@@ -11719,6 +11920,7 @@ def get_queue_entry_snapshot(entry_id: str):
         "phases_total": phases_total,
         "phases_complete": phases_complete,
         "cost_total": snapshot_cost_total,
+        "cost_estimated": snapshot_cost_estimated,
         "tokens_total": snapshot_tokens_total,
         "duration_seconds": snapshot_duration_seconds,
         "metrics_phases": snapshot_metrics_phases,

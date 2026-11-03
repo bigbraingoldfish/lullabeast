@@ -83,6 +83,12 @@ verified against the pinned OpenClaw version (2026.6.11):** a model entry
 carries `cost: {input, output, cacheRead, cacheWrite}` in USD per million
 tokens.
 
+These are list prices, so OpenClaw's per-call costs are estimates. OpenClaw
+asks OpenRouter for each call's billed cost, but before OpenRouter has
+published it, so it keeps the estimate. Lullabeast settles each OpenRouter call
+to its billed cost once OpenRouter has it (`autodev/pipeline/billed_costs.py`),
+and the dashboard marks any cost still at list price "est.".
+
 Anything outside the shipped set is meter-it-yourself: if the dashboard shows
 $0 for a run, OpenClaw has no pricing for the model that ran. See the pointer
 in the [deploy README](README.md) and the full walkthrough in SETUP.md under

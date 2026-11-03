@@ -33,6 +33,32 @@ for _p in (PIPELINE_DIR, REPO_ROOT):
         sys.path.insert(0, _p)
 
 
+def _openrouter_row(gen_id, inp, out, cost_parts, total=None):
+    """An OpenRouter assistant row as OpenClaw 2026.6.11 writes it: list-price
+    cost parts and their sum as the total, unless its billed-cost lookup
+    replaced the total."""
+    parts = dict(zip(("input", "output", "cacheRead", "cacheWrite"), cost_parts))
+    if total is None:
+        total = parts["input"] + parts["output"] + parts["cacheRead"] + parts["cacheWrite"]
+    return json.dumps({
+        "id": "msg",
+        "type": "message",
+        "timestamp": "2026-11-03T00:00:00Z",
+        "message": {
+            "role": "assistant",
+            "provider": "openrouter",
+            "model": "deepseek/deepseek-v4.1-flash-1017",
+            "api": "openai-completions",
+            "responseId": gen_id,
+            "usage": {
+                "input": inp, "output": out, "cacheRead": 0, "cacheWrite": 0,
+                "totalTokens": inp + out,
+                "cost": dict(parts, total=total),
+            },
+        },
+    })
+
+
 def _openclaw_row(inp, out, cache_read, total, cost):
     return json.dumps({
         "id": "msg",
@@ -86,6 +112,52 @@ def orch(tmp_path, monkeypatch):
     monkeypatch.setattr(orch_mod, "_write_pipeline_event", MagicMock())
 
     return inst, proj, artifacts
+
+
+def test_list_priced_openrouter_cost_settles_to_the_billed_cost(orch, tmp_path):
+    inst, proj, artifacts = orch
+
+    # Two reviewer responses priced at list (OpenClaw's lookup ran before
+    # OpenRouter published them) and one whose total OpenClaw already replaced
+    # with the billed cost.
+    jsonl = tmp_path / "reviewer.jsonl"
+    jsonl.write_text("\n".join([
+        _openrouter_row("gen-1-a", 1000, 100, (0.0003, 0.00012, 0.0, 0.0)),
+        _openrouter_row("gen-1-b", 2000, 100, (0.0006, 0.00012, 0.0, 0.0)),
+        _openrouter_row("gen-1-c", 1000, 100, (0.0003, 0.00012, 0.0, 0.0), total=0.00005),
+    ]) + "\n")
+    inst._accumulate_role_tokens("reviewer", str(jsonl))
+
+    # The live accumulator counts the estimate but stays lean: no per-call map
+    # in phase_state, which the dashboard polls every few seconds.
+    ps = json.loads((artifacts / "phase_state.json").read_text())
+    acc = ps["reviewer_tokens_acc"]
+    assert acc["cost_estimated"] == pytest.approx(0.00042 + 0.00072)
+    assert "cost_pending" not in acc
+    assert all("cost_pending" not in s for s in ps["reviewer_tokens_sessions"].values())
+
+    # The durable row names each generation still at list price.
+    inst._write_canonical_metrics_row()
+    row = json.loads((artifacts / "metrics.jsonl").read_text().splitlines()[-1])
+    assert row["reviewer_tokens"]["cost_pending"] == pytest.approx(
+        {"gen-1-a": 0.00042, "gen-1-b": 0.00072}
+    )
+    assert row["cost_estimated"] == pytest.approx(0.00114)
+    assert row["cost_total"] == pytest.approx(0.00119, abs=1e-6)
+
+    # The dashboard's reader settles the row against the billed costs
+    # OpenRouter has published so far (here one of the two).
+    from ui.server import _project_metrics_totals
+
+    cache = tmp_path / "billed_costs" / "pipeline-project.json"
+    cache.parent.mkdir()
+    cache.write_text(json.dumps({"gen-1-a": 0.00004}))
+    totals = _project_metrics_totals(str(proj), str(tmp_path))
+    (settled,) = totals["phases"]
+    assert settled["cost_total"] == pytest.approx(0.00004 + 0.00072 + 0.00005, abs=1e-6)
+    assert totals["cost_total"] == pytest.approx(0.00081, abs=1e-6)
+    assert totals["cost_estimated"] == pytest.approx(0.00072)
+    assert totals["pending_generation_ids"] == ["gen-1-b"]
 
 
 def test_orchestrator_written_row_feeds_server_token_and_cost_math(orch, tmp_path):

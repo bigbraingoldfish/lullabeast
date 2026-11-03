@@ -54,6 +54,7 @@ from queue_semantics import (
 )
 from env_resolvers import resolve_openclaw_root, resolve_pipeline_root, load_repo_env_file
 from atomic_io import write_json_atomic, write_text_atomic
+from billed_costs import classify_message_cost
 from error_codes import (
     ERR_MERGE_FAILED,
     ERR_MODEL_OVERRIDE_REJECTED,
@@ -1099,6 +1100,12 @@ def _sum_session_tokens(jsonl_path) -> dict:
         message.usage.totalTokens  → total_tokens
         message.usage.cost.total   → cost_total
 
+    Each message's cost is classified by ``billed_costs.classify_message_cost``:
+    ``cost_estimated`` sums the part of ``cost_total`` still at the model's
+    list price, and ``cost_pending`` maps each such OpenRouter response's
+    generation id to its list-price cost, so the dashboard can swap in the
+    billed cost once OpenRouter publishes it.
+
     A legacy flat shape (``usage``/``role`` at the row top level) is also
     accepted for backwards compatibility with synthetic test fixtures.
 
@@ -1107,14 +1114,15 @@ def _sum_session_tokens(jsonl_path) -> dict:
     zeros = {
         "input": 0, "output": 0, "cache_read": 0,
         "cache_write": 0, "total_tokens": 0, "cost_total": 0.0,
+        "cost_estimated": 0.0,
     }
     if not jsonl_path:
         print("[W1G] WARN: jsonl_path is None — returning zeros")
-        return dict(zeros)
+        return dict(zeros, cost_pending={})
     if not os.path.exists(jsonl_path):
         print(f"[W1G] WARN: session JSONL not found: {jsonl_path}")
-        return dict(zeros)
-    result = dict(zeros)
+        return dict(zeros, cost_pending={})
+    result = dict(zeros, cost_pending={})
     try:
         with open(jsonl_path, "r") as f:
             for line in f:
@@ -1129,12 +1137,9 @@ def _sum_session_tokens(jsonl_path) -> dict:
                     # row["message"].  Legacy flat shape (top-level role/usage)
                     # is accepted as a fallback for synthetic fixtures.
                     inner = row.get("message")
-                    if isinstance(inner, dict):
-                        role = inner.get("role")
-                        u = inner.get("usage")
-                    else:
-                        role = row.get("role")
-                        u = row.get("usage")
+                    msg = inner if isinstance(inner, dict) else row
+                    role = msg.get("role")
+                    u = msg.get("usage")
                     if role != "assistant":
                         continue
                     if not isinstance(u, dict):
@@ -1144,8 +1149,12 @@ def _sum_session_tokens(jsonl_path) -> dict:
                     result["cache_read"]   += u.get("cacheRead", 0)
                     result["cache_write"]  += u.get("cacheWrite", 0)
                     result["total_tokens"] += u.get("totalTokens", 0)
-                    cost = u.get("cost", {}) or {}
-                    result["cost_total"]   += cost.get("total", 0.0)
+                    cost, estimated, generation_id = classify_message_cost(msg)
+                    result["cost_total"]   += cost
+                    if estimated:
+                        result["cost_estimated"] += cost
+                    if generation_id:
+                        result["cost_pending"][generation_id] = cost
                 except (ValueError, AttributeError):
                     pass
     except OSError as e:
@@ -1157,6 +1166,21 @@ def _sum_session_tokens(jsonl_path) -> dict:
 # before the keyed-by-session-path accounting was deployed (mid-phase upgrade).
 # Never re-summed (there is no file behind it), never shrunk.
 _TOKENS_LEGACY_SESSION_KEY = "__pre_keyed_acc__"
+
+
+def _lean_token_sums(sums: dict) -> dict:
+    """A session's token sums without its per-call ``cost_pending`` map.
+
+    phase_state keeps only the sums (the dashboard polls it every few
+    seconds); the map rides the canonical metrics row instead."""
+    return {k: v for k, v in sums.items() if k != "cost_pending"}
+
+
+def _with_pending_costs(tokens: dict, pending) -> dict:
+    """A role's accumulated token dict with its ``cost_pending`` map attached."""
+    if isinstance(pending, dict) and pending:
+        return dict(tokens, cost_pending=dict(pending))
+    return tokens
 
 
 def _merge_token_sums(sums) -> dict:
@@ -1463,7 +1487,7 @@ def _write_run_summary(outcome: str, outcome_detail: str) -> None:
 
         # --- Token aggregation across all roles and phases ---
         _tok = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0,
-                "total_tokens": 0, "cost_total": 0.0}
+                "total_tokens": 0, "cost_total": 0.0, "cost_estimated": 0.0}
         for _row in deduped_rows:
             for _role_key in ("planner_tokens", "executor_tokens", "reviewer_tokens"):
                 _rt = _row.get(_role_key) or {}
@@ -1473,7 +1497,12 @@ def _write_run_summary(outcome: str, outcome_detail: str) -> None:
                 _tok["cache_write"] += _rt.get("cache_write", 0)
                 _tok["total_tokens"] += _rt.get("total_tokens", 0)
                 _tok["cost_total"] += _rt.get("cost_total", 0.0)
+                # Rows from before billed-cost settlement carry list prices
+                # with no marker, so all of their cost is an estimate. The
+                # dashboard settles pending calls later; this file is not.
+                _tok["cost_estimated"] += _rt.get("cost_estimated", _rt.get("cost_total", 0.0))
         _tok["cost_total"] = round(_tok["cost_total"], 6)
+        _tok["cost_estimated"] = round(_tok["cost_estimated"], 9)
 
         # --- phases array ---
         phases_list = [
@@ -4518,12 +4547,12 @@ class Orchestrator:
             if isinstance(_legacy, dict) and _legacy:
                 _sessions[_TOKENS_LEGACY_SESSION_KEY] = dict(_legacy)
         if jsonl_path:
-            _sessions[jsonl_path] = _sum_session_tokens(jsonl_path)
+            _sessions[jsonl_path] = _lean_token_sums(_sum_session_tokens(jsonl_path))
         _ps[f"{role}_tokens_sessions"] = _sessions
         _ps[f"{role}_tokens_acc"] = _merge_token_sums(_sessions.values())
         self.write_phase_state_atomic(_ps)
 
-    def _refresh_role_token_accumulators(self) -> None:
+    def _refresh_role_token_accumulators(self) -> dict:
         """Re-sum every recorded session JSONL and rebuild the accumulators.
 
         Called by ``_write_canonical_metrics_row`` before it reads the
@@ -4533,6 +4562,10 @@ class Orchestrator:
         recorded attempts, not just the last — a zombie attempt that streamed
         past its own sentinel is recounted too.
 
+        Returns ``{role: {generation_id: list-price cost}}`` for the OpenRouter
+        responses still priced at list, which the canonical row records so the
+        dashboard can settle them; phase_state keeps only the sums.
+
         Per-entry safety: the legacy frozen entry has no file and is kept
         as-is; a missing file (session pruned) keeps its stored sum; and since
         session JSONLs are append-only, a re-sum smaller than the stored
@@ -4541,6 +4574,7 @@ class Orchestrator:
         """
         _ps = self.read_phase_state()
         _changed = False
+        _pending: dict = {}
         for role in ("planner", "executor", "reviewer"):
             _sessions = _ps.get(f"{role}_tokens_sessions")
             if not isinstance(_sessions, dict) or not _sessions:
@@ -4555,11 +4589,13 @@ class Orchestrator:
                     _stored.get("total_tokens", 0) if isinstance(_stored, dict) else 0
                 )
                 if _new.get("total_tokens", 0) >= _stored_total:
-                    _sessions[_path] = _new
+                    _pending.setdefault(role, {}).update(_new.get("cost_pending") or {})
+                    _sessions[_path] = _lean_token_sums(_new)
             _ps[f"{role}_tokens_acc"] = _merge_token_sums(_sessions.values())
             _changed = True
         if _changed:
             self.write_phase_state_atomic(_ps)
+        return _pending
 
     def _clean_escalation_headline(self, raw_id=None):
         """P1 Stage G1 — a clean, deterministic headline for the escalation panel.
@@ -6385,8 +6421,11 @@ class Orchestrator:
         # accumulators below — agents keep streaming after writing .done, so
         # the sentinel-time snapshot under-counts (LLN-1 CORE-E2: +565k
         # reviewer tokens, ~32%, landed after the snapshot). Writes the
-        # refreshed accumulators to phase_state, which ps_m re-reads.
-        self._refresh_role_token_accumulators()
+        # refreshed accumulators to phase_state, which ps_m re-reads, and
+        # returns the per-role map of OpenRouter calls still at list price.
+        pending_costs = self._refresh_role_token_accumulators()
+        if not isinstance(pending_costs, dict):
+            pending_costs = {}
 
         # --- Compose the canonical row (schema preserved from inline writer) ---
         duration_seconds = None
@@ -6431,9 +6470,15 @@ class Orchestrator:
         )
         executor_attempts = executor_self_failures + executor_reviewer_rejections + 1
 
-        planner_tok = ps_m.get("planner_tokens_acc", {}) or {}
-        executor_tok = ps_m.get("executor_tokens_acc", {}) or {}
-        reviewer_tok = ps_m.get("reviewer_tokens_acc", {}) or {}
+        planner_tok = _with_pending_costs(
+            ps_m.get("planner_tokens_acc", {}) or {}, pending_costs.get("planner")
+        )
+        executor_tok = _with_pending_costs(
+            ps_m.get("executor_tokens_acc", {}) or {}, pending_costs.get("executor")
+        )
+        reviewer_tok = _with_pending_costs(
+            ps_m.get("reviewer_tokens_acc", {}) or {}, pending_costs.get("reviewer")
+        )
         canonical_row = json.dumps({
             "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "run_id": self.state.get("run_id"),  # run identity (null pre-deploy)
@@ -6457,6 +6502,17 @@ class Orchestrator:
                 + executor_tok.get("cost_total", 0.0)
                 + reviewer_tok.get("cost_total", 0.0),
                 6,
+            ),
+            # The part of cost_total still at list price. Each OpenRouter call
+            # behind it is named in its role's cost_pending map, so the
+            # dashboard can settle it once OpenRouter publishes the billed cost.
+            # An accumulator from before this field priced everything at list.
+            "cost_estimated": round(
+                sum(
+                    tok.get("cost_estimated", tok.get("cost_total", 0.0))
+                    for tok in (planner_tok, executor_tok, reviewer_tok)
+                ),
+                9,
             ),
             "duration_seconds": duration_seconds,
             # Phase 3 — durable per-phase pain signals, sourced from ps_m (the
