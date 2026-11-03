@@ -10,7 +10,13 @@ import pytest
 import subprocess
 from fastapi.testclient import TestClient
 
-from ui.server import app, load_config, _detect_base_branch
+from ui.server import (
+    USER_NO_PROJECT_SELECTED_FRIENDLY,
+    USER_PROJECT_PATH_BROKEN_FRIENDLY,
+    app,
+    load_config,
+    _detect_base_branch,
+)
 
 
 client = TestClient(app)
@@ -295,6 +301,61 @@ class TestApiStateEndpoint:
         assert data.get("project_dir_ok") is False
         assert data.get("project_dir_message")
         assert "broken" in data["project_dir_message"].lower() or "missing" in data["project_dir_message"].lower()
+
+    def _no_project_config(self, temp_dir, **extra):
+        cfg = {
+            "pipeline_state_path": os.path.join(temp_dir, "pipeline_state.json"),
+            "phase_state_path": os.path.join(temp_dir, "phase_state.json"),
+            "lock_path": os.path.join(temp_dir, "pipeline.lock"),
+            "events_path": os.path.join(temp_dir, "pipeline_events.jsonl"),
+        }
+        cfg.update(extra)
+        return cfg
+
+    def test_fresh_install_reports_no_project_selected(self, temp_dir):
+        # A fresh install configures the pipeline-project link path but creates
+        # the link only when a project is first launched or switched to. Nothing
+        # at that path means no project is selected, not a broken folder, and
+        # the unlinked path is not a project for the header to show.
+        hub = os.path.join(temp_dir, "pipeline-project")
+        cfg = self._no_project_config(temp_dir, project_dir_path=hub)
+        with patch("ui.server.load_config", return_value=cfg):
+            response = client.get("/api/state")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["project_dir_ok"] is False  # commands still need a project
+        assert data["project_dir_message"] == USER_NO_PROJECT_SELECTED_FRIENDLY
+        assert "broken" not in data["project_dir_message"].lower()
+        assert data.get("project_path") is None
+        assert data.get("project_symlink_target") is None
+
+    def test_no_configured_project_path_reports_no_project_selected(self, temp_dir):
+        cfg = self._no_project_config(temp_dir)
+        with patch("ui.server.load_config", return_value=cfg):
+            response = client.get("/api/state")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["project_dir_ok"] is False
+        assert data["project_dir_message"] == USER_NO_PROJECT_SELECTED_FRIENDLY
+
+    def test_missing_link_for_a_run_project_is_still_broken(self, temp_dir):
+        # Pipeline state names the project a run used, so a missing link there
+        # is a broken setup, not a fresh one.
+        project = os.path.join(temp_dir, "my-app")
+        os.makedirs(project)
+        state_path = os.path.join(temp_dir, "pipeline_state.json")
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump({"pipeline_status": "STOPPED", "project_path": project}, f)
+        cfg = self._no_project_config(
+            temp_dir, project_dir_path=os.path.join(temp_dir, "pipeline-project")
+        )
+        with patch("ui.server.load_config", return_value=cfg):
+            response = client.get("/api/state")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["project_dir_ok"] is False
+        assert data["project_dir_message"] == USER_PROJECT_PATH_BROKEN_FRIENDLY
+        assert data["project_path"] == project
 
     def test_omits_phase_fields_when_phase_state_missing(self, mock_config, mock_pipeline_state):
         """Test endpoint omits last_error_code and escalation_resets when phase_state.json is absent."""

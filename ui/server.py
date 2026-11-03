@@ -2466,6 +2466,14 @@ USER_PROJECT_PATH_BROKEN_FRIENDLY = (
     "commands can't run until it's fixed."
 )
 
+# Shown instead when no project is linked at all. A fresh install configures
+# the pipeline-project link path but creates the link only when a project is
+# first launched or switched to, so nothing at that path is not a broken folder.
+USER_NO_PROJECT_SELECTED_FRIENDLY = (
+    "No project selected. Start one in Project Ideas, or click Change to open "
+    "an existing project folder."
+)
+
 
 def _expand_project_dir_config(config: dict) -> str | None:
     p = config.get("project_dir_path") or config.get("symlink_target") or config.get("project_dir")
@@ -2485,6 +2493,15 @@ def _project_dir_unhealthy(expanded_path: str | None) -> bool:
         return not project_path.exists()
     except OSError:
         return True
+
+
+def _project_dir_unlinked(expanded_path: str | None) -> bool:
+    """True when no project is linked: nothing configured, or nothing at the path.
+
+    Not the same as broken: a dangling link (its target deleted) still exists at
+    the path, and so does a real folder.
+    """
+    return not expanded_path or not os.path.lexists(expanded_path)
 
 
 def _project_path_503_detail(expanded_path: str | None, *, dangling: bool) -> str:
@@ -3121,9 +3138,12 @@ def get_state():
     # Keep project_path sourced from pipeline_state to avoid mixing status from one
     # project with symlink target from another in a single /api/state payload.
     # Expose symlink target separately for UI diagnostics.
+    # Only a link that exists names a project: the realpath of a missing path is
+    # the path itself, which the header would show as if it were the project.
     _symlink_path = config.get("project_dir_path") or config.get("symlink_target") or config.get("project_dir")
     if _symlink_path:
         _symlink_path = os.path.expanduser(_symlink_path)
+    if _symlink_path and os.path.lexists(_symlink_path):
         try:
             response["project_symlink_target"] = os.path.realpath(_symlink_path)
         except Exception:
@@ -3134,7 +3154,13 @@ def get_state():
     pdp_exp = _expand_project_dir_config(config)
     unhealthy = _project_dir_unhealthy(pdp_exp)
     response["project_dir_ok"] = not unhealthy
-    response["project_dir_message"] = None if not unhealthy else USER_PROJECT_PATH_BROKEN_FRIENDLY
+    if not unhealthy:
+        response["project_dir_message"] = None
+    elif _project_dir_unlinked(pdp_exp) and not response.get("project_path"):
+        # Nothing linked and no run has named a project: a fresh install.
+        response["project_dir_message"] = USER_NO_PROJECT_SELECTED_FRIENDLY
+    else:
+        response["project_dir_message"] = USER_PROJECT_PATH_BROKEN_FRIENDLY
 
     # Setup completion marker
     _setup_marker = os.path.expanduser("~/.autodev_setup_complete")
