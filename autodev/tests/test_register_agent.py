@@ -47,7 +47,7 @@ def test_accepts_agents_defaults_without_list(tmp_path):
         assert aid in ids
     rc = next(e for e in data["agents"]["list"] if e["id"] == "roadmap-converter")
     assert rc["workspace"] == os.path.join(root, "workspace-roadmap-converter")
-    assert rc["model"]["primary"] == "openrouter/moonshotai/kimi-k3.1-pro"
+    assert rc["model"]["primary"] == "openrouter/deepseek/deepseek-v4.1-flash-1017"
     hooks = data.get("hooks", {}).get("allowedAgentIds", [])
     for aid in AUTODEV_AGENT_IDS:
         assert aid in hooks
@@ -156,8 +156,8 @@ def test_missing_prd_creator_uses_openrouter_fallback_when_configured(tmp_path):
     assert register_roadmap_converter(str(oc), root, dry_run=False, stderr=err) == "registered"
     data = json.loads(oc.read_text())
     rc = next(e for e in data["agents"]["list"] if e["id"] == "roadmap-converter")
-    assert rc["model"]["primary"] == "openrouter/moonshotai/kimi-k3.1-pro"
-    assert "openrouter" in err.getvalue().lower() or "kimi" in err.getvalue().lower()
+    assert rc["model"]["primary"] == "openrouter/deepseek/deepseek-v4.1-flash-1017"
+    assert "openrouter" in err.getvalue().lower() or "deepseek" in err.getvalue().lower()
 
 
 def test_missing_prd_creator_uses_defaults_model_when_no_openrouter(tmp_path):

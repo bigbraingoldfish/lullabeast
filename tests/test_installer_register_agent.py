@@ -146,7 +146,7 @@ class TestFallbackWhenNoPrdCreator:
         for aid in AUTODEV_AGENT_IDS:
             assert aid in ids
         rc = next(a for a in updated["agents"]["list"] if a["id"] == "roadmap-converter")
-        assert rc["model"]["primary"] == "openrouter/moonshotai/kimi-k3.1-pro"
+        assert rc["model"]["primary"] == "openrouter/deepseek/deepseek-v4.1-flash-1017"
 
     def test_missing_top_level_agents_key_is_normalized(self, tmp_path):
         oc_json = tmp_path / "openclaw.json"

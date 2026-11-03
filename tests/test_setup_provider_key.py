@@ -335,7 +335,8 @@ class TestProviderKeySuccess:
 # ── provider-key with per-role customization (Stage D) ───────────────────────
 
 def _oc_root(tmp_path: Path) -> str:
-    """A minimal rendered openclaw.json: one multimodal and one text-only model."""
+    """A minimal rendered openclaw.json: the vision roles' default, one other
+    multimodal model and one text-only model."""
     oc_root = tmp_path / "openclaw"
     oc_root.mkdir(parents=True, exist_ok=True)
     (oc_root / "openclaw.json").write_text(
@@ -345,6 +346,7 @@ def _oc_root(tmp_path: Path) -> str:
                     "providers": {
                         "openrouter": {
                             "models": [
+                                {"id": "deepseek/deepseek-v4.1-flash-1017", "input": ["text", "image"]},
                                 {"id": "moonshotai/kimi-k3.1-pro", "input": ["text", "image"]},
                                 {"id": "z-ai/glm-5.3", "input": ["text"]},
                             ]
@@ -548,15 +550,17 @@ class TestProviderKeyProperties:
         assert not os.path.exists(cfg["model_overrides_path"])
 
     def test_stripping_image_from_an_effective_vision_role_rejected(self, tmp_path):
-        # kimi is the executor's audited default; making it text only at setup
-        # would break every screenshot turn, so the whole request refuses.
+        # DeepSeek V4.1 Flash is the executor's default; making it text only at
+        # setup would break every screenshot turn, so the whole request refuses.
         cfg = self._cfg_with_overrides(tmp_path)
         r = self._post(
             cfg,
             {
                 "provider": "openrouter",
                 "key": "abc123456",
-                "properties": {"openrouter/moonshotai/kimi-k3.1-pro": {"input": ["text"]}},
+                "properties": {
+                    "openrouter/deepseek/deepseek-v4.1-flash-1017": {"input": ["text"]}
+                },
             },
         )
         assert r.status_code == 400

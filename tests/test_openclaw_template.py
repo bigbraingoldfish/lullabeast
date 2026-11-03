@@ -244,21 +244,20 @@ class TestModelPricing:
             unsupported = sorted(set(m["input"]) - set(OPENCLAW_INPUT_MODALITIES))
             assert not unsupported, f"{mid}: OpenClaw rejects input {unsupported}"
 
-    def test_defaults_stay_in_family_and_skip_flash_variants(self):
-        # X, 2026-11-03: a default role moves to the latest model of the same
-        # family, never to a flash variant or another family.
-        families = {
-            "PLANNER_MODEL": "z-ai",
-            "ROADMAP_MODEL": "z-ai",
-            "EXECUTOR_MODEL": "moonshotai",
-            "REVIEWER_MODEL": "moonshotai",
-            "PRD_MODEL": "moonshotai",
-            "ESCALATION_MODEL": "qwen",
+    def test_default_role_models(self):
+        # X, 2026-11-03: the planner, roadmap-converter and escalation roles take
+        # their family's latest model; the image roles (executor, reviewer,
+        # prd-creator) run on DeepSeek V4.1 Flash, the cheap image-capable model
+        # the project is built around, instead of Kimi K3.1 Pro at $2/$10 per
+        # million tokens. A change here is a deliberate default decision.
+        assert TEMPLATE_MODEL_DEFAULTS == {
+            "PLANNER_MODEL": "openrouter/z-ai/glm-5.3",
+            "EXECUTOR_MODEL": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+            "REVIEWER_MODEL": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+            "PRD_MODEL": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+            "ROADMAP_MODEL": "openrouter/z-ai/glm-5.3",
+            "ESCALATION_MODEL": "openrouter/qwen/qwen3.8-27b",
         }
-        assert set(families) == set(TEMPLATE_MODEL_DEFAULTS)
-        for var, ref in TEMPLATE_MODEL_DEFAULTS.items():
-            assert ref.startswith(f"openrouter/{families[var]}/"), f"{var}: {ref}"
-            assert "flash" not in ref, f"{var} default {ref} is a flash variant"
 
     def test_shipped_set_is_the_nine_model_picker(self):
         # X, 2026-11-03: every family in the picker (Qwen, MiniMax, Kimi, GLM,
