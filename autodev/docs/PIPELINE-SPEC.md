@@ -1312,7 +1312,7 @@ pipeline:phase-N:{raw_id}:reviewer-attempt-1
 
 > **Note:** The key includes `{raw_id}` (e.g., `CORE-2`) to avoid session key collisions between phases with the same phase number across different projects. The `executor-fallback-attempt-N` variant shown in earlier documentation is not used in the current implementation — all executor retries (both automatic and reviewer-rejection retries) use `executor-attempt-N` with the current `executor_retries + 1` counter. The `attempt_label` field visible in orchestrator logs (e.g., `"Local"`) is a display string for log output, not part of the session key itself.
 
-New attempt → new suffix in key → completely fresh session, zero prior context loaded. This prevents VRAM overflow on local models.
+New attempt → new suffix in key → completely fresh session, zero prior context loaded. This prevents VRAM overflow on local models. An operator reset (RESET_REVIEWER, RESET_EXECUTION, RESET_PHASE or the nuclear reset) zeros the attempt counters, so every key built after one also carries `-e{N}` (N = operator resets of the phase) and never reattaches an earlier attempt's session.
 
 ### Heartbeat Cron
 

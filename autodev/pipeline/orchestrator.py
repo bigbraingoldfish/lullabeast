@@ -4241,6 +4241,31 @@ class Orchestrator:
         n = self._provider_error_retries()
         return f"-pr{n}" if n else ""
 
+    def _operator_resets(self) -> int:
+        """Operator resets of the current phase so far: ``escalation_resets``
+        (RESET_REVIEWER, RESET_EXECUTION, RESET_PHASE) plus ``nuclear_resets``. Both
+        survive a phase reset and only grow within a phase. 0 on any read error."""
+        try:
+            ps = self.read_phase_state()
+            return int(ps.get("escalation_resets", 0) or 0) + int(
+                ps.get("nuclear_resets", 0) or 0
+            )
+        except (ValueError, TypeError):
+            return 0
+
+    def _reset_suffix(self) -> str:
+        """Session-key suffix (``-e{N}``) that gives every agent a fresh OpenClaw
+        session after an operator reset.
+
+        A reset zeros the retry counters the base keys encode and keeps the run id,
+        so without this the next attempt rebuilt an earlier attempt's key and
+        OpenClaw reattached that session: a reset reviewer re-entered the transcript
+        it had been rejected for. ``N`` is :meth:`_operator_resets`, so each reset
+        cycle gets its own sessions. Empty before the first reset, so those keys keep
+        their legacy shape."""
+        n = self._operator_resets()
+        return f"-e{n}" if n else ""
+
     def _run_suffix(self) -> str:
         """Session-key suffix (``-r{token}``) scoping a pipeline session to the
         current run.
@@ -4254,8 +4279,8 @@ class Orchestrator:
         the same run's session and continuity is preserved. Empty when run_id is
         absent (runs predating the field, and most unit tests) so those keys stay
         byte-identical to the legacy shape. Appended outermost, after the
-        ``-pr/-c/-u`` retry discriminators, and the ``pipeline:`` prefix the
-        run-exit sweep matches on is untouched."""
+        ``-c/-u/-pr/-e`` retry and reset discriminators, and the ``pipeline:``
+        prefix the run-exit sweep matches on is untouched."""
         rid = (getattr(self, "state", None) or {}).get("run_id") or ""
         return "-r" + rid.replace("-", "")[:8] if rid else ""
 
@@ -4289,7 +4314,9 @@ class Orchestrator:
         the agent's prior (rejected / context-overflowed) context — both observed to
         produce confused or repeat-failing retries. A fresh session + the enriched
         ``reviewer_retry_directive`` (which states exactly what the gate flagged) is the
-        reliable path. Matches the CONTRACT_FAILURE ``-c{N}`` behaviour.
+        reliable path. Matches the CONTRACT_FAILURE ``-c{N}`` behaviour. An operator
+        reset zeros all three counters, so the call site also appends
+        :meth:`_reset_suffix`; without it the next cycle rebuilt the first pass's key.
         """
         base = f"pipeline:phase-{phase}:{raw_id}:reviewer-attempt-{reviewer_retries + 1}"
         if contract_retries:
@@ -7112,7 +7139,7 @@ class Orchestrator:
                         time.sleep(2)
                         continue
 
-                    session_key = f"pipeline:phase-{phase}:{raw_id}:planner-attempt-{retries + 1}" + self._provider_retry_suffix() + self._run_suffix()
+                    session_key = f"pipeline:phase-{phase}:{raw_id}:planner-attempt-{retries + 1}" + self._provider_retry_suffix() + self._reset_suffix() + self._run_suffix()
                     _override_err = self._record_active_agent("planner", session_key)  # Phase 9 — abort-on-escalation target
                     if _override_err:
                         self._escalate_model_override_rejected("planner", _override_err)
@@ -7417,7 +7444,7 @@ class Orchestrator:
                         time.sleep(2)
                         continue
 
-                    session_key = f"pipeline:phase-{phase}:{raw_id}:executor-attempt-{retries + 1}" + self._provider_retry_suffix() + self._run_suffix()
+                    session_key = f"pipeline:phase-{phase}:{raw_id}:executor-attempt-{retries + 1}" + self._provider_retry_suffix() + self._reset_suffix() + self._run_suffix()
                     _override_err = self._record_active_agent("executor", session_key)  # Phase 9 — abort-on-escalation target
                     if _override_err:
                         self._escalate_model_override_rejected("executor", _override_err)
@@ -7441,6 +7468,7 @@ class Orchestrator:
                             role="executor",
                             session_key=(
                                 f"pipeline:phase-{phase}:{raw_id}:executor-attempt-{retries}"
+                                + self._reset_suffix()
                                 + self._run_suffix()
                             ),
                             stamp_path=os.path.join(
@@ -7738,7 +7766,7 @@ class Orchestrator:
                     _unverified_retries = _ps_rk.get("reviewer_unverified_retries", 0)
                     session_key = self._reviewer_session_key(
                         phase, raw_id, retries, _contract_retries, _unverified_retries
-                    ) + self._provider_retry_suffix() + self._run_suffix()
+                    ) + self._provider_retry_suffix() + self._reset_suffix() + self._run_suffix()
                     _override_err = self._record_active_agent("reviewer", session_key)  # Phase 9 — abort-on-escalation target
                     if _override_err:
                         self._escalate_model_override_rejected("reviewer", _override_err)
