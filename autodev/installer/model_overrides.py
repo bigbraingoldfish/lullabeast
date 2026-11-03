@@ -13,7 +13,7 @@ wiring. Precedence, lowest to highest: template render -> this overlay ->
 explicit ``LOCAL_MODEL_*`` env values (local models only).
 
 File shape: ``{"models": {"<provider>/<model-id>": {<properties>}}}``.
-Editable properties: ``input`` (modalities), ``contextWindow``, ``maxTokens``,
+Editable properties: ``input`` (text, image), ``contextWindow``, ``maxTokens``,
 ``cost`` (per-key), ``reasoning``, and ``params`` (``temperature``/``top_p``,
 applied to ``agents.defaults.models``). An override naming a model that is no
 longer registered stays dormant in the file and is skipped at apply time.
@@ -28,9 +28,16 @@ import copy
 import json
 import math
 
+from autodev.installer.openclaw_template import OPENCLAW_INPUT_MODALITIES
+
 COST_KEYS = ("input", "output", "cacheRead", "cacheWrite")
 PARAM_KEYS = ("temperature", "top_p")
-INPUT_MODALITIES = ("text", "image", "video", "audio")
+# Exactly what OpenClaw's model catalog accepts: anything else fails an
+# agent's whole catalog at boot (see openclaw_template.OPENCLAW_INPUT_MODALITIES).
+INPUT_MODALITIES = OPENCLAW_INPUT_MODALITIES
+# Accepted here by earlier releases and rejected by OpenClaw's catalog; the boot
+# migrates them out of a saved overlay (drop_retired_override_modalities).
+_RETIRED_INPUT_MODALITIES = ("video", "audio")
 # Same sanity ceilings as the local-model setup confirm fields (2^20 / 2^24).
 MAX_TOKENS_CEILING = 1_048_576
 CONTEXT_WINDOW_CEILING = 16_777_216
@@ -165,6 +172,30 @@ def split_valid_overrides(overrides: dict) -> tuple[dict, dict]:
         else:
             valid[ref] = props
     return valid, dropped
+
+
+def drop_retired_override_modalities(overrides: dict) -> tuple[dict, list[str]]:
+    """Cut the modalities earlier releases accepted ("video", "audio") from every ``input``.
+
+    Returns ``(overrides, refs)``: the overrides map with those values removed
+    and the refs whose entry changed. The boot runs this before
+    :func:`split_valid_overrides`, so an overlay saved by an earlier release
+    keeps the entry's other edits instead of being quarantined whole. Any other
+    invalid value is left alone for validation to quarantine as before.
+    Neither the map nor its entries are mutated; ``overrides`` is returned
+    as-is when nothing changes.
+    """
+    result: dict = {}
+    refs: list[str] = []
+    for ref, props in (overrides or {}).items():
+        inputs = props.get("input") if isinstance(props, dict) else None
+        if isinstance(inputs, list):
+            kept = [m for m in inputs if m not in _RETIRED_INPUT_MODALITIES]
+            if kept != inputs:
+                props = {**props, "input": kept}
+                refs.append(ref)
+        result[ref] = props
+    return (result, refs) if refs else (overrides, refs)
 
 
 def _merge_props(existing: dict, updates: dict) -> dict:

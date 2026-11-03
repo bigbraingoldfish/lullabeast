@@ -24,10 +24,12 @@ import pytest
 from autodev.installer import doctor
 from autodev.installer.model_overrides import apply_model_overrides
 from autodev.installer.openclaw_template import (
+    OPENCLAW_INPUT_MODALITIES,
     TEMPLATE_ENV_VARS,
     TEMPLATE_MODEL_DEFAULTS,
     TEMPLATE_PLACEHOLDER_RE,
     TEMPLATE_REQUIRED_VARS,
+    drop_unsupported_input_modalities,
     load_template,
     reconcile_config_to_template,
     render_template_text,
@@ -232,6 +234,15 @@ class TestModelPricing:
             for field in ("contextWindow", "maxTokens"):
                 assert isinstance(m.get(field), int) and m[field] > 0, f"{mid}: {field}"
             assert "text" in m["input"], mid
+
+    def test_input_modalities_are_ones_openclaw_accepts(self):
+        # OpenRouter reports "video" for several of these models, but the
+        # pinned OpenClaw validates every agent's model catalog against a
+        # schema that allows only text and image input, and one entry listing
+        # anything else fails that agent's whole catalog at boot.
+        for mid, m in self._openrouter_models().items():
+            unsupported = sorted(set(m["input"]) - set(OPENCLAW_INPUT_MODALITIES))
+            assert not unsupported, f"{mid}: OpenClaw rejects input {unsupported}"
 
     def test_defaults_stay_in_family_and_skip_flash_variants(self):
         # X, 2026-11-03: a default role moves to the latest model of the same
@@ -651,3 +662,89 @@ class TestReconcile:
         reconciled = reconcile_config_to_template(_rendered(), live)
         assert "${" not in json.dumps(reconciled)
         assert reconciled["hooks"]["token"] == _TEST_ENV["HOOKS_TOKEN"]
+
+
+# ── input modalities OpenClaw rejects (boot migration) ───────────────────────
+
+class TestDropUnsupportedInputModalities:
+    def test_openclaw_accepts_text_and_image_only(self):
+        # OpenClaw 2026.6.11's models.json schema allows exactly the literals
+        # "text" and "image" as input items. Widen this only with an OpenClaw
+        # release whose schema does.
+        assert OPENCLAW_INPUT_MODALITIES == ("text", "image")
+
+    def test_cuts_rejected_modalities_from_every_provider(self):
+        config = {
+            "models": {
+                "providers": {
+                    "openrouter": {
+                        "models": [
+                            {"id": "minimax/minimax-m3", "input": ["text", "image", "video"]},
+                            {"id": "z-ai/glm-5.3", "input": ["text"]},
+                        ]
+                    },
+                    "local": {"models": [{"id": "omni", "input": ["text", "audio", "image"]}]},
+                }
+            }
+        }
+        cleaned, refs = drop_unsupported_input_modalities(config)
+        providers = cleaned["models"]["providers"]
+        assert providers["openrouter"]["models"][0]["input"] == ["text", "image"]
+        assert providers["openrouter"]["models"][1]["input"] == ["text"]
+        assert providers["local"]["models"][0]["input"] == ["text", "image"]
+        assert refs == ["openrouter/minimax/minimax-m3", "local/omni"]
+        # The caller's config is not mutated.
+        assert config["models"]["providers"]["openrouter"]["models"][0]["input"][-1] == "video"
+
+    def test_entry_left_with_nothing_falls_back_to_text(self):
+        config = {"models": {"providers": {"p": {"models": [{"id": "m", "input": ["video"]}]}}}}
+        cleaned, refs = drop_unsupported_input_modalities(config)
+        assert cleaned["models"]["providers"]["p"]["models"][0]["input"] == ["text"]
+        assert refs == ["p/m"]
+
+    def test_conformant_config_returned_as_is(self):
+        rendered = _rendered()
+        cleaned, refs = drop_unsupported_input_modalities(rendered)
+        assert cleaned is rendered
+        assert refs == []
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            None,
+            [],
+            {},
+            {"models": []},
+            {"models": {"providers": []}},
+            {"models": {"providers": {"p": "x"}}},
+            {"models": {"providers": {"p": {"models": {}}}}},
+            {"models": {"providers": {"p": {"models": ["x", {"id": "m"}, {"id": "n", "input": "text"}]}}}},
+        ],
+    )
+    def test_tolerates_malformed_shapes(self, config):
+        cleaned, refs = drop_unsupported_input_modalities(config)
+        assert cleaned is config
+        assert refs == []
+
+    def test_upgraded_volume_loses_video_after_reconcile(self):
+        # The path every boot runs: v1.1.0 shipped MiniMax M3 with "video", and
+        # reconcile keeps extra scalar-list items by design, so the reconciled
+        # config still carries it until this migration cuts it.
+        live = _rendered()
+        minimax = next(
+            m for m in live["models"]["providers"]["openrouter"]["models"]
+            if m["id"] == "minimax/minimax-m3"
+        )
+        minimax["input"] = ["text", "image", "video"]
+        reconciled = reconcile_config_to_template(_rendered(), live)
+        kept = next(
+            m for m in reconciled["models"]["providers"]["openrouter"]["models"]
+            if m["id"] == "minimax/minimax-m3"
+        )
+        assert "video" in kept["input"]
+        cleaned, refs = drop_unsupported_input_modalities(reconciled)
+        assert refs == ["openrouter/minimax/minimax-m3"]
+        for provider in cleaned["models"]["providers"].values():
+            for m in provider.get("models") or []:
+                assert set(m.get("input") or []) <= set(OPENCLAW_INPUT_MODALITIES), m["id"]
+        assert template_conformance_issues(_template(), cleaned) == []

@@ -218,6 +218,27 @@ class TestEntrypoint:
         # loads as empty (the exact first-boot bug this pins).
         assert 'MODEL_OVERRIDES_FILE="$MODEL_OVERRIDES_FILE" python3' in wiring
 
+    def test_boot_drops_input_modalities_openclaw_rejects(self):
+        # OpenClaw's model catalog accepts only text and image input, and
+        # reconcile keeps extra scalar-list items, so the boot migrates both
+        # places a rejected modality can live: saved dashboard edits (before
+        # validation, so the rest of the entry survives) and the config itself
+        # (after the overlay, at the heredoc's top level, overlay or not).
+        render_def = ENTRYPOINT.find("render_reconcile_config() {")
+        render_end = ENTRYPOINT.find("wire_or_probe_local_models() {")
+        render_body = ENTRYPOINT[render_def:render_end]
+        migrate = render_body.find("drop_retired_override_modalities(overrides)")
+        split = render_body.find("split_valid_overrides(overrides)")
+        assert 0 < migrate < split
+        overlay_apply = render_body.find("apply_model_overrides(cfg, valid)")
+        cut = re.search(
+            r"^cleaned, cut = drop_unsupported_input_modalities\(cfg\)$",
+            render_body,
+            re.MULTILINE,
+        )
+        assert cut, "the config cut must run at the heredoc's top level"
+        assert 0 < overlay_apply < cut.start()
+
     def test_config_render_reconcile_is_a_function(self):
         # v1.0.0 Phase 3: the render/reconcile heredoc is wrapped in a function
         # so the setup-watch loop can re-run it, and called in the boot path.
@@ -1097,6 +1118,20 @@ class TestDeployImageWorkflow:
         # completion line, proving re-render + gateway restart end to end.
         assert "apply.request" in WORKFLOW_TEXT
         assert "configuration applied; gateway restarted" in WORKFLOW_TEXT
+
+    def test_full_envelope_guard_seeds_editor_modalities_and_checks_catalogs(self):
+        # The guard seeds the editor's own modality list, never a hand-copied
+        # one that can drift from what the dashboard accepts, and fails when an
+        # agent's model catalog is rejected, not only when the boot dies:
+        # OpenClaw logs "Invalid models.json schema" and keeps running.
+        jobs = self._load()["jobs"]
+        guard = next(
+            s for s in jobs["build-smoke"]["steps"]
+            if s.get("name") == "Guard - a full-envelope overlay still boots the gateway"
+        )
+        assert "list(INPUT_MODALITIES)" in guard["run"]
+        assert '"video"' not in guard["run"] and '"audio"' not in guard["run"]
+        assert "Invalid models.json schema" in guard["run"]
 
     def test_publish_gated_on_version_tags_with_packages_permission(self):
         jobs = self._load()["jobs"]

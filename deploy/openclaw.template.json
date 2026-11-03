@@ -15,8 +15,7 @@
             "reasoning": true,
             "input": [
               "text",
-              "image",
-              "video"
+              "image"
             ],
             "cost": {
               "input": 0.15,
@@ -33,8 +32,7 @@
             "reasoning": true,
             "input": [
               "text",
-              "image",
-              "video"
+              "image"
             ],
             "cost": {
               "input": 0.15,
@@ -51,8 +49,7 @@
             "reasoning": true,
             "input": [
               "text",
-              "image",
-              "video"
+              "image"
             ],
             "cost": {
               "input": 0.3,
@@ -69,8 +66,7 @@
             "reasoning": true,
             "input": [
               "text",
-              "image",
-              "video"
+              "image"
             ],
             "cost": {
               "input": 0.15,
@@ -87,8 +83,7 @@
             "reasoning": true,
             "input": [
               "text",
-              "image",
-              "video"
+              "image"
             ],
             "cost": {
               "input": 2,
@@ -121,8 +116,7 @@
             "reasoning": true,
             "input": [
               "text",
-              "image",
-              "video"
+              "image"
             ],
             "cost": {
               "input": 0.0285,

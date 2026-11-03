@@ -20,6 +20,9 @@ one shared implementation:
     the current image's template on every boot, so a template change shipped in
     a new image self-heals instead of dead-ending at the (now-failing)
     conformance check.
+  * Modality migration: ``drop_unsupported_input_modalities`` cuts model
+    ``input`` values OpenClaw's model catalog rejects. Reconcile keeps extra
+    list items by design, so without it such a value would survive every boot.
 
 Placeholder contract (whole-string ``${VAR}`` values only, so the raw template
 file always parses as strict JSON):
@@ -81,6 +84,16 @@ TEMPLATE_REQUIRED_VARS: tuple[str, ...] = ("HOOKS_TOKEN", "GATEWAY_TOKEN")
 TEMPLATE_ENV_VARS: tuple[str, ...] = TEMPLATE_REQUIRED_VARS + tuple(
     TEMPLATE_MODEL_DEFAULTS
 )
+
+# The input modalities OpenClaw's model catalog accepts. The pinned 2026.6.11
+# validates each agent's generated catalog against a schema whose ``input``
+# items are exactly "text" or "image", and one model listing anything else
+# (OpenRouter reports "video" for several picker models) fails that agent's
+# whole catalog at boot ("Invalid models.json schema"). The template ships only
+# these, the dashboard accepts only these (model_overrides.INPUT_MODALITIES),
+# and every boot cuts anything else from the live config. Revisit with any
+# OpenClaw bump.
+OPENCLAW_INPUT_MODALITIES: tuple[str, ...] = ("text", "image")
 
 
 def template_path(repo_path: str) -> str:
@@ -296,3 +309,38 @@ def reconcile_config_to_template(template, live):
 
     # Scalar leaf (including bool): the template value wins.
     return copy.deepcopy(template)
+
+
+def drop_unsupported_input_modalities(config):
+    """Return ``(config, refs)`` with every model's ``input`` cut to what OpenClaw accepts.
+
+    Walks every ``models.providers.<provider>.models[]`` entry and removes the
+    ``input`` items outside :data:`OPENCLAW_INPUT_MODALITIES`; an entry left
+    with none falls back to ``["text"]``. ``refs`` names each changed entry as
+    ``provider/model-id``, in config order. The boot runs this after reconcile
+    and the overlay: reconcile keeps extra scalar-list items by design, so a
+    value an older template shipped (1.1.0 listed "video" for MiniMax M3) or an
+    operator added would otherwise reach the gateway on every boot.
+
+    ``config`` is never mutated, and is returned as-is when nothing changes or
+    its shape is not a config's.
+    """
+    models_block = config.get("models") if isinstance(config, dict) else None
+    providers = models_block.get("providers") if isinstance(models_block, dict) else None
+    if not isinstance(providers, dict):
+        return config, []
+    result = copy.deepcopy(config)
+    refs: list[str] = []
+    for name, provider in result["models"]["providers"].items():
+        models = provider.get("models") if isinstance(provider, dict) else None
+        if not isinstance(models, list):
+            continue
+        for entry in models:
+            inputs = entry.get("input") if isinstance(entry, dict) else None
+            if not isinstance(inputs, list):
+                continue
+            kept = [m for m in inputs if m in OPENCLAW_INPUT_MODALITIES]
+            if kept != inputs:
+                entry["input"] = kept or ["text"]
+                refs.append(f"{name}/{entry.get('id')}")
+    return (result, refs) if refs else (config, refs)

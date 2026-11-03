@@ -14,8 +14,10 @@ import pytest
 from autodev.installer.model_overrides import (
     CONTEXT_WINDOW_CEILING,
     COST_CEILING,
+    INPUT_MODALITIES,
     MAX_TOKENS_CEILING,
     apply_model_overrides,
+    drop_retired_override_modalities,
     load_model_overrides,
     merge_model_overrides,
     split_valid_overrides,
@@ -80,7 +82,7 @@ class TestValidate:
         # move together.
         errors = validate_model_override(
             {
-                "input": ["text", "image", "video", "audio"],
+                "input": list(INPUT_MODALITIES),
                 "contextWindow": CONTEXT_WINDOW_CEILING,
                 "maxTokens": MAX_TOKENS_CEILING,
                 "reasoning": True,
@@ -106,6 +108,9 @@ class TestValidate:
             {"input": []},
             {"input": ["image"]},  # must include text
             {"input": ["text", "telepathy"]},
+            # OpenClaw's model catalog rejects both, so the editor does too.
+            {"input": ["text", "image", "video"]},
+            {"input": ["text", "audio"]},
             {"input": "text"},
             {"contextWindow": 0},
             {"contextWindow": -5},
@@ -155,6 +160,55 @@ class TestSplitValid:
 
     def test_all_invalid_none_applied(self):
         valid, dropped = split_valid_overrides({"m/x": {"contextWindow": 0}})
+        assert valid == {}
+        assert list(dropped) == ["m/x"]
+
+
+# ── retired modalities (boot migration) ──────────────────────────────────────
+
+class TestDropRetiredOverrideModalities:
+    def test_editor_accepts_exactly_what_openclaw_accepts(self):
+        # Earlier releases also accepted video and audio, which OpenClaw's
+        # model catalog rejects at boot.
+        assert INPUT_MODALITIES == tpl.OPENCLAW_INPUT_MODALITIES == ("text", "image")
+
+    def test_cuts_video_and_audio_and_keeps_the_rest_of_the_entry(self):
+        ov = {
+            "openrouter/vendor/alpha": {
+                "input": ["text", "image", "video", "audio"],
+                "contextWindow": 200_000,
+            },
+            "openrouter/vendor/beta": {"input": ["text", "image"]},
+            "local/qwen3.5": {"reasoning": True},
+        }
+        migrated, refs = drop_retired_override_modalities(ov)
+        assert migrated["openrouter/vendor/alpha"] == {
+            "input": ["text", "image"],
+            "contextWindow": 200_000,
+        }
+        assert migrated["openrouter/vendor/beta"] == {"input": ["text", "image"]}
+        assert migrated["local/qwen3.5"] == {"reasoning": True}
+        assert refs == ["openrouter/vendor/alpha"]
+        # Neither the map nor the entry is mutated.
+        assert ov["openrouter/vendor/alpha"]["input"][-1] == "audio"
+        # The migrated entry passes the boot's validation instead of being
+        # quarantined along with its other edits.
+        valid, dropped = split_valid_overrides(migrated)
+        assert dropped == {}
+        assert set(valid) == set(ov)
+
+    def test_unchanged_map_returned_as_is(self):
+        ov = {"m/x": {"input": ["text"]}, "m/y": {"reasoning": True}}
+        migrated, refs = drop_retired_override_modalities(ov)
+        assert migrated is ov
+        assert refs == []
+
+    def test_other_invalid_values_are_left_for_quarantine(self):
+        # Only the two values earlier releases accepted are migrated. Anything
+        # else invalid (a hand edit) still fails validation and is quarantined.
+        migrated, refs = drop_retired_override_modalities({"m/x": {"input": ["text", "telepathy"]}})
+        assert refs == []
+        valid, dropped = split_valid_overrides(migrated)
         assert valid == {}
         assert list(dropped) == ["m/x"]
 

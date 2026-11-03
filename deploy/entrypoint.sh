@@ -261,6 +261,7 @@ render_reconcile_config() {
 import json
 import os
 from autodev.installer.openclaw_template import (
+    drop_unsupported_input_modalities,
     reconcile_config_to_template,
     render_template_text,
     template_path,
@@ -313,11 +314,26 @@ if published.isdigit() and published != "18789":
 # render/reconcile so they survive the template force-win. Applied before
 # wire_or_probe_local_models, whose merge preserves existing fields and whose
 # explicit LOCAL_MODEL_* env values keep the last word for local models.
-from autodev.installer.model_overrides import apply_model_overrides, load_model_overrides, split_valid_overrides
+from autodev.installer.model_overrides import (
+    apply_model_overrides,
+    drop_retired_override_modalities,
+    load_model_overrides,
+    split_valid_overrides,
+)
 
 ov_path = os.environ.get("MODEL_OVERRIDES_FILE") or ""
 overrides = load_model_overrides(ov_path)
 if overrides:
+    # Earlier releases let the dashboard save video or audio input, which
+    # OpenClaw's model catalog rejects. Migrate those out first, so the rest of
+    # the entry survives instead of being quarantined with them.
+    overrides, migrated = drop_retired_override_modalities(overrides)
+    if migrated:
+        try:
+            write_json_atomic(ov_path, {"models": overrides})
+            print(f"[lullabeast] removed video/audio input from {len(migrated)} saved model edit(s): {', '.join(migrated)}")
+        except OSError as e:
+            print(f"[lullabeast] removed video/audio input from {len(migrated)} saved model edit(s) for this boot only (rewrite failed: {e})")
     # Apply only entries that pass the dashboard API's own validation, so a
     # hand-edited or upgrade-invalidated value cannot reach the gateway config.
     valid, dropped = split_valid_overrides(overrides)
@@ -337,6 +353,18 @@ if overrides:
         if overlaid != cfg:
             write_json_atomic(target, overlaid)
             print("[lullabeast] model property overrides applied from the data volume")
+
+# OpenClaw's model catalog accepts only text and image input, and one model
+# listing anything else fails that agent's whole catalog at boot ("Invalid
+# models.json schema"). Reconcile keeps extra scalar-list items, so a value an
+# older template shipped (1.1.0 listed video for MiniMax M3) or an operator
+# added survives every boot until it is cut here, after the overlay.
+with open(target, encoding="utf-8") as f:
+    cfg = json.load(f)
+cleaned, cut = drop_unsupported_input_modalities(cfg)
+if cut:
+    write_json_atomic(target, cleaned)
+    print(f"[lullabeast] removed input types OpenClaw rejects from {len(cut)} model(s): {', '.join(cut)}")
 PY
 }
 
