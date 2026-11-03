@@ -12307,7 +12307,11 @@ def _run_init_project(
     """Initialize a project directory (Mode A: new repo, Mode B: existing repo).
 
     Mode A: .git does NOT exist → create full structure, git init, initial commit.
-    Mode B: .git exists → create only missing files, append missing gitignore entries.
+    Mode B: .git exists → create only missing files, append missing gitignore entries,
+    and commit only the paths it wrote; the user's own uncommitted, untracked and
+    staged changes stay out of the init commit. An appended ``.gitignore`` is
+    committed only if it was tracked and clean; otherwise the append is left
+    uncommitted with the user's own edits.
 
     ``verification_content`` (Stage C): if provided, written to
     ``<repo>/verification.md`` after PRD. If absent AND no verification.md
@@ -12427,6 +12431,12 @@ def _run_init_project(
             )
 
         else:  # Mode B
+            # Repo-relative paths this init writes: the only paths it commits.
+            written = []
+
+            def _wrote(path: str) -> None:
+                written.append(os.path.relpath(path, repo_path).replace(os.sep, "/"))
+
             # Create only missing structure (pipeline artifacts under .autodev/pipeline/)
             art = os.path.join(repo_path, ".autodev", "pipeline")
             os.makedirs(os.path.join(art, "phases"), exist_ok=True)
@@ -12436,6 +12446,7 @@ def _run_init_project(
             init_py = os.path.join(src_dir, "__init__.py")
             if not os.path.exists(init_py):
                 open(init_py, "w").close()
+                _wrote(init_py)
 
             for fname, content in [
                 ("pipeline.json", json.dumps({
@@ -12448,16 +12459,20 @@ def _run_init_project(
                 path = os.path.join(art, fname)
                 if not os.path.exists(path):
                     atomic_write(path, content)
+                    _wrote(path)
 
             roadmap_path_b = os.path.join(repo_path, "roadmap.md")
             if not os.path.exists(roadmap_path_b):
                 atomic_write(roadmap_path_b, roadmap_seed)
+                _wrote(roadmap_path_b)
 
             prd_path = os.path.join(repo_path, "prd.md")
             if prd_content and str(prd_content).strip():
                 atomic_write(prd_path, str(prd_content))
+                _wrote(prd_path)
             elif not os.path.exists(prd_path):
                 atomic_write(prd_path, "# PRD\n\n_To be completed._\n")
+                _wrote(prd_path)
 
             # Stage C: verification.md — write when provided. On-disk doc is
             # left untouched in Mode B (re-running launch on an existing repo
@@ -12465,10 +12480,12 @@ def _run_init_project(
             ver_path_b = os.path.join(repo_path, "verification.md")
             if _ver_text and not os.path.exists(ver_path_b):
                 atomic_write(ver_path_b, _ver_text + ("\n" if not _ver_text.endswith("\n") else ""))
+                _wrote(ver_path_b)
 
             metrics_path = os.path.join(art, "metrics.jsonl")
             if not os.path.exists(metrics_path):
                 open(metrics_path, "w").close()
+                _wrote(metrics_path)
 
             # Append missing gitignore entries
             gitignore_path = os.path.join(repo_path, ".gitignore")
@@ -12477,21 +12494,61 @@ def _run_init_project(
                     existing = f.read()
                 missing = [e for e in _PIPELINE_GITIGNORE_ENTRIES if e not in existing]
                 if missing:
+                    # Commit the appended block only when .gitignore is tracked and
+                    # clean: committing the file would also commit the user's own
+                    # uncommitted edits to it. Otherwise the append is left for
+                    # the user to commit with their change.
+                    _gi_status = subprocess.run(
+                        ["git", "-C", repo_path, "status", "--porcelain", "--", ".gitignore"],
+                        capture_output=True, text=True,
+                    )
                     with open(gitignore_path, "a") as f:
                         f.write("\n" + _PIPELINE_GITIGNORE_HEADER + "\n" + "\n".join(missing) + "\n")
+                    if _gi_status.returncode == 0 and not (_gi_status.stdout or "").strip():
+                        _wrote(gitignore_path)
 
-            # git add + commit new files only
+            # Commit only the paths init wrote. A repo-wide `git add -A` would sweep
+            # the user's uncommitted edits, untracked files (secrets included) and
+            # staged work into the init commit; `git commit -- <paths>` leaves all
+            # of that where it was. Ignored paths are dropped first (`git add`
+            # refuses them), and the commit is skipped when none of the paths
+            # differ from HEAD, so a re-launch on a dirty repo still succeeds.
             _ensure_repo_git_identity(repo_path)
-            subprocess.run(["git", "-C", repo_path, "add", "-A"], check=True, capture_output=True)
-            result = subprocess.run(
-                ["git", "-C", repo_path, "status", "--porcelain"],
-                capture_output=True, text=True,
-            )
-            if result.stdout.strip():
-                subprocess.run(
-                    ["git", "-C", repo_path, "commit", "-m", "init: add pipeline project structure"],
-                    check=True, capture_output=True,
+            if written:
+                # NUL-delimited both ways: without -z, check-ignore quotes
+                # non-ASCII paths, which then would not match ``written``.
+                ignored = subprocess.run(
+                    ["git", "-C", repo_path, "check-ignore", "--stdin", "-z"],
+                    input="\0".join(written).encode("utf-8"),
+                    capture_output=True,
                 )
+                if ignored.returncode not in (0, 1):  # 1 = none ignored
+                    raise subprocess.CalledProcessError(
+                        ignored.returncode, ignored.args, stderr=ignored.stderr,
+                    )
+                ignored_paths = set(
+                    (ignored.stdout or b"").decode("utf-8", errors="replace").split("\0")
+                )
+                to_commit = [p for p in written if p not in ignored_paths]
+                if to_commit:
+                    subprocess.run(
+                        ["git", "-C", repo_path, "add", "--", *to_commit],
+                        check=True, capture_output=True,
+                    )
+                    staged = subprocess.run(
+                        ["git", "-C", repo_path, "diff", "--cached", "--quiet", "--", *to_commit],
+                        capture_output=True,
+                    )
+                    if staged.returncode not in (0, 1):  # 1 = paths differ from HEAD
+                        raise subprocess.CalledProcessError(
+                            staged.returncode, staged.args, stderr=staged.stderr,
+                        )
+                    if staged.returncode == 1:
+                        subprocess.run(
+                            ["git", "-C", repo_path, "commit", "-m",
+                             "init: add pipeline project structure", "--", *to_commit],
+                            check=True, capture_output=True,
+                        )
 
         # Step 8 (both modes): set pipeline-project symlink (repo-local runtime by default)
         _cfg = load_config()

@@ -393,6 +393,135 @@ class TestModeBExistingRepo:
         assert result["ok"] is True
         assert (repo_path / "prd.md").read_text() == prd
 
+    # -- The init commit holds only what init wrote --------------------------
+
+    def _git(self, repo_path: Path, *args) -> str:
+        return subprocess.run(
+            ["git", "-C", str(repo_path), *args],
+            check=True, capture_output=True, text=True,
+        ).stdout
+
+    def _head_files(self, repo_path: Path) -> set:
+        return set(self._git(repo_path, "ls-tree", "-r", "--name-only", "HEAD").splitlines())
+
+    def _make_dirty(self, repo_path: Path) -> None:
+        """An unstaged edit, an untracked secret and a pre-staged file."""
+        (repo_path / "README.md").write_text("# Test\n\nWork in progress.\n")
+        (repo_path / "secrets.txt").write_text("API_KEY=do-not-commit\n")
+        (repo_path / "staged.py").write_text("x = 1\n")
+        self._git(repo_path, "add", "staged.py")
+
+    def test_mode_b_leaves_user_changes_out_of_init_commit(self, tmp_path):
+        """Unstaged, untracked and pre-staged user changes stay out of HEAD and
+        keep their state; the pipeline files are committed."""
+        repo_path = tmp_path / "myproject"
+        self._make_git_repo(repo_path)
+        self._make_dirty(repo_path)
+
+        with patch("ui.server._atomic_symlink_swap"):
+            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
+
+        assert result["ok"] is True, result.get("error")
+        assert self._git(repo_path, "log", "-1", "--format=%s").strip() == "init: add pipeline project structure"
+        head = self._head_files(repo_path)
+        for path in ("roadmap.md", "prd.md", "verification.md", "src/myproject/__init__.py"):
+            assert path in head, f"pipeline file missing from the init commit: {path}"
+        assert "secrets.txt" not in head
+        assert "staged.py" not in head
+        assert self._git(repo_path, "show", "HEAD:README.md") == "# Test\n"
+        status = self._git(repo_path, "status", "--porcelain").splitlines()
+        assert " M README.md" in status
+        assert "?? secrets.txt" in status
+        assert "A  staged.py" in status
+
+    def test_mode_b_relaunch_on_dirty_repo_succeeds(self, tmp_path):
+        """A second launch rewrites prd.md with the same text: nothing init
+        wrote differs from HEAD, so it succeeds without an empty commit and
+        without committing the user's changes."""
+        repo_path = tmp_path / "myproject"
+        self._make_git_repo(repo_path)
+        prd = "# Product requirements\n\n## Problem\nFrom Ideas.\n"
+        with patch("ui.server._atomic_symlink_swap"):
+            first = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, prd, verification_content=VALID_VERIFICATION_CONTENT)
+        assert first["ok"] is True, first.get("error")
+        head_before = self._git(repo_path, "rev-parse", "HEAD")
+        self._make_dirty(repo_path)
+
+        with patch("ui.server._atomic_symlink_swap"):
+            second = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, prd, verification_content=VALID_VERIFICATION_CONTENT)
+
+        assert second["ok"] is True, second.get("error")
+        assert self._git(repo_path, "rev-parse", "HEAD") == head_before
+        assert "A  staged.py" in self._git(repo_path, "status", "--porcelain").splitlines()
+
+    def test_mode_b_clean_repo_commits_pipeline_structure(self, tmp_path):
+        """A clean repo behaves as before: one init commit, a clean tree after."""
+        repo_path = tmp_path / "myproject"
+        self._make_git_repo(repo_path)
+
+        with patch("ui.server._atomic_symlink_swap"):
+            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
+
+        assert result["ok"] is True, result.get("error")
+        assert self._git(repo_path, "rev-list", "--count", "HEAD").strip() == "2"
+        assert {"roadmap.md", "prd.md", "verification.md"} <= self._head_files(repo_path)
+        assert self._git(repo_path, "status", "--porcelain") == ""
+
+    def test_mode_b_skips_ignored_paths_and_commits_gitignore(self, tmp_path):
+        """Paths the repo ignores are left uncommitted rather than failing
+        `git add`; the appended .gitignore is committed."""
+        repo_path = tmp_path / "myproject"
+        self._make_git_repo(repo_path)
+        (repo_path / ".gitignore").write_text("*.pyc\nprd.md\n")
+        self._git(repo_path, "add", ".gitignore")
+        self._git(repo_path, "-c", "user.name=Test", "-c", "user.email=t@t.com", "commit", "-m", "ignore")
+
+        with patch("ui.server._atomic_symlink_swap"):
+            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
+
+        assert result["ok"] is True, result.get("error")
+        head = self._head_files(repo_path)
+        assert "prd.md" not in head
+        assert "roadmap.md" in head
+        assert not any(p.startswith(".autodev/pipeline/") for p in head)
+        assert ".autodev/pipeline/" in self._git(repo_path, "show", "HEAD:.gitignore")
+        assert self._git(repo_path, "status", "--porcelain") == ""
+
+    def test_mode_b_skips_ignored_non_ascii_path(self, tmp_path):
+        """An ignored path with non-ASCII characters is still recognised as
+        ignored (check-ignore quotes such paths unless NUL-delimited)."""
+        repo_path = tmp_path / "café"
+        self._make_git_repo(repo_path)
+        (repo_path / ".gitignore").write_text("src/\n")
+        self._git(repo_path, "add", ".gitignore")
+        self._git(repo_path, "-c", "user.name=Test", "-c", "user.email=t@t.com", "commit", "-m", "ignore")
+
+        with patch("ui.server._atomic_symlink_swap"):
+            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
+
+        assert result["ok"] is True, result.get("error")
+        assert (repo_path / "src" / "café" / "__init__.py").exists()
+        assert not any(p.startswith("src/") for p in self._head_files(repo_path))
+
+    def test_mode_b_leaves_dirty_gitignore_uncommitted(self, tmp_path):
+        """The user's own uncommitted .gitignore edits must not ride along in
+        the init commit: the pipeline block is appended but left uncommitted."""
+        repo_path = tmp_path / "myproject"
+        self._make_git_repo(repo_path)
+        (repo_path / ".gitignore").write_text("*.pyc\n")
+        self._git(repo_path, "add", ".gitignore")
+        self._git(repo_path, "-c", "user.name=Test", "-c", "user.email=t@t.com", "commit", "-m", "ignore")
+        (repo_path / ".gitignore").write_text("*.pyc\n.venv/\n")
+
+        with patch("ui.server._atomic_symlink_swap"):
+            result = _run_init_project(str(repo_path), VALID_ROADMAP_SEED, verification_content=VALID_VERIFICATION_CONTENT)
+
+        assert result["ok"] is True, result.get("error")
+        assert self._git(repo_path, "show", "HEAD:.gitignore") == "*.pyc\n"
+        gitignore = (repo_path / ".gitignore").read_text()
+        assert ".venv/" in gitignore and ".autodev/pipeline/" in gitignore
+        assert "roadmap.md" in self._head_files(repo_path)
+
 
 # ---------------------------------------------------------------------------
 # Symlink tests
