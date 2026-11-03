@@ -493,6 +493,21 @@ _UNVERIFIED_INSTRUCTIONS = {
     ),
 }
 
+# Bounds on the gate's problem list in a contract-shape retry directive. The list
+# holds every bad evidence anchor plus what the folders of missing files hold;
+# the bounds keep a pathological list from bloating the webhook message.
+_UNVERIFIED_DETAIL_MAX_ITEMS = 10
+_UNVERIFIED_DETAIL_MAX_CHARS = 1500
+
+# Follows the gate's specifics in a contract-shape retry directive.
+_UNVERIFIED_CITATION_RULE = (
+    "Cite only files that exist: copy each path from a listing of its folder, "
+    "relative to the project folder (for example "
+    ".autodev/pipeline/behavioral-smoke/<file>). Save evidence you capture under "
+    ".autodev/pipeline/ before citing it; a browser screenshot tool may save into "
+    "its own folder, so copy that file over."
+)
+
 # Hard cap for gate script subprocess.run — prevents hung gates from stalling the orchestrator.
 GATE_SUBPROCESS_TIMEOUT = 60
 
@@ -4324,19 +4339,24 @@ class Orchestrator:
         enriched with the gate's specific problem list (``detail`` — the value the gate
         stashed in ``phase_state['reviewer_unverified_detail']``) when present, so the
         re-invoked reviewer is told exactly what failed (e.g. "evidence must have at
-        least 3 entries"). Pure function — the inline handler that calls it lives in
-        ``run()``.
+        least 3 entries", every evidence file that does not exist, and what the
+        folders of those files hold), followed by :data:`_UNVERIFIED_CITATION_RULE`.
+        Pure function — the inline handler that calls it lives in ``run()``.
 
-        The appended specifics are bounded (first 3 problems, ~500 chars) so a
-        pathological problem list can't bloat the webhook message. ``detail`` may be
+        The appended specifics are bounded (first :data:`_UNVERIFIED_DETAIL_MAX_ITEMS`
+        problems, :data:`_UNVERIFIED_DETAIL_MAX_CHARS` chars) so a pathological
+        problem list can't bloat the webhook message. ``detail`` may be
         ``None``/empty (no enrichment) — a normal first-pass verdict carries no detail.
         """
         base = _UNVERIFIED_INSTRUCTIONS[gate_result]
         if detail:
-            specifics = "; ".join(str(d) for d in detail[:3])[:500]
+            specifics = "; ".join(
+                str(d) for d in detail[:_UNVERIFIED_DETAIL_MAX_ITEMS]
+            )[:_UNVERIFIED_DETAIL_MAX_CHARS]
             if specifics:
                 base = (
-                    f"{base} Specifically, the prior reviewer output had: {specifics}"
+                    f"{base} Specifically, the prior reviewer output had: {specifics}. "
+                    f"{_UNVERIFIED_CITATION_RULE}"
                 )
         return base
 

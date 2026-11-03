@@ -75,10 +75,90 @@ def _is_visual_phase(phase_raw_id):
 _REQUIRED_BEHAVIORAL_EVIDENCE_KEYS = ("claim", "file_or_screenshot_or_log", "method")
 _MIN_BEHAVIORAL_EVIDENCE_ANCHORS = 3
 
+# A missing evidence file is reported with what its folder holds, capped so a
+# crowded folder cannot flood the reviewer's retry directive.
+_FOLDER_LISTING_MAX_NAMES = 20
+
+
+def _evidence_folder_listing(missing_paths):
+    """Return one line per folder that ``missing_paths`` point into: the names it
+    holds, or that it does not exist. A retry can then cite a file that exists
+    instead of guessing a name again. Folders show relative to the project; a
+    folder outside the workspace is never listed."""
+    workspace_real = os.path.realpath(WORKSPACE_DIR)
+    lines = []
+    seen = set()
+    for path in missing_paths:
+        folder = os.path.realpath(
+            os.path.dirname(resolve_workspace_path(path, WORKSPACE_DIR))
+        )
+        if folder in seen:
+            continue
+        seen.add(folder)
+        try:
+            if os.path.commonpath([workspace_real, folder]) != workspace_real:
+                continue
+        except ValueError:
+            continue
+        rel = os.path.relpath(folder, workspace_real)
+        shown = "the project folder" if rel == os.curdir else rel + "/"
+        if not os.path.isdir(folder):
+            lines.append(f"{shown} does not exist")
+            continue
+        names = [
+            name + "/" if os.path.isdir(os.path.join(folder, name)) else name
+            for name in sorted(os.listdir(folder))
+        ]
+        if len(names) > _FOLDER_LISTING_MAX_NAMES:
+            extra = len(names) - _FOLDER_LISTING_MAX_NAMES
+            names = names[:_FOLDER_LISTING_MAX_NAMES] + [f"and {extra} more"]
+        lines.append(f"existing files in {shown}: " + (", ".join(names) or "none"))
+    return lines
+
+
+def _anchor_problems(block_name, evidence):
+    """Return every problem with ``block_name``'s evidence anchors, one per bad
+    anchor, followed by :func:`_evidence_folder_listing` for the missing files.
+
+    All anchors are checked in one pass, so the reviewer's retry hears about
+    every bad citation at once instead of one per pass. Each path must be a
+    string, stay inside the workspace (canonical ``os.path.realpath`` check,
+    symlinks resolved on both sides) and exist on disk; a relative path names a
+    file in the project, with or without the ``pipeline-project/`` prefix the
+    reviewer writes through (:func:`utils.resolve_workspace_path`)."""
+    problems = []
+    missing = []
+    for i, entry in enumerate(evidence):
+        label = f"{block_name}.evidence[{i}]"
+        if not isinstance(entry, dict):
+            problems.append(f"{label} must be an object")
+            continue
+        absent = [key for key in _REQUIRED_BEHAVIORAL_EVIDENCE_KEYS if not entry.get(key)]
+        if absent:
+            problems.append(f"{label} missing required key {absent[0]!r}")
+            continue
+        path = entry["file_or_screenshot_or_log"]
+        # The key check above only tests truthiness; reject a truthy non-string
+        # path first, since path_escapes_workspace treats a non-str as
+        # non-escaping (the validator owns the "must be a string" contract error).
+        if not isinstance(path, str):
+            problems.append(f"{label} file_or_screenshot_or_log must be a string")
+            continue
+        # Canonical (realpath) workspace-boundary check via the shared helper
+        # (utils.path_escapes_workspace) — resolves symlinks on both sides.
+        if path_escapes_workspace(path):
+            problems.append(f"{label} path escapes workspace: {path}")
+            continue
+        if not os.path.exists(os.path.realpath(resolve_workspace_path(path, WORKSPACE_DIR))):
+            problems.append(f"{label} path does not exist on disk: {path}")
+            missing.append(path)
+    return problems + _evidence_folder_listing(missing)
+
 
 def _check_behavioral_verification(data):
     """Return a list of problems with the reviewer's ``behavioral_verification``
-    object, or [] if shape is valid.
+    object (every bad evidence anchor, then what the folders of missing files
+    hold), or [] if shape is valid.
 
     Mirror of :func:`_check_visual_verification`. Required shape on phases
     whose ``current_phase.behavioral_verification`` is populated:
@@ -121,34 +201,7 @@ def _check_behavioral_verification(data):
             f"behavioral_verification.evidence must have at least "
             f"{_MIN_BEHAVIORAL_EVIDENCE_ANCHORS} entries when verdict='pass'"
         ]
-    for i, entry in enumerate(evidence):
-        if not isinstance(entry, dict):
-            return [f"behavioral_verification.evidence[{i}] must be an object"]
-        for key in _REQUIRED_BEHAVIORAL_EVIDENCE_KEYS:
-            if not entry.get(key):
-                return [
-                    f"behavioral_verification.evidence[{i}] missing required key {key!r}"
-                ]
-        path = entry["file_or_screenshot_or_log"]
-        # The key-presence loop above only checks truthiness; reject a truthy
-        # non-string path first, since path_escapes_workspace treats a non-str as
-        # non-escaping (the validator owns the "must be a string" contract error).
-        if not isinstance(path, str):
-            return [
-                f"behavioral_verification.evidence[{i}] file_or_screenshot_or_log must be a string"
-            ]
-        # Canonical (realpath) workspace-boundary check via the shared helper
-        # (utils.path_escapes_workspace) — resolves symlinks on both sides.
-        if path_escapes_workspace(path):
-            return [
-                f"behavioral_verification.evidence[{i}] path escapes workspace: {path}"
-            ]
-        real_path = os.path.realpath(resolve_workspace_path(path, WORKSPACE_DIR))
-        if not os.path.exists(real_path):
-            return [
-                f"behavioral_verification.evidence[{i}] path does not exist on disk: {path}"
-            ]
-    return []
+    return _anchor_problems("behavioral_verification", evidence)
 
 
 def _check_regression_verification(data, current_phase):
@@ -168,7 +221,8 @@ def _check_regression_verification(data, current_phase):
         :data:`_MIN_BEHAVIORAL_EVIDENCE_ANCHORS` entries (each a dict with
         ``claim``, ``file_or_screenshot_or_log``, ``method`` keys; paths must be
         strings, are canonically (``os.path.realpath``) workspace-bounded on both
-        sides, and must resolve on disk).
+        sides, and must resolve on disk). Every bad anchor is reported, then what
+        the folders of missing files hold (:func:`_anchor_problems`).
 
     A ``"fail"`` / ``"cannot_verify"`` verdict OR a ``followed: False`` signal
     is not a shape failure — those flow through the validation block as
@@ -209,32 +263,7 @@ def _check_regression_verification(data, current_phase):
             f"{_MIN_BEHAVIORAL_EVIDENCE_ANCHORS} entries when "
             f"verdict='pass' and prior_phase_how_to_check_followed=True"
         ]
-    for i, entry in enumerate(evidence):
-        if not isinstance(entry, dict):
-            return [f"regression_verification.evidence[{i}] must be an object"]
-        for key in _REQUIRED_BEHAVIORAL_EVIDENCE_KEYS:
-            if not entry.get(key):
-                return [
-                    f"regression_verification.evidence[{i}] missing required key {key!r}"
-                ]
-        path = entry["file_or_screenshot_or_log"]
-        # Reject a truthy non-string path first (path_escapes_workspace treats a
-        # non-str as non-escaping; the validator owns the "must be a string" contract).
-        if not isinstance(path, str):
-            return [
-                f"regression_verification.evidence[{i}] file_or_screenshot_or_log must be a string"
-            ]
-        # Canonical (realpath) workspace-boundary check via the shared helper.
-        if path_escapes_workspace(path):
-            return [
-                f"regression_verification.evidence[{i}] path escapes workspace: {path}"
-            ]
-        real_path = os.path.realpath(resolve_workspace_path(path, WORKSPACE_DIR))
-        if not os.path.exists(real_path):
-            return [
-                f"regression_verification.evidence[{i}] path does not exist on disk: {path}"
-            ]
-    return []
+    return _anchor_problems("regression_verification", evidence)
 
 
 def _synthesize_behavioral_blocking_issues(data):
@@ -399,6 +428,9 @@ def _check_visual_verification(data):
         the same ``commonpath`` boundary check behavioral/regression evidence
         enforce (T7.4; a path escaping the workspace is rejected, not followed).
 
+    Every bad artifact is reported, then what the folders of missing screenshots
+    hold, so a retry can fix them all at once.
+
     A "fail" or "cannot_verify" verdict is not treated as a gate-script-level
     problem here — it flows through the existing blocking_issues path in
     evaluate_reviewer. This function only validates the *contract shape*.
@@ -415,20 +447,27 @@ def _check_visual_verification(data):
     if verdict == "pass":
         if not isinstance(artifacts, list) or len(artifacts) == 0:
             return ["visual_smoke_artifacts must be a non-empty list when visual_verification='pass'"]
+        problems = []
+        missing = []
         for i, entry in enumerate(artifacts):
             if not isinstance(entry, dict):
-                return [f"visual_smoke_artifacts[{i}] must be an object"]
+                problems.append(f"visual_smoke_artifacts[{i}] must be an object")
+                continue
             path = entry.get("path")
             if not path or not isinstance(path, str):
-                return [f"visual_smoke_artifacts[{i}] missing path"]
+                problems.append(f"visual_smoke_artifacts[{i}] missing path")
+                continue
             # Canonical (realpath) workspace-boundary check via the shared helper,
             # parity with behavioral/regression evidence — resolves symlinks on
             # both sides (CLAUDE.md Security Constraints; do not weaken).
             if path_escapes_workspace(path):
-                return [f"visual_smoke_artifacts[{i}] path escapes workspace: {path}"]
+                problems.append(f"visual_smoke_artifacts[{i}] path escapes workspace: {path}")
+                continue
             real_path = os.path.realpath(resolve_workspace_path(path, WORKSPACE_DIR))
             if not os.path.exists(real_path):
-                return [f"visual_smoke_artifacts[{i}] path does not exist on disk: {path}"]
+                problems.append(f"visual_smoke_artifacts[{i}] path does not exist on disk: {path}")
+                missing.append(path)
+        return problems + _evidence_folder_listing(missing)
     return []
 
 

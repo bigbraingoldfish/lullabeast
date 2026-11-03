@@ -199,6 +199,28 @@ class TestVisualVerificationRequiredOnUiPhases:
 
         assert result == "PASS"
 
+    def test_every_missing_screenshot_is_reported_with_the_folder(self, tmp_workspace):
+        """All missing screenshots are named at once, followed by what the
+        folder holds."""
+        shot = os.path.join(tmp_workspace, "visual-smoke", "UI-E1-default.png")
+        os.makedirs(os.path.dirname(shot), exist_ok=True)
+        with open(shot, "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\n")
+        with _patch_workspace(tmp_workspace):
+            problems = reviewer_gate_module._check_visual_verification({
+                "visual_verification": "pass",
+                "visual_smoke_artifacts": [
+                    {"path": "visual-smoke/UI-E1-a.png", "description": "a"},
+                    {"path": "visual-smoke/UI-E1-default.png", "description": "ok"},
+                    {"path": "visual-smoke/UI-E1-b.png", "description": "b"},
+                ],
+            })
+        assert problems == [
+            "visual_smoke_artifacts[0] path does not exist on disk: visual-smoke/UI-E1-a.png",
+            "visual_smoke_artifacts[2] path does not exist on disk: visual-smoke/UI-E1-b.png",
+            "existing files in visual-smoke/: UI-E1-default.png",
+        ]
+
     def test_artifact_cited_through_the_agent_link_allows_pass(self, tmp_workspace):
         """A screenshot path written through the reviewer's ``pipeline-project``
         link names the project's file and passes like the plain form."""

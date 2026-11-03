@@ -533,6 +533,30 @@ class TestRegressionShapeValidation:
             result = reviewer_gate_module.evaluate_reviewer(output_path)
         assert result == "REGRESSION_UNVERIFIED"
 
+    def test_regression_reports_every_missing_anchor_and_the_folder(
+        self, tmp_workspace
+    ):
+        """Regression anchors get the same full report as behavioural ones:
+        every missing file, then what the folder holds."""
+        regression_block = _valid_regression_block(tmp_workspace)
+        regression_block["evidence"][0]["file_or_screenshot_or_log"] = (
+            "behavioral-smoke/regression/ghost-a.txt"
+        )
+        regression_block["evidence"][1]["file_or_screenshot_or_log"] = (
+            "behavioral-smoke/regression/ghost-b.txt"
+        )
+        with _patch_workspace(tmp_workspace):
+            problems = reviewer_gate_module._check_regression_verification(
+                {"regression_verification": regression_block},
+                {"prior_phase_raw_id": "CORE-E1"},
+            )
+        assert any("evidence[0]" in p and "ghost-a.txt" in p for p in problems)
+        assert any("evidence[1]" in p and "ghost-b.txt" in p for p in problems)
+        assert (
+            "existing files in behavioral-smoke/regression/: anchor-1.txt, "
+            "anchor-2.txt, anchor-3.txt"
+        ) in problems
+
     def test_regression_evidence_cited_through_the_agent_link_passes(
         self, tmp_workspace
     ):

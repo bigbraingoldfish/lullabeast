@@ -278,9 +278,45 @@ class TestComposeUnverifiedDirective:
 
     def test_bounded(self):
         orch = _bare_orch()
-        many = [f"problem number {i} " + ("x" * 200) for i in range(10)]
+        many = [f"problem number {i} " + ("x" * 40) for i in range(30)]
         out = orch._compose_unverified_directive("REGRESSION_UNVERIFIED", many)
-        # at most the first 3 problems, total appended specifics capped (~500 chars)
-        assert "problem number 0" in out and "problem number 2" in out
-        assert "problem number 3" not in out, "only the first 3 problems are included"
-        assert len(out) < 1500, "the enriched directive must be length-bounded"
+        # at most the first 10 problems, appended specifics capped at 1500 chars
+        assert "problem number 0" in out and "problem number 9" in out
+        assert "problem number 10" not in out, "only the first 10 problems are included"
+        huge = [f"problem number {i} " + ("x" * 900) for i in range(10)]
+        out = orch._compose_unverified_directive("REGRESSION_UNVERIFIED", huge)
+        assert len(out) < 3000, "the enriched directive must be length-bounded"
+
+    def test_keeps_every_anchor_and_the_folder_listing_of_a_typical_miss(self):
+        """A typical evidence miss (four anchors, two of them invented, plus the
+        folder listing) reaches the reviewer whole: the old first-3/500-char
+        bound cut the listing that says which files really exist."""
+        orch = _bare_orch()
+        detail = [
+            "behavioral_verification.evidence[2] path does not exist on disk: "
+            ".autodev/pipeline/behavioral-smoke/CORE-E1-grid-test.txt",
+            "behavioral_verification.evidence[3] path does not exist on disk: "
+            ".autodev/pipeline/behavioral-smoke/CORE-E1-step-buffer-test.txt",
+            "existing files in .autodev/pipeline/behavioral-smoke/: "
+            "CORE-E1-default-state.png, CORE-E1-offline-render.png, "
+            "CORE-E1-running-state.png, reviewer-CORE-E1-offline-smoke.txt, "
+            "reviewer-CORE-E1-rerun.txt, reviewer-CORE-E1-smoke.txt, "
+            "reviewer-grid-tests-rerun.txt, reviewer-grid-tests.txt, "
+            "reviewer-step-tests.txt",
+        ]
+        out = orch._compose_unverified_directive("BEHAVIORAL_UNVERIFIED", detail)
+        for item in detail:
+            assert item in out
+
+    def test_enriched_directive_says_how_to_cite_files_that_exist(self):
+        """With specifics, the directive also says how to avoid the miss: copy
+        each path from a listing of the folder, and save evidence before citing
+        it. Without specifics it stays the plain instruction."""
+        orch = _bare_orch()
+        out = orch._compose_unverified_directive(
+            "BEHAVIORAL_UNVERIFIED",
+            ["behavioral_verification.evidence[0] path does not exist on disk: x.png"],
+        )
+        assert "copy each path from a listing" in out
+        plain = orch._compose_unverified_directive("BEHAVIORAL_UNVERIFIED", None)
+        assert "copy each path from a listing" not in plain

@@ -223,6 +223,49 @@ class TestUnverifiedDetailPersistedToPhaseState:
         )
         assert any("behavioral_verification" in str(d) for d in detail)
 
+    def test_misnamed_evidence_detail_names_the_real_files(self, tmp_workspace):
+        """End-to-end, as in the DeepSeek V4.1 Flash run: the executor saved
+        ``CORE-E1-default-state.png`` and the reviewer cited ``CORE-E1-default.png``.
+        The detail the orchestrator feeds back names the miss and the file that
+        is really there."""
+        ws = tmp_workspace
+        with _patch_workspace(ws):
+            _write_current_phase_with_behavioral(ws, raw_id="CORE-E1")
+            _write_phase_state(ws)
+            _write_done_artifacts(ws, "CORE-E1")
+            smoke = os.path.join(ws, ".autodev", "pipeline", "behavioral-smoke")
+            os.makedirs(smoke)
+            for name in ("CORE-E1-default-state.png", "reviewer-grid-tests.txt"):
+                with open(os.path.join(smoke, name), "w") as f:
+                    f.write("x\n")
+            cited = [
+                "pipeline-project/.autodev/pipeline/behavioral-smoke/CORE-E1-default.png",
+                ".autodev/pipeline/behavioral-smoke/reviewer-grid-tests.txt",
+                ".autodev/pipeline/behavioral-smoke/CORE-E1-grid-test.txt",
+            ]
+            out = _reviewer_output(behavioral_verification={
+                "verdict": "pass",
+                "evidence": [
+                    {"claim": f"claim {i}", "file_or_screenshot_or_log": p, "method": "m"}
+                    for i, p in enumerate(cited)
+                ],
+                "how_to_check_followed": True,
+            })
+            with open(os.path.join(ws, "reviewer_output.json"), "w") as f:
+                json.dump(out, f)
+            verdict = reviewer_gate_module.evaluate_reviewer(
+                os.path.join(ws, "reviewer_output.json")
+            )
+        assert verdict == "BEHAVIORAL_UNVERIFIED"
+        with open(os.path.join(ws, "phase_state.json")) as f:
+            detail = json.load(f)["reviewer_unverified_detail"]
+        assert any("evidence[0]" in d and "CORE-E1-default.png" in d for d in detail)
+        assert any("evidence[2]" in d and "CORE-E1-grid-test.txt" in d for d in detail)
+        assert (
+            "existing files in .autodev/pipeline/behavioral-smoke/: "
+            "CORE-E1-default-state.png, reviewer-grid-tests.txt"
+        ) in detail
+
 
 # ---------------------------------------------------------------------------
 # B1 — content-driven phase detection
@@ -358,6 +401,44 @@ class TestCheckBehavioralVerificationContract:
                 "behavioral_verification": block,
             })
         assert problems == []
+
+    def test_every_missing_anchor_is_reported(self, tmp_workspace):
+        """Each bad anchor is named in one pass. Reporting only the first let a
+        retry fix one name and fail again on the next (a DeepSeek V4.1 Flash
+        reviewer cited two invented log names; the retry heard about one)."""
+        block = _valid_behavioral_block(tmp_workspace, n_anchors=3)
+        block["evidence"][0]["file_or_screenshot_or_log"] = "behavioral-smoke/ghost-1.txt"
+        block["evidence"][2]["file_or_screenshot_or_log"] = "behavioral-smoke/ghost-3.txt"
+        with _patch_workspace(tmp_workspace):
+            problems = reviewer_gate_module._check_behavioral_verification({
+                "behavioral_verification": block,
+            })
+        assert any("evidence[0]" in p and "ghost-1.txt" in p for p in problems)
+        assert any("evidence[2]" in p and "ghost-3.txt" in p for p in problems)
+        assert not any("evidence[1]" in p for p in problems)
+
+    def test_missing_anchor_lists_the_files_that_exist(self, tmp_workspace):
+        """A missing file comes with what its folder does hold, so the retry
+        can cite the real name instead of guessing again."""
+        block = _valid_behavioral_block(tmp_workspace, n_anchors=3)
+        block["evidence"][1]["file_or_screenshot_or_log"] = "behavioral-smoke/anchor-9.txt"
+        with _patch_workspace(tmp_workspace):
+            problems = reviewer_gate_module._check_behavioral_verification({
+                "behavioral_verification": block,
+            })
+        listing = [p for p in problems if p.startswith("existing files in behavioral-smoke/:")]
+        assert len(listing) == 1, problems
+        assert "anchor-1.txt" in listing[0] and "anchor-3.txt" in listing[0]
+
+    def test_missing_folder_is_named(self, tmp_workspace):
+        """When the cited folder does not exist either, say so."""
+        block = _valid_behavioral_block(tmp_workspace, n_anchors=3)
+        block["evidence"][0]["file_or_screenshot_or_log"] = "nowhere/shot.png"
+        with _patch_workspace(tmp_workspace):
+            problems = reviewer_gate_module._check_behavioral_verification({
+                "behavioral_verification": block,
+            })
+        assert "nowhere/ does not exist" in problems
 
     def test_evidence_cited_through_the_agent_link_returns_empty(self, tmp_workspace):
         """The reviewer writes every path through the ``pipeline-project`` link
