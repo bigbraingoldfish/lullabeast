@@ -1015,6 +1015,34 @@ def provider_error_retry_limit() -> int:
     return _env_int("PROVIDER_ERROR_RETRY", "0", min_clamp=0)
 
 
+def _missing_artifacts_directive(raw_id: str) -> str:
+    """The executor's one-shot directive after the reviewer gate's MISSING_ARTIFACTS.
+
+    Delivered as the webhook ``message=``, which replaces the executor's default
+    prompt, so it is self-contained: the implementation is preserved on the
+    branch, and the executor writes only the two artifacts the gate checks. The
+    handler also sets ``executor_keep_output``, so the executor branch's cleanup
+    keeps the ``executor_output.json`` that passed the executor gate. A JSON
+    rebuilt from memory could drop a ``files_deleted`` entry and fail the
+    deletion guard, whose retry hard-resets the phase's uncommitted work.
+    """
+    return (
+        f"MISSING COMPLETION ARTIFACTS: Your implementation for this phase is already "
+        f"complete and PRESERVED on the branch — do NOT re-implement or rebuild it. You "
+        f"are re-invoked solely to add the two completion artifacts the reviewer found "
+        f"missing. Read current_phase.json and your existing work on the branch for "
+        f"what to record, then, before writing executor_output.done, you MUST produce "
+        f"both: "
+        f"(1) Write the phase archive to .autodev/pipeline/phases/{raw_id}.md using the "
+        f"format in your AGENTS.md. "
+        f"(2) Append a metrics row to .autodev/pipeline/metrics.jsonl using the format "
+        f"in your AGENTS.md. "
+        f"Do not rewrite .autodev/pipeline/executor_output.json: the orchestrator kept "
+        f"the one that passed the executor gate. "
+        f"Write the archive first, metrics second, sentinel last."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Layer 2 — context-overflow discarded-verdict race.
 #
@@ -3436,18 +3464,32 @@ class Orchestrator:
     # FIND-EXECUTOR-COMPLETION-DETECTION: classify executor terminal state.
     # Returns one of: "executor_succeeded", "executor_crashed", "executor_preempted".
     # -----------------------------------------------------------------------
-    def classify_executor_outcome(self, sentinel_found: bool, output_path: str) -> str:
+    def classify_executor_outcome(
+        self, sentinel_found: bool, output_path: str, attempt_start: float | None = None
+    ) -> str:
         """Classify the executor's terminal state after polling ends.
 
         sentinel_found=True                              → executor_succeeded
         sentinel_found=False, output absent              → executor_crashed
         sentinel_found=False, output present (any size)  → executor_preempted
           (executor was killed between writing JSON and writing .done)
+
+        With ``attempt_start``, only output written during the attempt counts as
+        present. A MISSING_ARTIFACTS re-invoke keeps the executor_output.json
+        that passed the gate; if that run stalls, the kept file must not read as
+        a preempted finish (the gate would pass it again and the reviewer would
+        hit the same missing artifacts), so the stall is a crash and retries.
         """
         if sentinel_found:
             return "executor_succeeded"
         if os.path.exists(output_path):
-            return "executor_preempted"
+            if attempt_start is None:
+                return "executor_preempted"
+            try:
+                if os.path.getmtime(output_path) >= attempt_start:
+                    return "executor_preempted"
+            except OSError:
+                pass
         return "executor_crashed"
 
     def _init_activity_stamp_or_escalate(self, agent_role: str) -> bool:
@@ -5481,6 +5523,11 @@ class Orchestrator:
         phase_state["reviewer_retries"] = 0
         phase_state["reviewer_rejected"] = False
         phase_state.pop("executor_succeeded", None)
+        # A MISSING_ARTIFACTS re-invoke still pending (an escalation can land
+        # between its handler and the executor branch) no longer applies: the
+        # executor output it would keep is deleted above, and the next run is full.
+        phase_state.pop("executor_keep_output", None)
+        phase_state.pop("executor_retry_directive", None)
         # State-sync invariant: ``phase_state`` and ``self.state`` track the
         # same retry counters from different read paths.  Forgetting to update
         # both was the bug behind reviewer_retries drifting across retries —
@@ -5579,6 +5626,11 @@ class Orchestrator:
         # *_UNVERIFIED/CONTRACT handlers always read-and-pop the detail before any
         # executor flow could run.)
         phase_state.pop("reviewer_unverified_detail", None)
+        # Same for a MISSING_ARTIFACTS re-invoke still pending: the reviewer runs
+        # next, and a later executor run (e.g. on ROUTE_EXECUTOR) must get its own
+        # instructions, not "only add the artifacts, keep your old output".
+        phase_state.pop("executor_keep_output", None)
+        phase_state.pop("executor_retry_directive", None)
         # Operator-driven reset: restore a FRESH reviewer retry budget, mirroring
         # reset_execution('escalation') for the executor (which zeros the same three pools).
         # These pooled counters are deliberately preserved by reset_execution('auto') and
@@ -7488,7 +7540,14 @@ class Orchestrator:
                     self._ensure_phase_branch(_ex_branch)
 
                     _attempt_start_time = time.time()  # captured before cleanup for stale-sentinel guard
-                    cleanup_output_files(PROJECT_ARTIFACTS_DIR, "executor")
+                    # A MISSING_ARTIFACTS re-invoke keeps the executor_output.json that
+                    # passed the executor gate (one-shot flag set by that handler):
+                    # the executor writes only the two missing artifacts.
+                    _ps_keep = self.read_phase_state()
+                    _keep_output = bool(_ps_keep.pop("executor_keep_output", False))
+                    if _keep_output:
+                        self.write_phase_state_atomic(_ps_keep)
+                    cleanup_output_files(PROJECT_ARTIFACTS_DIR, "executor", keep_output_json=_keep_output)
                     self.skill_manager.inject_skill(
                         self.state.get("current_phase_raw_id", ""), "executor", self.openclaw_config
                     )
@@ -7661,7 +7720,7 @@ class Orchestrator:
                     # RR-3 (Phase 3): Classify executor terminal state before deciding action.
                     # executor_output_path is .json counterpart to sentinel_path (.done).
                     executor_output_path = os.path.join(PROJECT_ARTIFACTS_DIR, "executor_output.json")
-                    outcome = self.classify_executor_outcome(sentinel_found, executor_output_path)
+                    outcome = self.classify_executor_outcome(sentinel_found, executor_output_path, _attempt_start_time)
                     # A detected tool_loop is an agent malfunction, not an external preemption.
                     # The executor writes executor_output.json (step 11) BEFORE the archive /
                     # metrics / .done finalization steps, so a loop in that window leaves
@@ -8462,19 +8521,12 @@ class Orchestrator:
                             # default prompt — so it re-asserts that prior work is
                             # preserved and points the executor at what to record.
                             _raw_id = self.state.get("current_phase_raw_id", "this phase")
-                            _executor_directive = (
-                                f"MISSING COMPLETION ARTIFACTS: Your implementation for this phase is already "
-                                f"complete and PRESERVED on the branch — do NOT re-implement or rebuild it. You "
-                                f"are re-invoked solely to add the two completion artifacts the "
-                                f"reviewer found missing. Read current_phase.json and your existing work on the "
-                                f"branch for what to record, then, before writing executor_output.done, you MUST "
-                                f"produce both: "
-                                f"(1) Write the phase archive to .autodev/pipeline/phases/{_raw_id}.md using the "
-                                f"format in your AGENTS.md. "
-                                f"(2) Append a metrics row to .autodev/pipeline/metrics.jsonl using the format in "
-                                f"your AGENTS.md. Write the archive first, metrics second, sentinel last."
-                            )
+                            _executor_directive = _missing_artifacts_directive(_raw_id)
                             _ps_ma["executor_retry_directive"] = _executor_directive
+                            # Keep the executor_output.json that passed the executor
+                            # gate for the re-invoked run (one-shot: the executor
+                            # branch consumes the flag at its cleanup).
+                            _ps_ma["executor_keep_output"] = True
                             # Clear the executor gate's success flag, as the
                             # ROUTE_EXECUTOR handler does: with executor_retries at 0
                             # and the flag set, the executor branch's crash-recovery

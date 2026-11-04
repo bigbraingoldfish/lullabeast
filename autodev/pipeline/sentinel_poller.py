@@ -86,14 +86,19 @@ class PollResult:
         return self.success
 
 
-def cleanup_output_files(workspace_dir: str, agent_prefix: str):
-    """Deletes agent output JSON, .done sentinel, and activity stamp before a run."""
+def cleanup_output_files(workspace_dir: str, agent_prefix: str, keep_output_json: bool = False):
+    """Deletes agent output JSON, .done sentinel, and activity stamp before a run.
+
+    ``keep_output_json`` leaves ``{agent}_output.json`` in place: the executor's
+    MISSING_ARTIFACTS re-invoke keeps the output that already passed its gate.
+    """
     base_path = Path(workspace_dir)
     json_path = base_path / f"{agent_prefix}_output.json"
     done_path = base_path / f"{agent_prefix}_output.done"
     stamp_path = base_path / f"{agent_prefix}_activity.stamp"
 
-    for p in [json_path, done_path, stamp_path]:
+    paths = [done_path, stamp_path] if keep_output_json else [json_path, done_path, stamp_path]
+    for p in paths:
         try:
             p.unlink(missing_ok=True)
         except Exception:
