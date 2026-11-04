@@ -6,8 +6,10 @@ which it does not: OpenRouter publishes the record a minute or two later. These
 pin the classification the orchestrator records on each metrics row and the
 settlement the dashboard applies once the billed cost is known.
 """
+import http.server
 import io
 import json
+import threading
 import urllib.error
 
 import pytest
@@ -192,6 +194,54 @@ class TestLookup:
             ["gen-1", "gen-2", "gen-1", None], "k", lookup=lambda g, k: {"gen-1": 0.5}.get(g)
         )
         assert found == {"gen-1": 0.5}
+
+    def test_the_key_never_follows_a_redirect(self, monkeypatch):
+        """urllib's default opener re-sends every request header, Authorization
+        included, to wherever a redirect points, on any host and over any
+        scheme. The lookup carries the user's OpenRouter key, so a redirect
+        must end it instead (independent review, 2026-11-03)."""
+        seen = []
+
+        class Target(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.append((self.path, self.headers.get("Authorization")))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"data": {"total_cost": 1.0}}')
+
+            def log_message(self, *args):
+                pass
+
+        target = http.server.HTTPServer(("127.0.0.1", 0), Target)
+
+        class Redirect(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header(
+                    "Location", f"http://127.0.0.1:{target.server_port}/elsewhere"
+                )
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        origin = http.server.HTTPServer(("127.0.0.1", 0), Redirect)
+        for server in (target, origin):
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+        monkeypatch.setenv("no_proxy", "127.0.0.1")
+        monkeypatch.setattr(
+            bc, "GENERATION_URL", f"http://127.0.0.1:{origin.server_port}/api/v1/generation"
+        )
+        try:
+            assert bc.lookup_generation_cost("gen-1", "sk-secret") is None
+        finally:
+            origin.shutdown()
+            target.shutdown()
+            origin.server_close()
+            target.server_close()
+        assert seen == [], "the redirect target received the request (and the key)"
 
     def test_batch_needs_a_key_and_honours_the_limit(self):
         calls = []

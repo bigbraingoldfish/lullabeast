@@ -147,11 +147,28 @@ def pending_generation_ids(rows) -> list[str]:
     return list(seen)
 
 
-def lookup_generation_cost(generation_id, api_key, *, timeout=5.0, urlopen=urllib.request.urlopen):
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect.
+
+    urllib's default opener re-sends all request headers, Authorization
+    included, to wherever a redirect points, on any host and over any scheme.
+    The generation lookup carries the user's OpenRouter key, so a redirect
+    ends the lookup instead: an HTTPError, which reads as "not published yet".
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def lookup_generation_cost(generation_id, api_key, *, timeout=5.0, urlopen=_OPENER.open):
     """OpenRouter's billed ``total_cost`` for one generation, or None.
 
     None covers a generation OpenRouter has not published yet (404), any
-    network or HTTP error, and a response without a usable cost.
+    network or HTTP error, a redirect (never followed: the request carries the
+    key), and a response without a usable cost.
     """
     query = urllib.parse.urlencode({"id": generation_id})
     request = urllib.request.Request(
