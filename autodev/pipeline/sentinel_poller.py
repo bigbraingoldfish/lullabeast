@@ -132,6 +132,43 @@ def initialize_activity_stamp(workspace_dir: str, agent_prefix: str) -> bool:
         return False
 
 
+def _normalize_session_key(key: str) -> str:
+    """``key`` lowercased, without the gateway's ``agent:<role>:`` prefix.
+
+    The orchestrator names a session ``pipeline:phase-0:CORE-E1:executor-attempt-2-r<run>``;
+    the gateway hands the plugin the same session as
+    ``agent:executor:pipeline:phase-0:core-e1:executor-attempt-2-r<run>``.
+    """
+    key = key.strip().lower()
+    if key.startswith("agent:"):
+        parts = key.split(":", 2)
+        if len(parts) == 3:
+            key = parts[2]
+    return key
+
+
+def _sentinel_from_other_session(
+    sentinel_path: str, expected_session_key: str
+) -> str | None:
+    """The pipeline session a ``.done`` names, when that is not ``expected_session_key``.
+
+    The plugin's ``agent_end`` backstop writes the ending session's key into the
+    sentinel it writes. A sentinel the agent wrote itself is empty, and a body that is
+    not a pipeline session key is not judged: both return None, so the sentinel counts.
+    """
+    try:
+        with open(sentinel_path, encoding="utf-8", errors="replace") as f:
+            body = f.read(1024).strip()
+    except OSError:
+        return None
+    named = _normalize_session_key(body)
+    if not named.startswith("pipeline:"):
+        return None
+    if named == _normalize_session_key(expected_session_key):
+        return None
+    return body
+
+
 def poll_for_sentinel(
     sentinel_path: str,
     timeout_seconds: int = 600,
@@ -143,6 +180,7 @@ def poll_for_sentinel(
     heartbeat_interval_seconds: float | None = None,
     sentinel_acceptor: Optional[Callable[[], bool]] = None,
     loop_detector: Optional[Callable[[], bool]] = None,
+    expected_session_key: str | None = None,
 ) -> PollResult:
     """Poll for a sentinel file using a time.sleep loop, strictly avoiding inotify.
 
@@ -249,6 +287,16 @@ def poll_for_sentinel(
         self-failure retry path.  A predicate that raises is treated as ``False``
         (fail-safe) — a buggy detector can never false-abort a healthy agent.  The
         caller is expected to self-throttle (this is consulted every ~2 s tick).
+    expected_session_key:
+        The session key this attempt was invoked with.  The plugin's ``agent_end``
+        backstop writes the ending session's key into the ``.done`` it writes; when
+        this is set, a ``.done`` naming a *different* pipeline session is deleted
+        and polling continues (``[WARN] Stray sentinel discarded``), before
+        ``sentinel_acceptor`` is consulted.  This catches what
+        ``min_sentinel_mtime`` cannot: a replaced session whose turn ends *after*
+        this attempt started, which every steer-abort produces (``sessions.steer``
+        spawns a "stop here" turn on the aborted session).  A ``.done`` with no
+        session key (the agent wrote it) counts as before.
 
     Returns
     -------
@@ -372,6 +420,22 @@ def poll_for_sentinel(
                         continue
                 except OSError:
                     pass
+            if expected_session_key:
+                _other_session = _sentinel_from_other_session(
+                    sentinel_path, expected_session_key
+                )
+                if _other_session is not None:
+                    print(
+                        f"[WARN] Stray sentinel discarded — written by superseded "
+                        f"session {_other_session}, not this attempt's "
+                        f"{expected_session_key}."
+                    )
+                    try:
+                        os.unlink(sentinel_path)
+                    except OSError:
+                        pass
+                    time.sleep(2)
+                    continue
             if sentinel_acceptor is not None:
                 try:
                     _accepted = sentinel_acceptor()

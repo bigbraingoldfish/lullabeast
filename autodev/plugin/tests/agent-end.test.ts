@@ -7,7 +7,7 @@
  *   - Sentinel is written when absent and artifacts dir exists
  *   - Handler is a no-op when sentinel already exists
  *   - Handler is a no-op when artifacts dir does not exist
- *   - Written sentinel is an empty file
+ *   - Written sentinel names the session that ended
  *   - OPENCLAW_ROOT env var used as fallback when workspaceDir absent
  */
 
@@ -148,11 +148,33 @@ test("writes sentinel when absent for executor", () => {
   );
   assert.equal(
     fs.readFileSync(donePath, "utf8"),
-    "",
-    "sentinel must be an empty file",
+    "pipeline:phase-2:CORE-1:executor-attempt-1",
+    "sentinel must name the session that ended",
   );
 
   fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test("sentinel names the session in the gateway's agent:-prefixed form", () => {
+  // An aborted attempt's steer-spawned stop turn can end after the next attempt
+  // has started; the orchestrator tells the two apart by this name.
+  const tmpDir = makeTmpDir();
+  const openclawRoot = path.join(tmpDir, "openclaw");
+  const workspaceDir = path.join(openclawRoot, "workspace-executor");
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  const artifactsDir = makeArtifactsDir(openclawRoot);
+  const sessionKey =
+    "agent:executor:pipeline:phase-0:core-e1:executor-attempt-1-r2018eb06";
+
+  try {
+    handleAgentEnd(baseEvent, { agentId: "executor", sessionKey, workspaceDir });
+    assert.equal(
+      fs.readFileSync(path.join(artifactsDir, "executor_output.done"), "utf8"),
+      sessionKey,
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });
 
 test("writes sentinel for planner", () => {

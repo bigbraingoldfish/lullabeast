@@ -330,13 +330,14 @@ export function resolvePipelineSessionFromRunId(
 }
 
 /**
- * Write an empty sentinel file at the given path if it does not already exist.
- * Uses an atomic temp-file rename to avoid partial writes being observed.
+ * Write a sentinel file holding `body` (empty by default) at the given path if
+ * it does not already exist. Uses an atomic temp-file rename to avoid partial
+ * writes being observed.
  *
  * Returns true if the file was written, false if it already existed, throws on
  * unexpected errors.
  */
-export function writeSentinelIfAbsent(donePath: string): boolean {
+export function writeSentinelIfAbsent(donePath: string, body = ""): boolean {
   if (fs.existsSync(donePath)) return false;
 
   const dir = path.dirname(donePath);
@@ -345,7 +346,7 @@ export function writeSentinelIfAbsent(donePath: string): boolean {
   // Atomic write: temp file + rename so the sentinel appears atomically.
   const tmpPath = `${donePath}.tmp.${process.pid}`;
   try {
-    fs.writeFileSync(tmpPath, "", { flag: "wx" });
+    fs.writeFileSync(tmpPath, body, { flag: "wx" });
     fs.renameSync(tmpPath, donePath);
     return true;
   } catch (err: unknown) {

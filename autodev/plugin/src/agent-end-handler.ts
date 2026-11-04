@@ -3,7 +3,10 @@
  * and Ideas turn-by-turn (`ideas:{id}:session-{n}`) prd-creator sessions.
  *
  * Pipeline: when an OpenClaw agent session ends, writes missing `{agent}_output.done`
- * under the pipeline artifacts directory.
+ * under the pipeline artifacts directory. The sentinel's body is the ending
+ * session's key: a session the orchestrator replaced can end after the next
+ * attempt has started (an aborted attempt's steer-spawned stop turn), and the
+ * orchestrator's poll discards a sentinel naming a session other than its own.
  *
  * Ideas: for `prd-creator` + `ideas:{ideaId}:session-{turn}` only, writes missing
  * `ideas/{ideaId}/turns/{turn}.done` with body `done` (UI contract).
@@ -48,7 +51,7 @@ export function handleAgentEnd(
     }
 
     const donePath = path.join(artifactsDir, `${agentId}_output.done`);
-    const wrote = writeSentinelIfAbsent(donePath);
+    const wrote = writeSentinelIfAbsent(donePath, sessionKey);
     if (wrote) {
       console.log(
         `[autodev-pipeline-signals] agent_end: wrote missing sentinel ` +

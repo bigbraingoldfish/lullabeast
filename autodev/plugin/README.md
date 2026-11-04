@@ -6,7 +6,7 @@ OpenClaw plugin for Lullabeast pipeline liveness and output signaling.
 
 This plugin registers:
 
-- `agent_end` to write missing `{agent}_output.done` sentinels when a pipeline agent exits without writing one.
+- `agent_end` to write missing `{agent}_output.done` sentinels when a pipeline agent exits without writing one. The sentinel's body is the ending session's key, so the orchestrator can ignore one written by a session it has already replaced.
 - `before_agent_finalize` to request an in-context revision when required output JSON fields are missing.
 - `model_call_started`, `model_call_ended`, and `after_tool_call` to refresh `{agent}_activity.stamp`.
 - A live agent-event subscription fallback so activity is still recorded when typed hook context is incomplete.

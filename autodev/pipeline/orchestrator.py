@@ -1404,6 +1404,7 @@ def _run_completion_review(orchestrator, project_basename: str) -> None:
             timeout_seconds=300,  # infrastructure-failure backstop only; agent_end fires immediately on session close
             stop_sentinel_path=_stop_file,
             min_sentinel_mtime=_attempt_start,
+            expected_session_key=session_key,
         )
 
         report_path = os.path.join(SYMLINK_TARGET, "completion_report.md")
@@ -7207,6 +7208,7 @@ class Orchestrator:
                         timeout_seconds=_planner_backstop,
                         stop_sentinel_path=_stop_file,
                         min_sentinel_mtime=_attempt_start_time,
+                        expected_session_key=session_key,
                         stall_detection_path=_planner_stamp,
                         stall_threshold_seconds=_planner_stall,
                         startup_grace_seconds=_planner_grace,
@@ -7547,6 +7549,7 @@ class Orchestrator:
                         timeout_seconds=_executor_backstop,
                         stop_sentinel_path=_stop_file,
                         min_sentinel_mtime=_attempt_start_time,
+                        expected_session_key=session_key,
                         stall_detection_path=_executor_stamp,
                         stall_threshold_seconds=_executor_stall,
                         startup_grace_seconds=_executor_grace,
@@ -7852,6 +7855,7 @@ class Orchestrator:
                             timeout_seconds=_reviewer_backstop,
                             stop_sentinel_path=_stop_file,
                             min_sentinel_mtime=_attempt_start_time,
+                            expected_session_key=session_key,
                             stall_detection_path=_reviewer_stamp,
                             stall_threshold_seconds=_reviewer_stall,
                             startup_grace_seconds=_reviewer_grace,
