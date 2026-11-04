@@ -43,7 +43,7 @@ Open-weight models like Qwen, DeepSeek, Kimi, MiniMax, and GLM now write real so
 ## How it works
 
 <p align="center">
-  <img src="docs/assets/diagrams/workflow.png" alt="How a run works. Setup, once per project: Idea, PRD (prd-creator), Roadmap (roadmap-converter). Per phase, until the roadmap is done: Planner plans the work and its tests up front, Executor writes and commits the code, Reviewer checks it behaves, with a plain-Python gate after each, then the phase lands. If a gate can't be satisfied, the run stops and asks you. An optional completion report closes the roadmap." width="1008">
+  <img src="docs/assets/diagrams/workflow.png" alt="How a run works. Setup, once per project: Idea, PRD (prd-creator), Roadmap (roadmap-converter). Per phase, until the roadmap is done: Planner plans the work and its tests up front, Executor writes the code, Reviewer checks it behaves, with a plain-Python gate after each, then the phase lands. If a gate can't be satisfied, the run stops and asks you. An optional completion report closes the roadmap." width="1008">
 </p>
 
 Queue several projects and Lullabeast works them in order, honoring dependencies between them.

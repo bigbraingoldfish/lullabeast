@@ -634,11 +634,15 @@ does not provide them.
 The golden config ships `models.pricing.enabled: true` and complete pricing
 blocks for its 9 recommended OpenRouter models, so every call on a shipped
 model gets a dollar cost. Those are list prices, and OpenRouter often bills
-less because it routes to cheaper endpoints. Lullabeast looks up what
-OpenRouter billed for each call once OpenRouter publishes it, usually within
-a few minutes of the call, and the dashboard marks any cost still at list
-price "est.". The lookup uses your OpenRouter key and runs while the dashboard
-is up. Every other provider or
+less because it routes to cheaper endpoints. Once a phase completes,
+Lullabeast looks up what OpenRouter billed for each of the phase's calls,
+using your OpenRouter key; OpenRouter publishes a call's billed cost a few
+minutes after the call. The lookup runs while the dashboard's Pipeline or
+Queue view is open, for phases completed in the last 24 hours. The dashboard
+marks any cost still at list price "est.": a phase that is still running, one
+that stopped or escalated before completing, and one that neither view showed
+within a day of completing. `metrics.jsonl` keeps the list prices; the billed
+costs are stored apart, in `/data/pipeline-state/billed_costs/`. Every other provider or
 model is meter-it-yourself: **if a run's cost shows $0, OpenClaw has no
 pricing for the model that ran**, not that the run was free. To add pricing
 for your own model, follow the walkthrough in [SETUP.md](../SETUP.md) under

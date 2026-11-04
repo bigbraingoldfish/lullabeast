@@ -249,7 +249,7 @@ Setting `enabled` to `false` disables skill injection for all agents. Setting an
 
 ## Cost metrics: configuring OpenClaw so Lullabeast can report run cost
 
-Lullabeast does **not** compute model cost. It reads `usage.cost.total` directly from each OpenClaw session JSONL row and sums those values into `metrics.jsonl` and the **Pipeline Complete** panel. When OpenClaw writes zero for `cost.total`, Lullabeast's UI correctly hides the cost card and the **Cost** column — there is nothing to display. If you want cost reporting, **OpenClaw must populate that field**.
+Lullabeast does **not** price model calls itself. It reads `usage.cost.total` from each OpenClaw session JSONL row and sums those values into `metrics.jsonl` and the **Pipeline Complete** panel. For an OpenRouter call still priced at list, the dashboard later shows the cost OpenRouter billed instead, once the phase completes ([deploy/README.md](deploy/README.md#cost-tracking-and-the-0-case) has when); `metrics.jsonl` keeps the list price. When OpenClaw writes zero for `cost.total`, Lullabeast's UI correctly hides the cost card and the **Cost** column — there is nothing to display. If you want cost reporting, **OpenClaw must populate that field**.
 
 The container's shipped default models come with complete pricing blocks, so runs on the defaults report real dollars out of the box. The steps below are for models you add yourself. Treat it as a checklist, not a script.
 
