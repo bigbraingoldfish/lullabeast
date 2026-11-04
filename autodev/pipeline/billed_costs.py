@@ -65,6 +65,8 @@ def classify_message_cost(message) -> tuple[float, bool, str | None]:
         return 0.0, False, None
     openrouter = message.get("provider") == OPENROUTER_PROVIDER
     if openrouter and all(part in cost for part in _COST_PARTS):
+        # Left to right with +=, as OpenClaw sums them. Not sum(): it compensates
+        # since Python 3.12 and can differ from OpenClaw's total in the last bit.
         parts = 0.0
         for part in _COST_PARTS:
             parts += _number(cost.get(part))

@@ -36,6 +36,15 @@ class TestClassify:
         total = parts[0] + parts[1] + parts[2] + parts[3]
         assert bc.classify_message_cost(_message(total, parts)) == (total, True, "gen-1-abc")
 
+    def test_parts_are_summed_left_to_right_as_openclaw_sums_them(self):
+        # A real GLM 5.3 call from the 2026-11-03 MultiLife run, priced at list.
+        # OpenClaw's total is the plain left-to-right sum of the parts. Python's
+        # sum() compensates since 3.12 and gives 0.0009423199999999999 here, which
+        # would read this list-priced call as billed and never look it up.
+        parts = (4.448e-05, 0.0002412, 0.0006566399999999999, 0)
+        msg = _message(0.00094232, parts, response_id="gen-1793758")
+        assert bc.classify_message_cost(msg) == (0.00094232, True, "gen-1793758")
+
     def test_total_that_differs_from_its_parts_is_billed(self):
         msg = _message(0.000408985, (0.0025113, 0.0002784, 0.0, 0.0))
         assert bc.classify_message_cost(msg) == (0.000408985, False, None)
