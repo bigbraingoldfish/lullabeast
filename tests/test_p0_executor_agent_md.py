@@ -18,12 +18,27 @@ REPO_ROOT = os.path.abspath(
 EXECUTOR_AGENTS_MD = os.path.join(
     REPO_ROOT, "autodev", "agents", "executor", "AGENTS.md"
 )
+EXECUTOR_TOOLS_MD = os.path.join(
+    REPO_ROOT, "autodev", "agents", "executor", "TOOLS.md"
+)
 
 
 @pytest.fixture(scope="module")
 def agents_md_text():
     with open(EXECUTOR_AGENTS_MD, "r", encoding="utf-8") as f:
         return f.read()
+
+
+def test_tools_md_names_the_playwright_browser_mismatch_and_its_fix():
+    """A DeepSeek V4.1 Flash executor installed the latest ``playwright`` package,
+    whose Chromium build the image does not ship, hit ``Executable doesn't exist``
+    on launch, and reasoned about it until the stall detector ended the attempt
+    (MultiLife E2E, 2026-11-03). The next attempt ran the one-command fix at once.
+    TOOLS.md names the error and that fix."""
+    with open(EXECUTOR_TOOLS_MD, "r", encoding="utf-8") as f:
+        tools = f.read()
+    assert "Executable doesn't exist" in tools
+    assert "npx playwright install chromium" in tools
 
 
 def test_inputs_section_lists_prd_and_verification(agents_md_text):
