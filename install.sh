@@ -1695,6 +1695,8 @@ finally:
             else
                 warn "Could not restart gateway — run manually: systemctl --user restart openclaw-gateway"
             fi
+        elif [ "$OWNED_OPENCLAW" -eq 1 ]; then
+            info "The container entrypoint restarts the gateway next, which loads the plugin bundle"
         else
             info "Gateway is not a running user systemd service — restart it your usual way to load the plugin bundle"
         fi
@@ -1932,31 +1934,36 @@ case "$DOCTOR_EXIT" in
         ;;
 esac
 
-echo
-echo "  Start with: cd \"$AUTODEV_REPO_PATH\" && source .env && uvicorn ui.server:app --host 127.0.0.1 --port 18790 (change to 0.0.0.0 only if serving trusted LAN)"
-echo "  Verify hooks with POST (expect HTTP 200):"
-echo "    curl -sS -o /dev/null -w \"HTTP %{http_code}\\n\" -X POST http://127.0.0.1:18789/hooks/agent \\"
-echo "      -H \"Authorization: Bearer <hooks.token>\" -H \"Content-Type: application/json\" \\"
-echo "      -d '{\"agentId\":\"prd-creator\",\"sessionKey\":\"ideas:install-check:0\",\"wakeMode\":\"now\",\"message\":\"ping\",\"deliver\":false}'"
-echo
-echo "  To run as a background service:"
-if [ "$OS_TYPE" = "Darwin" ]; then
-    echo "    macOS — install the bundled LaunchAgent:"
-    echo "      1. Edit WorkingDirectory and ProgramArguments in ui/com.autodev.ui.plist"
-    echo "      2. cp \"$AUTODEV_REPO_PATH/ui/com.autodev.ui.plist\" ~/Library/LaunchAgents/"
-    echo "      3. launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/com.autodev.ui.plist"
-    echo "      4. launchctl enable gui/\$(id -u)/com.autodev.ui"
-    echo "    Tail logs: tail -f /tmp/autodev-ui.log /tmp/autodev-ui.err"
-elif [ "$IS_WSL2" -eq 1 ]; then
-    echo "    WSL2 — enable systemd first (if not already enabled):"
-    echo "      echo '[boot]' | sudo tee -a /etc/wsl.conf && echo 'systemd=true' | sudo tee -a /etc/wsl.conf"
-    echo "      (Restart the WSL instance for systemd to take effect.)"
-    echo "    Then install the bundled systemd unit:"
-    echo "      sudo cp \"$AUTODEV_REPO_PATH/ui/autodev-ui.service\" /etc/systemd/system/"
-    echo "      sudo systemctl daemon-reload && sudo systemctl enable --now autodev-ui"
-else
-    echo "    Linux — install the bundled systemd unit:"
-    echo "      sudo cp \"$AUTODEV_REPO_PATH/ui/autodev-ui.service\" /etc/systemd/system/"
-    echo "      sudo systemctl daemon-reload && sudo systemctl enable --now autodev-ui"
+if [ "$OWNED_OPENCLAW" -ne 1 ]; then
+    # Bare-metal next steps only. Owned mode is the container entrypoint,
+    # which restarts the gateway and starts and supervises the dashboard
+    # itself; in its boot log these would read as steps still to take.
+    echo
+    echo "  Start with: cd \"$AUTODEV_REPO_PATH\" && source .env && uvicorn ui.server:app --host 127.0.0.1 --port 18790 (change to 0.0.0.0 only if serving trusted LAN)"
+    echo "  Verify hooks with POST (expect HTTP 200):"
+    echo "    curl -sS -o /dev/null -w \"HTTP %{http_code}\\n\" -X POST http://127.0.0.1:18789/hooks/agent \\"
+    echo "      -H \"Authorization: Bearer <hooks.token>\" -H \"Content-Type: application/json\" \\"
+    echo "      -d '{\"agentId\":\"prd-creator\",\"sessionKey\":\"ideas:install-check:0\",\"wakeMode\":\"now\",\"message\":\"ping\",\"deliver\":false}'"
+    echo
+    echo "  To run as a background service:"
+    if [ "$OS_TYPE" = "Darwin" ]; then
+        echo "    macOS — install the bundled LaunchAgent:"
+        echo "      1. Edit WorkingDirectory and ProgramArguments in ui/com.autodev.ui.plist"
+        echo "      2. cp \"$AUTODEV_REPO_PATH/ui/com.autodev.ui.plist\" ~/Library/LaunchAgents/"
+        echo "      3. launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/com.autodev.ui.plist"
+        echo "      4. launchctl enable gui/\$(id -u)/com.autodev.ui"
+        echo "    Tail logs: tail -f /tmp/autodev-ui.log /tmp/autodev-ui.err"
+    elif [ "$IS_WSL2" -eq 1 ]; then
+        echo "    WSL2 — enable systemd first (if not already enabled):"
+        echo "      echo '[boot]' | sudo tee -a /etc/wsl.conf && echo 'systemd=true' | sudo tee -a /etc/wsl.conf"
+        echo "      (Restart the WSL instance for systemd to take effect.)"
+        echo "    Then install the bundled systemd unit:"
+        echo "      sudo cp \"$AUTODEV_REPO_PATH/ui/autodev-ui.service\" /etc/systemd/system/"
+        echo "      sudo systemctl daemon-reload && sudo systemctl enable --now autodev-ui"
+    else
+        echo "    Linux — install the bundled systemd unit:"
+        echo "      sudo cp \"$AUTODEV_REPO_PATH/ui/autodev-ui.service\" /etc/systemd/system/"
+        echo "      sudo systemctl daemon-reload && sudo systemctl enable --now autodev-ui"
+    fi
+    echo
 fi
-echo
