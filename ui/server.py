@@ -10372,6 +10372,95 @@ def _nested_repo_refusal_message(repo_path: str) -> str | None:
     )
 
 
+# Files Lullabeast writes into a project before the pipeline starts: preflight
+# writes the roadmap, PRD and verification doc, adds .gitignore entries and
+# .env.example, and moves extra roadmaps to autodev_archive/; pipeline state lives
+# under .autodev/; and Mode B init adds an empty src/<name>/__init__.py. Their
+# uncommitted changes are expected, and init commits them.
+_LAUNCH_OWNED_FILES = frozenset({"prd.md", "verification.md", ".gitignore", ".env.example"})
+_LAUNCH_OWNED_DIRS = (".autodev", "autodev_archive")
+
+
+def _is_launch_owned_path(repo_path: str, rel: str, untracked: bool) -> bool:
+    import fnmatch
+
+    rel = rel.rstrip("/")
+    if rel.split("/", 1)[0] in _LAUNCH_OWNED_DIRS:
+        return True
+    if "/" not in rel:
+        return rel in _LAUNCH_OWNED_FILES or fnmatch.fnmatchcase(rel, "*oadmap*.md")
+    name = os.path.basename(os.path.normpath(repo_path))
+    if untracked and rel == f"src/{name}/__init__.py":
+        try:
+            return os.path.getsize(os.path.join(repo_path, rel)) == 0
+        except OSError:
+            return False
+    return False
+
+
+def _uncommitted_user_changes(repo_path: str) -> list | None:
+    """Paths with uncommitted changes in ``repo_path`` that Lullabeast didn't write.
+
+    Staged, unstaged and untracked (not ignored) changes all count; a rename
+    counts by both of its paths. Line endings are folded (``core.autocrlf=input``):
+    Git for Windows checks text files out with CRLF from its system config, which
+    the container doesn't share, so a clean Windows checkout would otherwise read
+    as modified throughout. Returns None when git can't read the status (not a
+    repo, git missing): the caller's own git steps report that.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", repo_path, "-c", "core.autocrlf=input",
+             "status", "--porcelain", "--untracked-files=all"],
+            capture_output=True, text=True, errors="replace",
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    paths = []
+    for line in (result.stdout or "").splitlines():
+        if len(line) < 4:
+            continue
+        untracked = line.startswith("??")
+        for part in line[3:].split(" -> "):
+            rel = part.strip()
+            if len(rel) >= 2 and rel[0] == rel[-1] == '"':
+                rel = rel[1:-1]  # git quotes unusual names; shown as git shows them
+            if rel and rel not in paths and not _is_launch_owned_path(repo_path, rel, untracked):
+                paths.append(rel)
+    return paths
+
+
+def _uncommitted_changes_message(paths: list) -> str:
+    shown = ", ".join(paths[:5]) + (f" and {len(paths) - 5} more" if len(paths) > 5 else "")
+    return (
+        f"This repo has uncommitted changes: {shown}. Commit, stash (git stash -u) "
+        "or .gitignore them, then try again. The pipeline commits and resets this "
+        "working tree as it runs, so it would sweep up or discard uncommitted work."
+    )
+
+
+def _uncommitted_changes_check(repo_path: str) -> dict | None:
+    """The launch preflight's row for uncommitted work (None outside a git repo).
+
+    Only the Launch dialog's preflight adds it, because Launch refuses that work
+    (:func:`_run_init_project`). The queue, switch-project and revalidate paths
+    share :func:`_run_preflight_checks` and also resume runs whose own work in
+    progress is uncommitted, so the check stays out of there.
+    """
+    if not os.path.isdir(os.path.join(repo_path, ".git")):
+        return None
+    dirty = _uncommitted_user_changes(repo_path)
+    if dirty is None:
+        return None
+    if dirty:
+        return {"check": "uncommitted changes", "status": "fail",
+                "message": _uncommitted_changes_message(dirty)}
+    return {"check": "uncommitted changes", "status": "pass",
+            "message": "No uncommitted changes outside Lullabeast's own files"}
+
+
 def _run_preflight_checks(repo_path: str, config: dict | None = None) -> list:
     """Run ordered preflight checks for a project directory.
 
@@ -10914,6 +11003,9 @@ async def post_setup_preflight(request: Request):
         })
 
     checks = _run_preflight_checks(repo_abs)
+    _dirty_row = _uncommitted_changes_check(repo_abs)
+    if _dirty_row:
+        checks.append(_dirty_row)
     all_checks = header_checks + mat + checks
     if not any(c.get("status") == "fail" for c in all_checks):
         append_recent_project(repo_abs)
@@ -12535,7 +12627,10 @@ def _run_init_project(
     """Initialize a project directory (Mode A: new repo, Mode B: existing repo).
 
     Mode A: .git does NOT exist → create full structure, git init, initial commit.
-    Mode B: .git exists → create only missing files, append missing gitignore entries.
+    Mode B: .git exists → refuse, before writing anything, when the repo has
+    uncommitted changes outside Lullabeast's own files (the pipeline's commits and
+    resets would sweep them up or discard them); otherwise create only missing
+    files, append missing gitignore entries, and commit them.
 
     ``verification_content`` (Stage C): if provided, written to
     ``<repo>/verification.md`` after PRD. If absent AND no verification.md
@@ -12655,6 +12750,14 @@ def _run_init_project(
             )
 
         else:  # Mode B
+            # Uncommitted work Lullabeast didn't write would land in the init commit
+            # below, then in phase commits (`git add .`), or be lost to a retry's
+            # `git reset --hard`. Refuse before writing anything; preflight shows
+            # the same message first.
+            _dirty = _uncommitted_user_changes(repo_path)
+            if _dirty:
+                return {"ok": False, "error": _uncommitted_changes_message(_dirty)}
+
             # Create only missing structure (pipeline artifacts under .autodev/pipeline/)
             art = os.path.join(repo_path, ".autodev", "pipeline")
             os.makedirs(os.path.join(art, "phases"), exist_ok=True)
@@ -12708,7 +12811,7 @@ def _run_init_project(
                     with open(gitignore_path, "a") as f:
                         f.write("\n" + _PIPELINE_GITIGNORE_HEADER + "\n" + "\n".join(missing) + "\n")
 
-            # git add + commit new files only
+            # git add + commit: only Lullabeast's own files can be uncommitted here
             _ensure_repo_git_identity(repo_path)
             subprocess.run(["git", "-C", repo_path, "add", "-A"], check=True, capture_output=True)
             result = subprocess.run(
