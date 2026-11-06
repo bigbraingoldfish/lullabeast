@@ -222,12 +222,16 @@ def test_handler_clears_executor_succeeded_before_routing_to_the_executor():
     )
 
 
-def test_directive_does_not_promise_a_fresh_session():
-    """The re-invoked executor keeps its attempt-1 session key (the handler
-    resets executor_retries), so the directive must not claim a fresh session."""
+def test_directive_stands_alone():
+    """The re-invoked executor runs in a fresh session (a MISSING_ARTIFACTS
+    re-invoke is a send-back, so its key carries ``-b{N}``), so the directive
+    can't lean on an earlier transcript: it says the work is preserved and
+    where to read what to record."""
     import orchestrator as orc_module
 
-    assert "fresh session" not in orc_module._missing_artifacts_directive("CORE-E1")
+    directive = orc_module._missing_artifacts_directive("CORE-E1")
+    assert "PRESERVED on the branch" in directive
+    assert "current_phase.json" in directive
 
 
 def test_handler_routes_with_the_directive_builder():

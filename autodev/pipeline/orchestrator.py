@@ -4309,6 +4309,40 @@ class Orchestrator:
         n = self._operator_resets()
         return f"-e{n}" if n else ""
 
+    def _count_send_back(self, phase_state: dict) -> None:
+        """Count a reviewer send-back on ``phase_state``; the caller writes it.
+
+        Called by the ROUTE_EXECUTOR and ROUTE_PLANNER handlers and the
+        MISSING_ARTIFACTS re-invoke, before their phase_state write. Read by
+        :meth:`_send_back_suffix`. Only ``reset_phase``'s fresh phase_state clears
+        it, and an operator reset also moves ``-e{N}``."""
+        try:
+            n = int(phase_state.get("review_send_backs", 0) or 0)
+        except (ValueError, TypeError):
+            n = 0
+        phase_state["review_send_backs"] = n + 1
+
+    def _send_back_suffix(self) -> str:
+        """Session-key suffix (``-b{N}``) that gives every agent a fresh OpenClaw
+        session after the reviewer sends the phase back.
+
+        The base keys are built from the attempt counts in ``self.state``, and a
+        send-back restarts them: ROUTE_EXECUTOR and a MISSING_ARTIFACTS re-invoke
+        set ``executor_retries`` to 0, ROUTE_PLANNER sets ``planner_retries`` and
+        ``executor_retries`` to 0, and an executor self-failure zeros
+        ``reviewer_retries``. Without this the next attempt rebuilt an earlier
+        attempt's key and OpenClaw reattached that session: a rejected executor
+        resumed attempt 1's transcript, whichever attempt's work was rejected, and
+        every later round piled onto it. ``N`` counts the phase's send-backs
+        (:meth:`_count_send_back`). Empty before the first, so those keys keep
+        their legacy shape. Sits after the attempt and ``-c``/``-u``
+        discriminators, before ``-pr``."""
+        try:
+            n = int(self.read_phase_state().get("review_send_backs", 0) or 0)
+        except (ValueError, TypeError):
+            return ""
+        return f"-b{n}" if n > 0 else ""
+
     def _run_suffix(self) -> str:
         """Session-key suffix (``-r{token}``) scoping a pipeline session to the
         current run.
@@ -7192,7 +7226,7 @@ class Orchestrator:
                         time.sleep(2)
                         continue
 
-                    session_key = f"pipeline:phase-{phase}:{raw_id}:planner-attempt-{retries + 1}" + self._provider_retry_suffix() + self._reset_suffix() + self._run_suffix()
+                    session_key = f"pipeline:phase-{phase}:{raw_id}:planner-attempt-{retries + 1}" + self._send_back_suffix() + self._provider_retry_suffix() + self._reset_suffix() + self._run_suffix()
                     _override_err = self._record_active_agent("planner", session_key)  # Phase 9 — abort-on-escalation target
                     if _override_err:
                         self._escalate_model_override_rejected("planner", _override_err)
@@ -7488,9 +7522,9 @@ class Orchestrator:
                     # RR-F6: Crash-recovery skip — if executor already succeeded in a prior
                     # run (executor_succeeded flag in phase_state.json), skip re-invocation
                     # and advance directly to reviewer.  Mirrors the planner_output_preserved
-                    # pattern (lines 2020-2029). Only applied when retries==0 so that a
-                    # deliberate ROUTE_EXECUTOR re-run (which increments executor_retries) is
-                    # not short-circuited.
+                    # pattern (lines 2020-2029). Only applied when retries==0. A send-back
+                    # (ROUTE_EXECUTOR, MISSING_ARTIFACTS) zeros executor_retries, so those
+                    # handlers clear executor_succeeded to keep this skip off their re-run.
                     if retries == 0 and self.executor_output_already_succeeded(self.read_phase_state()):
                         print("[INFO] [EXECUTOR] executor_succeeded flag is set — skipping re-invocation, advancing to reviewer.")
                         self.state["current_agent"] = "reviewer"
@@ -7498,7 +7532,7 @@ class Orchestrator:
                         time.sleep(2)
                         continue
 
-                    session_key = f"pipeline:phase-{phase}:{raw_id}:executor-attempt-{retries + 1}" + self._provider_retry_suffix() + self._reset_suffix() + self._run_suffix()
+                    session_key = f"pipeline:phase-{phase}:{raw_id}:executor-attempt-{retries + 1}" + self._send_back_suffix() + self._provider_retry_suffix() + self._reset_suffix() + self._run_suffix()
                     _override_err = self._record_active_agent("executor", session_key)  # Phase 9 — abort-on-escalation target
                     if _override_err:
                         self._escalate_model_override_rejected("executor", _override_err)
@@ -7522,6 +7556,7 @@ class Orchestrator:
                             role="executor",
                             session_key=(
                                 f"pipeline:phase-{phase}:{raw_id}:executor-attempt-{retries}"
+                                + self._send_back_suffix()
                                 + self._reset_suffix()
                                 + self._run_suffix()
                             ),
@@ -7828,7 +7863,7 @@ class Orchestrator:
                     _unverified_retries = _ps_rk.get("reviewer_unverified_retries", 0)
                     session_key = self._reviewer_session_key(
                         phase, raw_id, retries, _contract_retries, _unverified_retries
-                    ) + self._provider_retry_suffix() + self._reset_suffix() + self._run_suffix()
+                    ) + self._send_back_suffix() + self._provider_retry_suffix() + self._reset_suffix() + self._run_suffix()
                     _override_err = self._record_active_agent("reviewer", session_key)  # Phase 9 — abort-on-escalation target
                     if _override_err:
                         self._escalate_model_override_rejected("reviewer", _override_err)
@@ -8454,6 +8489,9 @@ class Orchestrator:
                         _ps_re["executor_reviewer_rejection_retries"] = (
                             _ps_re.get("executor_reviewer_rejection_retries", 0) + 1
                         )
+                        # executor_retries restarts at 0 below; the send-back count
+                        # keeps the next run off executor-attempt-1's session.
+                        self._count_send_back(_ps_re)
                         self.write_phase_state_atomic(_ps_re)
                         # Mirror to self.state (state-sync invariant).
                         self.state["executor_reviewer_rejection_retries"] = (
@@ -8476,6 +8514,7 @@ class Orchestrator:
                         # wants fresh planner output — do not re-use what the reviewer rejected).
                         _ps_rp = self.read_phase_state()
                         _ps_rp["planner_output_preserved"] = False
+                        self._count_send_back(_ps_rp)
                         self.write_phase_state_atomic(_ps_rp)
                         self.state["planner_output_preserved"] = False
                         self.state["current_agent"] = "planner"
@@ -8534,6 +8573,7 @@ class Orchestrator:
                             # executor would never run, and the second miss would
                             # escalate.
                             _ps_ma.pop("executor_succeeded", None)
+                            self._count_send_back(_ps_ma)
                             self.write_phase_state_atomic(_ps_ma)
                             self.state["current_agent"] = "executor"
                             self.state["executor_retries"] = 0

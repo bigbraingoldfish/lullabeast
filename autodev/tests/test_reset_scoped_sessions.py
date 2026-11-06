@@ -89,14 +89,16 @@ class TestKeySitesCarryTheResetSuffix:
         for role in ("planner", "executor"):
             site = (
                 f'session_key = f"pipeline:phase-{{phase}}:{{raw_id}}:{role}-attempt-{{retries + 1}}" '
-                "+ self._provider_retry_suffix() + self._reset_suffix() + self._run_suffix()"
+                "+ self._send_back_suffix() + self._provider_retry_suffix() "
+                "+ self._reset_suffix() + self._run_suffix()"
             )
             assert site in _ORCH_SRC, role
 
     def test_reviewer_key(self):
         site = (
             "_reviewer_session_key( phase, raw_id, retries, _contract_retries, _unverified_retries ) "
-            "+ self._provider_retry_suffix() + self._reset_suffix() + self._run_suffix()"
+            "+ self._send_back_suffix() + self._provider_retry_suffix() "
+            "+ self._reset_suffix() + self._run_suffix()"
         )
         assert site in _ORCH_SRC
 
@@ -105,6 +107,6 @@ class TestKeySitesCarryTheResetSuffix:
         attempt is in the same reset cycle, so the key carries the same suffix."""
         site = (
             'f"pipeline:phase-{phase}:{raw_id}:executor-attempt-{retries}" '
-            "+ self._reset_suffix() + self._run_suffix()"
+            "+ self._send_back_suffix() + self._reset_suffix() + self._run_suffix()"
         )
         assert site in _ORCH_SRC

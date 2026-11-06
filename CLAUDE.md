@@ -632,7 +632,7 @@ OpenClaw normalises session keys to lowercase internally. The orchestrator accou
 
 ### Separate session key per retry
 
-Each retry attempt uses a distinct session key. This prevents the failure history from attempt 1 from polluting the agent context in attempt 2. Never reuse a session key across retry attempts for the same phase. Discriminators follow the base key in this order: `-c{N}` / `-u{N}` (reviewer contract and evidence retries), `-pr{N}` (provider-error retry), `-e{N}` (operator resets of the phase, `_reset_suffix`), then `-r{run}` (`_run_suffix`). An operator reset zeros the attempt counters and keeps the run id, so without `-e{N}` the next attempt rebuilt an earlier key and reattached that session.
+Each retry attempt uses a distinct session key. This prevents the failure history from attempt 1 from polluting the agent context in attempt 2. Never reuse a session key across retry attempts for the same phase. Discriminators follow the base key in this order: `-c{N}` / `-u{N}` (reviewer contract and evidence retries), `-b{N}` (reviewer send-backs of the phase, `_send_back_suffix`), `-pr{N}` (provider-error retry), `-e{N}` (operator resets of the phase, `_reset_suffix`), then `-r{run}` (`_run_suffix`). An operator reset zeros the attempt counters and keeps the run id, so without `-e{N}` the next attempt rebuilt an earlier key and reattached that session. A send-back (ROUTE_EXECUTOR, ROUTE_PLANNER, or a MISSING_ARTIFACTS re-invoke) restarts the attempt counts the same way, so `-b{N}` does the same job for it.
 
 ### `pipeline_state.json` reset checklist
 
