@@ -36,7 +36,7 @@ placeholders; real values are generated at first boot and persisted under
 | `agents.list[roadmap-converter]` | `${ROADMAP_MODEL}`, read/write only | Conversion agent; needs no execution surface. |
 | all six agents | `bootstrapMaxChars: 32000`, `postCompactionMaxChars: 8000` (pipeline roles) | OpenClaw's default caps truncate the agents' instruction files and silently drop their standing rules. |
 | `tools.profile` | `"coding"` | Required baseline for the pipeline's tool surface. |
-| `tools.exec` | unattended-exec whitelist (`ask`, `safeBins`, `safeBinProfiles`) | Without it, gate scripts and test runs stall on interactive exec-approval prompts. |
+| `tools.exec` | unattended-exec whitelist (`ask`, `safeBins`, `safeBinProfiles`) | Without it, the agents' test runs and other commands stall on interactive exec-approval prompts. (The gate scripts run as orchestrator subprocesses, outside OpenClaw's exec tool.) |
 | `tools.loopDetection` | tuned values | OpenClaw's own in-turn loop guard; validated in real runs. (Lullabeast's own tool-loop catcher is independent of it.) |
 | `hooks` | `enabled: true`, `${HOOKS_TOKEN}`, `defaultSessionKey: "pipeline:default"`, `allowRequestSessionKey: true`, prefixes `["pipeline:", "ideas:"]`, the 6 Lullabeast agent ids, internal hooks on with `session-memory` disabled | The webhook contract the whole pipeline runs on. The `session-memory` exception keeps per-session memory writes out of pipeline sessions. |
 | `gateway.port` / `gateway.mode` | `18789` / `"local"` | Standard gateway wiring; compose publishes 18789 to the host loopback so OpenClaw's own Control UI (model/provider management) is reachable. |

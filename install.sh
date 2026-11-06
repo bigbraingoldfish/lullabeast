@@ -630,8 +630,10 @@ print(refresh_exec_approvals_gate_paths(sys.argv[1], sys.argv[2]))
     fi
 # owned-mode-end: step 6
 elif [ ! -f "$EXEC_APPROVALS" ]; then
-    warn "exec-approvals.json not found at $EXEC_APPROVALS"
-    warn "  Gate scripts will not execute until approved via the OpenClaw UI"
+    # Nothing to migrate. The orchestrator runs the gate scripts as its own
+    # subprocesses, so they never need an OpenClaw exec approval.
+    info "exec-approvals.json absent: no gate paths to migrate"
+    APPROVALS_STATUS="absent"
 else
     NEW_GATE_DIR="$AUTODEV_REPO_PATH/autodev/pipeline/gate_scripts"
     STALE=$(grep -o '"[^"]*gate_scripts[^"]*"' "$EXEC_APPROVALS" 2>/dev/null \
@@ -642,8 +644,8 @@ else
         while IFS= read -r line; do
             warn "    $line"
         done <<< "$STALE"
-        warn "  Re-approve gate scripts via the OpenClaw UI"
-        warn "  Correct paths are under: $NEW_GATE_DIR/"
+        warn "  They are unused (the orchestrator runs the gate scripts itself); delete them"
+        warn "  Current gate scripts are under: $NEW_GATE_DIR/"
         APPROVALS_STATUS="stale entries found"
     else
         ok "exec-approvals.json paths look current"
@@ -1716,21 +1718,48 @@ PLAYWRIGHT_STEP="not attempted"
 # the multimodal reviewer reads them. Without Playwright the reviewer gate's
 # ERR_VISUAL_UNVERIFIED check rejects every UI/INT phase. Pass --skip-playwright
 # (or answer N at the prompt) to opt out; the gate still rejects but at least
-# no time is wasted on dependency install.
+# no time is wasted on dependency install. The Docker image bakes Chromium and
+# passes --skip-playwright, so an installed Chromium is reported as such, not
+# as a gap.
+
+# Prints the Chromium directory Playwright will use, if one is installed:
+# under $PLAYWRIGHT_BROWSERS_PATH when set (Playwright then looks nowhere
+# else), otherwise in the default per-user cache.
+playwright_chromium_dir() {
+    local base d
+    if [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then
+        set -- "$PLAYWRIGHT_BROWSERS_PATH"
+    else
+        set -- "$HOME/.cache/ms-playwright" "$HOME/Library/Caches/ms-playwright"
+    fi
+    for base in "$@"; do
+        for d in "$base"/chromium*; do
+            if [ -d "$d" ]; then
+                printf '%s\n' "$d"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
 
 if [ "$SKIP_PLAYWRIGHT" -eq 1 ]; then
+    if PW_CHROMIUM=$(playwright_chromium_dir); then
+        info "Playwright install skipped (--skip-playwright): Chromium already installed ($(basename "$PW_CHROMIUM"))"
+        PLAYWRIGHT_STEP="skipped (Chromium already installed)"
     # An explicit operator flag is a documented choice, not a defect, so it
     # must not trip owned mode's warnings-are-fatal policy. The doctor's
     # playwright check still reports the resulting gap.
-    if [ "$OWNED_OPENCLAW" -eq 1 ]; then
+    elif [ "$OWNED_OPENCLAW" -eq 1 ]; then
         info "Playwright install skipped (--skip-playwright flag)"
         info "  UI/INT phases will fail at the reviewer gate (ERR_VISUAL_UNVERIFIED)"
+        PLAYWRIGHT_STEP="skipped (--skip-playwright)"
     else
         warn "Playwright install skipped (--skip-playwright flag)"
         warn "  UI/INT phases will fail at the reviewer gate (ERR_VISUAL_UNVERIFIED)"
         warn "  Re-run without --skip-playwright to enable visual review"
+        PLAYWRIGHT_STEP="skipped (--skip-playwright)"
     fi
-    PLAYWRIGHT_STEP="skipped (--skip-playwright)"
 # ci-default: Y - UI/INT phases hard-fail at the reviewer gate without the
 # Playwright stack; opting out non-interactively is the explicit
 # --skip-playwright flag, not a prompt default.

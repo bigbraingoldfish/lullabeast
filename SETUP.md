@@ -339,9 +339,9 @@ tool-call parsing) — see the Qwen notes in [CLAUDE.md](CLAUDE.md) under *Agent
 
 ---
 
-## Re-approving Gate Scripts
+## Gate Scripts and Exec Approvals
 
-OpenClaw records which scripts each agent may execute in `exec-approvals.json`. The gate scripts (`autodev/pipeline/gate_scripts/*.py`) must be approved or agent sessions will refuse to run them. The simplest way to trigger the approval prompt is to start a pipeline run — OpenClaw pauses and asks (in its own UI, linked from the dashboard's Settings screen) the first time each script is encountered. The doctor's `exec_approvals` check flags entries pointing at stale paths.
+The orchestrator runs the gate scripts (`autodev/pipeline/gate_scripts/*.py`) as its own subprocesses, so they never need an OpenClaw exec approval. `exec-approvals.json` holds OpenClaw's approvals for commands the agents run outside the `tools.exec` allow-list. Older installs approved the gate scripts there; the doctor's `exec_approvals` check flags entries pointing at stale gate-script paths, and a missing file is fine.
 
 ---
 

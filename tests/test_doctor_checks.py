@@ -595,9 +595,14 @@ class TestPluginHooksRegistered:
 
 
 class TestExecApprovals:
-    def test_missing_warns(self, env):
+    def test_missing_is_ok(self, env):
+        """A fresh volume has no exec-approvals.json, so there are no stale gate
+        paths. The orchestrator runs the gate scripts as its own subprocesses, so
+        nothing needs approving either: this used to warn on every Docker boot."""
         os.remove(os.path.join(env["openclaw_root"], "exec-approvals.json"))
-        assert doctor.check_exec_approvals(env).status == "warn"
+        c = doctor.check_exec_approvals(env)
+        assert c.status == "ok"
+        assert "OpenClaw UI" not in c.detail and not c.fix_hint
 
     def test_stale_path_fails(self, env):
         with open(os.path.join(env["openclaw_root"], "exec-approvals.json"), "w") as f:

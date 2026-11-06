@@ -742,10 +742,11 @@ def check_exec_approvals(config: dict) -> CheckResult:
     path = os.path.join(config.get("openclaw_root") or "", "exec-approvals.json")
     repo = os.path.abspath(config.get("autodev_repo_path") or "")
     if not os.path.isfile(path):
+        # Nothing stale to find. The orchestrator runs the gate scripts as its own
+        # subprocesses, so they never wait on an OpenClaw exec approval.
         return CheckResult(
-            "exec_approvals", "exec-approvals gate paths current", "warn",
-            f"exec-approvals.json not found at {path}; gate scripts may need approval via the OpenClaw UI",
-            "approve the gate scripts once via the OpenClaw UI when the pipeline first runs",
+            "exec_approvals", "exec-approvals gate paths current", "ok",
+            "no exec-approvals.json, so no stale gate paths",
         )
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -763,7 +764,7 @@ def check_exec_approvals(config: dict) -> CheckResult:
         return CheckResult(
             "exec_approvals", "exec-approvals gate paths current", "fail",
             "stale gate_scripts paths: " + ", ".join(sorted(set(stale))[:5]),
-            "re-run ./install.sh or re-approve gate scripts under autodev/pipeline/gate_scripts/",
+            "re-run ./install.sh, or delete those entries: the orchestrator runs the gate scripts itself",
         )
     return CheckResult("exec_approvals", "exec-approvals gate paths current", "ok")
 

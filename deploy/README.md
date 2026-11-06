@@ -498,10 +498,9 @@ same steps fit the user stack: swap the compose file, volume name
   dashboard beyond loopback is a conscious edit; read "Security and network
   exposure" in [SETUP.md](../SETUP.md) first.
 - **18789** (OpenClaw gateway): published to `127.0.0.1` on the host only,
-  token-authenticated. Model and provider management and the one-time
-  gate-script approvals happen in OpenClaw's own UI, so the dashboard's
-  Settings screen links here. Same rule as the dashboard: exposing it beyond
-  loopback is a conscious edit.
+  token-authenticated. Model and provider management happens in OpenClaw's
+  own UI, so the dashboard's Settings screen links here. Same rule as the
+  dashboard: exposing it beyond loopback is a conscious edit.
 - `host.docker.internal` resolves to the docker host (via `extra_hosts`), so
   a model server running on the host is reachable from inside the container
   (see "Local models on the host" above).
@@ -510,8 +509,7 @@ same steps fit the user stack: swap the compose file, volume name
 
 The gateway runs inside the container on 18789 and is published to the host's
 loopback, so OpenClaw's own UI is at `http://127.0.0.1:18789`. That is where
-model and provider management lives, and where you approve the pipeline's gate
-scripts the first time they run. The dashboard's **Settings** screen opens it
+model and provider management lives. The dashboard's **Settings** screen opens it
 signed in: the button carries the gateway token in the URL hash fragment,
 which stays in the browser (never sent in the request, absent from server
 logs), and lands on the sessions view (`/sessions`), where agent activity

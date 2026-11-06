@@ -97,6 +97,48 @@ class TestStep12PlaywrightSection:
         assert "PLAYWRIGHT_STEP" in text, "step must set PLAYWRIGHT_STEP for the summary"
 
 
+class TestSkipWithChromiumAlreadyInstalled:
+    """The Docker entrypoint passes --skip-playwright because the image bakes
+    Chromium; the step then said "UI/INT phases will fail at the reviewer gate"
+    on every boot. With a Chromium already installed, skipping costs nothing."""
+
+    def _function(self) -> str:
+        text = _read_install_sh()
+        start = text.index("playwright_chromium_dir() {")
+        return text[start:text.index("\n}\n", start) + 3]
+
+    def _run(self, tmp_path, env_extra):
+        import os
+        import subprocess
+
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path / "home")}
+        env.update(env_extra)
+        script = self._function() + "playwright_chromium_dir\n"
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env)
+
+    def test_finds_chromium_under_playwright_browsers_path(self, tmp_path):
+        (tmp_path / "pw" / "chromium_headless_shell-1191").mkdir(parents=True)
+        r = self._run(tmp_path, {"PLAYWRIGHT_BROWSERS_PATH": str(tmp_path / "pw")})
+        assert r.returncode == 0 and r.stdout.strip().endswith("chromium_headless_shell-1191")
+
+    def test_finds_chromium_in_the_default_cache(self, tmp_path):
+        (tmp_path / "home" / ".cache" / "ms-playwright" / "chromium-1191").mkdir(parents=True)
+        r = self._run(tmp_path, {})
+        assert r.returncode == 0 and r.stdout.strip().endswith("chromium-1191")
+
+    def test_reports_none_when_absent(self, tmp_path):
+        (tmp_path / "pw").mkdir()
+        r = self._run(tmp_path, {"PLAYWRIGHT_BROWSERS_PATH": str(tmp_path / "pw")})
+        assert r.returncode == 1 and r.stdout == ""
+
+    def test_skip_warns_only_without_chromium(self):
+        text = _read_install_sh()
+        start = text.index('if [ "$SKIP_PLAYWRIGHT" -eq 1 ]; then')
+        block = text[start:text.index("elif ! prompt_yn", start)]
+        assert "playwright_chromium_dir" in block
+        assert block.index("playwright_chromium_dir") < block.index("UI/INT phases will fail")
+
+
 class TestRegisterAgentBrowserGrants:
     def test_executor_gets_browser_in_tools_allow(self):
         from autodev.installer import register_agent
