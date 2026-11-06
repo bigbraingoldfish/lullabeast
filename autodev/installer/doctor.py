@@ -851,11 +851,10 @@ def check_stale_lock(config: dict) -> CheckResult:
         )
     if held:
         return CheckResult("stale_lock", "Pipeline lock sane", "ok", "orchestrator alive (lock held)")
-    return CheckResult(
-        "stale_lock", "Pipeline lock sane", "warn",
-        f"lock file exists but no process holds it (stale): {lock_path}",
-        f"safe to remove: rm {lock_path}",
-    )
+    # A free lock is never stale: the OS releases a flock when its holder
+    # exits, and the dashboard and the heartbeat create the file whenever they
+    # probe liveness, so it exists from the first boot on.
+    return CheckResult("stale_lock", "Pipeline lock sane", "ok", "lock free (no orchestrator running)")
 
 
 def check_playwright(config: dict) -> CheckResult:

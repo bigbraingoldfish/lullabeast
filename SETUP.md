@@ -32,7 +32,7 @@ You can also edit a PRD section directly without asking the agent: each section 
 
 ## The doctor
 
-`python -m autodev.installer.doctor` checks every documented silent-failure mode in one pass: paths, Python deps, git identity, the PRD conversion prompt, `openclaw.json` health (hooks, agents, context limits, `tools.profile`, heartbeat), the OpenClaw version floor and known-bad releases, gateway reachability, plugin bundle freshness and hook registration, exec-approvals paths, `pipeline-project` symlink agreement, stale locks, Playwright, tokens, and ports. It is strictly read-only, and every red line carries a one-line fix hint.
+`python -m autodev.installer.doctor` checks every documented silent-failure mode in one pass: paths, Python deps, git identity, the PRD conversion prompt, `openclaw.json` health (hooks, agents, context limits, `tools.profile`, heartbeat), the OpenClaw version floor and known-bad releases, gateway reachability, plugin bundle freshness and hook registration, exec-approvals paths, `pipeline-project` symlink agreement, the pipeline lock, Playwright, tokens, and ports. It is strictly read-only, and every red line carries a one-line fix hint.
 
 Flags: `--json` (machine-readable report), `--quiet` (print only problems; warnings stop affecting the exit code), `--live` (also POSTs the webhook ping, which creates a real OpenClaw session, so it is opt-in). Exit codes: 0 all ok, 1 any failure, 2 warnings only. Network and subprocess probes are bounded by `DOCTOR_PROBE_TIMEOUT` seconds (default 5).
 

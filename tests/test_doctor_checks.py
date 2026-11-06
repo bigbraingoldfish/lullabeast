@@ -688,11 +688,16 @@ class TestStaleLock:
         c = doctor.check_stale_lock(env)
         assert c.status == "ok"
 
-    def test_stale_lock_warns(self, env):
+    def test_unheld_lock_file_is_ok(self, env):
+        # The dashboard and the heartbeat create the lock file whenever they
+        # probe liveness, so it exists from the first boot on. A flock is
+        # released when its holder exits, so a free lock is never stale: it
+        # means no orchestrator is running, not that a file needs deleting.
         Path(env["lock_path"]).write_text("")
         c = doctor.check_stale_lock(env)
-        assert c.status == "warn"
-        assert "rm " in c.fix_hint
+        assert c.status == "ok"
+        assert "no orchestrator running" in c.detail
+        assert not c.fix_hint
 
     def test_held_lock_ok(self, env):
         import fcntl
