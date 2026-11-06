@@ -143,7 +143,7 @@ An executor that hits the 20-tool-call hard stop writes `status: "stuck"` with p
 
 The corner case: if the executor hits the hard stop mid-implementation but enough code exists that tests pass (unlikely but possible on a partially implemented phase), the gate would pass it to the reviewer without the `status` check. The reviewer catches stubs and incomplete implementations, so it functions as a backstop — but relying on a reviewer pass to catch what the gate should have caught is fragile.
 
-The `status != "complete"` gate check (see PIPELINE-SPEC.md § Gate Scripts > Executor Output Gate) short-circuits this: any self-reported `"stuck"` or `"failed"` is an immediate gate failure regardless of test results. This is cheap to implement and eliminates the backstop dependency.
+The `status` gate check (anything but `"complete"` or `"completed"` fails; see PIPELINE-SPEC.md § Gate Scripts > Executor Output Gate) short-circuits this: any self-reported `"stuck"` or `"failed"` is an immediate gate failure regardless of test results. This is cheap to implement and eliminates the backstop dependency.
 
 ---
 

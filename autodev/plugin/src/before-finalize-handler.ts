@@ -19,7 +19,7 @@
  *   tdd_test_structure   — non-empty array
  *   pass_criteria        — non-empty array, every item has a "condition" string
  *
- * Executor (plugin-safe, only when status == "complete"):
+ * Executor (plugin-safe, only when status is "complete" or "completed"):
  *   test_results.all_passing — boolean present
  *   file_manifest            — array present
  *   tests_written            — array present
@@ -103,10 +103,21 @@ function checkPlanner(
   return missing;
 }
 
+/**
+ * True when the executor reported the phase finished. "complete" and
+ * "completed" mean the same; case and surrounding spaces don't matter.
+ * Mirrors is_finished_status() in gate_scripts/executor_gate.py.
+ */
+function isFinishedStatus(status: unknown): boolean {
+  if (typeof status !== "string") return false;
+  const value = status.trim().toLowerCase();
+  return value === "complete" || value === "completed";
+}
+
 function checkExecutor(data: Record<string, unknown>): string[] {
   // Only perform structural checks when the executor claims completion.
   // If status is "stuck" or "failed", the hard gate handles it.
-  if (data["status"] !== "complete") return [];
+  if (!isFinishedStatus(data["status"])) return [];
 
   const missing: string[] = [];
 

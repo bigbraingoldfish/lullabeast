@@ -46,7 +46,7 @@ Write your output to: `pipeline-project/.autodev/pipeline/executor_output.json`
 
 The gate script validates these fields strictly. Imprecise output wastes a retry.
 
-- **`status`** — The gate checks this FIRST. Must be `"complete"` to pass. `"stuck"` or `"failed"` = immediate gate failure regardless of any other field value. Use `"stuck"` ONLY if you hit the tool-call limit mid-implementation with work remaining. Use `"failed"` if you exhausted troubleshooting attempts and cannot proceed. Use `"complete"` only when tests pass and implementation is real.
+- **`status`** — The gate checks this FIRST. Must be `"complete"` to pass (`"completed"` counts the same). `"stuck"` or `"failed"` = immediate gate failure regardless of any other field value. Use `"stuck"` ONLY if you hit the tool-call limit mid-implementation with work remaining. Use `"failed"` if you exhausted troubleshooting attempts and cannot proceed. Use `"complete"` only when tests pass and implementation is real.
 - **`tests_written`** — MUST contain every file path from `planner_output.json` → `tdd_test_structure`. The gate cross-references this list against the planner spec. A planner-listed path missing from `tests_written` raises an `ERR_TDD_COVERAGE_MISMATCH` gate warning the reviewer adjudicates (it verifies coverage independently and may reject) — keep the list complete and accurate, even for files already on disk.
 - **`test_results.all_passing`** — Must be `true`. Run your tests and report honestly. The reviewer will verify this independently.
 - **`file_manifest`** — Every file listed must exist on disk. The gate verifies existence. Do not list files you planned to create but did not finish.

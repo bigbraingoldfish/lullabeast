@@ -9,7 +9,8 @@
  *   - Planner with empty tdd_test_structure → revise
  *   - Planner with pass_criteria missing condition fields → revise
  *   - Executor with complete status and valid structure → void
- *   - Executor with non-"complete" status → void (hard gate handles it)
+ *   - Executor with status "completed" gets the same checks as "complete"
+ *   - Executor with a status that isn't finished → void (hard gate handles it)
  *   - Executor missing test_results.all_passing → revise
  *   - Reviewer with well-formed output (incl. structured behavioral_verification) → void
  *   - Reviewer with missing blocking_issues → revise
@@ -308,6 +309,47 @@ test("returns void for executor with status=stuck (hard gate handles it)", () =>
     assert.equal(result, undefined, "non-complete status: defer to hard gate");
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("returns void for well-formed executor output with status=completed", () => {
+  const tmpDir = makeTmpDir();
+  const openclawRoot = path.join(tmpDir, "openclaw");
+  const workspaceDir = path.join(openclawRoot, "workspace-executor");
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  const artifactsDir = makeArtifactsDir(openclawRoot);
+  writeOutput(artifactsDir, "executor", { ...validExecutor, status: "completed" });
+
+  try {
+    const result = runHandler("executor", workspaceDir);
+    assert.equal(result, undefined);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("checks the structure when executor status is completed, not just complete", () => {
+  // "completed" means finished, same as "complete", so the same structural
+  // pre-check runs before the session ends (here: missing all_passing → revise).
+  for (const status of ["completed", " Completed "]) {
+    const tmpDir = makeTmpDir();
+    const openclawRoot = path.join(tmpDir, "openclaw");
+    const workspaceDir = path.join(openclawRoot, "workspace-executor");
+    fs.mkdirSync(workspaceDir, { recursive: true });
+    const artifactsDir = makeArtifactsDir(openclawRoot);
+    writeOutput(artifactsDir, "executor", {
+      ...validExecutor,
+      status,
+      test_results: {},
+    });
+
+    try {
+      const result = runHandler("executor", workspaceDir);
+      assert.equal(result?.action, "revise", `status ${JSON.stringify(status)}`);
+      assert.ok(result?.reason?.includes("test_results.all_passing"));
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   }
 });
 

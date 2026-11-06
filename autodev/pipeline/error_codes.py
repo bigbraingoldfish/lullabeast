@@ -40,7 +40,7 @@ ERR_JSON_PARSE = "ERR_JSON_PARSE"              # output file present but not val
 ERR_VALIDATION_FAILED = "ERR_VALIDATION_FAILED"
 
 # --- Executor gate ------------------------------------------------------------
-ERR_STATUS_NOT_COMPLETE = "ERR_STATUS_NOT_COMPLETE"        # executor status != "complete"
+ERR_STATUS_NOT_COMPLETE = "ERR_STATUS_NOT_COMPLETE"        # executor status not "complete"/"completed"
 ERR_TESTS_FAILING = "ERR_TESTS_FAILING"                    # executor reports tests not passing
 ERR_PATH_TRAVERSAL = "ERR_PATH_TRAVERSAL"                  # manifest path escapes workspace (hard-fail, security)
 ERR_MANIFEST_FILE_MISSING = "ERR_MANIFEST_FILE_MISSING"    # declared file not on disk (demoted warning)

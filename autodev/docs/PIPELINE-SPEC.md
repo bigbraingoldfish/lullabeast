@@ -315,8 +315,8 @@ The executor generates tool calls; OpenClaw executes them:
 {
   "status": {
     "type": "string",
-    "enum": ["complete", "failed", "stuck"],
-    "description": "Executor self-reported completion state. 'stuck' = hit tool-call hard stop mid-implementation. GATE-CHECKED."
+    "enum": ["complete", "completed", "failed", "stuck"],
+    "description": "Executor self-reported completion state. 'complete' and 'completed' both mean finished (case-insensitive). 'stuck' = hit tool-call hard stop mid-implementation. GATE-CHECKED."
   },
   "tests_written": {
     "type": "array",
@@ -739,7 +739,7 @@ IF FAIL AND retries >= 3   → escalation agent
 ```
 # --- Blocking checks (return FAIL) ---
 IF executor_output.json does NOT exist                       → FAIL
-IF status != "complete"                                      → FAIL
+IF status is not "complete" or "completed"                   → FAIL
 IF test_results.all_passing != true                          → FAIL
 IF any paths in tests_written or file_manifest attempt path
     traversal outside the shared workspace                   → FAIL (ERR_PATH_TRAVERSAL)
@@ -783,7 +783,7 @@ Written atomically by the orchestrator **before every routing decision** that fo
   "failing_agent": "<planner|executor|reviewer>",
   "attempt_number": "<int>",
   "gate_error_codes": ["<ERR_...>"],
-  "agent_status": "<complete|failed|stuck|null>",
+  "agent_status": "<complete|completed|failed|stuck|null>",
   "agent_failure_reason": "<string|null>",
   "agent_troubleshooting_attempts": ["<string>"],
   "blocking_issues": [{

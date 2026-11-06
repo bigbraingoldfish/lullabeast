@@ -38,6 +38,21 @@ from utils import (
     ERR_DELETION_CHECK_CRASHED,
 )
 
+# The executor's finished status. Models write "complete" or "completed" when
+# they finish a phase, and both mean the same thing. Anything else ("stuck",
+# "failed", a missing status) fails the gate with ERR_STATUS_NOT_COMPLETE.
+FINISHED_STATUSES = frozenset({"complete", "completed"})
+
+
+def is_finished_status(status) -> bool:
+    """True when the executor reported the phase finished ("complete" or "completed").
+
+    Case and surrounding whitespace are ignored; a non-string is never finished.
+    The plugin's before_agent_finalize pre-check mirrors this definition.
+    """
+    return isinstance(status, str) and status.strip().lower() in FINISHED_STATUSES
+
+
 # Vite content-hash pattern: dist/assets/<name>-<6-12 alphanum chars>.<js|css>
 # Only files matching this pattern are eligible for build-artifact rotation auto-accounting.
 _VITE_CONTENT_HASH_RE = _re.compile(
@@ -317,7 +332,7 @@ def evaluate_executor(output_path=None):
     data = load_json_safe(output_path, "executor")
     if data is None: return "FAIL"
 
-    if data.get("status") != "complete":
+    if not is_finished_status(data.get("status")):
         record_error_code_only("executor", ERR_STATUS_NOT_COMPLETE)
         return "FAIL"
 

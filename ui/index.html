@@ -650,7 +650,7 @@
             ERR_SESSION_DEAD_ON_ARRIVAL:
                 "Inference provider rejected the session before it started \u2014 check your API key and provider status.",
             ERR_STATUS_NOT_COMPLETE:
-                "Executor Error: the executor reported a status other than 'complete'. Discarded work. Attempting retry.",
+                "Executor Error: the executor didn’t report the phase complete (its status was stuck, failed, or missing). Its work is kept; retrying in a fresh session with that feedback.",
             ERR_TDD_COVERAGE_MISMATCH:
                 "Executor Error: the tests the plan required are missing from the execution output (TDD coverage mismatch). Discarded work. Attempting retry.",
             ERR_FILE_MISSING:
