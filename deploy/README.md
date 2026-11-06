@@ -41,7 +41,10 @@ container on Ctrl+C or when the shell closes). Wait for the boot log to end
 with the doctor verdict and a banner containing the dashboard URL, then open
 that URL (it includes the access token) on the machine running docker. First boot is slower: it provisions `/data`, runs the
 owned-mode installer, and performs a one-time live webhook ping that creates
-one tiny agent session to validate your API key end to end.
+one tiny agent session on your API key. The doctor's check covers the webhook
+(the gateway accepted the ping), not the model's reply: a key the provider
+rejects still boots green, and that run's error shows in the log as
+`hook agent run returned non-ok status`.
 
 ### First boot without a key (setup mode)
 
@@ -52,8 +55,8 @@ loud SETUP MODE banner with the dashboard URL, and waits. Open the dashboard
 and walk the setup wizard: add a model source (a cloud key, a detected local
 server, or both), assign the six agents on the same roster Settings uses,
 confirm model properties (pricing and sampling included), and finish. The
-container wires it, restarts the gateway, validates a cloud key with the
-one-time live webhook ping, and unlocks the pipeline automatically. No
+container wires it, restarts the gateway, runs the one-time live webhook ping on
+a cloud key, and unlocks the pipeline automatically. No
 terminal, no file editing.
 
 A key in `deploy/.env` still works exactly as before and takes precedence: if
@@ -107,7 +110,7 @@ it is one-way (the welcome screen never reappears; the Settings screen keeps
 the OpenClaw gateway link). The skip persists as a
 `PROVIDER_SETUP_SKIPPED=1` line in the same provider file; agents cannot run
 until a provider actually exists in OpenClaw, and the doctor's
-`provider_key` check keeps saying so. The one-time live validation ping stays
+`provider_key` check keeps saying so. The one-time live webhook ping stays
 unspent, so a real key added later still gets it.
 
 A local model server is an alternative to a cloud key: either set

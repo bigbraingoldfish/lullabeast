@@ -702,11 +702,13 @@ if [ "$OFFLINE" = "1" ] || [ "$SETUP_MODE" = "1" ]; then
     :
 elif [ ! -f "$FIRST_BOOT_MARKER" ]; then
     # --live adds the webhook ping, which creates one real (tiny, billable)
-    # agent session; that validates the provider API key end to end exactly
-    # once. Mark the ping spent BEFORE running the doctor: otherwise a doctor
-    # FAIL (die below) leaves the marker unwritten, and every container restart
-    # re-fires the billable --live ping in a crash loop. The non-live doctor
-    # still gates every subsequent boot, so a real problem still fails loudly.
+    # agent session on the provider key, exactly once. The doctor checks that
+    # the gateway accepted the ping, not the model's reply (a rejected key
+    # shows as that run's error in the gateway log). Mark the ping spent
+    # BEFORE running the doctor: otherwise a doctor FAIL (die below) leaves
+    # the marker unwritten, and every container restart re-fires the billable
+    # --live ping in a crash loop. The non-live doctor still gates every
+    # subsequent boot, so a real problem still fails loudly.
     DOCTOR_FLAGS+=(--live)
     touch "$FIRST_BOOT_MARKER"
 fi
@@ -890,7 +892,7 @@ while :; do
                 # (same crash-loop guard as the first-boot block above): a
                 # doctor die must not re-fire the paid ping on the next boot.
                 touch "$FIRST_BOOT_MARKER"
-                say "running deferred first-boot doctor --live to validate the key"
+                say "running deferred first-boot doctor --live: one tiny agent run on the new key"
                 DOCTOR_EXIT=0
                 (cd "$APP" && OWNED_OPENCLAW=1 python3 -m autodev.installer.doctor --live) || DOCTOR_EXIT=$?
                 case "$DOCTOR_EXIT" in

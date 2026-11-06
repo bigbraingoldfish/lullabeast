@@ -8628,7 +8628,7 @@ def post_setup_skip_provider():
     Persists ``PROVIDER_SETUP_SKIPPED=1`` to provider_key_path. The entrypoint's
     watch loop treats that as an unlock (no --live doctor fires and the
     first-boot marker stays unwritten, so a later real key still gets its one
-    validation ping), and later boots see the sourced flag and skip setup mode,
+    live ping), and later boots see the sourced flag and skip setup mode,
     so the welcome screen never reappears. Existing lines in the file are
     preserved. Agents cannot run until a provider is configured in OpenClaw;
     the doctor's provider_key check keeps reporting that honestly.
