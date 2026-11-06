@@ -666,6 +666,13 @@ if [ -d "$OPENCLAW_ROOT/extensions" ]; then
 fi
 
 say "starting OpenClaw gateway (bootstrap)"
+if [ ! -f "$OPENCLAW_ROOT/extensions/autodev-pipeline-signals/openclaw.plugin.json" ]; then
+    # Fresh /data: the rendered openclaw.json already lists the Lullabeast
+    # plugin, but install.sh deploys its bundle only once this gateway is up,
+    # so the gateway prints a "plugin not found ... remove it from plugins
+    # config" box for it. That advice doesn't apply here; say so first.
+    say "first boot: the gateway will warn that plugin autodev-pipeline-signals is not found; install.sh deploys it next, so keep its config entry"
+fi
 start_gateway
 wait_for_gateway
 

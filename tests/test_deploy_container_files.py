@@ -119,6 +119,24 @@ class TestEntrypoint:
         assert "write_text_atomic" in ENTRYPOINT
         assert "write_json_atomic" in ENTRYPOINT
 
+    def test_first_boot_plugin_warning_explained(self):
+        # On a fresh /data the rendered openclaw.json already lists the
+        # Lullabeast plugin, but install.sh deploys its bundle only after the
+        # bootstrap gateway is up, so that gateway prints a "plugin not found
+        # ... remove it from plugins config" box. The entrypoint says first
+        # that the warning is expected, and only while the bundle is missing.
+        start = ENTRYPOINT.find('say "starting OpenClaw gateway (bootstrap)"')
+        assert start != -1
+        boot = ENTRYPOINT.find("start_gateway", start)
+        assert boot != -1
+        block = ENTRYPOINT[start:boot]
+        assert re.search(
+            r'if \[ ! -f "\$OPENCLAW_ROOT/extensions/autodev-pipeline-signals/'
+            r'openclaw\.plugin\.json" \]; then',
+            block,
+        ), "the note must be conditional on the plugin bundle being absent"
+        assert re.search(r'say "[^"\n]*autodev-pipeline-signals[^"\n]*not found', block)
+
     def test_live_doctor_ping_marked_once(self):
         # The billable --live webhook ping must be marked spent BEFORE the
         # doctor runs, so a doctor FAIL (die) does not re-fire the paid ping on
