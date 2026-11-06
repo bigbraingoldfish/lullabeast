@@ -171,6 +171,19 @@ Snake game): copy it into `./projects/` and follow "Your first run" in the
   and restart the container. The defaults are chosen from models verified
   working, and the per-agent variables are listed in the environment contract
   table below.
+- **The boot log shows OpenClaw warnings on a healthy boot.** These are
+  expected. `Gateway is binding to a non-loopback address`: the gateway
+  listens on all of the container's interfaces so Docker can publish its port,
+  and compose publishes it to the host's loopback only, behind the gateway
+  token. `dangerous config flags enabled: hooks.allowRequestSessionKey=true`:
+  the pipeline names the session for every agent run, and the config accepts
+  only names starting with `pipeline:` or `ideas:`. On a fresh install, a
+  `Config warnings` box from the first gateway start saying
+  `autodev-pipeline-signals` is not found: install.sh deploys that plugin right
+  after, so keep its config entry. OpenClaw may also report that an update is
+  available; don't run `openclaw update` in the container, because the image
+  pins the OpenClaw release Lullabeast is tested with (see the version pin
+  above).
 
 ## Environment contract (`deploy/.env`)
 
@@ -541,6 +554,17 @@ in Lullabeast. Do it in this UI, following the
 Additions survive Lullabeast's per-boot config reconcile, and after a gateway
 restart they appear in the dashboard's model pickers, where capability and
 cost metadata stays editable (Settings, Model roles).
+
+**Log lines that look like failures during a run.** The container log carries
+the gateway's own log, and a healthy run prints a few lines that read like
+errors. `hook agent run returned non-ok status ... Write: ... _output.done
+failed`: an agent's last step is usually an empty `.done` file, which
+OpenClaw's write tool rejects; the pipeline plugin writes that file, with the
+ending session's key in it, the moment the agent's session ends, and the
+orchestrator reads that one. `exec preflight: complex interpreter invocation
+detected`: OpenClaw refused an inline `python -c` or `node -e` command, and the
+agent runs it another way. An `AbortError` just after an agent finishes: the
+orchestrator stopped that agent's turn once its output was in.
 
 The gateway is the agents' control plane, so the same exposure rule as the
 dashboard applies: it is published to `127.0.0.1` only, and widening that is a
