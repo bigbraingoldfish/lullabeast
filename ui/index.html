@@ -638,7 +638,7 @@
         const P3_LAST_ERROR_CODE_TITLES = {
             ERR_UNACCOUNTED_DELETION:
                 "Executor Error: files were removed that weren’t part of the phase’s declared work. Discarded work. Attempting retry.",
-            ERR_TESTS_FAILING: "Executor Error: tests failed. Discarded work. Attempting retry.",
+            ERR_TESTS_FAILING: "Executor Error: tests failed. Its work is kept; retrying in a fresh session with the failures fed back.",
             ERR_GIT_DIFF_FAILED:
                 "Executor Error: a required Git check could not run in the project. Action required: fix Git in the working tree (corrupt repo, lock, or permissions) — the pipeline will not get past this step until Git commands succeed. Automatic retries alone will not fix a broken repository.",
             ERR_REVIEWER_CONTRACT_FAILURE:
@@ -652,17 +652,17 @@
             ERR_STATUS_NOT_COMPLETE:
                 "Executor Error: the executor didn’t report the phase complete (its status was stuck, failed, or missing). Its work is kept; retrying in a fresh session with that feedback.",
             ERR_TDD_COVERAGE_MISMATCH:
-                "Executor Error: the tests the plan required are missing from the execution output (TDD coverage mismatch). Discarded work. Attempting retry.",
+                "Executor warning: a test the plan required isn’t listed in the executor’s reported tests (TDD coverage mismatch)",
             ERR_FILE_MISSING:
                 "Agent Error: the agent finished without producing its required output file (e.g. planner_output.json, executor_output.json, or reviewer_output.json), so its work could not be evaluated.",
             ERR_MANIFEST_FILE_MISSING:
-                "Executor Error: a file listed in the change manifest was not found on disk. Discarded work. Attempting retry.",
+                "Executor warning: a file listed in the change manifest wasn’t found on disk",
             ERR_PATH_TRAVERSAL:
-                "Executor Error: a manifest file path escaped the project directory and was blocked for safety. Discarded work. Attempting retry.",
+                "Executor Error: a manifest file path escaped the project directory and was blocked for safety. Its work is kept; retrying in a fresh session with that feedback.",
             ERR_MISSING_BASE_COMMIT:
                 "Executor Error: the phase base commit is unavailable, so file deletions cannot be verified. Action required: check the project's Git state.",
             ERR_BEHAVIORAL_ARTIFACTS_MISSING:
-                "Executor Error: required behavioral smoke-test artifacts are missing or empty for a phase that requires them. Discarded work. Attempting retry.",
+                "Executor warning: the behavioral smoke-test evidence this phase asks for is missing or empty",
             ERR_VISUAL_UNVERIFIED:
                 "Reviewer Error: visual verification artifacts are missing. Re-running the reviewer.",
             ERR_BEHAVIORAL_UNVERIFIED:

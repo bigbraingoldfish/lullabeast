@@ -125,7 +125,10 @@ H23_ERR_UNACCOUNTED = (
     "Executor Error: files were removed that weren’t part of the phase’s declared work. "
     "Discarded work. Attempting retry."
 )
-H23_ERR_TESTS = "Executor Error: tests failed. Discarded work. Attempting retry."
+H23_ERR_TESTS = (
+    "Executor Error: tests failed. Its work is kept; retrying in a fresh session "
+    "with the failures fed back."
+)
 H23_ERR_GIT_DIFF = (
     "Executor Error: a required Git check could not run in the project. Action required: fix Git in the "
     "working tree (corrupt repo, lock, or permissions) — the pipeline will not get past this step until "
