@@ -540,6 +540,38 @@ class TestWebhookPing:
             srv.shutdown()
             srv.server_close()
 
+    def test_live_ping_is_file_only(self, env):
+        # With default delivery the gateway tries to send the ping's reply to
+        # a notification channel once the model answers, finds none, and logs
+        # the run as an error ("Channel is required") on every first boot.
+        # The ping is file-only, like every pipeline webhook.
+        bodies = []
+
+        class H(BaseHTTPRequestHandler):
+            def do_POST(self):
+                raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                bodies.append(json.loads(raw))
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        srv = HTTPServer(("127.0.0.1", 0), H)
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        try:
+            env["hooks_url"] = f"http://127.0.0.1:{srv.server_port}/hooks/agent"
+            c = doctor.check_webhook_ping(env, live=True)
+            assert c.status == "ok"
+            assert len(bodies) == 1
+            assert bodies[0]["agentId"] == "prd-creator"
+            assert bodies[0].get("deliver") is False
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
 
 class TestPluginDeployed:
     def _bundle_path(self, env):

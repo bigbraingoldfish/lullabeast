@@ -17,7 +17,7 @@ Every network/subprocess probe is bounded by ``DOCTOR_PROBE_TIMEOUT`` seconds
 
 The ``--live`` flag additionally performs the webhook POST ping. It is opt-in
 because it creates a real OpenClaw agent session (the documented curl check
-from the README quickstart, automated).
+from SETUP.md, automated).
 """
 
 from __future__ import annotations
@@ -603,6 +603,10 @@ def check_webhook_ping(config: dict, live: bool) -> CheckResult:
             "sessionKey": "ideas:doctor-check:0",
             "wakeMode": "now",
             "message": "doctor ping",
+            # File-only, like every pipeline webhook: with default delivery
+            # the gateway tries to send the reply to a notification channel,
+            # finds none, and logs the run as an error ("Channel is required").
+            "deliver": False,
         }
     ).encode("utf-8")
     req = urllib.request.Request(

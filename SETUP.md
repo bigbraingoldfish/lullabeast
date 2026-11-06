@@ -67,7 +67,7 @@ A healthy gateway returns a JSON models list; connection refused means the gatew
 ```bash
 curl -sS -o /dev/null -w "HTTP %{http_code}\n" -X POST http://127.0.0.1:18789/hooks/agent \
   -H "Authorization: Bearer <hooks.token>" -H "Content-Type: application/json" \
-  -d '{"agentId":"prd-creator","sessionKey":"ideas:install-check:0","wakeMode":"now","message":"ping"}'
+  -d '{"agentId":"prd-creator","sessionKey":"ideas:install-check:0","wakeMode":"now","message":"ping","deliver":false}'
 ```
 
 Expect `HTTP 200`. `HTTP 401` means the Bearer token does not match `hooks.token` in `openclaw.json`.

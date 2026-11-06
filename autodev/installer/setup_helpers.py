@@ -738,7 +738,7 @@ Pipeline / Project Ideas / agent webhooks will NOT work until this is fixed.
   5. Verify with POST (not GET only), from the same host as OpenClaw:
        curl -sS -o /dev/null -w \"HTTP %{http_code}\\n\" -X POST http://127.0.0.1:18789/hooks/agent \\
          -H \"Authorization: Bearer <hooks.token>\" -H \"Content-Type: application/json\" \\
-         -d '{\"agentId\":\"prd-creator\",\"sessionKey\":\"ideas:install-check:0\",\"wakeMode\":\"now\",\"message\":\"ping\"}'
+         -d '{\"agentId\":\"prd-creator\",\"sessionKey\":\"ideas:install-check:0\",\"wakeMode\":\"now\",\"message\":\"ping\",\"deliver\":false}'
      Expect HTTP 200. 401 means the Bearer does not match hooks.token.
 """
 

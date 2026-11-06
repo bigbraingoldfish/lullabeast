@@ -1937,7 +1937,7 @@ echo "  Start with: cd \"$AUTODEV_REPO_PATH\" && source .env && uvicorn ui.serve
 echo "  Verify hooks with POST (expect HTTP 200):"
 echo "    curl -sS -o /dev/null -w \"HTTP %{http_code}\\n\" -X POST http://127.0.0.1:18789/hooks/agent \\"
 echo "      -H \"Authorization: Bearer <hooks.token>\" -H \"Content-Type: application/json\" \\"
-echo "      -d '{\"agentId\":\"prd-creator\",\"sessionKey\":\"ideas:install-check:0\",\"wakeMode\":\"now\",\"message\":\"ping\"}'"
+echo "      -d '{\"agentId\":\"prd-creator\",\"sessionKey\":\"ideas:install-check:0\",\"wakeMode\":\"now\",\"message\":\"ping\",\"deliver\":false}'"
 echo
 echo "  To run as a background service:"
 if [ "$OS_TYPE" = "Darwin" ]; then
