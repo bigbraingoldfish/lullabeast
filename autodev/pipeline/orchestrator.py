@@ -1043,6 +1043,31 @@ def _missing_artifacts_directive(raw_id: str) -> str:
     )
 
 
+def _reviewer_rejection_directive(raw_id: str) -> str:
+    """The executor's one-shot directive after a reviewer rejection (ROUTE_EXECUTOR).
+
+    The re-run starts in a fresh session (``-b{N}``), and the default prompt says
+    nothing about the rejection, so this frames the round: the reviewer sent the
+    phase back, the work is preserved, and the blocking issues are in
+    ``failure_context.json`` (``source: "reviewer"``). The issues stay in that
+    file: data the agent analyzes goes in a file, the framing in the message.
+    Self-contained, because ``message=`` replaces the default prompt.
+    """
+    p = "pipeline-project/.autodev/pipeline"
+    return (
+        f"REVIEWER REJECTION: The reviewer sent phase {raw_id} back with blocking "
+        f"issues. Your implementation from the last round is PRESERVED on the branch, "
+        f"so do NOT rebuild it. Read {p}/failure_context.json (source \"reviewer\") "
+        f"for the blocking_issues first, then pipeline-project/prd.md, "
+        f"pipeline-project/verification.md, {p}/current_phase.json and "
+        f"{p}/planner_output.json as usual. Fix each blocking issue specifically, on "
+        f"top of your existing code, as Scenario B in your AGENTS.md describes (it "
+        f"says which issues also need how_to_check re-run). Then run the tests and "
+        f"finish as usual: {p}/executor_output.json, the phase archive, the metrics "
+        f"row, and {p}/executor_output.done last."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Layer 2 — context-overflow discarded-verdict race.
 #
@@ -4468,9 +4493,9 @@ class Orchestrator:
         """Invoke the executor webhook, delivering a one-shot corrective directive.
 
         The ``executor_retry_directive`` phase-state field — written by the
-        reviewer-gate MISSING_ARTIFACTS handler — carries a concise, self-contained
-        instruction for the *next* executor session (produce the missing completion
-        artifacts). Deliver it here as the webhook ``message=`` (overriding the
+        reviewer-gate MISSING_ARTIFACTS and ROUTE_EXECUTOR handlers — carries a
+        concise, self-contained instruction for the *next* executor session (produce
+        the missing completion artifacts, or fix the reviewer's blocking issues). Deliver it here as the webhook ``message=`` (overriding the
         executor's default message, which only the prompt can do) and clear it
         immediately so it is one-shot: a later normal/self-failure retry must not
         re-inject a stale directive. When absent, the executor receives its default
@@ -8492,6 +8517,11 @@ class Orchestrator:
                         # executor_retries restarts at 0 below; the send-back count
                         # keeps the next run off executor-attempt-1's session.
                         self._count_send_back(_ps_re)
+                        # That fresh session's default prompt says nothing about
+                        # the rejection: tell it (one-shot, via _invoke_executor).
+                        _ps_re["executor_retry_directive"] = _reviewer_rejection_directive(
+                            self.state.get("current_phase_raw_id", "this phase")
+                        )
                         self.write_phase_state_atomic(_ps_re)
                         # Mirror to self.state (state-sync invariant).
                         self.state["executor_reviewer_rejection_retries"] = (

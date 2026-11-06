@@ -11,6 +11,7 @@ This project follows [Semantic Versioning](https://semver.org/). Format follows 
 - **The README names Qwen3.8 27B as a local model next to Qwen3.6.** The fully local mode lists it beside the validated Qwen3.6 builds: it passed the first phase of the bundled Snake sample on a single RTX 4090, and its full validation run is still pending.
 
 ### Fixed
+- **The executor is told when the reviewer sends a phase back, and where the reviewer's issues are.** It got its usual first-run prompt, so finding the blocking issues depended on it opening `failure_context.json` on its own.
 - **After the reviewer sends a phase back, every agent starts a fresh session.** A rejection, a re-plan or a missing-artifacts re-run restarted the attempt count a session is named from, so the next run reattached the first attempt's session: the executor resumed an old transcript, sometimes one the orchestrator had told to stop, and each round piled onto it.
 - **The activity feed no longer says a failed executor attempt's work was discarded.** A retry after a failed gate keeps the working tree; only an unexplained file deletion resets it. The three gate checks that are now warnings no longer read as a failure and a retry either.
 - **An executor that reports its phase "completed" no longer fails the gate.** The gate accepted only "complete", so a finished phase reported as "completed" spent a retry. Both words now count, in any case.
