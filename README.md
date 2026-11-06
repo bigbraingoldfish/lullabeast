@@ -43,19 +43,10 @@ Open-weight models like Qwen, DeepSeek, Kimi, MiniMax, and GLM now write real so
 ## How it works
 
 <p align="center">
-  <img src="docs/assets/diagrams/workflow.png" alt="How a run works. Setup, once per project: Idea, PRD (prd-creator), Roadmap (roadmap-converter). Per phase, until the roadmap is done: Planner plans the work and its tests up front, Executor writes the code, Reviewer checks it behaves, with a plain-Python gate after each, then the phase lands. If a gate can't be satisfied, the run stops and asks you. An optional completion report closes the roadmap." width="1008">
+  <img src="docs/assets/diagrams/workflow.png" alt="How a run works. Setup, once per project: the idea, in plain English; a PRD, which prd-creator turns it into; a roadmap of ordered phases, which roadmap-converter builds. Per phase, until the roadmap is done: the planner writes the plan and specifies the phase's tests up front; the executor writes those tests, then the code that makes them pass, and runs them; the reviewer checks the result behaves and passes it forward or sends it back to the executor. A plain-Python gate checks the evidence after each step, and a phase the reviewer passes is committed and merged. When a gate can't be satisfied, the run stops and asks you. An optional completion report closes the roadmap." width="1008">
 </p>
 
-Queue several projects and Lullabeast works them in order, honoring dependencies between them.
-
-**The agents.** Four pipeline agents and two ideation agents, run by a single orchestrator state machine that owns the git operations and recovery logic:
-
-- **Planner:** turns the current roadmap phase into a concrete implementation plan.
-- **Executor:** writes the code and tests, then commits to a phase branch.
-- **Reviewer:** verifies the result actually behaves as intended, including screenshot-based visual review for UI phases.
-- **Gate scripts:** deterministic, LLM-free Python checkers between every handoff: file manifest, git diff, test results, behavioral evidence, unaccounted deletions. The gates are the pipeline's source of truth; no agent advances on its own say-so.
-- **Escalation:** invoked only when gates and retries are exhausted; notifies you and pauses.
-- **prd-creator / roadmap-converter:** drive the idea, PRD, roadmap front end.
+One orchestrator runs this loop and owns git: it commits and merges each phase the reviewer passes. Queue several projects and Lullabeast works them in order, honoring dependencies between them.
 
 ---
 
