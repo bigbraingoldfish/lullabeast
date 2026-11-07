@@ -11529,12 +11529,13 @@ async def post_queue_add(request: Request):
     """Add a project to the queue after preflight materialize + checks.
 
     Runs ``_preflight_materialize`` (no seed/PRD from this endpoint) then
-    ``_run_preflight_checks`` (symlink, gitignore, git init, workspaces, roadmap).
-    On success, appends the project to recent-projects.
+    ``_run_preflight_checks`` (symlink, gitignore, git init, workspaces, roadmap)
+    plus Launch's uncommitted-changes check. On success, appends the project to
+    recent-projects.
 
     Body: {"project_path": str, "idea_id": str|null, "parent_id": str|null,
            "completion_review": optional bool}
-    Returns 400 with validation_errors if preflight fails.
+    Returns 400 with validation_errors (the failing checks) if preflight fails.
     Returns 422 if project_path is invalid.
     Returns 409 if the same project path (realpath) is already queued in a non-terminal state
     (terminal: COMPLETED, FAILED only).
@@ -11561,10 +11562,18 @@ async def post_queue_add(request: Request):
         return JSONResponse(status_code=400, content={"validation_errors": mat})
 
     checks = _run_preflight_checks(repo_abs)
+    # Adding a project starts it, as Launch does, so uncommitted work would be
+    # swept into phase commits or reset away: same refusal as Launch. (Relaunch
+    # and revalidate resume runs whose own work in progress is uncommitted, so
+    # the shared checks above leave it out.)
+    _dirty_row = _uncommitted_changes_check(repo_abs)
+    if _dirty_row:
+        checks.append(_dirty_row)
     if any(c.get("status") == "fail" for c in checks):
+        # Failing rows only: the Queue screen's Add dialog prints every row in red.
         return JSONResponse(
             status_code=400,
-            content={"validation_errors": mat + checks},
+            content={"validation_errors": [c for c in mat + checks if c.get("status") == "fail"]},
         )
 
     append_recent_project(repo_abs)

@@ -9,8 +9,10 @@ committing only init's own files left the rest exposed to those resets.
 The Launch dialog's preflight now lists the uncommitted paths in a failing
 check, which holds Launch and Add to Queue in the dashboard, and init refuses
 with the same message before writing anything (API callers skip preflight).
-The shared preflight checks that the queue, switch-project and revalidate paths
-run stay as they were: those also resume runs whose own work in progress is
+Adding a repo to the queue starts it the same way, so queue add refuses too:
+the Queue screen's Add dialog and the MCP queue_add tool post it directly.
+The shared preflight checks that switch-project, revalidate and relaunch run
+stay as they were: those resume runs whose own work in progress is
 uncommitted.
 
 Lullabeast's own files don't count: preflight writes the roadmap, PRD,
@@ -232,9 +234,56 @@ class TestPreflightReportsIt:
         assert self._preflight(_repo(tmp_path))["status"] == "pass"
 
     def test_shared_checks_leave_it_out(self, tmp_path):
-        """Queue, switch-project and revalidate resume runs with uncommitted work
-        in progress; the checks they share must not fail on it."""
+        """Switch-project, revalidate and relaunch resume runs with uncommitted
+        work in progress; the checks they share must not fail on it."""
         repo = _repo(tmp_path)
         (repo / "app.py").write_text("print('v2')\n")
         checks = _run_preflight_checks(str(repo), config=self._config(repo))
         assert not [c for c in checks if c["check"] == "uncommitted changes"]
+
+
+class TestQueueAddRefusesIt:
+    """The Queue screen's Add dialog and the MCP queue_add tool post /api/queue/add
+    without the Launch dialog's preflight, and a queued repo gets the same commits
+    and resets once it starts."""
+
+    def _add(self, repo, tmp_path):
+        from fastapi.testclient import TestClient
+        from ui.server import app
+
+        config = TestPreflightReportsIt()._config(repo)
+        config["pipeline_queue_path"] = str(tmp_path / "pipeline_queue.json")
+        with patch("ui.server.load_config", return_value=config), \
+             patch("ui.server.append_recent_project"):
+            return TestClient(app).post("/api/queue/add", json={"project_path": str(repo)})
+
+    def test_refuses_with_the_paths_and_queues_nothing(self, tmp_path):
+        repo = _repo(tmp_path)
+        (repo / "app.py").write_text("print('v2')\n")
+        (repo / "notes.txt").write_text("todo\n")
+        head = _git(repo, "rev-parse", "HEAD")
+
+        response = self._add(repo, tmp_path)
+
+        assert response.status_code == 400
+        errors = response.json()["validation_errors"]
+        rows = [e for e in errors if e["check"] == "uncommitted changes"]
+        assert len(rows) == 1, errors
+        assert "app.py" in rows[0]["message"] and "notes.txt" in rows[0]["message"]
+        assert "Commit, stash" in rows[0]["message"]
+        assert not (tmp_path / "pipeline_queue.json").exists()
+        assert _git(repo, "rev-parse", "HEAD") == head
+        assert (repo / "app.py").read_text() == "print('v2')\n"
+
+    def test_lists_only_the_failing_checks(self, tmp_path):
+        """The Add dialog prints every row it gets in red, so passing rows would
+        bury the one that matters."""
+        repo = _repo(tmp_path)
+        (repo / "app.py").write_text("print('v2')\n")
+        errors = self._add(repo, tmp_path).json()["validation_errors"]
+        assert errors and all(e["status"] == "fail" for e in errors), errors
+
+    def test_a_clean_repo_is_not_refused_for_it(self, tmp_path):
+        response = self._add(_repo(tmp_path), tmp_path)
+        errors = response.json().get("validation_errors") or []
+        assert not [e for e in errors if e["check"] == "uncommitted changes"], errors
