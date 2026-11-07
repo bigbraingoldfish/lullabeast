@@ -1,4 +1,4 @@
-"""Starting on a folder that isn't a git repo yet: what the first commit takes.
+"""Starting on a folder that isn't a git repo yet, which may already hold files.
 
 Preflight auto-initializes such a folder, and Launch's Mode A does the same when
 an API or MCP caller launches without preflight. Both commit everything in the
@@ -6,6 +6,9 @@ folder (``git add -A``) as the first commit, and every phase commit after that
 runs ``git add .``, so the folder's ``.gitignore`` decides what lands in history.
 A stray ``.env`` (secrets) was committed, and Mode A replaced an existing
 ``.gitignore`` outright, so files its rules kept out were committed too.
+
+Mode A also wrote its scaffold before validating the roadmap, and on an invalid
+one deleted the whole folder to clean up, files that were there before included.
 """
 
 import os
@@ -88,6 +91,35 @@ class TestLaunchModeA:
         tracked = _tracked(folder)
         assert "secrets.json" not in tracked and ".env" not in tracked
         assert ".gitignore" in tracked
+
+    def test_an_invalid_roadmap_deletes_nothing_and_writes_nothing(self, tmp_path):
+        folder = _folder(tmp_path)
+        before = sorted(p.name for p in folder.iterdir())
+        result = _launch(folder, roadmap="# Not a roadmap\n")
+        assert result["ok"] is False
+        assert "Roadmap invalid" in result["error"]
+        assert folder.is_dir()
+        assert sorted(p.name for p in folder.iterdir()) == before
+        assert (folder / "app.py").read_text() == "print('hi')\n"
+        assert (folder / ".env").read_text() == "API_KEY=not-for-git\n"
+
+    def test_a_failure_midway_removes_only_what_it_created(self, tmp_path):
+        folder = _folder(tmp_path)
+        before = sorted(p.name for p in folder.iterdir())
+        import ui.server as server
+        real_write = server.write_text_atomic
+
+        def failing_write(path, content):
+            if os.path.basename(path) == "prd.md":
+                raise OSError("disk full")
+            return real_write(path, content)
+
+        with patch("ui.server.write_text_atomic", side_effect=failing_write):
+            result = _launch(folder)
+        assert result["ok"] is False and "disk full" in result["error"]
+        assert folder.is_dir()
+        assert sorted(p.name for p in folder.iterdir()) == before
+        assert (folder / "app.py").read_text() == "print('hi')\n"
 
 
 class TestPreflightAutoInit:

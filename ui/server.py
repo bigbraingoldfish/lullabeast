@@ -12631,6 +12631,33 @@ async def post_setup_switch_project(request: Request):
 
 # ─── Launch sequence ──────────────────────────────────────────────────────────
 
+def _undo_mode_a_scaffold(repo_path: str, preexisting) -> None:
+    """Undo a failed Mode A scaffold. ``preexisting`` is the set of top-level
+    entries the folder held before Mode A ran, or None when Mode A created the
+    folder: then the folder goes. Otherwise only the entries it did not hold go
+    (the scaffold, ``.git`` from its ``git init``), never the ones it did.
+    Best-effort."""
+    import shutil
+    if preexisting is None:
+        shutil.rmtree(repo_path, ignore_errors=True)
+        return
+    try:
+        entries = os.listdir(repo_path)
+    except OSError:
+        return
+    for entry in entries:
+        if entry in preexisting:
+            continue
+        path = os.path.join(repo_path, entry)
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
 def _run_init_project(
     repo_path: str,
     roadmap_seed: str,
@@ -12654,12 +12681,17 @@ def _run_init_project(
     Returns {"ok": bool, "error": str|null}
     """
     import subprocess
-    import shutil
 
     repo_path = os.path.expanduser(repo_path)
     name = os.path.basename(repo_path.rstrip(os.sep))
     now = _utc_now_iso()
     mode = "B" if os.path.exists(os.path.join(repo_path, ".git")) else "A"
+    # What the folder already holds: a failed Mode A cleans up only what it
+    # created. (It used to delete repo_path outright, these files included.)
+    # None: the folder doesn't exist yet, so Mode A creates it.
+    _preexisting = None
+    if mode == "A" and os.path.isdir(repo_path):
+        _preexisting = set(os.listdir(repo_path))
 
     # Containment guard (REL-3): Mode A runs `git init` + `git add -A` on
     # ``repo_path``. If Launch is aimed at a *parent* of existing projects (e.g.
@@ -12689,6 +12721,13 @@ def _run_init_project(
             errs = "; ".join(e["message"] for e in _ver_val["errors"][:3])
             return {"ok": False, "error": f"verification.md invalid: {errs}"}
 
+    # Mode A validates the roadmap before writing anything, like the checks above.
+    if mode == "A":
+        validation = _validate_roadmap_content(roadmap_seed)
+        if not validation["valid"]:
+            errors_str = "; ".join(e["message"] for e in validation["errors"][:3])
+            return {"ok": False, "error": f"Roadmap invalid: {errors_str}"}
+
     def atomic_write(path: str, content: str):
         write_text_atomic(path, content)  # LAUNCH-5: shared helper (was fixed-".tmp")
 
@@ -12716,15 +12755,8 @@ def _run_init_project(
             }
             atomic_write(os.path.join(art, "pipeline.json"), json.dumps(pipeline, indent=2))
 
-            # Step 3: roadmap.md
+            # Step 3: roadmap.md (validated above, before any write)
             atomic_write(os.path.join(repo_path, "roadmap.md"), roadmap_seed)
-
-            # Step 4: validate roadmap
-            validation = _validate_roadmap_content(roadmap_seed)
-            if not validation["valid"]:
-                shutil.rmtree(repo_path, ignore_errors=True)
-                errors_str = "; ".join(e["message"] for e in validation["errors"][:3])
-                return {"ok": False, "error": f"Roadmap invalid: {errors_str}"}
 
             # Step 5: PRD (Ideas handoff or placeholder)
             prd_path = os.path.join(repo_path, "prd.md")
@@ -12867,11 +12899,11 @@ def _run_init_project(
 
     except subprocess.CalledProcessError as exc:
         if mode == "A":
-            shutil.rmtree(repo_path, ignore_errors=True)
+            _undo_mode_a_scaffold(repo_path, _preexisting)
         return {"ok": False, "error": f"Git command failed: {exc.stderr.decode(errors='replace') if exc.stderr else str(exc)}"}
     except OSError as exc:
         if mode == "A":
-            shutil.rmtree(repo_path, ignore_errors=True)
+            _undo_mode_a_scaffold(repo_path, _preexisting)
         return {"ok": False, "error": str(exc)}
 
 
