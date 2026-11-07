@@ -19,9 +19,7 @@ Lullabeast is an open-source, autonomous development pipeline built to get real,
 
 Lullabeast runs on [OpenClaw](https://docs.openclaw.ai/) and requires it: Lullabeast is the pipeline and dashboard, while the agents themselves run inside OpenClaw's runtime environment. The Docker image bundles a pinned, pre-configured OpenClaw, so the install path below needs nothing but Docker and an API key.
 
-<p align="center">
-  <img src="docs/assets/diagrams/demo-cycle.gif" alt="One full Lullabeast run, from idea to finished app" width="720">
-</p>
+https://github.com/user-attachments/assets/084f1abd-6b5d-408e-b0b8-05046f2ac6c6
 
 > **Early release, and honest about it.** Lullabeast reliably builds small, single-purpose webapps end to end, and hard phases escalate to you by design, but larger or more complex projects tend to surface more issues and need more polish before they're done. This beta release is a single-user tool meant to run on a trusted machine, protected by a locally generated access token. Frontier one-shot models (the latest GPT, Gemini, and Claude) cost more and are capable enough to suit a different architecture, so this one isn't built for them. (I personally run the pipeline and OpenClaw in a VM for transparency.) I'm shipping now to get it in front of other builders and find out where it breaks so I can strengthen it. Bug reports and suggestions are welcome.
 
