@@ -143,13 +143,34 @@ class TestKeySitesCarryTheSendBackSuffix:
         assert site in _ORCH_SRC
 
     def test_prior_executor_attempt_key_is_in_the_same_round(self):
-        """The retry-start interrupt rebuilds the prior attempt's key; a
-        self-failure retry stays in its round, so the key carries the suffix."""
+        """The retry-start interrupt rebuilds the prior attempt's key: a
+        self-failure retry stays in its round, so the key carries the send-back
+        suffix, and the provider-retry suffix that attempt's session ran under."""
         site = (
             'f"pipeline:phase-{phase}:{raw_id}:executor-attempt-{retries}" '
-            "+ self._send_back_suffix() + self._reset_suffix() + self._run_suffix()"
+            "+ self._send_back_suffix() + self._provider_retry_suffix() "
+            "+ self._reset_suffix() + self._run_suffix()"
         )
         assert site in _ORCH_SRC
+
+
+class TestRetryStartInterruptNamesThePriorSession:
+    """After a provider error re-runs an attempt under ``-pr{N}``, the next
+    retry's interrupt must name that session, or it steers a key nothing runs
+    under and the prior session keeps going."""
+
+    def test_matches_the_prior_attempt_after_a_provider_retry(self, tmp_path, monkeypatch):
+        orch = _orch(tmp_path, monkeypatch, {"provider_error_retries": 1})
+        prior = TestEveryDispatchGetsItsOwnKey()._key(orch, "executor")
+        assert prior.endswith("-pr1")
+        orch.reset_execution("auto")  # its gate failed: retry 2 starts
+        retries = orch.state["executor_retries"]
+        interrupt = (
+            f"pipeline:phase-1:CORE-E1:executor-attempt-{retries}"
+            + orch._send_back_suffix() + orch._provider_retry_suffix()
+            + orch._reset_suffix() + orch._run_suffix()
+        )
+        assert interrupt == prior
 
 
 class TestEveryDispatchGetsItsOwnKey:

@@ -7582,6 +7582,7 @@ class Orchestrator:
                             session_key=(
                                 f"pipeline:phase-{phase}:{raw_id}:executor-attempt-{retries}"
                                 + self._send_back_suffix()
+                                + self._provider_retry_suffix()
                                 + self._reset_suffix()
                                 + self._run_suffix()
                             ),

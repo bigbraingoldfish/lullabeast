@@ -107,6 +107,7 @@ class TestKeySitesCarryTheResetSuffix:
         attempt is in the same reset cycle, so the key carries the same suffix."""
         site = (
             'f"pipeline:phase-{phase}:{raw_id}:executor-attempt-{retries}" '
-            "+ self._send_back_suffix() + self._reset_suffix() + self._run_suffix()"
+            "+ self._send_back_suffix() + self._provider_retry_suffix() "
+            "+ self._reset_suffix() + self._run_suffix()"
         )
         assert site in _ORCH_SRC
