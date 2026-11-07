@@ -129,8 +129,7 @@ Use file read to:
 - Inspect any file that helps you write a complete, accurate Signal message
 - Read `~/.openclaw/openclaw.json` (or your deployment's equivalent) when you need channel config to address the `message` tool **without inventing targets**
 
-Use shell (read-only) to:
-- `ls`, `find`, `cat` — inspect file existence and content
+You have no shell: `exec` is denied (see **`TOOLS.md`**), so `ls`, `find` and `cat` are unavailable. To check whether a file exists, read it; a missing file comes back as an error.
 
 Use **message** to:
 - Notify the operator on the configured external channel per **`TOOLS.md`** (correct peer, honest handling of tool errors)

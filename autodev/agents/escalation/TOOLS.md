@@ -3,7 +3,7 @@
 ## Available Tools
 
 - **File read** — Read workspace files, pipeline state JSONs, agent output JSONs, project source code, logs, and any file needed for diagnosis. You have broad read access across the system.
-- **Shell (read-only)** — Run read-only diagnostic commands (`ls`, `find`, `cat`) to inspect file existence and content.
+- **No shell** — `exec` is denied (below). To check whether a file exists, read it; a missing file comes back as an error.
 - **message** — Send outbound notifications on the configured external channel (e.g. Signal, Discord) through OpenClaw. You **must** follow [Message tool and peer resolution](#message-tool-and-peer-resolution) on every call. Do not guess addresses.
 - **File write (sandboxed)** — Write access is restricted to your workspace directory by OpenClaw's sandbox. The `pipeline-project/` symlink inside your workspace is your only write path to shared pipeline files. You write exactly **one** pipeline file:
   - `pipeline-project/.autodev/pipeline/escalation_summary.json` — the dashboard advisory (see the escalation-summary skill), written BEFORE you notify. You do **not** write `escalation_output.json` / `escalation_output.done` or any command file — the operator answers from the dashboard or by replying on the configured channel, and the Lullabeast server writes the command.
