@@ -10704,6 +10704,9 @@ def _run_preflight_checks(repo_path: str, config: dict | None = None) -> list:
                 text=True,
             )
             if _head_ok.returncode != 0:
+                # This first commit takes everything in the folder, and every
+                # phase commit after it runs `git add .`: keep a stray .env out.
+                _ensure_env_gitignore_hygiene(repo_path)
                 subprocess.run(
                     ["git", "-C", repo_path, "add", "-A"],
                     capture_output=True,
@@ -10805,6 +10808,7 @@ def _run_preflight_checks(repo_path: str, config: dict | None = None) -> list:
                     # Attempt to create an initial commit so HEAD resolves and
                     # phase_base_commit can be set by the orchestrator on startup.
                     # Mirrors the fresh-init commit block above.
+                    _ensure_env_gitignore_hygiene(repo_path)
                     subprocess.run(
                         ["git", "-C", repo_path, "add", "-A"],
                         capture_output=True, text=True,
@@ -12739,13 +12743,26 @@ def _run_init_project(
             if not os.path.exists(metrics_path):
                 open(metrics_path, "w").close()
 
-            # Step 6: .gitignore
-            gitignore_content = (
-                "__pycache__/\n*.pyc\n.pytest_cache/\n*.egg-info/\ndist/\nbuild/\n.venv/\n.ruff_cache/\n\n"
-                + _PIPELINE_GITIGNORE_HEADER + "\n"
-                + "\n".join(_PIPELINE_GITIGNORE_ENTRIES) + "\n"
-            )
-            atomic_write(os.path.join(repo_path, ".gitignore"), gitignore_content)
+            # Step 6: .gitignore. The folder can arrive with its own: keep its rules
+            # (the first commit below takes everything they don't exclude) and append
+            # only the pipeline entries it lacks, as Mode B does.
+            gitignore_path_a = os.path.join(repo_path, ".gitignore")
+            if os.path.exists(gitignore_path_a):
+                with open(gitignore_path_a) as f:
+                    existing = f.read()
+                missing = [e for e in _PIPELINE_GITIGNORE_ENTRIES if e not in existing]
+                if missing:
+                    with open(gitignore_path_a, "a") as f:
+                        f.write("\n" + _PIPELINE_GITIGNORE_HEADER + "\n" + "\n".join(missing) + "\n")
+            else:
+                gitignore_content = (
+                    "__pycache__/\n*.pyc\n.pytest_cache/\n*.egg-info/\ndist/\nbuild/\n.venv/\n.ruff_cache/\n\n"
+                    + _PIPELINE_GITIGNORE_HEADER + "\n"
+                    + "\n".join(_PIPELINE_GITIGNORE_ENTRIES) + "\n"
+                )
+                atomic_write(gitignore_path_a, gitignore_content)
+            # Keep a stray .env out of the first commit and every phase commit.
+            _ensure_env_gitignore_hygiene(repo_path)
 
             # Step 7: git init + commit
             subprocess.run(["git", "init", repo_path], check=True, capture_output=True)
