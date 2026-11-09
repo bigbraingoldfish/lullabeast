@@ -32,7 +32,7 @@ placeholders; real values are generated at first boot and persisted under
 | `agents.list[executor]` | `${EXECUTOR_MODEL}`, tools `read, write, edit, exec, process, browser` | Must be multimodal: it captures screenshots on UI/INT phases. |
 | `agents.list[reviewer]` | `${REVIEWER_MODEL}`, tools `read, write, exec, process, browser` | Must be multimodal: it performs visual review. |
 | `agents.list[prd-creator]` | `${PRD_MODEL}`, read/write only | Drafting agent; needs no execution surface. |
-| `agents.list[escalation]` | `${ESCALATION_MODEL}`, notify-only policy (`profile: minimal`, allow `read/write/message`, deny `edit/apply_patch/exec/process/browser`), `default: true` | The reviewed security posture: the escalation agent reads diagnostics and notifies the human, nothing else. Must not be weakened. Its default model is `qwen/qwen3.8-27b`. |
+| `agents.list[escalation]` | `${ESCALATION_MODEL}`, notify-only policy (`profile: minimal`, allow `read/write/message`, deny `edit/apply_patch/exec/process/browser`), `default: true` | The reviewed security posture: the escalation agent reads diagnostics and notifies the human, nothing else. Must not be weakened. Its default model is `deepseek/deepseek-v4.1-flash-1017`, which the image roles run on. |
 | `agents.list[roadmap-converter]` | `${ROADMAP_MODEL}`, read/write only | Conversion agent; needs no execution surface. |
 | all six agents | `bootstrapMaxChars: 32000`, `postCompactionMaxChars: 8000` (pipeline roles) | OpenClaw's default caps truncate the agents' instruction files and silently drop their standing rules. |
 | `tools.profile` | `"coding"` | Required baseline for the pipeline's tool surface. |
@@ -106,7 +106,7 @@ One knob per agent role; defaults are encoded in
 | `REVIEWER_MODEL` | `openrouter/deepseek/deepseek-v4.1-flash-1017` | reviewer (multimodal, required) |
 | `PRD_MODEL` | `openrouter/deepseek/deepseek-v4.1-flash-1017` | prd-creator |
 | `ROADMAP_MODEL` | `openrouter/z-ai/glm-5.3` | roadmap-converter |
-| `ESCALATION_MODEL` | `openrouter/qwen/qwen3.8-27b` | escalation (notify-only) |
+| `ESCALATION_MODEL` | `openrouter/deepseek/deepseek-v4.1-flash-1017` | escalation (notify-only) |
 
 `HOOKS_TOKEN` and `GATEWAY_TOKEN` are the two required render-time secrets; the
 container entrypoint generates them on first boot and persists them under

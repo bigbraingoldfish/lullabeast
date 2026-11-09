@@ -245,18 +245,19 @@ class TestModelPricing:
             assert not unsupported, f"{mid}: OpenClaw rejects input {unsupported}"
 
     def test_default_role_models(self):
-        # X, 2026-11-03: the planner, roadmap-converter and escalation roles take
-        # their family's latest model; the image roles (executor, reviewer,
-        # prd-creator) run on DeepSeek V4.1 Flash, the cheap image-capable model
-        # the project is built around, instead of Kimi K3.1 Pro at $2/$10 per
-        # million tokens. A change here is a deliberate default decision.
+        # X, 2026-11-03: the planner and roadmap-converter take their family's
+        # latest model; the image roles (executor, reviewer, prd-creator) run on
+        # DeepSeek V4.1 Flash, the cheap image-capable model the project is
+        # built around, instead of Kimi K3.1 Pro at $2/$10 per million tokens.
+        # X, 2026-11-09: escalation runs on DeepSeek V4.1 Flash too. A change
+        # here is a deliberate default decision.
         assert TEMPLATE_MODEL_DEFAULTS == {
             "PLANNER_MODEL": "openrouter/z-ai/glm-5.3",
             "EXECUTOR_MODEL": "openrouter/deepseek/deepseek-v4.1-flash-1017",
             "REVIEWER_MODEL": "openrouter/deepseek/deepseek-v4.1-flash-1017",
             "PRD_MODEL": "openrouter/deepseek/deepseek-v4.1-flash-1017",
             "ROADMAP_MODEL": "openrouter/z-ai/glm-5.3",
-            "ESCALATION_MODEL": "openrouter/qwen/qwen3.8-27b",
+            "ESCALATION_MODEL": "openrouter/deepseek/deepseek-v4.1-flash-1017",
         }
 
     def test_shipped_set_is_the_nine_model_picker(self):

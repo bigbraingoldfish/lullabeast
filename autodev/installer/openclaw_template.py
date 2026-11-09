@@ -58,11 +58,11 @@ TEMPLATE_PLACEHOLDER_RE = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
 # role. The executor, reviewer, and prd-creator picks are multimodal by
 # requirement — all default to deepseek-v4.1-flash-1017, a cheap model that
 # takes image input: the reviewer does screenshot-based visual verification
-# and the prd-creator reads Ideas chat attachments. PLANNER_MODEL also backs
-# agents.defaults.model; the planner and roadmap-converter default to glm-5.3,
-# which is text-only in the shipped template (neither needs vision), and
-# escalation to qwen3.8-27b. Every default must be one of the shipped, fully
-# priced OpenRouter models in deploy/openclaw.template.json (tests enforce
+# and the prd-creator reads Ideas chat attachments. Escalation defaults to it
+# too. PLANNER_MODEL also backs agents.defaults.model; the planner and
+# roadmap-converter default to glm-5.3, which is text-only in the shipped
+# template (neither needs vision). Every default must be one of the shipped,
+# fully priced OpenRouter models in deploy/openclaw.template.json (tests enforce
 # that every referenced model is shipped and priced; a shipped model may be a
 # non-default, env-selectable option, e.g. minimax/minimax-m3, which no
 # default references).
@@ -72,7 +72,7 @@ TEMPLATE_MODEL_DEFAULTS: dict[str, str] = {
     "REVIEWER_MODEL": "openrouter/deepseek/deepseek-v4.1-flash-1017",
     "PRD_MODEL": "openrouter/deepseek/deepseek-v4.1-flash-1017",
     "ROADMAP_MODEL": "openrouter/z-ai/glm-5.3",
-    "ESCALATION_MODEL": "openrouter/qwen/qwen3.8-27b",
+    "ESCALATION_MODEL": "openrouter/deepseek/deepseek-v4.1-flash-1017",
 }
 
 # Secrets with no sane default: rendering fails loud when these are unset.
