@@ -319,12 +319,12 @@ class TestApply:
         live["meta"] = {"runtime": "bookkeeping"}
 
         reconciled = tpl.reconcile_config_to_template(template, live)
-        glm = next(
-            m
-            for m in reconciled["models"]["providers"]["openrouter"]["models"]
-            if m["id"] == "z-ai/glm-5.3"
+        shipped, glm = (
+            next(m for m in cfg["models"]["providers"]["openrouter"]["models"] if m["id"] == "z-ai/glm-5.3")
+            for cfg in (template, reconciled)
         )
-        assert glm["cost"]["input"] == 0.08, "reconcile must revert the raw edit"
+        assert shipped["cost"]["input"] != 0.9
+        assert glm["cost"]["input"] == shipped["cost"]["input"], "reconcile must revert the raw edit"
 
         final = apply_model_overrides(reconciled, overrides)
         glm = next(
