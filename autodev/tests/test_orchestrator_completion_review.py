@@ -38,6 +38,26 @@ def _make_queue_data(entry):
     return {"queue": [entry]}
 
 
+def _mock_orch(run_suffix=""):
+    """A stand-in orchestrator whose session keys get ``run_suffix``."""
+    mock_orch = MagicMock()
+    mock_orch.skill_manager.inject_skill.return_value = None
+    mock_orch.openclaw_config = {}
+    mock_orch._run_suffix.return_value = run_suffix
+    return mock_orch
+
+
+@pytest.fixture(autouse=True)
+def _empty_project(monkeypatch, tmp_path):
+    """Point the review at an empty project: it commits what it finds there, and the
+    import-time default can be a developer's live pipeline-project."""
+    import orchestrator as orc
+
+    project = tmp_path / "pipeline-project"
+    monkeypatch.setattr(orc, "SYMLINK_TARGET", str(project))
+    monkeypatch.setattr(orc, "PROJECT_ARTIFACTS_DIR", str(project / ".autodev" / "pipeline"))
+
+
 # ---------------------------------------------------------------------------
 # Tests for _run_completion_review helper isolation
 # ---------------------------------------------------------------------------
@@ -106,7 +126,10 @@ class TestRunCompletionReview:
         orc._run_completion_review(mock_orch, project_basename="my-proj")
 
     def test_session_key_format(self, tmp_path, monkeypatch):
-        """Session key must be pipeline:completion:{project_basename}:reviewer."""
+        """Session key: pipeline:completion:{project_basename}:reviewer, scoped to the
+        run like every pipeline session. project_basename names the pipeline-project
+        link, so unscoped, every run's review reattached one session (transcript and
+        model)."""
         import orchestrator as orc
 
         captured_args = []
@@ -114,9 +137,7 @@ class TestRunCompletionReview:
         def fake_webhook(agent_id, session_key, token, **kwargs):
             captured_args.append((agent_id, session_key))
 
-        mock_orch = MagicMock()
-        mock_orch.skill_manager.inject_skill.return_value = None
-        mock_orch.openclaw_config = {}
+        mock_orch = _mock_orch(run_suffix="-rabc12345")
 
         with patch("orchestrator.invoke_agent_webhook", side_effect=fake_webhook), \
              patch("orchestrator.poll_for_sentinel", return_value=True):
@@ -125,14 +146,13 @@ class TestRunCompletionReview:
         assert captured_args, "invoke_agent_webhook not called"
         agent_id, session_key = captured_args[0]
         assert agent_id == "reviewer"
-        assert session_key == "pipeline:completion:my-project:reviewer"
+        assert session_key == "pipeline:completion:my-project:reviewer-rabc12345"
 
     def test_inject_skill_called_with_complete_phase(self, monkeypatch):
         """inject_skill must receive 'COMPLETE-R0' as the phase_raw_id."""
         import orchestrator as orc
 
-        mock_orch = MagicMock()
-        mock_orch.openclaw_config = {}
+        mock_orch = _mock_orch()
 
         with patch("orchestrator.invoke_agent_webhook", return_value=None), \
              patch("orchestrator.poll_for_sentinel", return_value=True):
@@ -154,8 +174,7 @@ class TestRunCompletionReview:
         """
         import orchestrator as orc
 
-        mock_orch = MagicMock()
-        mock_orch.openclaw_config = {}
+        mock_orch = _mock_orch()
 
         poll_kwargs = {}
 
@@ -255,9 +274,7 @@ class TestCompletionMessageContent:
         def fake_webhook(agent_id, session_key, token, **kwargs):
             captured.update(kwargs)
 
-        mock_orch = MagicMock()
-        mock_orch.skill_manager.inject_skill.return_value = None
-        mock_orch.openclaw_config = {}
+        mock_orch = _mock_orch()
 
         with patch("orchestrator.invoke_agent_webhook", side_effect=fake_webhook), \
              patch("orchestrator.poll_for_sentinel", return_value=True):
@@ -310,3 +327,52 @@ class TestCompletionMessageContent:
         msg = self._capture_message(monkeypatch, fake_symlink_target="/tmp/fake-completion-target")
         assert "<your-path>" not in msg, "prompt must not contain a placeholder literal"
         assert "<project>" not in msg, "prompt must not contain a placeholder literal"
+
+
+class TestCompletionDocsAreCommitted:
+    """After its review the orchestrator commits what the reviewer wrote, as it
+    commits every phase; a finished project used to be left with them uncommitted."""
+
+    def _run(self, monkeypatch, tmp_path, sentinel_found):
+        import subprocess as sp
+
+        import orchestrator as orc
+
+        env = {**os.environ, "GIT_AUTHOR_NAME": "T", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "T", "GIT_COMMITTER_EMAIL": "t@t"}
+
+        def git(*args):
+            return sp.run(["git", "-C", str(repo), *args], check=True,
+                          capture_output=True, text=True, env=env).stdout
+
+        repo = tmp_path / "proj"
+        (repo / ".autodev" / "pipeline").mkdir(parents=True)
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@t")
+        git("config", "user.name", "T")
+        (repo / ".gitignore").write_text(".autodev/\n")
+        (repo / "index.html").write_text("<p>hi</p>\n")
+        git("add", "-A")
+        git("commit", "-q", "-m", "phase")
+        monkeypatch.setattr(orc, "SYMLINK_TARGET", str(repo))
+        monkeypatch.setattr(orc, "PROJECT_ARTIFACTS_DIR", str(repo / ".autodev" / "pipeline"))
+
+        def fake_webhook(agent_id, session_key, token, **kwargs):
+            # What the reviewer writes before its sentinel.
+            (repo / "README.md").write_text("# Proj\n")
+            (repo / "CHANGELOG.md").write_text("# Changelog\n")
+            (repo / "completion_report.md").write_text("# Completion report\n")
+
+        with patch("orchestrator.invoke_agent_webhook", side_effect=fake_webhook), \
+             patch("orchestrator.poll_for_sentinel", return_value=sentinel_found):
+            orc._run_completion_review(_mock_orch(), project_basename="proj")
+        return git
+
+    def test_commits_them_when_the_review_finishes(self, monkeypatch, tmp_path):
+        git = self._run(monkeypatch, tmp_path, sentinel_found=True)
+        assert git("log", "-1", "--format=%s").strip() == "docs: completion review"
+        assert git("status", "--porcelain") == ""
+
+    def test_leaves_them_when_the_review_never_finishes(self, monkeypatch, tmp_path):
+        git = self._run(monkeypatch, tmp_path, sentinel_found=False)
+        assert git("log", "-1", "--format=%s").strip() == "phase"

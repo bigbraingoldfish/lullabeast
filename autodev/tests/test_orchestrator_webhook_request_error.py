@@ -79,7 +79,16 @@ def test_invoke_executor_forwards_hooks_url():
     assert captured.get("url") == _HOOKS_URL
 
 
-def test_completion_review_forwards_hooks_url():
+def _empty_project(monkeypatch, tmp_path):
+    """Point the completion review at an empty project: it commits what it finds
+    there, and the import-time default can be a developer's live pipeline-project."""
+    project = tmp_path / "pipeline-project"
+    monkeypatch.setattr(orc, "SYMLINK_TARGET", str(project))
+    monkeypatch.setattr(orc, "PROJECT_ARTIFACTS_DIR", str(project / ".autodev" / "pipeline"))
+
+
+def test_completion_review_forwards_hooks_url(monkeypatch, tmp_path):
+    _empty_project(monkeypatch, tmp_path)
     captured = {}
 
     def fake_webhook(agent_id, session_key, token, **kwargs):
@@ -95,9 +104,10 @@ def test_completion_review_forwards_hooks_url():
     assert captured.get("url") == _HOOKS_URL
 
 
-def test_completion_review_tolerates_missing_hooks_url():
+def test_completion_review_tolerates_missing_hooks_url(monkeypatch, tmp_path):
     """A call site reading the url must use .get() so an empty config (as several
     existing tests pass) does not KeyError before the webhook fires."""
+    _empty_project(monkeypatch, tmp_path)
     m = MagicMock()
     m.openclaw_config = {}
     m.skill_manager.inject_skill.return_value = None

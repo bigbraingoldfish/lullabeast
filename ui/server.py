@@ -98,6 +98,11 @@ from env_resolvers import resolve_openclaw_root, resolve_pipeline_root  # noqa: 
 from skill_manager import SkillManager  # noqa: E402  (W5-E: inline completion reviewer)
 from webhook_client import invoke_agent_webhook, set_session_response_usage  # noqa: E402
 from sentinel_poller import cleanup_output_files  # noqa: E402
+from completion_review import (  # noqa: E402  (shared with the orchestrator's review)
+    commit_completion_docs_when_done,
+    completion_message,
+    on_demand_session_key,
+)
 
 ORCHESTRATOR_FILENAME = "orchestrator.py"
 WEBHOOK_AGENT_ID = "prd-creator"
@@ -13062,6 +13067,17 @@ async def get_completion_report():
 # W5-E: POST /api/completion-review/{project}
 # ---------------------------------------------------------------------------
 
+def _watch_completion_review(project_dir: str, sentinel_path: str, session_key: str, started_at: float) -> None:
+    """Commit an on-demand review's docs once it finishes, on a background thread
+    (the trigger returns before the reviewer does)."""
+    threading.Thread(
+        target=commit_completion_docs_when_done,
+        args=(project_dir, sentinel_path, session_key, started_at),
+        name="completion-review-commit",
+        daemon=True,
+    ).start()
+
+
 @app.post("/api/completion-review/{project}")
 async def post_completion_review_trigger(project: str):
     """On-demand completion review trigger for projects already in PIPELINE_COMPLETE.
@@ -13104,39 +13120,16 @@ async def post_completion_review_trigger(project: str):
             },
         )
 
-    session_key = f"pipeline:completion:{project}:reviewer"
+    session_key = on_demand_session_key(project)
     project_dir = _expand_project_dir_config(config)
     openclaw_root = os.path.expanduser(config.get("openclaw_root") or "~/.openclaw")
 
     # Fire-and-forget: inject skill, clean workspace, trigger webhook, return immediately.
     # The UI polls GET /api/completion-report on an interval to detect when the report appears.
     #
-    # Walkthrough structure must stay in sync with orchestrator._run_completion_review
-    # (autodev/pipeline/orchestrator.py). Both code paths are guarded by tests asserting
-    # Open-Terminal / cd / fresh-terminal / per-command-fenced-block requirements.
-    _p = "pipeline-project/.autodev/pipeline"
+    # The prompt comes from completion_review, shared with the orchestrator's own review.
     _project_abs_path = os.path.realpath(project_dir) if project_dir else ""
-    _completion_message = (
-        f"Begin completion documentation. Read the project source and git diff to understand "
-        f"what was built. Produce three artifacts at the project root: README.md updates, "
-        f"a CHANGELOG.md entry, and completion_report.md.\n\n"
-        f"completion_report.md must walk a non-technical user through running the project "
-        f"from a fresh terminal with no prior context — assume they have not opened a shell "
-        f"yet and are not in any particular directory. Structure it as:\n"
-        f"  1. What was built (one short paragraph).\n"
-        f"  2. How to run it — write this as numbered steps. Step 1 must be: "
-        f"'Open Terminal (macOS/Linux) or PowerShell (Windows)'. Step 2 must be the command "
-        f"`cd {_project_abs_path}` in its own fenced ``` code block (use the literal absolute "
-        f"path shown — never substitute a generic placeholder for the real path). "
-        f"Then one fenced code block per command: install dependencies, build, run, test. "
-        f"Reference the actual scripts present in package.json / Makefile / pyproject.toml / "
-        f"etc. — only commands a user can paste verbatim.\n"
-        f"  3. Files changed (brief list).\n"
-        f"  4. Suggested next steps (2–4 bullets).\n\n"
-        f"Every shell command must live in its own ``` fenced code block so the UI can render "
-        f"one Copy button per command. Do not group multiple commands in one block.\n\n"
-        f"Then write {_p}/reviewer_output.done."
-    )
+    _completion_message = completion_message(_project_abs_path)
     try:
         _artifacts_dir = os.path.join(project_dir, ".autodev", "pipeline") if project_dir else ""
         token = config.get("hooks_token") or os.environ.get("AUTODEV_HOOKS_TOKEN", "")
@@ -13156,7 +13149,16 @@ async def post_completion_review_trigger(project: str):
             cleanup_output_files(_artifacts_dir, "reviewer")
 
         _preset_session_response_usage_sync("reviewer", session_key)
+        _started = time.time()
         invoke_agent_webhook("reviewer", session_key, token, message=_completion_message)
+        # The orchestrator commits its own review's docs; this one returns first.
+        if project_dir:
+            _watch_completion_review(
+                _project_abs_path,
+                os.path.join(_artifacts_dir, "reviewer_output.done"),
+                session_key,
+                _started,
+            )
     except Exception as _exc:
         tagged("W5-E", f"Completion review invocation warning: {_exc}", level=logging.WARNING, logger=_ui_logger)
 

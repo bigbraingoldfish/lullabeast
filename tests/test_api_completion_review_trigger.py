@@ -10,7 +10,9 @@ Key invariants:
 
 import json
 import os
+import re
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
@@ -49,6 +51,16 @@ def write_sentinel(path):
     Path(path).touch()
 
 
+@pytest.fixture
+def watched_reviews(monkeypatch):
+    """Record the background commit a successful trigger starts, in place of a real
+    thread waiting on a sentinel no test writes."""
+    calls = []
+    monkeypatch.setattr("ui.server._watch_completion_review", lambda *args: calls.append(args))
+    return calls
+
+
+@pytest.mark.usefixtures("watched_reviews")
 class TestPostCompletionReviewTrigger:
 
     def test_returns_404_when_endpoint_not_implemented(self, tmp_path):
@@ -141,6 +153,38 @@ class TestPostCompletionReviewTrigger:
         assert "completion" in data["session_key"]
         assert "my-project" in data["session_key"]
         assert "reviewer" in data["session_key"]
+
+    def test_hands_the_commit_to_a_watch_on_this_review(self, tmp_path, watched_reviews):
+        """The trigger returns before its reviewer finishes, so it hands the commit to
+        a background watch on this review's sentinel and session."""
+        config = _base_config(tmp_path, pipeline_status="PIPELINE_COMPLETE")
+        client = load_client()
+
+        patches = self._success_patches(config)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            resp = client.post("/api/completion-review/my-project")
+
+        assert resp.status_code == 200
+        assert len(watched_reviews) == 1
+        project_dir, sentinel_path, session_key, started_at = watched_reviews[0]
+        assert project_dir == os.path.realpath(config["project_dir_path"])
+        assert sentinel_path == os.path.join(
+            config["project_dir_path"], ".autodev", "pipeline", "reviewer_output.done"
+        )
+        assert session_key == resp.json()["session_key"]
+        assert isinstance(started_at, float)
+
+    def test_each_trigger_starts_a_session_of_its_own(self, tmp_path):
+        """Reattaching the last review's session resumes its transcript, on the model
+        that session was created with."""
+        config = _base_config(tmp_path, pipeline_status="PIPELINE_COMPLETE")
+        client = load_client()
+
+        patches = self._success_patches(config)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            key = client.post("/api/completion-review/my-project").json()["session_key"]
+
+        assert re.fullmatch(r"pipeline:completion:my-project:reviewer-t\d+", key), key
 
     def test_returns_200_even_if_report_not_written_yet(self, tmp_path):
         """Fire-and-forget: endpoint returns 200 immediately, report appears later."""
@@ -248,6 +292,7 @@ class TestPostCompletionReviewTrigger:
         )
 
 
+@pytest.mark.usefixtures("watched_reviews")
 class TestCompletionMessageWalkthroughStructure:
     """The on-demand UI trigger and the auto-end-of-pipeline trigger must produce
     identically-structured completion_report.md walkthroughs. See plan §2.
@@ -304,3 +349,34 @@ class TestCompletionMessageWalkthroughStructure:
         msg, _ = self._capture_message(tmp_path)
         assert "<your-path>" not in msg, "prompt must not contain a placeholder literal"
         assert "<project>" not in msg, "prompt must not contain a placeholder literal"
+
+    def test_message_is_the_one_the_orchestrator_sends(self, tmp_path):
+        """Both reviews take their prompt from completion_review, so they can't drift."""
+        msg, project_dir = self._capture_message(tmp_path)
+        from completion_review import completion_message
+
+        assert msg == completion_message(os.path.realpath(project_dir))
+
+
+def test_the_watch_commits_on_a_daemon_thread(monkeypatch):
+    """So the request returns while the reviewer is still writing, and a review that
+    never finishes can't hold the server open."""
+    import ui.server as server
+
+    started = []
+
+    class FakeThread:
+        def __init__(self, target, args, name, daemon):
+            started.append((target, args, name, daemon))
+
+        def start(self):
+            started.append("started")
+
+    monkeypatch.setattr(server, "threading", SimpleNamespace(Thread=FakeThread))
+    server._watch_completion_review("/p", "/p/reviewer_output.done", "key", 1.0)
+
+    assert started == [
+        (server.commit_completion_docs_when_done, ("/p", "/p/reviewer_output.done", "key", 1.0),
+         "completion-review-commit", True),
+        "started",
+    ]

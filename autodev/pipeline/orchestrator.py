@@ -46,6 +46,7 @@ from webhook_client import (
 )
 from sentinel_poller import cleanup_output_files, initialize_activity_stamp, poll_for_sentinel
 from skill_manager import SkillManager
+from completion_review import commit_completion_docs, completion_message
 from event_log import append_pipeline_event
 from queue_semantics import (
     parent_blocks_child, ESCALATION_ANSWERED, REVIVABLE_ANSWERED_STATES,
@@ -1407,34 +1408,16 @@ def _run_completion_review(orchestrator, project_basename: str) -> None:
     try:
         sentinel_path = os.path.join(PROJECT_ARTIFACTS_DIR, "reviewer_output.done")
         token = orchestrator.openclaw_config.get("hooks", {}).get("token", "")
-        session_key = f"pipeline:completion:{project_basename}:reviewer"
+        # Run-scoped like every pipeline session: project_basename names the
+        # pipeline-project link, so without it every run's review reattached one session,
+        # its transcript and its model.
+        session_key = f"pipeline:completion:{project_basename}:reviewer" + orchestrator._run_suffix()
 
         orchestrator.skill_manager.inject_skill("COMPLETE-R0", "reviewer", orchestrator.openclaw_config)
         cleanup_output_files(PROJECT_ARTIFACTS_DIR, "reviewer")
 
-        _p = "pipeline-project/.autodev/pipeline"
         _project_abs_path = os.path.realpath(SYMLINK_TARGET)
-        _completion_message = (
-            f"Begin completion documentation. Read the project source and git diff to understand "
-            f"what was built. Produce three artifacts at the project root: README.md updates, "
-            f"a CHANGELOG.md entry, and completion_report.md.\n\n"
-            f"completion_report.md must walk a non-technical user through running the project "
-            f"from a fresh terminal with no prior context — assume they have not opened a shell "
-            f"yet and are not in any particular directory. Structure it as:\n"
-            f"  1. What was built (one short paragraph).\n"
-            f"  2. How to run it — write this as numbered steps. Step 1 must be: "
-            f"'Open Terminal (macOS/Linux) or PowerShell (Windows)'. Step 2 must be the command "
-            f"`cd {_project_abs_path}` in its own fenced ``` code block (use the literal absolute "
-            f"path shown — never substitute a generic placeholder for the real path). "
-            f"Then one fenced code block per command: install dependencies, build, run, test. "
-            f"Reference the actual scripts present in package.json / Makefile / pyproject.toml / "
-            f"etc. — only commands a user can paste verbatim.\n"
-            f"  3. Files changed (brief list).\n"
-            f"  4. Suggested next steps (2–4 bullets).\n\n"
-            f"Every shell command must live in its own ``` fenced code block so the UI can render "
-            f"one Copy button per command. Do not group multiple commands in one block.\n\n"
-            f"Then write {_p}/reviewer_output.done."
-        )
+        _completion_message = completion_message(_project_abs_path)
         _attempt_start = time.time()
         orchestrator._preset_session_response_usage("reviewer", session_key)
         invoke_agent_webhook(
@@ -1466,6 +1449,10 @@ def _run_completion_review(orchestrator, project_basename: str) -> None:
         else:
             print(f"[W5-B] Completion review: sentinel_found={sentinel_found}, "
                   f"report_exists={os.path.exists(report_path)} — continuing to PIPELINE_COMPLETE")
+        # Commit what it wrote, as every phase is committed: left out, the finished
+        # project had uncommitted files that Launch and the queue refuse to start on.
+        if sentinel_found and commit_completion_docs(_project_abs_path):
+            print("[W5-B] Completion docs committed (docs: completion review)")
     except Exception as _e:
         print(f"[W5-B] Completion review failed (non-fatal, pipeline will still complete): {_e}")
 
