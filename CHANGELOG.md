@@ -4,7 +4,9 @@ This project follows [Semantic Versioning](https://semver.org/). Format follows 
 
 > **Pre-1.0 development history.** Lullabeast was built across many TDD phases, each recorded in detail. The full, verbose engineering log — every fix, refactor, and decision, with internal phase tags (`P1 Stage *`, `T6.*`) and incident IDs — lives in **[`docs/archive/CHANGELOG-full.md`](docs/archive/CHANGELOG-full.md)**. That archive remains the system-of-record for the pre-release period. From `0.1.0` onward, this file carries concise, user-facing release notes.
 
-## [Unreleased]
+## [1.2.0] - 2026-11-09
+
+The model-refresh and hardening release. DeepSeek V4.1 Flash leads the new defaults, the build loop is fixed against what live runs on them exposed, first boot is quiet, launching on an existing folder is safe, and completion reports work from your own computer.
 
 ### Changed
 - **The OpenRouter picker moves to each family's latest models and adds DeepSeek.** It ships Qwen3.8 27B, MiniMax M3, Kimi K3.1 Pro, GLM 5.3 and DeepSeek V4 Pro 0813, plus the flash variants OpenRouter lists, each with its price, context window and image support. Prices are OpenRouter's as of 2026-11-09.
