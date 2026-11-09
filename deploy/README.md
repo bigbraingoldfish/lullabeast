@@ -196,6 +196,7 @@ Every variable is documented inline in [.env.example](.env.example).
 | `PLANNER_MODEL`, `EXECUTOR_MODEL`, `REVIEWER_MODEL`, `PRD_MODEL`, `ROADMAP_MODEL`, `ESCALATION_MODEL` | no | Per-agent model overrides; audited defaults in [CONFIG-AUDIT.md](CONFIG-AUDIT.md). Executor and reviewer picks must accept image input. |
 | `UI_PORT` | no | Dashboard port, default 18790, published to the host loopback only. |
 | `GIT_USER_NAME`, `GIT_USER_EMAIL` | no | Identity for the commits the pipeline makes inside project repos. |
+| `HOST_PROJECTS_DIR` | no | Absolute path on your computer of the folder mounted at `/data/projects` (`deploy/projects` unless you changed the mount). A completion report names a project's folder there in its run steps. Docker Desktop on Windows needs nothing: the container reads the folder from its mounts. Unset elsewhere, the report points to `deploy/projects` in your clone. |
 
 ## Local models on the host
 

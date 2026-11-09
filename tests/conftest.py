@@ -14,6 +14,10 @@ _ENV_KEYS_TO_SCRUB = (
     "AUTODEV_PIPELINE_ROOT",
     "AUTODEV_HOOKS_TOKEN",
     "AUTODEV_UI_TOKEN",
+    # Set by the image and deploy/.env: inside the container they switch the
+    # completion review to run steps for the reader's computer.
+    "AUTODEV_PROJECTS_MOUNT",
+    "HOST_PROJECTS_DIR",
 )
 
 

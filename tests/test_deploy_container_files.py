@@ -82,6 +82,8 @@ class TestDockerfile:
         assert "OPENCLAW_ROOT=/data/openclaw" in DOCKERFILE
         assert "AUTODEV_REPO_PATH=/app" in DOCKERFILE
         assert "AUTODEV_PIPELINE_ROOT=/data/pipeline-state" in DOCKERFILE
+        # The compose files' projects mount target (TestCompose, TestDevCompose).
+        assert "AUTODEV_PROJECTS_MOUNT=/data/projects" in DOCKERFILE
 
 
 class TestEntrypoint:
@@ -511,6 +513,7 @@ class TestEnvExample:
             "UI_PORT",
             "GIT_USER_NAME",
             "GIT_USER_EMAIL",
+            "HOST_PROJECTS_DIR",
             *TEMPLATE_MODEL_DEFAULTS,
         ):
             assert name in ENV_EXAMPLE, f".env.example is missing {name}"

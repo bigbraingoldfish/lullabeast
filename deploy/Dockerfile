@@ -104,11 +104,14 @@ RUN npx -y --package=@playwright/mcp@0.0.40 -- node -e "process.exit(0)" \
 # OPENCLAW_STATE_DIR is OpenClaw's own state-location env (the openclaw CLI
 # ignores Lullabeast's OPENCLAW_ROOT); the entrypoint also symlinks
 # ~/.openclaw at /data/openclaw for config values written as literal
-# "~/.openclaw/..." paths.
+# "~/.openclaw/..." paths. AUTODEV_PROJECTS_MOUNT is where docker-compose.yml
+# bind-mounts your projects folder; a completion report written here gives its
+# run steps for your computer, not this container.
 ENV OPENCLAW_ROOT=/data/openclaw \
     OPENCLAW_STATE_DIR=/data/openclaw \
     AUTODEV_REPO_PATH=/app \
     AUTODEV_PIPELINE_ROOT=/data/pipeline-state \
+    AUTODEV_PROJECTS_MOUNT=/data/projects \
     UI_PORT=18790
 
 # Python bytecode caches would otherwise try to land next to the root-owned

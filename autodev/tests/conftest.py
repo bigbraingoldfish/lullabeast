@@ -46,6 +46,11 @@ _ENV_KEYS_TO_SCRUB = (
     # (PROVIDER_ERROR_RETRY=1, sourced into the shell) cannot flip the
     # default-off behavior under test; the dedicated tests set it explicitly.
     "PROVIDER_ERROR_RETRY",
+    # Set by the image and deploy/.env: inside the container they switch the
+    # completion review to run steps for the reader's computer; the dedicated
+    # tests set them explicitly.
+    "AUTODEV_PROJECTS_MOUNT",
+    "HOST_PROJECTS_DIR",
 )
 
 
